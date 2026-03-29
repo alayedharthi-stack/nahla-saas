@@ -1,0 +1,26 @@
+# ── Web framework ────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# ── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# ── HTTP client (integrations, AI engine, WhatsApp) ──────────────────────────
+httpx==0.27.0
+
+# ── Environment ───────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+
+# ── Security ─────────────────────────────────────────────────────────────────
+python-multipart==0.0.9   # required by FastAPI for form data (OAuth token exchange)
+
+# ── AI / Claude (used by ai-orchestrator) ────────────────────────────────────
+# The orchestrator calls the Anthropic Messages API directly via httpx —
+# no extra SDK needed. anthropic SDK is listed here for optional local use.
+anthropic>=0.30.0

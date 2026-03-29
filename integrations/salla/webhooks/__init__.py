@@ -1,0 +1,1 @@
+# Salla webhook package

@@ -1,0 +1,3 @@
+# Backend service dependencies — install from the root requirements.txt
+# pip install -r ../requirements.txt
+-r ../requirements.txt

@@ -1,0 +1,106 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * ── Arabic-first font system ───────────────────────────────────────────────
+ * Cairo is the default (RTL / Arabic).
+ * Inter is loaded for LTR / English mode.
+ * Tailwind's font-sans resolves to var(--font-ui) — see tailwind.config.js.
+ */
+:root {
+  --font-ui: 'Cairo', system-ui, sans-serif;
+}
+
+[dir="ltr"] {
+  --font-ui: 'Inter', system-ui, sans-serif;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    /* Smooth transition when switching direction */
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 font-sans antialiased;
+  }
+
+  /*
+   * RTL-aware focus ring — matches both directions without needing
+   * per-component overrides.
+   */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2;
+  }
+
+  /* ── Scrollbar ─────────────────────────────────────────────────────────── */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-400;
+  }
+}
+
+@layer components {
+
+  /* ── Cards ──────────────────────────────────────────────────────────────── */
+  .card {
+    @apply bg-white rounded-xl border border-slate-200 shadow-sm shadow-slate-100/80;
+  }
+
+  /* ── Buttons ─────────────────────────────────────────────────────────────
+   * Use logical padding (ps/pe) so buttons mirror correctly in RTL.
+   * gap is direction-neutral. Icons before text become icons after text in RTL
+   * automatically because flex-row reverses in rtl contexts.
+   */
+  .btn-primary {
+    @apply inline-flex items-center gap-2 px-4 py-2
+           bg-brand-500 hover:bg-brand-600
+           text-white text-sm font-medium rounded-lg transition-colors;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 px-4 py-2
+           bg-white hover:bg-slate-50
+           text-slate-700 text-sm font-medium rounded-lg
+           border border-slate-200 transition-colors;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 px-3 py-2
+           hover:bg-slate-100
+           text-slate-600 text-sm font-medium rounded-lg transition-colors;
+  }
+
+  /* ── Inputs ──────────────────────────────────────────────────────────────
+   * text-start ensures placeholder and value align to the correct side
+   * in both RTL and LTR without needing per-input overrides.
+   */
+  .input {
+    @apply w-full px-3 py-2 text-sm text-start
+           bg-white border border-slate-200 rounded-lg
+           placeholder:text-slate-400
+           focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
+           transition-shadow;
+  }
+
+  .label {
+    @apply block text-sm font-medium text-slate-700 mb-1;
+  }
+}

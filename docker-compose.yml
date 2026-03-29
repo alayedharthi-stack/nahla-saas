@@ -1,0 +1,258 @@
+version: "3.9"
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Nahla SaaS — Local development stack
+#
+#  Usage:
+#    1. Copy config/.env.example to .env and fill in secrets.
+#    2. docker compose up --build
+#
+#  All Python services share a single image built from the repo root.
+#  Each service uses `cd /app/<dir> && uvicorn main:app ...` so that:
+#    - Python relative imports resolve correctly within each service directory.
+#    - Hyphenated directory names (whatsapp-service, ai-engine, etc.) do not
+#      break Python's module import system (hyphens are invalid identifiers).
+# ══════════════════════════════════════════════════════════════════════════════
+
+x-python-service: &python-service
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+  networks:
+    - nahla-net
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-nahla}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nahla_password}
+      POSTGRES_DB:       ${POSTGRES_DB:-nahla_saas}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nahla}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nahla-net
+
+  # Run Alembic migrations before any service starts
+  migrate:
+    <<: *python-service
+    command: >
+      sh -c "cd /app && alembic -c database/alembic.ini upgrade head"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Core services ───────────────────────────────────────────────────────────
+
+  backend:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/backend && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  whatsapp-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/whatsapp-service && uvicorn main:app --host 0.0.0.0 --port 8001 --reload"
+    ports:
+      - "8001:8001"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  ai-engine:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/ai-engine && uvicorn main:app --host 0.0.0.0 --port 8002 --reload"
+    ports:
+      - "8002:8002"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  catalog-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/catalog-service && uvicorn main:app --host 0.0.0.0 --port 8003 --reload"
+    ports:
+      - "8003:8003"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  order-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/order-service && uvicorn main:app --host 0.0.0.0 --port 8004 --reload"
+    ports:
+      - "8004:8004"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  coupon-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/coupon-service && uvicorn main:app --host 0.0.0.0 --port 8005 --reload"
+    ports:
+      - "8005:8005"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  campaign-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/campaign-service && uvicorn main:app --host 0.0.0.0 --port 8006 --reload"
+    ports:
+      - "8006:8006"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  widget-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/widget-service && uvicorn main:app --host 0.0.0.0 --port 8007 --reload"
+    ports:
+      - "8007:8007"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  conversation-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/conversation-service && uvicorn main:app --host 0.0.0.0 --port 8008 --reload"
+    ports:
+      - "8008:8008"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  automation-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/automation-service && uvicorn main:app --host 0.0.0.0 --port 8009 --reload"
+    ports:
+      - "8009:8009"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  analytics-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/analytics-service && uvicorn main:app --host 0.0.0.0 --port 8010 --reload"
+    ports:
+      - "8010:8010"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  billing-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/billing-service && uvicorn main:app --host 0.0.0.0 --port 8011 --reload"
+    ports:
+      - "8011:8011"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  location-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/location-service && uvicorn main:app --host 0.0.0.0 --port 8012 --reload"
+    ports:
+      - "8012:8012"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  marketplace-service:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/marketplace-service && uvicorn main:app --host 0.0.0.0 --port 8013 --reload"
+    ports:
+      - "8013:8013"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # ── AI Orchestrator (Customer Intelligence + Safety Layers) ─────────────────
+
+  ai-orchestrator:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/services/ai-orchestrator && uvicorn main:app --host 0.0.0.0 --port 8016 --reload"
+    ports:
+      - "8016:8016"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # ── Platform integrations ───────────────────────────────────────────────────
+
+  salla-integration:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/integrations/salla && uvicorn main:app --host 0.0.0.0 --port 8014 --reload"
+    ports:
+      - "8014:8014"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  zid-integration:
+    <<: *python-service
+    command: >
+      sh -c "cd /app/integrations/zid && uvicorn main:app --host 0.0.0.0 --port 8015 --reload"
+    ports:
+      - "8015:8015"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # ── Frontend dashboard ──────────────────────────────────────────────────────
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    networks:
+      - nahla-net
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+
+networks:
+  nahla-net:
+    driver: bridge
