@@ -15,7 +15,8 @@
       "Bash(done)",
       "Bash(grep -n \"from api\" c:/Users/STARS/Downloads/nahla-saas/*/main.py c:/Users/STARS/Downloads/nahla-saas/integrations/*/main.py)",
       "Bash(for f:*)",
-      "Read(//c/Users/STARS/Downloads/nahla-saas/dashboard/src/pages/**)"
+      "Read(//c/Users/STARS/Downloads/nahla-saas/dashboard/src/pages/**)",
+      "Bash(npm run:*)"
     ]
   }
 }

@@ -6,9 +6,13 @@ import Conversations from './pages/Conversations'
 import Orders from './pages/Orders'
 import Coupons from './pages/Coupons'
 import Campaigns from './pages/Campaigns'
+import Templates from './pages/Templates'
+import SmartAutomations from './pages/SmartAutomations'
+import Intelligence from './pages/Intelligence'
 import Integrations from './pages/Integrations'
 import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
+import AiSalesLogs from './pages/AiSalesLogs'
 
 export default function App() {
   return (
@@ -22,9 +26,13 @@ export default function App() {
             <Route path="orders"         element={<Orders />} />
             <Route path="coupons"        element={<Coupons />} />
             <Route path="campaigns"      element={<Campaigns />} />
+            <Route path="templates"      element={<Templates />} />
+            <Route path="automations"    element={<SmartAutomations />} />
+            <Route path="intelligence"   element={<Intelligence />} />
             <Route path="integrations"   element={<Integrations />} />
             <Route path="analytics"      element={<Analytics />} />
             <Route path="settings"       element={<Settings />} />
+            <Route path="ai-sales-logs"  element={<AiSalesLogs />} />
           </Route>
         </Routes>
       </BrowserRouter>

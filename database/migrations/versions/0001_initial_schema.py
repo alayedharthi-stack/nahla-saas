@@ -70,7 +70,7 @@ def upgrade() -> None:
     op.create_table(
         "products",
         sa.Column("id",                  sa.Integer, primary_key=True),
-        sa.Column("external_id",         sa.String,  nullable=True,  index=True),
+        sa.Column("external_id",         sa.String,  nullable=True),
         sa.Column("sku",                 sa.String,  nullable=True),
         sa.Column("title",               sa.String,  nullable=False),
         sa.Column("description",         sa.Text,    nullable=True),
@@ -96,7 +96,7 @@ def upgrade() -> None:
     op.create_table(
         "orders",
         sa.Column("id",            sa.Integer, primary_key=True),
-        sa.Column("external_id",   sa.String,  nullable=True, index=True),
+        sa.Column("external_id",   sa.String,  nullable=True),
         sa.Column("status",        sa.String,  nullable=False),
         sa.Column("total",         sa.String,  nullable=True),
         sa.Column("customer_info", JSONB,      nullable=True),
@@ -217,7 +217,7 @@ def upgrade() -> None:
     op.create_table(
         "conversations",
         sa.Column("id",               sa.Integer, primary_key=True),
-        sa.Column("external_id",      sa.String,  nullable=True, index=True),
+        sa.Column("external_id",      sa.String,  nullable=True),
         sa.Column("status",           sa.String,  nullable=False),
         sa.Column("customer_id",      sa.Integer, sa.ForeignKey("customers.id"), nullable=True),
         sa.Column("tenant_id",        sa.Integer, sa.ForeignKey("tenants.id"),   nullable=False),

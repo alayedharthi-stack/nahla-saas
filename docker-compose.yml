@@ -54,7 +54,7 @@ services:
   migrate:
     <<: *python-service
     command: >
-      sh -c "cd /app && alembic -c database/alembic.ini upgrade head"
+      sh -c "cd /app/database && alembic upgrade head"
     depends_on:
       postgres:
         condition: service_healthy

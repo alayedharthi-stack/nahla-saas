@@ -46,6 +46,11 @@ class Tenant(Base):
     message_events = relationship('MessageEvent', back_populates='tenant')
     customer_addresses = relationship('CustomerAddress', back_populates='tenant')
     settings = relationship('TenantSettings', back_populates='tenant', uselist=False)
+    campaigns = relationship('Campaign', back_populates='tenant')
+    whatsapp_templates = relationship('WhatsAppTemplate', back_populates='tenant')
+    smart_automations = relationship('SmartAutomation', back_populates='tenant')
+    automation_events = relationship('AutomationEvent', back_populates='tenant')
+    reorder_estimates = relationship('PredictiveReorderEstimate', back_populates='tenant')
     billing_plans = relationship('BillingPlan', back_populates='tenant')
     subscriptions = relationship('BillingSubscription', back_populates='tenant')
     payments = relationship('BillingPayment', back_populates='tenant')
@@ -62,7 +67,12 @@ class TenantSettings(Base):
     branding_text = Column(String, default='🐝 Powered by Nahla', nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
+    # Structured settings groups (added migration 0004)
+    whatsapp_settings = Column(JSONB, nullable=True)
+    ai_settings = Column(JSONB, nullable=True)
+    store_settings = Column(JSONB, nullable=True)
+    notification_settings = Column(JSONB, nullable=True)
 
 class User(Base):
     __tablename__ = 'users'
@@ -88,7 +98,7 @@ class Product(Base):
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     price = Column(String, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     recommendation_tags = Column(JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='products')
@@ -103,7 +113,7 @@ class Order(Base):
     line_items = Column(JSONB, nullable=True)
     checkout_url = Column(String, nullable=True)
     is_abandoned = Column(Boolean, default=False)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='orders')
 
@@ -114,7 +124,7 @@ class Coupon(Base):
     description = Column(Text, nullable=True)
     discount_type = Column(String, nullable=True)
     discount_value = Column(String, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     expires_at = Column(DateTime, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='coupons')
@@ -144,7 +154,7 @@ class SyncLog(Base):
     external_id = Column(String, nullable=True)
     status = Column(String, nullable=False)
     message = Column(Text, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='sync_logs')
@@ -184,7 +194,7 @@ class Customer(Base):
     name = Column(String, nullable=True)
     email = Column(String, nullable=True)
     phone = Column(String, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant')
     addresses = relationship('CustomerAddress', back_populates='customer')
@@ -231,7 +241,7 @@ class Conversation(Base):
     is_human_handoff = Column(Boolean, default=False)
     is_urgent = Column(Boolean, default=False)
     paused_by_human = Column(Boolean, default=False)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
 
 class MessageEvent(Base):
     __tablename__ = 'message_events'
@@ -243,7 +253,7 @@ class MessageEvent(Base):
     body = Column(Text, nullable=True)
     event_type = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
 
 class WidgetSetting(Base):
     __tablename__ = 'widget_settings'
@@ -265,7 +275,7 @@ class Developer(Base):
     email = Column(String, unique=True, nullable=False)
     company_name = Column(String, nullable=True)
     website = Column(String, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     apps = relationship('App', back_populates='developer')
 
@@ -283,7 +293,7 @@ class App(Base):
     permissions = Column(JSONB, nullable=True)
     categories = Column(JSONB, nullable=True)
     icon_url = Column(String, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     is_published = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -302,7 +312,7 @@ class AppInstall(Base):
     status = Column(String, default='installed')
     enabled = Column(Boolean, default=True)
     installed_at = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
 
 class AppPayment(Base):
     __tablename__ = 'app_payments'
@@ -321,7 +331,7 @@ class AppPayment(Base):
     status = Column(String, default='pending')
     transaction_reference = Column(String, nullable=True)
     paid_at = Column(DateTime, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class BillingPlan(Base):
@@ -338,7 +348,7 @@ class BillingPlan(Base):
     is_enterprise = Column(Boolean, default=False)
     features = Column(JSONB, nullable=True)
     limits = Column(JSONB, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class BillingSubscription(Base):
@@ -353,7 +363,7 @@ class BillingSubscription(Base):
     ends_at = Column(DateTime, nullable=True)
     trial_ends_at = Column(DateTime, nullable=True)
     auto_renew = Column(Boolean, default=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
 
 class BillingPayment(Base):
     __tablename__ = 'billing_payments'
@@ -368,7 +378,7 @@ class BillingPayment(Base):
     transaction_reference = Column(String, nullable=True)
     status = Column(String, nullable=False)
     paid_at = Column(DateTime, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class BillingInvoice(Base):
@@ -385,7 +395,7 @@ class BillingInvoice(Base):
     issued_date = Column(DateTime, default=datetime.utcnow)
     due_date = Column(DateTime, nullable=True)
     line_items = Column(JSONB, nullable=True)
-    metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
 
 class AuditLog(Base):
     __tablename__ = 'audit_logs'
@@ -527,6 +537,134 @@ class CommercePermissions(Base):
     can_cancel_orders = Column(Boolean, default=False, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     tenant = relationship('Tenant')
+
+
+class WhatsAppTemplate(Base):
+    """
+    WhatsApp message template — created in Nahla and submitted to Meta for approval.
+    Mirrors the Meta template object; status is kept in sync via webhook or manual sync.
+    """
+    __tablename__ = 'whatsapp_templates'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    tenant = relationship('Tenant', back_populates='whatsapp_templates')
+    # Meta identifiers
+    meta_template_id = Column(String, nullable=True)        # ID assigned by Meta after submission
+    name = Column(String, nullable=False)                    # snake_case name, unique per WABA
+    language = Column(String, default='ar', nullable=False)  # ar | en | ...
+    category = Column(String, nullable=False)                # MARKETING | UTILITY | AUTHENTICATION
+    status = Column(String, default='PENDING', nullable=False)  # APPROVED | PENDING | REJECTED | DISABLED
+    rejection_reason = Column(Text, nullable=True)
+    # Full components payload (HEADER, BODY, FOOTER, BUTTONS)
+    components = Column(JSONB, nullable=True)
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    synced_at = Column(DateTime, nullable=True)    # last time status was confirmed from Meta
+
+
+class Campaign(Base):
+    """WhatsApp campaign — must be based on a Meta-approved template."""
+    __tablename__ = 'campaigns'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    tenant = relationship('Tenant', back_populates='campaigns')
+    name = Column(String, nullable=False)
+    campaign_type = Column(String, nullable=False)  # abandoned_cart | promotion | vip | new_arrivals | broadcast
+    status = Column(String, default='draft', nullable=False)  # draft | scheduled | active | completed | paused
+    # Template info (from Meta WhatsApp Cloud API)
+    template_id = Column(String, nullable=True)
+    template_name = Column(String, nullable=True)
+    template_language = Column(String, default='ar', nullable=True)
+    template_category = Column(String, nullable=True)  # MARKETING | UTILITY
+    template_body = Column(Text, nullable=True)        # rendered preview body
+    template_variables = Column(JSONB, nullable=True)  # {"1": "اسم العميل", "2": "رابط العربة"}
+    # Audience
+    audience_type = Column(String, nullable=True)      # all | vip | abandoned_cart | inactive
+    audience_count = Column(Integer, default=0)
+    # Schedule
+    schedule_type = Column(String, default='immediate', nullable=True)  # immediate | scheduled | delayed
+    schedule_time = Column(DateTime, nullable=True)
+    delay_minutes = Column(Integer, nullable=True)
+    # Optional coupon
+    coupon_code = Column(String, nullable=True)
+    # Metrics
+    sent_count = Column(Integer, default=0)
+    delivered_count = Column(Integer, default=0)
+    read_count = Column(Integer, default=0)
+    clicked_count = Column(Integer, default=0)
+    converted_count = Column(Integer, default=0)
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    launched_at = Column(DateTime, nullable=True)
+
+
+class SmartAutomation(Base):
+    """
+    A toggleable marketing automation — triggered by an event and sends
+    a WhatsApp template message to the matched audience.
+    """
+    __tablename__ = 'smart_automations'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    tenant = relationship('Tenant', back_populates='smart_automations')
+    automation_type = Column(String, nullable=False)
+    # abandoned_cart | predictive_reorder | customer_winback |
+    # vip_upgrade | new_product_alert | back_in_stock
+    name = Column(String, nullable=False)
+    enabled = Column(Boolean, default=False, nullable=False)
+    config = Column(JSONB, nullable=True)          # delays, conditions, coupon_code, etc.
+    template_id = Column(Integer, ForeignKey('whatsapp_templates.id'), nullable=True)
+    template = relationship('WhatsAppTemplate')
+    # Aggregate stats
+    stats_triggered = Column(Integer, default=0, nullable=False)
+    stats_sent = Column(Integer, default=0, nullable=False)
+    stats_converted = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AutomationEvent(Base):
+    """
+    An event emitted by the system (cart abandoned, order placed, etc.)
+    that automations listen to and act on.
+    """
+    __tablename__ = 'automation_events'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    tenant = relationship('Tenant', back_populates='automation_events')
+    event_type = Column(String, nullable=False)
+    # cart_abandoned | order_completed | product_back_in_stock |
+    # customer_inactive | predictive_reorder_due | vip_customer_upgrade | product_created
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=True)
+    customer = relationship('Customer')
+    payload = Column(JSONB, nullable=True)    # event-specific data
+    processed = Column(Boolean, default=False, nullable=False)
+    automation_id = Column(Integer, ForeignKey('smart_automations.id'), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PredictiveReorderEstimate(Base):
+    """
+    Predicted reorder date for a customer + product combination,
+    computed from purchase history and product consumption rates.
+    """
+    __tablename__ = 'predictive_reorder_estimates'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    tenant = relationship('Tenant', back_populates='reorder_estimates')
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=False)
+    customer = relationship('Customer')
+    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
+    product = relationship('Product')
+    quantity_purchased = Column(Float, nullable=True)    # e.g. 500 (grams) or 1 (unit)
+    purchase_date = Column(DateTime, nullable=True)
+    consumption_rate_days = Column(Integer, nullable=True)  # average days to consume
+    predicted_reorder_date = Column(DateTime, nullable=True)
+    notified = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class AIActionLog(Base):

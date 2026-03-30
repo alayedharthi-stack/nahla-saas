@@ -27,7 +27,7 @@ export default function PageHeader({ title, subtitle, action }: PageHeaderProps)
         )}
       </div>
       {action && (
-        <div className="shrink-0 ml-4">{action}</div>
+        <div className="shrink-0 ms-4">{action}</div>
       )}
     </div>
   )

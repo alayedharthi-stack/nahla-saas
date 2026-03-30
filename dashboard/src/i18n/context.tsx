@@ -38,7 +38,7 @@ interface LangContextValue {
   isRTL:   boolean
   setLang: (lang: Lang) => void
   /** Type-safe accessor — accepts a selector function over the translation tree. */
-  t: (selector: (tr: Translations) => string) => string
+  t: <T>(selector: (tr: Translations) => T) => T
 }
 
 const LangContext = createContext<LangContextValue | null>(null)
@@ -74,7 +74,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     try { localStorage.setItem(STORAGE_KEY, next) } catch { /* ignore */ }
   }
 
-  const t = (selector: (tr: Translations) => string) => selector(tr)
+  const t = <T,>(selector: (tr: Translations) => T) => selector(tr)
 
   return (
     <LangContext.Provider value={{ lang, dir, isRTL, setLang, t }}>

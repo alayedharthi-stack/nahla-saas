@@ -26,6 +26,9 @@ export interface Translations {
       orders:        string
       coupons:       string
       campaigns:     string
+      templates:     string
+      automations:   string
+      intelligence:  string
       analyticsAI:   string
       integrations:  string
       settings:      string
@@ -50,6 +53,9 @@ export interface Translations {
     orders:        { title: string; subtitle: string }
     coupons:       { title: string; subtitle: string }
     campaigns:     { title: string; subtitle: string }
+    templates:     { title: string; subtitle: string }
+    automations:   { title: string; subtitle: string }
+    intelligence:  { title: string; subtitle: string }
     analytics:     { title: string; subtitle: string }
     integrations:  { title: string; subtitle: string }
     settings:      { title: string; subtitle: string }
@@ -57,15 +63,17 @@ export interface Translations {
 
   /** Common reusable action labels */
   actions: {
-    export:      string
-    newCoupon:   string
-    newCampaign: string
-    viewAll:     string
-    save:        string
-    saved:       string
-    cancel:      string
-    search:      string
-    filter:      string
+    export:        string
+    newCoupon:     string
+    newCampaign:   string
+    newTemplate:   string
+    syncTemplates: string
+    viewAll:       string
+    save:          string
+    saved:         string
+    cancel:        string
+    search:        string
+    filter:        string
   }
 }
 

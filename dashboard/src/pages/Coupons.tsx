@@ -25,11 +25,11 @@ const coupons: Coupon[] = [
 ]
 
 const rules = [
-  { id: 'r1', label: 'Auto-send coupon after abandoned cart (> 30 min)',    enabled: true },
-  { id: 'r2', label: 'VIP coupon for customers with > 5 orders',            enabled: true },
-  { id: 'r3', label: 'Birthday discount (10% off on customer birthday)',    enabled: false },
-  { id: 'r4', label: 'Bundle discount — buy 3 get 10% off',                 enabled: true },
-  { id: 'r5', label: 'First purchase discount — 15% off',                   enabled: false },
+  { id: 'r1', label: 'إرسال كوبون تلقائي بعد ترك العربة (أكثر من 30 دقيقة)',    enabled: true },
+  { id: 'r2', label: 'كوبون VIP للعملاء الذين لديهم أكثر من 5 طلبات',            enabled: true },
+  { id: 'r3', label: 'خصم عيد الميلاد (10% في يوم ميلاد العميل)',               enabled: false },
+  { id: 'r4', label: 'خصم التجميع — اشتر 3 واحصل على خصم 10%',                  enabled: true },
+  { id: 'r5', label: 'خصم أول شراء — 15% على أول طلب',                           enabled: false },
 ]
 
 const categoryIcon = (cat: Coupon['category']) => {
@@ -39,9 +39,14 @@ const categoryIcon = (cat: Coupon['category']) => {
 }
 
 const categoryBadge = (cat: Coupon['category']) =>
-  cat === 'vip'  ? <Badge label="VIP"  variant="amber"  /> :
-  cat === 'auto' ? <Badge label="Auto" variant="purple" /> :
-                   <Badge label="Standard" variant="slate" />
+  cat === 'vip'  ? <Badge label="VIP"      variant="amber"  /> :
+  cat === 'auto' ? <Badge label="تلقائي"   variant="purple" /> :
+                   <Badge label="عادي"      variant="slate"  />
+
+const typeLabel = (t: Coupon['type']) =>
+  t === 'percentage' ? 'نسبة مئوية' : 'مبلغ ثابت'
+
+const TABLE_HEADERS = ['الكود', 'النوع', 'الخصم', 'الاستخدامات', 'الانتهاء', 'الفئة', 'الحالة', '']
 
 export default function Coupons() {
   const [rulesState, setRulesState] = useState(rules)
@@ -73,15 +78,15 @@ export default function Coupons() {
       <div className="card">
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">Coupon Rules</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Automatic rules trigger coupon generation and sending</p>
+            <h2 className="text-sm font-semibold text-slate-900">قواعد الكوبونات</h2>
+            <p className="text-xs text-slate-400 mt-0.5">قواعد تلقائية تُنشئ الكوبونات وترسلها</p>
           </div>
         </div>
         <ul className="divide-y divide-slate-100">
           {rulesState.map((rule) => (
             <li key={rule.id} className="flex items-center justify-between px-5 py-3.5">
               <p className="text-sm text-slate-700">{rule.label}</p>
-              <button onClick={() => toggleRule(rule.id)} className="shrink-0 ml-4">
+              <button onClick={() => toggleRule(rule.id)} className="shrink-0 ms-4">
                 {rule.enabled
                   ? <ToggleRight className="w-6 h-6 text-brand-500" />
                   : <ToggleLeft  className="w-6 h-6 text-slate-300" />}
@@ -95,14 +100,14 @@ export default function Coupons() {
       <div className="card">
         <div className="px-5 py-4 border-b border-slate-100">
           <h2 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-            <Crown className="w-4 h-4 text-amber-500" /> VIP Discount Tiers
+            <Crown className="w-4 h-4 text-amber-500" /> مستويات خصم VIP
           </h2>
         </div>
-        <div className="grid sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-slate-100">
+        <div className="grid sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-100">
           {[
-            { tier: 'Silver', threshold: '3+ orders', discount: '10%', color: 'text-slate-500 bg-slate-50' },
-            { tier: 'Gold',   threshold: '7+ orders', discount: '20%', color: 'text-amber-600 bg-amber-50' },
-            { tier: 'Platinum', threshold: '15+ orders', discount: '30%', color: 'text-purple-600 bg-purple-50' },
+            { tier: 'فضي',    threshold: '+3 طلبات',  discount: '10%', color: 'text-slate-500 bg-slate-50' },
+            { tier: 'ذهبي',   threshold: '+7 طلبات',  discount: '20%', color: 'text-amber-600 bg-amber-50' },
+            { tier: 'بلاتيني',threshold: '+15 طلب',   discount: '30%', color: 'text-purple-600 bg-purple-50' },
           ].map(({ tier, threshold, discount, color }) => (
             <div key={tier} className={`flex flex-col items-center py-6 ${color.split(' ')[1]}`}>
               <span className={`text-xs font-bold uppercase tracking-widest ${color.split(' ')[0]}`}>{tier}</span>
@@ -116,15 +121,15 @@ export default function Coupons() {
       {/* Active Coupons */}
       <div className="card">
         <div className="px-5 py-4 border-b border-slate-100">
-          <h2 className="text-sm font-semibold text-slate-900">Active Coupons</h2>
+          <h2 className="text-sm font-semibold text-slate-900">الكوبونات النشطة</h2>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="border-b border-slate-100">
-                {['Code', 'Type', 'Discount', 'Usages', 'Expires', 'Category', 'Status', ''].map((h) => (
-                  <th key={h} className="text-left px-5 py-3 text-xs font-medium text-slate-500 uppercase tracking-wide whitespace-nowrap">
+                {TABLE_HEADERS.map((h) => (
+                  <th key={h} className="text-start px-5 py-3 text-xs font-medium text-slate-500 uppercase tracking-wide whitespace-nowrap">
                     {h}
                   </th>
                 ))}
@@ -136,19 +141,19 @@ export default function Coupons() {
                   <td className="px-5 py-3.5">
                     <div className="flex items-center gap-2">
                       {categoryIcon(c.category)}
-                      <span className="text-xs font-mono font-semibold text-slate-800">{c.code}</span>
+                      <span className="text-xs font-mono font-semibold text-slate-800" dir="ltr">{c.code}</span>
                       <button
                         onClick={() => copyCode(c.code, c.id)}
                         className="text-slate-300 hover:text-slate-500 transition-colors"
                       >
                         <Copy className="w-3 h-3" />
                       </button>
-                      {copiedId === c.id && <span className="text-xs text-emerald-600">Copied!</span>}
+                      {copiedId === c.id && <span className="text-xs text-emerald-600">تم النسخ!</span>}
                     </div>
                   </td>
-                  <td className="px-5 py-3.5 text-xs text-slate-600 capitalize">{c.type}</td>
+                  <td className="px-5 py-3.5 text-xs text-slate-600">{typeLabel(c.type)}</td>
                   <td className="px-5 py-3.5 text-xs font-semibold text-slate-900">
-                    {c.type === 'percentage' ? `${c.value}%` : `SAR ${c.value}`}
+                    {c.type === 'percentage' ? `${c.value}%` : `${c.value} ر.س`}
                   </td>
                   <td className="px-5 py-3.5">
                     <div className="flex items-center gap-2">
@@ -161,10 +166,10 @@ export default function Coupons() {
                       <span className="text-xs text-slate-500">{c.usages}/{c.limit}</span>
                     </div>
                   </td>
-                  <td className="px-5 py-3.5 text-xs text-slate-500">{c.expires}</td>
+                  <td className="px-5 py-3.5 text-xs text-slate-500" dir="ltr">{c.expires}</td>
                   <td className="px-5 py-3.5">{categoryBadge(c.category)}</td>
                   <td className="px-5 py-3.5">
-                    <Badge label={c.active ? 'Active' : 'Inactive'} variant={c.active ? 'green' : 'slate'} dot />
+                    <Badge label={c.active ? 'نشط' : 'غير نشط'} variant={c.active ? 'green' : 'slate'} dot />
                   </td>
                   <td className="px-5 py-3.5">
                     <button className="text-slate-300 hover:text-red-500 transition-colors">

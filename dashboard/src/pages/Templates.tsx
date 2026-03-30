@@ -1,0 +1,796 @@
+import { useState, useEffect, useCallback } from 'react'
+import {
+  Plus, RefreshCw, CheckCircle, Clock, XCircle, AlertCircle,
+  Eye, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
+  Type, Link2, Phone, Copy as CopyIcon, Zap, Star,
+} from 'lucide-react'
+import Badge from '../components/ui/Badge'
+import PageHeader from '../components/ui/PageHeader'
+import StatCard from '../components/ui/StatCard'
+import { useLanguage } from '../i18n/context'
+import {
+  templatesApi, WhatsAppTemplateRecord, CreateTemplatePayload,
+  TemplateStatus, TemplateCategory, TemplateComponent, TemplateButton,
+  TemplateVarMapRecord,
+  getBody, getHeader, getFooter, getButtons,
+  extractVars, renderBody, countVars,
+  STATUS_COLORS, STATUS_LABELS, CATEGORY_LABELS, LANGUAGE_LABELS,
+} from '../api/templates'
+
+// ── Default templates metadata ────────────────────────────────────────────────
+
+const DEFAULT_TEMPLATE_META: Record<string, {
+  purposeLabel: string
+  automationLabel: string
+  automationType: string
+  varLabels: Record<string, string>
+}> = {
+  cod_order_confirmation_ar: {
+    purposeLabel: 'تأكيد الطلب النقدي',
+    automationLabel: 'الطلبات بالدفع عند الاستلام',
+    automationType: 'cod_confirmation',
+    varLabels: { '{{1}}': 'اسم العميل', '{{2}}': 'اسم المنتج', '{{3}}': 'مبلغ الطلب' },
+  },
+  predictive_reorder_reminder_ar: {
+    purposeLabel: 'تذكير إعادة الطلب التنبؤي',
+    automationLabel: 'predictive_reorder',
+    automationType: 'predictive_reorder',
+    varLabels: { '{{1}}': 'اسم العميل', '{{2}}': 'اسم المنتج', '{{3}}': 'رابط إعادة الطلب' },
+  },
+}
+
+function isDefaultTemplate(name: string) {
+  return name in DEFAULT_TEMPLATE_META
+}
+
+// ── WhatsApp bubble preview ───────────────────────────────────────────────────
+
+function WaPreview({
+  header, body, footer, buttons,
+}: { header: string; body: string; footer: string; buttons: TemplateButton[] }) {
+  return (
+    <div className="bg-[#e5ddd5] rounded-xl p-4 flex items-end min-h-28">
+      <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs w-full p-3 space-y-1" dir="rtl">
+        {header && <p className="font-semibold text-slate-900 text-xs border-b border-slate-100 pb-1">{header}</p>}
+        {body && (
+          <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">{body}</p>
+        )}
+        {footer && <p className="text-[10px] text-slate-400 mt-1">{footer}</p>}
+        {buttons.length > 0 && (
+          <div className="border-t border-slate-100 pt-2 space-y-1">
+            {buttons.map((btn, i) => (
+              <div key={i} className="text-center text-xs text-blue-600 font-medium py-0.5">
+                {btn.text}
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-[10px] text-slate-300 text-end">✓✓ الآن</p>
+      </div>
+    </div>
+  )
+}
+
+// ── Template row ──────────────────────────────────────────────────────────────
+
+function TemplateRow({
+  tpl, onPreview, onDelete,
+}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void }) {
+  const vars = countVars(tpl)
+  const sm = STATUS_COLORS[tpl.status] as 'green' | 'amber' | 'red' | 'slate'
+  const isDefault = isDefaultTemplate(tpl.name)
+  const meta = DEFAULT_TEMPLATE_META[tpl.name]
+
+  return (
+    <tr className={`hover:bg-slate-50 transition-colors ${isDefault ? 'bg-brand-50/30' : ''}`}>
+      <td className="px-5 py-3.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className="text-xs font-semibold text-slate-900">{tpl.name.replace(/_/g, ' ')}</p>
+          {isDefault && (
+            <span className="inline-flex items-center gap-1 text-[10px] bg-brand-100 text-brand-700 border border-brand-200 px-1.5 py-0.5 rounded-full font-medium">
+              <Star className="w-2.5 h-2.5" />
+              افتراضي
+            </span>
+          )}
+        </div>
+        {isDefault && meta && (
+          <p className="text-[10px] text-brand-600 mt-0.5 flex items-center gap-1">
+            <Zap className="w-2.5 h-2.5" />
+            {meta.purposeLabel}
+          </p>
+        )}
+        {!isDefault && tpl.meta_template_id && (
+          <p className="text-[10px] text-slate-400 font-mono mt-0.5">{tpl.meta_template_id}</p>
+        )}
+      </td>
+      <td className="px-5 py-3.5 text-xs text-slate-600">{LANGUAGE_LABELS[tpl.language] ?? tpl.language}</td>
+      <td className="px-5 py-3.5">
+        <Badge
+          label={CATEGORY_LABELS[tpl.category as TemplateCategory] ?? tpl.category}
+          variant={tpl.category === 'MARKETING' ? 'amber' : tpl.category === 'UTILITY' ? 'blue' : 'purple'}
+        />
+      </td>
+      <td className="px-5 py-3.5">
+        <Badge label={STATUS_LABELS[tpl.status]} variant={sm} dot />
+        {tpl.status === 'REJECTED' && tpl.rejection_reason && (
+          <p className="text-[10px] text-red-500 mt-0.5 max-w-xs truncate">{tpl.rejection_reason}</p>
+        )}
+      </td>
+      <td className="px-5 py-3.5">
+        {vars > 0 ? (
+          <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
+            {vars} متغير
+          </span>
+        ) : (
+          <span className="text-xs text-slate-300">—</span>
+        )}
+      </td>
+      <td className="px-5 py-3.5 text-xs text-slate-400 whitespace-nowrap" dir="ltr">
+        {tpl.updated_at ? new Date(tpl.updated_at).toLocaleDateString('ar-SA') : '—'}
+      </td>
+      <td className="px-5 py-3.5">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onPreview}
+            className="text-slate-400 hover:text-brand-500 transition-colors"
+            title="معاينة"
+          >
+            <Eye className="w-4 h-4" />
+          </button>
+          {tpl.status !== 'APPROVED' && (
+            <button
+              onClick={onDelete}
+              className="text-slate-300 hover:text-red-500 transition-colors"
+              title="حذف"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
+  )
+}
+
+// ── Preview modal ─────────────────────────────────────────────────────────────
+
+function PreviewModal({ tpl, onClose }: { tpl: WhatsAppTemplateRecord; onClose: () => void }) {
+  const [vars, setVars] = useState<Record<string, string>>({})
+  const [varMapData, setVarMapData] = useState<TemplateVarMapRecord | null>(null)
+
+  const bodyRaw = getBody(tpl)
+  const varKeys = extractVars(bodyRaw)
+  const footer  = getFooter(tpl)
+  const buttons = getButtons(tpl)
+  const isDefault = isDefaultTemplate(tpl.name)
+  const defaultMeta = DEFAULT_TEMPLATE_META[tpl.name]
+
+  // Pre-fill var inputs with Arabic placeholder labels from default meta
+  const getVarPlaceholder = (varKey: string): string => {
+    if (defaultMeta?.varLabels[varKey]) return defaultMeta.varLabels[varKey]
+    if (varMapData?.var_map_annotated[varKey]) return varMapData.var_map_annotated[varKey].label
+    return `قيمة ${varKey}`
+  }
+
+  // Fetch var map from API for non-default templates
+  useEffect(() => {
+    if (!isDefault && tpl.id) {
+      templatesApi.getVarMap(tpl.id)
+        .then(setVarMapData)
+        .catch(() => {/* non-critical */})
+    }
+  }, [tpl.id, isDefault])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-bold text-slate-900">معاينة القالب</h2>
+            {isDefault && (
+              <span className="inline-flex items-center gap-1 text-[10px] bg-brand-100 text-brand-700 border border-brand-200 px-1.5 py-0.5 rounded-full font-medium">
+                <Star className="w-2.5 h-2.5" />
+                افتراضي
+              </span>
+            )}
+          </div>
+          <button onClick={onClose}><X className="w-5 h-5 text-slate-400 hover:text-slate-600" /></button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          {/* Meta info */}
+          <div className="grid grid-cols-3 gap-3 text-xs">
+            <div className="bg-slate-50 rounded-lg p-2.5">
+              <p className="text-slate-400 mb-0.5">الاسم</p>
+              <p className="font-medium text-slate-800 truncate">{tpl.name.replace(/_/g, ' ')}</p>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-2.5">
+              <p className="text-slate-400 mb-0.5">الفئة</p>
+              <p className="font-medium text-slate-800">{CATEGORY_LABELS[tpl.category as TemplateCategory]}</p>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-2.5">
+              <p className="text-slate-400 mb-0.5">الحالة</p>
+              <Badge label={STATUS_LABELS[tpl.status]} variant={STATUS_COLORS[tpl.status] as 'green' | 'amber' | 'red' | 'slate'} dot />
+            </div>
+          </div>
+
+          {/* Default template — variable mapping panel */}
+          {isDefault && defaultMeta && (
+            <div className="bg-brand-50 border border-brand-200 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Zap className="w-3.5 h-3.5 text-brand-600 shrink-0" />
+                <p className="text-xs font-semibold text-brand-800">
+                  ربط المتغيرات — {defaultMeta.purposeLabel}
+                </p>
+              </div>
+              <p className="text-[11px] text-brand-700 mb-3">
+                تُملأ هذه المتغيرات تلقائياً من بيانات العميل والطلب قبل الإرسال.
+              </p>
+              <div className="space-y-1.5">
+                {Object.entries(defaultMeta.varLabels).map(([varKey, label]) => (
+                  <div key={varKey} className="flex items-center gap-2 text-xs">
+                    <span className="font-mono bg-white border border-brand-200 text-brand-700 px-1.5 py-0.5 rounded text-[11px] w-12 text-center shrink-0">{varKey}</span>
+                    <span className="text-slate-400">←</span>
+                    <span className="text-slate-700 font-medium">{label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Variable inputs for preview */}
+          {varKeys.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-slate-600">قيم المتغيرات (للمعاينة)</p>
+              {varKeys.map(v => (
+                <div key={v} className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded w-14 text-center shrink-0">{v}</span>
+                  <input
+                    className="input text-xs py-1.5 flex-1"
+                    placeholder={getVarPlaceholder(v)}
+                    value={vars[v] ?? ''}
+                    onChange={e => setVars(p => ({ ...p, [v]: e.target.value }))}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          <WaPreview
+            header={renderBody(getHeader(tpl), vars)}
+            body={renderBody(bodyRaw, vars)}
+            footer={footer}
+            buttons={buttons}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Create template wizard ────────────────────────────────────────────────────
+
+const STEP_LABELS_CREATE = ['معلومات القالب', 'محتوى الرسالة', 'الأزرار', 'معاينة وإرسال']
+
+interface WizardState {
+  step: number
+  name: string
+  language: string
+  category: TemplateCategory
+  headerText: string
+  bodyText: string
+  footerText: string
+  buttons: TemplateButton[]
+}
+
+const INIT_WIZARD: WizardState = {
+  step: 1,
+  name: '',
+  language: 'ar',
+  category: 'MARKETING',
+  headerText: '',
+  bodyText: '',
+  footerText: '🐝 نهلة — مساعد متجرك',
+  buttons: [],
+}
+
+function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (t: WhatsAppTemplateRecord) => void }) {
+  const [wiz, setWiz] = useState<WizardState>(INIT_WIZARD)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const canNext = (): boolean => {
+    if (wiz.step === 1) return !!wiz.name.trim() && !!wiz.category
+    if (wiz.step === 2) return !!wiz.bodyText.trim()
+    return true
+  }
+
+  const next = () => setWiz(w => ({ ...w, step: Math.min(w.step + 1, 4) }))
+  const prev = () => setWiz(w => ({ ...w, step: Math.max(w.step - 1, 1) }))
+
+  const insertVar = (varNum: number) => {
+    setWiz(w => ({ ...w, bodyText: w.bodyText + `{{${varNum}}}` }))
+  }
+
+  const addButton = (type: TemplateButton['type']) => {
+    setWiz(w => ({
+      ...w,
+      buttons: [...w.buttons, { type, text: '', url: type === 'URL' ? '' : undefined, phone_number: type === 'PHONE_NUMBER' ? '' : undefined }],
+    }))
+  }
+
+  const removeButton = (i: number) => {
+    setWiz(w => ({ ...w, buttons: w.buttons.filter((_, idx) => idx !== i) }))
+  }
+
+  const updateButton = (i: number, patch: Partial<TemplateButton>) => {
+    setWiz(w => ({
+      ...w,
+      buttons: w.buttons.map((b, idx) => idx === i ? { ...b, ...patch } : b),
+    }))
+  }
+
+  const buildPayload = (): CreateTemplatePayload => {
+    const components: TemplateComponent[] = []
+    if (wiz.headerText.trim()) {
+      components.push({ type: 'HEADER', format: 'TEXT', text: wiz.headerText.trim() })
+    }
+    components.push({ type: 'BODY', text: wiz.bodyText.trim() })
+    if (wiz.footerText.trim()) {
+      components.push({ type: 'FOOTER', text: wiz.footerText.trim() })
+    }
+    if (wiz.buttons.length > 0) {
+      components.push({ type: 'BUTTONS', buttons: wiz.buttons })
+    }
+    return { name: wiz.name.toLowerCase().replace(/\s+/g, '_'), language: wiz.language, category: wiz.category, components }
+  }
+
+  const handleSubmit = async () => {
+    setSaving(true)
+    setError('')
+    try {
+      const created = await templatesApi.create(buildPayload())
+      onCreated(created)
+      onClose()
+    } catch {
+      setError('حدث خطأ أثناء إنشاء القالب. تأكد من البيانات وحاول مجدداً.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const previewComponents = buildPayload().components
+  const previewHeader  = previewComponents.find(c => c.type === 'HEADER')?.text ?? ''
+  const previewBody    = previewComponents.find(c => c.type === 'BODY')?.text ?? ''
+  const previewFooter  = previewComponents.find(c => c.type === 'FOOTER')?.text ?? ''
+  const previewButtons = previewComponents.find(c => c.type === 'BUTTONS')?.buttons ?? []
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">إنشاء قالب واتساب</h2>
+            <p className="text-xs text-slate-400 mt-0.5">{STEP_LABELS_CREATE[wiz.step - 1]} — الخطوة {wiz.step} من 4</p>
+          </div>
+          <button onClick={onClose}><X className="w-5 h-5 text-slate-400 hover:text-slate-600" /></button>
+        </div>
+
+        {/* Progress */}
+        <div className="px-6 pt-4">
+          <div className="flex gap-1">
+            {Array.from({ length: 4 }, (_, i) => (
+              <div key={i} className={`h-1 flex-1 rounded-full transition-colors ${
+                i + 1 < wiz.step ? 'bg-brand-500' : i + 1 === wiz.step ? 'bg-brand-300' : 'bg-slate-100'
+              }`} />
+            ))}
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+
+          {/* Step 1 — Template Info */}
+          {wiz.step === 1 && (
+            <div className="space-y-4">
+              <p className="text-xs text-slate-500">أدخل معلومات القالب الأساسية. الاسم يجب أن يكون بالإنجليزية مع شرطات سفلية.</p>
+              <div>
+                <label className="label">اسم القالب</label>
+                <input
+                  className="input text-sm"
+                  placeholder="مثال: cart_reminder أو special_offer"
+                  dir="ltr"
+                  value={wiz.name}
+                  onChange={e => setWiz(w => ({ ...w, name: e.target.value.toLowerCase().replace(/\s+/g, '_') }))}
+                />
+                <p className="text-xs text-slate-400 mt-1">أحرف صغيرة وشرطات سفلية فقط — هذا هو اسم القالب في Meta</p>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="label">اللغة</label>
+                  <select className="input text-sm" value={wiz.language} onChange={e => setWiz(w => ({ ...w, language: e.target.value }))}>
+                    <option value="ar">العربية</option>
+                    <option value="en">English</option>
+                    <option value="en_US">English (US)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label">الفئة</label>
+                  <select className="input text-sm" value={wiz.category} onChange={e => setWiz(w => ({ ...w, category: e.target.value as TemplateCategory }))}>
+                    <option value="MARKETING">تسويق (Marketing)</option>
+                    <option value="UTILITY">خدمة (Utility)</option>
+                    <option value="AUTHENTICATION">مصادقة (Authentication)</option>
+                  </select>
+                </div>
+              </div>
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-800 flex gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-blue-500" />
+                <span>قوالب <strong>التسويق</strong> تستخدم للعروض والحملات. قوالب <strong>الخدمة</strong> للإشعارات والمعاملات. قوالب <strong>المصادقة</strong> لكودات OTP.</span>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2 — Message Content */}
+          {wiz.step === 2 && (
+            <div className="space-y-4">
+              <p className="text-xs text-slate-500">أنشئ محتوى الرسالة. استخدم {`{{1}}`} {`{{2}}`} {`{{3}}`} للمتغيرات الديناميكية.</p>
+
+              <div>
+                <label className="label">نص الرأس (اختياري)</label>
+                <input
+                  className="input text-sm"
+                  placeholder="مثال: عرض خاص لك 🎁"
+                  value={wiz.headerText}
+                  onChange={e => setWiz(w => ({ ...w, headerText: e.target.value }))}
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="label mb-0">نص الرسالة *</label>
+                  <div className="flex gap-1">
+                    {[1, 2, 3].map(n => (
+                      <button
+                        key={n}
+                        onClick={() => insertVar(n)}
+                        className="text-[11px] bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.5 rounded hover:bg-amber-100 transition-colors font-mono"
+                      >
+                        {`{{${n}}}`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <textarea
+                  rows={5}
+                  className="input text-sm"
+                  placeholder={`مثال:\nمرحباً {{1}}،\nلديك عرض خاص — احصل على خصم {{2}} باستخدام كود: {{3}}`}
+                  value={wiz.bodyText}
+                  onChange={e => setWiz(w => ({ ...w, bodyText: e.target.value }))}
+                />
+                <p className="text-xs text-slate-400 mt-1">{wiz.bodyText.length}/1024 حرف</p>
+              </div>
+
+              <div>
+                <label className="label">نص التذييل (اختياري)</label>
+                <input
+                  className="input text-sm"
+                  value={wiz.footerText}
+                  onChange={e => setWiz(w => ({ ...w, footerText: e.target.value }))}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Step 3 — Buttons */}
+          {wiz.step === 3 && (
+            <div className="space-y-4">
+              <p className="text-xs text-slate-500">أضف أزراراً تفاعلية اختيارية (حتى 3 أزرار).</p>
+
+              {wiz.buttons.length < 3 && (
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => addButton('URL')} className="btn-secondary text-xs py-1.5 flex items-center gap-1.5">
+                    <Link2 className="w-3.5 h-3.5" /> رابط URL
+                  </button>
+                  <button onClick={() => addButton('PHONE_NUMBER')} className="btn-secondary text-xs py-1.5 flex items-center gap-1.5">
+                    <Phone className="w-3.5 h-3.5" /> رقم هاتف
+                  </button>
+                  <button onClick={() => addButton('COPY_CODE')} className="btn-secondary text-xs py-1.5 flex items-center gap-1.5">
+                    <CopyIcon className="w-3.5 h-3.5" /> نسخ كود
+                  </button>
+                </div>
+              )}
+
+              {wiz.buttons.length === 0 && (
+                <div className="py-8 text-center text-sm text-slate-400">
+                  <Type className="w-8 h-8 mx-auto mb-2 text-slate-200" />
+                  لا توجد أزرار — الرسالة ستُرسل بدون أزرار تفاعلية.
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {wiz.buttons.map((btn, i) => (
+                  <div key={i} className="border border-slate-200 rounded-xl p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-slate-600">
+                        {btn.type === 'URL' ? 'رابط URL' : btn.type === 'PHONE_NUMBER' ? 'رقم هاتف' : 'نسخ كود'}
+                      </span>
+                      <button onClick={() => removeButton(i)} className="text-slate-300 hover:text-red-500">
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <input
+                      className="input text-sm"
+                      placeholder="نص الزر"
+                      value={btn.text}
+                      onChange={e => updateButton(i, { text: e.target.value })}
+                    />
+                    {btn.type === 'URL' && (
+                      <input
+                        className="input text-sm"
+                        placeholder="https://example.com أو {{1}}"
+                        dir="ltr"
+                        value={btn.url ?? ''}
+                        onChange={e => updateButton(i, { url: e.target.value })}
+                      />
+                    )}
+                    {btn.type === 'PHONE_NUMBER' && (
+                      <input
+                        className="input text-sm"
+                        placeholder="+966 50 000 0000"
+                        dir="ltr"
+                        value={btn.phone_number ?? ''}
+                        onChange={e => updateButton(i, { phone_number: e.target.value })}
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Step 4 — Preview + Submit */}
+          {wiz.step === 4 && (
+            <div className="space-y-5">
+              <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-xs text-amber-800">
+                  بعد الإرسال، سيدخل القالب حالة <strong>قيد المراجعة</strong> حتى تعتمده Meta (24–48 ساعة).
+                  لن يمكن استخدامه في الحملات قبل الاعتماد.
+                </p>
+              </div>
+
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  {[
+                    ['الاسم',    wiz.name || '—'],
+                    ['اللغة',    LANGUAGE_LABELS[wiz.language] ?? wiz.language],
+                    ['الفئة',    CATEGORY_LABELS[wiz.category]],
+                    ['المتغيرات', `${extractVars(wiz.bodyText).length} متغير`],
+                    ['الأزرار',  wiz.buttons.length > 0 ? `${wiz.buttons.length} زر` : 'بدون أزرار'],
+                  ].map(([k, v]) => (
+                    <div key={k} className="flex gap-2 bg-slate-50 rounded-lg px-3 py-2 text-xs">
+                      <span className="text-slate-400 w-20 shrink-0">{k}</span>
+                      <span className="font-medium text-slate-800 truncate">{v}</span>
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 mb-2">معاينة الرسالة</p>
+                  <WaPreview
+                    header={previewHeader}
+                    body={previewBody}
+                    footer={previewFooter}
+                    buttons={previewButtons as TemplateButton[]}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer nav */}
+        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100">
+          <button onClick={prev} disabled={wiz.step === 1} className="btn-ghost text-sm disabled:opacity-30">
+            <ChevronRight className="w-4 h-4" /> السابق
+          </button>
+
+          {error && <p className="text-xs text-red-500 mx-4">{error}</p>}
+
+          {wiz.step < 4 ? (
+            <button onClick={next} disabled={!canNext()} className="btn-primary text-sm disabled:opacity-40">
+              التالي <ChevronLeft className="w-4 h-4" />
+            </button>
+          ) : (
+            <button onClick={handleSubmit} disabled={saving} className="btn-primary text-sm">
+              {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+              {saving ? 'جارٍ الإرسال…' : 'إرسال لـ Meta'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Filter tabs ───────────────────────────────────────────────────────────────
+
+const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
+  { key: 'all',      label: 'الكل' },
+  { key: 'APPROVED', label: 'معتمدة' },
+  { key: 'PENDING',  label: 'قيد المراجعة' },
+  { key: 'REJECTED', label: 'مرفوضة' },
+  { key: 'DISABLED', label: 'معطّلة' },
+]
+
+const TABLE_HEADERS = ['اسم القالب', 'اللغة', 'الفئة', 'الحالة', 'المتغيرات', 'آخر تحديث', '']
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export default function Templates() {
+  const [templates, setTemplates] = useState<WhatsAppTemplateRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+  const [filterTab, setFilterTab] = useState<TemplateStatus | 'all'>('all')
+  const [showCreate, setShowCreate] = useState(false)
+  const [preview, setPreview] = useState<WhatsAppTemplateRecord | null>(null)
+  const { t } = useLanguage()
+
+  const loadTemplates = useCallback(() => {
+    setLoading(true)
+    templatesApi.list()
+      .then(r => setTemplates(r.templates))
+      .catch(() => setTemplates([]))
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => { loadTemplates() }, [loadTemplates])
+
+  const handleSync = async () => {
+    setSyncing(true)
+    try {
+      await templatesApi.sync()
+      loadTemplates()
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const handleDelete = async (id: number) => {
+    try {
+      await templatesApi.delete(id)
+      setTemplates(ts => ts.filter(t => t.id !== id))
+    } catch { /* ignore */ }
+  }
+
+  const filtered = filterTab === 'all'
+    ? templates
+    : templates.filter(t => t.status === filterTab)
+
+  const counts = {
+    approved: templates.filter(t => t.status === 'APPROVED').length,
+    pending:  templates.filter(t => t.status === 'PENDING').length,
+    rejected: templates.filter(t => t.status === 'REJECTED').length,
+  }
+
+  return (
+    <div className="space-y-5">
+      {showCreate && (
+        <CreateWizard
+          onClose={() => setShowCreate(false)}
+          onCreated={tpl => setTemplates(ts => [tpl, ...ts])}
+        />
+      )}
+      {preview && (
+        <PreviewModal tpl={preview} onClose={() => setPreview(null)} />
+      )}
+
+      <PageHeader
+        title={t(tr => tr.pages.templates.title)}
+        subtitle={t(tr => tr.pages.templates.subtitle)}
+        action={
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="btn-secondary text-sm"
+            >
+              <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+              {t(tr => tr.actions.syncTemplates)}
+            </button>
+            <button onClick={() => setShowCreate(true)} className="btn-primary text-sm">
+              <Plus className="w-4 h-4" /> {t(tr => tr.actions.newTemplate)}
+            </button>
+          </div>
+        }
+      />
+
+      {/* Stats */}
+      <div className="grid grid-cols-3 gap-4">
+        <StatCard label="معتمدة"          value={String(counts.approved)} change={0}  icon={CheckCircle}  iconColor="text-emerald-600" iconBg="bg-emerald-50" />
+        <StatCard label="قيد المراجعة"   value={String(counts.pending)}  change={0}  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+        <StatCard label="مرفوضة"         value={String(counts.rejected)} change={0}  icon={XCircle}      iconColor="text-red-600"     iconBg="bg-red-50" />
+      </div>
+
+      {/* Compliance notice */}
+      <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+        <MessageSquare className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+        <p className="text-xs text-blue-800">
+          <span className="font-semibold">سياسة Meta: </span>
+          جميع القوالب تخضع لمراجعة Meta قبل الاستخدام. لا يمكن استخدام أي قالب في حملة قبل الحصول على حالة
+          <strong> APPROVED</strong>. مدة المراجعة عادةً 24–48 ساعة.
+        </p>
+      </div>
+
+      {/* Table */}
+      <div className="card">
+        {/* Filter tabs */}
+        <div className="flex items-center gap-1 px-5 py-4 border-b border-slate-100">
+          {FILTER_TABS.map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => setFilterTab(tab.key)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                filterTab === tab.key
+                  ? 'bg-brand-500 text-white'
+                  : 'text-slate-500 hover:bg-slate-100'
+              }`}
+            >
+              {tab.label}
+              {tab.key !== 'all' && (
+                <span className={`ms-1.5 text-[10px] px-1 rounded-full ${
+                  filterTab === tab.key ? 'bg-white/20' : 'bg-slate-100'
+                }`}>
+                  {templates.filter(t => t.status === tab.key).length}
+                </span>
+              )}
+            </button>
+          ))}
+          <button onClick={loadTemplates} className="ms-auto text-slate-400 hover:text-slate-600">
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="py-16 text-center text-sm text-slate-400 flex items-center justify-center gap-2">
+            <RefreshCw className="w-4 h-4 animate-spin" /> جارٍ التحميل…
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="py-16 text-center space-y-3">
+            <MessageSquare className="w-10 h-10 text-slate-200 mx-auto" />
+            <p className="text-sm text-slate-400">لا توجد قوالب في هذه الفئة.</p>
+            {filterTab === 'all' && (
+              <button onClick={() => setShowCreate(true)} className="btn-primary text-sm mx-auto">
+                <Plus className="w-4 h-4" /> أنشئ قالبك الأول
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  {TABLE_HEADERS.map((h, i) => (
+                    <th key={i} className="text-start px-5 py-3 text-xs font-medium text-slate-500 uppercase tracking-wide whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filtered.map(tpl => (
+                  <TemplateRow
+                    key={tpl.id}
+                    tpl={tpl}
+                    onPreview={() => setPreview(tpl)}
+                    onDelete={() => handleDelete(tpl.id)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}

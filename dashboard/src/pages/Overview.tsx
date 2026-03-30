@@ -10,33 +10,38 @@ import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 
 const revenueData = [
-  { day: 'Mon', revenue: 4200 },
-  { day: 'Tue', revenue: 5800 },
-  { day: 'Wed', revenue: 3900 },
-  { day: 'Thu', revenue: 7200 },
-  { day: 'Fri', revenue: 6100 },
-  { day: 'Sat', revenue: 9400 },
-  { day: 'Sun', revenue: 8700 },
+  { day: 'الاثنين', revenue: 4200 },
+  { day: 'الثلاثاء', revenue: 5800 },
+  { day: 'الأربعاء', revenue: 3900 },
+  { day: 'الخميس', revenue: 7200 },
+  { day: 'الجمعة', revenue: 6100 },
+  { day: 'السبت', revenue: 9400 },
+  { day: 'الأحد', revenue: 8700 },
 ]
 
 const recentConversations = [
-  { id: 'c1', customer: 'Ahmed Al-Rashid',  phone: '+966 50 123 4567', lastMsg: 'Is the red hoodie available in XL?', time: '2m ago',   isAI: true,  status: 'active' },
-  { id: 'c2', customer: 'Sara Al-Zahrани',  phone: '+966 55 987 6543', lastMsg: 'When will my order be delivered?',    time: '11m ago',  isAI: false, status: 'human' },
-  { id: 'c3', customer: 'Mohammed Khalid',  phone: '+966 56 222 3344', lastMsg: 'Do you have a discount for bulk?',    time: '34m ago',  isAI: true,  status: 'active' },
-  { id: 'c4', customer: 'Fatima Al-Hassan', phone: '+966 54 551 2200', lastMsg: 'Thanks, I placed the order ✅',       time: '1h ago',   isAI: true,  status: 'closed' },
+  { id: 'c1', customer: 'Ahmed Al-Rashid',  phone: '+966 50 123 4567', lastMsg: 'هل الهودي الأحمر متوفر بمقاس XL؟', time: 'منذ دقيقتين',   isAI: true,  status: 'active' },
+  { id: 'c2', customer: 'Sara Al-Zahrani',  phone: '+966 55 987 6543', lastMsg: 'متى يصل طلبي؟',                        time: 'منذ 11 دقيقة', isAI: false, status: 'human'  },
+  { id: 'c3', customer: 'Mohammed Khalid',  phone: '+966 56 222 3344', lastMsg: 'هل عندكم خصم على الكميات؟',            time: 'منذ 34 دقيقة', isAI: true,  status: 'active' },
+  { id: 'c4', customer: 'Fatima Al-Hassan', phone: '+966 54 551 2200', lastMsg: 'شكراً، قدّمت الطلب ✅',               time: 'منذ ساعة',     isAI: true,  status: 'closed' },
 ]
 
 const recentOrders = [
-  { id: '#3812', customer: 'Ahmed Al-Rashid',  amount: 'SAR 342', status: 'paid',    source: 'AI',    time: '5m ago' },
-  { id: '#3811', customer: 'Nora Al-Mutairi',  amount: 'SAR 180', status: 'pending', source: 'AI',    time: '22m ago' },
-  { id: '#3810', customer: 'Khalid Ibrahim',   amount: 'SAR 510', status: 'paid',    source: 'manual',time: '1h ago' },
-  { id: '#3809', customer: 'Lina Al-Saud',     amount: 'SAR 95',  status: 'failed',  source: 'AI',    time: '2h ago' },
+  { id: '#3812', customer: 'Ahmed Al-Rashid', amount: '342 ر.س', status: 'paid',    source: 'AI',     time: 'منذ 5 دقائق' },
+  { id: '#3811', customer: 'Nora Al-Mutairi', amount: '180 ر.س', status: 'pending', source: 'AI',     time: 'منذ 22 دقيقة' },
+  { id: '#3810', customer: 'Khalid Ibrahim',  amount: '510 ر.س', status: 'paid',    source: 'manual', time: 'منذ ساعة' },
+  { id: '#3809', customer: 'Lina Al-Saud',    amount: '95 ر.س',  status: 'failed',  source: 'AI',     time: 'منذ ساعتين' },
 ]
 
 const statusVariant = (s: string) =>
   s === 'paid'    ? 'green'  :
   s === 'pending' ? 'amber'  :
   s === 'failed'  ? 'red'    : 'slate'
+
+const statusLabel = (s: string) =>
+  s === 'paid'    ? 'مدفوع'         :
+  s === 'pending' ? 'قيد الانتظار'  :
+  s === 'failed'  ? 'فشل'           : 'ملغي'
 
 export default function Overview() {
   const { t } = useLanguage()
@@ -51,15 +56,15 @@ export default function Overview() {
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
-          label="Sales Today"
-          value="SAR 8,740"
+          label="المبيعات اليوم"
+          value="8,740 ر.س"
           change={12.4}
           icon={DollarSign}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
         />
         <StatCard
-          label="Conversations"
+          label="المحادثات"
           value="124"
           change={7.1}
           icon={MessageSquare}
@@ -67,7 +72,7 @@ export default function Overview() {
           iconBg="bg-blue-50"
         />
         <StatCard
-          label="Orders Today"
+          label="طلبات اليوم"
           value="37"
           change={-3.2}
           icon={ShoppingCart}
@@ -75,7 +80,7 @@ export default function Overview() {
           iconBg="bg-brand-50"
         />
         <StatCard
-          label="Conversion Rate"
+          label="معدل التحويل"
           value="29.8%"
           change={4.5}
           icon={TrendingUp}
@@ -88,13 +93,13 @@ export default function Overview() {
       <div className="card p-5">
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">Revenue — Last 7 Days</h2>
-            <p className="text-xs text-slate-400 mt-0.5">Total: SAR 45,300</p>
+            <h2 className="text-sm font-semibold text-slate-900">الإيرادات — آخر 7 أيام</h2>
+            <p className="text-xs text-slate-400 mt-0.5">المجموع: 45,300 ر.س</p>
           </div>
           <select className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-600 focus:outline-none">
-            <option>Last 7 days</option>
-            <option>Last 30 days</option>
-            <option>This month</option>
+            <option>آخر 7 أيام</option>
+            <option>آخر 30 يوم</option>
+            <option>هذا الشهر</option>
           </select>
         </div>
         <ResponsiveContainer width="100%" height={220}>
@@ -110,7 +115,7 @@ export default function Overview() {
             <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false} />
             <Tooltip
               contentStyle={{ fontSize: 12, border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 6px -1px rgb(0 0 0 / .1)' }}
-              formatter={(v: number) => [`SAR ${v.toLocaleString()}`, 'Revenue']}
+              formatter={(v: number) => [`${v.toLocaleString('ar-SA')} ر.س`, 'الإيرادات']}
             />
             <Area type="monotone" dataKey="revenue" stroke="#f59e0b" strokeWidth={2} fill="url(#colorRevenue)" />
           </AreaChart>
@@ -122,9 +127,9 @@ export default function Overview() {
         {/* Recent Conversations */}
         <div className="card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-            <h2 className="text-sm font-semibold text-slate-900">Recent Conversations</h2>
+            <h2 className="text-sm font-semibold text-slate-900">أحدث المحادثات</h2>
             <a href="/conversations" className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1">
-              View all <ExternalLink className="w-3 h-3" />
+              {t(tr => tr.actions.viewAll)} <ExternalLink className="w-3 h-3" />
             </a>
           </div>
           <ul className="divide-y divide-slate-100">
@@ -139,7 +144,7 @@ export default function Overview() {
                   <div className="flex items-center gap-2">
                     <p className="text-xs font-medium text-slate-900 truncate">{c.customer}</p>
                     {c.isAI
-                      ? <Bot className="w-3 h-3 text-brand-500 shrink-0" />
+                      ? <Bot  className="w-3 h-3 text-brand-500 shrink-0" />
                       : <User className="w-3 h-3 text-slate-400 shrink-0" />}
                   </div>
                   <p className="text-xs text-slate-500 truncate mt-0.5">{c.lastMsg}</p>
@@ -147,7 +152,7 @@ export default function Overview() {
                 <div className="flex flex-col items-end gap-1 shrink-0">
                   <span className="text-xs text-slate-400">{c.time}</span>
                   <Badge
-                    label={c.status === 'active' ? 'Active' : c.status === 'human' ? 'Human' : 'Closed'}
+                    label={c.status === 'active' ? 'نشطة' : c.status === 'human' ? 'بشري' : 'مغلقة'}
                     variant={c.status === 'active' ? 'green' : c.status === 'human' ? 'amber' : 'slate'}
                     dot
                   />
@@ -160,9 +165,9 @@ export default function Overview() {
         {/* Recent Orders */}
         <div className="card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-            <h2 className="text-sm font-semibold text-slate-900">Recent Orders</h2>
+            <h2 className="text-sm font-semibold text-slate-900">أحدث الطلبات</h2>
             <a href="/orders" className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1">
-              View all <ExternalLink className="w-3 h-3" />
+              {t(tr => tr.actions.viewAll)} <ExternalLink className="w-3 h-3" />
             </a>
           </div>
           <ul className="divide-y divide-slate-100">
@@ -171,14 +176,14 @@ export default function Overview() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-mono font-medium text-slate-700">{o.id}</span>
-                    <Badge label={o.source === 'AI' ? 'AI' : 'Manual'} variant={o.source === 'AI' ? 'purple' : 'slate'} />
+                    <Badge label={o.source === 'AI' ? 'ذكاء اصطناعي' : 'يدوي'} variant={o.source === 'AI' ? 'purple' : 'slate'} />
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">{o.customer}</p>
                 </div>
-                <div className="text-right shrink-0">
+                <div className="text-end shrink-0">
                   <p className="text-xs font-semibold text-slate-900">{o.amount}</p>
                   <div className="mt-0.5">
-                    <Badge label={o.status} variant={statusVariant(o.status) as 'green' | 'amber' | 'red' | 'slate'} />
+                    <Badge label={statusLabel(o.status)} variant={statusVariant(o.status) as 'green' | 'amber' | 'red' | 'slate'} />
                   </div>
                 </div>
               </li>

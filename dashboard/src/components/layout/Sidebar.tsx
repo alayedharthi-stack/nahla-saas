@@ -5,10 +5,14 @@ import {
   ShoppingCart,
   Tag,
   Megaphone,
+  FileText,
+  Zap,
+  Brain,
   Plug,
   BarChart2,
   Settings,
   Sparkles,
+  BrainCircuit,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -35,12 +39,16 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/orders',        icon: ShoppingCart,    label: tr => tr.nav.items.orders        },
       { to: '/coupons',       icon: Tag,             label: tr => tr.nav.items.coupons       },
       { to: '/campaigns',     icon: Megaphone,       label: tr => tr.nav.items.campaigns     },
+      { to: '/templates',     icon: FileText,        label: tr => tr.nav.items.templates     },
     ],
   },
   {
     groupLabel: tr => tr.nav.groups.ai,
     items: [
-      { to: '/analytics', icon: BarChart2, label: tr => tr.nav.items.analyticsAI },
+      { to: '/intelligence',   icon: Brain,         label: tr => tr.nav.items.intelligence  },
+      { to: '/automations',    icon: Zap,           label: tr => tr.nav.items.automations   },
+      { to: '/analytics',      icon: BarChart2,     label: tr => tr.nav.items.analyticsAI   },
+      { to: '/ai-sales-logs',  icon: BrainCircuit,  label: _tr => 'وكيل المبيعات'           },
     ],
   },
   {

@@ -19,6 +19,9 @@ const en: Translations = {
       orders:        'Orders',
       coupons:       'Coupons',
       campaigns:     'Campaigns',
+      templates:     'WhatsApp Templates',
+      automations:   'Smart Automations',
+      intelligence:  'Nahla Intelligence',
       analyticsAI:   'Analytics & AI Logs',
       integrations:  'Integrations',
       settings:      'Settings',
@@ -56,6 +59,18 @@ const en: Translations = {
       title:    'Campaigns',
       subtitle: 'WhatsApp broadcasts, abandoned cart recovery, and VIP targeting',
     },
+    templates: {
+      title:    'WhatsApp Templates',
+      subtitle: 'Manage Meta-approved templates and create new ones',
+    },
+    automations: {
+      title:    'Smart Automations',
+      subtitle: 'Marketing automations driven by customer behavior',
+    },
+    intelligence: {
+      title:    'Nahla Intelligence',
+      subtitle: 'Predictive insights and AI-driven marketing recommendations',
+    },
     analytics: {
       title:    'Analytics & AI',
       subtitle: 'Revenue, conversion & top products',
@@ -71,15 +86,17 @@ const en: Translations = {
   },
 
   actions: {
-    export:      'Export',
-    newCoupon:   'New Coupon',
-    newCampaign: 'New Campaign',
-    viewAll:     'View all',
-    save:        'Save Changes',
-    saved:       'Saved!',
-    cancel:      'Cancel',
-    search:      'Search',
-    filter:      'Filter',
+    export:        'Export',
+    newCoupon:     'New Coupon',
+    newCampaign:   'New Campaign',
+    newTemplate:   'New Template',
+    syncTemplates: 'Sync from Meta',
+    viewAll:       'View all',
+    save:          'Save Changes',
+    saved:         'Saved!',
+    cancel:        'Cancel',
+    search:        'Search',
+    filter:        'Filter',
   },
 }
 

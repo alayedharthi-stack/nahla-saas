@@ -23,6 +23,9 @@ const ar: Translations = {
       orders:        'الطلبات',
       coupons:       'الكوبونات',
       campaigns:     'الحملات',
+      templates:     'قوالب واتساب',
+      automations:   'التشغيل التلقائي',
+      intelligence:  'نهلة الذكية',
       analyticsAI:   'التحليلات وسجلات الذكاء',
       integrations:  'التكاملات',
       settings:      'الإعدادات',
@@ -60,6 +63,18 @@ const ar: Translations = {
       title:    'الحملات',
       subtitle: 'حملات واتساب واسترداد العربات المتروكة واستهداف VIP',
     },
+    templates: {
+      title:    'قوالب واتساب',
+      subtitle: 'إدارة القوالب المعتمدة من Meta وإنشاء قوالب جديدة',
+    },
+    automations: {
+      title:    'التشغيل التلقائي الذكي',
+      subtitle: 'أتمتة تسويقية مبنية على سلوك العملاء',
+    },
+    intelligence: {
+      title:    'نهلة الذكية',
+      subtitle: 'رؤى تنبؤية وتوصيات تسويقية مبنية على الذكاء الاصطناعي',
+    },
     analytics: {
       title:    'التحليلات والذكاء',
       subtitle: 'الإيرادات والتحويل والمنتجات الأكثر مبيعاً',
@@ -75,15 +90,17 @@ const ar: Translations = {
   },
 
   actions: {
-    export:      'تصدير',
-    newCoupon:   'كوبون جديد',
-    newCampaign: 'حملة جديدة',
-    viewAll:     'عرض الكل',
-    save:        'حفظ التغييرات',
-    saved:       'تم الحفظ!',
-    cancel:      'إلغاء',
-    search:      'بحث',
-    filter:      'تصفية',
+    export:        'تصدير',
+    newCoupon:     'كوبون جديد',
+    newCampaign:   'حملة جديدة',
+    newTemplate:   'قالب جديد',
+    syncTemplates: 'مزامنة من Meta',
+    viewAll:       'عرض الكل',
+    save:          'حفظ التغييرات',
+    saved:         'تم الحفظ!',
+    cancel:        'إلغاء',
+    search:        'بحث',
+    filter:        'تصفية',
   },
 }
 

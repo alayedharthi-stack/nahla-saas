@@ -14,7 +14,7 @@ export default function StatCard({
   label,
   value,
   change,
-  changeLabel = 'vs yesterday',
+  changeLabel = 'مقارنة بالأمس',
   icon: Icon,
   iconColor = 'text-brand-500',
   iconBg = 'bg-brand-50',

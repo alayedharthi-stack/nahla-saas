@@ -43,7 +43,7 @@ export default function Header({ title, subtitle }: HeaderProps) {
             <button
               key={code}
               onClick={() => setLang(code)}
-              aria-label={code === 'ar' ? 'التبديل إلى العربية' : 'Switch to English'}
+              aria-label={code === 'ar' ? 'التبديل إلى العربية' : 'التبديل إلى الإنجليزية'}
               className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${
                 lang === code
                   ? 'bg-brand-500 text-white'
