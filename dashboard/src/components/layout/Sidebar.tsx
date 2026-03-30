@@ -13,6 +13,8 @@ import {
   Settings,
   Sparkles,
   BrainCircuit,
+  Store,
+  UserCheck,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -49,13 +51,15 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/automations',    icon: Zap,           label: tr => tr.nav.items.automations   },
       { to: '/analytics',      icon: BarChart2,     label: tr => tr.nav.items.analyticsAI   },
       { to: '/ai-sales-logs',  icon: BrainCircuit,  label: _tr => 'وكيل المبيعات'           },
+      { to: '/handoff-queue',  icon: UserCheck,     label: _tr => 'طابور التحويل'            },
     ],
   },
   {
     groupLabel: tr => tr.nav.groups.store,
     items: [
-      { to: '/integrations', icon: Plug,     label: tr => tr.nav.items.integrations },
-      { to: '/settings',     icon: Settings, label: tr => tr.nav.items.settings     },
+      { to: '/integrations',      icon: Plug,     label: tr => tr.nav.items.integrations },
+      { to: '/store-integration', icon: Store,    label: _tr => 'ربط المتجر'              },
+      { to: '/settings',          icon: Settings, label: tr => tr.nav.items.settings     },
     ],
   },
 ]

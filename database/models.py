@@ -690,3 +690,43 @@ class AIActionLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     customer = relationship('Customer')
     tenant = relationship('Tenant')
+
+
+# ── Payment Sessions ──────────────────────────────────────────────────────────
+
+class PaymentSession(Base):
+    """Tracks a Moyasar (or other gateway) payment session tied to an Order."""
+    __tablename__ = 'payment_sessions'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    order_id = Column(Integer, ForeignKey('orders.id'), nullable=True)
+    gateway = Column(String, default='moyasar', nullable=False)
+    gateway_payment_id = Column(String, nullable=True, index=True)   # Moyasar invoice id
+    amount_sar = Column(Float, nullable=False)
+    currency = Column(String, default='SAR', nullable=False)
+    status = Column(String, default='pending', nullable=False)  # pending|paid|failed|expired
+    payment_link = Column(String, nullable=True)
+    callback_data = Column(JSONB, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    tenant = relationship('Tenant')
+
+
+# ── Handoff Sessions ──────────────────────────────────────────────────────────
+
+class HandoffSession(Base):
+    """Tracks a human handoff for an AI Sales conversation."""
+    __tablename__ = 'handoff_sessions'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_phone = Column(String, nullable=False, index=True)
+    customer_name = Column(String, nullable=True)
+    status = Column(String, default='active', nullable=False)   # active | resolved
+    handoff_reason = Column(Text, nullable=True)
+    last_message = Column(Text, nullable=True)
+    notification_sent = Column(Boolean, default=False)
+    resolved_by = Column(String, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    context_snapshot = Column(JSONB, nullable=True)  # last few messages/products
+    created_at = Column(DateTime, default=datetime.utcnow)
+    tenant = relationship('Tenant')

@@ -13,6 +13,8 @@ import Integrations from './pages/Integrations'
 import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
 import AiSalesLogs from './pages/AiSalesLogs'
+import StoreIntegration from './pages/StoreIntegration'
+import HandoffQueue from './pages/HandoffQueue'
 
 export default function App() {
   return (
@@ -33,6 +35,8 @@ export default function App() {
             <Route path="analytics"      element={<Analytics />} />
             <Route path="settings"       element={<Settings />} />
             <Route path="ai-sales-logs"  element={<AiSalesLogs />} />
+            <Route path="store-integration" element={<StoreIntegration />} />
+            <Route path="handoff-queue" element={<HandoffQueue />} />
           </Route>
         </Routes>
       </BrowserRouter>

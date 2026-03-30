@@ -1,0 +1,1 @@
+- [Real Store Integration Layer](project_store_integration.md) — Salla adapter architecture, integration points in AI Sales Agent, remaining work

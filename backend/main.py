@@ -13,7 +13,9 @@ from models import (
     Campaign, WhatsAppTemplate,
     SmartAutomation, AutomationEvent, PredictiveReorderEstimate,
     Customer, Product, CustomerProfile,
+    Order, Coupon, HandoffSession, PaymentSession,
 )
+import httpx
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -2277,6 +2279,25 @@ DEFAULT_AI_SALES_AGENT: Dict[str, Any] = {
     "handoff_phrases": ["موظف", "بشري", "انسان", "تكلم مع شخص", "تواصل مع الدعم", "شخص حقيقي"],
 }
 
+DEFAULT_MOYASAR: Dict[str, Any] = {
+    "enabled": False,
+    "secret_key": "",
+    "publishable_key": "",
+    "webhook_secret": "",
+    "callback_url": "",
+    "success_url": "",
+    "error_url": "",
+}
+
+DEFAULT_HANDOFF: Dict[str, Any] = {
+    "notification_method": "webhook",   # "webhook" | "whatsapp" | "both" | "none"
+    "webhook_url": "",
+    "staff_whatsapp": "",
+    "auto_pause_ai": True,
+}
+
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+
 # Intent definitions – each has detection keywords + the response strategy it maps to
 AI_SALES_INTENTS: Dict[str, Dict[str, Any]] = {
     "ask_product": {
@@ -2394,25 +2415,77 @@ def _detect_intent(message: str, settings: Dict[str, Any]) -> Tuple[str, float, 
     return best_intent, round(best_score, 2), best_response_type
 
 
-def _get_product_catalog(db: Session, tenant_id: int) -> List[Dict[str, Any]]:
+async def _call_orchestrator(
+    tenant_id: int,
+    customer_phone: str,
+    message: str,
+) -> Optional[Dict[str, Any]]:
     """
-    Return the tenant's real product catalog from the DB.
-    Returns an empty list when no products have been synced yet — callers must
-    handle the empty case gracefully without inventing fictional products.
+    Route the message through the AI Orchestrator pipeline.
+    Returns the orchestrator response dict, or None if unavailable.
+    The orchestrator applies: FactGuard, PolicyGuard, Claude reasoning.
     """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{ORCHESTRATOR_URL}/orchestrate",
+                json={
+                    "tenant_id": tenant_id,
+                    "customer_phone": customer_phone,
+                    "message": message,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        logger.warning(
+            f"[Orchestrator] Call failed for tenant={tenant_id}: {exc} "
+            f"— falling back to keyword engine"
+        )
+        return None
+
+
+def _get_handoff_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
+    s = _get_or_create_settings(db, tenant_id)
+    meta = s.extra_metadata or {}
+    return _merge_defaults(meta.get("handoff_settings", {}), DEFAULT_HANDOFF)
+
+
+def _get_moyasar_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
+    s = _get_or_create_settings(db, tenant_id)
+    meta = s.extra_metadata or {}
+    return _merge_defaults(meta.get("moyasar", {}), DEFAULT_MOYASAR)
+
+
+async def _get_product_catalog(db: Session, tenant_id: int) -> List[Dict[str, Any]]:
+    """
+    Fetch product catalog. Priority:
+    1. Real store adapter (Salla, etc.) if configured
+    2. Nahla DB products (synced or manually added)
+    Returns [] — never invents products.
+    """
+    import sys as _sys
+    _sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from store_integration.product_service import fetch_products, normalize_db_product
+    from store_integration.registry import get_adapter
+
+    # Try real store first
+    adapter = get_adapter(tenant_id)
+    if adapter:
+        try:
+            live_products = await fetch_products(tenant_id)
+            if live_products:
+                raw_live = [p.dict() for p in live_products]
+                from ranking.product_ranker import rank_products
+                return rank_products(raw_live, db, tenant_id)
+        except Exception:
+            pass  # fall through to DB
+
+    # DB fallback
     products = db.query(Product).filter(Product.tenant_id == tenant_id).all()
-    return [
-        {
-            "id":          p.id,
-            "title":       p.title,
-            "price":       p.price or None,
-            "sku":         p.sku or "",
-            "in_stock":    True,
-            "description": (p.description or "")[:200],
-            "tags":        p.recommendation_tags or [],
-        }
-        for p in products
-    ]
+    raw = [normalize_db_product(p) for p in products]
+    from ranking.product_ranker import rank_products
+    return rank_products(raw, db, tenant_id)
 
 
 def _build_response_context(db: Session, tenant_id: int) -> Dict[str, Any]:
@@ -2763,32 +2836,116 @@ async def ai_sales_process_message(request: Request, db: Session = Depends(get_d
     if not message:
         raise HTTPException(status_code=422, detail="message field is required")
 
-    # 1. Detect intent
+    # 1. Check for active human handoff — AI is paused for this conversation
+    from handoff.manager import get_active_handoff, create_handoff_session
+    from handoff.notifier import notify_handoff
+    active_handoff = get_active_handoff(db, tenant_id, cust_phone)
+    if active_handoff:
+        return {
+            "intent": "handoff_active",
+            "intent_label": "محادثة مع موظف",
+            "confidence": 1.0,
+            "response_text": (
+                f"مرحباً {cust_name}! 👋\n"
+                "محادثتك حالياً مع أحد موظفينا. سيرد عليك في أقرب وقت. 🙏"
+            ),
+            "products_used": False,
+            "order_started": False,
+            "payment_link": None,
+            "handoff_triggered": False,
+            "handoff_active": True,
+        }
+
+    # 2. Detect intent (keyword engine — used for handoff priority and logging)
     intent, confidence, response_type = _detect_intent(message, settings)
 
-    # 2. Load product catalog
-    products = _get_product_catalog(db, tenant_id)
+    # 3. Immediate handoff — handle before orchestrator call
+    if response_type == "human_handoff" and settings.get("allow_human_handoff", True):
+        handoff_settings = _get_handoff_settings(db, tenant_id)
+        handoff_session = create_handoff_session(
+            db, tenant_id, cust_phone, cust_name, message,
+            reason="customer_request",
+        )
+        if not handoff_session.notification_sent:
+            sent = await notify_handoff(
+                handoff_session.id, tenant_id, cust_phone, cust_name,
+                message, handoff_settings,
+            )
+            if sent:
+                handoff_session.notification_sent = True
+        _log_ai_sales_event(
+            db, tenant_id, cust_phone, cust_name, message,
+            "talk_to_human", 0.95,
+            f"مرحباً {cust_name} 👋\nسأحوّلك الآن إلى أحد موظفينا. انتظر لحظة من فضلك. 🙏",
+            False, False, False, True,
+        )
+        db.commit()
+        return {
+            "intent": "talk_to_human",
+            "intent_label": "التحدث مع موظف",
+            "confidence": 0.95,
+            "response_text": f"مرحباً {cust_name} 👋\nسأحوّلك الآن إلى أحد موظفينا. انتظر لحظة من فضلك. 🙏",
+            "products_used": False,
+            "order_started": False,
+            "payment_link": None,
+            "handoff_triggered": True,
+            "handoff_active": False,
+            "handoff_session_id": handoff_session.id,
+        }
+
+    # 4. Load product catalog and store context
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from store_integration.shipping_service import get_shipping_options, format_shipping_lines
+    from store_integration.payment_service import generate_payment_link as store_payment_link
+
+    products = await _get_product_catalog(db, tenant_id)
+    ctx = _build_response_context(db, tenant_id)
+
+    # Override shipping lines with live store data when adapter is configured
+    if response_type == "shipping_info":
+        live_shipping = await get_shipping_options(tenant_id)
+        if live_shipping:
+            ctx["shipping_lines"] = format_shipping_lines(live_shipping)
+
     products_used = response_type in ("product_info", "price_info", "recommendation", "start_order_flow", "cod_flow")
 
-    # 3. Build response
-    threshold = settings.get("confidence_threshold", 0.55)
-    if confidence < threshold and intent not in ("talk_to_human", "general"):
-        # Low confidence → rephrase as gentle clarification
-        response_text = (
-            f"مرحباً {cust_name}! 😊 لم أفهم طلبك تماماً.\n"
-            "هل تريد:\n• معرفة منتجاتنا وأسعارها؟\n• إتمام طلب؟\n• التواصل مع موظف؟\n\n"
-            "أجبني وسأكون سعيداً بمساعدتك! 🌟"
-        )
-        order_started = False
-        handoff_triggered = False
-    else:
-        response_text, order_started, handoff_triggered = _build_ai_sales_response(
-            intent, response_type, confidence, products, settings, cust_name,
-        )
-
+    # 5. Resolve payment link
     payment_link = None
     if response_type == "payment_link" and settings.get("allow_payment_link_sending", True):
-        payment_link = f"https://pay.nahla.ai/checkout/{tenant_id}-demo"
+        payment_link = await store_payment_link(tenant_id, str(tenant_id), 0.0)
+
+    # 6. Route through AI Orchestrator (Claude + FactGuard + PolicyGuard)
+    #    Falls back to keyword engine if orchestrator is unavailable.
+    orch_result = await _call_orchestrator(tenant_id, cust_phone, message)
+
+    if orch_result and orch_result.get("reply"):
+        response_text = orch_result["reply"]
+        # Detect order intent from orchestrator actions
+        order_started = any(
+            a.get("type") in ("propose_order", "create_draft_order") and a.get("executable", False)
+            for a in (orch_result.get("actions") or [])
+        )
+        handoff_triggered = False
+        logger.info(
+            f"[AISales] Orchestrator response used | tenant={tenant_id} "
+            f"model={orch_result.get('model_used', '?')} "
+            f"fact_guard_modified={orch_result.get('fact_guard', {}).get('was_modified', False)}"
+        )
+    else:
+        # Fallback: keyword-based response builder
+        threshold = settings.get("confidence_threshold", 0.55)
+        if confidence < threshold and intent not in ("general",):
+            response_text = (
+                f"مرحباً {cust_name}! 😊 لم أفهم طلبك تماماً.\n"
+                "هل تريد:\n• معرفة منتجاتنا وأسعارها؟\n• إتمام طلب؟\n• التواصل مع موظف؟\n\n"
+                "أجبني وسأكون سعيداً بمساعدتك! 🌟"
+            )
+            order_started = False
+            handoff_triggered = False
+        else:
+            response_text, order_started, handoff_triggered = _build_ai_sales_response(
+                intent, response_type, products, settings, ctx, cust_name, payment_link,
+            )
 
     # 4. Log event
     _log_ai_sales_event(
@@ -2838,7 +2995,41 @@ async def ai_sales_create_order(
         if not settings.get("allow_payment_link_sending", True):
             raise HTTPException(status_code=403, detail="Online payment is disabled for this tenant")
         order_status = "payment_pending"
-        payment_link = f"https://pay.nahla.ai/checkout/{tenant_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        payment_link = None  # will be resolved below via store adapter or placeholder
+
+    # Try to create order in the real store first
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from store_integration.order_service import create_order as store_create_order
+    from store_integration.models import OrderInput as StoreOrderInput, OrderItemInput as StoreOrderItem
+    from store_integration.payment_service import generate_payment_link as store_payment_link, has_real_payment
+
+    store_order = None
+    if body.payment_method in ("pay_now",):
+        store_order_input = StoreOrderInput(
+            customer_name=body.customer_name,
+            customer_phone=body.customer_phone,
+            city=body.city or "",
+            address=body.address or "",
+            payment_method=body.payment_method,
+            items=[StoreOrderItem(
+                product_id=str(body.product_id) if body.product_id else "0",
+                variant_id=str(body.variant_id) if body.variant_id else None,
+                quantity=body.quantity,
+            )],
+            notes=body.notes,
+        )
+        store_order = await store_create_order(tenant_id, store_order_input)
+
+    if store_order:
+        # Real store order created — use its ID and payment link
+        external_order_id = store_order.id
+        payment_link = store_order.payment_link
+        if not payment_link and order_status == "payment_pending":
+            payment_link = await store_payment_link(tenant_id, external_order_id, 0.0)
+    else:
+        external_order_id = None
+        if order_status == "payment_pending":
+            payment_link = await store_payment_link(tenant_id, str(tenant_id), 0.0)
 
     # Find or create customer
     customer = db.query(Customer).filter(
@@ -2889,6 +3080,7 @@ async def ai_sales_create_order(
         tenant_id=tenant_id,
         status=order_status,
         total=total_str,
+        external_id=external_order_id,
         customer_info={
             "name":    body.customer_name,
             "phone":   body.customer_phone,
@@ -2999,41 +3191,416 @@ async def get_ai_sales_logs(
             "timestamp":         r.created_at.isoformat() if r.created_at else None,
         })
 
-    # If no real logs exist, return illustrative demo entries
-    if not logs:
-        now = datetime.utcnow()
-        demo_ts = [
-            now.replace(hour=9,  minute=12).isoformat(),
-            now.replace(hour=10, minute=34).isoformat(),
-            now.replace(hour=11, minute=55).isoformat(),
-            now.replace(hour=13, minute=7).isoformat(),
-            now.replace(hour=14, minute=22).isoformat(),
-        ]
-        logs = [
-            {"id": 1, "customer_phone": "966501234567", "customer_name": "سارة المطيري",
-             "message": "ابي اعرف عن عسل السدر", "intent": "ask_product", "intent_label": "استفسار عن منتج",
-             "confidence": 0.82, "response_text": "مرحباً سارة! إليك منتجاتنا...", "product_used": True,
-             "order_created": False, "payment_link_sent": False, "handoff_triggered": False, "order_id": None, "timestamp": demo_ts[0]},
-            {"id": 2, "customer_phone": "966502345678", "customer_name": "محمد العتيبي",
-             "message": "بكم عسل المانوكا؟", "intent": "ask_price", "intent_label": "استفسار عن السعر",
-             "confidence": 0.78, "response_text": "سعر عسل المانوكا 299 ر.س", "product_used": True,
-             "order_created": False, "payment_link_sent": False, "handoff_triggered": False, "order_id": None, "timestamp": demo_ts[1]},
-            {"id": 3, "customer_phone": "966503456789", "customer_name": "فاطمة الشمري",
-             "message": "ابغى اطلب عسل السدر كميتين", "intent": "order_product", "intent_label": "طلب شراء منتج",
-             "confidence": 0.91, "response_text": "ممتاز! سأساعدك في إتمام طلبك...", "product_used": True,
-             "order_created": True, "payment_link_sent": False, "handoff_triggered": False, "order_id": 1042, "timestamp": demo_ts[2]},
-            {"id": 4, "customer_phone": "966504567890", "customer_name": "خالد الدوسري",
-             "message": "ادفع بالفيزا", "intent": "pay_now", "intent_label": "الدفع الإلكتروني",
-             "confidence": 0.88, "response_text": "رابط الدفع الآمن...", "product_used": False,
-             "order_created": False, "payment_link_sent": True, "handoff_triggered": False, "order_id": 1043, "timestamp": demo_ts[3]},
-            {"id": 5, "customer_phone": "966505678901", "customer_name": "نورة القحطاني",
-             "message": "ابي اتكلم مع موظف", "intent": "talk_to_human", "intent_label": "التحدث مع موظف",
-             "confidence": 0.95, "response_text": "سأحوّلك لأحد موظفينا...", "product_used": False,
-             "order_created": False, "payment_link_sent": False, "handoff_triggered": True, "order_id": None, "timestamp": demo_ts[4]},
-        ]
-        total = len(logs)
-
     return {"logs": logs, "total": total, "offset": offset, "limit": limit}
+
+
+# ── Moyasar Payment Gateway ────────────────────────────────────────────────────
+
+class MoyasarSettingsIn(BaseModel):
+    enabled: bool = False
+    secret_key: str = ""
+    publishable_key: str = ""
+    webhook_secret: str = ""
+    callback_url: str = ""
+    success_url: str = ""
+    error_url: str = ""
+
+
+@app.get("/moyasar/settings")
+async def get_moyasar_settings(request: Request, db: Session = Depends(get_db)):
+    """Return Moyasar settings for this tenant (keys masked)."""
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+    cfg = _get_moyasar_settings(db, tenant_id)
+    return {
+        "enabled": cfg.get("enabled", False),
+        "publishable_key": cfg.get("publishable_key", ""),
+        "secret_key_hint": ("***" + cfg.get("secret_key", "")[-4:]) if cfg.get("secret_key") else "",
+        "webhook_secret_set": bool(cfg.get("webhook_secret")),
+        "callback_url": cfg.get("callback_url", ""),
+        "success_url": cfg.get("success_url", ""),
+        "error_url": cfg.get("error_url", ""),
+    }
+
+
+@app.put("/moyasar/settings")
+async def put_moyasar_settings(
+    body: MoyasarSettingsIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+    s = _get_or_create_settings(db, tenant_id)
+    meta = dict(s.extra_metadata or {})
+    meta["moyasar"] = body.dict()
+    s.extra_metadata = meta
+    db.add(s)
+    db.commit()
+    return {"status": "saved"}
+
+
+@app.post("/payments/create-session")
+async def create_payment_session(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Create a Moyasar payment session for an order.
+    Body: { order_id, amount_sar, description? }
+    Returns: { payment_link, session_id, gateway }
+    """
+    body = await request.json()
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+
+    order_id = body.get("order_id")
+    amount_sar = float(body.get("amount_sar", 0))
+    description = str(body.get("description", f"طلب #{order_id}"))
+
+    if amount_sar <= 0:
+        raise HTTPException(status_code=422, detail="amount_sar must be > 0")
+
+    cfg = _get_moyasar_settings(db, tenant_id)
+
+    if cfg.get("enabled") and cfg.get("secret_key"):
+        # Real Moyasar payment session
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+        from payment_gateways.moyasar import MoyasarClient
+
+        client = MoyasarClient(
+            secret_key=cfg["secret_key"],
+            publishable_key=cfg.get("publishable_key", ""),
+        )
+        try:
+            invoice = await client.create_invoice(
+                amount_sar=amount_sar,
+                description=description,
+                callback_url=cfg.get("callback_url") or f"https://api.nahla.ai/payments/webhook/moyasar",
+                success_url=cfg.get("success_url", ""),
+                error_url=cfg.get("error_url", ""),
+                metadata={"order_id": str(order_id), "tenant_id": str(tenant_id)},
+            )
+            gateway_id = invoice.get("id", "")
+            payment_link = invoice.get("url", "")
+            gateway = "moyasar"
+        except Exception as exc:
+            logger.error(f"[Moyasar] create_invoice failed for tenant={tenant_id}: {exc}")
+            raise HTTPException(status_code=502, detail=f"Payment gateway error: {exc}")
+    else:
+        # Placeholder — Moyasar not configured
+        gateway_id = ""
+        payment_link = f"https://pay.nahla.ai/checkout/{tenant_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        gateway = "placeholder"
+        logger.warning(f"[Payment] Moyasar not configured for tenant={tenant_id}, returning placeholder")
+
+    # Persist PaymentSession
+    session = PaymentSession(
+        tenant_id=tenant_id,
+        order_id=order_id,
+        gateway=gateway,
+        gateway_payment_id=gateway_id,
+        amount_sar=amount_sar,
+        currency="SAR",
+        status="pending",
+        payment_link=payment_link,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(session)
+
+    # Attach payment link to Order
+    if order_id:
+        order = db.query(Order).filter(Order.id == order_id, Order.tenant_id == tenant_id).first()
+        if order:
+            order.checkout_url = payment_link
+
+    db.commit()
+
+    return {
+        "session_id": session.id,
+        "payment_link": payment_link,
+        "gateway": gateway,
+        "amount_sar": amount_sar,
+    }
+
+
+@app.post("/payments/webhook/moyasar")
+async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Handle Moyasar payment webhook callbacks.
+    Verifies HMAC-SHA256 signature and updates Order + PaymentSession status.
+    """
+    raw_body = await request.body()
+    signature = request.headers.get("signature", "")
+
+    # We process the event even without tenant context (it comes from Moyasar)
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Extract metadata to find tenant + order
+    meta = data.get("metadata") or {}
+    tenant_id = int(meta.get("tenant_id", 0))
+    order_id_str = meta.get("order_id", "")
+    payment_id = data.get("id", "")
+    payment_status = data.get("status", "")   # paid | failed | authorized
+
+    if tenant_id:
+        cfg = _get_moyasar_settings(db, tenant_id)
+        webhook_secret = cfg.get("webhook_secret", "")
+
+        # Verify signature when secret is configured
+        if webhook_secret and signature:
+            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+            from payment_gateways.moyasar import MoyasarClient
+            client = MoyasarClient(secret_key=cfg.get("secret_key", ""))
+            if not client.verify_webhook_signature(raw_body, signature, webhook_secret):
+                logger.warning(f"[Moyasar Webhook] Invalid signature for tenant={tenant_id}")
+                raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+        # Update PaymentSession
+        ps = (
+            db.query(PaymentSession)
+            .filter(
+                PaymentSession.gateway_payment_id == payment_id,
+                PaymentSession.tenant_id == tenant_id,
+            )
+            .first()
+        )
+        if ps:
+            ps.status = "paid" if payment_status in ("paid", "authorized") else "failed"
+            ps.callback_data = data
+            ps.updated_at = datetime.utcnow()
+
+        # Update Order status
+        if order_id_str:
+            try:
+                oid = int(order_id_str)
+                order = db.query(Order).filter(Order.id == oid, Order.tenant_id == tenant_id).first()
+                if order:
+                    if payment_status in ("paid", "authorized"):
+                        order.status = "paid"
+                        logger.info(
+                            f"[Moyasar Webhook] Order #{oid} marked paid for tenant={tenant_id}"
+                        )
+                    elif payment_status == "failed":
+                        order.status = "payment_failed"
+            except (ValueError, TypeError):
+                pass
+
+        db.commit()
+
+    logger.info(
+        f"[Moyasar Webhook] id={payment_id} status={payment_status} tenant={tenant_id}"
+    )
+    return {"received": True}
+
+
+# ── Human Handoff Management ───────────────────────────────────────────────────
+
+class HandoffSettingsIn(BaseModel):
+    notification_method: str = "webhook"
+    webhook_url: str = ""
+    staff_whatsapp: str = ""
+    auto_pause_ai: bool = True
+
+
+@app.get("/handoff/settings")
+async def get_handoff_settings_endpoint(request: Request, db: Session = Depends(get_db)):
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+    return {"settings": _get_handoff_settings(db, tenant_id)}
+
+
+@app.put("/handoff/settings")
+async def put_handoff_settings_endpoint(
+    body: HandoffSettingsIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+    s = _get_or_create_settings(db, tenant_id)
+    meta = dict(s.extra_metadata or {})
+    meta["handoff_settings"] = body.dict()
+    s.extra_metadata = meta
+    db.add(s)
+    db.commit()
+    return {"settings": body.dict()}
+
+
+@app.get("/handoff/sessions")
+async def list_handoff_sessions(
+    request: Request,
+    db: Session = Depends(get_db),
+    status: str = "active",
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List handoff sessions for the staff queue."""
+    tenant_id = _resolve_tenant_id(request)
+    query = (
+        db.query(HandoffSession)
+        .filter(HandoffSession.tenant_id == tenant_id)
+    )
+    if status in ("active", "resolved"):
+        query = query.filter(HandoffSession.status == status)
+    total = query.count()
+    rows = query.order_by(HandoffSession.created_at.desc()).offset(offset).limit(limit).all()
+    return {
+        "sessions": [
+            {
+                "id": r.id,
+                "customer_phone": r.customer_phone,
+                "customer_name": r.customer_name or "—",
+                "status": r.status,
+                "handoff_reason": r.handoff_reason,
+                "last_message": r.last_message,
+                "notification_sent": r.notification_sent,
+                "resolved_by": r.resolved_by,
+                "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+@app.put("/handoff/sessions/{session_id}/resolve")
+async def resolve_handoff_session_endpoint(
+    session_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Mark a handoff session as resolved and resume AI responses for the customer.
+    Body: { resolved_by? }
+    """
+    tenant_id = _resolve_tenant_id(request)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    resolved_by = body.get("resolved_by", "staff")
+
+    from handoff.manager import resolve_handoff_session
+    session = resolve_handoff_session(db, session_id, tenant_id, resolved_by)
+    if not session:
+        raise HTTPException(status_code=404, detail="Handoff session not found")
+    db.commit()
+    return {
+        "session_id": session.id,
+        "status": session.status,
+        "resolved_by": session.resolved_by,
+        "resolved_at": session.resolved_at.isoformat() if session.resolved_at else None,
+    }
+
+
+# ── Store Integration settings ────────────────────────────────────────────────
+
+class StoreIntegrationSettingsIn(BaseModel):
+    platform: str = "salla"
+    api_key: str
+    store_id: str = ""
+    webhook_secret: str = ""
+    enabled: bool = True
+
+
+@app.get("/store-integration/settings")
+async def get_store_integration_settings(request: Request, db: Session = Depends(get_db)):
+    """Return store integration config for this tenant (api_key masked)."""
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+    from models import Integration
+    integration = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+        Integration.provider.in_(["salla"]),
+    ).first()
+    if not integration:
+        return {"configured": False, "platform": None, "store_id": "", "enabled": False}
+    cfg = integration.config or {}
+    return {
+        "configured": True,
+        "platform": integration.provider,
+        "store_id": cfg.get("store_id", ""),
+        "api_key_hint": ("***" + cfg.get("api_key", "")[-4:]) if cfg.get("api_key") else "",
+        "enabled": integration.enabled,
+    }
+
+
+@app.put("/store-integration/settings")
+async def put_store_integration_settings(
+    body: StoreIntegrationSettingsIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Save or update store integration credentials."""
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+    from models import Integration
+    integration = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+        Integration.provider == body.platform,
+    ).first()
+    new_config = {
+        "api_key": body.api_key,
+        "store_id": body.store_id,
+        "webhook_secret": body.webhook_secret,
+    }
+    if integration:
+        integration.config = new_config
+        integration.enabled = body.enabled
+    else:
+        integration = Integration(
+            tenant_id=tenant_id,
+            provider=body.platform,
+            config=new_config,
+            enabled=body.enabled,
+        )
+        db.add(integration)
+    db.commit()
+    return {"status": "saved", "platform": body.platform, "enabled": body.enabled}
+
+
+@app.delete("/store-integration/settings")
+async def delete_store_integration_settings(request: Request, db: Session = Depends(get_db)):
+    """Disable store integration for this tenant."""
+    tenant_id = _resolve_tenant_id(request)
+    from models import Integration
+    integration = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+    ).first()
+    if integration:
+        integration.enabled = False
+        db.commit()
+    return {"status": "disabled"}
+
+
+@app.get("/store-integration/test")
+async def test_store_integration(request: Request):
+    """Test connectivity to the configured store adapter."""
+    tenant_id = _resolve_tenant_id(request)
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from store_integration.registry import get_adapter
+    adapter = get_adapter(tenant_id)
+    if not adapter:
+        return {"status": "not_configured", "message": "No store integration configured"}
+    try:
+        products = await adapter.get_products()
+        return {
+            "status": "ok",
+            "platform": adapter.platform,
+            "products_found": len(products),
+            "sample": products[0].dict() if products else None,
+        }
+    except Exception as exc:
+        return {"status": "error", "platform": adapter.platform, "error": str(exc)}
 
 
 # ── Existing endpoints ─────────────────────────────────────────────────────────
