@@ -41,9 +41,15 @@ app.add_middleware(
 # Multi-tenant middleware
 @app.middleware("http")
 async def multi_tenant_middleware(request: Request, call_next):
-    tenant_id = request.headers.get("X-Tenant-ID", "1")
+    # In production, replace this with JWT-based tenant resolution.
+    # The X-Tenant-ID header is used for dev/demo only.
+    # Any request without this header is treated as tenant 1 (demo store).
+    raw = request.headers.get("X-Tenant-ID", "1")
+    try:
+        tenant_id = str(int(raw))   # reject non-integer values
+    except (ValueError, TypeError):
+        tenant_id = "1"
     request.state.tenant_id = tenant_id
-    logger.info(f"Request for tenant: {tenant_id}")
     response = await call_next(request)
     return response
 
@@ -71,8 +77,8 @@ def _get_or_create_tenant(db: Session, tenant_id: int) -> Tenant:
     if not tenant:
         tenant = Tenant(
             id=tenant_id,
-            name="متجر أحمد للملابس",
-            domain="ahmed-clothing.salla.sa",
+            name=f"متجر رقم {tenant_id}",
+            domain=f"store-{tenant_id}.nahla.sa",
             is_active=True,
             created_at=datetime.utcnow(),
         )
@@ -111,6 +117,10 @@ DEFAULT_WHATSAPP: Dict[str, Any] = {
     "owner_whatsapp_number": "",
     "auto_reply_enabled": True,
     "transfer_to_owner_enabled": True,
+    # AI Template Generation mode:
+    #   draft_approval — save as DRAFT, merchant reviews before submitting to Meta
+    #   auto_submit    — generate and submit to Meta immediately, notify merchant
+    "template_submission_mode": "draft_approval",
 }
 
 DEFAULT_AI: Dict[str, Any] = {
@@ -795,7 +805,27 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "synced_at": t.synced_at.isoformat() if t.synced_at else None,
+        # AI lifecycle fields (migration 0009)
+        "source": getattr(t, "source", "merchant") or "merchant",
+        "objective": getattr(t, "objective", None),
+        "usage_count": getattr(t, "usage_count", 0) or 0,
+        "last_used_at": t.last_used_at.isoformat() if getattr(t, "last_used_at", None) else None,
+        "health_score": getattr(t, "health_score", None),
+        "recommendation_state": getattr(t, "recommendation_state", "none") or "none",
+        "recommendation_note": getattr(t, "recommendation_note", None),
+        "ai_generation_metadata": getattr(t, "ai_generation_metadata", None),
     }
+
+
+def _tpl_bump_usage(db: Session, template_id: int, tenant_id: int | None = None) -> None:
+    """Increment usage_count and set last_used_at. Called whenever a template is dispatched."""
+    q = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.id == template_id)
+    if tenant_id is not None:
+        q = q.filter(WhatsAppTemplate.tenant_id == tenant_id)
+    tpl = q.first()
+    if tpl:
+        tpl.usage_count = (getattr(tpl, "usage_count", 0) or 0) + 1
+        tpl.last_used_at = datetime.utcnow()
 
 
 # ── WhatsApp Templates endpoints ───────────────────────────────────────────────
@@ -896,6 +926,243 @@ async def delete_template(template_id: int, request: Request, db: Session = Depe
     db.delete(tpl)
     db.commit()
     return {"deleted": True}
+
+
+# ── AI Template Generation endpoints ──────────────────────────────────────────
+
+class GenerateTemplateIn(BaseModel):
+    objective: str          # abandoned_cart | reorder | winback | ...
+    language: str = "ar"
+
+
+class RecommendationActionIn(BaseModel):
+    action: str             # accepted | dismissed
+
+
+@app.post("/templates/generate")
+async def generate_template(body: GenerateTemplateIn, request: Request, db: Session = Depends(get_db)):
+    """
+    AI-generate a WhatsApp template draft for a given objective.
+
+    If template_submission_mode == 'auto_submit' and Meta credentials are present,
+    the draft is submitted immediately.
+    Otherwise it is saved as DRAFT for merchant review.
+    """
+    import sys as _sys
+    _sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from template_ai.generator import generate_template_draft, SUPPORTED_OBJECTIVES
+    from template_ai.policy_validator import validate_draft
+
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+
+    if body.objective not in SUPPORTED_OBJECTIVES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"الهدف '{body.objective}' غير مدعوم. الأهداف المتاحة: {', '.join(SUPPORTED_OBJECTIVES)}"
+        )
+
+    draft = generate_template_draft(objective=body.objective, language=body.language)
+
+    # Policy validation
+    existing = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id).all()
+    validation = validate_draft(draft, existing)
+
+    if not validation.passed and validation.action == "block":
+        return {
+            "generated": False,
+            "action": "block",
+            "issues": validation.issues,
+            "draft": draft,
+        }
+
+    if validation.action == "merge":
+        return {
+            "generated": False,
+            "action": "merge",
+            "issues": validation.issues,
+            "merge_with_id": validation.merge_with_id,
+            "merge_with_name": validation.merge_with_name,
+            "draft": draft,
+        }
+
+    # Determine submission mode from tenant whatsapp settings
+    settings = _get_or_create_settings(db, tenant_id)
+    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
+    submission_mode = wa.get("template_submission_mode", "draft_approval")
+
+    # Persist the draft
+    tpl = WhatsAppTemplate(
+        tenant_id=tenant_id,
+        name=draft["name"],
+        language=draft["language"],
+        category=draft["category"],
+        status="DRAFT",
+        components=draft["components"],
+        source="ai_generated",
+        objective=draft["objective"],
+        usage_count=0,
+        ai_generation_metadata=draft["ai_generation_metadata"],
+    )
+    db.add(tpl)
+    db.flush()
+
+    # Auto-submit if configured and credentials present
+    submitted = False
+    meta_id = None
+    if submission_mode == "auto_submit":
+        waba_id = wa.get("phone_number_id", "")
+        token = wa.get("access_token", "")
+        if waba_id and token:
+            meta_id = await _submit_template_to_meta(tpl.name, tpl.language, tpl.category, tpl.components or [], waba_id, token)
+            if meta_id:
+                tpl.meta_template_id = meta_id
+                tpl.status = "PENDING"
+                tpl.synced_at = datetime.utcnow()
+                submitted = True
+
+    db.commit()
+    db.refresh(tpl)
+
+    from observability.event_logger import log_event
+    log_event(db, tenant_id, "ai_sales", "template.generated",
+              f"قالب AI جديد: {tpl.name} (هدف: {body.objective})",
+              payload={"template_id": tpl.id, "submitted": submitted, "mode": submission_mode})
+    db.commit()
+
+    return {
+        "generated": True,
+        "action": "auto_submitted" if submitted else "saved_as_draft",
+        "template": _tpl_to_dict(tpl),
+        "validation_issues": validation.issues,
+        "submission_mode": submission_mode,
+    }
+
+
+@app.post("/templates/{template_id}/submit")
+async def submit_template_to_meta(template_id: int, request: Request, db: Session = Depends(get_db)):
+    """Submit a DRAFT template to Meta for approval."""
+    tenant_id = _resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if tpl.status not in ("DRAFT", "REJECTED"):
+        raise HTTPException(status_code=400, detail=f"لا يمكن إرسال قالب بحالة '{tpl.status}' إلى Meta")
+
+    settings = _get_or_create_settings(db, tenant_id)
+    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
+    waba_id = wa.get("phone_number_id", "")
+    token = wa.get("access_token", "")
+
+    if not waba_id or not token:
+        raise HTTPException(status_code=422, detail="بيانات WhatsApp Business غير مُعدَّة. أضف Phone Number ID و Access Token في الإعدادات.")
+
+    meta_id = await _submit_template_to_meta(tpl.name, tpl.language, tpl.category, tpl.components or [], waba_id, token)
+    if not meta_id:
+        raise HTTPException(status_code=502, detail="فشل إرسال القالب إلى Meta. تحقق من بيانات الاعتماد وحاول مرة أخرى.")
+
+    tpl.meta_template_id = meta_id
+    tpl.status = "PENDING"
+    tpl.synced_at = datetime.utcnow()
+    tpl.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(tpl)
+
+    from observability.event_logger import log_event
+    log_event(db, tenant_id, "ai_sales", "template.submitted",
+              f"تم إرسال القالب '{tpl.name}' إلى Meta للمراجعة",
+              payload={"template_id": tpl.id, "meta_template_id": meta_id})
+    db.commit()
+
+    return {"submitted": True, "template": _tpl_to_dict(tpl)}
+
+
+@app.get("/templates/health")
+async def get_template_health(request: Request, db: Session = Depends(get_db)):
+    """
+    Evaluate health scores for all tenant templates and return merchant-facing recommendations.
+    Updates health_score and recommendation_state in DB.
+    """
+    from template_ai.health_evaluator import evaluate_templates, health_summary
+
+    tenant_id = _resolve_tenant_id(request)
+    templates = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id).all()
+
+    if not templates:
+        return {"total": 0, "healthy": 0, "needs_attention": 0, "avg_health_score": 0.0, "details": []}
+
+    results = evaluate_templates(templates)
+
+    # Persist scores back to DB
+    tpl_map = {t.id: t for t in templates}
+    for r in results:
+        t = tpl_map.get(r["template_id"])
+        if t:
+            t.health_score = r["health_score"]
+            if r["recommendation_state"] != "none":
+                # Only write if not already actioned by merchant
+                if getattr(t, "recommendation_state", None) not in ("accepted", "dismissed"):
+                    t.recommendation_state = r["recommendation_state"]
+                    t.recommendation_note = r["recommendation_note"]
+    db.commit()
+
+    return health_summary(templates)
+
+
+@app.put("/templates/{template_id}/recommendation")
+async def action_template_recommendation(
+    template_id: int,
+    body: RecommendationActionIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Merchant acts on a template health recommendation.
+    action: 'accepted' (will delete/update) | 'dismissed' (ignore suggestion)
+    """
+    tenant_id = _resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    if body.action not in ("accepted", "dismissed"):
+        raise HTTPException(status_code=422, detail="action يجب أن يكون 'accepted' أو 'dismissed'")
+
+    tpl.recommendation_state = body.action
+    tpl.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(tpl)
+
+    return {"updated": True, "template": _tpl_to_dict(tpl)}
+
+
+@app.get("/templates/objectives")
+async def list_template_objectives(request: Request):
+    """Return the list of supported AI generation objectives."""
+    from template_ai.generator import SUPPORTED_OBJECTIVES
+    labels = {
+        "abandoned_cart":       "استرداد سلة متروكة",
+        "reorder":              "تذكير بإعادة الطلب",
+        "winback":              "استعادة عميل غير نشط",
+        "back_in_stock":        "إشعار توفر منتج",
+        "price_drop":           "إشعار انخفاض السعر",
+        "order_followup":       "متابعة طلب",
+        "quote_followup":       "متابعة عرض سعر",
+        "promotion":            "حملة ترويجية",
+        "transactional_update": "تحديث معاملة",
+    }
+    return {
+        "objectives": [
+            {"value": obj, "label": labels.get(obj, obj)}
+            for obj in SUPPORTED_OBJECTIVES
+        ]
+    }
 
 
 @app.post("/templates/sync")
@@ -1619,7 +1886,7 @@ async def get_customer_profile(customer_id: int, request: Request, db: Session =
 
     reorder_data = []
     for r in reorders:
-        product = db.query(Product).filter(Product.id == r.product_id).first()
+        product = db.query(Product).filter(Product.id == r.product_id, Product.tenant_id == tenant_id).first()
         reorder_data.append({
             "product_id": r.product_id,
             "product_name": product.title if product else f"Product #{r.product_id}",
@@ -1878,8 +2145,8 @@ def _job_predictive_reorder(db: Session, tenant_id: int, config: Dict[str, Any])
     ).all()
 
     for est in estimates:
-        customer = db.query(Customer).filter(Customer.id == est.customer_id).first()
-        product = db.query(Product).filter(Product.id == est.product_id).first()
+        customer = db.query(Customer).filter(Customer.id == est.customer_id, Customer.tenant_id == tenant_id).first()
+        product = db.query(Product).filter(Product.id == est.product_id, Product.tenant_id == tenant_id).first()
 
         customer_name = customer.name if customer else "العميل"
         product_name = product.title if product else f"المنتج #{est.product_id}"
@@ -2262,6 +2529,10 @@ async def resolve_template_vars(
         (c.get("text", "") for c in resolved_components if c.get("type") == "BODY"), ""
     )
 
+    # Track usage — only count when template is actually dispatched (resolved for send)
+    _tpl_bump_usage(db, tpl.id, tenant_id)
+    db.commit()
+
     return {
         "template_name": tpl.name,
         "resolved_components": resolved_components,
@@ -2605,8 +2876,10 @@ def _build_ai_sales_response(
     if response_type == "product_info":
         if not products:
             return (
-                f"مرحباً {customer_name}! لم يتم ربط كتالوج المنتجات{store_ref} بعد."
-                " تواصل معنا مباشرة للمساعدة.",
+                f"يسعدني مساعدتك {customer_name} 😊\n"
+                "يبدو أنني لا أستطيع الوصول إلى قائمة المنتجات حالياً.\n\n"
+                "هل يمكنك إخباري أكثر عن المنتج الذي تبحث عنه؟\n"
+                "مثل النوع أو المواصفات أو الفئة التي تهمك، وسأحاول مساعدتك بأفضل شكل 🙏",
                 False, False,
             )
         header = f"مرحباً {customer_name}! 😊 إليك المنتجات المتاحة{store_ref}:\n"
@@ -2639,7 +2912,12 @@ def _build_ai_sales_response(
             )
         if not products:
             return (
-                f"مرحباً {customer_name}! لا تتوفر بيانات منتجات{store_ref} حالياً للتوصية.",
+                f"يسعدني مساعدتك في إيجاد المناسب لك {customer_name} 😊\n"
+                "المنتجات غير متاحة للعرض الآن، لكن يمكنني مساعدتك بشكل أفضل إذا أخبرتني:\n\n"
+                "• ما الفئة أو النوع الذي تبحث عنه؟\n"
+                "• ما المواصفات أو الاستخدام الذي تحتاجه؟\n"
+                "• هل هناك ميزانية معينة تفكر فيها؟\n\n"
+                "سأبذل قصارى جهدي لتوجيهك نحو الخيار الأمثل 🛍️",
                 False, False,
             )
         # Pick highest-priority product (first in catalog; in production: sort by stats_converted)
@@ -2782,6 +3060,12 @@ def _log_ai_sales_event(
 
 # ── Pydantic models for AI Sales ──────────────────────────────────────────────
 
+class AiSalesProcessMessageIn(BaseModel):
+    customer_phone: str
+    message: str
+    customer_name: Optional[str] = None
+
+
 class AiSalesSettingsIn(BaseModel):
     enable_ai_sales_agent:        Optional[bool] = None
     allow_product_recommendations: Optional[bool] = None
@@ -2839,7 +3123,7 @@ async def put_ai_sales_settings(
 
 
 @app.post("/ai-sales/process-message")
-async def ai_sales_process_message(request: Request, db: Session = Depends(get_db)):
+async def ai_sales_process_message(body: AiSalesProcessMessageIn, request: Request, db: Session = Depends(get_db)):
     """
     Process an incoming WhatsApp message through the AI Sales Agent.
 
@@ -2847,7 +3131,6 @@ async def ai_sales_process_message(request: Request, db: Session = Depends(get_d
     Returns: { intent, confidence, response_text, products_used,
                order_started, payment_link, handoff_triggered }
     """
-    body = await request.json()
     tenant_id = _resolve_tenant_id(request)
     _get_or_create_tenant(db, tenant_id)
 
@@ -2863,9 +3146,9 @@ async def ai_sales_process_message(request: Request, db: Session = Depends(get_d
             "handoff_triggered": False,
         }
 
-    message      = str(body.get("message", "")).strip()
-    cust_phone   = str(body.get("customer_phone", "unknown"))
-    cust_name    = str(body.get("customer_name", "عزيزي العميل")).strip() or "عزيزي العميل"
+    message      = body.message.strip()
+    cust_phone   = body.customer_phone
+    cust_name    = (body.customer_name or "عزيزي العميل").strip() or "عزيزي العميل"
 
     if not message:
         raise HTTPException(status_code=422, detail="message field is required")
@@ -3370,6 +3653,15 @@ async def create_payment_session(
     if amount_sar <= 0:
         raise HTTPException(status_code=422, detail="amount_sar must be > 0")
 
+    # Guard: verify order belongs to this tenant before proceeding
+    if order_id:
+        _order_guard = db.query(Order).filter(
+            Order.id == order_id,
+            Order.tenant_id == tenant_id,
+        ).first()
+        if not _order_guard:
+            raise HTTPException(status_code=404, detail="Order not found")
+
     # Rate limit: 3 payment sessions/hour per order_id
     _rate_limit(f"pay:{tenant_id}:{order_id or 'anon'}", max_count=3, window_seconds=3600)
 
@@ -3421,11 +3713,9 @@ async def create_payment_session(
     )
     db.add(session)
 
-    # Attach payment link to Order
+    # Attach payment link to Order (ownership already verified above)
     if order_id:
-        order = db.query(Order).filter(Order.id == order_id, Order.tenant_id == tenant_id).first()
-        if order:
-            order.checkout_url = payment_link
+        _order_guard.checkout_url = payment_link
 
     from observability.event_logger import log_event
     log_event(
