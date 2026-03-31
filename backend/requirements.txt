@@ -1,3 +1,24 @@
-# Backend service dependencies — install from the root requirements.txt
-# pip install -r ../requirements.txt
--r ../requirements.txt
+# ── Web framework ────────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# ── Database ─────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.30
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# ── HTTP client ───────────────────────────────────────────────────────────────
+httpx==0.27.0
+
+# ── Environment ───────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+
+# ── Security ─────────────────────────────────────────────────────────────────
+python-multipart==0.0.9
+
+# ── AI / Claude ───────────────────────────────────────────────────────────────
+anthropic>=0.30.0
