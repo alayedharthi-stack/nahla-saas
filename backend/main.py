@@ -14,8 +14,10 @@ from models import (
     SmartAutomation, AutomationEvent, PredictiveReorderEstimate,
     Customer, Product, CustomerProfile,
     Order, Coupon, HandoffSession, PaymentSession,
+    SystemEvent, ConversationTrace,
 )
 import httpx
+import time as _time
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -50,6 +52,9 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -2298,6 +2303,26 @@ DEFAULT_HANDOFF: Dict[str, Any] = {
 
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
 
+ENVIRONMENT   = os.getenv("ENVIRONMENT", "development")
+IS_PRODUCTION = ENVIRONMENT == "production"
+
+if IS_PRODUCTION:
+    logger.info("Running in PRODUCTION mode — demo fallbacks disabled, strict logging active")
+else:
+    logger.info(f"Running in {ENVIRONMENT} mode")
+
+
+def _rate_limit(key: str, max_count: int, window_seconds: int) -> None:
+    """Raise HTTP 429 if the rate limit is exceeded."""
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from observability.rate_limiter import check_rate_limit
+    if not check_rate_limit(key, max_count, window_seconds):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Max {max_count} requests per {window_seconds}s.",
+        )
+
+
 # Intent definitions – each has detection keywords + the response strategy it maps to
 AI_SALES_INTENTS: Dict[str, Dict[str, Any]] = {
     "ask_product": {
@@ -2373,13 +2398,15 @@ def _get_ai_sales_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
 
 def _save_ai_sales_settings(db: Session, tenant_id: int, patch: Dict[str, Any]) -> Dict[str, Any]:
     """Deep-merge patch into existing config and persist."""
+    from sqlalchemy.orm.attributes import flag_modified
     s = _get_or_create_settings(db, tenant_id)
     meta = dict(s.extra_metadata or {})
     current = _merge_defaults(meta.get("ai_sales_agent", {}), DEFAULT_AI_SALES_AGENT)
     current.update(patch)
     meta["ai_sales_agent"] = current
     s.extra_metadata = meta
-    db.add(s)
+    s.updated_at = datetime.utcnow()
+    flag_modified(s, "extra_metadata")   # guarantee SQLAlchemy 2.0 tracks the JSONB change
     return current
 
 
@@ -2796,12 +2823,19 @@ async def put_ai_sales_settings(
     db: Session = Depends(get_db),
 ):
     """Save AI Sales Agent settings (partial update — only provided fields)."""
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    patch = {k: v for k, v in body.dict().items() if v is not None}
-    updated = _save_ai_sales_settings(db, tenant_id, patch)
-    db.commit()
-    return {"settings": updated}
+    try:
+        tenant_id = _resolve_tenant_id(request)
+        _get_or_create_tenant(db, tenant_id)
+        # model_dump() is the Pydantic v2 API; body.dict() is deprecated and
+        # can behave inconsistently with FastAPI 0.111.0 + Pydantic v2.
+        patch = {k: v for k, v in body.model_dump().items() if v is not None}
+        updated = _save_ai_sales_settings(db, tenant_id, patch)
+        db.commit()
+        logger.info(f"[AI Sales] settings updated for tenant={tenant_id} keys={list(patch.keys())}")
+        return {"settings": updated}
+    except Exception as exc:
+        logger.error(f"[AI Sales] PUT /ai-sales/settings failed: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save AI Sales settings")
 
 
 @app.post("/ai-sales/process-message")
@@ -2835,6 +2869,11 @@ async def ai_sales_process_message(request: Request, db: Session = Depends(get_d
 
     if not message:
         raise HTTPException(status_code=422, detail="message field is required")
+
+    # Rate limit: 20 messages/min per customer
+    _rate_limit(f"msg:{tenant_id}:{cust_phone}", max_count=20, window_seconds=60)
+
+    _msg_start = _time.monotonic()
 
     # 1. Check for active human handoff — AI is paused for this conversation
     from handoff.manager import get_active_handoff, create_handoff_session
@@ -2878,6 +2917,16 @@ async def ai_sales_process_message(request: Request, db: Session = Depends(get_d
             "talk_to_human", 0.95,
             f"مرحباً {cust_name} 👋\nسأحوّلك الآن إلى أحد موظفينا. انتظر لحظة من فضلك. 🙏",
             False, False, False, True,
+        )
+        from observability.event_logger import log_event
+        log_event(
+            db, tenant_id,
+            category="handoff",
+            event_type="handoff.triggered",
+            summary=f"تحويل بشري: {cust_phone} — '{message[:60]}'",
+            severity="info",
+            payload={"customer_phone": cust_phone, "session_id": handoff_session.id},
+            reference_id=str(handoff_session.id),
         )
         db.commit()
         return {
@@ -2947,12 +2996,55 @@ async def ai_sales_process_message(request: Request, db: Session = Depends(get_d
                 intent, response_type, products, settings, ctx, cust_name, payment_link,
             )
 
-    # 4. Log event
+    # 4. Log event + observability
     _log_ai_sales_event(
         db, tenant_id, cust_phone, cust_name, message,
         intent, confidence, response_text,
         products_used, order_started, payment_link is not None, handoff_triggered,
     )
+
+    _latency = int((_time.monotonic() - _msg_start) * 1000)
+    _orch_used = bool(orch_result and orch_result.get("reply"))
+    _fg = orch_result.get("fact_guard", {}) if orch_result else {}
+
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from observability.event_logger import log_event, write_trace
+
+    write_trace(
+        db, tenant_id, cust_phone,
+        message=message,
+        detected_intent=intent,
+        confidence=confidence,
+        response_type=response_type,
+        response_text=response_text,
+        orchestrator_used=_orch_used,
+        model_used=orch_result.get("model_used", "") if orch_result else "keyword",
+        fact_guard_modified=_fg.get("was_modified", False),
+        fact_guard_claims=_fg.get("claims_detected", []),
+        actions_triggered=[
+            {"type": a.get("type"), "executable": a.get("executable")}
+            for a in (orch_result.get("actions") or [])
+        ] if orch_result else [],
+        order_started=order_started,
+        payment_link_sent=payment_link is not None,
+        handoff_triggered=handoff_triggered,
+        latency_ms=_latency,
+    )
+
+    log_event(
+        db, tenant_id,
+        category="ai_sales",
+        event_type="ai_sales.message_processed",
+        summary=f"[{intent}] {cust_phone}: {message[:60]}",
+        severity="info",
+        payload={
+            "intent": intent, "confidence": confidence,
+            "orchestrator": _orch_used, "latency_ms": _latency,
+            "handoff": handoff_triggered, "order": order_started,
+        },
+        reference_id=cust_phone,
+    )
+
     db.commit()
 
     return {
@@ -2985,6 +3077,9 @@ async def ai_sales_create_order(
 
     if not settings.get("allow_order_creation", True):
         raise HTTPException(status_code=403, detail="Order creation is disabled for this tenant")
+
+    # Rate limit: 5 orders/hour per customer
+    _rate_limit(f"order:{tenant_id}:{body.customer_phone}", max_count=5, window_seconds=3600)
 
     if body.payment_method == "cash_on_delivery" or body.payment_method == "cod":
         if not settings.get("allow_cod_confirmation_flow", True):
@@ -3121,6 +3216,20 @@ async def ai_sales_create_order(
         order_id=order.id,
     )
 
+    from observability.event_logger import log_event
+    log_event(
+        db, tenant_id,
+        category="order",
+        event_type="order.created",
+        summary=f"طلب #{order.id} — {product_display or 'منتج'} x{body.quantity} [{body.payment_method}]",
+        severity="info",
+        payload={
+            "order_id": order.id, "status": order_status,
+            "product": product_display, "qty": body.quantity,
+            "method": body.payment_method, "external_id": external_order_id,
+        },
+        reference_id=str(order.id),
+    )
     db.commit()
 
     return {
@@ -3261,6 +3370,9 @@ async def create_payment_session(
     if amount_sar <= 0:
         raise HTTPException(status_code=422, detail="amount_sar must be > 0")
 
+    # Rate limit: 3 payment sessions/hour per order_id
+    _rate_limit(f"pay:{tenant_id}:{order_id or 'anon'}", max_count=3, window_seconds=3600)
+
     cfg = _get_moyasar_settings(db, tenant_id)
 
     if cfg.get("enabled") and cfg.get("secret_key"):
@@ -3315,6 +3427,16 @@ async def create_payment_session(
         if order:
             order.checkout_url = payment_link
 
+    from observability.event_logger import log_event
+    log_event(
+        db, tenant_id,
+        category="payment",
+        event_type="payment.session_created",
+        summary=f"رابط دفع بقيمة {amount_sar} ر.س [{gateway}]",
+        severity="info" if gateway != "placeholder" else "warning",
+        payload={"amount_sar": amount_sar, "gateway": gateway, "order_id": order_id},
+        reference_id=str(order_id) if order_id else None,
+    )
     db.commit()
 
     return {
@@ -3390,6 +3512,17 @@ async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
             except (ValueError, TypeError):
                 pass
 
+        from observability.event_logger import log_event
+        _sev = "info" if payment_status in ("paid", "authorized") else "warning"
+        log_event(
+            db, tenant_id,
+            category="payment",
+            event_type=f"payment.{payment_status}",
+            summary=f"Moyasar {payment_status}: payment {payment_id}",
+            severity=_sev,
+            payload={"payment_id": payment_id, "status": payment_status, "order_id": order_id_str},
+            reference_id=order_id_str or payment_id,
+        )
         db.commit()
 
     logger.info(
@@ -3493,6 +3626,16 @@ async def resolve_handoff_session_endpoint(
     session = resolve_handoff_session(db, session_id, tenant_id, resolved_by)
     if not session:
         raise HTTPException(status_code=404, detail="Handoff session not found")
+    from observability.event_logger import log_event
+    log_event(
+        db, tenant_id,
+        category="handoff",
+        event_type="handoff.resolved",
+        summary=f"تم حل التحويل #{session_id} بواسطة {resolved_by}",
+        severity="info",
+        payload={"session_id": session_id, "resolved_by": resolved_by},
+        reference_id=str(session_id),
+    )
     db.commit()
     return {
         "session_id": session.id,
@@ -3601,6 +3744,135 @@ async def test_store_integration(request: Request):
         }
     except Exception as exc:
         return {"status": "error", "platform": adapter.platform, "error": str(exc)}
+
+
+# ── System Observability ───────────────────────────────────────────────────────
+
+@app.get("/system/health")
+async def system_health(request: Request, db: Session = Depends(get_db)):
+    """
+    Comprehensive health check for all system components.
+    Returns component status + overall system status.
+    """
+    from observability.health import (
+        check_database, check_orchestrator, check_moyasar, check_salla, overall_status
+    )
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+
+    moyasar_cfg = _get_moyasar_settings(db, tenant_id)
+
+    components = {
+        "database":     await check_database(db),
+        "orchestrator": await check_orchestrator(ORCHESTRATOR_URL),
+        "moyasar":      check_moyasar(moyasar_cfg),
+        "salla":        check_salla(tenant_id),
+    }
+
+    return {
+        "status":      overall_status(components),
+        "environment": ENVIRONMENT,
+        "production":  IS_PRODUCTION,
+        "components":  components,
+        "timestamp":   datetime.utcnow().isoformat() + "Z",
+    }
+
+
+@app.get("/system/events")
+async def list_system_events(
+    request: Request,
+    db: Session = Depends(get_db),
+    category: str = "",
+    severity: str = "",
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Return paginated System Event Timeline for this tenant."""
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+
+    query = db.query(SystemEvent).filter(SystemEvent.tenant_id == tenant_id)
+    if category:
+        query = query.filter(SystemEvent.category == category)
+    if severity:
+        query = query.filter(SystemEvent.severity == severity)
+
+    total = query.count()
+    rows = (
+        query.order_by(SystemEvent.created_at.desc())
+        .offset(offset)
+        .limit(min(limit, 200))
+        .all()
+    )
+
+    return {
+        "events": [
+            {
+                "id":           r.id,
+                "category":     r.category,
+                "event_type":   r.event_type,
+                "severity":     r.severity,
+                "summary":      r.summary,
+                "reference_id": r.reference_id,
+                "payload":      r.payload,
+                "created_at":   r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+        "total":  total,
+        "offset": offset,
+        "limit":  limit,
+    }
+
+
+@app.get("/conversations/trace/{customer_phone}")
+async def get_conversation_trace(
+    customer_phone: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 50,
+):
+    """Return conversation trace turns for a specific customer (latest session first)."""
+    tenant_id = _resolve_tenant_id(request)
+    _get_or_create_tenant(db, tenant_id)
+
+    rows = (
+        db.query(ConversationTrace)
+        .filter(
+            ConversationTrace.tenant_id == tenant_id,
+            ConversationTrace.customer_phone == customer_phone,
+        )
+        .order_by(ConversationTrace.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "customer_phone": customer_phone,
+        "turns": [
+            {
+                "id":                  r.id,
+                "session_id":          r.session_id,
+                "turn":                r.turn,
+                "message":             r.message,
+                "detected_intent":     r.detected_intent,
+                "confidence":          r.confidence,
+                "response_type":       r.response_type,
+                "response_text":       r.response_text,
+                "orchestrator_used":   r.orchestrator_used,
+                "model_used":          r.model_used,
+                "fact_guard_modified": r.fact_guard_modified,
+                "fact_guard_claims":   r.fact_guard_claims,
+                "actions_triggered":   r.actions_triggered,
+                "order_started":       r.order_started,
+                "payment_link_sent":   r.payment_link_sent,
+                "handoff_triggered":   r.handoff_triggered,
+                "latency_ms":          r.latency_ms,
+                "created_at":          r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
 
 
 # ── Existing endpoints ─────────────────────────────────────────────────────────

@@ -67,7 +67,7 @@ class TenantSettings(Base):
     branding_text = Column(String, default='🐝 Powered by Nahla', nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)   # DB column is 'metadata' (migration 0001)
     # Structured settings groups (added migration 0004)
     whatsapp_settings = Column(JSONB, nullable=True)
     ai_settings = Column(JSONB, nullable=True)
@@ -98,7 +98,7 @@ class Product(Base):
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     price = Column(String, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     recommendation_tags = Column(JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='products')
@@ -113,7 +113,7 @@ class Order(Base):
     line_items = Column(JSONB, nullable=True)
     checkout_url = Column(String, nullable=True)
     is_abandoned = Column(Boolean, default=False)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='orders')
 
@@ -124,7 +124,7 @@ class Coupon(Base):
     description = Column(Text, nullable=True)
     discount_type = Column(String, nullable=True)
     discount_value = Column(String, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     expires_at = Column(DateTime, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='coupons')
@@ -154,7 +154,7 @@ class SyncLog(Base):
     external_id = Column(String, nullable=True)
     status = Column(String, nullable=False)
     message = Column(Text, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='sync_logs')
@@ -194,7 +194,7 @@ class Customer(Base):
     name = Column(String, nullable=True)
     email = Column(String, nullable=True)
     phone = Column(String, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant')
     addresses = relationship('CustomerAddress', back_populates='customer')
@@ -241,7 +241,7 @@ class Conversation(Base):
     is_human_handoff = Column(Boolean, default=False)
     is_urgent = Column(Boolean, default=False)
     paused_by_human = Column(Boolean, default=False)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class MessageEvent(Base):
     __tablename__ = 'message_events'
@@ -253,7 +253,7 @@ class MessageEvent(Base):
     body = Column(Text, nullable=True)
     event_type = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class WidgetSetting(Base):
     __tablename__ = 'widget_settings'
@@ -275,7 +275,7 @@ class Developer(Base):
     email = Column(String, unique=True, nullable=False)
     company_name = Column(String, nullable=True)
     website = Column(String, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     apps = relationship('App', back_populates='developer')
 
@@ -293,7 +293,7 @@ class App(Base):
     permissions = Column(JSONB, nullable=True)
     categories = Column(JSONB, nullable=True)
     icon_url = Column(String, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     is_published = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -312,7 +312,7 @@ class AppInstall(Base):
     status = Column(String, default='installed')
     enabled = Column(Boolean, default=True)
     installed_at = Column(DateTime, default=datetime.utcnow)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class AppPayment(Base):
     __tablename__ = 'app_payments'
@@ -331,7 +331,7 @@ class AppPayment(Base):
     status = Column(String, default='pending')
     transaction_reference = Column(String, nullable=True)
     paid_at = Column(DateTime, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class BillingPlan(Base):
@@ -348,7 +348,7 @@ class BillingPlan(Base):
     is_enterprise = Column(Boolean, default=False)
     features = Column(JSONB, nullable=True)
     limits = Column(JSONB, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class BillingSubscription(Base):
@@ -363,7 +363,7 @@ class BillingSubscription(Base):
     ends_at = Column(DateTime, nullable=True)
     trial_ends_at = Column(DateTime, nullable=True)
     auto_renew = Column(Boolean, default=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class BillingPayment(Base):
     __tablename__ = 'billing_payments'
@@ -378,7 +378,7 @@ class BillingPayment(Base):
     transaction_reference = Column(String, nullable=True)
     status = Column(String, nullable=False)
     paid_at = Column(DateTime, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class BillingInvoice(Base):
@@ -395,7 +395,7 @@ class BillingInvoice(Base):
     issued_date = Column(DateTime, default=datetime.utcnow)
     due_date = Column(DateTime, nullable=True)
     line_items = Column(JSONB, nullable=True)
-    extra_metadata = Column(JSONB, nullable=True)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class AuditLog(Base):
     __tablename__ = 'audit_logs'
@@ -728,5 +728,58 @@ class HandoffSession(Base):
     resolved_by = Column(String, nullable=True)
     resolved_at = Column(DateTime, nullable=True)
     context_snapshot = Column(JSONB, nullable=True)  # last few messages/products
+    created_at = Column(DateTime, default=datetime.utcnow)
+    tenant = relationship('Tenant')
+
+
+# ── System Event Timeline ─────────────────────────────────────────────────────
+
+class SystemEvent(Base):
+    """Unified event log for all major subsystems — drives the Event Timeline UI."""
+    __tablename__ = 'system_events'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    category = Column(String, nullable=False, index=True)
+    # payment | ai_sales | handoff | order | orchestrator | system
+    event_type = Column(String, nullable=False)
+    # e.g. payment.completed, handoff.triggered, order.created
+    severity = Column(String, default='info', nullable=False)   # info | warning | error
+    summary = Column(String, nullable=True)                     # one-line human-readable
+    payload = Column(JSONB, nullable=True)
+    reference_id = Column(String, nullable=True, index=True)    # order id, session id, etc.
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    tenant = relationship('Tenant')
+
+
+# ── Conversation Trace ────────────────────────────────────────────────────────
+
+class ConversationTrace(Base):
+    """Per-turn debug trace for every AI Sales conversation step."""
+    __tablename__ = 'conversation_traces'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_phone = Column(String, nullable=False, index=True)
+    session_id = Column(String, nullable=True, index=True)  # date-scoped session key
+    turn = Column(Integer, default=1)
+    # Input
+    message = Column(Text, nullable=True)
+    # Detection
+    detected_intent = Column(String, nullable=True)
+    confidence = Column(Float, nullable=True)
+    response_type = Column(String, nullable=True)
+    # Orchestrator
+    orchestrator_used = Column(Boolean, default=False)
+    model_used = Column(String, nullable=True)
+    fact_guard_modified = Column(Boolean, default=False)
+    fact_guard_claims = Column(JSONB, nullable=True)
+    # Actions
+    actions_triggered = Column(JSONB, nullable=True)
+    # Output
+    response_text = Column(Text, nullable=True)
+    order_started = Column(Boolean, default=False)
+    payment_link_sent = Column(Boolean, default=False)
+    handoff_triggered = Column(Boolean, default=False)
+    # Performance
+    latency_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     tenant = relationship('Tenant')

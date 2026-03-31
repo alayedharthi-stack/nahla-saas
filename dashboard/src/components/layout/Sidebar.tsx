@@ -15,6 +15,7 @@ import {
   BrainCircuit,
   Store,
   UserCheck,
+  Activity,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -59,6 +60,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/integrations',      icon: Plug,     label: tr => tr.nav.items.integrations },
       { to: '/store-integration', icon: Store,    label: _tr => 'ربط المتجر'              },
+      { to: '/system-status',     icon: Activity, label: _tr => 'حالة النظام'             },
       { to: '/settings',          icon: Settings, label: tr => tr.nav.items.settings     },
     ],
   },

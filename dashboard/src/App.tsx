@@ -15,6 +15,7 @@ import Settings from './pages/Settings'
 import AiSalesLogs from './pages/AiSalesLogs'
 import StoreIntegration from './pages/StoreIntegration'
 import HandoffQueue from './pages/HandoffQueue'
+import SystemStatus from './pages/SystemStatus'
 
 export default function App() {
   return (
@@ -37,6 +38,7 @@ export default function App() {
             <Route path="ai-sales-logs"  element={<AiSalesLogs />} />
             <Route path="store-integration" element={<StoreIntegration />} />
             <Route path="handoff-queue" element={<HandoffQueue />} />
+            <Route path="system-status" element={<SystemStatus />} />
           </Route>
         </Routes>
       </BrowserRouter>
