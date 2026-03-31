@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom'
+import { useState, useEffect } from 'react'
 import {
   LayoutDashboard,
   MessageSquare,
@@ -68,6 +69,22 @@ const NAV_GROUPS: NavGroup[] = [
 
 export default function Sidebar() {
   const { t } = useLanguage()
+  const [storeName, setStoreName]   = useState('نهلة')
+  const [logoUrl,   setLogoUrl]     = useState('')
+
+  useEffect(() => {
+    fetch('/api/settings', {
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-ID': '1' },
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.store?.store_name) setStoreName(data.store.store_name)
+        if (data?.store?.store_logo_url) setLogoUrl(data.store.store_logo_url)
+      })
+      .catch(() => {/* keep defaults */})
+  }, [])
+
+  const initial = storeName.trim().charAt(0) || 'ن'
 
   return (
     /*
@@ -80,11 +97,13 @@ export default function Sidebar() {
 
       {/* Logo */}
       <div className="flex items-center gap-2.5 px-5 py-5 border-b border-slate-800">
-        <div className="w-8 h-8 bg-brand-500 rounded-lg flex items-center justify-center shrink-0">
-          <Sparkles className="w-4 h-4 text-white" />
+        <div className="w-8 h-8 bg-brand-500 rounded-lg flex items-center justify-center shrink-0 overflow-hidden">
+          {logoUrl
+            ? <img src={logoUrl} alt={storeName} className="w-full h-full object-cover" />
+            : <Sparkles className="w-4 h-4 text-white" />}
         </div>
         <div>
-          <p className="text-white font-semibold text-sm leading-none">نهلة</p>
+          <p className="text-white font-semibold text-sm leading-none">{storeName}</p>
           <p className="text-slate-500 text-xs mt-0.5">{t(tr => tr.nav.logoTagline)}</p>
         </div>
       </div>
@@ -133,11 +152,13 @@ export default function Sidebar() {
       {/* Store badge */}
       <div className="px-3 py-4 border-t border-slate-800">
         <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors cursor-pointer">
-          <div className="w-7 h-7 bg-brand-500/20 rounded-full flex items-center justify-center shrink-0">
-            <span className="text-brand-400 text-xs font-bold">ن</span>
+          <div className="w-7 h-7 bg-brand-500/20 rounded-full flex items-center justify-center shrink-0 overflow-hidden">
+            {logoUrl
+              ? <img src={logoUrl} alt={storeName} className="w-full h-full object-cover rounded-full" />
+              : <span className="text-brand-400 text-xs font-bold">{initial}</span>}
           </div>
           <div className="min-w-0">
-            <p className="text-white text-xs font-medium truncate">متجر نهلة</p>
+            <p className="text-white text-xs font-medium truncate">{storeName}</p>
             <p className="text-slate-500 text-xs truncate">{t(tr => tr.nav.storeBadge.plan)}</p>
           </div>
         </div>
