@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import {
   Zap, Send, CheckCircle, TrendingUp, Sparkles,
   ChevronDown, ChevronUp, AlertCircle, RefreshCw,
@@ -59,7 +59,7 @@ const STATIC_VAR_MAPS: Record<string, Record<string, string>> = {
   },
 }
 
-function TemplateVarMapPanel({ templateName }: { templateName: string }) {
+function TemplateVarMapPanel({ templateName }: { templateName: string }): React.ReactNode {
   const varMap = STATIC_VAR_MAPS[templateName]
   if (!varMap || Object.keys(varMap).length === 0) return null
 
