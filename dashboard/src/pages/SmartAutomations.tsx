@@ -354,7 +354,7 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
           {automation.template_name && (
             <TemplateVarMapPanel templateName={automation.template_name} />
           )}
-          {!automation.template_name && (automation.config as Record<string, unknown>).template_name && (
+          {!automation.template_name && !!(automation.config as Record<string, unknown>).template_name && (
             <TemplateVarMapPanel templateName={String((automation.config as Record<string, unknown>).template_name)} />
           )}
 
