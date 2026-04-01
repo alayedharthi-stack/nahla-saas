@@ -4785,6 +4785,117 @@ async def billing_payment_result(
     }
 
 
+# ── Storefront Snippet & Tracking ─────────────────────────────────────────────
+
+@app.get("/snippet.js")
+async def serve_snippet():
+    """
+    Serve the Nahla storefront tracking snippet.
+    Merchants add one <script> tag pointing here; the script handles all event
+    tracking (page view, product view, add to cart, cart abandon, checkout).
+    """
+    snippet_path = os.path.join(os.path.dirname(__file__), "snippet.js")
+    try:
+        with open(snippet_path, "r", encoding="utf-8") as f:
+            js = f.read()
+    except FileNotFoundError:
+        js = "/* Nahla snippet not found */"
+    from fastapi.responses import Response
+    return Response(
+        content=js,
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+class StorefrontEventIn(BaseModel):
+    event_type:     str
+    tenant_id:      Optional[str] = None
+    store_id:       Optional[str] = None
+    payload:        Optional[Dict[str, Any]] = None
+    url:            Optional[str] = None
+    referrer:       Optional[str] = None
+    ts:             Optional[int] = None
+
+
+@app.post("/track/event")
+async def track_storefront_event(
+    body: StorefrontEventIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Receive storefront events from the Nahla snippet.
+
+    Supported event types:
+      page_view, product_view, add_to_cart, cart_update,
+      begin_checkout, order_created, cart_abandon
+
+    cart_abandon events are forwarded to the autopilot engine
+    as abandoned_cart signals for WhatsApp recovery flows.
+    """
+    # Resolve tenant — snippet sends tenant_id in body; fallback to header
+    raw_tid = body.tenant_id or request.headers.get("X-Tenant-ID", "1")
+    try:
+        tenant_id = int(raw_tid)
+    except (ValueError, TypeError):
+        tenant_id = 1
+
+    _get_or_create_tenant(db, tenant_id)
+
+    payload = body.payload or {}
+    payload["url"]      = body.url
+    payload["referrer"] = body.referrer
+    payload["store_id"] = body.store_id
+
+    event = AutomationEvent(
+        tenant_id=tenant_id,
+        event_type=f"storefront_{body.event_type}",
+        customer_id=None,
+        payload=payload,
+        processed=False,
+    )
+    db.add(event)
+    db.commit()
+
+    logger.info(
+        f"[Snippet] tenant={tenant_id} event={body.event_type} "
+        f"store={body.store_id} url={body.url}"
+    )
+
+    # For cart_abandon: also emit an autopilot-compatible abandoned_cart event
+    # so the existing WhatsApp recovery automation can pick it up.
+    if body.event_type == "cart_abandon":
+        customer_phone = payload.get("customer_phone")
+        if customer_phone:
+            # Try to match to a known customer
+            customer = db.query(Customer).filter(
+                Customer.tenant_id == tenant_id,
+                Customer.phone.like(f"%{customer_phone[-9:]}%"),
+            ).first()
+            cart_event = AutomationEvent(
+                tenant_id=tenant_id,
+                event_type="abandoned_cart",
+                customer_id=customer.id if customer else None,
+                payload={
+                    "source":       "storefront_snippet",
+                    "cart_total":   payload.get("cart_total"),
+                    "items":        payload.get("items"),
+                    "phone":        customer_phone,
+                    "url":          body.url,
+                },
+                processed=False,
+            )
+            db.add(cart_event)
+            db.commit()
+            logger.info(
+                f"[Snippet] cart_abandon → autopilot event "
+                f"tenant={tenant_id} phone={customer_phone}"
+            )
+
+    return {"received": True, "event_type": body.event_type}
+
+
 # ── Existing endpoints ─────────────────────────────────────────────────────────
 
 @app.get("/health")
