@@ -111,8 +111,8 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
         className={[
           'fixed inset-y-0 start-0 w-60 bg-slate-900 flex flex-col z-40',
           'transition-transform duration-300 ease-in-out',
-          /* Desktop: always visible */
-          'lg:translate-x-0',
+          /* Desktop: always visible — override any mobile transform */
+          'lg:!translate-x-0',
           /* Mobile: slide in/out from the inline-start edge */
           isOpen
             ? 'translate-x-0'
