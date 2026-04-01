@@ -33,11 +33,11 @@ RUN printf 'server {\n\
     index        index.html;\n\
 \n\
     # Proxy /api/ to the backend service\n\
-    resolver 127.0.0.11 valid=30s;\n\
-    set $backend http://nahla-saas.railway.internal:8000;\n\
+    resolver 8.8.8.8 valid=30s;\n\
+    set $backend https://nahla-saas-production.up.railway.app;\n\
     location /api/ {\n\
         proxy_pass $backend/;\n\
-        proxy_set_header Host nahla-saas.railway.internal;\n\
+        proxy_set_header Host nahla-saas-production.up.railway.app;\n\
         proxy_set_header X-Real-IP $remote_addr;\n\
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
     }\n\
