@@ -34,11 +34,10 @@ RUN printf 'server {\n\
 \n\
     # Proxy /api/ to the backend service\n\
     resolver 8.8.8.8 valid=30s;\n\
-    set $backend https://api.nahlaai.com;\n\
+    set $backend http://creative-intuition.railway.internal:8000;\n\
     location /api/ {\n\
         proxy_pass $backend/;\n\
-        proxy_ssl_server_name on;\n\
-        proxy_set_header Host api.nahlaai.com;\n\
+        proxy_set_header Host creative-intuition.railway.internal;\n\
         proxy_set_header X-Real-IP $remote_addr;\n\
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
     }\n\
