@@ -15,6 +15,8 @@ from models import (
     Customer, Product, CustomerProfile,
     Order, Coupon, HandoffSession, PaymentSession,
     SystemEvent, ConversationTrace,
+    BillingPlan, BillingSubscription,
+    Conversation,
 )
 import httpx
 import time as _time
@@ -170,6 +172,136 @@ def _merge_defaults(stored: Optional[Dict], defaults: Dict) -> Dict:
     if stored:
         result.update(stored)
     return result
+
+
+# ── Billing plan definitions ────────────────────────────────────────────────────
+
+INTEGRATION_FEE_SAR = 59          # Fee charged via Salla/Zid marketplace listing
+LAUNCH_PROMO_MONTHS = 2           # First N months at launch price
+LAUNCH_PROMO_UNTIL  = datetime(2026, 6, 30, 23, 59, 59)  # Promo window end date
+
+BILLING_PLANS_SEED: List[Dict[str, Any]] = [
+    {
+        "slug": "starter",
+        "name": "Starter",
+        "name_ar": "المبتدئ",
+        "description": "للمتاجر الصغيرة التي تبدأ رحلة الأتمتة",
+        "price_sar": 899,
+        "launch_price_sar": 449,
+        "billing_cycle": "monthly",
+        "features": [
+            "ردود ذكاء اصطناعي تلقائية",
+            "حتى 1,000 محادثة/شهر",
+            "3 أتمتات فعّالة",
+            "حملتان/شهر",
+            "تحليلات أساسية",
+        ],
+        "limits": {
+            "conversations_per_month": 1000,
+            "automations": 3,
+            "campaigns_per_month": 2,
+        },
+    },
+    {
+        "slug": "growth",
+        "name": "Growth",
+        "name_ar": "النمو",
+        "description": "للمتاجر المتنامية التي تريد تحقيق أقصى مبيعات",
+        "price_sar": 1699,
+        "launch_price_sar": 849,
+        "billing_cycle": "monthly",
+        "features": [
+            "ردود ذكاء اصطناعي تلقائية",
+            "حتى 5,000 محادثة/شهر",
+            "أتمتات غير محدودة",
+            "10 حملات/شهر",
+            "تحليلات متقدمة",
+            "أولوية الدعم",
+        ],
+        "limits": {
+            "conversations_per_month": 5000,
+            "automations": -1,
+            "campaigns_per_month": 10,
+        },
+    },
+    {
+        "slug": "scale",
+        "name": "Scale",
+        "name_ar": "التوسع",
+        "description": "للمتاجر الكبيرة والعلامات التجارية المتسارعة",
+        "price_sar": 2999,
+        "launch_price_sar": 1499,
+        "billing_cycle": "monthly",
+        "features": [
+            "ردود ذكاء اصطناعي تلقائية",
+            "محادثات غير محدودة",
+            "أتمتات غير محدودة",
+            "حملات غير محدودة",
+            "تحليلات متقدمة + تقارير مخصصة",
+            "دعم مخصص 24/7",
+            "وصول API كامل",
+        ],
+        "limits": {
+            "conversations_per_month": -1,
+            "automations": -1,
+            "campaigns_per_month": -1,
+        },
+    },
+]
+
+
+def _ensure_billing_plans(db: Session) -> None:
+    """Seed the system billing plans on first use."""
+    for seed in BILLING_PLANS_SEED:
+        if not db.query(BillingPlan).filter(BillingPlan.slug == seed["slug"]).first():
+            plan = BillingPlan(
+                tenant_id=None,
+                slug=seed["slug"],
+                name=seed["name"],
+                description=seed["description"],
+                currency="SAR",
+                price_sar=seed["price_sar"],
+                billing_cycle=seed["billing_cycle"],
+                features=seed["features"],
+                limits=seed["limits"],
+                extra_metadata={
+                    "name_ar": seed["name_ar"],
+                    "launch_price_sar": seed["launch_price_sar"],
+                },
+            )
+            db.add(plan)
+    db.commit()
+
+
+def _get_tenant_subscription(db: Session, tenant_id: int) -> Optional[BillingSubscription]:
+    """Return the active subscription for a tenant."""
+    return (
+        db.query(BillingSubscription)
+        .filter(
+            BillingSubscription.tenant_id == tenant_id,
+            BillingSubscription.status == "active",
+        )
+        .order_by(BillingSubscription.started_at.desc())
+        .first()
+    )
+
+
+def _is_launch_discount_active(sub: BillingSubscription) -> bool:
+    """True if the subscription is still within the launch promo window."""
+    if not sub.started_at:
+        return False
+    now = datetime.utcnow()
+    months_active = (now.year - sub.started_at.year) * 12 + (now.month - sub.started_at.month)
+    return months_active < LAUNCH_PROMO_MONTHS and sub.started_at <= LAUNCH_PROMO_UNTIL
+
+
+def _require_subscription(db: Session, tenant_id: int) -> None:
+    """Raise HTTP 402 if the tenant has no active Nahla subscription."""
+    if not _get_tenant_subscription(db, tenant_id):
+        raise HTTPException(
+            status_code=402,
+            detail="الرجاء اختيار خطة نهلة لتفعيل الطيار الآلي للمبيعات.",
+        )
 
 # ── Pydantic schemas ───────────────────────────────────────────────────────────
 
@@ -2355,6 +2487,10 @@ async def update_autopilot_settings(
     tenant_id = _resolve_tenant_id(request)
     _get_or_create_tenant(db, tenant_id)
 
+    # Require active subscription to enable autopilot
+    if body.enabled:
+        _require_subscription(db, int(tenant_id))
+
     current = _get_autopilot_settings(db, tenant_id)
 
     if body.enabled is not None:
@@ -4162,6 +4298,146 @@ async def get_conversation_trace(
             }
             for r in rows
         ],
+    }
+
+
+# ── Billing ────────────────────────────────────────────────────────────────────
+
+@app.get("/billing/plans")
+async def list_billing_plans(db: Session = Depends(get_db)):
+    """Return all available Nahla SaaS subscription plans."""
+    _ensure_billing_plans(db)
+    plans = (
+        db.query(BillingPlan)
+        .filter(BillingPlan.tenant_id == None)  # noqa: E711 — SQLAlchemy requires ==
+        .order_by(BillingPlan.price_sar)
+        .all()
+    )
+    result = []
+    for p in plans:
+        meta = p.extra_metadata or {}
+        result.append({
+            "id":               p.id,
+            "slug":             p.slug,
+            "name":             p.name,
+            "name_ar":          meta.get("name_ar", p.name),
+            "description":      p.description,
+            "price_sar":        p.price_sar,
+            "launch_price_sar": meta.get("launch_price_sar", p.price_sar),
+            "billing_cycle":    p.billing_cycle,
+            "features":         p.features or [],
+            "limits":           p.limits or {},
+        })
+    return {"plans": result, "integration_fee_sar": INTEGRATION_FEE_SAR}
+
+
+@app.get("/billing/status")
+async def get_billing_status(request: Request, db: Session = Depends(get_db)):
+    """Return the current subscription status for the tenant."""
+    tenant_id = _resolve_tenant_id(request)
+    _ensure_billing_plans(db)
+
+    sub = _get_tenant_subscription(db, tenant_id)
+
+    # Count conversations (all-time since no created_at on Conversation)
+    conversations_used = (
+        db.query(Conversation)
+        .filter(Conversation.tenant_id == tenant_id)
+        .count()
+    )
+
+    if sub is None:
+        return {
+            "has_subscription":      False,
+            "plan":                  None,
+            "status":                "none",
+            "conversations_used":    conversations_used,
+            "conversations_limit":   0,
+            "launch_discount_active": False,
+            "current_price_sar":     0,
+            "integration_fee_sar":   INTEGRATION_FEE_SAR,
+        }
+
+    plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+    meta  = plan.extra_metadata or {} if plan else {}
+    launch = _is_launch_discount_active(sub)
+    price  = meta.get("launch_price_sar", plan.price_sar) if launch else plan.price_sar
+    limits = plan.limits or {}
+
+    return {
+        "has_subscription":        True,
+        "plan": {
+            "id":               plan.id,
+            "slug":             plan.slug,
+            "name":             plan.name,
+            "name_ar":          meta.get("name_ar", plan.name),
+            "price_sar":        plan.price_sar,
+            "launch_price_sar": meta.get("launch_price_sar", plan.price_sar),
+            "features":         plan.features or [],
+            "limits":           limits,
+        },
+        "status":                  sub.status,
+        "started_at":              sub.started_at.isoformat() if sub.started_at else None,
+        "conversations_used":      conversations_used,
+        "conversations_limit":     limits.get("conversations_per_month", -1),
+        "launch_discount_active":  launch,
+        "current_price_sar":       price,
+        "integration_fee_sar":     INTEGRATION_FEE_SAR,
+    }
+
+
+class SubscribeRequest(BaseModel):
+    plan_slug: str
+
+
+@app.post("/billing/subscribe")
+async def subscribe_to_plan(
+    body: SubscribeRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Activate a Nahla subscription plan for the tenant."""
+    tenant_id = _resolve_tenant_id(request)
+    _ensure_billing_plans(db)
+
+    plan = (
+        db.query(BillingPlan)
+        .filter(BillingPlan.slug == body.plan_slug, BillingPlan.tenant_id == None)  # noqa: E711
+        .first()
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    # Cancel any existing active subscriptions
+    db.query(BillingSubscription).filter(
+        BillingSubscription.tenant_id == tenant_id,
+        BillingSubscription.status == "active",
+    ).update({"status": "cancelled"})
+
+    now = datetime.utcnow()
+    sub = BillingSubscription(
+        tenant_id=tenant_id,
+        plan_id=plan.id,
+        status="active",
+        started_at=now,
+        auto_renew=True,
+        extra_metadata={"activated_by": "dashboard"},
+    )
+    db.add(sub)
+    db.commit()
+    db.refresh(sub)
+
+    meta   = plan.extra_metadata or {}
+    launch = _is_launch_discount_active(sub)
+    price  = meta.get("launch_price_sar", plan.price_sar) if launch else plan.price_sar
+
+    logger.info(f"[Billing] Tenant {tenant_id} subscribed to plan '{body.plan_slug}' (launch={launch})")
+    return {
+        "success":               True,
+        "subscription_id":       sub.id,
+        "plan_slug":             plan.slug,
+        "launch_discount_active": launch,
+        "current_price_sar":     price,
     }
 
 

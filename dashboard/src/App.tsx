@@ -3,6 +3,8 @@ import { LanguageProvider } from './i18n/context'
 import Layout from './components/layout/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
 import Login from './pages/Login'
+import Onboarding from './pages/Onboarding'
+import Billing from './pages/Billing'
 import Overview from './pages/Overview'
 import Conversations from './pages/Conversations'
 import Orders from './pages/Orders'
@@ -25,7 +27,8 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           {/* Public */}
-          <Route path="/login" element={<Login />} />
+          <Route path="/login"      element={<Login />} />
+          <Route path="/onboarding" element={<Onboarding />} />
 
           {/* Protected */}
           <Route
@@ -53,6 +56,7 @@ export default function App() {
             <Route path="store-integration"  element={<StoreIntegration />} />
             <Route path="handoff-queue"      element={<HandoffQueue />} />
             <Route path="system-status"      element={<SystemStatus />} />
+            <Route path="billing"            element={<Billing />} />
           </Route>
         </Routes>
       </BrowserRouter>

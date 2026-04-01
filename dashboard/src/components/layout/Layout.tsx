@@ -17,6 +17,7 @@ const PAGE_META: Record<string, MetaSelector> = {
   '/analytics':          tr => tr.pages.analytics,
   '/settings':           tr => tr.pages.settings,
   '/smart-automations':  _tr => ({ title: 'الطيار الآلي', subtitle: 'إدارة الأتمتة الذكية' }),
+  '/billing':            _tr => ({ title: 'الاشتراك والفوترة', subtitle: 'إدارة خطة نهلة' }),
 }
 
 export default function Layout() {

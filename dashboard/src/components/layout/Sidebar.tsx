@@ -18,6 +18,7 @@ import {
   Store,
   UserCheck,
   Activity,
+  CreditCard,
   X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -61,10 +62,11 @@ const NAV_GROUPS: NavGroup[] = [
   {
     groupLabel: tr => tr.nav.groups.store,
     items: [
-      { to: '/integrations',      icon: Plug,     label: tr  => tr.nav.items.integrations },
-      { to: '/store-integration', icon: Store,    label: _tr => 'ربط المتجر'              },
-      { to: '/system-status',     icon: Activity, label: _tr => 'حالة النظام'             },
-      { to: '/settings',          icon: Settings, label: tr  => tr.nav.items.settings     },
+      { to: '/integrations',      icon: Plug,       label: tr  => tr.nav.items.integrations },
+      { to: '/store-integration', icon: Store,      label: _tr => 'ربط المتجر'              },
+      { to: '/system-status',     icon: Activity,   label: _tr => 'حالة النظام'             },
+      { to: '/billing',           icon: CreditCard, label: _tr => 'الاشتراك والفوترة'       },
+      { to: '/settings',          icon: Settings,   label: tr  => tr.nav.items.settings     },
     ],
   },
 ]
