@@ -34,7 +34,11 @@ app = FastAPI(title="Nahla SaaS Backend", description="Multi-tenant SaaS API ser
 # CORS – allow dashboard dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://app.nahlaai.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -4502,7 +4506,7 @@ async def create_billing_checkout(
     price_sar  = int(plan_meta.get("launch_price_sar", plan.price_sar)) if is_launch else int(plan.price_sar)
 
     # Build redirect URLs (frontend sends its own origin so we stay domain-agnostic)
-    base_success = (body.success_url or "").rstrip("/") or "https://dashboard.nahlaai.com"
+    base_success = (body.success_url or "").rstrip("/") or "https://app.nahlaai.com"
     base_error   = (body.error_url   or "").rstrip("/") or base_success
 
     gateway_client, gateway_name, gateway_cfg = _get_billing_gateway(db, tenant_id)
@@ -4538,7 +4542,7 @@ async def create_billing_checkout(
             invoice = await gateway_client.create_invoice(
                 amount_sar=float(price_sar),
                 description=f"نهلة — خطة {plan_meta.get('name_ar', plan.name)} (شهري)",
-                callback_url="https://app.nahlaai.com/billing/webhook/moyasar/subscription",
+                callback_url="https://api.nahlaai.com/billing/webhook/moyasar/subscription",
                 success_url=success_redirect,
                 error_url=error_redirect,
                 metadata={
