@@ -64,14 +64,14 @@ export default function Overview() {
             <div>
               <p className="text-xs text-slate-900 font-semibold">مبيعات ولّدتها نهلة هذا الشهر</p>
               <p className="text-2xl font-black text-red-600 leading-none mt-0.5">
-                4,320 <span className="text-sm font-semibold text-red-400">ر.س</span>
+                4,320 <span className="text-sm font-bold text-red-700">ر.س</span>
               </p>
             </div>
           </div>
           <div className="flex items-center gap-4">
             <div className="text-center hidden sm:block">
-              <p className="text-xs text-slate-400">طلبات أنجزها الذكاء</p>
-              <p className="text-lg font-bold text-slate-700">28 طلب</p>
+              <p className="text-xs text-slate-900 font-semibold">طلبات أنجزها الذكاء</p>
+              <p className="text-lg font-bold text-slate-900">28 طلب</p>
             </div>
             <div className="h-8 w-px bg-slate-200 hidden sm:block" />
             <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-white rounded-xl px-3 py-2 border border-slate-200">
