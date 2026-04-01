@@ -1,22 +1,34 @@
-import { Bell, Search, ChevronDown } from 'lucide-react'
+import { Bell, Search, ChevronDown, Menu } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
 import type { Lang } from '../../i18n/types'
 
 interface HeaderProps {
-  title:     string
-  subtitle?: string
+  title:        string
+  subtitle?:    string
+  onMenuClick?: () => void
 }
 
-export default function Header({ title, subtitle }: HeaderProps) {
+export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const { lang, setLang, t } = useLanguage()
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 sticky top-0 z-20">
+    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 sticky top-0 z-20">
 
-      {/* Page title */}
-      <div>
-        <h1 className="text-base font-semibold text-slate-900 leading-none">{title}</h1>
-        {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
+      {/* Left side: hamburger (mobile) + page title */}
+      <div className="flex items-center gap-3">
+        {/* Hamburger — visible only on mobile */}
+        <button
+          className="lg:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 text-slate-500 transition-colors"
+          onClick={onMenuClick}
+          aria-label="فتح القائمة"
+        >
+          <Menu className="w-5 h-5" />
+        </button>
+
+        <div>
+          <h1 className="text-base font-semibold text-slate-900 leading-none">{title}</h1>
+          {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
+        </div>
       </div>
 
       {/* Right-side actions */}
