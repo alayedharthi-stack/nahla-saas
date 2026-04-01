@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import {
   CheckCircle, Zap, TrendingUp, Rocket, Loader2, AlertCircle,
-  RefreshCw, Tag, MessageSquare, Star, ArrowUp,
+  RefreshCw, Tag, MessageSquare, Star, ArrowUp, ExternalLink, ShieldCheck,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
 
@@ -16,35 +16,37 @@ function usagePercent(used: number, limit: number) {
   return Math.min(100, Math.round((used / limit) * 100))
 }
 
-// ── Plan card icons ───────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
+
 const PLAN_ICONS: Record<string, React.ReactNode> = {
-  starter: <Zap       className="w-5 h-5" />,
+  starter: <Zap        className="w-5 h-5" />,
   growth:  <TrendingUp className="w-5 h-5" />,
-  scale:   <Rocket    className="w-5 h-5" />,
+  scale:   <Rocket     className="w-5 h-5" />,
 }
 
-const PLAN_COLORS: Record<string, string> = {
+const PLAN_GRADIENTS: Record<string, string> = {
   starter: 'from-blue-500 to-blue-600',
   growth:  'from-brand-500 to-brand-600',
   scale:   'from-purple-500 to-purple-600',
 }
 
-// ── Components ────────────────────────────────────────────────────────────────
+// ── PlanCard ──────────────────────────────────────────────────────────────────
 
 function PlanCard({
   plan,
   isCurrentPlan,
-  onSelect,
-  subscribing,
+  onCheckout,
+  checkingOut,
 }: {
-  plan:          BillingPlan
+  plan:         BillingPlan
   isCurrentPlan: boolean
-  onSelect:      (slug: string) => void
-  subscribing:   string | null
+  onCheckout:   (slug: string) => void
+  checkingOut:  string | null
 }) {
-  const isPopular = plan.slug === 'growth'
-  const gradient  = PLAN_COLORS[plan.slug] ?? 'from-slate-500 to-slate-600'
-  const isLoading = subscribing === plan.slug
+  const isPopular  = plan.slug === 'growth'
+  const gradient   = PLAN_GRADIENTS[plan.slug] ?? 'from-slate-500 to-slate-600'
+  const isLoading  = checkingOut === plan.slug
+  const hasDiscount = plan.launch_price_sar < plan.price_sar
 
   return (
     <div
@@ -55,6 +57,7 @@ function PlanCard({
           : 'border-slate-200 hover:border-slate-300 hover:shadow-md',
       ].join(' ')}
     >
+      {/* Badge */}
       {isPopular && !isCurrentPlan && (
         <div className="absolute -top-3 start-1/2 -translate-x-1/2 rtl:translate-x-1/2">
           <span className="bg-brand-500 text-white text-[11px] font-bold px-3 py-1 rounded-full flex items-center gap-1">
@@ -70,7 +73,7 @@ function PlanCard({
         </div>
       )}
 
-      {/* Header */}
+      {/* Header gradient */}
       <div className={`bg-gradient-to-br ${gradient} rounded-t-2xl p-5 text-white`}>
         <div className="flex items-center gap-2 mb-3">
           {PLAN_ICONS[plan.slug]}
@@ -78,28 +81,30 @@ function PlanCard({
         </div>
         <p className="text-white/80 text-xs mb-4">{plan.description}</p>
 
-        {/* Pricing */}
         <div className="flex items-end gap-2">
           <div>
-            <span className="text-3xl font-black">{plan.launch_price_sar.toLocaleString('ar-SA')}</span>
+            <span className="text-3xl font-black">
+              {plan.launch_price_sar.toLocaleString('ar-SA')}
+            </span>
             <span className="text-sm ms-1 font-medium">ر.س</span>
           </div>
-          {plan.launch_price_sar < plan.price_sar && (
+          {hasDiscount && (
             <span className="line-through text-white/50 text-sm mb-1">
               {plan.price_sar.toLocaleString('ar-SA')}
             </span>
           )}
         </div>
-        <p className="text-white/70 text-xs mt-1">شهرياً · أول شهرين بسعر الإطلاق</p>
-        {plan.launch_price_sar < plan.price_sar && (
+        <p className="text-white/70 text-xs mt-1">شهرياً</p>
+
+        {hasDiscount && (
           <div className="mt-2 inline-flex items-center gap-1 bg-white/20 rounded-lg px-2 py-1 text-xs font-semibold">
             <Tag className="w-3 h-3" />
-            خصم 50% لأول شهرين
+            خصم 50% — أول شهرين
           </div>
         )}
       </div>
 
-      {/* Features */}
+      {/* Features list */}
       <div className="p-5 flex-1">
         <ul className="space-y-2.5">
           {plan.features.map((f, i) => (
@@ -119,17 +124,27 @@ function PlanCard({
           </div>
         ) : (
           <button
-            onClick={() => onSelect(plan.slug)}
-            disabled={!!subscribing}
+            onClick={() => onCheckout(plan.slug)}
+            disabled={!!checkingOut}
             className={[
-              'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all flex items-center justify-center gap-2',
+              'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all',
+              'flex items-center justify-center gap-2',
               `bg-gradient-to-br ${gradient}`,
-              subscribing ? 'opacity-60 cursor-not-allowed' : 'hover:opacity-90 active:scale-95',
+              checkingOut ? 'opacity-60 cursor-not-allowed' : 'hover:opacity-90 active:scale-95',
             ].join(' ')}
           >
-            {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-            {isLoading ? 'جارٍ التفعيل...' : 'اختر هذه الخطة'}
+            {isLoading
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ التوجيه للدفع...</>
+              : <><ExternalLink className="w-4 h-4" /> ادفع الآن — {plan.launch_price_sar.toLocaleString('ar-SA')} ر.س</>}
           </button>
+        )}
+
+        {/* Secure payment note */}
+        {!isCurrentPlan && (
+          <p className="flex items-center justify-center gap-1 text-[10px] text-slate-400 mt-2">
+            <ShieldCheck className="w-3 h-3" />
+            دفع آمن عبر موى
+          </p>
         )}
       </div>
     </div>
@@ -144,9 +159,9 @@ export default function Billing() {
   const [integFee,    setIntegFee]    = useState(59)
   const [loading,     setLoading]     = useState(true)
   const [loadError,   setLoadError]   = useState<string | null>(null)
-  const [subscribing, setSubscribing] = useState<string | null>(null)
-  const [subSuccess,  setSubSuccess]  = useState<string | null>(null)
-  const [subError,    setSubError]    = useState<string | null>(null)
+  const [checkingOut, setCheckingOut] = useState<string | null>(null)
+  const [checkoutMsg, setCheckoutMsg] = useState<string | null>(null)
+  const [checkoutErr, setCheckoutErr] = useState<string | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -168,20 +183,28 @@ export default function Billing() {
 
   useEffect(() => { load() }, [])
 
-  const handleSelect = async (slug: string) => {
-    setSubscribing(slug)
-    setSubSuccess(null)
-    setSubError(null)
+  const handleCheckout = async (slug: string) => {
+    setCheckingOut(slug)
+    setCheckoutMsg(null)
+    setCheckoutErr(null)
+
     try {
-      const res = await billingApi.subscribe(slug)
-      if (res.success) {
-        setSubSuccess(`تم تفعيل الخطة بنجاح!`)
+      const res = await billingApi.createCheckout(slug)
+
+      if (res.checkout_url) {
+        // Real Moyasar payment — redirect to hosted payment page
+        window.location.href = res.checkout_url
+        // (page navigates away; no further state updates needed)
+      } else if (res.demo_mode) {
+        // No gateway configured — subscription activated immediately
+        setCheckoutMsg('تم تفعيل الخطة بنجاح! (وضع تجريبي — بدون دفع)')
         await load()
+        setCheckingOut(null)
       }
-    } catch {
-      setSubError('فشل تفعيل الخطة. يرجى المحاولة مجدداً.')
-    } finally {
-      setSubscribing(null)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'خطأ غير معروف'
+      setCheckoutErr(`فشل إنشاء جلسة الدفع: ${msg}`)
+      setCheckingOut(null)
     }
   }
 
@@ -205,7 +228,10 @@ export default function Billing() {
     )
   }
 
-  const pct = usagePercent(status?.conversations_used ?? 0, status?.conversations_limit ?? 0)
+  const pct = usagePercent(
+    status?.conversations_used ?? 0,
+    status?.conversations_limit ?? 0,
+  )
 
   return (
     <div className="space-y-6 max-w-5xl" dir="rtl">
@@ -216,22 +242,32 @@ export default function Billing() {
         <p className="text-sm text-slate-500 mt-1">إدارة خطة نهلة واستخدامك الشهري</p>
       </div>
 
-      {/* Success / Error banners */}
-      {subSuccess && (
+      {/* Banners */}
+      {checkoutMsg && (
         <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm">
           <CheckCircle className="w-4 h-4 shrink-0" />
-          {subSuccess}
+          {checkoutMsg}
         </div>
       )}
-      {subError && (
+      {checkoutErr && (
         <div className="flex items-center gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
           <AlertCircle className="w-4 h-4 shrink-0" />
-          {subError}
+          {checkoutErr}
         </div>
       )}
 
-      {/* Current status card */}
+      {/* Redirecting overlay */}
+      {checkingOut && (
+        <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center gap-4">
+          <Loader2 className="w-10 h-10 animate-spin text-brand-500" />
+          <p className="text-sm font-semibold text-slate-700">جارٍ التوجيه إلى صفحة الدفع...</p>
+          <p className="text-xs text-slate-400">يرجى الانتظار</p>
+        </div>
+      )}
+
+      {/* Current status cards */}
       <div className="grid sm:grid-cols-3 gap-4">
+
         {/* Active plan */}
         <div className="card p-5">
           <p className="text-xs text-slate-500 mb-1">الخطة الحالية</p>
@@ -267,7 +303,8 @@ export default function Billing() {
             {(status?.conversations_used ?? 0).toLocaleString('ar-SA')}
           </p>
           <p className="text-xs text-slate-400 mt-0.5">
-            من {fmt(status?.conversations_limit ?? 0)}{status?.conversations_limit !== -1 ? ' محادثة' : ' (غير محدود)'}
+            من {fmt(status?.conversations_limit ?? 0)}
+            {status?.conversations_limit !== -1 ? ' محادثة' : ' (غير محدود)'}
           </p>
           {status?.has_subscription && status.conversations_limit !== -1 && (
             <div className="mt-3">
@@ -310,33 +347,48 @@ export default function Billing() {
         </div>
       )}
 
-      {/* Upgrade prompt for active subscribers */}
+      {/* Upgrade nudge */}
       {status?.has_subscription && status.plan?.slug !== 'scale' && (
         <div className="flex items-center gap-3 bg-brand-50 border border-brand-100 rounded-xl p-4">
           <ArrowUp className="w-5 h-5 text-brand-500 shrink-0" />
           <p className="text-sm text-brand-800">
-            ترقية الخطة تعني محادثات أكثر وأتمتات أقوى. الترقية مجانية حتى نهاية الشهر الحالي.
+            ترقية الخطة تعني محادثات أكثر وأتمتات أقوى.
           </p>
         </div>
       )}
 
-      {/* Plan cards */}
+      {/* Plans grid */}
       <div>
-        <h2 className="text-base font-bold text-slate-900 mb-4">خطط نهلة</h2>
+        <h2 className="text-base font-bold text-slate-900 mb-1">خطط نهلة</h2>
+        <p className="text-xs text-slate-400 mb-4">
+          جميع المدفوعات تتم عبر موى (Moyasar) — بوابة الدفع الموثوقة في السعودية
+        </p>
         <div className="grid md:grid-cols-3 gap-6">
           {plans.map(plan => (
             <PlanCard
               key={plan.slug}
               plan={plan}
               isCurrentPlan={status?.plan?.slug === plan.slug}
-              onSelect={handleSelect}
-              subscribing={subscribing}
+              onCheckout={handleCheckout}
+              checkingOut={checkingOut}
             />
           ))}
         </div>
       </div>
 
-      {/* Pricing structure note */}
+      {/* Payment security note */}
+      <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-4 border border-slate-200">
+        <ShieldCheck className="w-5 h-5 text-slate-400 shrink-0" />
+        <div>
+          <p className="text-xs font-semibold text-slate-700">دفع آمن ومشفّر</p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            تتم معالجة جميع المدفوعات عبر بوابة موى (Moyasar) المرخّصة في المملكة العربية السعودية.
+            بيانات بطاقتك لا تُخزَّن على خوادم نهلة.
+          </p>
+        </div>
+      </div>
+
+      {/* Pricing structure */}
       <div className="card p-5 bg-slate-50">
         <h3 className="text-sm font-semibold text-slate-700 mb-3">هيكل الأسعار</h3>
         <div className="space-y-3">
@@ -344,14 +396,14 @@ export default function Billing() {
             <div className="w-6 h-6 rounded-full bg-slate-700 text-white text-xs font-bold flex items-center justify-center shrink-0">١</div>
             <div>
               <p className="text-sm font-medium text-slate-800">رسوم تكامل سلة/زد — {integFee} ر.س/شهر</p>
-              <p className="text-xs text-slate-500 mt-0.5">تُدفع عبر المنصة · تشمل: ربط المتجر، مزامنة الطلبات والمنتجات، الإشعارات الآلية</p>
+              <p className="text-xs text-slate-500 mt-0.5">تُدفع عبر المنصة · ربط المتجر، مزامنة الطلبات والمنتجات</p>
             </div>
           </div>
           <div className="flex items-start gap-3">
             <div className="w-6 h-6 rounded-full bg-brand-500 text-white text-xs font-bold flex items-center justify-center shrink-0">٢</div>
             <div>
               <p className="text-sm font-medium text-slate-800">خطة نهلة — من 449 ر.س/شهر</p>
-              <p className="text-xs text-slate-500 mt-0.5">تُدفع مباشرة لنهلة · تشمل: الطيار الآلي، الردود الذكية، الحملات، وكيل المبيعات</p>
+              <p className="text-xs text-slate-500 mt-0.5">تُدفع عبر موى · الطيار الآلي، الردود الذكية، الحملات، وكيل المبيعات</p>
             </div>
           </div>
         </div>

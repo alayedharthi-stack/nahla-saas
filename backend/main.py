@@ -15,7 +15,7 @@ from models import (
     Customer, Product, CustomerProfile,
     Order, Coupon, HandoffSession, PaymentSession,
     SystemEvent, ConversationTrace,
-    BillingPlan, BillingSubscription,
+    BillingPlan, BillingSubscription, BillingPayment,
     Conversation,
 )
 import httpx
@@ -4438,6 +4438,280 @@ async def subscribe_to_plan(
         "plan_slug":             plan.slug,
         "launch_discount_active": launch,
         "current_price_sar":     price,
+    }
+
+
+# ── Billing Checkout (Moyasar) ─────────────────────────────────────────────────
+
+def _get_billing_gateway(db: Session, tenant_id: int):
+    """
+    Return the configured payment gateway client for billing, or None.
+    Currently supports Moyasar; Stripe can be added here later.
+    """
+    cfg = _get_moyasar_settings(db, tenant_id)
+    if cfg.get("enabled") and cfg.get("secret_key"):
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+        from payment_gateways.moyasar import MoyasarClient
+        return MoyasarClient(
+            secret_key=cfg["secret_key"],
+            publishable_key=cfg.get("publishable_key", ""),
+        ), "moyasar", cfg
+    # Future: check for Stripe config here
+    return None, "demo", {}
+
+
+class CheckoutRequest(BaseModel):
+    plan_slug:   str
+    success_url: Optional[str] = None   # base URL to redirect after payment
+    error_url:   Optional[str] = None
+
+
+@app.post("/billing/checkout")
+async def create_billing_checkout(
+    body: CheckoutRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Create a payment checkout session for a Nahla subscription plan.
+
+    Flow:
+    - If Moyasar is configured → create a hosted invoice, return checkout_url.
+      Subscription is created as 'pending_payment' and activated by the webhook.
+    - If no gateway is configured (demo/test) → activate the subscription
+      immediately and return demo_mode=True.
+
+    Architecture is gateway-agnostic: replace _get_billing_gateway() to add Stripe.
+    """
+    tenant_id = _resolve_tenant_id(request)
+    _ensure_billing_plans(db)
+
+    plan = (
+        db.query(BillingPlan)
+        .filter(BillingPlan.slug == body.plan_slug, BillingPlan.tenant_id == None)  # noqa: E711
+        .first()
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    plan_meta = plan.extra_metadata or {}
+    now        = datetime.utcnow()
+
+    # Apply launch discount if still within the promo window
+    is_launch = now <= LAUNCH_PROMO_UNTIL
+    price_sar  = int(plan_meta.get("launch_price_sar", plan.price_sar)) if is_launch else int(plan.price_sar)
+
+    # Build redirect URLs (frontend sends its own origin so we stay domain-agnostic)
+    base_success = (body.success_url or "").rstrip("/") or "https://dashboard.nahlaai.com"
+    base_error   = (body.error_url   or "").rstrip("/") or base_success
+
+    gateway_client, gateway_name, gateway_cfg = _get_billing_gateway(db, tenant_id)
+
+    # ── Real Moyasar flow ──────────────────────────────────────────────────────
+    if gateway_client is not None:
+        # Cancel stale pending_payment subscriptions for this tenant
+        db.query(BillingSubscription).filter(
+            BillingSubscription.tenant_id == tenant_id,
+            BillingSubscription.status == "pending_payment",
+        ).update({"status": "cancelled"})
+
+        # Create subscription in pending state — activated by webhook on payment
+        sub = BillingSubscription(
+            tenant_id=tenant_id,
+            plan_id=plan.id,
+            status="pending_payment",
+            started_at=now,
+            auto_renew=True,
+            extra_metadata={
+                "gateway": gateway_name,
+                "price_charged_sar": price_sar,
+                "launch_discount": is_launch,
+            },
+        )
+        db.add(sub)
+        db.flush()   # get sub.id before commit
+
+        success_redirect = f"{base_success}?status=paid&sub_id={sub.id}"
+        error_redirect   = f"{base_error}?status=failed&sub_id={sub.id}"
+
+        try:
+            invoice = await gateway_client.create_invoice(
+                amount_sar=float(price_sar),
+                description=f"نهلة — خطة {plan_meta.get('name_ar', plan.name)} (شهري)",
+                callback_url="https://app.nahlaai.com/billing/webhook/moyasar/subscription",
+                success_url=success_redirect,
+                error_url=error_redirect,
+                metadata={
+                    "subscription_id": str(sub.id),
+                    "tenant_id":       str(tenant_id),
+                    "plan_slug":       plan.slug,
+                },
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.error(f"[Billing] Moyasar invoice error tenant={tenant_id}: {exc}")
+            raise HTTPException(status_code=502, detail=f"Payment gateway error: {exc}")
+
+        invoice_id   = invoice.get("id", "")
+        checkout_url = invoice.get("url", "")
+
+        meta = dict(sub.extra_metadata or {})
+        meta["moyasar_invoice_id"] = invoice_id
+        sub.extra_metadata = meta
+        db.commit()
+
+        logger.info(
+            f"[Billing] Checkout created tenant={tenant_id} plan={plan.slug} "
+            f"amount={price_sar} SAR invoice={invoice_id}"
+        )
+        return {
+            "subscription_id": sub.id,
+            "checkout_url":    checkout_url,
+            "gateway":         gateway_name,
+            "amount_sar":      price_sar,
+            "plan_slug":       plan.slug,
+            "demo_mode":       False,
+        }
+
+    # ── Demo / no-gateway flow ─────────────────────────────────────────────────
+    # No payment gateway configured — activate the subscription immediately.
+    db.query(BillingSubscription).filter(
+        BillingSubscription.tenant_id == tenant_id,
+        BillingSubscription.status == "active",
+    ).update({"status": "cancelled"})
+
+    sub = BillingSubscription(
+        tenant_id=tenant_id,
+        plan_id=plan.id,
+        status="active",
+        started_at=now,
+        auto_renew=True,
+        extra_metadata={
+            "activated_by":     "demo_checkout",
+            "price_charged_sar": price_sar,
+            "launch_discount":   is_launch,
+        },
+    )
+    db.add(sub)
+    db.commit()
+    db.refresh(sub)
+
+    logger.info(f"[Billing] Demo checkout: tenant={tenant_id} plan={plan.slug} activated directly")
+    return {
+        "subscription_id": sub.id,
+        "checkout_url":    None,
+        "gateway":         "demo",
+        "amount_sar":      price_sar,
+        "plan_slug":       plan.slug,
+        "demo_mode":       True,
+        "success":         True,
+        "launch_discount_active": is_launch,
+        "current_price_sar": price_sar,
+    }
+
+
+@app.post("/billing/webhook/moyasar/subscription")
+async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db)):
+    """
+    Moyasar payment webhook handler for subscription payments.
+    Activates the BillingSubscription and records a BillingPayment on success.
+    """
+    import json as _json
+    body_bytes = await request.body()
+
+    try:
+        event = _json.loads(body_bytes)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    payment_id   = event.get("id", "")
+    status       = event.get("status", "")
+    amount_h     = int(event.get("amount", 0))   # halalas
+    amount_sar   = amount_h // 100
+    payment_meta = event.get("metadata") or {}
+
+    subscription_id = payment_meta.get("subscription_id")
+    tenant_id_raw   = payment_meta.get("tenant_id")
+
+    logger.info(
+        f"[Billing Webhook] event id={payment_id} status={status} "
+        f"sub={subscription_id} tenant={tenant_id_raw}"
+    )
+
+    if not subscription_id:
+        logger.warning("[Billing Webhook] No subscription_id in metadata, ignoring")
+        return {"received": True}
+
+    sub = db.query(BillingSubscription).filter(
+        BillingSubscription.id == int(subscription_id)
+    ).first()
+
+    if not sub:
+        logger.warning(f"[Billing Webhook] Subscription {subscription_id} not found")
+        return {"received": True}
+
+    if status == "paid":
+        sub.status = "active"
+        m = dict(sub.extra_metadata or {})
+        m["moyasar_payment_id"] = payment_id
+        m["paid_at"] = datetime.utcnow().isoformat()
+        sub.extra_metadata = m
+
+        billing_payment = BillingPayment(
+            tenant_id=sub.tenant_id,
+            subscription_id=sub.id,
+            amount_sar=amount_sar or int(m.get("price_charged_sar", 0)),
+            currency="SAR",
+            gateway="moyasar",
+            transaction_reference=payment_id,
+            status="paid",
+            paid_at=datetime.utcnow(),
+            extra_metadata={"moyasar_event": event},
+        )
+        db.add(billing_payment)
+        logger.info(
+            f"[Billing Webhook] Subscription {subscription_id} ACTIVATED "
+            f"for tenant {sub.tenant_id} (payment {payment_id})"
+        )
+
+    elif status in ("failed", "expired"):
+        sub.status = "payment_failed"
+        logger.info(
+            f"[Billing Webhook] Payment {status} for subscription {subscription_id}"
+        )
+
+    db.commit()
+    return {"received": True}
+
+
+@app.get("/billing/payment-result")
+async def billing_payment_result(
+    request: Request,
+    db: Session = Depends(get_db),
+    sub_id: Optional[int] = None,
+    status: Optional[str] = None,
+):
+    """
+    Return subscription status for the payment-result page after Moyasar redirect.
+    Frontend polls this endpoint to confirm activation.
+    """
+    if not sub_id:
+        return {"activated": False, "status": "unknown"}
+
+    sub = db.query(BillingSubscription).filter(BillingSubscription.id == sub_id).first()
+    if not sub:
+        return {"activated": False, "status": "not_found"}
+
+    plan      = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+    plan_meta = plan.extra_metadata or {} if plan else {}
+
+    return {
+        "subscription_id": sub.id,
+        "status":          sub.status,
+        "activated":       sub.status == "active",
+        "plan_slug":       plan.slug if plan else None,
+        "plan_name_ar":    plan_meta.get("name_ar", plan.name if plan else ""),
+        "amount_sar":      (sub.extra_metadata or {}).get("price_charged_sar"),
     }
 
 
