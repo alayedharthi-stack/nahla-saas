@@ -1,5 +1,8 @@
-import { Bell, Search, ChevronDown, Menu } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { Bell, Search, ChevronDown, Menu, LogOut, User } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { useLanguage } from '../../i18n/context'
+import { logout } from '../../auth'
 import type { Lang } from '../../i18n/types'
 
 interface HeaderProps {
@@ -10,6 +13,24 @@ interface HeaderProps {
 
 export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const { lang, setLang, t } = useLanguage()
+  const navigate = useNavigate()
+  const [profileOpen, setProfileOpen] = useState(false)
+  const profileRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  const handleLogout = () => {
+    logout()
+    navigate('/login')
+  }
 
   return (
     <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 sticky top-0 z-20">
@@ -76,16 +97,44 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
           <span className="absolute top-1.5 end-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white" />
         </button>
 
-        {/* Profile */}
-        <button className="flex items-center gap-2 ps-2 pe-3 py-1.5 rounded-lg hover:bg-slate-50 transition-colors">
-          <div className="w-7 h-7 bg-brand-500 rounded-full flex items-center justify-center">
-            <span className="text-white text-xs font-semibold">م</span>
-          </div>
-          <span className="text-sm font-medium text-slate-700 hidden md:block">
-            {t(tr => tr.topbar.admin)}
-          </span>
-          <ChevronDown className="w-3.5 h-3.5 text-slate-400 hidden md:block" />
-        </button>
+        {/* Profile dropdown */}
+        <div ref={profileRef} className="relative">
+          <button
+            onClick={() => setProfileOpen(o => !o)}
+            className="flex items-center gap-2 ps-2 pe-3 py-1.5 rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            <div className="w-7 h-7 bg-brand-500 rounded-full flex items-center justify-center">
+              <span className="text-white text-xs font-semibold">م</span>
+            </div>
+            <span className="text-sm font-medium text-slate-700 hidden md:block">
+              {t(tr => tr.topbar.admin)}
+            </span>
+            <ChevronDown className={`w-3.5 h-3.5 text-slate-400 hidden md:block transition-transform ${profileOpen ? 'rotate-180' : ''}`} />
+          </button>
+
+          {profileOpen && (
+            <div className="absolute end-0 top-full mt-1 w-44 bg-white rounded-xl shadow-lg border border-slate-100 py-1 z-50">
+              <div className="px-3 py-2 border-b border-slate-100">
+                <p className="text-xs font-semibold text-slate-900">المدير</p>
+                <p className="text-xs text-slate-400">admin@nahlaai.com</p>
+              </div>
+              <button
+                onClick={() => { setProfileOpen(false); navigate('/settings') }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
+              >
+                <User className="w-4 h-4 text-slate-400" />
+                الإعدادات
+              </button>
+              <button
+                onClick={handleLogout}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+                تسجيل الخروج
+              </button>
+            </div>
+          )}
+        </div>
 
       </div>
     </header>
