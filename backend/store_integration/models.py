@@ -37,6 +37,11 @@ class OrderInput(BaseModel):
     customer_name: str
     customer_phone: str
     customer_email: Optional[str] = None
+    # Saudi national address fields
+    building_number: str = ""
+    street: str = ""
+    district: str = ""
+    postal_code: str = ""
     city: str = ""
     address: str = ""
     payment_method: str = "cod"

@@ -178,7 +178,11 @@ def build_system_prompt(ctx: Dict[str, Any]) -> str:
         "  • When suggesting a product, use its product ID in brackets, e.g. [42].\n"
         "  • When proposing a coupon, state the code clearly.\n"
         "  • Do not add any AI disclosure or branding footer — that is added separately.\n"
-        "  • Use action tools to propose products, coupons, bundles, or draft orders."
+        "  • Use action tools to propose products, coupons, bundles, or draft orders.\n"
+        "  • When collecting a shipping address for Saudi Arabia, ask for the national address "
+        "fields in order: رقم المبنى (building number), اسم الشارع (street name), الحي (district), "
+        "الرمز البريدي (postal code), المدينة (city). Collect them step by step if the customer "
+        "has not provided all fields. Include all five fields in the create_draft_order action."
     )
 
     return "\n\n".join(sections)

@@ -183,6 +183,7 @@ def _merge_defaults(stored: Optional[Dict], defaults: Dict) -> Dict:
 INTEGRATION_FEE_SAR = 59          # Fee charged via Salla/Zid marketplace listing
 LAUNCH_PROMO_MONTHS = 2           # First N months at launch price
 LAUNCH_PROMO_UNTIL  = datetime(2026, 6, 30, 23, 59, 59)  # Promo window end date
+FREE_TRIAL_DAYS     = 14          # Free trial period for new tenants
 
 BILLING_PLANS_SEED: List[Dict[str, Any]] = [
     {
@@ -3129,12 +3130,21 @@ def _build_ai_sales_response(
         lines = [
             f"💵 *الدفع عند الاستلام*\n",
             f"ممتاز {customer_name}! سنُعدّ طلبك{store_ref} بالدفع عند الاستلام.\n",
+            "أرسل لنا البيانات التالية:\n",
             "من فضلك أكّد:",
             "1️⃣ المنتج والكمية",
-            "2️⃣ اسمك الكريم",
+            "2️⃣ الاسم الكامل (الاسم الأول والأخير)",
+            "3️⃣ رقم الجوال",
         ]
         if collect_address:
-            lines.append("3️⃣ مدينتك وعنوانك")
+            lines += [
+                "4️⃣ *العنوان الوطني:*",
+                "   • رقم المبنى",
+                "   • اسم الشارع",
+                "   • الحي",
+                "   • الرمز البريدي",
+                "   • المدينة",
+            ]
         lines.append("\nبعد التأكيد سنرسل لك رقم الطلب ✅")
         return "\n".join(lines), True, False
 
@@ -3218,16 +3228,21 @@ class AiSalesSettingsIn(BaseModel):
 
 
 class AiSalesCreateOrderIn(BaseModel):
-    customer_phone:  str
-    customer_name:   str = ""
-    product_id:      Optional[int] = None
-    product_name:    str = ""
-    variant_id:      Optional[int] = None
-    quantity:        int = 1
-    city:            str = ""
-    address:         str = ""
-    payment_method:  str = "cod"   # "cod" | "pay_now"
-    notes:           str = ""
+    customer_phone:   str
+    customer_name:    str = ""
+    product_id:       Optional[int] = None
+    product_name:     str = ""
+    variant_id:       Optional[int] = None
+    quantity:         int = 1
+    # Saudi national address fields
+    building_number:  str = ""   # رقم المبنى
+    street:           str = ""   # اسم الشارع
+    district:         str = ""   # الحي
+    postal_code:      str = ""   # الرمز البريدي
+    city:             str = ""   # المدينة
+    address:          str = ""   # عنوان نصي إضافي (اختياري)
+    payment_method:   str = "cod"  # "cod" | "pay_now"
+    notes:            str = ""
 
 
 # ── AI Sales endpoints ─────────────────────────────────────────────────────────
@@ -3526,6 +3541,10 @@ async def ai_sales_create_order(
         store_order_input = StoreOrderInput(
             customer_name=body.customer_name,
             customer_phone=body.customer_phone,
+            building_number=body.building_number or "",
+            street=body.street or "",
+            district=body.district or "",
+            postal_code=body.postal_code or "",
             city=body.city or "",
             address=body.address or "",
             payment_method=body.payment_method,
@@ -3600,10 +3619,14 @@ async def ai_sales_create_order(
         total=total_str,
         external_id=external_order_id,
         customer_info={
-            "name":    body.customer_name,
-            "phone":   body.customer_phone,
-            "city":    body.city,
-            "address": body.address,
+            "name":            body.customer_name,
+            "phone":           body.customer_phone,
+            "building_number": body.building_number,
+            "street":          body.street,
+            "district":        body.district,
+            "postal_code":     body.postal_code,
+            "city":            body.city,
+            "address":         body.address,
         },
         line_items=line_items,
         checkout_url=payment_link,
@@ -4350,16 +4373,28 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
         .count()
     )
 
+    # Compute trial status from tenant creation date
+    tenant = _get_or_create_tenant(db, tenant_id)
+    now = datetime.utcnow()
+    trial_start = tenant.created_at or now
+    trial_elapsed = (now - trial_start).days
+    trial_days_remaining = max(0, FREE_TRIAL_DAYS - trial_elapsed)
+    is_trial = sub is None and trial_days_remaining > 0
+    trial_expired = sub is None and trial_days_remaining == 0
+
     if sub is None:
         return {
-            "has_subscription":      False,
-            "plan":                  None,
-            "status":                "none",
-            "conversations_used":    conversations_used,
-            "conversations_limit":   0,
+            "has_subscription":       False,
+            "plan":                   None,
+            "status":                 "trial" if is_trial else "none",
+            "is_trial":               is_trial,
+            "trial_days_remaining":   trial_days_remaining,
+            "trial_expired":          trial_expired,
+            "conversations_used":     conversations_used,
+            "conversations_limit":    100,  # basic limit during trial
             "launch_discount_active": False,
-            "current_price_sar":     0,
-            "integration_fee_sar":   INTEGRATION_FEE_SAR,
+            "current_price_sar":      0,
+            "integration_fee_sar":    INTEGRATION_FEE_SAR,
         }
 
     plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
@@ -4381,6 +4416,9 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
             "limits":           limits,
         },
         "status":                  sub.status,
+        "is_trial":                False,
+        "trial_days_remaining":    0,
+        "trial_expired":           False,
         "started_at":              sub.started_at.isoformat() if sub.started_at else None,
         "conversations_used":      conversations_used,
         "conversations_limit":     limits.get("conversations_per_month", -1),

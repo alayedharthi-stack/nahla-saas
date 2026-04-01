@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import {
   CheckCircle, Zap, TrendingUp, Rocket, Loader2, AlertCircle,
   RefreshCw, Tag, MessageSquare, Star, ArrowUp, ExternalLink, ShieldCheck,
+  Clock, Sparkles, Bot,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
 
@@ -242,6 +243,76 @@ export default function Billing() {
         <p className="text-sm text-slate-500 mt-1">إدارة خطة نهلة واستخدامك الشهري</p>
       </div>
 
+      {/* Hero value proposition */}
+      <div className="rounded-2xl bg-gradient-to-l from-brand-600 to-brand-400 p-5 text-white">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+            <Bot className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <h2 className="font-bold text-base leading-snug">
+              نهلة — موظف مبيعات يعمل 24/7
+            </h2>
+            <p className="text-white/80 text-xs mt-1 leading-relaxed">
+              يرد على العملاء، يُكمل الطلبات، ويُرسل روابط الدفع — بشكل تلقائي، دون توقف.
+              لا رواتب، لا إجازات، لا تأخير.
+            </p>
+          </div>
+          <div className="hidden sm:flex flex-col items-end shrink-0">
+            <div className="flex items-center gap-1 bg-white/20 rounded-lg px-2.5 py-1 text-xs font-semibold">
+              <Sparkles className="w-3 h-3" />
+              14 يوم مجاناً
+            </div>
+            <p className="text-white/60 text-[11px] mt-1">ثم من 449 ر.س/شهر</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Trial status card — shown only during trial */}
+      {status?.is_trial && (
+        <div className="rounded-xl border-2 border-brand-300 bg-brand-50 p-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <Clock className="w-5 h-5 text-brand-500 shrink-0" />
+            <div>
+              <p className="text-sm font-bold text-brand-900">
+                التجربة المجانية — متبقي {status.trial_days_remaining} {status.trial_days_remaining === 1 ? 'يوم' : 'أيام'}
+              </p>
+              <p className="text-xs text-brand-700 mt-0.5">
+                استمتع بجميع الميزات مجاناً · لا حاجة لبطاقة ائتمان الآن
+              </p>
+            </div>
+          </div>
+          <div className="shrink-0">
+            <div className="flex items-center gap-1 text-xs text-brand-600 font-medium">
+              {Array.from({ length: 14 }).map((_, i) => (
+                <div
+                  key={i}
+                  className={`h-2 w-2 rounded-full ${
+                    i < (14 - status.trial_days_remaining) ? 'bg-brand-500' : 'bg-brand-200'
+                  }`}
+                />
+              ))}
+            </div>
+            <p className="text-[11px] text-brand-500 mt-1 text-center">
+              {14 - status.trial_days_remaining} من 14 يوم
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Trial expired warning */}
+      {status?.trial_expired && (
+        <div className="flex items-start gap-3 bg-red-50 border-2 border-red-200 rounded-xl p-4">
+          <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold text-red-800">انتهت فترة التجربة المجانية</p>
+            <p className="text-xs text-red-700 mt-1">
+              ميزات الطيار الآلي والردود التلقائية موقوفة مؤقتاً. اختر خطة لإعادة تشغيل موظف المبيعات الذكي.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Banners */}
       {checkoutMsg && (
         <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm">
@@ -286,9 +357,22 @@ export default function Billing() {
                 </span>
               )}
             </>
+          ) : status?.is_trial ? (
+            <>
+              <p className="text-base font-semibold text-brand-600">تجربة مجانية</p>
+              <div className="flex items-baseline gap-1 mt-1">
+                <span className="text-2xl font-black text-brand-600">
+                  {status.trial_days_remaining}
+                </span>
+                <span className="text-xs text-slate-500">يوم متبقي</span>
+              </div>
+              <span className="inline-flex items-center gap-1 mt-2 text-[11px] bg-brand-50 border border-brand-200 text-brand-700 px-2 py-0.5 rounded-full">
+                <Clock className="w-3 h-3" /> مجاني لمدة 14 يوم
+              </span>
+            </>
           ) : (
             <>
-              <p className="text-base font-semibold text-slate-700">لا يوجد اشتراك</p>
+              <p className="text-base font-semibold text-red-600">التجربة منتهية</p>
               <p className="text-xs text-slate-400 mt-1">اختر خطة لتفعيل الطيار الآلي</p>
             </>
           )}
@@ -334,14 +418,15 @@ export default function Billing() {
         </div>
       </div>
 
-      {/* No subscription alert */}
-      {!status?.has_subscription && (
+      {/* No subscription alert — only shown after trial ends */}
+      {!status?.has_subscription && !status?.is_trial && (
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
           <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
           <div>
             <p className="text-sm font-semibold text-amber-800">لم تختر خطة نهلة بعد</p>
             <p className="text-xs text-amber-700 mt-0.5">
               الردود الذكية والطيار الآلي والحملات محجوبة حتى تختار خطة.
+              اشترك الآن لإعادة تشغيل موظف المبيعات الذكي.
             </p>
           </div>
         </div>
@@ -359,9 +444,15 @@ export default function Billing() {
 
       {/* Plans grid */}
       <div>
-        <h2 className="text-base font-bold text-slate-900 mb-1">خطط نهلة</h2>
+        <div className="flex items-end justify-between mb-1">
+          <h2 className="text-base font-bold text-slate-900">اختر خطتك</h2>
+          <span className="text-xs text-brand-600 font-medium flex items-center gap-1">
+            <Sparkles className="w-3 h-3" />
+            خصم 50% — أول شهرين
+          </span>
+        </div>
         <p className="text-xs text-slate-400 mb-4">
-          جميع المدفوعات تتم عبر موى (Moyasar) — بوابة الدفع الموثوقة في السعودية
+          جميع الخطط تشمل الطيار الآلي · الردود الذكية · وكيل المبيعات 24/7
         </p>
         <div className="grid md:grid-cols-3 gap-6">
           {plans.map(plan => (

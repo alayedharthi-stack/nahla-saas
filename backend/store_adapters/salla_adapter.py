@@ -190,10 +190,14 @@ class SallaAdapter(BaseStoreAdapter):
         }
         if order_input.customer_email:
             body["customer"]["email"] = order_input.customer_email
-        if order_input.city or order_input.address:
+        if any([order_input.city, order_input.address, order_input.street,
+                order_input.building_number, order_input.district, order_input.postal_code]):
             body["address"] = {
-                "city": order_input.city,
-                "street": order_input.address,
+                "city":            order_input.city,
+                "street":          order_input.street or order_input.address,
+                "building_number": order_input.building_number,
+                "district":        order_input.district,
+                "postal_code":     order_input.postal_code,
             }
         if order_input.notes:
             body["notes"] = order_input.notes

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import Header from './Header'
+import TrialBanner from '../ui/TrialBanner'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
 
@@ -42,6 +43,7 @@ export default function Layout() {
           subtitle={meta.subtitle}
           onMenuClick={() => setSidebarOpen(o => !o)}
         />
+        <TrialBanner />
         <main className="flex-1 p-4 md:p-6">
           <Outlet />
         </main>

@@ -3,6 +3,7 @@ import {
 } from 'recharts'
 import {
   DollarSign, MessageSquare, ShoppingCart, TrendingUp, Bot, User, ExternalLink,
+  Sparkles, Clock,
 } from 'lucide-react'
 import StatCard from '../components/ui/StatCard'
 import Badge from '../components/ui/Badge'
@@ -52,6 +53,34 @@ export default function Overview() {
         title={t(tr => tr.pages.overview.title)}
         subtitle={t(tr => tr.pages.overview.subtitle)}
       />
+
+      {/* Nahla Impact Banner — "موظف مبيعات يعمل 24/7" */}
+      <div className="rounded-2xl overflow-hidden bg-gradient-to-l from-brand-600 to-amber-500 p-px">
+        <div className="bg-gradient-to-l from-brand-600/10 to-amber-500/10 rounded-2xl px-5 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-brand-500/20 flex items-center justify-center shrink-0">
+              <Sparkles className="w-5 h-5 text-brand-600" />
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 font-medium">مبيعات ولّدتها نهلة هذا الشهر</p>
+              <p className="text-2xl font-black text-slate-900 leading-none mt-0.5">
+                4,320 <span className="text-sm font-semibold text-slate-500">ر.س</span>
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="text-center hidden sm:block">
+              <p className="text-xs text-slate-400">طلبات أنجزها الذكاء</p>
+              <p className="text-lg font-bold text-slate-700">28 طلب</p>
+            </div>
+            <div className="h-8 w-px bg-slate-200 hidden sm:block" />
+            <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-white rounded-xl px-3 py-2 border border-slate-200">
+              <Clock className="w-3.5 h-3.5 text-brand-500" />
+              <span>موظف مبيعات يعمل <strong className="text-slate-700">24/7</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

@@ -553,7 +553,7 @@ class WhatsAppTemplate(Base):
     name = Column(String, nullable=False)                    # snake_case name, unique per WABA
     language = Column(String, default='ar', nullable=False)  # ar | en | ...
     category = Column(String, nullable=False)                # MARKETING | UTILITY | AUTHENTICATION
-    status = Column(String, default='PENDING', nullable=False)  # APPROVED | PENDING | REJECTED | DISABLED
+    status = Column(String, default='PENDING', nullable=False)  # DRAFT | APPROVED | PENDING | REJECTED | DISABLED
     rejection_reason = Column(Text, nullable=True)
     # Full components payload (HEADER, BODY, FOOTER, BUTTONS)
     components = Column(JSONB, nullable=True)
@@ -561,6 +561,15 @@ class WhatsAppTemplate(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     synced_at = Column(DateTime, nullable=True)    # last time status was confirmed from Meta
+    # AI generation & lifecycle (migration 0009)
+    source = Column(String, default='merchant', nullable=True)   # merchant | ai_generated
+    objective = Column(String, nullable=True)                    # abandoned_cart | reorder | winback | ...
+    usage_count = Column(Integer, default=0, nullable=True)
+    last_used_at = Column(DateTime, nullable=True)
+    health_score = Column(Float, nullable=True)                  # 0.0–1.0
+    recommendation_state = Column(String, nullable=True)         # none | pending | accepted | dismissed
+    recommendation_note = Column(Text, nullable=True)
+    ai_generation_metadata = Column(JSONB, nullable=True)        # prompt, model, generation params
 
 
 class Campaign(Base):
