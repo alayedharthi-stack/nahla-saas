@@ -33,7 +33,7 @@ RUN printf 'server {\n\
     index        index.html;\n\
 \n\
     # Proxy /api/ to the backend service\n\
-    resolver 8.8.8.8 valid=30s;\n\
+    resolver 127.0.0.11 valid=30s;\n\
     set $backend http://creative-intuition.railway.internal:8000;\n\
     location /api/ {\n\
         proxy_pass $backend/;\n\
