@@ -24,6 +24,7 @@ export interface StoreIntegrationTestResult {
 
 async function apiCall<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
+    cache: 'no-store',
     headers: {
       'Content-Type': 'application/json',
       'X-Tenant-ID': '1',
