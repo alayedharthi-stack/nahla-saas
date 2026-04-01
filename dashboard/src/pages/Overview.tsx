@@ -62,16 +62,16 @@ export default function Overview() {
               <Sparkles className="w-5 h-5 text-brand-600" />
             </div>
             <div>
-              <p className="text-xs text-slate-900 font-semibold">مبيعات ولّدتها نهلة هذا الشهر</p>
-              <p className="text-2xl font-black text-red-600 leading-none mt-0.5">
-                4,320 <span className="text-sm font-bold text-red-700">ر.س</span>
+              <p className="text-xs text-white/80 font-medium">مبيعات ولّدتها نهلة هذا الشهر</p>
+              <p className="text-2xl font-black text-white leading-none mt-0.5">
+                4,320 <span className="text-sm font-bold text-white/90">ر.س</span>
               </p>
             </div>
           </div>
           <div className="flex items-center gap-4">
             <div className="text-center hidden sm:block">
-              <p className="text-xs text-slate-900 font-semibold">طلبات أنجزها الذكاء</p>
-              <p className="text-lg font-bold text-slate-900">28 طلب</p>
+              <p className="text-xs text-white/80 font-medium">طلبات أنجزها الذكاء</p>
+              <p className="text-lg font-bold text-white">28 طلب</p>
             </div>
             <div className="h-8 w-px bg-slate-200 hidden sm:block" />
             <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-white rounded-xl px-3 py-2 border border-slate-200">
