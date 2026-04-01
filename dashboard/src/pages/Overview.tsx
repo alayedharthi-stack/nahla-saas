@@ -49,11 +49,6 @@ export default function Overview() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title={t(tr => tr.pages.overview.title)}
-        subtitle={t(tr => tr.pages.overview.subtitle)}
-      />
-
       {/* Nahla Impact Banner — "موظف مبيعات يعمل 24/7" */}
       <div className="rounded-2xl overflow-hidden bg-gradient-to-l from-brand-600 to-amber-500 p-px">
         <div className="bg-gradient-to-l from-brand-600/10 to-amber-500/10 rounded-2xl px-5 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
