@@ -4412,7 +4412,7 @@ async def subscribe_to_plan(
     db.query(BillingSubscription).filter(
         BillingSubscription.tenant_id == tenant_id,
         BillingSubscription.status == "active",
-    ).update({"status": "cancelled"})
+    ).update({"status": "cancelled"}, synchronize_session=False)
 
     now = datetime.utcnow()
     sub = BillingSubscription(
@@ -4513,7 +4513,7 @@ async def create_billing_checkout(
         db.query(BillingSubscription).filter(
             BillingSubscription.tenant_id == tenant_id,
             BillingSubscription.status == "pending_payment",
-        ).update({"status": "cancelled"})
+        ).update({"status": "cancelled"}, synchronize_session=False)
 
         # Create subscription in pending state — activated by webhook on payment
         sub = BillingSubscription(
@@ -4578,7 +4578,7 @@ async def create_billing_checkout(
     db.query(BillingSubscription).filter(
         BillingSubscription.tenant_id == tenant_id,
         BillingSubscription.status == "active",
-    ).update({"status": "cancelled"})
+    ).update({"status": "cancelled"}, synchronize_session=False)
 
     sub = BillingSubscription(
         tenant_id=tenant_id,
@@ -4610,14 +4610,20 @@ async def create_billing_checkout(
     }
 
 
+_MOYASAR_FAIL_STATUSES = frozenset({"failed", "expired", "canceled", "voided", "refunded"})
+_BILLING_ACTIVATABLE   = frozenset({"pending_payment"})
+
+
 @app.post("/billing/webhook/moyasar/subscription")
 async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db)):
     """
     Moyasar payment webhook handler for subscription payments.
     Activates the BillingSubscription and records a BillingPayment on success.
+    Hardened: idempotency, signature verification, full status handling, race protection.
     """
     import json as _json
     body_bytes = await request.body()
+    signature  = request.headers.get("x-moyasar-signature", "")
 
     try:
         event = _json.loads(body_bytes)
@@ -4650,7 +4656,49 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
         logger.warning(f"[Billing Webhook] Subscription {subscription_id} not found")
         return {"received": True}
 
+    # ── Signature verification (when webhook_secret is configured) ─────────────
+    cfg = _get_moyasar_settings(db, sub.tenant_id)
+    webhook_secret = cfg.get("webhook_secret", "")
+    if webhook_secret:
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+        from payment_gateways.moyasar import MoyasarClient
+        client = MoyasarClient(secret_key=cfg.get("secret_key", ""))
+        if not client.verify_webhook_signature(body_bytes, signature, webhook_secret):
+            logger.warning(
+                f"[Billing Webhook] Invalid signature for sub={subscription_id} "
+                f"tenant={sub.tenant_id}"
+            )
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
     if status == "paid":
+        # ── Idempotency: guard duplicate delivery ──────────────────────────────
+        if payment_id:
+            existing = db.query(BillingPayment).filter(
+                BillingPayment.transaction_reference == payment_id,
+                BillingPayment.gateway == "moyasar",
+            ).first()
+            if existing:
+                logger.info(
+                    f"[Billing Webhook] Duplicate delivery payment_id={payment_id} "
+                    f"— idempotent, ignoring"
+                )
+                return {"received": True, "idempotent": True}
+
+        # ── Race / already-active guard ────────────────────────────────────────
+        if sub.status == "active":
+            logger.info(
+                f"[Billing Webhook] Sub {subscription_id} already active "
+                f"— duplicate webhook ignored"
+            )
+            return {"received": True, "already_active": True}
+
+        if sub.status not in _BILLING_ACTIVATABLE:
+            logger.warning(
+                f"[Billing Webhook] Sub {subscription_id} in unexpected status "
+                f"{sub.status!r} — skipping activation"
+            )
+            return {"received": True, "skipped": True}
+
         sub.status = "active"
         m = dict(sub.extra_metadata or {})
         m["moyasar_payment_id"] = payment_id
@@ -4674,10 +4722,23 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
             f"for tenant {sub.tenant_id} (payment {payment_id})"
         )
 
-    elif status in ("failed", "expired"):
+    elif status in _MOYASAR_FAIL_STATUSES:
+        # Never downgrade an already-active subscription
+        if sub.status == "active":
+            logger.warning(
+                f"[Billing Webhook] Ignoring {status!r} webhook for active sub "
+                f"{subscription_id} — not downgrading"
+            )
+            return {"received": True, "protected": True}
         sub.status = "payment_failed"
         logger.info(
-            f"[Billing Webhook] Payment {status} for subscription {subscription_id}"
+            f"[Billing Webhook] Payment {status!r} for subscription {subscription_id}"
+        )
+
+    else:
+        logger.info(
+            f"[Billing Webhook] Unhandled status {status!r} for sub {subscription_id} "
+            f"— no action taken"
         )
 
     db.commit()
@@ -4698,9 +4759,14 @@ async def billing_payment_result(
     if not sub_id:
         return {"activated": False, "status": "unknown"}
 
+    tenant_id = _resolve_tenant_id(request)
     sub = db.query(BillingSubscription).filter(BillingSubscription.id == sub_id).first()
     if not sub:
         return {"activated": False, "status": "not_found"}
+
+    # Ownership guard — prevent tenants from polling each other's subscriptions
+    if sub.tenant_id != int(tenant_id):
+        raise HTTPException(status_code=403, detail="Access denied")
 
     plan      = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
     plan_meta = plan.extra_metadata or {} if plan else {}

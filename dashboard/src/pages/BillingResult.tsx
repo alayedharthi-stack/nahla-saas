@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { CheckCircle, XCircle, Loader2, ArrowRight, RefreshCw } from 'lucide-react'
+import { CheckCircle, XCircle, Loader2, ArrowRight, RefreshCw, Clock } from 'lucide-react'
 import { billingApi, type PaymentResult } from '../api/billing'
 
 const MAX_POLLS  = 12
@@ -12,16 +12,18 @@ export default function BillingResult() {
   const rawStatus     = params.get('status')      // 'paid' | 'failed' | null
   const subIdStr      = params.get('sub_id')
 
-  const [result,   setResult]   = useState<PaymentResult | null>(null)
-  const [polling,  setPolling]  = useState(false)
-  const [attempts, setAttempts] = useState(0)
-  const [error,    setError]    = useState<string | null>(null)
+  const [result,       setResult]       = useState<PaymentResult | null>(null)
+  const [polling,      setPolling]      = useState(false)
+  const [attempts,     setAttempts]     = useState(0)
+  const [error,        setError]        = useState<string | null>(null)
+  const [slowWebhook,  setSlowWebhook]  = useState(false)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const poll = async (subId: number, attempt: number) => {
     if (attempt > MAX_POLLS) {
       setPolling(false)
-      setError('لم يتم تأكيد الدفع بعد. تحقق من حالة الاشتراك لاحقاً.')
+      // Webhook may still be in flight — show "processing" state instead of hard error
+      setSlowWebhook(true)
       return
     }
     try {
@@ -70,7 +72,7 @@ export default function BillingResult() {
 
   const isActivated  = result?.activated === true
   const isFailed     = result?.status === 'payment_failed' || rawStatus === 'failed'
-  const isPending    = polling || (!isActivated && !isFailed && !error)
+  const isPending    = polling || (!isActivated && !isFailed && !error && !slowWebhook)
 
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4" dir="rtl">
@@ -96,6 +98,30 @@ export default function BillingResult() {
                   {attempts > 0 && ` (${attempts}/${MAX_POLLS})`}
                 </p>
               </div>
+            </>
+          )}
+
+          {/* Slow webhook — payment likely succeeded, webhook still in transit */}
+          {slowWebhook && !isActivated && !isFailed && (
+            <>
+              <Clock className="w-14 h-14 text-amber-400 mx-auto" />
+              <div>
+                <p className="text-base font-bold text-slate-900">الدفع قيد المعالجة</p>
+                <p className="text-sm text-slate-500 mt-1">
+                  تمت عملية الدفع بنجاح ويتم الآن تفعيل اشتراكك.
+                  قد يستغرق ذلك بضع دقائق إضافية.
+                </p>
+                <p className="text-xs text-slate-400 mt-2">
+                  يمكنك المتابعة إلى لوحة التحكم — سيتم تفعيل خطتك تلقائياً.
+                </p>
+              </div>
+              <button
+                onClick={() => navigate('/overview')}
+                className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
+              >
+                الذهاب إلى لوحة التحكم
+                <ArrowRight className="w-4 h-4 rtl:rotate-180" />
+              </button>
             </>
           )}
 
