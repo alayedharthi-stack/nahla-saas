@@ -62,9 +62,9 @@ export default function Overview() {
               <Sparkles className="w-5 h-5 text-brand-600" />
             </div>
             <div>
-              <p className="text-xs text-slate-500 font-medium">مبيعات ولّدتها نهلة هذا الشهر</p>
-              <p className="text-2xl font-black text-slate-900 leading-none mt-0.5">
-                4,320 <span className="text-sm font-semibold text-slate-500">ر.س</span>
+              <p className="text-xs text-slate-900 font-semibold">مبيعات ولّدتها نهلة هذا الشهر</p>
+              <p className="text-2xl font-black text-red-600 leading-none mt-0.5">
+                4,320 <span className="text-sm font-semibold text-red-400">ر.س</span>
               </p>
             </div>
           </div>
