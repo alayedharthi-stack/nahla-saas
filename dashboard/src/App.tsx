@@ -49,7 +49,7 @@ export default function App() {
             <Route path="campaigns"          element={<Campaigns />} />
             <Route path="templates"          element={<Templates />} />
             <Route path="smart-automations"  element={<SmartAutomations />} />
-            <Route path="automations"        element={<SmartAutomations />} />
+            <Route path="automations"        element={<Navigate to="/smart-automations" replace />} />
             <Route path="intelligence"       element={<Intelligence />} />
             <Route path="integrations"       element={<Integrations />} />
             <Route path="analytics"          element={<Analytics />} />

@@ -53,7 +53,6 @@ const NAV_GROUPS: NavGroup[] = [
     groupLabel: tr => tr.nav.groups.ai,
     items: [
       { to: '/intelligence',  icon: Brain,        label: tr  => tr.nav.items.intelligence },
-      { to: '/automations',   icon: Zap,          label: tr  => tr.nav.items.automations  },
       { to: '/analytics',     icon: BarChart2,    label: tr  => tr.nav.items.analyticsAI  },
       { to: '/ai-sales-logs', icon: BrainCircuit, label: _tr => 'وكيل المبيعات'           },
       { to: '/handoff-queue', icon: UserCheck,    label: _tr => 'طابور التحويل'            },

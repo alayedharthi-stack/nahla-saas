@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   Zap, Send, CheckCircle, TrendingUp, Sparkles,
   ChevronDown, ChevronUp, AlertCircle, RefreshCw,
-  Settings2, ArrowRight,
+  Settings2, ArrowRight, ShoppingCart, Gift, UserX,
+  Tag, Megaphone, MessageSquare,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -14,11 +15,9 @@ import {
   AutomationType,
   AUTOMATION_META,
 } from '../api/automations'
-import { templatesApi, TemplateVarMapRecord } from '../api/templates'
 
 // ── Template variable map panel ───────────────────────────────────────────────
 
-// Inline static var maps for the two default templates (no extra API call needed)
 const STATIC_VAR_MAPS: Record<string, Record<string, string>> = {
   predictive_reorder_reminder_ar: {
     '{{1}}': 'اسم العميل',
@@ -227,7 +226,6 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
     try {
       await automationsApi.toggle(automation.id, next)
     } catch {
-      // revert on failure
       onToggle(automation.id, !next)
     } finally {
       setToggling(false)
@@ -242,7 +240,6 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
 
   return (
     <div className={`card overflow-hidden transition-all duration-200 ${automation.enabled ? 'ring-1 ring-emerald-200' : ''}`}>
-      {/* Header row */}
       <div className="p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
@@ -266,7 +263,6 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
           />
         </div>
 
-        {/* Trigger + Template row */}
         <div className="flex items-center gap-4 mt-4 flex-wrap">
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-slate-400">المُشغِّل:</span>
@@ -282,7 +278,6 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
           )}
         </div>
 
-        {/* Stats row */}
         <div className="flex items-center gap-5 mt-4 pt-4 border-t border-slate-100">
           <div className="text-center">
             <p className="text-base font-bold text-slate-900">{automation.stats_triggered.toLocaleString('ar-SA')}</p>
@@ -326,7 +321,6 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
         </div>
       </div>
 
-      {/* Expandable config panel */}
       {expanded && (
         <div className="border-t border-slate-100 bg-slate-50 px-5 py-4">
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">
@@ -350,7 +344,6 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
             </div>
           )}
 
-          {/* Template variable mapping panel */}
           {automation.template_name && (
             <TemplateVarMapPanel templateName={automation.template_name} />
           )}
@@ -371,16 +364,80 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 
 function AutomationSkeleton() {
+  return <div className="animate-pulse bg-slate-100 rounded-xl h-40" />
+}
+
+// ── Section header ────────────────────────────────────────────────────────────
+
+interface SectionProps {
+  icon: React.ReactNode
+  title: string
+  types: AutomationType[]
+  automations: AutomationRecord[]
+  onToggle: (id: number, enabled: boolean) => void
+}
+
+function AutomationSection({ icon, title, types, automations, onToggle }: SectionProps) {
+  const items = automations.filter(a => types.includes(a.automation_type))
+  if (items.length === 0) return null
+
   return (
-    <div className="animate-pulse bg-slate-100 rounded-xl h-40" />
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="text-slate-400">{icon}</span>
+        <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
+        <div className="flex-1 h-px bg-slate-100" />
+        <span className="text-xs text-slate-400">{items.filter(a => a.enabled).length}/{items.length} مُفعّل</span>
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {items.map(automation => (
+          <AutomationCard
+            key={automation.id}
+            automation={automation}
+            onToggle={onToggle}
+          />
+        ))}
+      </div>
+    </div>
   )
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function SmartAutomations() {
-  const { t } = useLanguage()
+const SECTIONS: { icon: React.ReactNode; title: string; types: AutomationType[] }[] = [
+  {
+    icon: <ShoppingCart className="w-4 h-4" />,
+    title: 'السلة المتروكة',
+    types: ['abandoned_cart'],
+  },
+  {
+    icon: <CheckCircle className="w-4 h-4" />,
+    title: 'رسائل ما بعد الشراء',
+    types: ['predictive_reorder'],
+  },
+  {
+    icon: <UserX className="w-4 h-4" />,
+    title: 'إعادة تنشيط العملاء',
+    types: ['customer_winback'],
+  },
+  {
+    icon: <Tag className="w-4 h-4" />,
+    title: 'إرسال الكوبونات الذكية',
+    types: ['vip_upgrade'],
+  },
+  {
+    icon: <Megaphone className="w-4 h-4" />,
+    title: 'حملات واتساب التلقائية',
+    types: ['new_product_alert', 'back_in_stock'],
+  },
+  {
+    icon: <MessageSquare className="w-4 h-4" />,
+    title: 'الردود التلقائية',
+    types: [],
+  },
+]
 
+export default function SmartAutomations() {
   const [automations, setAutomations] = useState<AutomationRecord[]>([])
   const [autopilot, setAutopilot] = useState(false)
   const [autopilotLoading, setAutopilotLoading] = useState(false)
@@ -401,44 +458,38 @@ export default function SmartAutomations() {
     }
   }, [])
 
-  useEffect(() => {
-    loadData()
-  }, [loadData])
+  useEffect(() => { loadData() }, [loadData])
 
   const handleAutopilot = async (next: boolean) => {
-    setAutopilot(next) // optimistic
+    setAutopilot(next)
     setAutopilotLoading(true)
     try {
       const res = await automationsApi.setAutopilot(next)
       setAutopilot(res.autopilot_enabled)
     } catch {
-      setAutopilot(!next) // revert
+      setAutopilot(!next)
     } finally {
       setAutopilotLoading(false)
     }
   }
 
   const handleToggleAutomation = (id: number, enabled: boolean) => {
-    setAutomations(prev =>
-      prev.map(a => (a.id === id ? { ...a, enabled } : a))
-    )
+    setAutomations(prev => prev.map(a => (a.id === id ? { ...a, enabled } : a)))
   }
 
-  // ── Computed stats ──
-  const enabledCount = automations.filter(a => a.enabled).length
-  const totalSent = automations.reduce((sum, a) => sum + a.stats_sent, 0)
+  const enabledCount   = automations.filter(a => a.enabled).length
+  const totalSent      = automations.reduce((sum, a) => sum + a.stats_sent, 0)
   const totalConverted = automations.reduce((sum, a) => sum + a.stats_converted, 0)
-  const conversionRate =
-    totalSent > 0 ? ((totalConverted / totalSent) * 100).toFixed(1) : '0.0'
+  const conversionRate = totalSent > 0 ? ((totalConverted / totalSent) * 100).toFixed(1) : '0.0'
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title="التشغيل التلقائي الذكي"
-        subtitle="أتمتة تسويقية مبنية على سلوك العملاء"
+        title="الطيار الآلي"
+        subtitle="مركز التحكم في جميع العمليات التلقائية"
       />
 
-      {/* ── Master autopilot card ── */}
+      {/* ── Master autopilot toggle ── */}
       <div className="card p-5">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-start gap-4">
@@ -447,7 +498,7 @@ export default function SmartAutomations() {
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-base font-bold text-slate-900">طيّار التسويق التلقائي</h2>
+                <h2 className="text-base font-bold text-slate-900">تشغيل الطيار الآلي</h2>
                 <Badge
                   label={autopilot ? 'مُفعّل' : 'غير مُفعّل'}
                   variant={autopilot ? 'green' : 'slate'}
@@ -455,7 +506,7 @@ export default function SmartAutomations() {
                 />
               </div>
               <p className="text-sm text-slate-500 mt-1 leading-relaxed max-w-lg">
-                عند التفعيل، تتولى نهلة إدارة العربات المتروكة وتذكيرات إعادة الطلب وحملات الاسترجاع تلقائياً دون تدخل منك.
+                عند التفعيل، يبدأ النظام بتشغيل جميع الأتمتة تلقائياً — السلة المتروكة، الكوبونات، استرجاع العملاء، وحملات واتساب.
               </p>
             </div>
           </div>
@@ -528,26 +579,34 @@ export default function SmartAutomations() {
         </div>
       )}
 
-      {/* ── Automations grid ── */}
+      {/* ── Sections ── */}
       {loading ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <AutomationSkeleton key={i} />
-          ))}
+          {Array.from({ length: 6 }).map((_, i) => <AutomationSkeleton key={i} />)}
         </div>
-      ) : !error && automations.length === 0 ? (
-        <div className="card p-10 text-center text-slate-400">
-          <Zap className="w-10 h-10 mx-auto mb-3 opacity-30" />
-          <p className="text-sm">لا توجد أتمتة مُهيَّأة بعد.</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {automations.map(automation => (
-            <AutomationCard
-              key={automation.id}
-              automation={automation}
-              onToggle={handleToggleAutomation}
-            />
+      ) : !error && (
+        <div className="space-y-8">
+          {SECTIONS.map(section => (
+            section.types.length === 0 ? (
+              /* Static placeholder for sections with no backend type yet */
+              <div key={section.title} className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">{section.icon}</span>
+                  <h3 className="text-sm font-semibold text-slate-700">{section.title}</h3>
+                  <div className="flex-1 h-px bg-slate-100" />
+                  <span className="text-xs text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full border border-slate-200">قريباً</span>
+                </div>
+              </div>
+            ) : (
+              <AutomationSection
+                key={section.title}
+                icon={section.icon}
+                title={section.title}
+                types={section.types}
+                automations={automations}
+                onToggle={handleToggleAutomation}
+              />
+            )
           ))}
         </div>
       )}
