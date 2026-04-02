@@ -39,6 +39,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "https://app.nahlaai.com",
         "https://api.nahlaai.com",
+        "https://creative-intuition-production-c193.up.railway.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],

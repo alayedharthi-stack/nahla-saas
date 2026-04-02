@@ -59,8 +59,10 @@ export interface ConversationTurn {
   created_at:          string | null
 }
 
+const API_BASE = (import.meta.env.VITE_API_BASE ?? '') + '/api'
+
 async function apiCall<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`${API_BASE}${path}`, {
     cache: 'no-store',
     headers: {
       'Content-Type': 'application/json',
