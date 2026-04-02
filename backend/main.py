@@ -164,7 +164,7 @@ async def request_logging_middleware(request: Request, call_next):
 # Requires a valid JWT for all routes except public ones.
 # When valid: attaches payload to request.state.jwt_payload and
 #             overrides tenant_id from the token (prevents header spoofing).
-_JWT_PUBLIC_PREFIXES = ("/health", "/webhook", "/auth")
+_JWT_PUBLIC_PREFIXES = ("/health", "/webhook", "/auth", "/oauth")
 
 @app.middleware("http")
 async def jwt_enforcement_middleware(request: Request, call_next):
@@ -5155,9 +5155,31 @@ async def track_storefront_event(
 
 _START_TIME = _time.monotonic()
 
+# ── Root ───────────────────────────────────────────────────────────────────────
+@app.get("/")
+async def root():
+    """API root — confirms the backend is reachable."""
+    return {
+        "service": "nahla-saas",
+        "status":  "ok",
+        "version": "1.0.0",
+        "docs":    "/docs",
+    }
+
+# ── Health ─────────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     """Lightweight liveness probe — always returns fast, no DB hit."""
+    return {
+        "status": "ok",
+        "service": "nahla-saas",
+        "uptime_seconds": round(_time.monotonic() - _START_TIME),
+        "version": "1.0.0",
+    }
+
+@app.get("/api/health")
+async def health_alias():
+    """Alias: /api/health → same as /health (for clients that prefix all paths with /api)."""
     return {
         "status": "ok",
         "service": "nahla-saas",
@@ -5288,6 +5310,58 @@ async def auth_me(user: Dict[str, Any] = Depends(get_current_user)):
 async def auth_logout():
     """Client-side logout — token invalidation is handled by the frontend."""
     return {"detail": "logged out"}
+
+
+# ── OAuth callbacks ─────────────────────────────────────────────────────────────
+# These endpoints are PUBLIC (no JWT) — they receive redirects from external
+# OAuth providers (Salla, etc.) and exchange the code for an access token.
+
+@app.get("/oauth/salla/callback")
+async def salla_oauth_callback(
+    request: Request,
+    code:  str = None,
+    state: str = None,
+    error: str = None,
+):
+    """
+    Salla OAuth 2.0 callback.
+    Set SALLA_REDIRECT_URI = https://api.nahlaai.com/oauth/salla/callback
+
+    Flow:
+      1. Salla redirects here with ?code=... after the merchant authorises.
+      2. We exchange the code for an access + refresh token (TODO).
+      3. We store the tokens in the tenant's store settings.
+
+    Currently returns a diagnostic JSON so we can confirm the callback is wired.
+    """
+    client_ip = request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
+    logger.info("Salla OAuth callback | code=%s state=%s error=%s ip=%s",
+                bool(code), state, error, client_ip)
+
+    if error:
+        logger.warning("Salla OAuth error: %s", error)
+        return JSONResponse(status_code=400, content={
+            "error":   error,
+            "message": "Salla returned an error during OAuth authorisation.",
+        })
+
+    if not code:
+        logger.warning("Salla OAuth callback called without code")
+        return JSONResponse(status_code=400, content={
+            "error":   "missing_code",
+            "message": "No authorisation code received from Salla.",
+        })
+
+    # TODO: exchange code for access_token via Salla token endpoint
+    # POST https://accounts.salla.sa/oauth2/token
+    #   client_id, client_secret, code, redirect_uri, grant_type=authorization_code
+    logger.info("Salla OAuth code received — token exchange not yet implemented")
+    return {
+        "success":      True,
+        "code_received": True,
+        "state":        state,
+        "next_step":    "token_exchange_pending",
+    }
 
 
 # ── Admin — merchant management ────────────────────────────────────────────────
