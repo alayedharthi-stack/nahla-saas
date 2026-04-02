@@ -19,6 +19,8 @@ python-dotenv==1.0.1
 
 # ── Security ─────────────────────────────────────────────────────────────────
 python-multipart==0.0.9   # required by FastAPI for form data (OAuth token exchange)
+python-jose[cryptography]==3.3.0   # JWT signing and verification
+passlib[bcrypt]==1.7.4             # password hashing (available for future use)
 
 # ── AI / Claude (used by ai-orchestrator) ────────────────────────────────────
 # The orchestrator calls the Anthropic Messages API directly via httpx —
