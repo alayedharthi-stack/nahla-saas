@@ -72,6 +72,15 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return payload
 
+def require_admin(
+    creds: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> Dict[str, Any]:
+    """Dependency — requires a valid JWT with role=admin."""
+    user = get_current_user(creds)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger("nahla-backend")
@@ -151,6 +160,46 @@ async def request_logging_middleware(request: Request, call_next):
     )
     return response
 
+# ── JWT enforcement middleware ──────────────────────────────────────────────────
+# Requires a valid JWT for all routes except public ones.
+# When valid: attaches payload to request.state.jwt_payload and
+#             overrides tenant_id from the token (prevents header spoofing).
+_JWT_PUBLIC_PREFIXES = ("/health", "/webhook", "/auth")
+
+@app.middleware("http")
+async def jwt_enforcement_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # Always allow public endpoints without a token
+    if any(path.startswith(p) for p in _JWT_PUBLIC_PREFIXES):
+        return await call_next(request)
+
+    # If jose isn't installed yet (e.g. first deploy), fail open with a warning
+    if not _JWT_AVAILABLE:
+        logger.warning("JWT enforcement skipped — python-jose not installed")
+        return await call_next(request)
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required", "code": "missing_token"},
+        )
+
+    payload = _decode_token(auth_header[7:])
+    if not payload:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Token expired or invalid", "code": "invalid_token"},
+        )
+
+    # Attach to request state so downstream can read role/tenant without re-decoding
+    request.state.jwt_payload = payload
+    # Override tenant_id from JWT — the token is the authoritative source,
+    # not the X-Tenant-ID header (which could be spoofed by a caller).
+    request.state.tenant_id = str(payload.get("tenant_id", 1))
+    return await call_next(request)
+
 # Dependency for DB session
 def get_db():
     db = SessionLocal()
@@ -163,7 +212,13 @@ def get_db():
         db.close()
 
 def _resolve_tenant_id(request: Request) -> int:
-    """Parse tenant_id from request state, default to 1."""
+    """
+    Resolve tenant_id for the current request.
+    Priority: JWT payload (authoritative) > X-Tenant-ID header (dev fallback) > 1.
+    """
+    jwt_payload = getattr(request.state, "jwt_payload", None)
+    if jwt_payload:
+        return int(jwt_payload.get("tenant_id", 1))
     try:
         return int(request.state.tenant_id)
     except (ValueError, AttributeError):
@@ -2854,6 +2909,32 @@ if IS_PRODUCTION:
     logger.info("Running in PRODUCTION mode — demo fallbacks disabled, strict logging active")
 else:
     logger.info(f"Running in {ENVIRONMENT} mode")
+
+# ── Production startup guard ────────────────────────────────────────────────────
+# Fail fast and loudly if critical secrets are missing in production.
+# Set these in Railway → Variables before deploying.
+_REQUIRED_PROD_VARS = ("JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD")
+if IS_PRODUCTION:
+    _missing = [v for v in _REQUIRED_PROD_VARS if not os.environ.get(v)]
+    if _missing:
+        logger.critical(
+            "STARTUP ABORTED — required env vars not configured: %s\n"
+            "Set them in Railway → Variables and redeploy.",
+            ", ".join(_missing),
+        )
+        sys.exit(1)
+    if os.environ.get("ADMIN_PASSWORD") == "nahla-admin-2026":
+        logger.critical(
+            "STARTUP ABORTED — default ADMIN_PASSWORD 'nahla-admin-2026' must not be used in production.\n"
+            "Set a strong unique password in Railway → Variables."
+        )
+        sys.exit(1)
+    if os.environ.get("JWT_SECRET", "").startswith("dev-"):
+        logger.critical(
+            "STARTUP ABORTED — JWT_SECRET looks like a dev placeholder. Set a random 64-char secret."
+        )
+        sys.exit(1)
+    logger.info("Production secrets validated — JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD are set.")
 
 
 def _rate_limit(key: str, max_count: int, window_seconds: int) -> None:
