@@ -76,11 +76,15 @@ class TenantSettings(Base):
 
 class User(Base):
     __tablename__ = 'users'
-    id = Column(Integer, primary_key=True)
-    username = Column(String, unique=True, nullable=False)
-    email = Column(String, unique=True, nullable=False)
-    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
-    tenant = relationship('Tenant', back_populates='users')
+    id            = Column(Integer, primary_key=True)
+    username      = Column(String, unique=True, nullable=False)
+    email         = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=True)
+    role          = Column(String, nullable=False, default='merchant', server_default='merchant')
+    is_active     = Column(Boolean, nullable=False, default=True, server_default='true')
+    created_at    = Column(DateTime, nullable=True)
+    tenant_id     = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    tenant        = relationship('Tenant', back_populates='users')
 
 class WhatsAppNumber(Base):
     __tablename__ = 'whatsapp_numbers'

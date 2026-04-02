@@ -5221,31 +5221,54 @@ async def health_detailed(request: Request, db: Session = Depends(get_db)):
 
 # ── Auth endpoints ─────────────────────────────────────────────────────────────
 
+try:
+    from passlib.context import CryptContext as _CryptContext
+    _pwd_context = _CryptContext(schemes=["bcrypt"], deprecated="auto")
+    _PASSLIB_AVAILABLE = True
+except ImportError:
+    _PASSLIB_AVAILABLE = False
+
 class LoginIn(BaseModel):
     email: str
     password: str
 
 @app.post("/auth/login")
-async def auth_login(body: LoginIn):
+async def auth_login(body: LoginIn, db: Session = Depends(get_db)):
     """
     Exchange email + password for a signed JWT.
-    Credentials are configured via ADMIN_EMAIL / ADMIN_PASSWORD env vars on Railway.
+    Checks admin env-var credentials first, then merchant accounts in the database.
     """
     if not _JWT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Auth service unavailable — python-jose not installed")
 
-    email_ok    = hmac.compare_digest(body.email.lower(), _ADMIN_EMAIL.lower())
-    password_ok = hmac.compare_digest(body.password,      _ADMIN_PASSWORD)
+    _INVALID = HTTPException(status_code=401, detail="البريد الإلكتروني أو كلمة المرور غير صحيحة")
+    email = body.email.strip().lower()
 
-    if not (email_ok and password_ok):
-        raise HTTPException(status_code=401, detail="البريد الإلكتروني أو كلمة المرور غير صحيحة")
+    # 1. Admin credentials (env vars — fastest path, no DB hit)
+    email_ok    = hmac.compare_digest(email,         _ADMIN_EMAIL.lower())
+    password_ok = hmac.compare_digest(body.password, _ADMIN_PASSWORD)
+    if email_ok and password_ok:
+        token = _create_token(email=_ADMIN_EMAIL, role="admin", tenant_id=1)
+        return {"access_token": token, "token_type": "bearer",
+                "role": "admin", "email": _ADMIN_EMAIL, "tenant_id": 1}
 
-    token = _create_token(email=_ADMIN_EMAIL, role="admin", tenant_id=1)
+    # 2. Merchant credentials (database)
+    if not _PASSLIB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable — passlib not installed")
+
+    user = db.query(User).filter(User.email == email, User.is_active == True).first()
+    if not user or not getattr(user, "password_hash", None):
+        raise _INVALID
+    if not _pwd_context.verify(body.password, user.password_hash):
+        raise _INVALID
+
+    token = _create_token(email=user.email, role=user.role or "merchant", tenant_id=user.tenant_id)
     return {
         "access_token": token,
         "token_type":   "bearer",
-        "role":         "admin",
-        "email":        _ADMIN_EMAIL,
+        "role":         user.role or "merchant",
+        "email":        user.email,
+        "tenant_id":    user.tenant_id,
     }
 
 @app.get("/auth/me")
@@ -5261,6 +5284,107 @@ async def auth_me(user: Dict[str, Any] = Depends(get_current_user)):
 async def auth_logout():
     """Client-side logout — token invalidation is handled by the frontend."""
     return {"detail": "logged out"}
+
+
+# ── Admin — merchant management ────────────────────────────────────────────────
+
+class CreateMerchantIn(BaseModel):
+    email:      str
+    password:   str
+    store_name: str
+    phone:      str = ""
+
+def _merchant_row(user: User) -> Dict[str, Any]:
+    return {
+        "id":         user.id,
+        "email":      user.email,
+        "role":       user.role,
+        "is_active":  user.is_active,
+        "tenant_id":  user.tenant_id,
+        "store_name": user.tenant.name if user.tenant else "",
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
+
+@app.get("/admin/merchants")
+async def list_merchants(
+    db:    Session          = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """List all merchant accounts (admin only)."""
+    users = (
+        db.query(User)
+        .filter(User.role == "merchant")
+        .order_by(User.created_at.desc())
+        .all()
+    )
+    return {"merchants": [_merchant_row(u) for u in users]}
+
+@app.post("/admin/merchants")
+async def create_merchant(
+    body:   CreateMerchantIn,
+    db:     Session          = Depends(get_db),
+    _admin: Dict[str, Any]  = Depends(require_admin),
+):
+    """Create a new merchant account + a dedicated tenant (admin only)."""
+    if not _PASSLIB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="passlib not installed")
+
+    email = body.email.strip().lower()
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="البريد الإلكتروني مسجَّل مسبقاً")
+
+    # Create a dedicated tenant for this merchant
+    tenant = Tenant(
+        name=body.store_name,
+        domain=f"store-{email.split('@')[0]}.nahla.sa",
+        is_active=True,
+        created_at=datetime.utcnow(),
+    )
+    db.add(tenant)
+    db.flush()  # populate tenant.id
+
+    user = User(
+        username=email,
+        email=email,
+        password_hash=_pwd_context.hash(body.password),
+        role="merchant",
+        is_active=True,
+        created_at=datetime.utcnow(),
+        tenant_id=tenant.id,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return _merchant_row(user)
+
+@app.put("/admin/merchants/{user_id}/toggle")
+async def toggle_merchant(
+    user_id: int,
+    db:      Session          = Depends(get_db),
+    _admin:  Dict[str, Any]  = Depends(require_admin),
+):
+    """Activate or deactivate a merchant account (admin only)."""
+    user = db.query(User).filter(User.id == user_id, User.role == "merchant").first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    user.is_active = not user.is_active
+    db.commit()
+    db.refresh(user)
+    return _merchant_row(user)
+
+@app.delete("/admin/merchants/{user_id}")
+async def delete_merchant(
+    user_id: int,
+    db:      Session          = Depends(get_db),
+    _admin:  Dict[str, Any]  = Depends(require_admin),
+):
+    """Permanently delete a merchant account (admin only)."""
+    user = db.query(User).filter(User.id == user_id, User.role == "merchant").first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    db.delete(user)
+    db.commit()
+    return {"deleted": True}
 
 
 @app.get("/tenants/{tenant_id}")

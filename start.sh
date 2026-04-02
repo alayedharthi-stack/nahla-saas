@@ -7,7 +7,15 @@ import sys
 sys.path.insert(0, '/app')
 from database.session import engine
 from database.models import Base
+from sqlalchemy import text
 Base.metadata.create_all(engine)
+# Add new user columns to existing deployments (safe: IF NOT EXISTS)
+with engine.connect() as conn:
+    conn.execute(text(\"ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR\"))
+    conn.execute(text(\"ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR NOT NULL DEFAULT 'merchant'\"))
+    conn.execute(text(\"ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true\"))
+    conn.execute(text(\"ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP\"))
+    conn.commit()
 print('Tables ready.')
 "
 

@@ -21,6 +21,7 @@ import AiSalesLogs from './pages/AiSalesLogs'
 import StoreIntegration from './pages/StoreIntegration'
 import HandoffQueue from './pages/HandoffQueue'
 import SystemStatus from './pages/SystemStatus'
+import Merchants from './pages/Merchants'
 
 export default function App() {
   return (
@@ -58,6 +59,7 @@ export default function App() {
             <Route path="store-integration"  element={<StoreIntegration />} />
             <Route path="handoff-queue"      element={<HandoffQueue />} />
             <Route path="system-status"      element={<SystemStatus />} />
+            <Route path="merchants"          element={<Merchants />} />
             <Route path="billing"            element={<Billing />} />
           </Route>
         </Routes>

@@ -8,7 +8,6 @@ import {
   Tag,
   Megaphone,
   FileText,
-  Zap,
   Brain,
   Plug,
   BarChart2,
@@ -16,6 +15,7 @@ import {
   BrainCircuit,
   Store,
   UserCheck,
+  Users,
   Activity,
   CreditCard,
   X,
@@ -23,6 +23,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
+import { isAdmin } from '../../auth'
 
 interface NavItem {
   to:    string
@@ -153,7 +154,7 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                   <NavLink
                     key={to}
                     to={to}
-                    onClick={onClose}   /* close drawer on navigation (mobile) */
+                    onClick={onClose}
                     className={({ isActive }) =>
                       `relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                         isActive
@@ -176,6 +177,38 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
               </div>
             </div>
           ))}
+
+          {/* Admin-only section */}
+          {isAdmin() && (
+            <div>
+              <p className="px-3 mb-1.5 text-[10px] font-semibold text-amber-500/80 uppercase tracking-widest">
+                المالك
+              </p>
+              <div className="space-y-0.5">
+                <NavLink
+                  to="/merchants"
+                  onClick={onClose}
+                  className={({ isActive }) =>
+                    `relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                      isActive
+                        ? 'bg-white/10 text-white'
+                        : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+                    }`
+                  }
+                >
+                  {({ isActive }) => (
+                    <>
+                      {isActive && (
+                        <span className="absolute start-0 inset-y-1.5 w-0.5 bg-amber-400 rounded-e-full" />
+                      )}
+                      <Users className="w-4 h-4 shrink-0" />
+                      إدارة التجار
+                    </>
+                  )}
+                </NavLink>
+              </div>
+            </div>
+          )}
         </nav>
 
         {/* Store badge */}
