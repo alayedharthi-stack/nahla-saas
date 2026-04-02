@@ -2,7 +2,7 @@
 // All dashboard API modules import apiCall from here so the auth token
 // is automatically attached to every request.
 
-import { getToken } from '../auth'
+import { getToken, logout } from '../auth'
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
@@ -21,7 +21,7 @@ export async function apiCall<T>(path: string, options?: RequestInit): Promise<T
 
   // Token expired or missing — clear auth state and send user to login
   if (res.status === 401) {
-    import('../auth').then(({ logout }) => logout())
+    logout()
     window.location.href = '/login'
     throw new Error('Session expired')
   }
