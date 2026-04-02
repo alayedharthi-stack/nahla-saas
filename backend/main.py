@@ -25,7 +25,7 @@ import httpx
 import time as _time
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 import logging
 
 # ── JWT auth setup ─────────────────────────────────────────────────────────────
@@ -38,6 +38,14 @@ except ImportError:
 _JWT_SECRET    = os.environ.get("JWT_SECRET") or secrets.token_hex(32)
 _JWT_ALGORITHM = "HS256"
 _JWT_EXPIRE_H  = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))   # 7 days default
+
+# ── Salla OAuth app credentials ────────────────────────────────────────────────
+_SALLA_CLIENT_ID     = os.environ.get("SALLA_CLIENT_ID", "")
+_SALLA_CLIENT_SECRET = os.environ.get("SALLA_CLIENT_SECRET", "")
+_SALLA_REDIRECT_URI  = os.environ.get(
+    "SALLA_REDIRECT_URI",
+    "https://api.nahlaai.com/oauth/salla/callback",
+)
 
 _ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL",    "admin@nahlaai.com")
 _ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "nahla-admin-2026")
@@ -5316,52 +5324,260 @@ async def auth_logout():
 # These endpoints are PUBLIC (no JWT) — they receive redirects from external
 # OAuth providers (Salla, etc.) and exchange the code for an access token.
 
+@app.get("/api/salla/authorize")
+async def salla_authorize(request: Request):
+    """Return the Salla OAuth authorization URL for this tenant."""
+    tenant_id = _resolve_tenant_id(request)
+    if not _SALLA_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="SALLA_CLIENT_ID not configured")
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        "client_id":     _SALLA_CLIENT_ID,
+        "redirect_uri":  _SALLA_REDIRECT_URI,
+        "response_type": "code",
+        "scope":         "offline_access",
+        "state":         str(tenant_id),
+    })
+    return {"url": f"https://accounts.salla.sa/oauth2/auth?{params}"}
+
+
 @app.get("/oauth/salla/callback")
 async def salla_oauth_callback(
     request: Request,
-    code:  str = None,
-    state: str = None,
-    error: str = None,
+    code:    str = None,
+    state:   str = None,
+    error:   str = None,
+    db:      Session = Depends(get_db),
 ):
     """
-    Salla OAuth 2.0 callback.
-    Set SALLA_REDIRECT_URI = https://api.nahlaai.com/oauth/salla/callback
+    Salla OAuth 2.0 callback — full token exchange flow.
 
-    Flow:
-      1. Salla redirects here with ?code=... after the merchant authorises.
-      2. We exchange the code for an access + refresh token (TODO).
-      3. We store the tokens in the tenant's store settings.
-
-    Currently returns a diagnostic JSON so we can confirm the callback is wired.
+    Salla redirects here after the merchant authorises the app.
+    We exchange the code for tokens, fetch store info, save to DB,
+    then redirect to the dashboard success or error page.
     """
-    client_ip = request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
-    logger.info("Salla OAuth callback | code=%s state=%s error=%s ip=%s",
-                bool(code), state, error, client_ip)
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
+    logger.info(
+        "Salla OAuth callback received | code=%s state=%s error=%s ip=%s",
+        bool(code), state, error, client_ip,
+    )
 
+    # ── Decode state → tenant_id ───────────────────────────────────────────────
+    try:
+        tenant_id = int(state) if state else 1
+    except (ValueError, TypeError):
+        tenant_id = 1
+    logger.info("Salla OAuth: resolved tenant_id=%s", tenant_id)
+
+    # ── Provider-level error ───────────────────────────────────────────────────
     if error:
-        logger.warning("Salla OAuth error: %s", error)
-        return JSONResponse(status_code=400, content={
-            "error":   error,
-            "message": "Salla returned an error during OAuth authorisation.",
-        })
+        logger.warning("Salla OAuth provider error: %s", error)
+        return RedirectResponse(
+            url=f"/integrations/salla/error?reason={error}",
+            status_code=302,
+        )
 
     if not code:
-        logger.warning("Salla OAuth callback called without code")
-        return JSONResponse(status_code=400, content={
-            "error":   "missing_code",
-            "message": "No authorisation code received from Salla.",
-        })
+        logger.warning("Salla OAuth callback: missing code")
+        return RedirectResponse(
+            url="/integrations/salla/error?reason=missing_code",
+            status_code=302,
+        )
 
-    # TODO: exchange code for access_token via Salla token endpoint
-    # POST https://accounts.salla.sa/oauth2/token
-    #   client_id, client_secret, code, redirect_uri, grant_type=authorization_code
-    logger.info("Salla OAuth code received — token exchange not yet implemented")
+    # ── Exchange code for access_token ─────────────────────────────────────────
+    if not _SALLA_CLIENT_ID or not _SALLA_CLIENT_SECRET:
+        logger.error("Salla OAuth: SALLA_CLIENT_ID or SALLA_CLIENT_SECRET not set")
+        return RedirectResponse(
+            url="/integrations/salla/error?reason=app_not_configured",
+            status_code=302,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            logger.info("Salla OAuth: exchanging code for token …")
+            token_resp = await client.post(
+                "https://accounts.salla.sa/oauth2/token",
+                data={
+                    "grant_type":    "authorization_code",
+                    "client_id":     _SALLA_CLIENT_ID,
+                    "client_secret": _SALLA_CLIENT_SECRET,
+                    "code":          code,
+                    "redirect_uri":  _SALLA_REDIRECT_URI,
+                },
+                headers={"Accept": "application/json"},
+            )
+            logger.info(
+                "Salla token endpoint response: status=%s", token_resp.status_code
+            )
+            if token_resp.status_code != 200:
+                logger.error(
+                    "Salla token exchange failed: %s %s",
+                    token_resp.status_code, token_resp.text[:500],
+                )
+                return RedirectResponse(
+                    url="/integrations/salla/error?reason=token_exchange_failed",
+                    status_code=302,
+                )
+
+            token_data   = token_resp.json()
+            access_token  = token_data.get("access_token", "")
+            refresh_token = token_data.get("refresh_token", "")
+            expires_in    = token_data.get("expires_in", 0)
+            logger.info(
+                "Salla OAuth: token exchange succeeded | expires_in=%s", expires_in
+            )
+
+            # ── Fetch store info ───────────────────────────────────────────────
+            logger.info("Salla OAuth: fetching store info …")
+            store_resp = await client.get(
+                "https://api.salla.dev/admin/v2/store",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept":        "application/json",
+                },
+            )
+            logger.info(
+                "Salla store info response: status=%s", store_resp.status_code
+            )
+            store_data = {}
+            salla_store_id = ""
+            store_name     = ""
+            if store_resp.status_code == 200:
+                store_json     = store_resp.json()
+                store_data     = store_json.get("data", {})
+                salla_store_id = str(store_data.get("id", ""))
+                store_name     = store_data.get("name", "")
+                logger.info(
+                    "Salla store info: id=%s name=%s", salla_store_id, store_name
+                )
+            else:
+                logger.warning(
+                    "Salla store info fetch failed: %s", store_resp.status_code
+                )
+
+    except Exception as exc:
+        logger.exception("Salla OAuth: unexpected error during token exchange: %s", exc)
+        return RedirectResponse(
+            url="/integrations/salla/error?reason=network_error",
+            status_code=302,
+        )
+
+    # ── Save to integrations table ─────────────────────────────────────────────
+    try:
+        from models import Integration
+        _get_or_create_tenant(db, tenant_id)
+        integration = db.query(Integration).filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider  == "salla",
+        ).first()
+
+        new_config = {
+            "api_key":       access_token,
+            "store_id":      salla_store_id,
+            "refresh_token": refresh_token,
+            "store_name":    store_name,
+            "expires_in":    expires_in,
+            "connected_at":  datetime.utcnow().isoformat(),
+        }
+
+        if integration:
+            integration.config  = new_config
+            integration.enabled = True
+            logger.info("Salla OAuth: updated existing integration for tenant %s", tenant_id)
+        else:
+            integration = Integration(
+                tenant_id=tenant_id,
+                provider="salla",
+                config=new_config,
+                enabled=True,
+            )
+            db.add(integration)
+            logger.info("Salla OAuth: created new integration for tenant %s", tenant_id)
+
+        db.commit()
+        logger.info(
+            "Salla OAuth: integration saved | tenant=%s store_id=%s store_name=%s",
+            tenant_id, salla_store_id, store_name,
+        )
+    except Exception as exc:
+        logger.exception("Salla OAuth: failed to save integration: %s", exc)
+        return RedirectResponse(
+            url="/integrations/salla/error?reason=db_save_failed",
+            status_code=302,
+        )
+
+    # ── Success — redirect to dashboard ───────────────────────────────────────
+    logger.info("Salla OAuth: flow complete — redirecting to success page")
+    return RedirectResponse(
+        url=f"/integrations/salla/success?store={salla_store_id}&name={store_name}",
+        status_code=302,
+    )
+
+
+# ── Salla data API endpoints ───────────────────────────────────────────────────
+
+@app.get("/api/salla/store")
+async def get_salla_store(request: Request, db: Session = Depends(get_db)):
+    """Return saved Salla store info for this tenant."""
+    tenant_id = _resolve_tenant_id(request)
+    from models import Integration
+    integration = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+        Integration.provider  == "salla",
+        Integration.enabled   == True,
+    ).first()
+    if not integration:
+        raise HTTPException(status_code=404, detail="Salla integration not configured")
+    cfg = integration.config or {}
     return {
-        "success":      True,
-        "code_received": True,
-        "state":        state,
-        "next_step":    "token_exchange_pending",
+        "configured":  True,
+        "store_id":    cfg.get("store_id", ""),
+        "store_name":  cfg.get("store_name", ""),
+        "connected_at": cfg.get("connected_at"),
+        "api_key_hint": ("***" + cfg.get("api_key", "")[-4:]) if cfg.get("api_key") else "",
     }
+
+
+@app.get("/api/salla/products")
+async def get_salla_products(request: Request):
+    """Fetch live products from the tenant's Salla store via the adapter."""
+    tenant_id = _resolve_tenant_id(request)
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from store_integration.registry import get_adapter
+    adapter = get_adapter(tenant_id)
+    if not adapter:
+        raise HTTPException(status_code=404, detail="Salla integration not configured")
+    try:
+        products = await adapter.get_products()
+        return {"products": [p.dict() for p in products], "count": len(products)}
+    except Exception as exc:
+        logger.error("Salla products fetch error: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Salla API error: {exc}")
+
+
+@app.post("/api/salla/test-coupon")
+async def test_salla_coupon(request: Request):
+    """Validate a coupon code against the tenant's Salla store."""
+    body = await request.json()
+    coupon_code = body.get("coupon_code", "").strip()
+    if not coupon_code:
+        raise HTTPException(status_code=400, detail="coupon_code is required")
+    tenant_id = _resolve_tenant_id(request)
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+    from store_integration.registry import get_adapter
+    adapter = get_adapter(tenant_id)
+    if not adapter:
+        raise HTTPException(status_code=404, detail="Salla integration not configured")
+    try:
+        offer = await adapter.validate_coupon(coupon_code)
+        if offer:
+            return {"valid": True, "coupon": offer.dict()}
+        return {"valid": False, "reason": "coupon not found or expired"}
+    except Exception as exc:
+        logger.error("Salla coupon validation error: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Salla API error: {exc}")
 
 
 # ── Admin — merchant management ────────────────────────────────────────────────

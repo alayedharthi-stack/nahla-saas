@@ -16,6 +16,7 @@ import {
   type StoreIntegrationStatus,
   type StoreIntegrationTestResult,
 } from '../api/storeIntegration'
+import { apiCall } from '../api/client'
 
 export default function StoreIntegration() {
   const [status, setStatus] = useState<StoreIntegrationStatus | null>(null)
@@ -25,6 +26,7 @@ export default function StoreIntegration() {
   const [testResult, setTestResult] = useState<StoreIntegrationTestResult | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
+  const [oauthLoading, setOauthLoading] = useState(false)
 
   // Form state
   const [platform, setPlatform] = useState('salla')
@@ -86,6 +88,18 @@ export default function StoreIntegration() {
       setTestResult({ status: 'error', error: 'فشل الاتصال بالخادم' })
     } finally {
       setTesting(false)
+    }
+  }
+
+  async function handleOAuthConnect() {
+    setOauthLoading(true)
+    try {
+      const data = await apiCall<{ url: string }>('/salla/authorize')
+      window.location.href = data.url
+    } catch {
+      alert('تعذّر الحصول على رابط التفويض. تأكد من تهيئة SALLA_CLIENT_ID في الخادم.')
+    } finally {
+      setOauthLoading(false)
     }
   }
 
@@ -312,12 +326,32 @@ export default function StoreIntegration() {
         </div>
       )}
 
+      {/* OAuth Quick Connect */}
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
+        <div>
+          <h2 className="font-semibold text-slate-900 text-sm">ربط سريع عبر OAuth</h2>
+          <p className="text-slate-500 text-xs mt-1">
+            انقر على الزر أدناه لتفويض نحلة AI مباشرة من حساب سلة بدون نسخ مفاتيح يدوياً.
+          </p>
+        </div>
+        <button
+          onClick={handleOAuthConnect}
+          disabled={oauthLoading}
+          className="flex items-center gap-2.5 px-5 py-3 rounded-xl bg-[#1d2939] text-white text-sm font-semibold hover:bg-[#101828] transition-colors disabled:opacity-60 w-full justify-center"
+        >
+          {oauthLoading
+            ? <Loader2 className="w-4 h-4 animate-spin" />
+            : <Store className="w-4 h-4" />}
+          ربط المتجر عبر سلة (OAuth)
+        </button>
+      </div>
+
       {/* Info Box */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-5">
         <div className="flex items-start gap-3">
           <Store className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
           <div className="space-y-1.5 text-xs text-blue-700">
-            <p className="font-semibold text-blue-900 text-sm">كيفية الحصول على بيانات الاعتماد</p>
+            <p className="font-semibold text-blue-900 text-sm">أو أدخل بيانات الاعتماد يدوياً</p>
             <p>1. سجّل دخولك إلى لوحة تحكم سلة على <span className="font-mono">salla.sa</span></p>
             <p>2. اذهب إلى التطبيقات ← تطبيقاتي ← أضف تطبيقاً أو استخدم Access Token من إعدادات API</p>
             <p>3. انسخ الـ Access Token والصقه في حقل "مفتاح API" أعلاه</p>
