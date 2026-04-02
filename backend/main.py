@@ -4192,6 +4192,97 @@ async def create_payment_session(
     }
 
 
+# ── Salla Webhook ──────────────────────────────────────────────────────────────
+_SALLA_WEBHOOK_SECRET = os.environ.get("SALLA_WEBHOOK_SECRET", "")
+
+@app.post("/webhook/salla")
+async def salla_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Receive event notifications from Salla.
+    Verifies HMAC-SHA256 signature when SALLA_WEBHOOK_SECRET is set.
+    Logs every event so we can see them in Railway logs.
+
+    Salla sends:  X-Salla-Signature: sha256=<hex>
+    """
+    raw_body = await request.body()
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
+
+    # ── Signature verification ─────────────────────────────────────────────────
+    if _SALLA_WEBHOOK_SECRET:
+        sig_header = request.headers.get("X-Salla-Signature", "")
+        # Header format: "sha256=<hex_digest>"
+        if sig_header.startswith("sha256="):
+            received_sig = sig_header[7:]
+        else:
+            received_sig = sig_header
+
+        expected_sig = hmac.new(
+            _SALLA_WEBHOOK_SECRET.encode(),
+            raw_body,
+            "sha256",
+        ).hexdigest()
+
+        if not hmac.compare_digest(received_sig, expected_sig):
+            logger.warning(
+                "Salla webhook: invalid signature | ip=%s sig_received=%s",
+                client_ip, sig_header[:20],
+            )
+            _audit("salla_webhook_invalid_signature", ip=client_ip)
+            return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
+    else:
+        logger.warning("Salla webhook: SALLA_WEBHOOK_SECRET not set — skipping signature check")
+
+    # ── Parse payload ──────────────────────────────────────────────────────────
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    event      = payload.get("event", "unknown")
+    store_id   = payload.get("merchant", payload.get("store_id", "unknown"))
+    created_at = payload.get("created_at", "")
+
+    logger.info(
+        "Salla webhook received | event=%s store_id=%s created_at=%s ip=%s",
+        event, store_id, created_at, client_ip,
+    )
+    _audit("salla_webhook", event=event, store_id=store_id, ip=client_ip)
+
+    # ── Route by event type ────────────────────────────────────────────────────
+    # All events are logged above. Specific handling will be added per event type.
+    data = payload.get("data", {})
+
+    if event == "order.created":
+        order_id = data.get("id") or data.get("reference_id", "")
+        logger.info("Salla order.created | order_id=%s store=%s", order_id, store_id)
+
+    elif event == "order.updated":
+        order_id = data.get("id") or data.get("reference_id", "")
+        status   = data.get("status", {})
+        logger.info("Salla order.updated | order_id=%s status=%s store=%s", order_id, status, store_id)
+
+    elif event == "shipment.created":
+        shipment_id = data.get("id", "")
+        logger.info("Salla shipment.created | shipment_id=%s store=%s", shipment_id, store_id)
+
+    elif event == "customer.created":
+        customer_email = data.get("email", "")
+        logger.info("Salla customer.created | email=%s store=%s", customer_email, store_id)
+
+    elif event == "app.installed":
+        logger.info("Salla app.installed | store=%s", store_id)
+
+    elif event == "app.uninstalled":
+        logger.info("Salla app.uninstalled | store=%s", store_id)
+
+    else:
+        logger.info("Salla webhook unhandled event=%s store=%s | data=%s", event, store_id, str(data)[:200])
+
+    return {"status": "ok", "event": event}
+
+
 @app.post("/payments/webhook/moyasar")
 async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
     """
