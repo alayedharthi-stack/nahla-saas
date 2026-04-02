@@ -50,6 +50,16 @@ _SALLA_REDIRECT_URI  = os.environ.get(
 _ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL",    "admin@nahlaai.com")
 _ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "nahla-admin-2026")
 
+# ── Notification credentials ────────────────────────────────────────────────────
+# Email: Resend API (https://resend.com) — no extra library, uses httpx
+_RESEND_API_KEY  = os.environ.get("RESEND_API_KEY", "")
+_EMAIL_FROM      = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlaai.com>")
+_DASHBOARD_URL   = os.environ.get("DASHBOARD_URL", "https://api.nahlaai.com")
+
+# WhatsApp: Meta Cloud API (platform account, not tenant store)
+_WA_TOKEN        = os.environ.get("WHATSAPP_TOKEN", "")
+_WA_PHONE_ID     = os.environ.get("PHONE_NUMBER_ID", "")
+
 # ── Registration gate ───────────────────────────────────────────────────────────
 # When REQUIRE_INVITE=true (default in production), /auth/register requires a
 # valid invitation token issued by an admin. Set to "false" only for local dev.
@@ -83,6 +93,24 @@ def _create_invite_token(email: str, tenant_id_hint: Optional[int] = None) -> st
         "invited_email":   email,
         "tenant_id_hint":  tenant_id_hint,
         "exp":             datetime.utcnow() + timedelta(hours=_INVITE_EXPIRE_H),
+    }
+    return _jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+def _create_verify_token(email: str) -> str:
+    """24-hour email verification JWT."""
+    payload = {
+        "type":  "verify_email",
+        "sub":   email,
+        "exp":   datetime.utcnow() + timedelta(hours=24),
+    }
+    return _jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+def _create_reset_token(email: str) -> str:
+    """1-hour password reset JWT."""
+    payload = {
+        "type":  "password_reset",
+        "sub":   email,
+        "exp":   datetime.utcnow() + timedelta(hours=1),
     }
     return _jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
 
@@ -159,6 +187,133 @@ def get_jwt_tenant_id(request: Request) -> int:
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger("nahla-backend")
+
+
+# ── Notification helpers ────────────────────────────────────────────────────────
+
+async def _send_email(to: str, subject: str, html: str) -> bool:
+    """Send a transactional email via Resend API. Returns True on success."""
+    if not _RESEND_API_KEY:
+        logger.warning("_send_email: RESEND_API_KEY not set — skipping email to %s", to)
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {_RESEND_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"from": _EMAIL_FROM, "to": [to],
+                      "subject": subject, "html": html},
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Email sent: to=%s subject=%s", to, subject)
+                return True
+            else:
+                logger.error("Email failed: to=%s status=%s body=%s",
+                             to, resp.status_code, resp.text[:200])
+                return False
+    except Exception as exc:
+        logger.exception("Email error: to=%s exc=%s", to, exc)
+        return False
+
+
+async def _send_whatsapp(to: str, text: str) -> bool:
+    """Send a WhatsApp text message via Meta Cloud API. Returns True on success."""
+    if not _WA_TOKEN or not _WA_PHONE_ID:
+        logger.warning("_send_whatsapp: WHATSAPP_TOKEN or PHONE_NUMBER_ID not set — skipping")
+        return False
+    # Normalize number — remove spaces/dashes, ensure no leading zeros
+    phone = to.strip().replace(" ", "").replace("-", "").lstrip("0")
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    phone = phone.lstrip("+")  # Meta API expects digits only without +
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"https://graph.facebook.com/v19.0/{_WA_PHONE_ID}/messages",
+                headers={"Authorization": f"Bearer {_WA_TOKEN}",
+                         "Content-Type": "application/json"},
+                json={
+                    "messaging_product": "whatsapp",
+                    "to": phone,
+                    "type": "text",
+                    "text": {"body": text},
+                },
+            )
+            if resp.status_code == 200:
+                logger.info("WhatsApp sent: to=%s", phone)
+                return True
+            else:
+                logger.error("WhatsApp failed: to=%s status=%s body=%s",
+                             phone, resp.status_code, resp.text[:200])
+                return False
+    except Exception as exc:
+        logger.exception("WhatsApp error: to=%s exc=%s", phone, exc)
+        return False
+
+
+# ── Email templates ─────────────────────────────────────────────────────────────
+
+def _email_verify(store_name: str, verify_url: str) -> str:
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3>مرحباً بك في نحلة، {store_name}!</h3>
+  <p>أنشأت حسابك بنجاح. أكّد بريدك الإلكتروني للبدء:</p>
+  <a href="{verify_url}"
+     style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    تأكيد البريد الإلكتروني
+  </a>
+  <p style="color:#64748b;font-size:13px">الرابط صالح لمدة 24 ساعة.</p>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI</p>
+</div>"""
+
+def _email_welcome(store_name: str, dashboard_url: str) -> str:
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3>تم تفعيل حسابك بنجاح 🎉</h3>
+  <p>مرحباً بك في <strong>{store_name}</strong>! يمكنك الآن الدخول للوحة التحكم وبدء ربط متجرك.</p>
+  <a href="{dashboard_url}"
+     style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    الدخول إلى لوحة التحكم
+  </a>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI</p>
+</div>"""
+
+def _email_reset(reset_url: str) -> str:
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3>إعادة تعيين كلمة المرور</h3>
+  <p>استلمنا طلباً لإعادة تعيين كلمة مرور حسابك. انقر على الزر أدناه:</p>
+  <a href="{reset_url}"
+     style="display:inline-block;background:#ef4444;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    إعادة تعيين كلمة المرور
+  </a>
+  <p style="color:#64748b;font-size:13px">الرابط صالح لمدة ساعة واحدة فقط.</p>
+  <p style="color:#64748b;font-size:13px">إذا لم تطلب هذا، تجاهل الرسالة.</p>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI</p>
+</div>"""
+
+def _email_subscription(store_name: str, plan_name: str, ends_at: str) -> str:
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3>تم تفعيل اشتراكك ✅</h3>
+  <p>مرحباً <strong>{store_name}</strong>،</p>
+  <p>تم تفعيل خطة <strong>{plan_name}</strong> بنجاح.</p>
+  <p style="color:#64748b">ينتهي الاشتراك في: <strong>{ends_at}</strong></p>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI</p>
+</div>"""
+
 
 app = FastAPI(title="Nahla SaaS Backend", description="Multi-tenant SaaS API server.")
 
@@ -5142,10 +5297,43 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
             extra_metadata={"moyasar_event": event},
         )
         db.add(billing_payment)
+        db.flush()
         logger.info(
             f"[Billing Webhook] Subscription {subscription_id} ACTIVATED "
             f"for tenant {sub.tenant_id} (payment {payment_id})"
         )
+
+        # ── Notify merchant via email + WhatsApp ───────────────────────────────
+        try:
+            tenant_obj  = db.query(Tenant).filter(Tenant.id == sub.tenant_id).first()
+            merchant    = db.query(User).filter(
+                User.tenant_id == sub.tenant_id,
+                User.role == "merchant",
+                User.is_active == True,
+            ).first()
+            plan_obj    = sub.plan if hasattr(sub, "plan") and sub.plan else None
+            plan_name   = plan_obj.name if plan_obj else payment_meta.get("plan_slug", "")
+            store_name  = tenant_obj.name if tenant_obj else f"Tenant {sub.tenant_id}"
+            ends_str    = sub.ends_at.strftime("%Y-%m-%d") if sub.ends_at else "—"
+
+            if merchant:
+                import asyncio
+                asyncio.ensure_future(_send_email(
+                    to      = merchant.email,
+                    subject = f"تم تفعيل اشتراك {plan_name} — نحلة AI",
+                    html    = _email_subscription(store_name, plan_name, ends_str),
+                ))
+                asyncio.ensure_future(_send_whatsapp(
+                    to   = merchant.username,   # username field may hold phone
+                    text = (
+                        f"🐝 نحلة AI\n"
+                        f"مرحباً {store_name}!\n"
+                        f"تم تفعيل خطة {plan_name} بنجاح ✅\n"
+                        f"ينتهي الاشتراك في: {ends_str}"
+                    ),
+                ))
+        except Exception as notify_exc:
+            logger.warning("[Billing Webhook] Notification error: %s", notify_exc)
 
     elif status in _MOYASAR_FAIL_STATUSES:
         # Never downgrade an already-active subscription
@@ -5601,8 +5789,123 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
         ip=client_ip,
     )
 
+    # ── Send verification email ────────────────────────────────────────────────
+    verify_token = _create_verify_token(email)
+    verify_url   = f"{_DASHBOARD_URL}/verify-email?token={verify_token}"
+    import asyncio
+    asyncio.ensure_future(_send_email(
+        to      = email,
+        subject = "أكّد بريدك الإلكتروني — نحلة AI",
+        html    = _email_verify(body.store_name.strip(), verify_url),
+    ))
+    logger.info("Verification email queued for %s", email)
+
     token = _create_token(email=email, role="merchant", tenant_id=tenant.id)
-    return {"access_token": token, "token_type": "bearer", "role": "merchant"}
+    return {
+        "access_token":    token,
+        "token_type":      "bearer",
+        "role":            "merchant",
+        "email_verified":  False,
+    }
+
+
+# ── Auth — email verification & password reset ──────────────────────────────────
+
+@app.get("/auth/verify-email")
+async def verify_email(token: str, db: Session = Depends(get_db)):
+    """Verify a merchant's email address via signed token link."""
+    if not _JWT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+    payload = _decode_token(token)
+    if not payload or payload.get("type") != "verify_email":
+        return RedirectResponse(
+            url=f"{_DASHBOARD_URL}/verify-email?status=invalid",
+            status_code=302,
+        )
+    email = payload.get("sub", "")
+    user  = db.query(User).filter(User.email == email).first()
+    if not user:
+        return RedirectResponse(
+            url=f"{_DASHBOARD_URL}/verify-email?status=not_found",
+            status_code=302,
+        )
+    # Mark verified (column added by start.sh migration)
+    try:
+        db.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE users SET email_verified=true WHERE email=:e"
+            ),
+            {"e": email},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    _audit("email_verified", sub=email)
+
+    # Send welcome email now that verification is done
+    store_name = user.tenant.name if user.tenant else email.split("@")[0]
+    import asyncio
+    asyncio.ensure_future(_send_email(
+        to      = email,
+        subject = "مرحباً بك في نحلة AI 🎉",
+        html    = _email_welcome(store_name, _DASHBOARD_URL),
+    ))
+
+    # WhatsApp welcome if phone available (stored in username field only if set)
+    logger.info("Email verified: %s — welcome email queued", email)
+    return RedirectResponse(
+        url=f"{_DASHBOARD_URL}/verify-email?status=success",
+        status_code=302,
+    )
+
+
+class ForgotPasswordIn(BaseModel):
+    email: str
+
+@app.post("/auth/forgot-password")
+async def forgot_password(body: ForgotPasswordIn, db: Session = Depends(get_db)):
+    """Send a password reset link to the given email if it exists."""
+    email = body.email.strip().lower()
+    user  = db.query(User).filter(User.email == email, User.is_active == True).first()
+    # Always return 200 to avoid email enumeration
+    if user:
+        reset_token = _create_reset_token(email)
+        reset_url   = f"{_DASHBOARD_URL}/reset-password?token={reset_token}"
+        import asyncio
+        asyncio.ensure_future(_send_email(
+            to      = email,
+            subject = "إعادة تعيين كلمة المرور — نحلة AI",
+            html    = _email_reset(reset_url),
+        ))
+        _audit("password_reset_requested", sub=email)
+        logger.info("Password reset email queued for %s", email)
+    return {"detail": "إذا كان البريد مسجَّلاً ستصلك رسالة قريباً"}
+
+
+class ResetPasswordIn(BaseModel):
+    token:    str
+    password: str
+
+@app.post("/auth/reset-password")
+async def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)):
+    """Reset password using a signed token from the email link."""
+    if not _JWT_AVAILABLE or not _PASSLIB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+    payload = _decode_token(body.token)
+    if not payload or payload.get("type") != "password_reset":
+        raise HTTPException(status_code=400, detail="الرابط غير صالح أو منتهي الصلاحية")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تكون 8 أحرف على الأقل")
+    email = payload.get("sub", "")
+    user  = db.query(User).filter(User.email == email, User.is_active == True).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="الحساب غير موجود")
+    user.password_hash = _pwd_context.hash(body.password)
+    db.commit()
+    _audit("password_reset_done", sub=email)
+    logger.info("Password reset completed for %s", email)
+    return {"detail": "تم تغيير كلمة المرور بنجاح"}
 
 
 # ── OAuth callbacks ─────────────────────────────────────────────────────────────

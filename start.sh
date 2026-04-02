@@ -15,6 +15,7 @@ with engine.connect() as conn:
     conn.execute(text(\"ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR NOT NULL DEFAULT 'merchant'\"))
     conn.execute(text(\"ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true\"))
     conn.execute(text(\"ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP\"))
+    conn.execute(text(\"ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false\"))
     conn.commit()
 print('Tables ready.')
 "
