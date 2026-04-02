@@ -5320,6 +5320,60 @@ async def auth_logout():
     return {"detail": "logged out"}
 
 
+class RegisterIn(BaseModel):
+    email:      str
+    password:   str
+    store_name: str
+    phone:      str = ""
+
+@app.post("/auth/register")
+async def auth_register(body: RegisterIn, db: Session = Depends(get_db)):
+    """
+    Self-registration for new merchants.
+    Creates a dedicated tenant + merchant user, returns a JWT token.
+    """
+    if not _PASSLIB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="passlib not installed")
+
+    email = body.email.strip().lower()
+    if not email or not body.password or not body.store_name.strip():
+        raise HTTPException(status_code=400, detail="البريد وكلمة المرور واسم المتجر مطلوبة")
+
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تكون 8 أحرف على الأقل")
+
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=409, detail="البريد الإلكتروني مسجَّل مسبقاً")
+
+    # Create a dedicated tenant
+    tenant = Tenant(
+        name=body.store_name.strip(),
+        domain=f"store-{email.split('@')[0]}.nahla.sa",
+        is_active=True,
+        created_at=datetime.utcnow(),
+    )
+    db.add(tenant)
+    db.flush()
+
+    user = User(
+        username=email,
+        email=email,
+        password_hash=_pwd_context.hash(body.password),
+        role="merchant",
+        is_active=True,
+        created_at=datetime.utcnow(),
+        tenant_id=tenant.id,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    logger.info("New merchant registered: email=%s tenant_id=%s", email, tenant.id)
+
+    token = _create_token({"sub": email, "role": "merchant", "tenant_id": tenant.id})
+    return {"access_token": token, "token_type": "bearer", "role": "merchant"}
+
+
 # ── OAuth callbacks ─────────────────────────────────────────────────────────────
 # These endpoints are PUBLIC (no JWT) — they receive redirects from external
 # OAuth providers (Salla, etc.) and exchange the code for an access token.

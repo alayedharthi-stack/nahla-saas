@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { Sparkles, Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react'
 import { login } from '../auth'
 
@@ -114,7 +114,14 @@ export default function Login() {
           </form>
         </div>
 
-        <p className="text-center text-slate-600 text-xs mt-6">
+        <p className="text-center text-slate-500 text-xs mt-4">
+          متجر جديد؟{' '}
+          <Link to="/register" className="text-brand-400 font-medium hover:underline">
+            أنشئ حساباً مجاناً
+          </Link>
+        </p>
+
+        <p className="text-center text-slate-600 text-xs mt-3">
           مدعوم بواسطة نحلة AI
         </p>
       </div>

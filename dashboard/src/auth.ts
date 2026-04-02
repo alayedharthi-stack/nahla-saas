@@ -44,3 +44,26 @@ export function getRole(): string {
 export function isAdmin(): boolean {
   return getRole() === 'admin'
 }
+
+export async function register(
+  email: string,
+  password: string,
+  storeName: string,
+  phone: string = '',
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, store_name: storeName, phone }),
+    })
+    const data = await res.json()
+    if (!res.ok) return { ok: false, error: data.detail ?? 'فشل التسجيل' }
+    localStorage.setItem(AUTH_KEY,  '1')
+    localStorage.setItem(TOKEN_KEY, data.access_token ?? '')
+    localStorage.setItem(ROLE_KEY,  data.role ?? 'merchant')
+    return { ok: true }
+  } catch {
+    return { ok: false, error: 'تعذّر الاتصال بالخادم' }
+  }
+}

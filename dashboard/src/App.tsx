@@ -24,6 +24,7 @@ import SystemStatus from './pages/SystemStatus'
 import Merchants from './pages/Merchants'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
+import Register from './pages/Register'
 
 export default function App() {
   return (
@@ -34,6 +35,7 @@ export default function App() {
           <Route path="/login"                element={<Login />} />
           <Route path="/onboarding"           element={<Onboarding />} />
           <Route path="/billing/payment-result" element={<BillingResult />} />
+          <Route path="/register"                   element={<Register />} />
           <Route path="/integrations/salla/success" element={<SallaOAuthSuccess />} />
           <Route path="/integrations/salla/error"   element={<SallaOAuthError />} />
 
