@@ -26,6 +26,13 @@ export async function apiCall<T>(path: string, options?: RequestInit): Promise<T
     throw new Error('Session expired')
   }
 
-  if (!res.ok) throw new Error(`API error ${res.status}`)
+  if (!res.ok) {
+    let detail = `API error ${res.status}`
+    try {
+      const body = await res.json()
+      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+    } catch { /* ignore parse errors */ }
+    throw new Error(detail)
+  }
   return res.json() as Promise<T>
 }

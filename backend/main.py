@@ -5561,15 +5561,20 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="البريد الإلكتروني مسجَّل مسبقاً")
 
-    # Create a dedicated tenant
+    # Create a dedicated tenant — use email slug as suffix to guarantee uniqueness
+    slug = email.split('@')[0]
     tenant = Tenant(
-        name=body.store_name.strip(),
-        domain=f"store-{email.split('@')[0]}.nahla.sa",
+        name=f"{body.store_name.strip()} ({slug})",
+        domain=f"store-{slug}.nahla.sa",
         is_active=True,
         created_at=datetime.utcnow(),
     )
     db.add(tenant)
-    db.flush()
+    try:
+        db.flush()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="اسم المتجر أو النطاق مسجَّل مسبقاً")
 
     user = User(
         username=email,
@@ -5581,7 +5586,11 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
         tenant_id=tenant.id,
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="فشل إنشاء الحساب — حاول مرة أخرى")
     db.refresh(user)
 
     _audit(
@@ -5914,14 +5923,21 @@ async def create_merchant(
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="البريد الإلكتروني مسجَّل مسبقاً")
 
+    # Use email prefix as suffix to guarantee uniqueness on name and domain
+    slug = email.split('@')[0]
     tenant = Tenant(
-        name=body.store_name,
-        domain=f"store-{email.split('@')[0]}.nahla.sa",
+        name=f"{body.store_name} ({slug})",
+        domain=f"store-{slug}.nahla.sa",
         is_active=True,
         created_at=datetime.utcnow(),
     )
     db.add(tenant)
-    db.flush()
+    try:
+        db.flush()
+    except Exception as exc:
+        db.rollback()
+        logger.error("create_merchant: tenant flush failed: %s", exc)
+        raise HTTPException(status_code=400, detail=f"فشل إنشاء الـ tenant: {exc}")
 
     user = User(
         username=email,
@@ -5933,7 +5949,12 @@ async def create_merchant(
         tenant_id=tenant.id,
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("create_merchant: commit failed: %s", exc)
+        raise HTTPException(status_code=400, detail=f"فشل حفظ المستخدم: {exc}")
     db.refresh(user)
 
     _audit(

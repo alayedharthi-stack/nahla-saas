@@ -46,8 +46,8 @@ export default function Merchants() {
       setForm(EMPTY_FORM)
       setShowForm(false)
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : ''
-      setFormError(msg.includes('400') ? 'البريد الإلكتروني مسجَّل مسبقاً' : 'حدث خطأ أثناء الإنشاء')
+      const msg = err instanceof Error ? err.message : 'حدث خطأ أثناء الإنشاء'
+      setFormError(msg)
     } finally {
       setSaving(false)
     }
