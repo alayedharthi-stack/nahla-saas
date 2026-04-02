@@ -1,4 +1,5 @@
-import { API_BASE } from './api/client'
+// Defined locally to avoid circular dependency with api/client.ts
+const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
 const AUTH_KEY  = 'nahla_auth'
 const TOKEN_KEY = 'nahla_token'
