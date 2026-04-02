@@ -13,7 +13,6 @@ import {
   Plug,
   BarChart2,
   Settings,
-  Sparkles,
   BrainCircuit,
   Store,
   UserCheck,
@@ -77,8 +76,8 @@ interface SidebarProps {
 
 export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const { t } = useLanguage()
-  const [storeName, setStoreName] = useState('نهلة')
-  const [logoUrl,   setLogoUrl]   = useState('')
+  const [storeName, setStoreName] = useState('نحلة')
+  const [logoUrl,   setLogoUrl]   = useState('/logo.png')
 
   useEffect(() => {
     fetch('/api/settings', {
@@ -120,10 +119,13 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       >
         {/* Logo + close button (mobile only) */}
         <div className="flex items-center gap-2.5 px-5 py-5 border-b border-slate-800">
-          <div className="w-8 h-8 bg-brand-500 rounded-lg flex items-center justify-center shrink-0 overflow-hidden">
-            {logoUrl
-              ? <img src={logoUrl} alt={storeName} className="w-full h-full object-cover" />
-              : <Sparkles className="w-4 h-4 text-white" />}
+          <div className="w-8 h-8 rounded-lg shrink-0 overflow-hidden bg-slate-800">
+            <img
+              src={logoUrl}
+              alt={storeName}
+              className="w-full h-full object-contain"
+              onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+            />
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-white font-semibold text-sm leading-none truncate">{storeName}</p>

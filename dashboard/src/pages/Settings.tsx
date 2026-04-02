@@ -215,7 +215,7 @@ function WhatsAppTab({
         </div>
       </Section>
 
-      <Section title="أزرار المتجر في الرسائل" description="تُظهر نهلة هذه الأزرار للعملاء أسفل الرسائل">
+      <Section title="أزرار المتجر في الرسائل" description="تُظهر نحلة هذه الأزرار للعملاء أسفل الرسائل">
         <div className="grid sm:grid-cols-2 gap-4">
           <Field label="نص زر المتجر">
             <input className="input" value={data.store_button_label} onChange={e => onChange({ store_button_label: e.target.value })} placeholder="زيارة المتجر" />
@@ -233,7 +233,7 @@ function WhatsAppTab({
       </Section>
 
       <Section title="الردود والتحويل التلقائي">
-        <Toggle label="تفعيل الردود التلقائية" hint="نهلة ترد على العملاء تلقائياً" value={data.auto_reply_enabled} onChange={v => onChange({ auto_reply_enabled: v })} />
+        <Toggle label="تفعيل الردود التلقائية" hint="نحلة ترد على العملاء تلقائياً" value={data.auto_reply_enabled} onChange={v => onChange({ auto_reply_enabled: v })} />
         <Toggle label="تحويل المحادثة للمالك" hint="إرسال تنبيه للمالك عند الحاجة للتدخل البشري" value={data.transfer_to_owner_enabled} onChange={v => onChange({ transfer_to_owner_enabled: v })} />
       </Section>
 
@@ -269,10 +269,10 @@ function AITab({
 }) {
   return (
     <div className="space-y-5">
-      <Section title="شخصية المساعدة" description="كيف تقدّم نهلة نفسها للعملاء">
+      <Section title="شخصية المساعدة" description="كيف تقدّم نحلة نفسها للعملاء">
         <div className="grid sm:grid-cols-2 gap-4">
           <Field label="اسم المساعدة">
-            <input className="input" value={data.assistant_name} onChange={e => onChange({ assistant_name: e.target.value })} placeholder="نهلة" />
+            <input className="input" value={data.assistant_name} onChange={e => onChange({ assistant_name: e.target.value })} placeholder="نحلة" />
           </Field>
           <Field label="نبرة الرد">
             <select className="input" value={data.reply_tone} onChange={e => onChange({ reply_tone: e.target.value as AISettings['reply_tone'] })}>
@@ -303,15 +303,15 @@ function AITab({
         </div>
       </Section>
 
-      <Section title="تعليمات المالك" description="تُضاف إلى كل محادثة كقواعد أساسية لنهلة">
+      <Section title="تعليمات المالك" description="تُضاف إلى كل محادثة كقواعد أساسية لنحلة">
         <div className="space-y-4">
-          <Field label="تعليمات عامة" hint="قواعد وسياسات يجب أن تلتزم بها نهلة دائماً">
+          <Field label="تعليمات عامة" hint="قواعد وسياسات يجب أن تلتزم بها نحلة دائماً">
             <textarea className="input min-h-[100px] resize-y" value={data.owner_instructions} onChange={e => onChange({ owner_instructions: e.target.value })} placeholder="مثال: لا تعد بتوصيل خلال يوم واحد إلا بعد التأكيد. لا تذكر أسماء منافسين..." />
           </Field>
-          <Field label="قواعد تقديم الكوبونات" hint="متى تعرض نهلة خصماً على العميل">
+          <Field label="قواعد تقديم الكوبونات" hint="متى تعرض نحلة خصماً على العميل">
             <textarea className="input min-h-[80px] resize-y" value={data.coupon_rules} onChange={e => onChange({ coupon_rules: e.target.value })} placeholder="مثال: قدّمي كوبون خصم 10% للعملاء الذين يسألون عن السعر مرتين دون شراء..." />
           </Field>
-          <Field label="قواعد التصعيد للإنسان" hint="متى تحوّل نهلة المحادثة للمالك أو الدعم">
+          <Field label="قواعد التصعيد للإنسان" hint="متى تحوّل نحلة المحادثة للمالك أو الدعم">
             <textarea className="input min-h-[80px] resize-y" value={data.escalation_rules} onChange={e => onChange({ escalation_rules: e.target.value })} placeholder="مثال: صعّدي المحادثة عند وجود شكاوى، أو طلبات استرداد، أو غضب واضح..." />
           </Field>
         </div>
@@ -331,7 +331,7 @@ function AITab({
           </Field>
           <Toggle
             label="تفعيل توصيات المنتجات"
-            hint="نهلة تقترح منتجات ذات صلة أثناء المحادثة"
+            hint="نحلة تقترح منتجات ذات صلة أثناء المحادثة"
             value={data.recommendations_enabled}
             onChange={v => onChange({ recommendations_enabled: v })}
           />
@@ -488,7 +488,7 @@ function TeamTab() {
     <div className="space-y-5">
       <Section
         title="أعضاء الفريق"
-        description="إدارة المستخدمين وصلاحياتهم في لوحة نهلة"
+        description="إدارة المستخدمين وصلاحياتهم في لوحة نحلة"
       >
         <div className="space-y-2">
           {MOCK_TEAM.map(member => (
@@ -588,7 +588,7 @@ function NotificationsTab({
         <Toggle label="تنبيهات البريد الإلكتروني" hint="استلام تقارير ومنبهات عبر الإيميل" value={data.email_alerts} onChange={v => onChange({ email_alerts: v })} />
       </Section>
 
-      <Section title="تنبيهات النظام" description="أحداث داخلية تؤثر على أداء نهلة">
+      <Section title="تنبيهات النظام" description="أحداث داخلية تؤثر على أداء نحلة">
         <Toggle
           label="تنبيهات النظام العامة"
           hint="أخطاء، توقف الخدمة، استهلاك عالٍ"
@@ -742,7 +742,7 @@ function DailySummaryPanel({ items, lastRunAt, onRunNow, running }: {
     <div className="card overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-slate-900">إجراءات نهلة اليوم</h3>
+          <h3 className="text-sm font-semibold text-slate-900">إجراءات نحلة اليوم</h3>
           {lastRunAt && (
             <p className="text-xs text-slate-400 mt-0.5">
               آخر تشغيل: {formatTime(lastRunAt)}
@@ -886,7 +886,7 @@ function AutopilotTab() {
                 </span>
               </div>
               <p className="text-sm text-slate-500 mt-1 leading-relaxed max-w-lg">
-                عند التفعيل تتولى نهلة تلقائياً: تأكيد طلبات COD، تذكيرات إعادة الطلب، استرداد السلات المتروكة، واسترجاع العملاء الخاملين.
+                عند التفعيل تتولى نحلة تلقائياً: تأكيد طلبات COD، تذكيرات إعادة الطلب، استرداد السلات المتروكة، واسترجاع العملاء الخاملين.
               </p>
             </div>
           </div>
@@ -1035,7 +1035,7 @@ function AiSalesAgentTab() {
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-1 max-w-lg">
-                تحوّل نهلة إلى موظف مبيعات ذكي داخل محادثات واتساب — يتعرّف على نيّة العميل،
+                تحوّل نحلة إلى موظف مبيعات ذكي داخل محادثات واتساب — يتعرّف على نيّة العميل،
                 يقترح المنتجات المناسبة، ينشئ الطلبات، ويرسل روابط الدفع، كل ذلك باستخدام بيانات متجرك الفعلية فقط.
               </p>
             </div>

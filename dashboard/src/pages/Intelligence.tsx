@@ -138,7 +138,7 @@ export default function Intelligence() {
     <div className="space-y-6">
       {/* ── Page Header ───────────────────────────────────────────────────── */}
       <PageHeader
-        title="نهلة الذكية"
+        title="نحلة الذكية"
         subtitle="رؤى تنبؤية وتوصيات تسويقية مبنية على الذكاء الاصطناعي"
         action={
           <button
@@ -199,7 +199,7 @@ export default function Intelligence() {
             <div className="card">
               <div className="px-5 py-4 border-b border-slate-100">
                 <h2 className="text-sm font-semibold text-slate-900">
-                  توصيات نهلة الذكية 💡
+                  توصيات نحلة الذكية 💡
                 </h2>
               </div>
               <ul className="divide-y divide-slate-100">

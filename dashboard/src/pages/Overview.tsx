@@ -57,7 +57,7 @@ export default function Overview() {
               <Sparkles className="w-5 h-5 text-brand-600" />
             </div>
             <div>
-              <p className="text-xs text-white/80 font-medium">مبيعات ولّدتها نهلة هذا الشهر</p>
+              <p className="text-xs text-white/80 font-medium">مبيعات ولّدتها نحلة هذا الشهر</p>
               <p className="text-2xl font-black text-white leading-none mt-0.5">
                 4,320 <span className="text-sm font-bold text-white/90">ر.س</span>
               </p>

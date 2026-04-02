@@ -290,7 +290,7 @@ const INIT_WIZARD: WizardState = {
   category: 'MARKETING',
   headerText: '',
   bodyText: '',
-  footerText: '🐝 نهلة — مساعد متجرك',
+  footerText: '🐝 نحلة — مساعد متجرك',
   buttons: [],
 }
 

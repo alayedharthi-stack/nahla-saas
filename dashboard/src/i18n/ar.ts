@@ -25,7 +25,7 @@ const ar: Translations = {
       campaigns:     'الحملات',
       templates:     'قوالب واتساب',
       automations:   'التشغيل التلقائي',
-      intelligence:  'نهلة الذكية',
+      intelligence:  'نحلة الذكية',
       analyticsAI:   'التحليلات وسجلات الذكاء',
       integrations:  'التكاملات',
       settings:      'الإعدادات',
@@ -49,7 +49,7 @@ const ar: Translations = {
     },
     conversations: {
       title:    'المحادثات',
-      subtitle: 'محادثات واتساب وردود نهلة الذكية',
+      subtitle: 'محادثات واتساب وردود نحلة الذكية',
     },
     orders: {
       title:    'الطلبات',
@@ -72,7 +72,7 @@ const ar: Translations = {
       subtitle: 'أتمتة تسويقية مبنية على سلوك العملاء',
     },
     intelligence: {
-      title:    'نهلة الذكية',
+      title:    'نحلة الذكية',
       subtitle: 'رؤى تنبؤية وتوصيات تسويقية مبنية على الذكاء الاصطناعي',
     },
     analytics: {
@@ -81,7 +81,7 @@ const ar: Translations = {
     },
     integrations: {
       title:    'التكاملات',
-      subtitle: 'ربط سلة وزد وواتساب بنهلة',
+      subtitle: 'ربط سلة وزد وواتساب بنحلة',
     },
     settings: {
       title:    'الإعدادات',

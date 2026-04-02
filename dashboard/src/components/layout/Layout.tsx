@@ -18,7 +18,7 @@ const PAGE_META: Record<string, MetaSelector> = {
   '/analytics':          tr => tr.pages.analytics,
   '/settings':           tr => tr.pages.settings,
   '/smart-automations':  _tr => ({ title: 'الطيار الآلي', subtitle: 'إدارة الأتمتة الذكية' }),
-  '/billing':            _tr => ({ title: 'الاشتراك والفوترة', subtitle: 'إدارة خطة نهلة' }),
+  '/billing':            _tr => ({ title: 'الاشتراك والفوترة', subtitle: 'إدارة خطة نحلة' }),
 }
 
 export default function Layout() {
@@ -26,7 +26,7 @@ export default function Layout() {
   const { t } = useLanguage()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
-  const metaSelector = PAGE_META[pathname] ?? (() => ({ title: 'نهلة', subtitle: '' }))
+  const metaSelector = PAGE_META[pathname] ?? (() => ({ title: 'نحلة', subtitle: '' }))
   const meta = t(metaSelector)
 
   return (

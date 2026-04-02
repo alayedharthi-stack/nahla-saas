@@ -35,7 +35,7 @@ export default function TrialBanner() {
             انتهت فترة التجربة المجانية — ميزات الطيار الآلي موقوفة مؤقتاً
           </span>
           <span className="hidden sm:inline text-red-200">
-            · فعّل خطة نهلة للمتابعة
+            · فعّل خطة نحلة للمتابعة
           </span>
         </div>
         <button

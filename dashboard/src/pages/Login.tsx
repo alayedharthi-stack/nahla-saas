@@ -38,7 +38,7 @@ export default function Login() {
           <div className="w-14 h-14 bg-brand-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-brand-500/30">
             <Sparkles className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-white">نهلة</h1>
+          <h1 className="text-2xl font-bold text-white">نحلة</h1>
           <p className="text-slate-400 text-sm mt-1">لوحة التحكم</p>
         </div>
 
@@ -118,7 +118,7 @@ export default function Login() {
         </div>
 
         <p className="text-center text-slate-600 text-xs mt-6">
-          مدعوم بواسطة نهلة AI
+          مدعوم بواسطة نحلة AI
         </p>
       </div>
     </div>

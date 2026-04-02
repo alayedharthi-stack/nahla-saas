@@ -105,7 +105,7 @@ function LogRow({ entry }: { entry: AiSalesLogEntry }) {
                 </p>
               </div>
               <div>
-                <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1">رد نهلة</p>
+                <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide mb-1">رد نحلة</p>
                 <p className="text-sm text-slate-700 bg-white rounded-lg px-3 py-2 border border-slate-100 whitespace-pre-line">
                   {entry.response_text || '—'}
                 </p>

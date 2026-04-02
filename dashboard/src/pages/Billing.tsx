@@ -240,7 +240,7 @@ export default function Billing() {
       {/* Page header */}
       <div>
         <h1 className="text-xl font-bold text-slate-900">الاشتراك والفوترة</h1>
-        <p className="text-sm text-slate-500 mt-1">إدارة خطة نهلة واستخدامك الشهري</p>
+        <p className="text-sm text-slate-500 mt-1">إدارة خطة نحلة واستخدامك الشهري</p>
       </div>
 
       {/* Hero value proposition */}
@@ -251,7 +251,7 @@ export default function Billing() {
           </div>
           <div className="flex-1">
             <h2 className="font-bold text-base leading-snug">
-              نهلة — موظف مبيعات يعمل 24/7
+              نحلة — موظف مبيعات يعمل 24/7
             </h2>
             <p className="text-white/80 text-xs mt-1 leading-relaxed">
               يرد على العملاء، يُكمل الطلبات، ويُرسل روابط الدفع — بشكل تلقائي، دون توقف.
@@ -423,7 +423,7 @@ export default function Billing() {
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
           <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
           <div>
-            <p className="text-sm font-semibold text-amber-800">لم تختر خطة نهلة بعد</p>
+            <p className="text-sm font-semibold text-amber-800">لم تختر خطة نحلة بعد</p>
             <p className="text-xs text-amber-700 mt-0.5">
               الردود الذكية والطيار الآلي والحملات محجوبة حتى تختار خطة.
               اشترك الآن لإعادة تشغيل موظف المبيعات الذكي.
@@ -474,7 +474,7 @@ export default function Billing() {
           <p className="text-xs font-semibold text-slate-700">دفع آمن ومشفّر</p>
           <p className="text-xs text-slate-500 mt-0.5">
             تتم معالجة جميع المدفوعات عبر بوابة موى (Moyasar) المرخّصة في المملكة العربية السعودية.
-            بيانات بطاقتك لا تُخزَّن على خوادم نهلة.
+            بيانات بطاقتك لا تُخزَّن على خوادم نحلة.
           </p>
         </div>
       </div>
@@ -493,7 +493,7 @@ export default function Billing() {
           <div className="flex items-start gap-3">
             <div className="w-6 h-6 rounded-full bg-brand-500 text-white text-xs font-bold flex items-center justify-center shrink-0">٢</div>
             <div>
-              <p className="text-sm font-medium text-slate-800">خطة نهلة — من 449 ر.س/شهر</p>
+              <p className="text-sm font-medium text-slate-800">خطة نحلة — من 449 ر.س/شهر</p>
               <p className="text-xs text-slate-500 mt-0.5">تُدفع عبر موى · الطيار الآلي، الردود الذكية، الحملات، وكيل المبيعات</p>
             </div>
           </div>

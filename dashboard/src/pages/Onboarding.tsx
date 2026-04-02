@@ -63,7 +63,7 @@ function WelcomeStep({ onNext }: { onNext: () => void }) {
         </div>
       </div>
       <div>
-        <h1 className="text-2xl font-black text-slate-900">أهلاً بك في نهلة!</h1>
+        <h1 className="text-2xl font-black text-slate-900">أهلاً بك في نحلة!</h1>
         <p className="text-slate-500 mt-2 text-sm leading-relaxed max-w-xs mx-auto">
           منصة الطيار الآلي للمبيعات المدعومة بالذكاء الاصطناعي لمتجرك
         </p>
@@ -92,7 +92,7 @@ function PricingStep({ onNext, integFee }: { onNext: () => void; integFee: numbe
   return (
     <div className="space-y-5">
       <div className="text-center">
-        <h2 className="text-lg font-black text-slate-900">هيكل أسعار نهلة</h2>
+        <h2 className="text-lg font-black text-slate-900">هيكل أسعار نحلة</h2>
         <p className="text-xs text-slate-500 mt-1">سعر شفاف بدون مفاجآت</p>
       </div>
 
@@ -122,11 +122,11 @@ function PricingStep({ onNext, integFee }: { onNext: () => void; integFee: numbe
           <div className="w-8 h-8 bg-brand-500 text-white text-sm font-black rounded-xl flex items-center justify-center shrink-0">٢</div>
           <div className="flex-1">
             <div className="flex items-center justify-between">
-              <p className="font-semibold text-slate-900 text-sm">خطة نهلة للذكاء الاصطناعي</p>
+              <p className="font-semibold text-slate-900 text-sm">خطة نحلة للذكاء الاصطناعي</p>
               <span className="text-sm font-black text-brand-600">من 449 ر.س<span className="text-xs text-slate-400 font-normal">/شهر</span></span>
             </div>
             <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-              تُدفع مباشرة لنهلة. تفعّل الطيار الآلي، الردود الذكية، الحملات التسويقية، ووكيل المبيعات.
+              تُدفع مباشرة لنحلة. تفعّل الطيار الآلي، الردود الذكية، الحملات التسويقية، ووكيل المبيعات.
             </p>
             <div className="mt-2 flex items-center gap-1 text-[11px] text-brand-700 bg-brand-100 border border-brand-200 rounded-lg px-2 py-1 w-fit">
               <Tag className="w-3 h-3" />
@@ -168,7 +168,7 @@ function PlansStep({
   return (
     <div className="space-y-4">
       <div className="text-center">
-        <h2 className="text-lg font-black text-slate-900">اختر خطة نهلة</h2>
+        <h2 className="text-lg font-black text-slate-900">اختر خطة نحلة</h2>
         <p className="text-xs text-slate-500 mt-1">يمكنك الترقية أو التخفيض في أي وقت</p>
       </div>
 
@@ -305,7 +305,7 @@ export default function Onboarding() {
             <div className="w-7 h-7 bg-brand-500 rounded-lg flex items-center justify-center">
               <Sparkles className="w-4 h-4 text-white" />
             </div>
-            <span className="font-bold text-slate-800">نهلة</span>
+            <span className="font-bold text-slate-800">نحلة</span>
           </div>
           <StepIndicator current={STEP_NUM[step]} total={4} />
         </div>

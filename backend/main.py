@@ -61,6 +61,49 @@ async def multi_tenant_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
+# ── API key protection ──────────────────────────────────────────────────────────
+# Set API_SECRET_KEY env var to enable. Requests must include X-Nahla-Key header.
+# Exempt: /health, /webhook/* (WhatsApp webhooks from Meta).
+_API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    if _API_SECRET_KEY:
+        path = request.url.path
+        if not (path.startswith("/health") or path.startswith("/webhook")):
+            provided = request.headers.get("X-Nahla-Key", "")
+            if provided != _API_SECRET_KEY:
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
+
+# ── Global rate limiting ────────────────────────────────────────────────────────
+# 300 requests per minute per IP. Exempt: /health.
+import sys as _sys
+_sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'observability')))
+from rate_limiter import check_rate_limit as _check_rate_limit
+
+@app.middleware("http")
+async def global_rate_limit_middleware(request: Request, call_next):
+    if not request.url.path.startswith("/health"):
+        client_ip = request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
+        if not _check_rate_limit(f"global:{client_ip}", max_count=300, window_seconds=60):
+            return JSONResponse(status_code=429, content={"detail": "Too many requests"})
+    return await call_next(request)
+
+# ── HTTP request logging ────────────────────────────────────────────────────────
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    start = _time.monotonic()
+    response = await call_next(request)
+    duration_ms = round((_time.monotonic() - start) * 1000)
+    tenant_id = getattr(request.state, "tenant_id", "-")
+    client_ip = request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
+    logger.info(
+        "%s %s %d %dms tenant=%s ip=%s",
+        request.method, request.url.path, response.status_code, duration_ms, tenant_id, client_ip,
+    )
+    return response
+
 # Dependency for DB session
 def get_db():
     db = SessionLocal()
@@ -132,7 +175,7 @@ DEFAULT_WHATSAPP: Dict[str, Any] = {
 }
 
 DEFAULT_AI: Dict[str, Any] = {
-    "assistant_name": "نهلة",
+    "assistant_name": "نحلة",
     "assistant_role": "مساعدة ذكية لخدمة عملاء المتجر",
     "reply_tone": "friendly",
     "reply_length": "medium",
@@ -307,7 +350,7 @@ def _require_subscription(db: Session, tenant_id: int) -> None:
     if not _get_tenant_subscription(db, tenant_id):
         raise HTTPException(
             status_code=402,
-            detail="الرجاء اختيار خطة نهلة لتفعيل الطيار الآلي للمبيعات.",
+            detail="الرجاء اختيار خطة نحلة لتفعيل الطيار الآلي للمبيعات.",
         )
 
 # ── Pydantic schemas ───────────────────────────────────────────────────────────
@@ -327,7 +370,7 @@ class WhatsAppSettingsIn(BaseModel):
     transfer_to_owner_enabled: bool = True
 
 class AISettingsIn(BaseModel):
-    assistant_name: str = "نهلة"
+    assistant_name: str = "نحلة"
     assistant_role: str = ""
     reply_tone: str = "friendly"
     reply_length: str = "medium"
@@ -370,6 +413,40 @@ class AllSettingsIn(BaseModel):
     store: Optional[StoreSettingsIn] = None
     notifications: Optional[NotificationSettingsIn] = None
 
+# ── Secret masking ────────────────────────────────────────────────────────────
+# Fields that are masked before returning to the frontend.
+# Key: settings group name → set of field names.
+_SECRET_FIELDS: Dict[str, set] = {
+    "whatsapp": {"access_token", "verify_token"},
+    "store":    {"salla_client_secret", "salla_access_token",
+                 "zid_client_secret", "shopify_access_token"},
+}
+
+def _mask_secret(value: str) -> str:
+    """Return a masked version: first 4 chars + **** + last 4 chars."""
+    if not value or len(value) < 9:
+        return value  # too short — don't mask (probably empty/placeholder)
+    return value[:4] + "****" + value[-4:]
+
+def _is_masked(value: str) -> bool:
+    """True if this value was previously returned as a mask (contains ****)."""
+    return isinstance(value, str) and "****" in value
+
+def _apply_masks(data: Dict[str, Any], group: str) -> Dict[str, Any]:
+    """Return a copy of data with secret fields masked."""
+    fields = _SECRET_FIELDS.get(group, set())
+    return {k: (_mask_secret(v) if k in fields and isinstance(v, str) else v)
+            for k, v in data.items()}
+
+def _restore_secrets(incoming: Dict[str, Any], stored: Dict[str, Any], group: str) -> Dict[str, Any]:
+    """Replace masked values in incoming with the original stored secret."""
+    fields = _SECRET_FIELDS.get(group, set())
+    result = dict(incoming)
+    for field in fields:
+        if field in result and _is_masked(result[field]):
+            result[field] = stored.get(field, "")
+    return result
+
 # ── Settings endpoints ─────────────────────────────────────────────────────────
 
 @app.get("/settings")
@@ -379,10 +456,12 @@ async def get_settings(request: Request, db: Session = Depends(get_db)):
     settings = _get_or_create_settings(db, tenant_id)
     db.commit()
 
+    wa    = _merge_defaults(settings.whatsapp_settings,    DEFAULT_WHATSAPP)
+    store = _merge_defaults(settings.store_settings,       DEFAULT_STORE)
     return {
-        "whatsapp":      _merge_defaults(settings.whatsapp_settings,      DEFAULT_WHATSAPP),
+        "whatsapp":      _apply_masks(wa,    "whatsapp"),
         "ai":            _merge_defaults(settings.ai_settings,             DEFAULT_AI),
-        "store":         _merge_defaults(settings.store_settings,          DEFAULT_STORE),
+        "store":         _apply_masks(store, "store"),
         "notifications": _merge_defaults(settings.notification_settings,   DEFAULT_NOTIFICATIONS),
     }
 
@@ -399,7 +478,8 @@ async def update_settings(
 
     if body.whatsapp is not None:
         current = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-        current.update(body.whatsapp.model_dump())
+        incoming = _restore_secrets(body.whatsapp.model_dump(), current, "whatsapp")
+        current.update(incoming)
         settings.whatsapp_settings = current
 
     if body.ai is not None:
@@ -409,7 +489,8 @@ async def update_settings(
 
     if body.store is not None:
         current = _merge_defaults(settings.store_settings, DEFAULT_STORE)
-        current.update(body.store.model_dump())
+        incoming = _restore_secrets(body.store.model_dump(), current, "store")
+        current.update(incoming)
         settings.store_settings = current
 
     if body.notifications is not None:
@@ -421,10 +502,12 @@ async def update_settings(
     db.commit()
     db.refresh(settings)
 
+    wa_saved    = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
+    store_saved = _merge_defaults(settings.store_settings,    DEFAULT_STORE)
     return {
-        "whatsapp":      _merge_defaults(settings.whatsapp_settings,      DEFAULT_WHATSAPP),
+        "whatsapp":      _apply_masks(wa_saved,    "whatsapp"),
         "ai":            _merge_defaults(settings.ai_settings,             DEFAULT_AI),
-        "store":         _merge_defaults(settings.store_settings,          DEFAULT_STORE),
+        "store":         _apply_masks(store_saved, "store"),
         "notifications": _merge_defaults(settings.notification_settings,   DEFAULT_NOTIFICATIONS),
     }
 
@@ -455,7 +538,7 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
             {"type": "BODY",   "text": "مرحباً {{1}}،\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن قبل نفاد الكمية:\n{{2}}"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
             {"type": "BUTTONS", "buttons": [{"type": "URL", "text": "أكمل الطلب", "url": "{{2}}"}]},
         ],
     },
@@ -467,7 +550,7 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "عرض خاص لك 🎁"},
             {"type": "BODY",   "text": "أهلاً {{1}}،\nاحصل على خصم {{2}} باستخدام كود: *{{3}}*\nالعرض ينتهي قريباً — لا تفوّته!"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     {
@@ -478,7 +561,7 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "وصل جديد! ✨"},
             {"type": "BODY",   "text": "مرحباً {{1}}،\nيسعدنا إعلامك بوصول منتجات جديدة في متجر {{2}}.\nاكتشف أحدث التشكيلة الآن وكن أول من يحصل عليها."},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     {
@@ -489,7 +572,7 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "👑 عرض VIP حصري"},
             {"type": "BODY",   "text": "{{1}}، أنت من عملائنا المميزين!\nبصفتك عضواً VIP لديك خصم حصري {{2}} على مشترياتك القادمة.\nاستخدم الكود: *{{3}}*"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     {
@@ -500,7 +583,7 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "تأكيد الطلب ✅"},
             {"type": "BODY",   "text": "شكراً {{1}}!\nتم استلام طلبك رقم *{{2}}* بنجاح.\nسيتم التواصل معك قريباً لتأكيد موعد التوصيل."},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     {
@@ -511,7 +594,7 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "اشتقنا إليك! 💙"},
             {"type": "BODY",   "text": "مرحباً {{1}}،\nلم نرك منذ فترة ونحن نفتقدك!\nعُد إلينا مع خصم خاص {{2}} على طلبك القادم.\nالكود: *{{3}}*"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     # ── Default intelligence templates ────────────────────────────────────────
@@ -522,7 +605,7 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "BODY",   "text": "مرحباً {{1}} 🐝\n\nاستلمنا طلبك بنجاح 🍯\n\nالمنتج: {{2}}\nالمبلغ: {{3}} ريال\n\nطريقة الدفع: الدفع عند الاستلام\n\nيرجى تأكيد الطلب بالضغط على الزر أدناه."},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
             {"type": "BUTTONS", "buttons": [
                 {"type": "QUICK_REPLY", "text": "تأكيد الطلب ✅"},
                 {"type": "QUICK_REPLY", "text": "إلغاء الطلب ❌"},
@@ -536,7 +619,7 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "BODY",   "text": "مرحباً {{1}} 🐝\n\nنتوقع أن {{2}} لديك قد أوشك على النفاد 🍯\n\nاطلب عبوة جديدة الآن:\n\n{{3}}"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
 ]
@@ -832,7 +915,7 @@ MOCK_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
             {"type": "BODY",   "text": "مرحباً {{1}}،\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن قبل نفاد الكمية: {{2}}"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
             {"type": "BUTTONS", "buttons": [{"type": "URL", "text": "أكمل الطلب", "url": "{{2}}"}]},
         ],
     },
@@ -845,7 +928,7 @@ MOCK_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "عرض خاص لك 🎁"},
             {"type": "BODY",   "text": "أهلاً {{1}}،\nاحصل على خصم {{2}} باستخدام كود: *{{3}}*\nالعرض ينتهي قريباً — لا تفوّته!"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     {
@@ -857,7 +940,7 @@ MOCK_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "وصل جديد! ✨"},
             {"type": "BODY",   "text": "مرحباً {{1}}،\nيسعدنا إعلامك بوصول منتجات جديدة في متجر {{2}}.\nاكتشف أحدث التشكيلة الآن وكن أول من يحصل عليها."},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     {
@@ -869,7 +952,7 @@ MOCK_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "👑 عرض VIP حصري"},
             {"type": "BODY",   "text": "{{1}}، أنت من عملائنا المميزين!\nبصفتك عضواً VIP لديك خصم حصري {{2}} على مشترياتك القادمة.\nاستخدم الكود: *{{3}}*"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     {
@@ -881,7 +964,7 @@ MOCK_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "تأكيد الطلب ✅"},
             {"type": "BODY",   "text": "شكراً {{1}}!\nتم استلام طلبك رقم *{{2}}* بنجاح.\nسيتم التواصل معك قريباً لتأكيد موعد التوصيل."},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
     {
@@ -893,7 +976,7 @@ MOCK_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "اشتقنا إليك! 💙"},
             {"type": "BODY",   "text": "مرحباً {{1}}،\nلم نرك منذ فترة ونحن نفتقدك!\nعدت إلينا مع خصم خاص {{2}} على طلبك القادم.\nالكود: *{{3}}*"},
-            {"type": "FOOTER", "text": "🐝 نهلة — مساعد متجرك"},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
 ]
@@ -2959,7 +3042,7 @@ def _build_response_context(db: Session, tenant_id: int) -> Dict[str, Any]:
     return {
         "store_name":       store.get("store_name") or "",
         "store_url":        store.get("store_url") or "",
-        "assistant_name":   ai.get("assistant_name") or "نهلة",
+        "assistant_name":   ai.get("assistant_name") or "نحلة",
         "coupon_rules":     ai.get("coupon_rules") or "",
         "escalation_rules": ai.get("escalation_rules") or "",
         "shipping_lines":   shipping_lines,
@@ -4581,7 +4664,7 @@ async def create_billing_checkout(
         try:
             invoice = await gateway_client.create_invoice(
                 amount_sar=float(price_sar),
-                description=f"نهلة — خطة {plan_meta.get('name_ar', plan.name)} (شهري)",
+                description=f"نحلة — خطة {plan_meta.get('name_ar', plan.name)} (شهري)",
                 callback_url="https://api.nahlaai.com/billing/webhook/moyasar/subscription",
                 success_url=success_redirect,
                 error_url=error_redirect,
@@ -4938,10 +5021,74 @@ async def track_storefront_event(
 
 # ── Existing endpoints ─────────────────────────────────────────────────────────
 
+_START_TIME = _time.monotonic()
+
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "ok"}
+    """Lightweight liveness probe — always returns fast, no DB hit."""
+    return {
+        "status": "ok",
+        "service": "nahla-saas",
+        "uptime_seconds": round(_time.monotonic() - _START_TIME),
+        "version": "1.0.0",
+    }
+
+@app.get("/health/db")
+async def health_db(db: Session = Depends(get_db)):
+    """Database connectivity probe."""
+    from observability.health import check_database
+    result = await check_database(db)
+    ok = result.get("status") == "ok"
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={"status": result.get("status"), "service": "nahla-saas", "database": ok},
+    )
+
+@app.get("/health/whatsapp")
+async def health_whatsapp(request: Request, db: Session = Depends(get_db)):
+    """WhatsApp integration readiness check — reports configured/not_configured without exposing secrets."""
+    tenant_id = _resolve_tenant_id(request)
+    settings = _get_or_create_settings(db, tenant_id)
+    db.commit()
+    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
+    configured = bool(wa.get("phone_number_id") and wa.get("access_token"))
+    return {
+        "status": "configured" if configured else "not_configured",
+        "service": "nahla-saas",
+        "phone_number_set": bool(wa.get("phone_number")),
+        "phone_number_id_set": bool(wa.get("phone_number_id")),
+        "access_token_set": bool(wa.get("access_token")),
+        "verify_token_set": bool(wa.get("verify_token")),
+        "auto_reply_enabled": wa.get("auto_reply_enabled", False),
+    }
+
+@app.get("/health/detailed")
+async def health_detailed(request: Request, db: Session = Depends(get_db)):
+    """Full readiness probe: DB + WhatsApp configuration check."""
+    from observability.health import check_database
+    db_result = await check_database(db)
+    db_ok = db_result.get("status") == "ok"
+
+    tenant_id = _resolve_tenant_id(request)
+    wa = _merge_defaults(
+        (_get_or_create_settings(db, tenant_id)).whatsapp_settings,
+        DEFAULT_WHATSAPP,
+    )
+    db.commit()
+    wa_configured = bool(wa.get("phone_number_id") and wa.get("access_token"))
+
+    overall = "ok" if db_ok else "degraded"
+    return JSONResponse(
+        status_code=200 if db_ok else 503,
+        content={
+            "status": overall,
+            "service": "nahla-saas",
+            "database": db_ok,
+            "whatsapp_configured": wa_configured,
+            "uptime_seconds": round(_time.monotonic() - _START_TIME),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        },
+    )
 
 
 @app.get("/tenants/{tenant_id}")

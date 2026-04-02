@@ -171,7 +171,7 @@ export default function Conversations() {
             )}
             {selected.status === 'human' && (
               <button className="btn-secondary text-xs py-1.5">
-                <RefreshCw className="w-3.5 h-3.5" /> أعد لنهلة
+                <RefreshCw className="w-3.5 h-3.5" /> أعد لنحلة
               </button>
             )}
             <button className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400">
@@ -187,7 +187,7 @@ export default function Conversations() {
               <div className={`max-w-xs lg:max-w-md xl:max-w-lg ${m.direction === 'out' ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
                 {m.direction === 'out' && m.isAI && (
                   <span className="text-xs text-brand-500 flex items-center gap-1 px-1">
-                    <Bot className="w-3 h-3" /> رد نهلة
+                    <Bot className="w-3 h-3" /> رد نحلة
                   </span>
                 )}
                 <div
@@ -221,7 +221,7 @@ export default function Conversations() {
           </div>
           <p className="text-xs text-slate-400 mt-1.5 flex items-center gap-1">
             <Bot className="w-3 h-3 text-brand-400" />
-            نهلة تتولى هذه المحادثة — انقر «تولّ» للرد يدوياً
+            نحلة تتولى هذه المحادثة — انقر «تولّ» للرد يدوياً
           </p>
         </div>
       </div>

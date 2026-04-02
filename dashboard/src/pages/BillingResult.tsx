@@ -133,7 +133,7 @@ export default function BillingResult() {
                 <p className="text-base font-bold text-slate-900">تم الدفع بنجاح!</p>
                 <p className="text-sm text-slate-500 mt-1">
                   خطة{' '}
-                  <strong>{result?.plan_name_ar ?? 'نهلة'}</strong>{' '}
+                  <strong>{result?.plan_name_ar ?? 'نحلة'}</strong>{' '}
                   فعّالة الآن. الطيار الآلي جاهز.
                 </p>
                 {result?.amount_sar && (
