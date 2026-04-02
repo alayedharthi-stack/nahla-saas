@@ -24,6 +24,7 @@ import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
 import { isAdmin } from '../../auth'
+import { apiCall } from '../../api/client'
 
 interface NavItem {
   to:    string
@@ -81,12 +82,9 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const [logoUrl,   setLogoUrl]   = useState('/logo.png')
 
   useEffect(() => {
-    fetch('/api/settings', {
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-ID': '1' },
-    })
-      .then(r => r.ok ? r.json() : null)
+    apiCall<{ store?: { store_name?: string; store_logo_url?: string } }>('/settings')
       .then(data => {
-        if (data?.store?.store_name)    setStoreName(data.store.store_name)
+        if (data?.store?.store_name)     setStoreName(data.store.store_name)
         if (data?.store?.store_logo_url) setLogoUrl(data.store.store_logo_url)
       })
       .catch(() => {/* keep defaults */})
