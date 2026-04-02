@@ -79,7 +79,7 @@ interface SidebarProps {
 export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const { t } = useLanguage()
   const [storeName, setStoreName] = useState('نحلة')
-  const [logoUrl,   setLogoUrl]   = useState('/logo.png')
+  const [logoUrl,   setLogoUrl]   = useState('/logo-v2.png')
 
   useEffect(() => {
     apiCall<{ store?: { store_name?: string; store_logo_url?: string } }>('/settings')
