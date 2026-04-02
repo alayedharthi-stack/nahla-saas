@@ -74,7 +74,8 @@ def update_customer_memory(
 
 def _update_conversation_summary(db, tenant_id: int, customer_id: int, turn: Dict) -> None:
     summary = db.query(ConversationHistorySummary).filter(
-        ConversationHistorySummary.customer_id == customer_id
+        ConversationHistorySummary.customer_id == customer_id,
+        ConversationHistorySummary.tenant_id == tenant_id,
     ).first()
 
     intent = turn.get("intent", "")
@@ -121,6 +122,7 @@ def _update_product_affinities(db, tenant_id: int, customer_id: int, turn: Dict)
         row = db.query(ProductAffinity).filter(
             ProductAffinity.customer_id == customer_id,
             ProductAffinity.product_id == product_id,
+            ProductAffinity.tenant_id == tenant_id,
         ).first()
         now = datetime.utcnow()
         if not row:
@@ -148,7 +150,8 @@ def _update_preferences(db, tenant_id: int, customer_id: int, turn: Dict) -> Non
         return
 
     prefs = db.query(CustomerPreferences).filter(
-        CustomerPreferences.customer_id == customer_id
+        CustomerPreferences.customer_id == customer_id,
+        CustomerPreferences.tenant_id == tenant_id,
     ).first()
 
     if not prefs:
@@ -175,7 +178,8 @@ def _update_preferences(db, tenant_id: int, customer_id: int, turn: Dict) -> Non
 
 def _update_profile_last_seen(db, tenant_id: int, customer_id: int) -> None:
     profile = db.query(CustomerProfile).filter(
-        CustomerProfile.customer_id == customer_id
+        CustomerProfile.customer_id == customer_id,
+        CustomerProfile.tenant_id == tenant_id,
     ).first()
     now = datetime.utcnow()
     if not profile:

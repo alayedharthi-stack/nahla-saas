@@ -58,7 +58,7 @@ export interface CreateCampaignPayload {
   coupon_code: string
 }
 
-const API_BASE = (import.meta.env.VITE_API_BASE ?? '') + '/api'
+const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
 async function apiCall<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {

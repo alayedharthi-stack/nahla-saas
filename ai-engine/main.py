@@ -70,14 +70,20 @@ def _load_tenant_context(tenant_identifier: str, tenant_id: Optional[int]) -> Di
         if tenant_id:
             tenant = db.query(Tenant).filter(Tenant.id == tenant_id, Tenant.is_active == True).first()
 
-        # Fallback: resolve by WhatsApp number or domain
+        # Fallback: resolve tenant by registered WhatsApp number.
+        # This is a lookup (not a data query), so no tenant_id scoping is needed —
+        # the result itself determines which tenant owns this number.
+        # Guard: only resolve to active tenants.
         if not tenant:
             from database.models import WhatsAppNumber
             wa = db.query(WhatsAppNumber).filter(
                 WhatsAppNumber.number.contains(tenant_identifier)
             ).first()
             if wa:
-                tenant = db.query(Tenant).filter(Tenant.id == wa.tenant_id).first()
+                tenant = db.query(Tenant).filter(
+                    Tenant.id == wa.tenant_id,
+                    Tenant.is_active == True,
+                ).first()
 
         if not tenant:
             return {"store_name": "our store", "products": [], "coupons": [], "policy": {}, "branding": {}}

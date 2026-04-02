@@ -72,19 +72,23 @@ def load_customer_memory(
 
         # ── Customer intelligence records ─────────────────────────────────────
         profile: Optional[CustomerProfile] = db.query(CustomerProfile).filter(
-            CustomerProfile.customer_id == customer_id
+            CustomerProfile.customer_id == customer_id,
+            CustomerProfile.tenant_id == tenant_id,
         ).first()
 
         prefs: Optional[CustomerPreferences] = db.query(CustomerPreferences).filter(
-            CustomerPreferences.customer_id == customer_id
+            CustomerPreferences.customer_id == customer_id,
+            CustomerPreferences.tenant_id == tenant_id,
         ).first()
 
         sensitivity: Optional[PriceSensitivityScore] = db.query(PriceSensitivityScore).filter(
-            PriceSensitivityScore.customer_id == customer_id
+            PriceSensitivityScore.customer_id == customer_id,
+            PriceSensitivityScore.tenant_id == tenant_id,
         ).first()
 
         history: Optional[ConversationHistorySummary] = db.query(ConversationHistorySummary).filter(
-            ConversationHistorySummary.customer_id == customer_id
+            ConversationHistorySummary.customer_id == customer_id,
+            ConversationHistorySummary.tenant_id == tenant_id,
         ).first()
 
         # ── Top-affinity products for this customer ───────────────────────────
