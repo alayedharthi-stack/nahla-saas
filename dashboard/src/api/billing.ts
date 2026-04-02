@@ -1,21 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
-
-async function apiCall<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Tenant-ID': '1',
-      ...(options?.headers ?? {}),
-    },
-    ...options,
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`API ${res.status}: ${text}`)
-  }
-  return res.json() as Promise<T>
-}
+import { apiCall } from './client'
 
 export interface BillingPlan {
   id:               number

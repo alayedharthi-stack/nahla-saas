@@ -11,20 +11,17 @@ export default function Login() {
   const [error,    setError]    = useState('')
   const [loading,  setLoading]  = useState(false)
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
     setLoading(true)
-
-    // Small delay for UX
-    setTimeout(() => {
-      if (login(email, password)) {
-        navigate('/overview', { replace: true })
-      } else {
-        setError('البريد الإلكتروني أو كلمة المرور غير صحيحة')
-        setLoading(false)
-      }
-    }, 400)
+    const ok = await login(email, password)
+    if (ok) {
+      navigate('/overview', { replace: true })
+    } else {
+      setError('البريد الإلكتروني أو كلمة المرور غير صحيحة')
+      setLoading(false)
+    }
   }
 
   return (

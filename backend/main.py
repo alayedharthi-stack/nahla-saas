@@ -1,9 +1,12 @@
 import os
-from datetime import datetime
+import hmac
+import secrets
+from datetime import datetime, timedelta
 from typing import Optional, Any, Dict, List, Tuple
 from sqlalchemy.orm import Session
 from fastapi import Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../database')))
@@ -24,6 +27,50 @@ import time as _time
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import logging
+
+# ── JWT auth setup ─────────────────────────────────────────────────────────────
+try:
+    from jose import JWTError, jwt as _jwt
+    _JWT_AVAILABLE = True
+except ImportError:
+    _JWT_AVAILABLE = False
+
+_JWT_SECRET    = os.environ.get("JWT_SECRET") or secrets.token_hex(32)
+_JWT_ALGORITHM = "HS256"
+_JWT_EXPIRE_H  = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))   # 7 days default
+
+_ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL",    "admin@nahlaai.com")
+_ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "nahla-admin-2026")
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+def _create_token(email: str, role: str, tenant_id: int) -> str:
+    payload = {
+        "sub":       email,
+        "role":      role,
+        "tenant_id": tenant_id,
+        "exp":       datetime.utcnow() + timedelta(hours=_JWT_EXPIRE_H),
+    }
+    return _jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+def _decode_token(token: str) -> Dict[str, Any] | None:
+    if not _JWT_AVAILABLE:
+        return None
+    try:
+        return _jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+    except JWTError:
+        return None
+
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> Dict[str, Any]:
+    """Dependency — raises 401 if token is missing or invalid."""
+    if not creds:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    payload = _decode_token(creds.credentials)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return payload
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -70,7 +117,7 @@ _API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
 async def api_key_middleware(request: Request, call_next):
     if _API_SECRET_KEY:
         path = request.url.path
-        if not (path.startswith("/health") or path.startswith("/webhook")):
+        if not (path.startswith("/health") or path.startswith("/webhook") or path.startswith("/auth")):
             provided = request.headers.get("X-Nahla-Key", "")
             if provided != _API_SECRET_KEY:
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
@@ -84,7 +131,7 @@ from rate_limiter import check_rate_limit as _check_rate_limit
 
 @app.middleware("http")
 async def global_rate_limit_middleware(request: Request, call_next):
-    if not request.url.path.startswith("/health"):
+    if not (request.url.path.startswith("/health") or request.url.path.startswith("/auth")):
         client_ip = request.headers.get("X-Real-IP") or (request.client.host if request.client else "unknown")
         if not _check_rate_limit(f"global:{client_ip}", max_count=300, window_seconds=60):
             return JSONResponse(status_code=429, content={"detail": "Too many requests"})
@@ -5089,6 +5136,50 @@ async def health_detailed(request: Request, db: Session = Depends(get_db)):
             "timestamp": datetime.utcnow().isoformat() + "Z",
         },
     )
+
+
+# ── Auth endpoints ─────────────────────────────────────────────────────────────
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+@app.post("/auth/login")
+async def auth_login(body: LoginIn):
+    """
+    Exchange email + password for a signed JWT.
+    Credentials are configured via ADMIN_EMAIL / ADMIN_PASSWORD env vars on Railway.
+    """
+    if not _JWT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable — python-jose not installed")
+
+    email_ok    = hmac.compare_digest(body.email.lower(), _ADMIN_EMAIL.lower())
+    password_ok = hmac.compare_digest(body.password,      _ADMIN_PASSWORD)
+
+    if not (email_ok and password_ok):
+        raise HTTPException(status_code=401, detail="البريد الإلكتروني أو كلمة المرور غير صحيحة")
+
+    token = _create_token(email=_ADMIN_EMAIL, role="admin", tenant_id=1)
+    return {
+        "access_token": token,
+        "token_type":   "bearer",
+        "role":         "admin",
+        "email":        _ADMIN_EMAIL,
+    }
+
+@app.get("/auth/me")
+async def auth_me(user: Dict[str, Any] = Depends(get_current_user)):
+    """Return the identity of the currently authenticated user."""
+    return {
+        "email":     user.get("sub"),
+        "role":      user.get("role"),
+        "tenant_id": user.get("tenant_id"),
+    }
+
+@app.post("/auth/logout")
+async def auth_logout():
+    """Client-side logout — token invalidation is handled by the frontend."""
+    return {"detail": "logged out"}
 
 
 @app.get("/tenants/{tenant_id}")
