@@ -1,18 +1,39 @@
-import { useState, type FormEvent } from 'react'
+import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Sparkles, Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
+import { Sparkles, Eye, EyeOff, AlertCircle, Loader2, CheckCircle, Mail } from 'lucide-react'
 import { register } from '../auth'
 
 export default function Register() {
   const navigate = useNavigate()
-  const [storeName, setStoreName] = useState('')
-  const [email,     setEmail]     = useState('')
-  const [phone,     setPhone]     = useState('')
-  const [password,  setPassword]  = useState('')
-  const [confirm,   setConfirm]   = useState('')
-  const [showPw,    setShowPw]    = useState(false)
-  const [error,     setError]     = useState('')
-  const [loading,   setLoading]   = useState(false)
+  const [storeName,    setStoreName]    = useState('')
+  const [email,        setEmail]        = useState('')
+  const [phone,        setPhone]        = useState('')
+  const [password,     setPassword]     = useState('')
+  const [confirm,      setConfirm]      = useState('')
+  const [showPw,       setShowPw]       = useState(false)
+  const [error,        setError]        = useState('')
+  const [loading,      setLoading]      = useState(false)
+  const [inviteToken,  setInviteToken]  = useState('')
+  const [inviteValid,  setInviteValid]  = useState<boolean | null>(null)
+
+  // Extract invite token from URL ?invite=...
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const token = params.get('invite') ?? ''
+    setInviteToken(token)
+    if (token) {
+      // Validate invite token against backend
+      fetch(`/api/auth/invite/${token}`)
+        .then(r => r.json())
+        .then(data => {
+          setInviteValid(!!data.valid)
+          if (data.invited_email) setEmail(data.invited_email)
+        })
+        .catch(() => setInviteValid(false))
+    } else {
+      setInviteValid(null) // unknown — backend will decide
+    }
+  }, [])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -28,13 +49,29 @@ export default function Register() {
     }
 
     setLoading(true)
-    const result = await register(email, password, storeName, phone)
+    const result = await register(email, password, storeName, phone, inviteToken)
     if (result.ok) {
       navigate('/overview', { replace: true })
     } else {
       setError(result.error ?? 'فشل التسجيل')
       setLoading(false)
     }
+  }
+
+  // If invite token is present but invalid, show error page
+  if (inviteToken && inviteValid === false) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4" dir="rtl">
+        <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl p-8 text-center space-y-4">
+          <AlertCircle className="w-10 h-10 text-red-500 mx-auto" />
+          <h2 className="text-lg font-bold text-slate-900">رابط الدعوة غير صالح</h2>
+          <p className="text-slate-500 text-sm">هذا الرابط منتهي الصلاحية أو غير صحيح. تواصل مع المالك للحصول على رابط جديد.</p>
+          <Link to="/login" className="block text-brand-600 text-sm font-medium hover:underline">
+            تسجيل الدخول
+          </Link>
+        </div>
+      </div>
+    )
   }
 
   return (

@@ -50,12 +50,13 @@ export async function register(
   password: string,
   storeName: string,
   phone: string = '',
+  inviteToken: string = '',
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await fetch(`${API_BASE}/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, store_name: storeName, phone }),
+      body: JSON.stringify({ email, password, store_name: storeName, phone, invite_token: inviteToken }),
     })
     const data = await res.json()
     if (!res.ok) return { ok: false, error: data.detail ?? 'فشل التسجيل' }

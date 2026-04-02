@@ -50,7 +50,22 @@ _SALLA_REDIRECT_URI  = os.environ.get(
 _ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL",    "admin@nahlaai.com")
 _ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "nahla-admin-2026")
 
+# ── Registration gate ───────────────────────────────────────────────────────────
+# When REQUIRE_INVITE=true (default in production), /auth/register requires a
+# valid invitation token issued by an admin. Set to "false" only for local dev.
+_REQUIRE_INVITE = os.environ.get("REQUIRE_INVITE", "true").lower() != "false"
+_INVITE_EXPIRE_H = 168  # 7 days
+
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+# ── Audit logger ────────────────────────────────────────────────────────────────
+_audit_logger = logging.getLogger("nahla.audit")
+
+def _audit(event: str, **ctx) -> None:
+    """Emit a structured audit log line. Always goes to a dedicated logger."""
+    parts = " ".join(f"{k}={v}" for k, v in ctx.items())
+    _audit_logger.info("AUDIT event=%s %s", event, parts)
+
 
 def _create_token(email: str, role: str, tenant_id: int) -> str:
     payload = {
@@ -58,6 +73,16 @@ def _create_token(email: str, role: str, tenant_id: int) -> str:
         "role":      role,
         "tenant_id": tenant_id,
         "exp":       datetime.utcnow() + timedelta(hours=_JWT_EXPIRE_H),
+    }
+    return _jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
+
+def _create_invite_token(email: str, tenant_id_hint: Optional[int] = None) -> str:
+    """Create a short-lived invitation JWT (type=invite)."""
+    payload = {
+        "type":            "invite",
+        "invited_email":   email,
+        "tenant_id_hint":  tenant_id_hint,
+        "exp":             datetime.utcnow() + timedelta(hours=_INVITE_EXPIRE_H),
     }
     return _jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
 
@@ -81,13 +106,55 @@ def get_current_user(
     return payload
 
 def require_admin(
+    request: Request,
     creds: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
 ) -> Dict[str, Any]:
-    """Dependency — requires a valid JWT with role=admin."""
+    """Dependency — requires a valid JWT with role=admin. Logs every denial."""
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
     user = get_current_user(creds)
     if user.get("role") != "admin":
+        _audit(
+            "admin_access_denied",
+            path=str(request.url.path),
+            method=request.method,
+            role=user.get("role"),
+            sub=user.get("sub"),
+            tenant_id=user.get("tenant_id"),
+            ip=client_ip,
+        )
         raise HTTPException(status_code=403, detail="Admin access required")
+    _audit(
+        "admin_access_granted",
+        path=str(request.url.path),
+        method=request.method,
+        sub=user.get("sub"),
+        ip=client_ip,
+    )
     return user
+
+def require_authenticated(request: Request) -> Dict[str, Any]:
+    """
+    Dependency — returns the JWT payload for the current authenticated request.
+    Reads ONLY from request.state.jwt_payload (set by jwt_enforcement_middleware).
+    Never falls back to headers — prevents tenant escape via forged X-Tenant-ID.
+    """
+    payload = getattr(request.state, "jwt_payload", None)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return payload
+
+def get_jwt_tenant_id(request: Request) -> int:
+    """
+    Strict tenant resolver — reads tenant_id ONLY from the validated JWT.
+    Use this for all data endpoints to prevent tenant escape.
+    """
+    payload = require_authenticated(request)
+    tid = payload.get("tenant_id")
+    if tid is None:
+        raise HTTPException(status_code=401, detail="Token missing tenant_id claim")
+    return int(tid)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -5267,7 +5334,7 @@ class LoginIn(BaseModel):
     password: str
 
 @app.post("/auth/login")
-async def auth_login(body: LoginIn, db: Session = Depends(get_db)):
+async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     """
     Exchange email + password for a signed JWT.
     Checks admin env-var credentials first, then merchant accounts in the database.
@@ -5278,11 +5345,16 @@ async def auth_login(body: LoginIn, db: Session = Depends(get_db)):
     _INVALID = HTTPException(status_code=401, detail="البريد الإلكتروني أو كلمة المرور غير صحيحة")
     email = body.email.strip().lower()
 
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
+
     # 1. Admin credentials (env vars — fastest path, no DB hit)
     email_ok    = hmac.compare_digest(email,         _ADMIN_EMAIL.lower())
     password_ok = hmac.compare_digest(body.password, _ADMIN_PASSWORD)
     if email_ok and password_ok:
         token = _create_token(email=_ADMIN_EMAIL, role="admin", tenant_id=1)
+        _audit("login_success", role="admin", sub=_ADMIN_EMAIL, ip=client_ip)
         return {"access_token": token, "token_type": "bearer",
                 "role": "admin", "email": _ADMIN_EMAIL, "tenant_id": 1}
 
@@ -5292,11 +5364,17 @@ async def auth_login(body: LoginIn, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.email == email, User.is_active == True).first()
     if not user or not getattr(user, "password_hash", None):
+        _audit("login_failed", reason="user_not_found", sub=email, ip=client_ip)
         raise _INVALID
     if not _pwd_context.verify(body.password, user.password_hash):
+        _audit("login_failed", reason="wrong_password", sub=email, ip=client_ip)
+        raise _INVALID
+    if not user.is_active:
+        _audit("login_failed", reason="account_inactive", sub=email, ip=client_ip)
         raise _INVALID
 
     token = _create_token(email=user.email, role=user.role or "merchant", tenant_id=user.tenant_id)
+    _audit("login_success", role=user.role, sub=user.email, tenant_id=user.tenant_id, ip=client_ip)
     return {
         "access_token": token,
         "token_type":   "bearer",
@@ -5321,19 +5399,39 @@ async def auth_logout():
 
 
 class RegisterIn(BaseModel):
-    email:      str
-    password:   str
-    store_name: str
-    phone:      str = ""
+    email:        str
+    password:     str
+    store_name:   str
+    phone:        str = ""
+    invite_token: str = ""  # required when REQUIRE_INVITE=true
+
+@app.get("/auth/invite/{token}")
+async def validate_invite(token: str):
+    """Check whether an invitation token is valid and return the pre-filled email."""
+    if not _JWT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+    payload = _decode_token(token)
+    if not payload or payload.get("type") != "invite":
+        raise HTTPException(status_code=400, detail="رابط الدعوة غير صالح أو منتهي الصلاحية")
+    return {
+        "valid":          True,
+        "invited_email":  payload.get("invited_email", ""),
+        "tenant_id_hint": payload.get("tenant_id_hint"),
+    }
 
 @app.post("/auth/register")
-async def auth_register(body: RegisterIn, db: Session = Depends(get_db)):
+async def auth_register(body: RegisterIn, request: Request, db: Session = Depends(get_db)):
     """
-    Self-registration for new merchants.
+    Register a new merchant account.
+    When REQUIRE_INVITE=true (production default), a valid invite_token is mandatory.
     Creates a dedicated tenant + merchant user, returns a JWT token.
     """
     if not _PASSLIB_AVAILABLE:
         raise HTTPException(status_code=503, detail="passlib not installed")
+
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
 
     email = body.email.strip().lower()
     if not email or not body.password or not body.store_name.strip():
@@ -5341,6 +5439,33 @@ async def auth_register(body: RegisterIn, db: Session = Depends(get_db)):
 
     if len(body.password) < 8:
         raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تكون 8 أحرف على الأقل")
+
+    # ── Invitation gate ────────────────────────────────────────────────────────
+    if _REQUIRE_INVITE:
+        if not body.invite_token:
+            _audit("register_denied", reason="missing_invite", sub=email, ip=client_ip)
+            raise HTTPException(
+                status_code=403,
+                detail="التسجيل يتطلب رابط دعوة صالح. تواصل مع المالك للحصول على رابط دعوة.",
+            )
+        invite = _decode_token(body.invite_token)
+        if not invite or invite.get("type") != "invite":
+            _audit("register_denied", reason="invalid_invite", sub=email, ip=client_ip)
+            raise HTTPException(status_code=403, detail="رابط الدعوة غير صالح أو منتهي الصلاحية")
+        # If the invite was for a specific email, enforce it
+        invited_email = invite.get("invited_email", "")
+        if invited_email and invited_email.lower() != email:
+            _audit(
+                "register_denied",
+                reason="email_mismatch",
+                sub=email,
+                invited=invited_email,
+                ip=client_ip,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="البريد الإلكتروني لا يطابق الدعوة المرسلة",
+            )
 
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="البريد الإلكتروني مسجَّل مسبقاً")
@@ -5368,9 +5493,15 @@ async def auth_register(body: RegisterIn, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    logger.info("New merchant registered: email=%s tenant_id=%s", email, tenant.id)
+    _audit(
+        "merchant_registered",
+        sub=email,
+        tenant_id=tenant.id,
+        store_name=body.store_name.strip(),
+        ip=client_ip,
+    )
 
-    token = _create_token({"sub": email, "role": "merchant", "tenant_id": tenant.id})
+    token = _create_token(email=email, role="merchant", tenant_id=tenant.id)
     return {"access_token": token, "token_type": "bearer", "role": "merchant"}
 
 
@@ -5573,9 +5704,13 @@ async def salla_oauth_callback(
 # ── Salla data API endpoints ───────────────────────────────────────────────────
 
 @app.get("/api/salla/store")
-async def get_salla_store(request: Request, db: Session = Depends(get_db)):
-    """Return saved Salla store info for this tenant."""
-    tenant_id = _resolve_tenant_id(request)
+async def get_salla_store(
+    request:   Request,
+    db:        Session = Depends(get_db),
+    tenant_id: int     = Depends(get_jwt_tenant_id),
+):
+    """Return saved Salla store info for this tenant (JWT tenant_id only)."""
+    _audit("salla_store_read", tenant_id=tenant_id)
     from models import Integration
     integration = db.query(Integration).filter(
         Integration.tenant_id == tenant_id,
@@ -5595,9 +5730,12 @@ async def get_salla_store(request: Request, db: Session = Depends(get_db)):
 
 
 @app.get("/api/salla/products")
-async def get_salla_products(request: Request):
-    """Fetch live products from the tenant's Salla store via the adapter."""
-    tenant_id = _resolve_tenant_id(request)
+async def get_salla_products(
+    request:   Request,
+    tenant_id: int = Depends(get_jwt_tenant_id),
+):
+    """Fetch live products from the tenant's Salla store (JWT tenant_id only)."""
+    _audit("salla_products_fetched", tenant_id=tenant_id)
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
     from store_integration.registry import get_adapter
     adapter = get_adapter(tenant_id)
@@ -5607,18 +5745,21 @@ async def get_salla_products(request: Request):
         products = await adapter.get_products()
         return {"products": [p.dict() for p in products], "count": len(products)}
     except Exception as exc:
-        logger.error("Salla products fetch error: %s", exc)
+        logger.error("Salla products fetch error tenant=%s: %s", tenant_id, exc)
         raise HTTPException(status_code=502, detail=f"Salla API error: {exc}")
 
 
 @app.post("/api/salla/test-coupon")
-async def test_salla_coupon(request: Request):
-    """Validate a coupon code against the tenant's Salla store."""
+async def test_salla_coupon(
+    request:   Request,
+    tenant_id: int = Depends(get_jwt_tenant_id),
+):
+    """Validate a coupon code against the tenant's Salla store (JWT tenant_id only)."""
     body = await request.json()
     coupon_code = body.get("coupon_code", "").strip()
     if not coupon_code:
         raise HTTPException(status_code=400, detail="coupon_code is required")
-    tenant_id = _resolve_tenant_id(request)
+    _audit("salla_coupon_test", tenant_id=tenant_id, coupon=coupon_code)
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
     from store_integration.registry import get_adapter
     adapter = get_adapter(tenant_id)
@@ -5630,7 +5771,7 @@ async def test_salla_coupon(request: Request):
             return {"valid": True, "coupon": offer.dict()}
         return {"valid": False, "reason": "coupon not found or expired"}
     except Exception as exc:
-        logger.error("Salla coupon validation error: %s", exc)
+        logger.error("Salla coupon error tenant=%s: %s", tenant_id, exc)
         raise HTTPException(status_code=502, detail=f"Salla API error: {exc}")
 
 
@@ -5670,6 +5811,7 @@ async def list_merchants(
 @app.post("/admin/merchants")
 async def create_merchant(
     body:   CreateMerchantIn,
+    request: Request,
     db:     Session          = Depends(get_db),
     _admin: Dict[str, Any]  = Depends(require_admin),
 ):
@@ -5681,7 +5823,6 @@ async def create_merchant(
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="البريد الإلكتروني مسجَّل مسبقاً")
 
-    # Create a dedicated tenant for this merchant
     tenant = Tenant(
         name=body.store_name,
         domain=f"store-{email.split('@')[0]}.nahla.sa",
@@ -5689,7 +5830,7 @@ async def create_merchant(
         created_at=datetime.utcnow(),
     )
     db.add(tenant)
-    db.flush()  # populate tenant.id
+    db.flush()
 
     user = User(
         username=email,
@@ -5703,11 +5844,53 @@ async def create_merchant(
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    _audit(
+        "merchant_created_by_admin",
+        admin=_admin.get("sub"),
+        merchant_email=email,
+        tenant_id=tenant.id,
+        store_name=body.store_name,
+    )
     return _merchant_row(user)
+
+
+class InviteIn(BaseModel):
+    email: str  # pre-fill the invite for a specific email, or "" for open invite
+
+@app.post("/admin/invitations")
+async def create_invitation(
+    body:    InviteIn,
+    request: Request,
+    _admin:  Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Generate an invitation link for a new merchant (admin only).
+    Returns a signed token valid for 7 days.
+    Set email="" to create an open invitation (any email can use it).
+    """
+    if not _JWT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+    email = body.email.strip().lower()
+    token = _create_invite_token(email=email)
+    invite_url = f"https://app.nahlaai.com/register?invite={token}"
+    _audit(
+        "invitation_created",
+        admin=_admin.get("sub"),
+        invited_email=email or "(open)",
+    )
+    return {
+        "invite_token": token,
+        "invite_url":   invite_url,
+        "invited_email": email or None,
+        "expires_in_hours": _INVITE_EXPIRE_H,
+    }
+
 
 @app.put("/admin/merchants/{user_id}/toggle")
 async def toggle_merchant(
     user_id: int,
+    request: Request,
     db:      Session          = Depends(get_db),
     _admin:  Dict[str, Any]  = Depends(require_admin),
 ):
@@ -5718,11 +5901,18 @@ async def toggle_merchant(
     user.is_active = not user.is_active
     db.commit()
     db.refresh(user)
+    _audit(
+        "merchant_toggled",
+        admin=_admin.get("sub"),
+        merchant_id=user_id,
+        is_active=user.is_active,
+    )
     return _merchant_row(user)
 
 @app.delete("/admin/merchants/{user_id}")
 async def delete_merchant(
     user_id: int,
+    request: Request,
     db:      Session          = Depends(get_db),
     _admin:  Dict[str, Any]  = Depends(require_admin),
 ):
@@ -5730,6 +5920,13 @@ async def delete_merchant(
     user = db.query(User).filter(User.id == user_id, User.role == "merchant").first()
     if not user:
         raise HTTPException(status_code=404, detail="Merchant not found")
+    _audit(
+        "merchant_deleted",
+        admin=_admin.get("sub"),
+        merchant_id=user_id,
+        merchant_email=user.email,
+        tenant_id=user.tenant_id,
+    )
     db.delete(user)
     db.commit()
     return {"deleted": True}
