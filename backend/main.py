@@ -170,6 +170,10 @@ _JWT_PUBLIC_PREFIXES = ("/health", "/webhook", "/auth")
 async def jwt_enforcement_middleware(request: Request, call_next):
     path = request.url.path
 
+    # CORS preflight — browser sends OPTIONS without Authorization; let it through
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     # Always allow public endpoints without a token
     if any(path.startswith(p) for p in _JWT_PUBLIC_PREFIXES):
         return await call_next(request)
