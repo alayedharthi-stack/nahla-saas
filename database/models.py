@@ -30,6 +30,24 @@ class Tenant(Base):
     branding = Column(JSONB, nullable=True)
     recommendation_controls = Column(JSONB, nullable=True)
     coupon_policy = Column(JSONB, nullable=True)
+
+    # ── Billing provider fields ───────────────────────────────────────────────
+    # billing_provider: 'stripe' (auto recurring) | 'hyperpay' (local manual)
+    billing_provider        = Column(String, nullable=True, default='stripe')
+
+    # Stripe fields (managed by Stripe webhooks — source of truth)
+    stripe_customer_id      = Column(String, nullable=True)
+    stripe_subscription_id  = Column(String, nullable=True)
+    stripe_price_id         = Column(String, nullable=True)
+    subscription_status     = Column(String, nullable=True)   # trialing | active | past_due | canceled
+    trial_started_at        = Column(DateTime, nullable=True)
+    trial_ends_at           = Column(DateTime, nullable=True)
+    current_period_end      = Column(DateTime, nullable=True)
+
+    # HyperPay fields (manual monthly payment flow)
+    hyperpay_payment_id     = Column(String, nullable=True)
+    billing_status          = Column(String, nullable=True)   # pending | paid | failed
+
     widget_settings = relationship('WidgetSetting', back_populates='tenant')
     whatsapp_numbers = relationship('WhatsAppNumber', back_populates='tenant')
     users = relationship('User', back_populates='tenant')

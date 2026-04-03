@@ -22,6 +22,10 @@ python-multipart==0.0.9   # required by FastAPI for form data (OAuth token excha
 python-jose[cryptography]==3.3.0   # JWT signing and verification
 passlib[bcrypt]==1.7.4             # password hashing (available for future use)
 
+# ── Payment gateways ──────────────────────────────────────────────────────────
+stripe==9.12.0             # Stripe subscription billing
+bcrypt==4.1.3              # Direct bcrypt (replaces passlib for Python 3.11 compat)
+
 # ── AI / Claude (used by ai-orchestrator) ────────────────────────────────────
 # The orchestrator calls the Anthropic Messages API directly via httpx —
 # no extra SDK needed. anthropic SDK is listed here for optional local use.

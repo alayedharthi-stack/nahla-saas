@@ -695,2418 +695,32 @@ def _require_subscription(db: Session, tenant_id: int) -> None:
             detail="الرجاء اختيار خطة نحلة لتفعيل الطيار الآلي للمبيعات.",
         )
 
-# ── Pydantic schemas ───────────────────────────────────────────────────────────
-
-class WhatsAppSettingsIn(BaseModel):
-    business_display_name: str = ""
-    phone_number: str = ""
-    phone_number_id: str = ""
-    access_token: str = ""
-    verify_token: str = ""
-    webhook_url: str = ""
-    store_button_label: str = "زيارة المتجر"
-    store_button_url: str = ""
-    owner_contact_label: str = "تواصل مع المالك"
-    owner_whatsapp_number: str = ""
-    auto_reply_enabled: bool = True
-    transfer_to_owner_enabled: bool = True
-
-class AISettingsIn(BaseModel):
-    assistant_name: str = "نحلة"
-    assistant_role: str = ""
-    reply_tone: str = "friendly"
-    reply_length: str = "medium"
-    default_language: str = "arabic"
-    owner_instructions: str = ""
-    coupon_rules: str = ""
-    escalation_rules: str = ""
-    allowed_discount_levels: str = "10"
-    recommendations_enabled: bool = True
-
-class StoreSettingsIn(BaseModel):
-    store_name: str = ""
-    store_logo_url: str = ""
-    store_url: str = ""
-    platform_type: str = "salla"
-    salla_client_id: str = ""
-    salla_client_secret: str = ""
-    salla_access_token: str = ""
-    zid_client_id: str = ""
-    zid_client_secret: str = ""
-    shopify_shop_domain: str = ""
-    shopify_access_token: str = ""
-    shipping_provider: str = ""
-    google_maps_location: str = ""
-    instagram_url: str = ""
-    twitter_url: str = ""
-    snapchat_url: str = ""
-    tiktok_url: str = ""
-
-class NotificationSettingsIn(BaseModel):
-    whatsapp_alerts: bool = True
-    email_alerts: bool = True
-    system_alerts: bool = True
-    failed_webhook_alerts: bool = True
-    low_balance_alerts: bool = True
-
-class AllSettingsIn(BaseModel):
-    whatsapp: Optional[WhatsAppSettingsIn] = None
-    ai: Optional[AISettingsIn] = None
-    store: Optional[StoreSettingsIn] = None
-    notifications: Optional[NotificationSettingsIn] = None
-
-# ── Secret masking ────────────────────────────────────────────────────────────
-# Fields that are masked before returning to the frontend.
-# Key: settings group name → set of field names.
-_SECRET_FIELDS: Dict[str, set] = {
-    "whatsapp": {"access_token", "verify_token"},
-    "store":    {"salla_client_secret", "salla_access_token",
-                 "zid_client_secret", "shopify_access_token"},
-}
-
-def _mask_secret(value: str) -> str:
-    """Return a masked version: first 4 chars + **** + last 4 chars."""
-    if not value or len(value) < 9:
-        return value  # too short — don't mask (probably empty/placeholder)
-    return value[:4] + "****" + value[-4:]
-
-def _is_masked(value: str) -> bool:
-    """True if this value was previously returned as a mask (contains ****)."""
-    return isinstance(value, str) and "****" in value
-
-def _apply_masks(data: Dict[str, Any], group: str) -> Dict[str, Any]:
-    """Return a copy of data with secret fields masked."""
-    fields = _SECRET_FIELDS.get(group, set())
-    return {k: (_mask_secret(v) if k in fields and isinstance(v, str) else v)
-            for k, v in data.items()}
-
-def _restore_secrets(incoming: Dict[str, Any], stored: Dict[str, Any], group: str) -> Dict[str, Any]:
-    """Replace masked values in incoming with the original stored secret."""
-    fields = _SECRET_FIELDS.get(group, set())
-    result = dict(incoming)
-    for field in fields:
-        if field in result and _is_masked(result[field]):
-            result[field] = stored.get(field, "")
-    return result
-
-# ── Settings endpoints ─────────────────────────────────────────────────────────
-
-@app.get("/settings")
-async def get_settings(request: Request, db: Session = Depends(get_db)):
-    """Return all settings for the current tenant."""
-    tenant_id = _resolve_tenant_id(request)
-    settings = _get_or_create_settings(db, tenant_id)
-    db.commit()
-
-    wa    = _merge_defaults(settings.whatsapp_settings,    DEFAULT_WHATSAPP)
-    store = _merge_defaults(settings.store_settings,       DEFAULT_STORE)
-    return {
-        "whatsapp":      _apply_masks(wa,    "whatsapp"),
-        "ai":            _merge_defaults(settings.ai_settings,             DEFAULT_AI),
-        "store":         _apply_masks(store, "store"),
-        "notifications": _merge_defaults(settings.notification_settings,   DEFAULT_NOTIFICATIONS),
-    }
-
-
-@app.put("/settings")
-async def update_settings(
-    body: AllSettingsIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Update settings for the current tenant (partial update – only provided groups saved)."""
-    tenant_id = _resolve_tenant_id(request)
-    settings = _get_or_create_settings(db, tenant_id)
-
-    if body.whatsapp is not None:
-        current = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-        incoming = _restore_secrets(body.whatsapp.model_dump(), current, "whatsapp")
-        current.update(incoming)
-        settings.whatsapp_settings = current
-
-    if body.ai is not None:
-        current = _merge_defaults(settings.ai_settings, DEFAULT_AI)
-        current.update(body.ai.model_dump())
-        settings.ai_settings = current
-
-    if body.store is not None:
-        current = _merge_defaults(settings.store_settings, DEFAULT_STORE)
-        incoming = _restore_secrets(body.store.model_dump(), current, "store")
-        current.update(incoming)
-        settings.store_settings = current
-
-    if body.notifications is not None:
-        current = _merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS)
-        current.update(body.notifications.model_dump())
-        settings.notification_settings = current
-
-    settings.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(settings)
-
-    wa_saved    = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    store_saved = _merge_defaults(settings.store_settings,    DEFAULT_STORE)
-    return {
-        "whatsapp":      _apply_masks(wa_saved,    "whatsapp"),
-        "ai":            _merge_defaults(settings.ai_settings,             DEFAULT_AI),
-        "store":         _apply_masks(store_saved, "store"),
-        "notifications": _merge_defaults(settings.notification_settings,   DEFAULT_NOTIFICATIONS),
-    }
-
-
-@app.post("/settings/test-whatsapp")
-async def test_whatsapp_connection(request: Request, db: Session = Depends(get_db)):
-    """Simulate a WhatsApp API connection test."""
-    tenant_id = _resolve_tenant_id(request)
-    settings = _get_or_create_settings(db, tenant_id)
-    db.commit()
-
-    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    if not wa.get("phone_number_id") or not wa.get("access_token"):
-        return {"success": False, "message": "Phone Number ID و Access Token مطلوبان لاختبار الاتصال"}
-
-    # In production, call the WhatsApp Business API here
-    return {"success": True, "message": "تم الاتصال بنجاح بـ WhatsApp Business API"}
-
-
-# ── Seed templates — auto-inserted into DB when the table is empty ────────────
-
-SEED_TEMPLATES: List[Dict[str, Any]] = [
-    {
-        "name": "abandoned_cart_reminder",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن قبل نفاد الكمية:\n{{2}}"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-            {"type": "BUTTONS", "buttons": [{"type": "URL", "text": "أكمل الطلب", "url": "{{2}}"}]},
-        ],
-    },
-    {
-        "name": "special_offer",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "عرض خاص لك 🎁"},
-            {"type": "BODY",   "text": "أهلاً {{1}}،\nاحصل على خصم {{2}} باستخدام كود: *{{3}}*\nالعرض ينتهي قريباً — لا تفوّته!"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    {
-        "name": "new_arrivals",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "وصل جديد! ✨"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nيسعدنا إعلامك بوصول منتجات جديدة في متجر {{2}}.\nاكتشف أحدث التشكيلة الآن وكن أول من يحصل عليها."},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    {
-        "name": "vip_exclusive",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "👑 عرض VIP حصري"},
-            {"type": "BODY",   "text": "{{1}}، أنت من عملائنا المميزين!\nبصفتك عضواً VIP لديك خصم حصري {{2}} على مشترياتك القادمة.\nاستخدم الكود: *{{3}}*"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    {
-        "name": "order_confirmed",
-        "language": "ar",
-        "category": "UTILITY",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "تأكيد الطلب ✅"},
-            {"type": "BODY",   "text": "شكراً {{1}}!\nتم استلام طلبك رقم *{{2}}* بنجاح.\nسيتم التواصل معك قريباً لتأكيد موعد التوصيل."},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    {
-        "name": "win_back",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "اشتقنا إليك! 💙"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nلم نرك منذ فترة ونحن نفتقدك!\nعُد إلينا مع خصم خاص {{2}} على طلبك القادم.\nالكود: *{{3}}*"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    # ── Default intelligence templates ────────────────────────────────────────
-    {
-        "name": "cod_order_confirmation_ar",
-        "language": "ar",
-        "category": "UTILITY",
-        "status": "APPROVED",
-        "components": [
-            {"type": "BODY",   "text": "مرحباً {{1}} 🐝\n\nاستلمنا طلبك بنجاح 🍯\n\nالمنتج: {{2}}\nالمبلغ: {{3}} ريال\n\nطريقة الدفع: الدفع عند الاستلام\n\nيرجى تأكيد الطلب بالضغط على الزر أدناه."},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-            {"type": "BUTTONS", "buttons": [
-                {"type": "QUICK_REPLY", "text": "تأكيد الطلب ✅"},
-                {"type": "QUICK_REPLY", "text": "إلغاء الطلب ❌"},
-            ]},
-        ],
-    },
-    {
-        "name": "predictive_reorder_reminder_ar",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "BODY",   "text": "مرحباً {{1}} 🐝\n\nنتوقع أن {{2}} لديك قد أوشك على النفاد 🍯\n\nاطلب عبوة جديدة الآن:\n\n{{3}}"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-]
-
-# Variable mapping documentation for smart automations
-TEMPLATE_VAR_MAP: Dict[str, Dict[str, str]] = {
-    "predictive_reorder_reminder_ar": {
-        "{{1}}": "customer_name",
-        "{{2}}": "product_name",
-        "{{3}}": "reorder_url",
-    },
-    "cod_order_confirmation_ar": {
-        "{{1}}": "customer_name",
-        "{{2}}": "product_name",
-        "{{3}}": "order_amount",
-    },
-    "abandoned_cart_reminder": {
-        "{{1}}": "customer_name",
-        "{{2}}": "cart_url",
-    },
-    "special_offer": {
-        "{{1}}": "customer_name",
-        "{{2}}": "discount_pct",
-        "{{3}}": "coupon_code",
-    },
-    "win_back": {
-        "{{1}}": "customer_name",
-        "{{2}}": "discount_pct",
-        "{{3}}": "coupon_code",
-    },
-    "vip_exclusive": {
-        "{{1}}": "customer_name",
-        "{{2}}": "discount_pct",
-        "{{3}}": "coupon_code",
-    },
-    "new_arrivals": {
-        "{{1}}": "customer_name",
-        "{{2}}": "store_name",
-    },
-    "order_confirmed": {
-        "{{1}}": "customer_name",
-        "{{2}}": "order_id",
-    },
-}
-
-# ── Seed automations ───────────────────────────────────────────────────────────
-
-SEED_AUTOMATIONS: List[Dict[str, Any]] = [
-    {
-        "automation_type": "abandoned_cart",
-        "name": "استرداد العربة المتروكة",
-        "enabled": False,
-        "config": {
-            "steps": [
-                {"delay_minutes": 30,   "message_type": "reminder"},
-                {"delay_minutes": 180,  "message_type": "reminder"},
-                {"delay_minutes": 1440, "message_type": "coupon", "coupon_code": "CART10AUTO"},
-            ],
-            "template_name": "abandoned_cart_reminder",
-        },
-    },
-    {
-        "automation_type": "predictive_reorder",
-        "name": "تذكير إعادة الطلب التنبؤي",
-        "enabled": False,
-        "config": {
-            "template_name": "predictive_reorder_reminder_ar",
-            "var_map": {"{{1}}": "customer_name", "{{2}}": "product_name", "{{3}}": "reorder_url"},
-            "days_before": 3,
-        },
-    },
-    {
-        "automation_type": "customer_winback",
-        "name": "استرجاع العملاء غير النشطين",
-        "enabled": False,
-        "config": {
-            "inactive_days_first": 60,
-            "inactive_days_second": 90,
-            "discount_pct": 15,
-            "template_name": "win_back",
-        },
-    },
-    {
-        "automation_type": "vip_upgrade",
-        "name": "مكافأة عملاء VIP",
-        "enabled": False,
-        "config": {
-            "min_spent_sar": 2000,
-            "discount_pct": 20,
-            "template_name": "vip_exclusive",
-        },
-    },
-    {
-        "automation_type": "new_product_alert",
-        "name": "تنبيه المنتجات الجديدة",
-        "enabled": False,
-        "config": {
-            "target_interested_only": True,
-            "template_name": "new_arrivals",
-        },
-    },
-    {
-        "automation_type": "back_in_stock",
-        "name": "تنبيه عودة المنتج للمخزون",
-        "enabled": False,
-        "config": {
-            "notify_previous_buyers": True,
-            "notify_previous_viewers": True,
-            "template_name": "new_arrivals",
-        },
-    },
-]
-
-
-def _seed_automations_if_empty(db: Session, tenant_id: int) -> None:
-    count = db.query(SmartAutomation).filter(SmartAutomation.tenant_id == tenant_id).count()
-    if count == 0:
-        for seed in SEED_AUTOMATIONS:
-            auto = SmartAutomation(
-                tenant_id=tenant_id,
-                automation_type=seed["automation_type"],
-                name=seed["name"],
-                enabled=seed["enabled"],
-                config=seed["config"],
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-            )
-            db.add(auto)
-        db.flush()
-
-
-# ── Demo customer seed data ────────────────────────────────────────────────────
-
-DEMO_CUSTOMERS_DATA: List[Dict[str, Any]] = [
-    {"name": "أحمد الراشد",   "phone": "+966501234567", "email": "ahmed@example.com",
-     "total_orders": 18, "total_spend": 4820.0, "days_since_last_order": 7},
-    {"name": "نورا المطيري",  "phone": "+966526543210", "email": "nora@example.com",
-     "total_orders": 6,  "total_spend": 1240.0, "days_since_last_order": 18},
-    {"name": "خالد إبراهيم",  "phone": "+966578887766", "email": "khalid@example.com",
-     "total_orders": 12, "total_spend": 3150.0, "days_since_last_order": 5},
-    {"name": "ليلى السعود",   "phone": "+966545512200", "email": "leila@example.com",
-     "total_orders": 3,  "total_spend": 540.0,  "days_since_last_order": 30},
-    {"name": "عمر الغامدي",   "phone": "+966563219900", "email": "omar@example.com",
-     "total_orders": 9,  "total_spend": 2340.0, "days_since_last_order": 22},
-    {"name": "ريم الحربي",    "phone": "+966554100033", "email": "reem@example.com",
-     "total_orders": 4,  "total_spend": 820.0,  "days_since_last_order": 110},
-    {"name": "يوسف الشهري",   "phone": "+966507755522", "email": "yousef@example.com",
-     "total_orders": 5,  "total_spend": 1100.0, "days_since_last_order": 71},
-    {"name": "سارة القحطاني", "phone": "+966532218800", "email": "sara@example.com",
-     "total_orders": 3,  "total_spend": 650.0,  "days_since_last_order": 87},
-    {"name": "محمد العتيبي",  "phone": "+966561234567", "email": "mohammed@example.com",
-     "total_orders": 1,  "total_spend": 150.0,  "days_since_last_order": 3},
-    {"name": "فاطمة الدوسري", "phone": "+966547896543", "email": "fatima@example.com",
-     "total_orders": 2,  "total_spend": 380.0,  "days_since_last_order": 14},
-    {"name": "عبدالله الزهراني", "phone": "+966509876543", "email": "abdullah@example.com",
-     "total_orders": 7,  "total_spend": 1650.0, "days_since_last_order": 45},
-    {"name": "منى الحارثي",   "phone": "+966551234000", "email": "mona@example.com",
-     "total_orders": 1,  "total_spend": 250.0,  "days_since_last_order": 2},
-]
-
-# Predictive reorder estimates for demo products
-DEMO_REORDER_PRODUCTS: List[Dict[str, Any]] = [
-    {"product_name": "عسل السدر 500g",    "consumption_days": 30},
-    {"product_name": "عسل الطلح 1kg",     "consumption_days": 60},
-    {"product_name": "عسل الأكاسيا 250g", "consumption_days": 20},
-    {"product_name": "عسل السمر 1kg",     "consumption_days": 60},
-]
-
-
-def _compute_customer_segment(total_orders: int, total_spend: float, days_inactive: int) -> tuple:
-    """
-    Classify a customer into one of 5 segments and compute a churn risk score.
-
-    Segments (Arabic labels):
-      vip      → VIP Customer     (≥5 orders AND spend ≥2000 SAR)
-      active   → Active Customer  (recent buyer, not VIP, not new)
-      new      → New Customer     (≤1 order)
-      at_risk  → Churn Risk       (60–90 days inactive)
-      churned  → Dormant Customer (>90 days inactive)
-    """
-    from math import exp
-
-    # Churn risk: logistic-ish curve rising with inactivity
-    # 0.0 = loyal, 1.0 = certainly churned
-    if days_inactive <= 14:
-        churn_risk = max(0.02, days_inactive * 0.005)
-    elif days_inactive <= 30:
-        churn_risk = 0.10 + (days_inactive - 14) * 0.008
-    elif days_inactive <= 60:
-        churn_risk = 0.23 + (days_inactive - 30) * 0.01
-    elif days_inactive <= 90:
-        churn_risk = 0.53 + (days_inactive - 60) * 0.008
-    else:
-        churn_risk = 0.77 + min((days_inactive - 90) * 0.002, 0.23)
-
-    churn_risk = round(min(churn_risk, 1.0), 3)
-
-    if days_inactive > 90:
-        segment = "churned"
-    elif days_inactive > 60:
-        segment = "at_risk"
-    elif total_orders <= 1:
-        segment = "new"
-    elif total_spend >= 2000 and total_orders >= 5:
-        segment = "vip"
-    else:
-        segment = "active"
-
-    return segment, churn_risk
-
-
-def _seed_demo_customers(db: Session, tenant_id: int) -> None:
-    """
-    Seed demo customers with CustomerProfile records if the tenant has no customers yet.
-    This lets the intelligence dashboard show real DB data immediately in development.
-    """
-    count = db.query(Customer).filter(Customer.tenant_id == tenant_id).count()
-    if count > 0:
-        return  # already seeded
-
-    from datetime import timedelta
-
-    for demo in DEMO_CUSTOMERS_DATA:
-        customer = Customer(
-            name=demo["name"],
-            phone=demo["phone"],
-            email=demo["email"],
-            tenant_id=tenant_id,
-        )
-        db.add(customer)
-        db.flush()  # get customer.id
-
-        days = demo["days_since_last_order"]
-        last_order_at = datetime.utcnow() - timedelta(days=days)
-        first_seen_at = last_order_at - timedelta(days=demo["total_orders"] * 14)
-
-        segment, churn_risk = _compute_customer_segment(
-            demo["total_orders"],
-            demo["total_spend"],
-            days,
-        )
-
-        profile = CustomerProfile(
-            customer_id=customer.id,
-            tenant_id=tenant_id,
-            total_orders=demo["total_orders"],
-            total_spend_sar=demo["total_spend"],
-            average_order_value_sar=round(demo["total_spend"] / max(demo["total_orders"], 1), 2),
-            max_single_order_sar=round(demo["total_spend"] / max(demo["total_orders"], 1) * 1.4, 2),
-            segment=segment,
-            churn_risk_score=churn_risk,
-            is_returning=demo["total_orders"] > 1,
-            first_seen_at=first_seen_at,
-            last_seen_at=datetime.utcnow() - timedelta(days=max(1, days - 2)),
-            last_order_at=last_order_at,
-            updated_at=datetime.utcnow(),
-        )
-        db.add(profile)
-
-    db.flush()
-
-
-def _seed_templates_if_empty(db: Session, tenant_id: int) -> None:
-    """Seed demo templates into the DB if this tenant has none."""
-    count = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id).count()
-    if count == 0:
-        for seed in SEED_TEMPLATES:
-            tpl = WhatsAppTemplate(
-                tenant_id=tenant_id,
-                meta_template_id=f"seed_{seed['name']}",
-                name=seed["name"],
-                language=seed["language"],
-                category=seed["category"],
-                status=seed["status"],
-                components=seed["components"],
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-                synced_at=datetime.utcnow(),
-            )
-            db.add(tpl)
-        db.flush()
-
-
-# ── Mock WhatsApp templates (used when Meta credentials are not configured) ────
-
-MOCK_TEMPLATES: List[Dict[str, Any]] = [
-    {
-        "id": "mock_1",
-        "name": "abandoned_cart_reminder",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن قبل نفاد الكمية: {{2}}"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-            {"type": "BUTTONS", "buttons": [{"type": "URL", "text": "أكمل الطلب", "url": "{{2}}"}]},
-        ],
-    },
-    {
-        "id": "mock_2",
-        "name": "special_offer",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "عرض خاص لك 🎁"},
-            {"type": "BODY",   "text": "أهلاً {{1}}،\nاحصل على خصم {{2}} باستخدام كود: *{{3}}*\nالعرض ينتهي قريباً — لا تفوّته!"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    {
-        "id": "mock_3",
-        "name": "new_arrivals",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "وصل جديد! ✨"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nيسعدنا إعلامك بوصول منتجات جديدة في متجر {{2}}.\nاكتشف أحدث التشكيلة الآن وكن أول من يحصل عليها."},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    {
-        "id": "mock_4",
-        "name": "vip_exclusive",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "👑 عرض VIP حصري"},
-            {"type": "BODY",   "text": "{{1}}، أنت من عملائنا المميزين!\nبصفتك عضواً VIP لديك خصم حصري {{2}} على مشترياتك القادمة.\nاستخدم الكود: *{{3}}*"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    {
-        "id": "mock_5",
-        "name": "order_confirmed",
-        "language": "ar",
-        "category": "UTILITY",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "تأكيد الطلب ✅"},
-            {"type": "BODY",   "text": "شكراً {{1}}!\nتم استلام طلبك رقم *{{2}}* بنجاح.\nسيتم التواصل معك قريباً لتأكيد موعد التوصيل."},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-    {
-        "id": "mock_6",
-        "name": "win_back",
-        "language": "ar",
-        "category": "MARKETING",
-        "status": "APPROVED",
-        "components": [
-            {"type": "HEADER", "format": "TEXT", "text": "اشتقنا إليك! 💙"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nلم نرك منذ فترة ونحن نفتقدك!\nعدت إلينا مع خصم خاص {{2}} على طلبك القادم.\nالكود: *{{3}}*"},
-            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-        ],
-    },
-]
-
-def _fetch_meta_templates(waba_id: str, access_token: str) -> Optional[List[Dict[str, Any]]]:
-    """Try to fetch templates from Meta Graph API. Returns None on failure."""
-    try:
-        import urllib.request
-        import json as _json
-        url = f"https://graph.facebook.com/v18.0/{waba_id}/message_templates?access_token={access_token}&limit=50&status=APPROVED"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            data = _json.loads(resp.read())
-            return data.get("data", [])
-    except Exception:
-        return None
-
-
-# ── Pydantic schemas for WhatsApp templates ───────────────────────────────────
-
-class TemplateComponentIn(BaseModel):
-    type: str                        # HEADER | BODY | FOOTER | BUTTONS
-    format: Optional[str] = None     # TEXT | IMAGE | DOCUMENT | VIDEO (HEADER only)
-    text: Optional[str] = None
-    buttons: Optional[List[Dict[str, Any]]] = None
-
-class CreateTemplateIn(BaseModel):
-    name: str
-    language: str = "ar"
-    category: str                    # MARKETING | UTILITY | AUTHENTICATION
-    components: List[TemplateComponentIn]
-
-class UpdateTemplateStatusIn(BaseModel):
-    status: str                      # APPROVED | REJECTED | DISABLED
-    rejection_reason: Optional[str] = None
-    meta_template_id: Optional[str] = None
-
-
-def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
-    return {
-        "id": t.id,
-        "meta_template_id": t.meta_template_id,
-        "name": t.name,
-        "language": t.language,
-        "category": t.category,
-        "status": t.status,
-        "rejection_reason": t.rejection_reason,
-        "components": t.components or [],
-        "created_at": t.created_at.isoformat() if t.created_at else None,
-        "updated_at": t.updated_at.isoformat() if t.updated_at else None,
-        "synced_at": t.synced_at.isoformat() if t.synced_at else None,
-        # AI lifecycle fields (migration 0009)
-        "source": getattr(t, "source", "merchant") or "merchant",
-        "objective": getattr(t, "objective", None),
-        "usage_count": getattr(t, "usage_count", 0) or 0,
-        "last_used_at": t.last_used_at.isoformat() if getattr(t, "last_used_at", None) else None,
-        "health_score": getattr(t, "health_score", None),
-        "recommendation_state": getattr(t, "recommendation_state", "none") or "none",
-        "recommendation_note": getattr(t, "recommendation_note", None),
-        "ai_generation_metadata": getattr(t, "ai_generation_metadata", None),
-    }
-
-
-def _tpl_bump_usage(db: Session, template_id: int, tenant_id: int | None = None) -> None:
-    """Increment usage_count and set last_used_at. Called whenever a template is dispatched."""
-    q = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.id == template_id)
-    if tenant_id is not None:
-        q = q.filter(WhatsAppTemplate.tenant_id == tenant_id)
-    tpl = q.first()
-    if tpl:
-        tpl.usage_count = (getattr(tpl, "usage_count", 0) or 0) + 1
-        tpl.last_used_at = datetime.utcnow()
-
-
-# ── WhatsApp Templates endpoints ───────────────────────────────────────────────
-
-@app.get("/templates")
-async def list_templates(
-    request: Request,
-    status: Optional[str] = None,
-    db: Session = Depends(get_db),
-):
-    """List all WhatsApp templates for this tenant, optionally filtered by status."""
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    _seed_templates_if_empty(db, tenant_id)
-    db.commit()
-
-    q = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id)
-    if status:
-        q = q.filter(WhatsAppTemplate.status == status.upper())
-    templates = q.order_by(WhatsAppTemplate.created_at.desc()).all()
-    return {"templates": [_tpl_to_dict(t) for t in templates]}
-
-
-@app.post("/templates")
-async def create_template(body: CreateTemplateIn, request: Request, db: Session = Depends(get_db)):
-    """
-    Create a new template locally and submit it to Meta for approval.
-    The template is saved with status PENDING until Meta responds.
-    """
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-
-    # Try to submit to Meta if credentials are configured
-    settings = _get_or_create_settings(db, tenant_id)
-    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    waba_id = wa.get("phone_number_id", "")
-    token = wa.get("access_token", "")
-
-    meta_id = None
-    if waba_id and token:
-        meta_id = _submit_template_to_meta(waba_id, token, body)
-
-    tpl = WhatsAppTemplate(
-        tenant_id=tenant_id,
-        meta_template_id=meta_id,
-        name=body.name,
-        language=body.language,
-        category=body.category,
-        status="PENDING",
-        components=[c.model_dump(exclude_none=True) for c in body.components],
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
-    db.add(tpl)
-    db.commit()
-    db.refresh(tpl)
-    return _tpl_to_dict(tpl)
-
-
-@app.put("/templates/{template_id}/status")
-async def update_template_status(
-    template_id: int,
-    body: UpdateTemplateStatusIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Update template status (called by webhook or manually for testing)."""
-    tenant_id = _resolve_tenant_id(request)
-    tpl = db.query(WhatsAppTemplate).filter(
-        WhatsAppTemplate.id == template_id,
-        WhatsAppTemplate.tenant_id == tenant_id,
-    ).first()
-    if not tpl:
-        raise HTTPException(status_code=404, detail="Template not found")
-    tpl.status = body.status.upper()
-    if body.rejection_reason:
-        tpl.rejection_reason = body.rejection_reason
-    if body.meta_template_id:
-        tpl.meta_template_id = body.meta_template_id
-    tpl.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(tpl)
-    return _tpl_to_dict(tpl)
-
-
-@app.delete("/templates/{template_id}")
-async def delete_template(template_id: int, request: Request, db: Session = Depends(get_db)):
-    """Delete a template (only allowed for PENDING/REJECTED/DISABLED)."""
-    tenant_id = _resolve_tenant_id(request)
-    tpl = db.query(WhatsAppTemplate).filter(
-        WhatsAppTemplate.id == template_id,
-        WhatsAppTemplate.tenant_id == tenant_id,
-    ).first()
-    if not tpl:
-        raise HTTPException(status_code=404, detail="Template not found")
-    if tpl.status == "APPROVED":
-        raise HTTPException(status_code=400, detail="Cannot delete an APPROVED template — disable it from Meta Business Manager first")
-    db.delete(tpl)
-    db.commit()
-    return {"deleted": True}
-
-
-# ── AI Template Generation endpoints ──────────────────────────────────────────
-
-class GenerateTemplateIn(BaseModel):
-    objective: str          # abandoned_cart | reorder | winback | ...
-    language: str = "ar"
-
-
-class RecommendationActionIn(BaseModel):
-    action: str             # accepted | dismissed
-
-
-@app.post("/templates/generate")
-async def generate_template(body: GenerateTemplateIn, request: Request, db: Session = Depends(get_db)):
-    """
-    AI-generate a WhatsApp template draft for a given objective.
-
-    If template_submission_mode == 'auto_submit' and Meta credentials are present,
-    the draft is submitted immediately.
-    Otherwise it is saved as DRAFT for merchant review.
-    """
-    import sys as _sys
-    _sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
-    from template_ai.generator import generate_template_draft, SUPPORTED_OBJECTIVES
-    from template_ai.policy_validator import validate_draft
-
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-
-    if body.objective not in SUPPORTED_OBJECTIVES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"الهدف '{body.objective}' غير مدعوم. الأهداف المتاحة: {', '.join(SUPPORTED_OBJECTIVES)}"
-        )
-
-    draft = generate_template_draft(objective=body.objective, language=body.language)
-
-    # Policy validation
-    existing = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id).all()
-    validation = validate_draft(draft, existing)
-
-    if not validation.passed and validation.action == "block":
-        return {
-            "generated": False,
-            "action": "block",
-            "issues": validation.issues,
-            "draft": draft,
-        }
-
-    if validation.action == "merge":
-        return {
-            "generated": False,
-            "action": "merge",
-            "issues": validation.issues,
-            "merge_with_id": validation.merge_with_id,
-            "merge_with_name": validation.merge_with_name,
-            "draft": draft,
-        }
-
-    # Determine submission mode from tenant whatsapp settings
-    settings = _get_or_create_settings(db, tenant_id)
-    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    submission_mode = wa.get("template_submission_mode", "draft_approval")
-
-    # Persist the draft
-    tpl = WhatsAppTemplate(
-        tenant_id=tenant_id,
-        name=draft["name"],
-        language=draft["language"],
-        category=draft["category"],
-        status="DRAFT",
-        components=draft["components"],
-        source="ai_generated",
-        objective=draft["objective"],
-        usage_count=0,
-        ai_generation_metadata=draft["ai_generation_metadata"],
-    )
-    db.add(tpl)
-    db.flush()
-
-    # Auto-submit if configured and credentials present
-    submitted = False
-    meta_id = None
-    if submission_mode == "auto_submit":
-        waba_id = wa.get("phone_number_id", "")
-        token = wa.get("access_token", "")
-        if waba_id and token:
-            meta_id = await _submit_template_to_meta(tpl.name, tpl.language, tpl.category, tpl.components or [], waba_id, token)
-            if meta_id:
-                tpl.meta_template_id = meta_id
-                tpl.status = "PENDING"
-                tpl.synced_at = datetime.utcnow()
-                submitted = True
-
-    db.commit()
-    db.refresh(tpl)
-
-    from observability.event_logger import log_event
-    log_event(db, tenant_id, "ai_sales", "template.generated",
-              f"قالب AI جديد: {tpl.name} (هدف: {body.objective})",
-              payload={"template_id": tpl.id, "submitted": submitted, "mode": submission_mode})
-    db.commit()
-
-    return {
-        "generated": True,
-        "action": "auto_submitted" if submitted else "saved_as_draft",
-        "template": _tpl_to_dict(tpl),
-        "validation_issues": validation.issues,
-        "submission_mode": submission_mode,
-    }
-
-
-@app.post("/templates/{template_id}/submit")
-async def submit_template_to_meta(template_id: int, request: Request, db: Session = Depends(get_db)):
-    """Submit a DRAFT template to Meta for approval."""
-    tenant_id = _resolve_tenant_id(request)
-    tpl = db.query(WhatsAppTemplate).filter(
-        WhatsAppTemplate.id == template_id,
-        WhatsAppTemplate.tenant_id == tenant_id,
-    ).first()
-    if not tpl:
-        raise HTTPException(status_code=404, detail="Template not found")
-    if tpl.status not in ("DRAFT", "REJECTED"):
-        raise HTTPException(status_code=400, detail=f"لا يمكن إرسال قالب بحالة '{tpl.status}' إلى Meta")
-
-    settings = _get_or_create_settings(db, tenant_id)
-    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    waba_id = wa.get("phone_number_id", "")
-    token = wa.get("access_token", "")
-
-    if not waba_id or not token:
-        raise HTTPException(status_code=422, detail="بيانات WhatsApp Business غير مُعدَّة. أضف Phone Number ID و Access Token في الإعدادات.")
-
-    meta_id = await _submit_template_to_meta(tpl.name, tpl.language, tpl.category, tpl.components or [], waba_id, token)
-    if not meta_id:
-        raise HTTPException(status_code=502, detail="فشل إرسال القالب إلى Meta. تحقق من بيانات الاعتماد وحاول مرة أخرى.")
-
-    tpl.meta_template_id = meta_id
-    tpl.status = "PENDING"
-    tpl.synced_at = datetime.utcnow()
-    tpl.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(tpl)
-
-    from observability.event_logger import log_event
-    log_event(db, tenant_id, "ai_sales", "template.submitted",
-              f"تم إرسال القالب '{tpl.name}' إلى Meta للمراجعة",
-              payload={"template_id": tpl.id, "meta_template_id": meta_id})
-    db.commit()
-
-    return {"submitted": True, "template": _tpl_to_dict(tpl)}
-
-
-@app.get("/templates/health")
-async def get_template_health(request: Request, db: Session = Depends(get_db)):
-    """
-    Evaluate health scores for all tenant templates and return merchant-facing recommendations.
-    Updates health_score and recommendation_state in DB.
-    """
-    from template_ai.health_evaluator import evaluate_templates, health_summary
-
-    tenant_id = _resolve_tenant_id(request)
-    templates = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id).all()
-
-    if not templates:
-        return {"total": 0, "healthy": 0, "needs_attention": 0, "avg_health_score": 0.0, "details": []}
-
-    results = evaluate_templates(templates)
-
-    # Persist scores back to DB
-    tpl_map = {t.id: t for t in templates}
-    for r in results:
-        t = tpl_map.get(r["template_id"])
-        if t:
-            t.health_score = r["health_score"]
-            if r["recommendation_state"] != "none":
-                # Only write if not already actioned by merchant
-                if getattr(t, "recommendation_state", None) not in ("accepted", "dismissed"):
-                    t.recommendation_state = r["recommendation_state"]
-                    t.recommendation_note = r["recommendation_note"]
-    db.commit()
-
-    return health_summary(templates)
-
-
-@app.put("/templates/{template_id}/recommendation")
-async def action_template_recommendation(
-    template_id: int,
-    body: RecommendationActionIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """
-    Merchant acts on a template health recommendation.
-    action: 'accepted' (will delete/update) | 'dismissed' (ignore suggestion)
-    """
-    tenant_id = _resolve_tenant_id(request)
-    tpl = db.query(WhatsAppTemplate).filter(
-        WhatsAppTemplate.id == template_id,
-        WhatsAppTemplate.tenant_id == tenant_id,
-    ).first()
-    if not tpl:
-        raise HTTPException(status_code=404, detail="Template not found")
-
-    if body.action not in ("accepted", "dismissed"):
-        raise HTTPException(status_code=422, detail="action يجب أن يكون 'accepted' أو 'dismissed'")
-
-    tpl.recommendation_state = body.action
-    tpl.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(tpl)
-
-    return {"updated": True, "template": _tpl_to_dict(tpl)}
-
-
-@app.get("/templates/objectives")
-async def list_template_objectives(request: Request):
-    """Return the list of supported AI generation objectives."""
-    from template_ai.generator import SUPPORTED_OBJECTIVES
-    labels = {
-        "abandoned_cart":       "استرداد سلة متروكة",
-        "reorder":              "تذكير بإعادة الطلب",
-        "winback":              "استعادة عميل غير نشط",
-        "back_in_stock":        "إشعار توفر منتج",
-        "price_drop":           "إشعار انخفاض السعر",
-        "order_followup":       "متابعة طلب",
-        "quote_followup":       "متابعة عرض سعر",
-        "promotion":            "حملة ترويجية",
-        "transactional_update": "تحديث معاملة",
-    }
-    return {
-        "objectives": [
-            {"value": obj, "label": labels.get(obj, obj)}
-            for obj in SUPPORTED_OBJECTIVES
-        ]
-    }
-
-
-@app.post("/templates/sync")
-async def sync_templates_from_meta(request: Request, db: Session = Depends(get_db)):
-    """
-    Pull all templates from Meta Graph API and upsert them into the local DB.
-    New templates are inserted; existing ones have their status updated.
-    """
-    tenant_id = _resolve_tenant_id(request)
-    settings = _get_or_create_settings(db, tenant_id)
-    db.commit()
-
-    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    waba_id = wa.get("phone_number_id", "")
-    token = wa.get("access_token", "")
-
-    if not waba_id or not token:
-        return {"synced": 0, "message": "يجب إدخال Phone Number ID و Access Token في الإعدادات أولاً"}
-
-    live = _fetch_meta_templates(waba_id, token)
-    if live is None:
-        return {"synced": 0, "message": "تعذّر الاتصال بـ Meta. تأكد من صحة بيانات الاعتماد."}
-
-    synced = 0
-    for item in live:
-        meta_id = str(item.get("id", ""))
-        existing = db.query(WhatsAppTemplate).filter(
-            WhatsAppTemplate.tenant_id == tenant_id,
-            WhatsAppTemplate.meta_template_id == meta_id,
-        ).first()
-        if existing:
-            existing.status = item.get("status", existing.status)
-            existing.components = item.get("components", existing.components)
-            existing.synced_at = datetime.utcnow()
-            existing.updated_at = datetime.utcnow()
-        else:
-            tpl = WhatsAppTemplate(
-                tenant_id=tenant_id,
-                meta_template_id=meta_id,
-                name=item.get("name", ""),
-                language=item.get("language", "ar"),
-                category=item.get("category", "MARKETING"),
-                status=item.get("status", "PENDING"),
-                components=item.get("components", []),
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-                synced_at=datetime.utcnow(),
-            )
-            db.add(tpl)
-        synced += 1
-
-    db.commit()
-    return {"synced": synced, "message": f"تمت مزامنة {synced} قالب من Meta"}
-
-
-def _submit_template_to_meta(waba_id: str, token: str, body: "CreateTemplateIn") -> Optional[str]:
-    """Submit a new template to Meta Graph API. Returns the Meta template ID or None."""
-    try:
-        import urllib.request
-        import urllib.parse
-        import json as _json
-        url = f"https://graph.facebook.com/v18.0/{waba_id}/message_templates"
-        payload = _json.dumps({
-            "name": body.name,
-            "language": body.language,
-            "category": body.category,
-            "components": [c.model_dump(exclude_none=True) for c in body.components],
-        }).encode()
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = _json.loads(resp.read())
-            return str(data.get("id", ""))
-    except Exception:
-        return None
-
-
-# ── Pydantic schemas for campaigns ────────────────────────────────────────────
-
-class CreateCampaignIn(BaseModel):
-    name: str
-    campaign_type: str
-    template_id: str
-    template_name: str
-    template_language: str = "ar"
-    template_category: str = "MARKETING"
-    template_body: str = ""
-    template_variables: Optional[Dict[str, str]] = None
-    audience_type: str = "all"
-    audience_count: int = 0
-    schedule_type: str = "immediate"
-    schedule_time: Optional[str] = None
-    delay_minutes: Optional[int] = None
-    coupon_code: str = ""
-
-class UpdateCampaignStatusIn(BaseModel):
-    status: str  # active | paused | completed
-
-class TestSendIn(BaseModel):
-    phone: str
-    template_id: str
-    template_name: str
-    template_language: str = "ar"
-    variables: Dict[str, str] = {}
-
-
-def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
-    return {
-        "id": c.id,
-        "name": c.name,
-        "campaign_type": c.campaign_type,
-        "status": c.status,
-        "template_id": c.template_id,
-        "template_name": c.template_name,
-        "template_language": c.template_language,
-        "template_category": c.template_category,
-        "template_body": c.template_body,
-        "template_variables": c.template_variables or {},
-        "audience_type": c.audience_type,
-        "audience_count": c.audience_count,
-        "schedule_type": c.schedule_type,
-        "schedule_time": c.schedule_time.isoformat() if c.schedule_time else None,
-        "delay_minutes": c.delay_minutes,
-        "coupon_code": c.coupon_code or "",
-        "sent_count": c.sent_count,
-        "delivered_count": c.delivered_count,
-        "read_count": c.read_count,
-        "clicked_count": c.clicked_count,
-        "converted_count": c.converted_count,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
-        "launched_at": c.launched_at.isoformat() if c.launched_at else None,
-    }
-
-
-# ── Campaign endpoints ─────────────────────────────────────────────────────────
-
-@app.get("/campaigns/templates")
-async def get_campaign_templates(request: Request, db: Session = Depends(get_db)):
-    """Return APPROVED templates from DB for campaign wizard."""
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    _seed_templates_if_empty(db, tenant_id)
-    db.commit()
-
-    approved = (
-        db.query(WhatsAppTemplate)
-        .filter(WhatsAppTemplate.tenant_id == tenant_id, WhatsAppTemplate.status == "APPROVED")
-        .order_by(WhatsAppTemplate.created_at.desc())
-        .all()
-    )
-    result = []
-    for t in approved:
-        result.append({
-            "id": str(t.id),
-            "name": t.name,
-            "language": t.language,
-            "category": t.category,
-            "status": t.status,
-            "components": t.components or [],
-        })
-    return {"templates": result, "source": "db"}
-
-
-@app.get("/campaigns")
-async def list_campaigns(request: Request, db: Session = Depends(get_db)):
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    db.commit()
-    campaigns = db.query(Campaign).filter(Campaign.tenant_id == tenant_id).order_by(Campaign.created_at.desc()).all()
-    return {"campaigns": [_campaign_to_dict(c) for c in campaigns]}
-
-
-@app.post("/campaigns")
-async def create_campaign(body: CreateCampaignIn, request: Request, db: Session = Depends(get_db)):
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-
-    schedule_dt = None
-    if body.schedule_time:
-        try:
-            from datetime import datetime as _dt
-            schedule_dt = _dt.fromisoformat(body.schedule_time)
-        except ValueError:
-            pass
-
-    campaign = Campaign(
-        tenant_id=tenant_id,
-        name=body.name,
-        campaign_type=body.campaign_type,
-        status="scheduled" if body.schedule_type == "scheduled" and schedule_dt else "draft",
-        template_id=body.template_id,
-        template_name=body.template_name,
-        template_language=body.template_language,
-        template_category=body.template_category,
-        template_body=body.template_body,
-        template_variables=body.template_variables or {},
-        audience_type=body.audience_type,
-        audience_count=body.audience_count,
-        schedule_type=body.schedule_type,
-        schedule_time=schedule_dt,
-        delay_minutes=body.delay_minutes,
-        coupon_code=body.coupon_code or None,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
-    db.add(campaign)
-    db.commit()
-    db.refresh(campaign)
-    return _campaign_to_dict(campaign)
-
-
-@app.put("/campaigns/{campaign_id}/status")
-async def update_campaign_status(
-    campaign_id: int,
-    body: UpdateCampaignStatusIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    tenant_id = _resolve_tenant_id(request)
-    campaign = db.query(Campaign).filter(Campaign.id == campaign_id, Campaign.tenant_id == tenant_id).first()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    campaign.status = body.status
-    if body.status == "active" and not campaign.launched_at:
-        campaign.launched_at = datetime.utcnow()
-    campaign.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(campaign)
-    return _campaign_to_dict(campaign)
-
-
-@app.post("/campaigns/test-send")
-async def test_send(body: TestSendIn, request: Request, db: Session = Depends(get_db)):
-    """Simulate sending a test message to a phone number."""
-    tenant_id = _resolve_tenant_id(request)
-    settings = _get_or_create_settings(db, tenant_id)
-    db.commit()
-    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    if not wa.get("phone_number_id") or not wa.get("access_token"):
-        return {"success": True, "simulated": True, "message": f"تمت المحاكاة — أرسلنا القالب '{body.template_name}' إلى {body.phone} (وضع تجريبي)"}
-    # In production: call Meta Cloud API send message endpoint here
-    return {"success": True, "simulated": False, "message": f"تم إرسال رسالة اختبار إلى {body.phone}"}
-
-
-# ── Pydantic schemas for automations ──────────────────────────────────────────
-
-class ToggleAutomationIn(BaseModel):
-    enabled: bool
-
-class UpdateAutomationConfigIn(BaseModel):
-    config: Dict[str, Any]
-    template_id: Optional[int] = None
-
-class EmitEventIn(BaseModel):
-    event_type: str
-    customer_id: Optional[int] = None
-    payload: Optional[Dict[str, Any]] = None
-
-
-def _auto_to_dict(a: SmartAutomation) -> Dict[str, Any]:
-    return {
-        "id": a.id,
-        "automation_type": a.automation_type,
-        "name": a.name,
-        "enabled": a.enabled,
-        "config": a.config or {},
-        "template_id": a.template_id,
-        "template_name": a.template.name if a.template else None,
-        "stats_triggered": a.stats_triggered,
-        "stats_sent": a.stats_sent,
-        "stats_converted": a.stats_converted,
-        "updated_at": a.updated_at.isoformat() if a.updated_at else None,
-    }
-
-
-# ── Automations endpoints ──────────────────────────────────────────────────────
-
-@app.get("/automations")
-async def list_automations(request: Request, db: Session = Depends(get_db)):
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    _seed_automations_if_empty(db, tenant_id)
-    db.commit()
-    autos = db.query(SmartAutomation).filter(SmartAutomation.tenant_id == tenant_id).order_by(SmartAutomation.id).all()
-    autopilot = _get_autopilot_enabled(db, tenant_id)
-    return {"automations": [_auto_to_dict(a) for a in autos], "autopilot_enabled": autopilot}
-
-
-@app.put("/automations/{automation_id}/toggle")
-async def toggle_automation(
-    automation_id: int,
-    body: ToggleAutomationIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    tenant_id = _resolve_tenant_id(request)
-    auto = db.query(SmartAutomation).filter(
-        SmartAutomation.id == automation_id,
-        SmartAutomation.tenant_id == tenant_id,
-    ).first()
-    if not auto:
-        raise HTTPException(status_code=404, detail="Automation not found")
-    auto.enabled = body.enabled
-    auto.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(auto)
-    return _auto_to_dict(auto)
-
-
-@app.put("/automations/{automation_id}/config")
-async def update_automation_config(
-    automation_id: int,
-    body: UpdateAutomationConfigIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    tenant_id = _resolve_tenant_id(request)
-    auto = db.query(SmartAutomation).filter(
-        SmartAutomation.id == automation_id,
-        SmartAutomation.tenant_id == tenant_id,
-    ).first()
-    if not auto:
-        raise HTTPException(status_code=404, detail="Automation not found")
-    auto.config = body.config
-    if body.template_id is not None:
-        auto.template_id = body.template_id
-    auto.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(auto)
-    return _auto_to_dict(auto)
-
-
-@app.post("/automations/autopilot")
-async def set_autopilot(
-    body: ToggleAutomationIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Enable/disable the Marketing Autopilot master switch."""
-    tenant_id = _resolve_tenant_id(request)
-    settings = _get_or_create_settings(db, tenant_id)
-    current = _merge_defaults(settings.ai_settings, DEFAULT_AI)
-    current["autopilot_enabled"] = body.enabled
-    settings.ai_settings = current
-    settings.updated_at = datetime.utcnow()
-    db.commit()
-    return {"autopilot_enabled": body.enabled}
-
-
-@app.post("/automations/events")
-async def emit_event(body: EmitEventIn, request: Request, db: Session = Depends(get_db)):
-    """Emit a system event that automations can react to."""
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    event = AutomationEvent(
-        tenant_id=tenant_id,
-        event_type=body.event_type,
-        customer_id=body.customer_id,
-        payload=body.payload or {},
-        processed=False,
-        created_at=datetime.utcnow(),
-    )
-    db.add(event)
-    db.commit()
-    return {"event_id": event.id, "event_type": event.event_type}
-
-
-def _get_autopilot_enabled(db: Session, tenant_id: int) -> bool:
-    settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).first()
-    if not settings:
-        return False
-    ai = _merge_defaults(settings.ai_settings, DEFAULT_AI)
-    return bool(ai.get("autopilot_enabled", False))
-
-
-# ── Intelligence dashboard endpoints ──────────────────────────────────────────
-
-# Mock intelligence data (production: computed by background worker)
-_MOCK_REORDER_CUSTOMERS = [
-    {"customer_name": "Ahmed Al-Rashid", "phone": "+966 50 123 4567", "product_name": "عسل السدر 500g", "predicted_date": "2026-04-05", "confidence": 87},
-    {"customer_name": "Nora Al-Mutairi",  "phone": "+966 52 654 3210", "product_name": "عسل الطلح 1kg",  "predicted_date": "2026-04-08", "confidence": 74},
-    {"customer_name": "Khalid Ibrahim",   "phone": "+966 57 888 7766", "product_name": "عسل السدر 500g", "predicted_date": "2026-04-10", "confidence": 91},
-    {"customer_name": "Lina Al-Saud",     "phone": "+966 54 551 2200", "product_name": "عسل الأكاسيا 250g", "predicted_date": "2026-04-12", "confidence": 68},
-    {"customer_name": "Omar Al-Ghamdi",   "phone": "+966 56 321 9900", "product_name": "عسل السمر 1kg",  "predicted_date": "2026-04-14", "confidence": 82},
-]
-
-_MOCK_CHURN_RISK = [
-    {"customer_name": "Reem Al-Harbi",    "phone": "+966 55 410 0033", "last_purchase": "2025-12-10", "days_inactive": 110, "risk_score": 0.82},
-    {"customer_name": "Yousef Al-Shehri", "phone": "+966 50 775 5522", "last_purchase": "2026-01-18", "days_inactive": 71,  "risk_score": 0.65},
-    {"customer_name": "Sara Al-Qahtani",  "phone": "+966 53 221 8800", "last_purchase": "2026-01-02", "days_inactive": 87,  "risk_score": 0.71},
-]
-
-_MOCK_VIP_CUSTOMERS = [
-    {"customer_name": "Ahmed Al-Rashid",  "total_spent": 4820, "orders": 18, "segment": "VIP"},
-    {"customer_name": "Khalid Ibrahim",   "total_spent": 3150, "orders": 12, "segment": "VIP"},
-    {"customer_name": "Omar Al-Ghamdi",   "total_spent": 2340, "orders": 9,  "segment": "VIP"},
-]
-
-_MOCK_SUGGESTIONS = [
-    {
-        "id": "s1",
-        "type": "reorder",
-        "priority": "high",
-        "title": "أطلق حملة إعادة طلب لعملاء عسل السدر",
-        "desc": "5 عملاء يُتوقع احتياجهم لإعادة الطلب خلال 2 أسبوع.",
-        "action": "launch_campaign",
-        "automation_type": "predictive_reorder",
-    },
-    {
-        "id": "s2",
-        "type": "winback",
-        "priority": "medium",
-        "title": "3 عملاء في خطر المغادرة",
-        "desc": "لم يتسوقوا منذ أكثر من 60 يوماً — أرسل عرضاً لاستعادتهم.",
-        "action": "launch_campaign",
-        "automation_type": "customer_winback",
-    },
-    {
-        "id": "s3",
-        "type": "vip",
-        "priority": "low",
-        "title": "فعّل التشغيل التلقائي لـ VIP",
-        "desc": "3 عملاء أنفقوا أكثر من 2000 ر.س ولم يتلقوا عرض VIP بعد.",
-        "action": "enable_automation",
-        "automation_type": "vip_upgrade",
-    },
-]
-
-
-@app.get("/intelligence/dashboard")
-async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)):
-    """
-    Return intelligence summary for the current tenant.
-    Uses real CustomerProfile data when available; falls back to mock data otherwise.
-    """
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    _seed_automations_if_empty(db, tenant_id)
-    _seed_demo_customers(db, tenant_id)
-    db.commit()
-
-    # Automation summary (always real)
-    autos = db.query(SmartAutomation).filter(SmartAutomation.tenant_id == tenant_id).all()
-    active_automations = sum(1 for a in autos if a.enabled)
-
-    # ── Real DB intelligence ───────────────────────────────────────────────────
-    profiles_exist = db.query(CustomerProfile).filter(
-        CustomerProfile.tenant_id == tenant_id
-    ).count() > 0
-
-    if profiles_exist:
-        now = datetime.utcnow()
-
-        # Segment counts
-        from sqlalchemy import func as sqlfunc
-        seg_rows = (
-            db.query(CustomerProfile.segment, sqlfunc.count(CustomerProfile.id))
-            .filter(CustomerProfile.tenant_id == tenant_id)
-            .group_by(CustomerProfile.segment)
-            .all()
-        )
-        seg_map = {row[0]: row[1] for row in seg_rows}
-
-        # VIP customers sorted by spend
-        vip_rows = (
-            db.query(CustomerProfile, Customer)
-            .join(Customer, CustomerProfile.customer_id == Customer.id)
-            .filter(
-                CustomerProfile.tenant_id == tenant_id,
-                CustomerProfile.segment == "vip",
-            )
-            .order_by(CustomerProfile.total_spend_sar.desc())
-            .limit(10)
-            .all()
-        )
-        vip_customers = [
-            {
-                "customer_name": c.name or "—",
-                "total_spent": round(float(p.total_spend_sar or 0), 2),
-                "orders": p.total_orders or 0,
-                "segment": "VIP",
-            }
-            for p, c in vip_rows
-        ]
-
-        # At-risk customers sorted by churn risk
-        churn_rows = (
-            db.query(CustomerProfile, Customer)
-            .join(Customer, CustomerProfile.customer_id == Customer.id)
-            .filter(
-                CustomerProfile.tenant_id == tenant_id,
-                CustomerProfile.segment.in_(["at_risk", "churned"]),
-            )
-            .order_by(CustomerProfile.churn_risk_score.desc())
-            .limit(10)
-            .all()
-        )
-        churn_risk = [
-            {
-                "customer_name": c.name or "—",
-                "phone": c.phone or "",
-                "last_purchase": (p.last_order_at or now).isoformat(),
-                "days_inactive": max(0, (now - (p.last_order_at or now)).days),
-                "risk_score": round((p.churn_risk_score or 0) * 100),
-            }
-            for p, c in churn_rows
-        ]
-
-        # Smart suggestions from real data
-        suggestions: List[Dict[str, Any]] = []
-        reorder_count = len(_MOCK_REORDER_CUSTOMERS)  # real engine: query PredictiveReorderEstimate
-        if reorder_count > 0:
-            suggestions.append({
-                "id": "s1", "type": "reorder", "priority": "high",
-                "title": "أطلق حملة إعادة طلب لعملاء عسل السدر",
-                "desc": f"{reorder_count} عملاء يُتوقع احتياجهم لإعادة الطلب خلال أسبوعين.",
-                "action": "launch_campaign",
-                "automation_type": "predictive_reorder",
-            })
-        if churn_risk:
-            suggestions.append({
-                "id": "s2", "type": "winback", "priority": "medium",
-                "title": f"{len(churn_risk)} عملاء في خطر المغادرة",
-                "desc": "لم يتسوقوا منذ أكثر من 60 يوماً — أرسل عرضاً لاستعادتهم.",
-                "action": "launch_campaign",
-                "automation_type": "customer_winback",
-            })
-        vip_auto_on = any(a.automation_type == "vip_upgrade" and a.enabled for a in autos)
-        if vip_customers and not vip_auto_on:
-            suggestions.append({
-                "id": "s3", "type": "vip", "priority": "low",
-                "title": "فعّل التشغيل التلقائي لـ VIP",
-                "desc": f"{len(vip_customers)} عملاء أنفقوا أكثر من 2000 ر.س ولم يتلقوا عرض VIP بعد.",
-                "action": "enable_automation",
-                "automation_type": "vip_upgrade",
-            })
-
-        return {
-            "summary": {
-                "reorder_soon_count": reorder_count,
-                "churn_risk_count": len(churn_risk),
-                "vip_count": len(vip_customers),
-                "active_automations": active_automations,
-            },
-            "reorder_predictions": _MOCK_REORDER_CUSTOMERS,
-            "churn_risk": churn_risk,
-            "vip_customers": vip_customers,
-            "suggestions": suggestions,
-            "segments": [
-                {"key": "new",     "label": "عملاء جدد",      "count": seg_map.get("new", 0),     "color": "blue"},
-                {"key": "active",  "label": "عملاء نشطون",     "count": seg_map.get("active", 0),  "color": "green"},
-                {"key": "vip",     "label": "VIP",              "count": seg_map.get("vip", 0),     "color": "amber"},
-                {"key": "at_risk", "label": "خطر المغادرة",    "count": seg_map.get("at_risk", 0), "color": "red"},
-                {"key": "churned", "label": "خاملون",           "count": seg_map.get("churned", 0), "color": "slate"},
-            ],
-        }
-
-    # ── Fallback: mock data (no profiles in DB yet) ────────────────────────────
-    return {
-        "summary": {
-            "reorder_soon_count": len(_MOCK_REORDER_CUSTOMERS),
-            "churn_risk_count": len(_MOCK_CHURN_RISK),
-            "vip_count": len(_MOCK_VIP_CUSTOMERS),
-            "active_automations": active_automations,
-        },
-        "reorder_predictions": _MOCK_REORDER_CUSTOMERS,
-        "churn_risk": _MOCK_CHURN_RISK,
-        "vip_customers": _MOCK_VIP_CUSTOMERS,
-        "suggestions": _MOCK_SUGGESTIONS,
-        "segments": [
-            {"key": "new",      "label": "عملاء جدد",    "count": 240, "color": "blue"},
-            {"key": "active",   "label": "عملاء نشطون",   "count": 890, "color": "green"},
-            {"key": "vip",      "label": "VIP",            "count": 83,  "color": "amber"},
-            {"key": "churned",  "label": "خاملون",         "count": 420, "color": "slate"},
-            {"key": "at_risk",  "label": "خطر المغادرة",  "count": 127, "color": "red"},
-        ],
-    }
-
-
-@app.get("/intelligence/reorder-predictions")
-async def reorder_predictions(request: Request, db: Session = Depends(get_db)):
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    db.commit()
-    # In production: query PredictiveReorderEstimate joined with Customer + Product
-    return {"predictions": _MOCK_REORDER_CUSTOMERS}
-
-
-@app.post("/intelligence/analyze-customers")
-async def analyze_customers(request: Request, db: Session = Depends(get_db)):
-    """
-    Re-compute segment + churn_risk_score for every CustomerProfile in this tenant.
-    Call this after importing orders or on a nightly schedule.
-    """
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    _seed_demo_customers(db, tenant_id)
-    db.commit()
-
-    profiles = db.query(CustomerProfile).filter(CustomerProfile.tenant_id == tenant_id).all()
-    updated = 0
-
-    for profile in profiles:
-        days_inactive = (
-            (datetime.utcnow() - profile.last_order_at).days
-            if profile.last_order_at
-            else 999
-        )
-        segment, churn_risk = _compute_customer_segment(
-            profile.total_orders or 0,
-            float(profile.total_spend_sar or 0),
-            days_inactive,
-        )
-        profile.segment = segment
-        profile.churn_risk_score = churn_risk
-        profile.updated_at = datetime.utcnow()
-        updated += 1
-
-    db.commit()
-    return {"analyzed": updated, "message": f"تم تحليل {updated} عميل وتحديث شرائحهم"}
-
-
-@app.get("/intelligence/segments/live")
-async def live_segments(request: Request, db: Session = Depends(get_db)):
-    """Return real-time segment counts computed from CustomerProfile records."""
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    _seed_demo_customers(db, tenant_id)
-    db.commit()
-
-    from sqlalchemy import func as sqlfunc
-    rows = (
-        db.query(CustomerProfile.segment, sqlfunc.count(CustomerProfile.id))
-        .filter(CustomerProfile.tenant_id == tenant_id)
-        .group_by(CustomerProfile.segment)
-        .all()
-    )
-    seg_map = {r[0]: r[1] for r in rows}
-
-    return {
-        "segments": [
-            {"key": "new",     "label": "عملاء جدد",      "count": seg_map.get("new", 0),     "color": "blue"},
-            {"key": "active",  "label": "عملاء نشطون",     "count": seg_map.get("active", 0),  "color": "green"},
-            {"key": "vip",     "label": "VIP",              "count": seg_map.get("vip", 0),     "color": "amber"},
-            {"key": "at_risk", "label": "خطر المغادرة",    "count": seg_map.get("at_risk", 0), "color": "red"},
-            {"key": "churned", "label": "خاملون",           "count": seg_map.get("churned", 0), "color": "slate"},
-        ],
-        "total": sum(seg_map.values()),
-    }
-
-
-@app.get("/intelligence/customer-profile/{customer_id}")
-async def get_customer_profile(customer_id: int, request: Request, db: Session = Depends(get_db)):
-    """
-    Return the full behavior profile for a single customer, including segment,
-    churn risk, spend history, and reorder estimates.
-    """
-    tenant_id = _resolve_tenant_id(request)
-    customer = db.query(Customer).filter(
-        Customer.id == customer_id,
-        Customer.tenant_id == tenant_id,
-    ).first()
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-
-    profile = db.query(CustomerProfile).filter(
-        CustomerProfile.customer_id == customer_id,
-        CustomerProfile.tenant_id == tenant_id,
-    ).first()
-
-    reorders = db.query(PredictiveReorderEstimate).filter(
-        PredictiveReorderEstimate.customer_id == customer_id,
-        PredictiveReorderEstimate.tenant_id == tenant_id,
-    ).order_by(PredictiveReorderEstimate.predicted_reorder_date.asc()).all()
-
-    SEGMENT_LABELS = {
-        "new": "عميل جديد",
-        "active": "عميل نشط",
-        "vip": "عميل VIP",
-        "at_risk": "في خطر المغادرة",
-        "churned": "خامل",
-    }
-
-    profile_data: Dict[str, Any] = {
-        "customer_id": customer.id,
-        "customer_name": customer.name,
-        "phone": customer.phone,
-        "email": customer.email,
-    }
-
-    if profile:
-        days_inactive = (
-            (datetime.utcnow() - profile.last_order_at).days
-            if profile.last_order_at
-            else None
-        )
-        profile_data.update({
-            "total_orders": profile.total_orders,
-            "total_spent": profile.total_spend_sar,
-            "average_order_value": profile.average_order_value_sar,
-            "last_order_date": profile.last_order_at.isoformat() if profile.last_order_at else None,
-            "first_seen_date": profile.first_seen_at.isoformat() if profile.first_seen_at else None,
-            "days_inactive": days_inactive,
-            "segment": profile.segment,
-            "segment_label": SEGMENT_LABELS.get(profile.segment or "new", profile.segment),
-            "churn_risk_score": profile.churn_risk_score,
-            "lifetime_value_score": profile.lifetime_value_score,
-            "is_returning": profile.is_returning,
-        })
-    else:
-        profile_data.update({
-            "total_orders": 0, "total_spent": 0, "average_order_value": 0,
-            "last_order_date": None, "first_seen_date": None, "days_inactive": None,
-            "segment": "new", "segment_label": "عميل جديد",
-            "churn_risk_score": 0.0, "lifetime_value_score": 0.0, "is_returning": False,
-        })
-
-    reorder_data = []
-    for r in reorders:
-        product = db.query(Product).filter(Product.id == r.product_id, Product.tenant_id == tenant_id).first()
-        reorder_data.append({
-            "product_id": r.product_id,
-            "product_name": product.title if product else f"Product #{r.product_id}",
-            "purchase_date": r.purchase_date.isoformat() if r.purchase_date else None,
-            "predicted_reorder_date": r.predicted_reorder_date.isoformat() if r.predicted_reorder_date else None,
-            "consumption_rate_days": r.consumption_rate_days,
-            "notified": r.notified,
-        })
-
-    profile_data["reorder_estimates"] = reorder_data
-    return profile_data
-
-
-@app.post("/intelligence/reorder-estimate")
-async def create_reorder_estimate(
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """
-    Compute a predicted reorder date given product + purchase history.
-    Body: { customer_id, product_id, quantity_purchased, purchase_date, consumption_rate_days }
-    """
-    body = await request.json()
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-
-    from datetime import timedelta
-    purchase_dt = datetime.utcnow()
-    try:
-        purchase_dt = datetime.fromisoformat(body.get("purchase_date", datetime.utcnow().isoformat()))
-    except (ValueError, TypeError):
-        pass
-
-    consumption_days = int(body.get("consumption_rate_days", 30))
-    predicted = purchase_dt + timedelta(days=consumption_days)
-
-    estimate = PredictiveReorderEstimate(
-        tenant_id=tenant_id,
-        customer_id=int(body.get("customer_id", 0)),
-        product_id=int(body.get("product_id", 0)),
-        quantity_purchased=body.get("quantity_purchased"),
-        purchase_date=purchase_dt,
-        consumption_rate_days=consumption_days,
-        predicted_reorder_date=predicted,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
-    db.add(estimate)
-    db.commit()
-    return {
-        "predicted_reorder_date": predicted.isoformat(),
-        "consumption_rate_days": consumption_days,
-    }
-
-
-# ── Sales Autopilot ───────────────────────────────────────────────────────────
-
-DEFAULT_AUTOPILOT: Dict[str, Any] = {
-    "enabled": False,
-    "cod_confirmation": {
-        "enabled": True,
-        "reminder_hours": 2,
-        "auto_cancel_hours": 24,
-        "template_name": "cod_order_confirmation_ar",
-    },
-    "predictive_reorder": {
-        "enabled": True,
-        "days_before": 3,
-        "consumption_days_default": 45,
-        "template_name": "predictive_reorder_reminder_ar",
-    },
-    "abandoned_cart": {
-        "enabled": True,
-        "reminder_30min": True,
-        "reminder_24h": True,
-        "coupon_48h": False,
-        "coupon_code": "",
-        "template_name": "abandoned_cart_reminder",
-    },
-    "inactive_recovery": {
-        "enabled": True,
-        "inactive_days": 60,
-        "discount_pct": 15,
-        "template_name": "win_back",
-    },
-}
-
-# Event types emitted by autopilot jobs (stored in AutomationEvent table)
-AUTOPILOT_EVENT_TYPES = {
-    "cod_confirmation":  "autopilot_cod_sent",
-    "predictive_reorder": "autopilot_reorder_sent",
-    "abandoned_cart":    "autopilot_cart_sent",
-    "inactive_recovery": "autopilot_inactive_sent",
-}
-
-# Arabic labels shown in the daily summary
-AUTOPILOT_SUMMARY_LABELS: Dict[str, str] = {
-    "autopilot_cod_sent":      "تأكيدات طلبات COD أُرسلت",
-    "autopilot_reorder_sent":  "تذكيرات إعادة طلب أُرسلت",
-    "autopilot_cart_sent":     "سلات متروكة تم التواصل بشأنها",
-    "autopilot_inactive_sent": "عملاء غير نشطين تم استرجاعهم",
-}
-
-AUTOPILOT_SUMMARY_ICONS: Dict[str, str] = {
-    "autopilot_cod_sent":      "🍯",
-    "autopilot_reorder_sent":  "🔄",
-    "autopilot_cart_sent":     "🛒",
-    "autopilot_inactive_sent": "💙",
-}
-
-
-def _get_autopilot_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
-    """Read autopilot config from TenantSettings.extra_metadata."""
-    settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).first()
-    stored: Dict[str, Any] = {}
-    if settings and settings.extra_metadata:
-        stored = settings.extra_metadata.get("autopilot", {})
-    merged = dict(DEFAULT_AUTOPILOT)
-    if stored:
-        merged.update({k: v for k, v in stored.items() if k in DEFAULT_AUTOPILOT})
-        # Deep-merge sub-automation configs
-        for sub in ("cod_confirmation", "predictive_reorder", "abandoned_cart", "inactive_recovery"):
-            if sub in stored and isinstance(stored[sub], dict):
-                base = dict(DEFAULT_AUTOPILOT[sub])
-                base.update(stored[sub])
-                merged[sub] = base
-    return merged
-
-
-def _save_autopilot_settings(db: Session, tenant_id: int, autopilot: Dict[str, Any]) -> None:
-    """Persist autopilot config to TenantSettings.extra_metadata."""
-    settings = _get_or_create_settings(db, tenant_id)
-    extra: Dict[str, Any] = dict(settings.extra_metadata or {})
-    extra["autopilot"] = autopilot
-    settings.extra_metadata = extra
-    settings.updated_at = datetime.utcnow()
-
-
-def _get_daily_summary(db: Session, tenant_id: int) -> List[Dict[str, Any]]:
-    """Count today's autopilot actions from AutomationEvent."""
-    from datetime import date
-    today_start = datetime.combine(date.today(), datetime.min.time())
-    summary = []
-    for evt_type, label in AUTOPILOT_SUMMARY_LABELS.items():
-        count = (
-            db.query(AutomationEvent)
-            .filter(
-                AutomationEvent.tenant_id == tenant_id,
-                AutomationEvent.event_type == evt_type,
-                AutomationEvent.created_at >= today_start,
-            )
-            .count()
-        )
-        summary.append({
-            "key": evt_type,
-            "label": label,
-            "count": count,
-            "icon": AUTOPILOT_SUMMARY_ICONS.get(evt_type, "📨"),
-        })
-    return summary
-
-
-# ── Autopilot job functions ────────────────────────────────────────────────────
-
-def _log_autopilot_event(
-    db: Session,
-    tenant_id: int,
-    event_type: str,
-    customer_id: Optional[int],
-    payload: Dict[str, Any],
-) -> None:
-    """Write an AutomationEvent row for an autopilot action."""
-    event = AutomationEvent(
-        tenant_id=tenant_id,
-        event_type=event_type,
-        customer_id=customer_id,
-        payload=payload,
-        processed=True,
-        created_at=datetime.utcnow(),
-    )
-    db.add(event)
-
-
-def _job_cod_confirmation(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    """
-    For every recent Order with payment_method=cod and status=pending:
-    - If no confirmation received within reminder_hours → log a reminder event.
-    - If still no response within auto_cancel_hours → log a cancel event.
-
-    Returns the number of messages sent.
-    """
-    from datetime import timedelta
-
-    reminder_hours = int(config.get("reminder_hours", 2))
-    cancel_hours = int(config.get("auto_cancel_hours", 24))
-    sent = 0
-
-    # Query pending COD orders (last 48 hours)
-    cutoff = datetime.utcnow() - timedelta(hours=48)
-    cod_orders = db.query(Order).filter(
-        Order.tenant_id == tenant_id,
-        Order.status == "pending",
-    ).all()
-
-    for order in cod_orders:
-        # Check if order metadata indicates COD
-        meta = order.extra_metadata or {}
-        payment_method = meta.get("payment_method", "")
-        if payment_method not in ("cod", "cash_on_delivery", ""):
-            continue  # skip non-COD orders (empty = treat as COD in demo)
-
-        customer_info = order.customer_info or {}
-        customer_name = customer_info.get("name", "العميل")
-
-        # Already logged a confirmation event? Check AutomationEvent
-        already_sent = db.query(AutomationEvent).filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type == AUTOPILOT_EVENT_TYPES["cod_confirmation"],
-            AutomationEvent.payload.op("->")("order_id").astext == str(order.id),
-        ).count()
-
-        if already_sent > 0:
-            continue  # already handled
-
-        _log_autopilot_event(
-            db, tenant_id,
-            AUTOPILOT_EVENT_TYPES["cod_confirmation"],
-            None,
-            {
-                "order_id": order.id,
-                "customer_name": customer_name,
-                "template": config.get("template_name", "cod_order_confirmation_ar"),
-                "action": "confirmation_sent",
-            },
-        )
-        sent += 1
-
-    return sent
-
-
-def _job_predictive_reorder(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    """
-    For every PredictiveReorderEstimate where predicted_reorder_date is within
-    days_before days AND notified=False: log a reorder reminder event.
-    """
-    from datetime import timedelta
-
-    days_before = int(config.get("days_before", 3))
-    window_end = datetime.utcnow() + timedelta(days=days_before)
-    sent = 0
-
-    estimates = db.query(PredictiveReorderEstimate).filter(
-        PredictiveReorderEstimate.tenant_id == tenant_id,
-        PredictiveReorderEstimate.notified == False,
-        PredictiveReorderEstimate.predicted_reorder_date <= window_end,
-    ).all()
-
-    for est in estimates:
-        customer = db.query(Customer).filter(Customer.id == est.customer_id, Customer.tenant_id == tenant_id).first()
-        product = db.query(Product).filter(Product.id == est.product_id, Product.tenant_id == tenant_id).first()
-
-        customer_name = customer.name if customer else "العميل"
-        product_name = product.title if product else f"المنتج #{est.product_id}"
-        store_url = ""
-        settings_row = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).first()
-        if settings_row:
-            store = _merge_defaults(settings_row.store_settings, DEFAULT_STORE)
-            store_url = store.get("store_url", "")
-
-        _log_autopilot_event(
-            db, tenant_id,
-            AUTOPILOT_EVENT_TYPES["predictive_reorder"],
-            est.customer_id,
-            {
-                "estimate_id": est.id,
-                "customer_name": customer_name,
-                "product_name": product_name,
-                "template": config.get("template_name", "predictive_reorder_reminder_ar"),
-                "vars": {
-                    "{{1}}": customer_name,
-                    "{{2}}": product_name,
-                    "{{3}}": store_url or "https://store.example.com",
-                },
-            },
-        )
-        est.notified = True
-        sent += 1
-
-    return sent
-
-
-def _job_abandoned_cart(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    """
-    For every Order with is_abandoned=True that hasn't been contacted yet:
-    log an abandoned cart recovery event.
-    """
-    sent = 0
-
-    abandoned = db.query(Order).filter(
-        Order.tenant_id == tenant_id,
-        Order.is_abandoned == True,
-    ).all()
-
-    for order in abandoned:
-        # Check if already sent an autopilot cart event for this order
-        already = db.query(AutomationEvent).filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type == AUTOPILOT_EVENT_TYPES["abandoned_cart"],
-            AutomationEvent.payload.op("->")("order_id").astext == str(order.id),
-        ).count()
-
-        if already > 0:
-            continue
-
-        customer_info = order.customer_info or {}
-        customer_name = customer_info.get("name", "العميل")
-        checkout_url = order.checkout_url or ""
-
-        _log_autopilot_event(
-            db, tenant_id,
-            AUTOPILOT_EVENT_TYPES["abandoned_cart"],
-            None,
-            {
-                "order_id": order.id,
-                "customer_name": customer_name,
-                "checkout_url": checkout_url,
-                "template": config.get("template_name", "abandoned_cart_reminder"),
-                "vars": {
-                    "{{1}}": customer_name,
-                    "{{2}}": checkout_url or "https://store.example.com/cart",
-                },
-                "steps": [
-                    {"delay": "30m", "sent": True},
-                    {"delay": "24h", "scheduled": True},
-                    {"delay": "48h", "coupon": config.get("coupon_code", ""), "scheduled": bool(config.get("coupon_48h"))},
-                ],
-            },
-        )
-        sent += 1
-
-    return sent
-
-
-def _job_inactive_customers(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    """
-    For every CustomerProfile with segment='at_risk' that hasn't been contacted recently:
-    log an inactive recovery event.
-    """
-    from datetime import timedelta
-
-    inactive_days = int(config.get("inactive_days", 60))
-    discount_pct = int(config.get("discount_pct", 15))
-    sent = 0
-
-    threshold = datetime.utcnow() - timedelta(days=inactive_days)
-    at_risk = (
-        db.query(CustomerProfile, Customer)
-        .join(Customer, CustomerProfile.customer_id == Customer.id)
-        .filter(
-            CustomerProfile.tenant_id == tenant_id,
-            CustomerProfile.segment.in_(["at_risk", "churned"]),
-            CustomerProfile.last_order_at <= threshold,
-        )
-        .all()
-    )
-
-    for profile, customer in at_risk:
-        # Check if already sent a recovery message in the last inactive_days
-        cutoff = datetime.utcnow() - timedelta(days=inactive_days // 2)
-        already = db.query(AutomationEvent).filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type == AUTOPILOT_EVENT_TYPES["inactive_recovery"],
-            AutomationEvent.customer_id == customer.id,
-            AutomationEvent.created_at >= cutoff,
-        ).count()
-
-        if already > 0:
-            continue
-
-        _log_autopilot_event(
-            db, tenant_id,
-            AUTOPILOT_EVENT_TYPES["inactive_recovery"],
-            customer.id,
-            {
-                "customer_name": customer.name,
-                "days_inactive": (datetime.utcnow() - profile.last_order_at).days if profile.last_order_at else inactive_days,
-                "template": config.get("template_name", "win_back"),
-                "discount_pct": discount_pct,
-                "vars": {
-                    "{{1}}": customer.name or "العميل",
-                    "{{2}}": f"{discount_pct}%",
-                    "{{3}}": f"WINBACK{discount_pct}",
-                },
-            },
-        )
-        sent += 1
-
-    return sent
-
-
-# ── Pydantic schemas for autopilot ────────────────────────────────────────────
-
-class AutopilotSubIn(BaseModel):
-    enabled: Optional[bool] = None
-    reminder_hours: Optional[int] = None
-    auto_cancel_hours: Optional[int] = None
-    days_before: Optional[int] = None
-    consumption_days_default: Optional[int] = None
-    reminder_30min: Optional[bool] = None
-    reminder_24h: Optional[bool] = None
-    coupon_48h: Optional[bool] = None
-    coupon_code: Optional[str] = None
-    inactive_days: Optional[int] = None
-    discount_pct: Optional[int] = None
-
-class AutopilotSettingsIn(BaseModel):
-    enabled: Optional[bool] = None
-    cod_confirmation: Optional[AutopilotSubIn] = None
-    predictive_reorder: Optional[AutopilotSubIn] = None
-    abandoned_cart: Optional[AutopilotSubIn] = None
-    inactive_recovery: Optional[AutopilotSubIn] = None
-
-
-# ── Autopilot endpoints ────────────────────────────────────────────────────────
-
-@app.get("/autopilot/status")
-async def autopilot_status(request: Request, db: Session = Depends(get_db)):
-    """
-    Return autopilot settings, today's action summary, and next scheduled run time.
-    """
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    _seed_demo_customers(db, tenant_id)
-    db.commit()
-
-    ap = _get_autopilot_settings(db, tenant_id)
-    summary = _get_daily_summary(db, tenant_id)
-
-    # Last run: most recent autopilot event
-    last_event = (
-        db.query(AutomationEvent)
-        .filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type.in_(list(AUTOPILOT_EVENT_TYPES.values())),
-        )
-        .order_by(AutomationEvent.created_at.desc())
-        .first()
-    )
-    last_run_at = last_event.created_at.isoformat() if last_event else None
-
-    return {
-        "settings": ap,
-        "daily_summary": summary,
-        "last_run_at": last_run_at,
-        "is_running": False,  # in production: check background job state
-    }
-
-
-@app.put("/autopilot/settings")
-async def update_autopilot_settings(
-    body: AutopilotSettingsIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Save autopilot master toggle and sub-automation settings."""
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-
-    # Require active subscription to enable autopilot
-    if body.enabled:
-        _require_subscription(db, int(tenant_id))
-
-    current = _get_autopilot_settings(db, tenant_id)
-
-    if body.enabled is not None:
-        current["enabled"] = body.enabled
-
-    for sub_key, sub_in in [
-        ("cod_confirmation",  body.cod_confirmation),
-        ("predictive_reorder", body.predictive_reorder),
-        ("abandoned_cart",    body.abandoned_cart),
-        ("inactive_recovery", body.inactive_recovery),
-    ]:
-        if sub_in is not None:
-            patch = sub_in.model_dump(exclude_none=True)
-            current[sub_key] = {**current[sub_key], **patch}
-
-    _save_autopilot_settings(db, tenant_id, current)
-    db.commit()
-    return {"settings": current}
-
-
-@app.post("/autopilot/run")
-async def run_autopilot(request: Request, db: Session = Depends(get_db)):
-    """
-    Manually trigger all enabled autopilot jobs for this tenant.
-    In production this is called by a cron scheduler every hour.
-    """
-    tenant_id = _resolve_tenant_id(request)
-    _get_or_create_tenant(db, tenant_id)
-    _seed_demo_customers(db, tenant_id)
-
-    ap = _get_autopilot_settings(db, tenant_id)
-
-    if not ap.get("enabled", False):
-        return {"ran": False, "message": "الطيار التلقائي معطّل — فعّله أولاً من الإعدادات"}
-
-    results: Dict[str, int] = {}
-
-    if ap["cod_confirmation"].get("enabled", True):
-        results["cod_confirmation"] = _job_cod_confirmation(db, tenant_id, ap["cod_confirmation"])
-
-    if ap["predictive_reorder"].get("enabled", True):
-        results["predictive_reorder"] = _job_predictive_reorder(db, tenant_id, ap["predictive_reorder"])
-
-    if ap["abandoned_cart"].get("enabled", True):
-        results["abandoned_cart"] = _job_abandoned_cart(db, tenant_id, ap["abandoned_cart"])
-
-    if ap["inactive_recovery"].get("enabled", True):
-        results["inactive_recovery"] = _job_inactive_customers(db, tenant_id, ap["inactive_recovery"])
-
-    db.commit()
-
-    total = sum(results.values())
-    return {
-        "ran": True,
-        "total_actions": total,
-        "breakdown": results,
-        "ran_at": datetime.utcnow().isoformat(),
-        "message": f"الطيار التلقائي أرسل {total} رسالة في هذه الجلسة",
-    }
-
-
-# ── Template variable resolution ──────────────────────────────────────────────
-
-# Human-readable Arabic labels for variable semantic names
-VAR_FIELD_LABELS: Dict[str, str] = {
-    "customer_name":  "اسم العميل",
-    "product_name":   "اسم المنتج",
-    "reorder_url":    "رابط إعادة الطلب",
-    "order_amount":   "مبلغ الطلب (ر.س)",
-    "cart_url":       "رابط السلة المتروكة",
-    "discount_pct":   "نسبة الخصم",
-    "coupon_code":    "كود الكوبون",
-    "store_name":     "اسم المتجر",
-    "order_id":       "رقم الطلب",
-}
-
-
-@app.get("/templates/{template_id}/var-map")
-async def get_template_var_map(
-    template_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """
-    Return the variable → field mapping for a template.
-    Used by smart automations to know which customer/order fields to inject
-    before sending a WhatsApp message.
-    """
-    tenant_id = _resolve_tenant_id(request)
-    tpl = db.query(WhatsAppTemplate).filter(
-        WhatsAppTemplate.id == template_id,
-        WhatsAppTemplate.tenant_id == tenant_id,
-    ).first()
-    if not tpl:
-        raise HTTPException(status_code=404, detail="Template not found")
-
-    raw_map = TEMPLATE_VAR_MAP.get(tpl.name, {})
-    annotated = {
-        var: {"field": field, "label": VAR_FIELD_LABELS.get(field, field)}
-        for var, field in raw_map.items()
-    }
-    return {
-        "template_id": template_id,
-        "template_name": tpl.name,
-        "category": tpl.category,
-        "var_map": raw_map,          # e.g. {"{{1}}": "customer_name", ...}
-        "var_map_annotated": annotated,  # includes Arabic label
-        "is_default": tpl.name in ("cod_order_confirmation_ar", "predictive_reorder_reminder_ar"),
-    }
-
-
-@app.post("/templates/{template_id}/resolve")
-async def resolve_template_vars(
-    template_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """
-    Resolve all template variables for a specific customer.
-    Body: { customer_id: int, extra: { "reorder_url": "...", "coupon_code": "..." } }
-    Returns the rendered message body ready to be sent via WhatsApp Cloud API.
-    """
-    body = await request.json()
-    tenant_id = _resolve_tenant_id(request)
-    customer_id = int(body.get("customer_id", 0))
-    extra: Dict[str, str] = body.get("extra", {})
-
-    tpl = db.query(WhatsAppTemplate).filter(
-        WhatsAppTemplate.id == template_id,
-        WhatsAppTemplate.tenant_id == tenant_id,
-    ).first()
-    if not tpl:
-        raise HTTPException(status_code=404, detail="Template not found")
-
-    customer = db.query(Customer).filter(
-        Customer.id == customer_id,
-        Customer.tenant_id == tenant_id,
-    ).first()
-
-    settings = _get_or_create_settings(db, tenant_id)
-    store = _merge_defaults(settings.store_settings, DEFAULT_STORE)
-
-    # Build the field→value lookup
-    field_values: Dict[str, str] = {
-        "customer_name": (customer.name if customer else "العميل") or "العميل",
-        "store_name": store.get("store_name", "") or "المتجر",
-        **extra,  # caller can override / provide order-specific values
-    }
-
-    var_map = TEMPLATE_VAR_MAP.get(tpl.name, {})
-    components = tpl.components or []
-    resolved_components: List[Dict[str, Any]] = []
-
-    for comp in components:
-        comp_copy = dict(comp)
-        if comp_copy.get("text"):
-            text = comp_copy["text"]
-            for var_placeholder, field in var_map.items():
-                text = text.replace(var_placeholder, field_values.get(field, var_placeholder))
-            comp_copy["text"] = text
-        resolved_components.append(comp_copy)
-
-    # Build the WhatsApp API parameters array: [{"type":"text","text":"value"}, ...]
-    wa_params = []
-    for var_placeholder, field in sorted(var_map.items()):
-        wa_params.append({
-            "type": "text",
-            "text": field_values.get(field, var_placeholder),
-        })
-
-    body_text = next(
-        (c.get("text", "") for c in resolved_components if c.get("type") == "BODY"), ""
-    )
-
-    # Track usage — only count when template is actually dispatched (resolved for send)
-    _tpl_bump_usage(db, tpl.id, tenant_id)
-    db.commit()
-
-    return {
-        "template_name": tpl.name,
-        "resolved_components": resolved_components,
-        "rendered_body": body_text,
-        "wa_parameters": wa_params,  # pass directly to Meta Cloud API
-    }
+# ── Routers ────────────────────────────────────────────────────────────────────
+# Each router is extracted from this file incrementally.
+# Only move code here — never rewrite logic during extraction.
+
+from routers.health    import router as _health_router
+from routers.admin     import router as _admin_router
+from routers.auth      import router as _auth_router
+from routers.settings  import router as _settings_router
+
+app.include_router(_health_router)
+app.include_router(_admin_router)
+app.include_router(_auth_router)
+app.include_router(_settings_router)
+from routers.templates    import router as _templates_router
+from routers.campaigns    import router as _campaigns_router
+from routers.automations  import router as _automations_router
+from routers.automations  import (
+    _get_autopilot_settings as _get_autopilot_settings,
+    _log_autopilot_event    as _log_autopilot_event,
+)
+from routers.intelligence import router as _intelligence_router
+
+app.include_router(_templates_router)
+app.include_router(_campaigns_router)
+app.include_router(_automations_router)
+app.include_router(_intelligence_router)
 
 
 # ── AI Sales Agent ─────────────────────────────────────────────────────────────
@@ -3140,7 +754,7 @@ DEFAULT_HANDOFF: Dict[str, Any] = {
     "auto_pause_ai": True,
 }
 
-ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8001")
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8016")
 
 ENVIRONMENT   = os.getenv("ENVIRONMENT", "development")
 IS_PRODUCTION = ENVIRONMENT == "production"
@@ -5511,407 +3125,7 @@ async def track_storefront_event(
     return {"received": True, "event_type": body.event_type}
 
 
-# ── Existing endpoints ─────────────────────────────────────────────────────────
-
-_START_TIME = _time.monotonic()
-
-# ── Root ───────────────────────────────────────────────────────────────────────
-@app.get("/")
-async def root():
-    """API root — confirms the backend is reachable."""
-    return {
-        "service": "nahla-saas",
-        "status":  "ok",
-        "version": "1.0.0",
-        "docs":    "/docs",
-    }
-
-# ── Health ─────────────────────────────────────────────────────────────────────
-@app.get("/health")
-async def health():
-    """Lightweight liveness probe — always returns fast, no DB hit."""
-    return {
-        "status": "ok",
-        "service": "nahla-saas",
-        "uptime_seconds": round(_time.monotonic() - _START_TIME),
-        "version": "1.0.0",
-    }
-
-@app.get("/api/health")
-async def health_alias():
-    """Alias: /api/health → same as /health (for clients that prefix all paths with /api)."""
-    return {
-        "status": "ok",
-        "service": "nahla-saas",
-        "uptime_seconds": round(_time.monotonic() - _START_TIME),
-        "version": "1.0.0",
-    }
-
-@app.get("/health/db")
-async def health_db(db: Session = Depends(get_db)):
-    """Database connectivity probe."""
-    from observability.health import check_database
-    result = await check_database(db)
-    ok = result.get("status") == "ok"
-    return JSONResponse(
-        status_code=200 if ok else 503,
-        content={"status": result.get("status"), "service": "nahla-saas", "database": ok},
-    )
-
-@app.get("/health/whatsapp")
-async def health_whatsapp(request: Request, db: Session = Depends(get_db)):
-    """WhatsApp integration readiness check — reports configured/not_configured without exposing secrets."""
-    tenant_id = _resolve_tenant_id(request)
-    settings = _get_or_create_settings(db, tenant_id)
-    db.commit()
-    wa = _merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    configured = bool(wa.get("phone_number_id") and wa.get("access_token"))
-    return {
-        "status": "configured" if configured else "not_configured",
-        "service": "nahla-saas",
-        "phone_number_set": bool(wa.get("phone_number")),
-        "phone_number_id_set": bool(wa.get("phone_number_id")),
-        "access_token_set": bool(wa.get("access_token")),
-        "verify_token_set": bool(wa.get("verify_token")),
-        "auto_reply_enabled": wa.get("auto_reply_enabled", False),
-    }
-
-@app.get("/health/detailed")
-async def health_detailed(request: Request, db: Session = Depends(get_db)):
-    """Full readiness probe: DB + WhatsApp configuration check."""
-    from observability.health import check_database
-    db_result = await check_database(db)
-    db_ok = db_result.get("status") == "ok"
-
-    tenant_id = _resolve_tenant_id(request)
-    wa = _merge_defaults(
-        (_get_or_create_settings(db, tenant_id)).whatsapp_settings,
-        DEFAULT_WHATSAPP,
-    )
-    db.commit()
-    wa_configured = bool(wa.get("phone_number_id") and wa.get("access_token"))
-
-    overall = "ok" if db_ok else "degraded"
-    return JSONResponse(
-        status_code=200 if db_ok else 503,
-        content={
-            "status": overall,
-            "service": "nahla-saas",
-            "database": db_ok,
-            "whatsapp_configured": wa_configured,
-            "uptime_seconds": round(_time.monotonic() - _START_TIME),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        },
-    )
-
-
-# ── Auth endpoints ─────────────────────────────────────────────────────────────
-
-try:
-    import bcrypt as _bcrypt_pwd
-    _PASSLIB_AVAILABLE = True
-except ImportError:
-    _PASSLIB_AVAILABLE = False
-
-class LoginIn(BaseModel):
-    email: str
-    password: str
-
-@app.post("/auth/login")
-async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
-    """
-    Exchange email + password for a signed JWT.
-    Checks admin env-var credentials first, then merchant accounts in the database.
-    """
-    if not _JWT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable — python-jose not installed")
-
-    _INVALID = HTTPException(status_code=401, detail="البريد الإلكتروني أو كلمة المرور غير صحيحة")
-    email = body.email.strip().lower()
-
-    client_ip = request.headers.get("X-Real-IP") or (
-        request.client.host if request.client else "unknown"
-    )
-
-    # 1. Admin credentials (env vars — fastest path, no DB hit)
-    email_ok    = hmac.compare_digest(email,         _ADMIN_EMAIL.lower())
-    password_ok = hmac.compare_digest(body.password, _ADMIN_PASSWORD)
-    if email_ok and password_ok:
-        token = _create_token(email=_ADMIN_EMAIL, role="admin", tenant_id=1)
-        _audit("login_success", role="admin", sub=_ADMIN_EMAIL, ip=client_ip)
-        return {"access_token": token, "token_type": "bearer",
-                "role": "admin", "email": _ADMIN_EMAIL, "tenant_id": 1}
-
-    # 2. Merchant credentials (database)
-    if not _PASSLIB_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable — passlib not installed")
-
-    user = db.query(User).filter(User.email == email, User.is_active == True).first()
-    if not user or not getattr(user, "password_hash", None):
-        _audit("login_failed", reason="user_not_found", sub=email, ip=client_ip)
-        raise _INVALID
-    if not _bcrypt_pwd.checkpw(body.password[:72].encode("utf-8"), user.password_hash.encode("utf-8")):
-        _audit("login_failed", reason="wrong_password", sub=email, ip=client_ip)
-        raise _INVALID
-    if not user.is_active:
-        _audit("login_failed", reason="account_inactive", sub=email, ip=client_ip)
-        raise _INVALID
-
-    token = _create_token(email=user.email, role=user.role or "merchant", tenant_id=user.tenant_id)
-    _audit("login_success", role=user.role, sub=user.email, tenant_id=user.tenant_id, ip=client_ip)
-    return {
-        "access_token": token,
-        "token_type":   "bearer",
-        "role":         user.role or "merchant",
-        "email":        user.email,
-        "tenant_id":    user.tenant_id,
-    }
-
-@app.get("/auth/me")
-async def auth_me(user: Dict[str, Any] = Depends(get_current_user)):
-    """Return the identity of the currently authenticated user."""
-    return {
-        "email":     user.get("sub"),
-        "role":      user.get("role"),
-        "tenant_id": user.get("tenant_id"),
-    }
-
-@app.post("/auth/logout")
-async def auth_logout():
-    """Client-side logout — token invalidation is handled by the frontend."""
-    return {"detail": "logged out"}
-
-
-class RegisterIn(BaseModel):
-    email:        str
-    password:     str
-    store_name:   str
-    phone:        str = ""
-    invite_token: str = ""  # required when REQUIRE_INVITE=true
-
-@app.get("/auth/invite/{token}")
-async def validate_invite(token: str):
-    """Check whether an invitation token is valid and return the pre-filled email."""
-    if not _JWT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
-    payload = _decode_token(token)
-    if not payload or payload.get("type") != "invite":
-        raise HTTPException(status_code=400, detail="رابط الدعوة غير صالح أو منتهي الصلاحية")
-    return {
-        "valid":          True,
-        "invited_email":  payload.get("invited_email", ""),
-        "tenant_id_hint": payload.get("tenant_id_hint"),
-    }
-
-@app.post("/auth/register")
-async def auth_register(body: RegisterIn, request: Request, db: Session = Depends(get_db)):
-    """
-    Register a new merchant account.
-    When REQUIRE_INVITE=true (production default), a valid invite_token is mandatory.
-    Creates a dedicated tenant + merchant user, returns a JWT token.
-    """
-    if not _PASSLIB_AVAILABLE:
-        raise HTTPException(status_code=503, detail="passlib not installed")
-
-    client_ip = request.headers.get("X-Real-IP") or (
-        request.client.host if request.client else "unknown"
-    )
-
-    email = body.email.strip().lower()
-    if not email or not body.password or not body.store_name.strip():
-        raise HTTPException(status_code=400, detail="البريد وكلمة المرور واسم المتجر مطلوبة")
-
-    if len(body.password) < 8:
-        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تكون 8 أحرف على الأقل")
-
-    # ── Invitation gate ────────────────────────────────────────────────────────
-    if _REQUIRE_INVITE:
-        if not body.invite_token:
-            _audit("register_denied", reason="missing_invite", sub=email, ip=client_ip)
-            raise HTTPException(
-                status_code=403,
-                detail="التسجيل يتطلب رابط دعوة صالح. تواصل مع المالك للحصول على رابط دعوة.",
-            )
-        invite = _decode_token(body.invite_token)
-        if not invite or invite.get("type") != "invite":
-            _audit("register_denied", reason="invalid_invite", sub=email, ip=client_ip)
-            raise HTTPException(status_code=403, detail="رابط الدعوة غير صالح أو منتهي الصلاحية")
-        # If the invite was for a specific email, enforce it
-        invited_email = invite.get("invited_email", "")
-        if invited_email and invited_email.lower() != email:
-            _audit(
-                "register_denied",
-                reason="email_mismatch",
-                sub=email,
-                invited=invited_email,
-                ip=client_ip,
-            )
-            raise HTTPException(
-                status_code=403,
-                detail="البريد الإلكتروني لا يطابق الدعوة المرسلة",
-            )
-
-    if db.query(User).filter(User.email == email).first():
-        raise HTTPException(status_code=409, detail="البريد الإلكتروني مسجَّل مسبقاً")
-
-    # Create a dedicated tenant — use email slug as suffix to guarantee uniqueness
-    slug = email.split('@')[0]
-    tenant = Tenant(
-        name=f"{body.store_name.strip()} ({slug})",
-        domain=f"store-{slug}.nahla.sa",
-        is_active=True,
-        created_at=datetime.utcnow(),
-    )
-    db.add(tenant)
-    try:
-        db.flush()
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="اسم المتجر أو النطاق مسجَّل مسبقاً")
-
-    user = User(
-        username=email,
-        email=email,
-        password_hash=_hash_password(body.password),
-        role="merchant",
-        is_active=True,
-        created_at=datetime.utcnow(),
-        tenant_id=tenant.id,
-    )
-    db.add(user)
-    try:
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="فشل إنشاء الحساب — حاول مرة أخرى")
-    db.refresh(user)
-
-    _audit(
-        "merchant_registered",
-        sub=email,
-        tenant_id=tenant.id,
-        store_name=body.store_name.strip(),
-        ip=client_ip,
-    )
-
-    # ── Send verification email ────────────────────────────────────────────────
-    verify_token = _create_verify_token(email)
-    verify_url   = f"{_DASHBOARD_URL}/verify-email?token={verify_token}"
-    import asyncio
-    asyncio.ensure_future(_send_email(
-        to      = email,
-        subject = "أكّد بريدك الإلكتروني — نحلة AI",
-        html    = _email_verify(body.store_name.strip(), verify_url),
-    ))
-    logger.info("Verification email queued for %s", email)
-
-    token = _create_token(email=email, role="merchant", tenant_id=tenant.id)
-    return {
-        "access_token":    token,
-        "token_type":      "bearer",
-        "role":            "merchant",
-        "email_verified":  False,
-    }
-
-
-# ── Auth — email verification & password reset ──────────────────────────────────
-
-@app.get("/auth/verify-email")
-async def verify_email(token: str, db: Session = Depends(get_db)):
-    """Verify a merchant's email address via signed token link."""
-    if not _JWT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
-    payload = _decode_token(token)
-    if not payload or payload.get("type") != "verify_email":
-        return RedirectResponse(
-            url=f"{_DASHBOARD_URL}/verify-email?status=invalid",
-            status_code=302,
-        )
-    email = payload.get("sub", "")
-    user  = db.query(User).filter(User.email == email).first()
-    if not user:
-        return RedirectResponse(
-            url=f"{_DASHBOARD_URL}/verify-email?status=not_found",
-            status_code=302,
-        )
-    # Mark verified (column added by start.sh migration)
-    try:
-        db.execute(
-            __import__("sqlalchemy").text(
-                "UPDATE users SET email_verified=true WHERE email=:e"
-            ),
-            {"e": email},
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-
-    _audit("email_verified", sub=email)
-
-    # Send welcome email now that verification is done
-    store_name = user.tenant.name if user.tenant else email.split("@")[0]
-    import asyncio
-    asyncio.ensure_future(_send_email(
-        to      = email,
-        subject = "مرحباً بك في نحلة AI 🎉",
-        html    = _email_welcome(store_name, _DASHBOARD_URL),
-    ))
-
-    # WhatsApp welcome if phone available (stored in username field only if set)
-    logger.info("Email verified: %s — welcome email queued", email)
-    return RedirectResponse(
-        url=f"{_DASHBOARD_URL}/verify-email?status=success",
-        status_code=302,
-    )
-
-
-class ForgotPasswordIn(BaseModel):
-    email: str
-
-@app.post("/auth/forgot-password")
-async def forgot_password(body: ForgotPasswordIn, db: Session = Depends(get_db)):
-    """Send a password reset link to the given email if it exists."""
-    email = body.email.strip().lower()
-    user  = db.query(User).filter(User.email == email, User.is_active == True).first()
-    # Always return 200 to avoid email enumeration
-    if user:
-        reset_token = _create_reset_token(email)
-        reset_url   = f"{_DASHBOARD_URL}/reset-password?token={reset_token}"
-        import asyncio
-        asyncio.ensure_future(_send_email(
-            to      = email,
-            subject = "إعادة تعيين كلمة المرور — نحلة AI",
-            html    = _email_reset(reset_url),
-        ))
-        _audit("password_reset_requested", sub=email)
-        logger.info("Password reset email queued for %s", email)
-    return {"detail": "إذا كان البريد مسجَّلاً ستصلك رسالة قريباً"}
-
-
-class ResetPasswordIn(BaseModel):
-    token:    str
-    password: str
-
-@app.post("/auth/reset-password")
-async def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)):
-    """Reset password using a signed token from the email link."""
-    if not _JWT_AVAILABLE or not _PASSLIB_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
-    payload = _decode_token(body.token)
-    if not payload or payload.get("type") != "password_reset":
-        raise HTTPException(status_code=400, detail="الرابط غير صالح أو منتهي الصلاحية")
-    if len(body.password) < 8:
-        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تكون 8 أحرف على الأقل")
-    email = payload.get("sub", "")
-    user  = db.query(User).filter(User.email == email, User.is_active == True).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="الحساب غير موجود")
-    user.password_hash = _hash_password(body.password)
-    db.commit()
-    _audit("password_reset_done", sub=email)
-    logger.info("Password reset completed for %s", email)
-    return {"detail": "تم تغيير كلمة المرور بنجاح"}
-
+# ── Auth routes removed — now served by routers/auth.py ────────────────────────
 
 # ── OAuth callbacks ─────────────────────────────────────────────────────────────
 # These endpoints are PUBLIC (no JWT) — they receive redirects from external
@@ -6183,182 +3397,362 @@ async def test_salla_coupon(
         raise HTTPException(status_code=502, detail=f"Salla API error: {exc}")
 
 
-# ── Admin — merchant management ────────────────────────────────────────────────
+# ── Admin + tenant routes removed — now served by routers/admin.py ─────────────
 
-class CreateMerchantIn(BaseModel):
-    email:      str
-    password:   str
-    store_name: str
-    phone:      str = ""
+# ══════════════════════════════════════════════════════════════════════════════
+# Stripe Billing — subscription lifecycle managed by Stripe webhooks
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _merchant_row(user: User) -> Dict[str, Any]:
-    return {
-        "id":         user.id,
-        "email":      user.email,
-        "role":       user.role,
-        "is_active":  user.is_active,
-        "tenant_id":  user.tenant_id,
-        "store_name": user.tenant.name if user.tenant else "",
-        "created_at": user.created_at.isoformat() if user.created_at else None,
-    }
+_STRIPE_SECRET_KEY      = os.environ.get("STRIPE_SECRET_KEY", "")
+_STRIPE_WEBHOOK_SECRET  = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+_STRIPE_PRICE_ID        = os.environ.get("STRIPE_PRICE_ID", "")   # Monthly plan price ID
+_STRIPE_TRIAL_DAYS      = int(os.environ.get("STRIPE_TRIAL_DAYS", "14"))
 
-@app.get("/admin/merchants")
-async def list_merchants(
-    db:    Session          = Depends(get_db),
-    _admin: Dict[str, Any] = Depends(require_admin),
-):
-    """List all merchant accounts (admin only)."""
-    users = (
-        db.query(User)
-        .filter(User.role == "merchant")
-        .order_by(User.created_at.desc())
-        .all()
+
+def _get_stripe_client():
+    """Return a configured StripeClient, or raise if not configured."""
+    if not _STRIPE_SECRET_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Stripe is not configured. Set STRIPE_SECRET_KEY.",
+        )
+    from payment_gateways.stripe_client import StripeClient
+    return StripeClient(
+        secret_key=_STRIPE_SECRET_KEY,
+        webhook_secret=_STRIPE_WEBHOOK_SECRET,
     )
-    return {"merchants": [_merchant_row(u) for u in users]}
 
-@app.post("/admin/merchants")
-async def create_merchant(
-    body:   CreateMerchantIn,
+
+class StripeSetupIntentRequest(BaseModel):
+    email: str
+    name:  str
+
+
+@app.post("/billing/stripe/setup-intent")
+async def stripe_create_setup_intent(
+    body:    StripeSetupIntentRequest,
     request: Request,
-    db:     Session          = Depends(get_db),
-    _admin: Dict[str, Any]  = Depends(require_admin),
+    db:      Session = Depends(get_db),
 ):
-    """Create a new merchant account + a dedicated tenant (admin only)."""
-    if not _PASSLIB_AVAILABLE:
-        raise HTTPException(status_code=503, detail="passlib not installed")
+    """
+    Step 1 of Stripe flow: create (or reuse) a Stripe Customer, then create a
+    SetupIntent so the frontend can collect a card via Stripe Elements without
+    charging the merchant yet.
 
-    email = body.email.strip().lower()
-    if db.query(User).filter(User.email == email).first():
-        raise HTTPException(status_code=400, detail="البريد الإلكتروني مسجَّل مسبقاً")
+    Returns: { stripe_customer_id, setup_intent_id, client_secret }
+    """
+    tenant_id = _resolve_tenant_id(request)
+    tenant    = _get_or_create_tenant(db, tenant_id)
+    stripe    = _get_stripe_client()
 
-    # Use email prefix as suffix to guarantee uniqueness on name and domain
-    slug = email.split('@')[0]
-    tenant = Tenant(
-        name=f"{body.store_name} ({slug})",
-        domain=f"store-{slug}.nahla.sa",
-        is_active=True,
-        created_at=datetime.utcnow(),
-    )
-    db.add(tenant)
-    try:
-        db.flush()
-    except Exception as exc:
-        db.rollback()
-        logger.error("create_merchant: tenant flush failed: %s", exc)
-        raise HTTPException(status_code=400, detail=f"فشل إنشاء الـ tenant: {exc}")
-
-    user = User(
-        username=email,
-        email=email,
-        password_hash=_hash_password(body.password),
-        role="merchant",
-        is_active=True,
-        created_at=datetime.utcnow(),
-        tenant_id=tenant.id,
-    )
-    db.add(user)
-    try:
+    # Reuse existing Stripe customer or create a new one
+    if not tenant.stripe_customer_id:
+        customer = stripe.create_customer(
+            email=body.email,
+            name=body.name,
+            metadata={"tenant_id": str(tenant_id)},
+        )
+        tenant.stripe_customer_id = customer["id"]
         db.commit()
-    except Exception as exc:
-        db.rollback()
-        logger.error("create_merchant: commit failed: %s", exc)
-        raise HTTPException(status_code=400, detail=f"فشل حفظ المستخدم: {exc}")
-    db.refresh(user)
+        logger.info(f"[Stripe] New customer {customer['id']} for tenant {tenant_id}")
 
-    _audit(
-        "merchant_created_by_admin",
-        admin=_admin.get("sub"),
-        merchant_email=email,
-        tenant_id=tenant.id,
-        store_name=body.store_name,
-    )
-    return _merchant_row(user)
-
-
-class InviteIn(BaseModel):
-    email: str  # pre-fill the invite for a specific email, or "" for open invite
-
-@app.post("/admin/invitations")
-async def create_invitation(
-    body:    InviteIn,
-    request: Request,
-    _admin:  Dict[str, Any] = Depends(require_admin),
-):
-    """
-    Generate an invitation link for a new merchant (admin only).
-    Returns a signed token valid for 7 days.
-    Set email="" to create an open invitation (any email can use it).
-    """
-    if not _JWT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
-    email = body.email.strip().lower()
-    token = _create_invite_token(email=email)
-    invite_url = f"https://app.nahlaai.com/register?invite={token}"
-    _audit(
-        "invitation_created",
-        admin=_admin.get("sub"),
-        invited_email=email or "(open)",
+    si = stripe.create_setup_intent(
+        customer_id=tenant.stripe_customer_id,
+        metadata={"tenant_id": str(tenant_id)},
     )
     return {
-        "invite_token": token,
-        "invite_url":   invite_url,
-        "invited_email": email or None,
-        "expires_in_hours": _INVITE_EXPIRE_H,
+        "stripe_customer_id": tenant.stripe_customer_id,
+        "setup_intent_id":    si["setup_intent_id"],
+        "client_secret":      si["client_secret"],
     }
 
 
-@app.put("/admin/merchants/{user_id}/toggle")
-async def toggle_merchant(
-    user_id: int,
+class StripeSubscribeRequest(BaseModel):
+    payment_method_id: str          # pm_xxx returned by Stripe Elements after SetupIntent
+    price_id:          Optional[str] = None   # override; defaults to STRIPE_PRICE_ID env
+
+
+@app.post("/billing/stripe/subscribe")
+async def stripe_create_subscription(
+    body:    StripeSubscribeRequest,
     request: Request,
-    db:      Session          = Depends(get_db),
-    _admin:  Dict[str, Any]  = Depends(require_admin),
+    db:      Session = Depends(get_db),
 ):
-    """Activate or deactivate a merchant account (admin only)."""
-    user = db.query(User).filter(User.id == user_id, User.role == "merchant").first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Merchant not found")
-    user.is_active = not user.is_active
-    db.commit()
-    db.refresh(user)
-    _audit(
-        "merchant_toggled",
-        admin=_admin.get("sub"),
-        merchant_id=user_id,
-        is_active=user.is_active,
-    )
-    return _merchant_row(user)
+    """
+    Step 2 of Stripe flow: create a Stripe Subscription with a 14-day trial.
+    The merchant is not charged until the trial ends.
 
-@app.delete("/admin/merchants/{user_id}")
-async def delete_merchant(
-    user_id: int,
+    Requires: the tenant must already have stripe_customer_id (call setup-intent first).
+    Returns: { subscription_id, status, trial_ends_at }
+    """
+    tenant_id = _resolve_tenant_id(request)
+    tenant    = _get_or_create_tenant(db, tenant_id)
+    stripe    = _get_stripe_client()
+
+    if not tenant.stripe_customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No Stripe customer found. Call /billing/stripe/setup-intent first.",
+        )
+
+    price_id = body.price_id or _STRIPE_PRICE_ID
+    if not price_id:
+        raise HTTPException(status_code=503, detail="STRIPE_PRICE_ID is not configured.")
+
+    sub = stripe.create_subscription(
+        customer_id=tenant.stripe_customer_id,
+        price_id=price_id,
+        trial_period_days=_STRIPE_TRIAL_DAYS,
+        payment_method_id=body.payment_method_id,
+        metadata={"tenant_id": str(tenant_id)},
+    )
+
+    now = datetime.utcnow()
+    trial_end = now + timedelta(days=_STRIPE_TRIAL_DAYS)
+
+    tenant.stripe_subscription_id = sub["id"]
+    tenant.stripe_price_id         = price_id
+    tenant.subscription_status     = sub.get("status", "trialing")
+    tenant.billing_provider        = "stripe"
+    tenant.trial_started_at        = now
+    tenant.trial_ends_at           = trial_end
+    db.commit()
+
+    logger.info(
+        f"[Stripe] Tenant {tenant_id} subscribed: sub={sub['id']} "
+        f"status={sub.get('status')} trial_ends={trial_end.date()}"
+    )
+    return {
+        "success":        True,
+        "subscription_id": sub["id"],
+        "status":         sub.get("status"),
+        "trial_ends_at":  trial_end.isoformat(),
+    }
+
+
+@app.post("/webhook/stripe")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Stripe webhook endpoint — source of truth for subscription state changes.
+
+    Handled events:
+      invoice.paid                → activate / keep account active
+      invoice.payment_failed      → mark past_due, notify merchant
+      customer.subscription.deleted → cancel, disable account
+    """
+    payload    = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+
+    stripe_client = _get_stripe_client()
+    try:
+        event = stripe_client.construct_webhook_event(payload, sig_header)
+    except Exception as exc:
+        logger.warning(f"[Stripe] Webhook signature verification failed: {exc}")
+        raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature")
+
+    event_type = event["type"]
+    data_obj   = event["data"]["object"]
+
+    # Resolve tenant from Stripe customer ID or subscription metadata
+    customer_id    = data_obj.get("customer")
+    subscription_id = data_obj.get("id") if event_type.startswith("customer.subscription") \
+                      else data_obj.get("subscription")
+
+    tenant = None
+    if customer_id:
+        tenant = db.query(Tenant).filter(Tenant.stripe_customer_id == customer_id).first()
+    if tenant is None and subscription_id:
+        tenant = db.query(Tenant).filter(Tenant.stripe_subscription_id == subscription_id).first()
+
+    if tenant is None:
+        # Unknown tenant — could be a test event, acknowledge and ignore
+        logger.info(f"[Stripe] Webhook {event_type}: no tenant found for customer={customer_id}")
+        return {"received": True}
+
+    # ── Handle events ──────────────────────────────────────────────────────────
+
+    if event_type == "invoice.paid":
+        period_end_ts = data_obj.get("lines", {}).get("data", [{}])[0] \
+                            .get("period", {}).get("end")
+        if period_end_ts:
+            tenant.current_period_end = datetime.utcfromtimestamp(period_end_ts)
+        tenant.subscription_status = "active"
+        tenant.is_active           = True
+        tenant.billing_status      = "paid"
+        db.commit()
+        logger.info(f"[Stripe] invoice.paid → tenant {tenant.id} activated")
+
+    elif event_type == "invoice.payment_failed":
+        tenant.subscription_status = "past_due"
+        tenant.billing_status      = "failed"
+        db.commit()
+        logger.warning(f"[Stripe] invoice.payment_failed → tenant {tenant.id} marked past_due")
+        # TODO: send notification email / WhatsApp to merchant
+
+    elif event_type == "customer.subscription.deleted":
+        tenant.subscription_status = "canceled"
+        tenant.is_active           = False
+        tenant.billing_status      = "failed"
+        db.commit()
+        logger.warning(f"[Stripe] subscription.deleted → tenant {tenant.id} disabled")
+
+    elif event_type == "customer.subscription.updated":
+        new_status = data_obj.get("status")
+        if new_status:
+            tenant.subscription_status = new_status
+        period_end_ts = data_obj.get("current_period_end")
+        if period_end_ts:
+            tenant.current_period_end = datetime.utcfromtimestamp(period_end_ts)
+        db.commit()
+        logger.info(f"[Stripe] subscription.updated → tenant {tenant.id} status={new_status}")
+
+    return {"received": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HyperPay Billing — Saudi local payment methods (MADA, Apple Pay, STC Pay)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_HYPERPAY_ACCESS_TOKEN  = os.environ.get("HYPERPAY_ACCESS_TOKEN", "")
+_HYPERPAY_ENTITY_ID     = os.environ.get("HYPERPAY_ENTITY_ID", "")
+_HYPERPAY_WEBHOOK_SECRET = os.environ.get("HYPERPAY_WEBHOOK_SECRET", "")
+_HYPERPAY_LIVE_MODE     = os.environ.get("HYPERPAY_LIVE_MODE", "false").lower() == "true"
+
+
+def _get_hyperpay_client():
+    """Return a configured HyperPayClient, or raise if not configured."""
+    if not _HYPERPAY_ACCESS_TOKEN or not _HYPERPAY_ENTITY_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="HyperPay is not configured. Set HYPERPAY_ACCESS_TOKEN and HYPERPAY_ENTITY_ID.",
+        )
+    from payment_gateways.hyperpay_client import HyperPayClient
+    return HyperPayClient(
+        access_token=_HYPERPAY_ACCESS_TOKEN,
+        entity_id=_HYPERPAY_ENTITY_ID,
+        webhook_secret=_HYPERPAY_WEBHOOK_SECRET,
+        live_mode=_HYPERPAY_LIVE_MODE,
+    )
+
+
+class HyperPayPaymentLinkRequest(BaseModel):
+    amount_sar:   float
+    brand:        str = "MADA"   # MADA | APPLEPAY | STC_PAY | VISA | MASTER
+    description:  str = "Nahla SaaS Monthly Subscription"
+
+
+@app.post("/billing/hyperpay/payment-link")
+async def hyperpay_create_payment_link(
+    body:    HyperPayPaymentLinkRequest,
     request: Request,
-    db:      Session          = Depends(get_db),
-    _admin:  Dict[str, Any]  = Depends(require_admin),
+    db:      Session = Depends(get_db),
 ):
-    """Permanently delete a merchant account (admin only)."""
-    user = db.query(User).filter(User.id == user_id, User.role == "merchant").first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Merchant not found")
-    _audit(
-        "merchant_deleted",
-        admin=_admin.get("sub"),
-        merchant_id=user_id,
-        merchant_email=user.email,
-        tenant_id=user.tenant_id,
+    """
+    Create a HyperPay checkout session for Saudi local payment methods.
+
+    The frontend receives `checkout_id` and the `payment_widget_url`, then
+    either embeds the HyperPay widget or redirects the merchant to the
+    hosted payment page to complete the payment.
+
+    After payment: HyperPay sends a webhook to POST /webhook/hyperpay.
+    Returns: { checkout_id, payment_widget_url }
+    """
+    tenant_id = _resolve_tenant_id(request)
+    tenant    = _get_or_create_tenant(db, tenant_id)
+    hp        = _get_hyperpay_client()
+
+    result = await hp.create_checkout(
+        amount=body.amount_sar,
+        currency="SAR",
+        brand=body.brand,
+        merchant_transaction_id=f"nahla-{tenant_id}-{int(datetime.utcnow().timestamp())}",
+        description=body.description,
+        metadata={"tenant_id": str(tenant_id)},
     )
-    db.delete(user)
+
+    checkout_id = result.get("id", "")
+    result_code = result.get("result", {}).get("code", "")
+
+    # Store the pending payment reference on the tenant
+    tenant.hyperpay_payment_id = checkout_id
+    tenant.billing_provider    = "hyperpay"
+    tenant.billing_status      = "pending"
     db.commit()
-    return {"deleted": True}
+
+    logger.info(
+        f"[HyperPay] Checkout created for tenant {tenant_id}: "
+        f"id={checkout_id} brand={body.brand} amount={body.amount_sar} SAR"
+    )
+    return {
+        "checkout_id":        checkout_id,
+        "result_code":        result_code,
+        "payment_widget_url": hp.build_payment_page_url(checkout_id, body.brand),
+    }
 
 
-@app.get("/tenants/{tenant_id}")
-async def get_tenant(tenant_id: int, db: Session = Depends(get_db)):
-    """Retrieve a single tenant by its numeric ID."""
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id, Tenant.is_active == True).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return {"id": tenant.id, "name": tenant.name, "domain": tenant.domain, "is_active": tenant.is_active}
+@app.post("/webhook/hyperpay")
+async def hyperpay_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    HyperPay webhook endpoint — confirms payment success for local Saudi methods.
+
+    On success:
+      - subscription_status → 'active'
+      - current_period_end  → now + 30 days
+      - billing_status      → 'paid'
+
+    On failure:
+      - billing_status → 'failed'
+    """
+    payload = await request.body()
+    iv        = request.headers.get("X-Initialization-Vector", "")
+    signature = request.headers.get("X-Authentication-Tag", "")
+
+    hp = _get_hyperpay_client()
+
+    # Verify signature only if the webhook secret is configured
+    if _HYPERPAY_WEBHOOK_SECRET:
+        if not hp.verify_webhook_signature(payload, iv, signature):
+            logger.warning("[HyperPay] Webhook signature verification failed")
+            raise HTTPException(status_code=400, detail="Invalid HyperPay webhook signature")
+
+    try:
+        import json as _json
+        data = _json.loads(payload)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    checkout_id = data.get("id", "")
+    result_code = data.get("result", {}).get("code", "")
+    payment_id  = data.get("id", checkout_id)
+
+    # Resolve tenant from stored checkout ID
+    tenant = db.query(Tenant).filter(Tenant.hyperpay_payment_id == checkout_id).first()
+    if tenant is None:
+        logger.info(f"[HyperPay] Webhook: no tenant found for checkout_id={checkout_id}")
+        return {"received": True}
+
+    if hp.is_payment_successful(data):
+        now = datetime.utcnow()
+        tenant.subscription_status = "active"
+        tenant.billing_status      = "paid"
+        tenant.is_active           = True
+        tenant.current_period_end  = now + timedelta(days=30)
+        tenant.hyperpay_payment_id = payment_id
+        db.commit()
+        logger.info(
+            f"[HyperPay] Payment SUCCESS for tenant {tenant.id}: "
+            f"code={result_code} period_end={tenant.current_period_end.date()}"
+        )
+    else:
+        tenant.billing_status = "failed"
+        db.commit()
+        logger.warning(
+            f"[HyperPay] Payment FAILED for tenant {tenant.id}: "
+            f"code={result_code} desc={data.get('result', {}).get('description', '')}"
+        )
+
+    return {"received": True}
+
 
 if __name__ == "__main__":
     import uvicorn

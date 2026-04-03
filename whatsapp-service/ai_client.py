@@ -12,8 +12,9 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-AI_ORCHESTRATOR_URL = os.getenv("AI_ORCHESTRATOR_URL", "http://localhost:8016/orchestrate")
-AI_ENGINE_URL       = os.getenv("AI_ENGINE_URL",        "http://localhost:8002/ai/respond")
+_ORCHESTRATOR_BASE  = os.getenv("ORCHESTRATOR_URL", "http://localhost:8016")
+AI_ORCHESTRATOR_URL = f"{_ORCHESTRATOR_BASE}/orchestrate"
+AI_ENGINE_URL       = os.getenv("AI_ENGINE_URL", "http://localhost:8002/ai/respond")
 
 logger = logging.getLogger("whatsapp-service.ai_client")
 

@@ -5,14 +5,20 @@ Calls the Anthropic Claude API with the full customer-aware system prompt.
 Uses Claude's native tool use so that product/coupon suggestions are
 returned as structured data (not parsed from freetext).
 
+Uses the official `anthropic` Python SDK when available.
+Falls back to raw httpx if the SDK is not installed.
+Falls back to rule-based responses if no API key is configured.
+
+Environment variables:
+  ANTHROPIC_API_KEY   — primary (standard Anthropic env var)
+  CLAUDE_API_KEY      — legacy alias (checked if ANTHROPIC_API_KEY is not set)
+  CLAUDE_MODEL        — model ID (default: claude-opus-4-6)
+
 Tools available to Claude:
   suggest_product   — recommend a specific product by ID
   suggest_coupon    — propose a discount percentage
   suggest_bundle    — recommend a product bundle
   propose_order     — initiate a draft order
-
-Fallback: if CLAUDE_API_KEY is not set, returns a rule-based response
-(same bilingual fallback as ai-engine — so the platform always responds).
 """
 
 from __future__ import annotations
@@ -21,13 +27,23 @@ import logging
 import os
 from typing import Any, Dict, List
 
-import httpx
-
 logger = logging.getLogger("ai-orchestrator.engine")
 
-CLAUDE_API_KEY  = os.getenv("CLAUDE_API_KEY", "")
-CLAUDE_MODEL    = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+# Support ANTHROPIC_API_KEY (standard) with CLAUDE_API_KEY as legacy fallback
+CLAUDE_API_KEY  = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY", "")
+CLAUDE_MODEL    = os.getenv("CLAUDE_MODEL", "claude-opus-4-6")
 CLAUDE_API_BASE = "https://api.anthropic.com/v1"
+
+# Try to import the official Anthropic SDK
+try:
+    import anthropic as _anthropic
+    _SDK_AVAILABLE = True
+    logger.info("Anthropic SDK loaded — using SDK client")
+except ImportError:
+    _SDK_AVAILABLE = False
+    import httpx
+    logger.warning("anthropic SDK not installed — falling back to raw httpx")
+
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
 _TOOLS: List[Dict] = [
@@ -127,44 +143,103 @@ _TOOLS: List[Dict] = [
 ]
 
 
+# ── Main entry point ──────────────────────────────────────────────────────────
+
 async def call_claude(
     system_prompt: str,
     user_message: str,
 ) -> Dict[str, Any]:
     """
-    Returns:
+    Call Claude and return:
     {
         "reply":   str,            # conversational WhatsApp reply
-        "actions": [               # tool use blocks — to be validated by PolicyGuard
+        "actions": [               # tool-use blocks — validated by PolicyGuard
             {"type": str, "payload": dict}
         ],
         "model":   str,
     }
     """
     if not CLAUDE_API_KEY:
+        logger.warning("No ANTHROPIC_API_KEY configured — using rule-based fallback")
         return {
             "reply":   _rule_based_fallback(user_message),
             "actions": [],
             "model":   "rule-based",
         }
 
+    if _SDK_AVAILABLE:
+        return await _call_via_sdk(system_prompt, user_message)
+    else:
+        return await _call_via_httpx(system_prompt, user_message)
+
+
+# ── SDK implementation ────────────────────────────────────────────────────────
+
+async def _call_via_sdk(system_prompt: str, user_message: str) -> Dict[str, Any]:
+    """Use the official anthropic SDK (preferred)."""
+    client = _anthropic.AsyncAnthropic(api_key=CLAUDE_API_KEY)
+    try:
+        response = await client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            system=system_prompt,
+            tools=_TOOLS,
+            tool_choice={"type": "auto"},
+            messages=[{"role": "user", "content": user_message}],
+        )
+    except _anthropic.AuthenticationError:
+        logger.error("Claude SDK: authentication failed — check ANTHROPIC_API_KEY")
+        return {
+            "reply":   _rule_based_fallback(user_message),
+            "actions": [],
+            "model":   "rule-based-fallback",
+        }
+    except _anthropic.APIConnectionError as exc:
+        logger.error(f"Claude SDK: connection error — {exc}")
+        return {
+            "reply":   _rule_based_fallback(user_message),
+            "actions": [],
+            "model":   "rule-based-fallback",
+        }
+    except _anthropic.APIError as exc:
+        logger.error(f"Claude SDK: API error — {exc}")
+        return {
+            "reply":   _rule_based_fallback(user_message),
+            "actions": [],
+            "model":   "rule-based-fallback",
+        }
+
+    reply   = ""
+    actions = []
+    for block in response.content:
+        if block.type == "text":
+            reply = block.text
+        elif block.type == "tool_use":
+            actions.append({
+                "type":    block.name,
+                "payload": block.input,
+            })
+
+    return {"reply": reply, "actions": actions, "model": CLAUDE_MODEL}
+
+
+# ── httpx fallback implementation ─────────────────────────────────────────────
+
+async def _call_via_httpx(system_prompt: str, user_message: str) -> Dict[str, Any]:
+    """Raw httpx fallback when the anthropic SDK is not installed."""
     headers = {
         "x-api-key":         CLAUDE_API_KEY,
         "anthropic-version": "2023-06-01",
         "content-type":      "application/json",
     }
-
     body = {
         "model":      CLAUDE_MODEL,
         "max_tokens": 1024,
         "system":     system_prompt,
         "tools":      _TOOLS,
         "tool_choice": {"type": "auto"},
-        "messages": [
-            {"role": "user", "content": user_message}
-        ],
+        "messages": [{"role": "user", "content": user_message}],
     }
-
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
             resp = await client.post(
@@ -175,7 +250,7 @@ async def call_claude(
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as exc:
-        logger.error(f"Claude API call failed: {exc}")
+        logger.error(f"Claude httpx call failed: {exc}")
         return {
             "reply":   _rule_based_fallback(user_message),
             "actions": [],
@@ -184,7 +259,6 @@ async def call_claude(
 
     reply   = ""
     actions = []
-
     for block in data.get("content", []):
         if block.get("type") == "text":
             reply = block.get("text", "")
