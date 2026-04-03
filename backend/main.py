@@ -5649,7 +5649,7 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
     if not user or not getattr(user, "password_hash", None):
         _audit("login_failed", reason="user_not_found", sub=email, ip=client_ip)
         raise _INVALID
-    if not _pwd_context.verify(body.password, user.password_hash):
+    if not _pwd_context.verify(body.password[:72], user.password_hash):
         _audit("login_failed", reason="wrong_password", sub=email, ip=client_ip)
         raise _INVALID
     if not user.is_active:
