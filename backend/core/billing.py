@@ -149,3 +149,46 @@ def require_subscription(db: Session, tenant_id: int) -> None:
             status_code=402,
             detail="الرجاء اختيار خطة نحلة لتفعيل الطيار الآلي للمبيعات.",
         )
+
+
+# ── Moyasar gateway helpers ───────────────────────────────────────────────────
+
+DEFAULT_MOYASAR: Dict[str, Any] = {
+    "enabled": False,
+    "secret_key": "",
+    "publishable_key": "",
+    "webhook_secret": "",
+    "callback_url": "",
+    "success_url": "",
+    "error_url": "",
+}
+
+
+def get_moyasar_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Return Moyasar gateway config for a tenant, merged with defaults."""
+    from core.tenant import get_or_create_settings, merge_defaults
+    s = get_or_create_settings(db, tenant_id)
+    meta = s.extra_metadata or {}
+    return merge_defaults(meta.get("moyasar", {}), DEFAULT_MOYASAR)
+
+
+def get_billing_gateway(db: Session, tenant_id: int):
+    """
+    Return (gateway_client, gateway_name, gateway_cfg) for billing checkout.
+    Priority: Moyasar → demo.
+    Returns (None, 'demo', {}) when no gateway is configured.
+    """
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+    cfg = get_moyasar_settings(db, tenant_id)
+    if cfg.get("enabled") and cfg.get("secret_key"):
+        from payment_gateways.moyasar import MoyasarClient  # noqa: PLC0415
+        return (
+            MoyasarClient(
+                secret_key=cfg["secret_key"],
+                publishable_key=cfg.get("publishable_key", ""),
+            ),
+            "moyasar",
+            cfg,
+        )
+    return None, "demo", {}

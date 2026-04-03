@@ -7,7 +7,7 @@ export default function ProtectedRoute({ children }: { children: ReactNode }) {
   // A missing token means the session is from the pre-JWT era — force re-login.
   if (!isAuthenticated() || !getToken()) {
     logout() // clear any stale flags
-    return <Navigate to="/login" replace />
+    return <Navigate to="/landing" replace />
   }
   return <>{children}</>
 }

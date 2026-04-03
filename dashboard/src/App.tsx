@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { LanguageProvider } from './i18n/context'
 import Layout from './components/layout/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
+import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
 import Billing from './pages/Billing'
@@ -25,6 +26,7 @@ import Merchants from './pages/Merchants'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import Register from './pages/Register'
+import WhatsAppConnect from './pages/WhatsAppConnect'
 import VerifyEmail from './pages/VerifyEmail'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
@@ -34,7 +36,10 @@ export default function App() {
     <LanguageProvider>
       <BrowserRouter>
         <Routes>
-          {/* Public */}
+          {/* Public — marketing */}
+          <Route path="/landing"              element={<Landing />} />
+
+          {/* Public — auth */}
           <Route path="/login"                element={<Login />} />
           <Route path="/onboarding"           element={<Onboarding />} />
           <Route path="/billing/payment-result" element={<BillingResult />} />
@@ -45,7 +50,7 @@ export default function App() {
           <Route path="/integrations/salla/success" element={<SallaOAuthSuccess />} />
           <Route path="/integrations/salla/error"   element={<SallaOAuthError />} />
 
-          {/* Protected */}
+          {/* Protected dashboard — all existing routes unchanged */}
           <Route
             path="/"
             element={
@@ -69,6 +74,7 @@ export default function App() {
             <Route path="settings"           element={<Settings />} />
             <Route path="ai-sales-logs"      element={<AiSalesLogs />} />
             <Route path="store-integration"  element={<StoreIntegration />} />
+            <Route path="whatsapp-connect"   element={<WhatsAppConnect />} />
             <Route path="handoff-queue"      element={<HandoffQueue />} />
             <Route path="system-status"      element={<SystemStatus />} />
             <Route path="merchants"          element={<Merchants />} />

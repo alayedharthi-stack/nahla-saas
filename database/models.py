@@ -76,6 +76,13 @@ class Tenant(Base):
     app_installs = relationship('AppInstall', back_populates='tenant')
     app_payments = relationship('AppPayment', back_populates='tenant')
 
+    # Goal A — WhatsApp Embedded Signup
+    whatsapp_connection = relationship('WhatsAppConnection', back_populates='tenant', uselist=False)
+
+    # Goal B — Store Knowledge Sync
+    store_sync_jobs   = relationship('StoreSyncJob', back_populates='tenant')
+    store_knowledge   = relationship('StoreKnowledgeSnapshot', back_populates='tenant', uselist=False)
+
 class TenantSettings(Base):
     __tablename__ = 'tenant_settings'
     id = Column(Integer, primary_key=True)
@@ -783,6 +790,119 @@ class SystemEvent(Base):
 
 
 # ── Conversation Trace ────────────────────────────────────────────────────────
+
+# ── WhatsApp Embedded Signup Connection ───────────────────────────────────────
+
+class WhatsAppConnection(Base):
+    """
+    Per-tenant WhatsApp / Meta connection state.
+    Persists all Meta identifiers and the (server-side-only) access token.
+    The access_token column is NEVER serialised to the frontend.
+    """
+    __tablename__ = 'whatsapp_connections'
+    id           = Column(Integer, primary_key=True)
+    tenant_id    = Column(Integer, ForeignKey('tenants.id'), nullable=False, unique=True)
+
+    # State machine ─────────────────────────────────────────────────────────────
+    # not_connected | pending | connected | error | disconnected | needs_reauth
+    status       = Column(String, default='not_connected', nullable=False)
+
+    # Meta identifiers (safe to log / return to frontend) ─────────────────────
+    meta_business_account_id     = Column(String, nullable=True)
+    whatsapp_business_account_id = Column(String, nullable=True)
+    phone_number_id              = Column(String, nullable=True)
+    phone_number                 = Column(String, nullable=True)
+    business_display_name        = Column(String, nullable=True)
+    business_manager_id          = Column(String, nullable=True)
+
+    # Token — backend-only, NEVER send to frontend ────────────────────────────
+    access_token      = Column(String, nullable=True)
+    token_type        = Column(String, nullable=True)   # short_lived | long_lived
+    token_expires_at  = Column(DateTime, nullable=True)
+
+    # Timestamps and audit ────────────────────────────────────────────────────
+    connected_at      = Column(DateTime, nullable=True)
+    last_verified_at  = Column(DateTime, nullable=True)
+    last_attempt_at   = Column(DateTime, nullable=True)
+    last_error        = Column(Text, nullable=True)
+
+    # Prerequisites flags ─────────────────────────────────────────────────────
+    webhook_verified  = Column(Boolean, default=False)
+    sending_enabled   = Column(Boolean, default=False)
+
+    extra_metadata    = Column(JSONB, nullable=True)
+    created_at        = Column(DateTime, default=datetime.utcnow)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship('Tenant', back_populates='whatsapp_connection')
+
+
+# ── Store Knowledge Sync ──────────────────────────────────────────────────────
+
+class StoreSyncJob(Base):
+    """Tracks a single store-sync run (full or incremental) for a tenant."""
+    __tablename__ = 'store_sync_jobs'
+    id           = Column(Integer, primary_key=True)
+    tenant_id    = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+
+    # pending | running | completed | failed | partial
+    status       = Column(String, default='pending', nullable=False)
+    # full | incremental | webhook
+    sync_type    = Column(String, default='full', nullable=False)
+    triggered_by = Column(String, nullable=True)    # merchant | system | webhook
+
+    started_at   = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    # Progress counters ────────────────────────────────────────────────────────
+    products_synced   = Column(Integer, default=0)
+    categories_synced = Column(Integer, default=0)
+    orders_synced     = Column(Integer, default=0)
+    shipping_synced   = Column(Integer, default=0)
+    coupons_synced    = Column(Integer, default=0)
+    customers_synced  = Column(Integer, default=0)
+
+    error_message  = Column(Text, nullable=True)
+    extra_metadata = Column(JSONB, nullable=True)
+    created_at     = Column(DateTime, default=datetime.utcnow)
+
+    tenant = relationship('Tenant', back_populates='store_sync_jobs')
+
+
+class StoreKnowledgeSnapshot(Base):
+    """
+    Normalised, AI-ready snapshot of a tenant's store data.
+    Updated after every full or incremental sync.
+    The AI reads this to answer questions accurately.
+    """
+    __tablename__ = 'store_knowledge_snapshots'
+    id        = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False, unique=True)
+
+    # Normalised knowledge blocks (JSONB) ──────────────────────────────────────
+    store_profile    = Column(JSONB, nullable=True)   # name, logo, url, contact
+    catalog_summary  = Column(JSONB, nullable=True)   # top products, categories
+    shipping_summary = Column(JSONB, nullable=True)   # methods, zones, estimates
+    policy_summary   = Column(JSONB, nullable=True)   # return, payment, support
+    coupon_summary   = Column(JSONB, nullable=True)   # active coupons/offers
+
+    # Sync metadata ───────────────────────────────────────────────────────────
+    last_full_sync_at        = Column(DateTime, nullable=True)
+    last_incremental_sync_at = Column(DateTime, nullable=True)
+
+    # Entity counts (displayed in dashboard) ──────────────────────────────────
+    product_count  = Column(Integer, default=0)
+    category_count = Column(Integer, default=0)
+    order_count    = Column(Integer, default=0)
+    coupon_count   = Column(Integer, default=0)
+    customer_count = Column(Integer, default=0)
+
+    sync_version = Column(Integer, default=0)   # bumped on every full sync
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship('Tenant', back_populates='store_knowledge')
+
 
 class ConversationTrace(Base):
     """Per-turn debug trace for every AI Sales conversation step."""

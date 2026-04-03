@@ -17,6 +17,7 @@ import {
   type StoreIntegrationTestResult,
 } from '../api/storeIntegration'
 import { apiCall } from '../api/client'
+import StoreSyncPanel from '../components/StoreSyncPanel'
 
 export default function StoreIntegration() {
   const [status, setStatus] = useState<StoreIntegrationStatus | null>(null)
@@ -345,6 +346,9 @@ export default function StoreIntegration() {
           ربط المتجر عبر سلة (OAuth)
         </button>
       </div>
+
+      {/* Store Knowledge Sync */}
+      <StoreSyncPanel isStoreConnected={isConfigured} />
 
       {/* Info Box */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-5">

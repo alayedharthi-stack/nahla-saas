@@ -18,6 +18,7 @@ import {
   Users,
   Activity,
   CreditCard,
+  MessageCircle,
   X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -63,7 +64,8 @@ const NAV_GROUPS: NavGroup[] = [
     groupLabel: tr => tr.nav.groups.store,
     items: [
       { to: '/integrations',      icon: Plug,       label: tr  => tr.nav.items.integrations },
-      { to: '/store-integration', icon: Store,      label: _tr => 'ربط المتجر'              },
+      { to: '/store-integration', icon: Store,         label: _tr => 'ربط المتجر'        },
+      { to: '/whatsapp-connect',  icon: MessageCircle, label: _tr => 'ربط واتساب'        },
       { to: '/system-status',     icon: Activity,   label: _tr => 'حالة النظام'             },
       { to: '/billing',           icon: CreditCard, label: _tr => 'الاشتراك والفوترة'       },
       { to: '/settings',          icon: Settings,   label: tr  => tr.nav.items.settings     },

@@ -1,0 +1,81 @@
+import { apiCall } from './client'
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export type WaConnectionStatus =
+  | 'not_connected'
+  | 'pending'
+  | 'connected'
+  | 'error'
+  | 'disconnected'
+  | 'needs_reauth'
+
+export interface WaConnection {
+  status: WaConnectionStatus
+  phone_number: string | null
+  business_display_name: string | null
+  whatsapp_business_account_id: string | null
+  phone_number_id: string | null
+  meta_business_account_id: string | null
+  connected_at: string | null
+  last_verified_at: string | null
+  last_attempt_at: string | null
+  last_error: string | null
+  webhook_verified: boolean
+  sending_enabled: boolean
+  token_expires_at: string | null
+}
+
+export interface WaStartResult {
+  status: string
+  meta_app_id: string
+  graph_version: string
+  scope: string
+  extras: Record<string, unknown>
+}
+
+export interface WaHealthResult {
+  healthy: boolean
+  status: WaConnectionStatus
+  phone_number: string | null
+  checks: {
+    has_connection: boolean
+    token_present: boolean
+    token_valid: boolean
+    webhook_verified: boolean
+    sending_enabled: boolean
+  }
+  last_verified: string | null
+  last_error: string | null
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+
+export const whatsappConnectApi = {
+  getStatus: () =>
+    apiCall<WaConnection>('/whatsapp/connection'),
+
+  start: () =>
+    apiCall<WaStartResult>('/whatsapp/connection/start', { method: 'POST' }),
+
+  callback: (data: { code: string; state?: string; waba_id?: string; phone_number_id?: string; business_id?: string }) =>
+    apiCall<WaConnection & { status: string }>('/whatsapp/connection/callback', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  verify: () =>
+    apiCall<{ verified: boolean; reason?: string; sending_enabled?: boolean }>(
+      '/whatsapp/connection/verify',
+      { method: 'POST' }
+    ),
+
+  disconnect: () =>
+    apiCall<{ status: string }>('/whatsapp/connection/disconnect', { method: 'POST' }),
+
+  reconnect: () =>
+    apiCall<WaStartResult>('/whatsapp/connection/reconnect', { method: 'POST' }),
+
+  health: () =>
+    apiCall<WaHealthResult>('/whatsapp/connection/health'),
+}
