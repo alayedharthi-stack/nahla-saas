@@ -100,6 +100,7 @@ from routers.system            import router as _system_router           # noqa:
 from routers.widget            import router as _widget_router           # noqa: E402
 from routers.tracking          import router as _tracking_router         # noqa: E402
 from routers.whatsapp_connect  import router as _wa_connect_router       # noqa: E402
+from routers.whatsapp_webhook  import router as _wa_webhook_router        # noqa: E402
 from routers.store_sync        import router as _store_sync_router        # noqa: E402
 
 app.include_router(_health_router)
@@ -120,6 +121,7 @@ app.include_router(_system_router)
 app.include_router(_widget_router)
 app.include_router(_tracking_router)
 app.include_router(_wa_connect_router)
+app.include_router(_wa_webhook_router)
 app.include_router(_store_sync_router)
 
 # ── Production startup guard ───────────────────────────────────────────────────

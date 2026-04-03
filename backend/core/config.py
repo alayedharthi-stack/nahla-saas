@@ -26,8 +26,9 @@ EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlaai.com>")
 DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlaai.com")
 
 # WhatsApp Business (Meta Cloud API — platform-level, not per-tenant)
-WA_TOKEN    = os.environ.get("WHATSAPP_TOKEN", "")
-WA_PHONE_ID = os.environ.get("PHONE_NUMBER_ID", "")
+WA_TOKEN        = os.environ.get("WHATSAPP_TOKEN", "")
+WA_PHONE_ID     = os.environ.get("PHONE_NUMBER_ID", "")
+WA_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "nahla2025")
 
 # ── Salla OAuth ────────────────────────────────────────────────────────────────
 SALLA_CLIENT_ID      = os.environ.get("SALLA_CLIENT_ID", "")
