@@ -95,7 +95,7 @@ export default function StoreIntegration() {
   async function handleOAuthConnect() {
     setOauthLoading(true)
     try {
-      const data = await apiCall<{ url: string }>('/salla/authorize')
+      const data = await apiCall<{ url: string }>('/api/salla/authorize')
       window.location.href = data.url
     } catch {
       alert('تعذّر الحصول على رابط التفويض. تأكد من تهيئة SALLA_CLIENT_ID في الخادم.')
