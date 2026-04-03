@@ -32,9 +32,7 @@ export default function Login() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 bg-brand-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-brand-500/30">
-            <Sparkles className="w-7 h-7 text-white" />
-          </div>
+          <img src="/logo.png" alt="نحلة" className="w-20 h-20 object-contain mb-3 drop-shadow-xl" />
           <h1 className="text-2xl font-bold text-white">نحلة</h1>
           <p className="text-slate-400 text-sm mt-1">لوحة التحكم</p>
         </div>

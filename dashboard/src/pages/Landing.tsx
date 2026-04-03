@@ -319,7 +319,7 @@ export default function Landing() {
           <div className="flex items-center justify-between h-16">
             {/* Logo */}
             <Link to="/landing" className="flex items-center gap-2 group">
-              <BeeIcon className="w-8 h-8" />
+              <img src="/logo.png" alt="نحلة" className="w-10 h-10 object-contain drop-shadow-md" />
               <span className="text-white font-black text-xl tracking-tight">نحلة</span>
               <span className="text-amber-400 text-[10px] font-black bg-amber-500/15 px-1.5 py-0.5 rounded-full border border-amber-500/25 leading-none">
                 AI
@@ -912,7 +912,7 @@ export default function Landing() {
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[300px] bg-amber-500/8 rounded-full blur-3xl pointer-events-none" />
 
         <div className="relative z-10 max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-          <BeeIcon className="w-16 h-16 mx-auto mb-6" />
+          <img src="/logo.png" alt="نحلة" className="w-20 h-20 mx-auto mb-6 object-contain drop-shadow-lg" />
           <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-4">
             متجرك يستحق مساعداً لا يتعب
           </h2>
@@ -997,7 +997,7 @@ export default function Landing() {
             {/* Brand */}
             <div className="lg:col-span-2">
               <div className="flex items-center gap-2.5 mb-5">
-                <BeeIcon className="w-9 h-9" />
+                <img src="/logo.png" alt="نحلة" className="w-10 h-10 object-contain" />
                 <span className="text-white font-black text-xl">نحلة</span>
                 <span className="text-amber-400 text-[10px] font-black bg-amber-500/15 px-2 py-0.5 rounded-full border border-amber-500/20">
                   AI
@@ -1069,7 +1069,7 @@ export default function Landing() {
           <div className="pt-6 border-t border-white/6 flex flex-col sm:flex-row items-center justify-between gap-4 text-slate-600 text-xs">
             <p>© 2025 نحلة AI — جميع الحقوق محفوظة</p>
             <div className="flex items-center gap-2">
-              <BeeIcon className="w-4 h-4" />
+              <img src="/logo.png" alt="نحلة" className="w-5 h-5 object-contain" />
               <span>صُنع بعناية في المملكة العربية السعودية 🇸🇦</span>
             </div>
           </div>
