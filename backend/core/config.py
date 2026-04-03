@@ -23,7 +23,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "nahla-admin-2026")
 # ── Notification services ──────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlaai.com>")
-DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://api.nahlaai.com")
+DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlaai.com")
 
 # WhatsApp Business (Meta Cloud API — platform-level, not per-tenant)
 WA_TOKEN    = os.environ.get("WHATSAPP_TOKEN", "")
