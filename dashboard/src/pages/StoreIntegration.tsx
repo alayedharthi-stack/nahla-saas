@@ -348,7 +348,7 @@ export default function StoreIntegration() {
       </div>
 
       {/* Store Knowledge Sync */}
-      <StoreSyncPanel isStoreConnected={isConfigured} />
+      <StoreSyncPanel isStoreConnected={!!isConfigured} />
 
       {/* Info Box */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-5">
