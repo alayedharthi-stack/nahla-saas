@@ -97,7 +97,11 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
 
     data = payload.get("data", {})
 
-    if event == "order.created":
+    if event in ("app.store.authorize", "app.store.token"):
+        # Salla sends full token data when merchant installs/authorizes the app
+        await _handle_salla_authorize(db, store_id, data, payload)
+
+    elif event == "order.created":
         logger.info("Salla order.created | order_id=%s store=%s", data.get("id"), store_id)
     elif event == "order.updated":
         logger.info(
@@ -110,8 +114,10 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         logger.info("Salla customer.created | email=%s store=%s", data.get("email"), store_id)
     elif event == "app.installed":
         logger.info("Salla app.installed | store=%s", store_id)
+        await _handle_salla_authorize(db, store_id, data, payload)
     elif event == "app.uninstalled":
         logger.info("Salla app.uninstalled | store=%s", store_id)
+        _disable_salla_integration(db, str(store_id))
     else:
         logger.info(
             "Salla webhook unhandled event=%s store=%s | data=%s",
@@ -119,6 +125,80 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         )
 
     return {"status": "ok", "event": event}
+
+
+async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> None:
+    """Save Salla OAuth tokens received via webhook (app.store.authorize / app.installed)."""
+    from datetime import datetime
+    import sys, os
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
+    from models import Integration, Tenant
+    from core.tenant import get_or_create_tenant
+
+    # Token may be nested under data or at root
+    access_token  = data.get("access_token")  or payload.get("access_token", "")
+    refresh_token = data.get("refresh_token") or payload.get("refresh_token", "")
+    expires_in    = data.get("expires_in")    or payload.get("expires_in", 0)
+    salla_store_id = str(data.get("merchant_id") or data.get("store_id") or store_id or "")
+    store_name     = data.get("store", {}).get("name", "") if isinstance(data.get("store"), dict) else ""
+
+    if not access_token:
+        logger.warning("Salla authorize webhook: no access_token in payload | store=%s", store_id)
+        return
+
+    # Find or create tenant by salla_store_id
+    tenant = db.query(Tenant).filter(Tenant.salla_store_id == salla_store_id).first()
+    if not tenant:
+        # Fall back to tenant 1 (admin) for single-tenant setups
+        tenant = db.query(Tenant).filter(Tenant.id == 1).first()
+    tenant_id = tenant.id if tenant else 1
+
+    integration = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+        Integration.provider  == "salla",
+    ).first()
+
+    new_config = {
+        "api_key":       access_token,
+        "refresh_token": refresh_token,
+        "store_id":      salla_store_id,
+        "store_name":    store_name,
+        "expires_in":    expires_in,
+        "connected_at":  datetime.utcnow().isoformat(),
+    }
+
+    if integration:
+        integration.config  = new_config
+        integration.enabled = True
+    else:
+        integration = Integration(
+            tenant_id=tenant_id,
+            provider="salla",
+            config=new_config,
+            enabled=True,
+        )
+        db.add(integration)
+
+    db.commit()
+    logger.info(
+        "Salla authorize saved via webhook | tenant=%s store_id=%s store_name=%s",
+        tenant_id, salla_store_id, store_name,
+    )
+
+
+def _disable_salla_integration(db, store_id: str) -> None:
+    """Disable integration when app is uninstalled."""
+    from models import Integration, Tenant
+    tenant = db.query(Tenant).filter(Tenant.salla_store_id == store_id).first()
+    if tenant:
+        integration = db.query(Integration).filter(
+            Integration.tenant_id == tenant.id,
+            Integration.provider  == "salla",
+        ).first()
+        if integration:
+            integration.enabled = False
+            db.commit()
+            logger.info("Salla integration disabled | store=%s", store_id)
 
 
 # ── Moyasar payment webhook ───────────────────────────────────────────────────
