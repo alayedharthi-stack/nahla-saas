@@ -96,6 +96,10 @@ def _create_invite_token(email: str, tenant_id_hint: Optional[int] = None) -> st
     }
     return _jwt.encode(payload, _JWT_SECRET, algorithm=_JWT_ALGORITHM)
 
+def _hash_password(password: str) -> str:
+    """Hash password with bcrypt. Truncates to 72 bytes (bcrypt limit)."""
+    return _pwd_context.hash(password[:72])
+
 def _create_verify_token(email: str) -> str:
     """24-hour email verification JWT."""
     payload = {
@@ -5767,7 +5771,7 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
     user = User(
         username=email,
         email=email,
-        password_hash=_pwd_context.hash(body.password),
+        password_hash=_hash_password(body.password),
         role="merchant",
         is_active=True,
         created_at=datetime.utcnow(),
@@ -5901,7 +5905,7 @@ async def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)):
     user  = db.query(User).filter(User.email == email, User.is_active == True).first()
     if not user:
         raise HTTPException(status_code=404, detail="الحساب غير موجود")
-    user.password_hash = _pwd_context.hash(body.password)
+    user.password_hash = _hash_password(body.password)
     db.commit()
     _audit("password_reset_done", sub=email)
     logger.info("Password reset completed for %s", email)
@@ -6245,7 +6249,7 @@ async def create_merchant(
     user = User(
         username=email,
         email=email,
-        password_hash=_pwd_context.hash(body.password),
+        password_hash=_hash_password(body.password),
         role="merchant",
         is_active=True,
         created_at=datetime.utcnow(),
