@@ -28,9 +28,13 @@ from models import Integration  # noqa: E402
 
 from core.audit import audit
 from core.auth import get_jwt_tenant_id
-from core.config import SALLA_CLIENT_ID, SALLA_CLIENT_SECRET, SALLA_REDIRECT_URI
+from core.config import DASHBOARD_URL, SALLA_CLIENT_ID, SALLA_CLIENT_SECRET, SALLA_REDIRECT_URI
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
+
+# Strip accidental "KEY=value" prefix if DASHBOARD_URL was set incorrectly
+_DASHBOARD = DASHBOARD_URL.split("=", 1)[-1] if "=" in DASHBOARD_URL else DASHBOARD_URL
+_DASHBOARD = _DASHBOARD.rstrip("/") or "https://app.nahlaai.com"
 
 logger = logging.getLogger("nahla-backend")
 
@@ -84,19 +88,19 @@ async def salla_oauth_callback(
     if error:
         logger.warning("Salla OAuth provider error: %s", error)
         return RedirectResponse(
-            url=f"/integrations/salla/error?reason={error}", status_code=302,
+            url=f"{_DASHBOARD}/store-integration?salla_error={error}", status_code=302,
         )
 
     if not code:
         logger.warning("Salla OAuth callback: missing code")
         return RedirectResponse(
-            url="/integrations/salla/error?reason=missing_code", status_code=302,
+            url=f"{_DASHBOARD}/store-integration?salla_error=missing_code", status_code=302,
         )
 
     if not SALLA_CLIENT_ID or not SALLA_CLIENT_SECRET:
         logger.error("Salla OAuth: SALLA_CLIENT_ID or SALLA_CLIENT_SECRET not set")
         return RedirectResponse(
-            url="/integrations/salla/error?reason=app_not_configured", status_code=302,
+            url=f"{_DASHBOARD}/store-integration?salla_error=app_not_configured", status_code=302,
         )
 
     try:
@@ -149,7 +153,7 @@ async def salla_oauth_callback(
     except Exception as exc:
         logger.exception("Salla OAuth: unexpected error during token exchange: %s", exc)
         return RedirectResponse(
-            url="/integrations/salla/error?reason=network_error", status_code=302,
+            url=f"{_DASHBOARD}/store-integration?salla_error=network_error", status_code=302,
         )
 
     try:
@@ -190,12 +194,13 @@ async def salla_oauth_callback(
     except Exception as exc:
         logger.exception("Salla OAuth: failed to save integration: %s", exc)
         return RedirectResponse(
-            url="/integrations/salla/error?reason=db_save_failed", status_code=302,
+            url=f"{_DASHBOARD}/store-integration?salla_error=db_save_failed", status_code=302,
         )
 
     logger.info("Salla OAuth: flow complete — redirecting to success page")
+    store_name_enc = urllib.parse.quote(store_name)
     return RedirectResponse(
-        url=f"/integrations/salla/success?store={salla_store_id}&name={store_name}",
+        url=f"{_DASHBOARD}/store-integration?salla_connected=true&store={salla_store_id}&name={store_name_enc}",
         status_code=302,
     )
 

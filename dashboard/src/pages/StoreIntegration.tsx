@@ -28,6 +28,7 @@ export default function StoreIntegration() {
   const [showApiKey, setShowApiKey] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
   const [oauthLoading, setOauthLoading] = useState(false)
+  const [oauthMessage, setOauthMessage] = useState<{type: 'success'|'error', text: string} | null>(null)
 
   // Form state
   const [platform, setPlatform] = useState('salla')
@@ -38,6 +39,26 @@ export default function StoreIntegration() {
 
   useEffect(() => {
     loadSettings()
+    // Check if redirected back from Salla OAuth
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('salla_connected') === 'true') {
+      const name = params.get('name') || ''
+      setOauthMessage({ type: 'success', text: `تم ربط المتجر بنجاح! ${name ? '(' + name + ')' : ''}` })
+      window.history.replaceState({}, '', window.location.pathname)
+      loadSettings()
+    } else if (params.get('salla_error')) {
+      const err = params.get('salla_error')
+      const msgs: Record<string, string> = {
+        invalid_state:        'رفضت سلة الطلب — تأكد أن التطبيق مفعّل في حساب شركاء سلة أو جرّب ربط متجرك كمتجر تجريبي.',
+        token_exchange_failed:'فشل تبادل الرمز مع سلة — تحقق من Client Secret.',
+        app_not_configured:   'لم يتم ضبط بيانات التطبيق في الخادم.',
+        missing_code:         'لم يُرسل كود التفويض من سلة.',
+        network_error:        'خطأ في الاتصال بسلة.',
+        db_save_failed:       'تم الربط لكن فشل الحفظ في قاعدة البيانات.',
+      }
+      setOauthMessage({ type: 'error', text: msgs[err!] || `خطأ: ${err}` })
+      window.history.replaceState({}, '', window.location.pathname)
+    }
   }, [])
 
   async function loadSettings() {
@@ -324,6 +345,20 @@ export default function StoreIntegration() {
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* OAuth result banner */}
+      {oauthMessage && (
+        <div className={`rounded-xl p-4 text-sm flex items-start gap-3 ${
+          oauthMessage.type === 'success'
+            ? 'bg-green-50 border border-green-200 text-green-800'
+            : 'bg-red-50 border border-red-200 text-red-800'
+        }`}>
+          {oauthMessage.type === 'success'
+            ? <CheckCircle className="w-4 h-4 mt-0.5 shrink-0" />
+            : <XCircle className="w-4 h-4 mt-0.5 shrink-0" />}
+          <span>{oauthMessage.text}</span>
         </div>
       )}
 
