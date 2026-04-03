@@ -4,7 +4,10 @@
 
 import { getToken, logout } from '../auth'
 
-export const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
+// In production the frontend talks directly to the backend domain.
+// This avoids nginx acting as a proxy (which caused POST failures on Railway Edge).
+// CORS on the backend already allows https://api.nahlaai.com as origin.
+export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://app.nahlaai.com'
 
 export async function apiCall<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken()
