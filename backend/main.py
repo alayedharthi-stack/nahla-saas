@@ -98,7 +98,9 @@ def _create_invite_token(email: str, tenant_id_hint: Optional[int] = None) -> st
 
 def _hash_password(password: str) -> str:
     """Hash password with bcrypt. Truncates to 72 bytes (bcrypt limit)."""
-    return _pwd_context.hash(password[:72])
+    import bcrypt as _bcrypt_lib
+    hashed = _bcrypt_lib.hashpw(password[:72].encode("utf-8"), _bcrypt_lib.gensalt())
+    return hashed.decode("utf-8")
 
 def _create_verify_token(email: str) -> str:
     """24-hour email verification JWT."""
@@ -5606,8 +5608,7 @@ async def health_detailed(request: Request, db: Session = Depends(get_db)):
 # ── Auth endpoints ─────────────────────────────────────────────────────────────
 
 try:
-    from passlib.context import CryptContext as _CryptContext
-    _pwd_context = _CryptContext(schemes=["bcrypt"], deprecated="auto")
+    import bcrypt as _bcrypt_pwd
     _PASSLIB_AVAILABLE = True
 except ImportError:
     _PASSLIB_AVAILABLE = False
@@ -5649,7 +5650,7 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
     if not user or not getattr(user, "password_hash", None):
         _audit("login_failed", reason="user_not_found", sub=email, ip=client_ip)
         raise _INVALID
-    if not _pwd_context.verify(body.password[:72], user.password_hash):
+    if not _bcrypt_pwd.checkpw(body.password[:72].encode("utf-8"), user.password_hash.encode("utf-8")):
         _audit("login_failed", reason="wrong_password", sub=email, ip=client_ip)
         raise _INVALID
     if not user.is_active:
