@@ -288,7 +288,7 @@ function AITab({
               <option value="sales">{s.toneOptions.luxury}</option>
             </select>
           </Field>
-          <Field label={t(tr => tr.lang === 'ar' ? 'طول الرد' : 'Reply Length')}>
+          <Field label={t(tr => tr.meta.code === 'ar' ? 'طول الرد' : 'Reply Length')}>
             <select className="input" value={data.reply_length} onChange={e => onChange({ reply_length: e.target.value as AISettings['reply_length'] })}>
               <option value="short">{t(tr => tr.meta.code === 'ar' ? 'قصير ومختصر' : 'Short & concise')}</option>
               <option value="medium">{t(tr => tr.meta.code === 'ar' ? 'متوسط' : 'Medium')}</option>
