@@ -924,9 +924,12 @@ export default function Landing() {
                 { value: '35٪',    label: 'زيادة متوسطة في إيرادات واتساب',    color: 'text-amber-400',  bg: 'bg-amber-500/8 border-amber-500/15' },
                 { value: '3 ساعات', label: 'توفّر يومياً من وقت فريق الدعم',    color: 'text-blue-400',   bg: 'bg-blue-500/8 border-blue-500/15' },
                 { value: '30٪',    label: 'من السلات المتروكة تُسترجع',          color: 'text-green-400',  bg: 'bg-green-500/8 border-green-500/15' },
-                { value: '< ساعة',  label: 'الإعداد الكامل من الصفر',             color: 'text-purple-400', bg: 'bg-purple-500/8 border-purple-500/15' },
+                { value: '1 ساعة',  label: 'الإعداد الكامل من الصفر',             color: 'text-purple-400', bg: 'bg-purple-500/8 border-purple-500/15' },
               ].map(({ value, label, color, bg }, i) => (
                 <div key={i} className={`p-5 sm:p-6 rounded-2xl border text-center ${bg}`}>
+                  {i === 3 && (
+                    <div className="text-slate-500 text-[10px] font-medium mb-0.5">أقل من</div>
+                  )}
                   <div className={`text-3xl sm:text-4xl font-black mb-2 ${color}`}>{value}</div>
                   <div className="text-slate-400 text-xs sm:text-sm leading-snug">{label}</div>
                 </div>
