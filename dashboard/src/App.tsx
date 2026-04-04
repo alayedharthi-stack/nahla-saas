@@ -23,6 +23,7 @@ import StoreIntegration from './pages/StoreIntegration'
 import HandoffQueue from './pages/HandoffQueue'
 import SystemStatus from './pages/SystemStatus'
 import Merchants from './pages/Merchants'
+import AdminDashboard from './pages/AdminDashboard'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import Register from './pages/Register'
@@ -78,6 +79,7 @@ export default function App() {
             <Route path="handoff-queue"      element={<HandoffQueue />} />
             <Route path="system-status"      element={<SystemStatus />} />
             <Route path="merchants"          element={<Merchants />} />
+            <Route path="admin"             element={<AdminDashboard />} />
             <Route path="billing"            element={<Billing />} />
           </Route>
         </Routes>

@@ -186,6 +186,27 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
               </p>
               <div className="space-y-0.5">
                 <NavLink
+                  to="/admin"
+                  onClick={onClose}
+                  className={({ isActive }) =>
+                    `relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                      isActive
+                        ? 'bg-white/10 text-white'
+                        : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+                    }`
+                  }
+                >
+                  {({ isActive }) => (
+                    <>
+                      {isActive && (
+                        <span className="absolute start-0 inset-y-1.5 w-0.5 bg-amber-400 rounded-e-full" />
+                      )}
+                      <span className="text-base">👑</span>
+                      لوحة المالك
+                    </>
+                  )}
+                </NavLink>
+                <NavLink
                   to="/merchants"
                   onClick={onClose}
                   className={({ isActive }) =>

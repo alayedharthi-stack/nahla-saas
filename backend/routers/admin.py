@@ -222,6 +222,87 @@ async def delete_merchant(
     return {"deleted": True}
 
 
+@router.get("/admin/stats")
+async def get_platform_stats(
+    db:     Session         = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Platform-wide statistics for the owner dashboard."""
+    from sqlalchemy import func
+    from models import BillingSubscription, BillingPayment  # noqa: E402
+
+    total_merchants  = db.query(func.count(User.id)).filter(User.role == "merchant").scalar() or 0
+    active_merchants = db.query(func.count(User.id)).filter(User.role == "merchant", User.is_active == True).scalar() or 0  # noqa: E712
+    total_tenants    = db.query(func.count(Tenant.id)).scalar() or 0
+
+    # Subscriptions
+    try:
+        active_subs = db.query(func.count(BillingSubscription.id)).filter(
+            BillingSubscription.status.in_(["active", "trialing"])
+        ).scalar() or 0
+        total_subs = db.query(func.count(BillingSubscription.id)).scalar() or 0
+    except Exception:
+        active_subs = 0
+        total_subs  = 0
+
+    # Revenue
+    try:
+        total_revenue = db.query(func.sum(BillingPayment.amount)).filter(
+            BillingPayment.status == "paid"
+        ).scalar() or 0
+        recent_payments = db.query(BillingPayment).order_by(
+            BillingPayment.created_at.desc()
+        ).limit(10).all()
+        payments_list = [
+            {
+                "id":         p.id,
+                "tenant_id":  p.tenant_id,
+                "amount":     p.amount,
+                "currency":   p.currency,
+                "status":     p.status,
+                "gateway":    p.gateway,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+            }
+            for p in recent_payments
+        ]
+    except Exception:
+        total_revenue   = 0
+        payments_list   = []
+
+    # Recent merchants
+    recent_merchants = db.query(User).filter(User.role == "merchant").order_by(
+        User.created_at.desc()
+    ).limit(5).all()
+
+    return {
+        "merchants": {
+            "total":  total_merchants,
+            "active": active_merchants,
+        },
+        "tenants": {
+            "total": total_tenants,
+        },
+        "subscriptions": {
+            "active": active_subs,
+            "total":  total_subs,
+        },
+        "revenue": {
+            "total_sar": float(total_revenue),
+        },
+        "recent_payments":  payments_list,
+        "recent_merchants": [
+            {
+                "id":         u.id,
+                "email":      u.email,
+                "store_name": u.name,
+                "is_active":  u.is_active,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in recent_merchants
+        ],
+    }
+
+
 @router.get("/tenants/{tenant_id}")
 async def get_tenant(tenant_id: int, db: Session = Depends(get_db)):
     """Retrieve a single tenant by its numeric ID."""
