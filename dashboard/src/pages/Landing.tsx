@@ -989,6 +989,76 @@ export default function Landing() {
       </section>
 
       {/* ══════════════════════════════════════════════════════════
+          MOBILE APP SECTION
+      ══════════════════════════════════════════════════════════ */}
+      <section className="bg-gradient-to-b from-slate-900 to-slate-950 py-20 px-4">
+        <div className="max-w-3xl mx-auto text-center">
+          <div className="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 rounded-full px-4 py-1.5 mb-6">
+            <span className="text-amber-400 text-xs font-semibold">قريباً</span>
+            <span className="text-slate-400 text-xs">·</span>
+            <span className="text-slate-400 text-xs">تطبيق الجوال</span>
+          </div>
+          <h2 className="text-3xl md:text-4xl font-black text-white mb-4">
+            نحلة في جيبك{' '}
+            <span className="text-amber-400">دائماً</span>
+          </h2>
+          <p className="text-slate-400 text-base leading-relaxed mb-10 max-w-xl mx-auto">
+            تابع محادثات متجرك، راجع الطلبات، وأدِر مساعدك الذكي من هاتفك في أي وقت ومن أي مكان.
+            التطبيق قادم قريباً على App Store وGoogle Play.
+          </p>
+
+          {/* Mock phone + badges */}
+          <div className="flex flex-col items-center gap-8">
+            {/* Feature chips */}
+            <div className="flex flex-wrap justify-center gap-3">
+              {[
+                { icon: '💬', text: 'ردود واتساب فورية' },
+                { icon: '📦', text: 'إدارة الطلبات' },
+                { icon: '📊', text: 'إحصائيات حية' },
+                { icon: '🔔', text: 'إشعارات لحظية' },
+              ].map(chip => (
+                <div key={chip.text} className="flex items-center gap-2 bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-2">
+                  <span className="text-base">{chip.icon}</span>
+                  <span className="text-slate-300 text-sm font-medium">{chip.text}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Store badges */}
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex flex-wrap justify-center gap-3" dir="ltr">
+                {/* App Store */}
+                <div className="flex items-center gap-2 bg-slate-800 text-white rounded-2xl px-5 py-3 border border-slate-600/50 opacity-70 cursor-not-allowed select-none">
+                  <svg viewBox="0 0 24 24" className="w-6 h-6 fill-white flex-shrink-0">
+                    <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z" />
+                  </svg>
+                  <div className="flex flex-col leading-none text-right">
+                    <span className="text-[10px] text-slate-400">قريباً على</span>
+                    <span className="text-base font-bold">App Store</span>
+                  </div>
+                </div>
+
+                {/* Google Play */}
+                <div className="flex items-center gap-2 bg-slate-800 text-white rounded-2xl px-5 py-3 border border-slate-600/50 opacity-70 cursor-not-allowed select-none">
+                  <svg viewBox="0 0 24 24" className="w-6 h-6 fill-white flex-shrink-0">
+                    <path d="M3.18 23.76c.31.17.66.22 1.02.14l12.2-7.03-2.66-2.66-10.56 9.55zM.54 1.3C.2 1.67 0 2.2 0 2.9v18.2c0 .7.2 1.23.54 1.6l.09.08 10.2-10.2v-.24L.63 1.22l-.09.08zM20.3 10.27l-2.9-1.67-2.98 2.98 2.98 2.98 2.92-1.68c.83-.48.83-1.26-.02-1.61zM4.2.1L16.4 7.13l-2.66 2.66L3.18.24C3.5.08 3.89.05 4.2.1z" />
+                  </svg>
+                  <div className="flex flex-col leading-none text-right">
+                    <span className="text-[10px] text-slate-400">قريباً على</span>
+                    <span className="text-base font-bold">Google Play</span>
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-slate-600 text-xs">
+                في انتظار المراجعة · سيُعلن عند الإطلاق
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ══════════════════════════════════════════════════════════
           FOOTER
       ══════════════════════════════════════════════════════════ */}
       <footer className="border-t border-white/6 bg-slate-900 pt-14 pb-8">

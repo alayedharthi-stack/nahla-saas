@@ -2,9 +2,32 @@
 <html lang="ar" dir="rtl">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/png" href="/logo.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>نحلة — ذكاء المتجر</title>
+    <meta name="description" content="مساعد مبيعات ذكي لمتجرك عبر واتساب — نحلة AI" />
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#f59e0b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <!-- Apple PWA -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="نحلة" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <link rel="apple-touch-startup-image" href="/logo.png" />
+
+    <!-- Icons -->
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <link rel="shortcut icon" href="/logo.png" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="نحلة — ذكاء المتجر" />
+    <meta property="og:description" content="مساعد مبيعات ذكي يرد على عملائك عبر واتساب" />
+    <meta property="og:image" content="/logo.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://app.nahlah.ai" />
 
     <!-- Fonts: Cairo (Arabic primary) + Inter (English) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -17,5 +40,12 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {})
+        })
+      }
+    </script>
   </body>
 </html>
