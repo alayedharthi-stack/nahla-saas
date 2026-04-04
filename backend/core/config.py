@@ -23,7 +23,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "nahla-admin-2026")
 # ── Notification services ──────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlaai.com>")
-DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlaai.com")
+DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlah.ai")
 
 # WhatsApp Business (Meta Cloud API — platform-level, not per-tenant)
 WA_TOKEN        = os.environ.get("WHATSAPP_TOKEN", "")
@@ -35,7 +35,7 @@ SALLA_CLIENT_ID      = os.environ.get("SALLA_CLIENT_ID", "")
 SALLA_CLIENT_SECRET  = os.environ.get("SALLA_CLIENT_SECRET", "")
 SALLA_REDIRECT_URI   = os.environ.get(
     "SALLA_REDIRECT_URI",
-    "https://api.nahlaai.com/oauth/salla/callback",
+    "https://api.nahlah.ai/oauth/salla/callback",
 )
 SALLA_WEBHOOK_SECRET = os.environ.get("SALLA_WEBHOOK_SECRET", "")
 
