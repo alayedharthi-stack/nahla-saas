@@ -1,10 +1,12 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Sparkles, Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react'
+import { Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react'
 import { login } from '../auth'
+import { useLanguage } from '../i18n/context'
 
 export default function Login() {
   const navigate = useNavigate()
+  const { t, lang, setLang, dir } = useLanguage()
   const [email,    setEmail]    = useState('')
   const [password, setPassword] = useState('')
   const [showPw,   setShowPw]   = useState(false)
@@ -19,7 +21,7 @@ export default function Login() {
     if (ok) {
       navigate('/overview', { replace: true })
     } else {
-      setError('البريد الإلكتروني أو كلمة المرور غير صحيحة')
+      setError(t(tr => tr.login.invalidCreds))
       setLoading(false)
     }
   }
@@ -27,20 +29,30 @@ export default function Login() {
   return (
     <div
       className="min-h-screen flex items-center justify-center bg-slate-900 px-4"
-      dir="rtl"
+      dir={dir}
     >
       <div className="w-full max-w-sm">
+        {/* Language toggle */}
+        <div className="flex justify-end mb-4">
+          <button
+            onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
+            className="text-xs text-slate-400 hover:text-white border border-slate-600 rounded-lg px-3 py-1.5 transition"
+          >
+            {lang === 'ar' ? 'English' : 'العربية'}
+          </button>
+        </div>
+
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
           <img src="/logo.png" alt="نحلة" className="w-20 h-20 object-contain mb-3 drop-shadow-xl" />
-          <h1 className="text-2xl font-bold text-white">نحلة</h1>
-          <p className="text-slate-400 text-sm mt-1">لوحة التحكم</p>
+          <h1 className="text-2xl font-bold text-white">{t(tr => tr.login.title)}</h1>
+          <p className="text-slate-400 text-sm mt-1">{t(tr => tr.login.subtitle)}</p>
         </div>
 
         {/* Card */}
         <div className="bg-white rounded-2xl shadow-xl p-6 space-y-5">
           <h2 className="text-base font-semibold text-slate-800 text-center">
-            تسجيل الدخول
+            {t(tr => tr.login.submitBtn)}
           </h2>
 
           {error && (
@@ -54,7 +66,7 @@ export default function Login() {
             {/* Email */}
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                البريد الإلكتروني
+                {t(tr => tr.login.emailLabel)}
               </label>
               <input
                 type="email"
@@ -62,7 +74,7 @@ export default function Login() {
                 autoComplete="email"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="admin@nahlah.ai"
+                placeholder={t(tr => tr.login.emailPlaceholder)}
                 dir="ltr"
                 className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-lg
                            focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
@@ -73,7 +85,7 @@ export default function Login() {
             {/* Password */}
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                كلمة المرور
+                {t(tr => tr.login.passwordLabel)}
               </label>
               <div className="relative">
                 <input
@@ -92,7 +104,6 @@ export default function Login() {
                   type="button"
                   onClick={() => setShowPw(s => !s)}
                   className="absolute inset-y-0 end-0 pe-3 flex items-center text-slate-400 hover:text-slate-600"
-                  aria-label={showPw ? 'إخفاء' : 'إظهار'}
                 >
                   {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -101,7 +112,7 @@ export default function Login() {
 
             <div className="flex justify-end">
               <Link to="/forgot-password" className="text-xs text-brand-600 hover:underline">
-                نسيت كلمة المرور؟
+                {t(tr => tr.login.forgotPassword)}
               </Link>
             </div>
 
@@ -113,30 +124,25 @@ export default function Login() {
                          flex items-center justify-center gap-2"
             >
               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              {loading ? 'جارٍ تسجيل الدخول...' : 'تسجيل الدخول'}
+              {loading ? t(tr => tr.login.submitting) : t(tr => tr.login.submitBtn)}
             </button>
           </form>
         </div>
 
         <p className="text-center text-slate-500 text-xs mt-4">
-          متجر جديد؟{' '}
+          {t(tr => tr.login.noAccount)}{' '}
           <Link to="/register" className="text-brand-400 font-medium hover:underline">
-            أنشئ حساباً مجاناً
+            {t(tr => tr.login.registerLink)}
           </Link>
         </p>
 
         <p className="text-center text-slate-600 text-xs mt-3">
-          مدعوم بواسطة نحلة AI
+          {t(tr => tr.common.poweredBy)}
         </p>
 
         <div className="text-center mt-4 pb-2">
-          <p className="text-slate-400 text-xs">
-            تطوير وإدارة:{' '}
-            <span className="text-slate-500 font-medium">تركي بن عايد الحارثي</span>
-          </p>
-          <p className="text-slate-400 text-xs">
-            المدير التنفيذي والمؤسس · nahlah.ai
-          </p>
+          <p className="text-slate-400 text-xs">{t(tr => tr.login.dev)}</p>
+          <p className="text-slate-400 text-xs">{t(tr => tr.login.devRole)}</p>
         </div>
       </div>
     </div>

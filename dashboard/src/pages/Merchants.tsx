@@ -4,6 +4,7 @@ import { UserPlus, ToggleLeft, ToggleRight, Trash2, Loader2, Store, Link2, Copy,
 import { merchantsApi, type Merchant } from '../api/merchants'
 import { apiCall, API_BASE } from '../api/client'
 import { getToken, startImpersonation } from '../auth'
+import { useLanguage } from '../i18n/context'
 
 interface FormState {
   email: string
@@ -15,6 +16,8 @@ interface FormState {
 const EMPTY_FORM: FormState = { email: '', password: '', store_name: '', phone: '' }
 
 export default function Merchants() {
+  const { t } = useLanguage()
+  const m = t(tr => tr.merchants)
   const [merchants, setMerchants] = useState<Merchant[]>([])
   const [loading,   setLoading]   = useState(true)
   const [error,     setError]     = useState('')
@@ -110,7 +113,7 @@ export default function Merchants() {
   }
 
   const handleDelete = async (id: number, email: string) => {
-    if (!confirm(`هل تريد حذف حساب ${email} نهائياً؟`)) return
+    if (!confirm(`${m.confirmDel} ${email}?`)) return
     try {
       await merchantsApi.remove(id)
       setMerchants(prev => prev.filter(m => m.id !== id))
@@ -124,8 +127,8 @@ export default function Merchants() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">إدارة التجار</h1>
-          <p className="text-sm text-slate-500 mt-0.5">أنشئ حسابات للتجار وتحكّم في صلاحياتهم</p>
+          <h1 className="text-xl font-bold text-slate-900">{m.title}</h1>
+          <p className="text-sm text-slate-500 mt-0.5">{m.subtitle}</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -133,14 +136,14 @@ export default function Merchants() {
             className="flex items-center gap-2 border border-slate-300 hover:bg-slate-50 text-slate-700 text-sm font-medium px-4 py-2 rounded-lg transition-colors"
           >
             <Link2 className="w-4 h-4" />
-            إرسال دعوة
+            {m.sendInvite}
           </button>
           <button
             onClick={() => { setShowForm(true); setFormError('') }}
             className="flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
           >
             <UserPlus className="w-4 h-4" />
-            تاجر جديد
+            {m.newMerchant}
           </button>
         </div>
       </div>
@@ -148,17 +151,15 @@ export default function Merchants() {
       {/* Invite form */}
       {showInvite && (
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-          <h2 className="font-semibold text-slate-800 mb-1">إرسال رابط دعوة</h2>
-          <p className="text-xs text-slate-500 mb-4">
-            سيحصل التاجر على رابط يُمكّنه من إنشاء حسابه بنفسه. صالح لمدة 7 أيام.
-          </p>
+          <h2 className="font-semibold text-slate-800 mb-1">{m.inviteTitle}</h2>
+          <p className="text-xs text-slate-500 mb-4">{m.inviteDesc}</p>
           <form onSubmit={handleInvite} className="flex gap-3">
             <input
               type="email"
               dir="ltr"
               value={inviteEmail}
               onChange={e => setInviteEmail(e.target.value)}
-              placeholder="merchant@example.com (أو اتركه فارغاً لدعوة مفتوحة)"
+              placeholder={m.invitePh}
               className="flex-1 px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
             <button
@@ -167,7 +168,7 @@ export default function Merchants() {
               className="flex items-center gap-2 px-4 py-2 text-sm bg-brand-500 hover:bg-brand-600 disabled:opacity-60 text-white font-medium rounded-lg transition-colors"
             >
               {inviting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
-              إنشاء رابط
+              {m.createLink}
             </button>
           </form>
           {inviteUrl && (
@@ -184,7 +185,7 @@ export default function Merchants() {
       {/* Create form */}
       {showForm && (
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
-          <h2 className="font-semibold text-slate-800 mb-4">إضافة تاجر جديد</h2>
+          <h2 className="font-semibold text-slate-800 mb-4">{m.formTitle}</h2>
           {formError && (
             <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
               {formError}
@@ -192,47 +193,47 @@ export default function Merchants() {
           )}
           <form onSubmit={handleCreate} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">اسم المتجر</label>
+              <label className="block text-xs font-medium text-slate-600 mb-1">{m.storeName}</label>
               <input
                 required
                 value={form.store_name}
                 onChange={e => setForm(f => ({ ...f, store_name: e.target.value }))}
-                placeholder="متجر أحمد للملابس"
+                placeholder={m.storeNamePh}
                 className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">البريد الإلكتروني</label>
+              <label className="block text-xs font-medium text-slate-600 mb-1">{m.emailCol}</label>
               <input
                 required
                 type="email"
                 dir="ltr"
                 value={form.email}
                 onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                placeholder="merchant@example.com"
+                placeholder={m.emailPh}
                 className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">كلمة المرور</label>
+              <label className="block text-xs font-medium text-slate-600 mb-1">{t(tr => tr.common.password)}</label>
               <input
                 required
                 type="password"
                 dir="ltr"
                 value={form.password}
                 onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-                placeholder="كلمة مرور قوية"
+                placeholder={m.passwordPh}
                 className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">رقم الهاتف (اختياري)</label>
+              <label className="block text-xs font-medium text-slate-600 mb-1">{t(tr => tr.common.phone)} ({t(tr => tr.common.optional)})</label>
               <input
                 type="tel"
                 dir="ltr"
                 value={form.phone}
                 onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
-                placeholder="+966 5x xxx xxxx"
+                placeholder={m.phonePh}
                 className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
             </div>
@@ -242,7 +243,7 @@ export default function Merchants() {
                 onClick={() => setShowForm(false)}
                 className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 border border-slate-200 rounded-lg"
               >
-                إلغاء
+                {t(tr => tr.actions.cancel)}
               </button>
               <button
                 type="submit"
@@ -250,7 +251,7 @@ export default function Merchants() {
                 className="flex items-center gap-2 px-4 py-2 text-sm bg-brand-500 hover:bg-brand-600 disabled:opacity-60 text-white font-medium rounded-lg transition-colors"
               >
                 {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                {saving ? 'جارٍ الحفظ...' : 'إنشاء الحساب'}
+                {saving ? m.creating : m.createFirst}
               </button>
             </div>
           </form>
@@ -267,18 +268,18 @@ export default function Merchants() {
       ) : merchants.length === 0 ? (
         <div className="text-center py-16 space-y-2">
           <Store className="w-10 h-10 text-slate-300 mx-auto" />
-          <p className="text-slate-500 text-sm">لا يوجد تجار بعد — أنشئ أول حساب</p>
+          <p className="text-slate-500 text-sm">{m.noMerchants}</p>
         </div>
       ) : (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 border-b border-slate-200">
               <tr>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">المتجر</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">البريد</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">Tenant ID</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">تاريخ الإنشاء</th>
-                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">الحالة</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">{m.storeName}</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">{m.emailCol}</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">{m.tenantId}</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">{m.createdAt}</th>
+                <th className="text-right px-4 py-3 text-xs font-medium text-slate-500">{m.statusCol}</th>
                 <th className="px-4 py-3" />
               </tr>
             </thead>
@@ -297,7 +298,7 @@ export default function Merchants() {
                         ? 'bg-green-100 text-green-700'
                         : 'bg-slate-100 text-slate-500'
                     }`}>
-                      {m.is_active ? 'نشط' : 'معطّل'}
+                      {m.is_active ? t(tr => tr.common.active) : t(tr => tr.common.inactive)}
                     </span>
                   </td>
                   <td className="px-4 py-3">

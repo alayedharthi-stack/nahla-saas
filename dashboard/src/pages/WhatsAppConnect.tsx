@@ -32,6 +32,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { whatsappConnectApi, type WaConnection, type WaConnectionStatus, type WaHealthResult } from '../api/whatsappConnect'
+import { useLanguage } from '../i18n/context'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -56,30 +57,31 @@ interface FBLoginResponse {
 
 // ── Status config map ─────────────────────────────────────────────────────────
 
-const STATUS_CONFIG: Record<WaConnectionStatus, {
-  label: string
+const STATUS_STYLE: Record<WaConnectionStatus, {
   color: string
   bg: string
   border: string
   icon: React.ElementType
 }> = {
-  not_connected: { label: 'غير مرتبط',     color: 'text-slate-500',  bg: 'bg-slate-100',  border: 'border-slate-200', icon: WifiOff },
-  pending:       { label: 'جاري الربط…',   color: 'text-amber-600',  bg: 'bg-amber-50',   border: 'border-amber-200', icon: Loader2 },
-  connected:     { label: 'مرتبط',          color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200', icon: Wifi },
-  error:         { label: 'خطأ في الربط',   color: 'text-red-600',    bg: 'bg-red-50',     border: 'border-red-200', icon: XCircle },
-  disconnected:  { label: 'غير متصل',       color: 'text-slate-500',  bg: 'bg-slate-100',  border: 'border-slate-200', icon: WifiOff },
-  needs_reauth:  { label: 'يحتاج إعادة تفويض', color: 'text-orange-600', bg: 'bg-orange-50', border: 'border-orange-200', icon: AlertTriangle },
+  not_connected: { color: 'text-slate-500',   bg: 'bg-slate-100',  border: 'border-slate-200',  icon: WifiOff },
+  pending:       { color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-200',  icon: Loader2 },
+  connected:     { color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200',icon: Wifi },
+  error:         { color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-200',    icon: XCircle },
+  disconnected:  { color: 'text-slate-500',   bg: 'bg-slate-100',  border: 'border-slate-200',  icon: WifiOff },
+  needs_reauth:  { color: 'text-orange-600',  bg: 'bg-orange-50',  border: 'border-orange-200', icon: AlertTriangle },
 }
 
 // ── Small helper components ───────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: WaConnectionStatus }) {
-  const cfg  = STATUS_CONFIG[status] ?? STATUS_CONFIG.not_connected
+  const { t } = useLanguage()
+  const cfg  = STATUS_STYLE[status] ?? STATUS_STYLE.not_connected
   const Icon = cfg.icon
+  const label = t(tr => tr.whatsappConnect.status[status] ?? status)
   return (
     <span className={`inline-flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-full border ${cfg.color} ${cfg.bg} ${cfg.border}`}>
       <Icon className={`w-3.5 h-3.5 ${status === 'pending' ? 'animate-spin' : ''}`} />
-      {cfg.label}
+      {label}
     </span>
   )
 }
@@ -141,6 +143,8 @@ function HealthCheck({ health }: { health: WaHealthResult }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function WhatsAppConnect() {
+  const { t } = useLanguage()
+  const wt = t(tr => tr.whatsappConnect)
   const [conn, setConn]           = useState<WaConnection | null>(null)
   const [health, setHealth]       = useState<WaHealthResult | null>(null)
   const [loading, setLoading]     = useState(true)
@@ -288,7 +292,7 @@ export default function WhatsAppConnect() {
   }
 
   const status   = conn?.status ?? 'not_connected'
-  const cfg      = STATUS_CONFIG[status]
+  const cfg      = STATUS_STYLE[status]
   const isActive = status === 'connected'
   const needsAction = status === 'error' || status === 'needs_reauth' || status === 'disconnected'
 
@@ -299,10 +303,10 @@ export default function WhatsAppConnect() {
       <div>
         <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
           <MessageCircle className="w-6 h-6 text-emerald-500" />
-          ربط واتساب
+          {wt.title}
         </h1>
         <p className="text-slate-500 mt-1 text-sm">
-          اربط رقم واتساب Business الخاص بمتجرك حتى تتمكن نحلة من الرد على عملائك تلقائياً.
+          {wt.subtitle}
         </p>
       </div>
 
@@ -328,7 +332,7 @@ export default function WhatsAppConnect() {
               )}
               {!isActive && !conn?.phone_number && (
                 <p className="text-xs text-slate-500 mt-1">
-                  أضف رقم واتساب Business الخاص بمتجرك
+                  {wt.statusHint}
                 </p>
               )}
             </div>
@@ -386,8 +390,8 @@ export default function WhatsAppConnect() {
             className="w-full flex items-center justify-center gap-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-emerald-600/20"
           >
             {connecting
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> جاري فتح نافذة Meta…</>
-              : <><MessageCircle className="w-4 h-4" /> ربط واتساب عبر Meta</>
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> {t(tr => tr.common.loading)}</>
+              : <><MessageCircle className="w-4 h-4" /> {wt.connectBtn}</>
             }
           </button>
         )}
@@ -400,8 +404,8 @@ export default function WhatsAppConnect() {
             className="w-full flex items-center justify-center gap-2.5 bg-amber-500 hover:bg-amber-400 text-white font-bold text-sm py-3.5 rounded-xl transition-all disabled:opacity-60"
           >
             {connecting
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> جاري الربط…</>
-              : <><RefreshCw className="w-4 h-4" /> إعادة الربط</>
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> {t(tr => tr.common.loading)}</>
+              : <><RefreshCw className="w-4 h-4" /> {wt.reconnectBtn}</>
             }
           </button>
         )}
@@ -418,14 +422,14 @@ export default function WhatsAppConnect() {
                 ? <Loader2 className="w-4 h-4 animate-spin" />
                 : <Zap className="w-4 h-4" />
               }
-              التحقق من الاتصال
+              {t(tr => tr.common.test)}
             </button>
             <button
               onClick={handleDisconnect}
               className="flex items-center justify-center gap-2 border border-red-200 text-red-500 hover:bg-red-50 font-medium text-sm px-4 py-2.5 rounded-xl transition-all"
             >
               <Unplug className="w-4 h-4" />
-              فصل الاتصال
+              {wt.disconnectBtn}
             </button>
           </div>
         )}
@@ -441,9 +445,13 @@ export default function WhatsAppConnect() {
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
           <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
           <div className="text-sm">
-            <p className="font-semibold text-amber-800">الإرسال غير مفعّل بعد</p>
+            <p className="font-semibold text-amber-800">
+              {t(tr => tr.meta.code === 'ar' ? 'الإرسال غير مفعّل بعد' : 'Sending not yet enabled')}
+            </p>
             <p className="text-amber-700 mt-0.5 text-xs">
-              تحقق من إعدادات رقم الهاتف في Meta Business Manager وتأكد من اجتياز التحقق.
+              {t(tr => tr.meta.code === 'ar'
+                ? 'تحقق من إعدادات رقم الهاتف في Meta Business Manager وتأكد من اجتياز التحقق.'
+                : 'Check your phone number settings in Meta Business Manager and ensure verification is complete.')}
             </p>
           </div>
         </div>
@@ -453,16 +461,10 @@ export default function WhatsAppConnect() {
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 space-y-3">
         <p className="font-semibold text-blue-900 text-sm flex items-center gap-2">
           <ExternalLink className="w-4 h-4" />
-          كيف يعمل الربط؟
+          {wt.howTitle}
         </p>
         <ol className="space-y-2 text-xs text-blue-700 list-none">
-          {[
-            'انقر على "ربط واتساب عبر Meta" لفتح نافذة Meta الرسمية.',
-            'سجّل دخولك بحساب Facebook المرتبط بـ WhatsApp Business.',
-            'اختر الـ WhatsApp Business Account المراد ربطه.',
-            'وافق على الصلاحيات المطلوبة — نحلة ستتولى الباقي.',
-            'ستظهر حالة "مرتبط" فور اكتمال العملية.',
-          ].map((step, i) => (
+          {[wt.howStep1, wt.howStep2, wt.howStep3, wt.howStep4, wt.howStep5].map((step, i) => (
             <li key={i} className="flex gap-2">
               <span className="shrink-0 w-4 h-4 rounded-full bg-blue-200 text-blue-700 flex items-center justify-center font-bold text-[10px]">
                 {i + 1}
@@ -475,12 +477,12 @@ export default function WhatsAppConnect() {
 
       {/* Meta prerequisites */}
       <div className="text-xs text-slate-400 space-y-1 border-t border-slate-100 pt-4">
-        <p className="font-medium text-slate-500">المتطلبات الخارجية:</p>
+        <p className="font-medium text-slate-500">{wt.prereqTitle}:</p>
         <ul className="list-disc list-inside space-y-0.5">
-          <li>حساب Meta Business Manager مُنشأ ومُفعّل</li>
-          <li>رقم هاتف مخصص لـ WhatsApp Business (غير مسجّل في تطبيق WhatsApp العادي)</li>
-          <li>إعداد META_APP_ID و META_APP_SECRET في متغيرات البيئة على الخادم</li>
-          <li>اتصال Webhook مُهيأ في Meta Developer Portal</li>
+          <li>{wt.prereq1}</li>
+          <li>{wt.prereq2}</li>
+          <li>META_APP_ID / META_APP_SECRET (environment variables)</li>
+          <li>{t(tr => tr.meta.code === 'ar' ? 'اتصال Webhook مُهيأ في Meta Developer Portal' : 'Webhook configured in Meta Developer Portal')}</li>
         </ul>
       </div>
     </div>

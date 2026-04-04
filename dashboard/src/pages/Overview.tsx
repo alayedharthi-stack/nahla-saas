@@ -39,13 +39,18 @@ const statusVariant = (s: string) =>
   s === 'pending' ? 'amber'  :
   s === 'failed'  ? 'red'    : 'slate'
 
-const statusLabel = (s: string) =>
-  s === 'paid'    ? 'مدفوع'         :
-  s === 'pending' ? 'قيد الانتظار'  :
-  s === 'failed'  ? 'فشل'           : 'ملغي'
+// statusLabel is computed inside component to support i18n
 
 export default function Overview() {
   const { t } = useLanguage()
+  const ov = t(tr => tr.overview)
+
+  const statusLabel = (s: string) => {
+    if (s === 'paid')    return ov.statusPaid
+    if (s === 'pending') return ov.statusPending
+    if (s === 'failed')  return ov.statusFailed
+    return ov.statusCancelled
+  }
 
   return (
     <div className="space-y-6">
@@ -57,7 +62,7 @@ export default function Overview() {
               <Sparkles className="w-5 h-5 text-brand-600" />
             </div>
             <div>
-              <p className="text-xs text-white/80 font-medium">مبيعات ولّدتها نحلة هذا الشهر</p>
+              <p className="text-xs text-white/80 font-medium">{ov.aiSalesLabel}</p>
               <p className="text-2xl font-black text-white leading-none mt-0.5">
                 4,320 <span className="text-sm font-bold text-white/90">ر.س</span>
               </p>
@@ -65,13 +70,13 @@ export default function Overview() {
           </div>
           <div className="flex items-center gap-4">
             <div className="text-center hidden sm:block">
-              <p className="text-xs text-white/80 font-medium">طلبات أنجزها الذكاء</p>
-              <p className="text-lg font-bold text-white">28 طلب</p>
+              <p className="text-xs text-white/80 font-medium">{ov.aiOrdersLabel}</p>
+              <p className="text-lg font-bold text-white">28</p>
             </div>
             <div className="h-8 w-px bg-slate-200 hidden sm:block" />
             <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-white rounded-xl px-3 py-2 border border-slate-200">
               <Clock className="w-3.5 h-3.5 text-brand-500" />
-              <span>موظف مبيعات يعمل <strong className="text-slate-700">24/7</strong></span>
+              <span>{ov.salesBot.replace('24/7', '')} <strong className="text-slate-700">24/7</strong></span>
             </div>
           </div>
         </div>
@@ -80,15 +85,15 @@ export default function Overview() {
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
-          label="المبيعات اليوم"
-          value="8,740 ر.س"
+          label={ov.kpiRevenue}
+          value="8,740 SAR"
           change={12.4}
           icon={DollarSign}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
         />
         <StatCard
-          label="المحادثات"
+          label={ov.kpiConversations}
           value="124"
           change={7.1}
           icon={MessageSquare}
@@ -96,7 +101,7 @@ export default function Overview() {
           iconBg="bg-blue-50"
         />
         <StatCard
-          label="طلبات اليوم"
+          label={ov.kpiOrders}
           value="37"
           change={-3.2}
           icon={ShoppingCart}
@@ -104,7 +109,7 @@ export default function Overview() {
           iconBg="bg-brand-50"
         />
         <StatCard
-          label="معدل التحويل"
+          label={ov.kpiAiRate}
           value="29.8%"
           change={4.5}
           icon={TrendingUp}
@@ -151,7 +156,7 @@ export default function Overview() {
         {/* Recent Conversations */}
         <div className="card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-            <h2 className="text-sm font-semibold text-slate-900">أحدث المحادثات</h2>
+            <h2 className="text-sm font-semibold text-slate-900">{ov.recentConvTitle}</h2>
             <a href="/conversations" className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1">
               {t(tr => tr.actions.viewAll)} <ExternalLink className="w-3 h-3" />
             </a>
@@ -189,7 +194,7 @@ export default function Overview() {
         {/* Recent Orders */}
         <div className="card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-            <h2 className="text-sm font-semibold text-slate-900">أحدث الطلبات</h2>
+            <h2 className="text-sm font-semibold text-slate-900">{ov.recentOrdTitle}</h2>
             <a href="/orders" className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1">
               {t(tr => tr.actions.viewAll)} <ExternalLink className="w-3 h-3" />
             </a>
@@ -200,7 +205,7 @@ export default function Overview() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-mono font-medium text-slate-700">{o.id}</span>
-                    <Badge label={o.source === 'AI' ? 'ذكاء اصطناعي' : 'يدوي'} variant={o.source === 'AI' ? 'purple' : 'slate'} />
+                    <Badge label={o.source === 'AI' ? ov.aiBadge : ov.sourceManual} variant={o.source === 'AI' ? 'purple' : 'slate'} />
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">{o.customer}</p>
                 </div>

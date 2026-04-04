@@ -1,10 +1,12 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Sparkles, Eye, EyeOff, AlertCircle, Loader2, CheckCircle, Mail } from 'lucide-react'
+import { Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
 import { register } from '../auth'
+import { useLanguage } from '../i18n/context'
 
 export default function Register() {
   const navigate = useNavigate()
+  const { t, lang, setLang, dir } = useLanguage()
   const [storeName,    setStoreName]    = useState('')
   const [email,        setEmail]        = useState('')
   const [phone,        setPhone]        = useState('')
@@ -16,13 +18,11 @@ export default function Register() {
   const [inviteToken,  setInviteToken]  = useState('')
   const [inviteValid,  setInviteValid]  = useState<boolean | null>(null)
 
-  // Extract invite token from URL ?invite=...
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const token = params.get('invite') ?? ''
     setInviteToken(token)
     if (token) {
-      // Validate invite token against backend
       fetch(`/api/auth/invite/${token}`)
         .then(r => r.json())
         .then(data => {
@@ -31,7 +31,7 @@ export default function Register() {
         })
         .catch(() => setInviteValid(false))
     } else {
-      setInviteValid(null) // unknown — backend will decide
+      setInviteValid(null)
     }
   }, [])
 
@@ -40,11 +40,11 @@ export default function Register() {
     setError('')
 
     if (password !== confirm) {
-      setError('كلمتا المرور غير متطابقتين')
+      setError(lang === 'ar' ? 'كلمتا المرور غير متطابقتين' : 'Passwords do not match')
       return
     }
     if (password.length < 8) {
-      setError('كلمة المرور يجب أن تكون 8 أحرف على الأقل')
+      setError(lang === 'ar' ? 'كلمة المرور يجب أن تكون 8 أحرف على الأقل' : 'Password must be at least 8 characters')
       return
     }
 
@@ -53,21 +53,26 @@ export default function Register() {
     if (result.ok) {
       navigate('/overview', { replace: true })
     } else {
-      setError(result.error ?? 'فشل التسجيل')
+      setError(result.error ?? (lang === 'ar' ? 'فشل التسجيل' : 'Registration failed'))
       setLoading(false)
     }
   }
 
-  // If invite token is present but invalid, show error page
   if (inviteToken && inviteValid === false) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4" dir="rtl">
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4" dir={dir}>
         <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl p-8 text-center space-y-4">
           <AlertCircle className="w-10 h-10 text-red-500 mx-auto" />
-          <h2 className="text-lg font-bold text-slate-900">رابط الدعوة غير صالح</h2>
-          <p className="text-slate-500 text-sm">هذا الرابط منتهي الصلاحية أو غير صحيح. تواصل مع المالك للحصول على رابط جديد.</p>
+          <h2 className="text-lg font-bold text-slate-900">
+            {lang === 'ar' ? 'رابط الدعوة غير صالح' : 'Invalid Invitation Link'}
+          </h2>
+          <p className="text-slate-500 text-sm">
+            {lang === 'ar'
+              ? 'هذا الرابط منتهي الصلاحية أو غير صحيح. تواصل مع المالك للحصول على رابط جديد.'
+              : 'This link has expired or is invalid. Contact the owner for a new link.'}
+          </p>
           <Link to="/login" className="block text-brand-600 text-sm font-medium hover:underline">
-            تسجيل الدخول
+            {t(tr => tr.login.submitBtn)}
           </Link>
         </div>
       </div>
@@ -77,20 +82,30 @@ export default function Register() {
   return (
     <div
       className="min-h-screen flex items-center justify-center bg-slate-900 px-4 py-8"
-      dir="rtl"
+      dir={dir}
     >
       <div className="w-full max-w-sm">
+        {/* Language toggle */}
+        <div className="flex justify-end mb-4">
+          <button
+            onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
+            className="text-xs text-slate-400 hover:text-white border border-slate-600 rounded-lg px-3 py-1.5 transition"
+          >
+            {lang === 'ar' ? 'English' : 'العربية'}
+          </button>
+        </div>
+
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
           <img src="/logo.png" alt="نحلة" className="w-20 h-20 object-contain mb-3 drop-shadow-xl" />
-          <h1 className="text-2xl font-bold text-white">نحلة</h1>
-          <p className="text-slate-400 text-sm mt-1">إنشاء حساب تاجر جديد</p>
+          <h1 className="text-2xl font-bold text-white">{t(tr => tr.login.title)}</h1>
+          <p className="text-slate-400 text-sm mt-1">{t(tr => tr.register.subtitle)}</p>
         </div>
 
         {/* Card */}
         <div className="bg-white rounded-2xl shadow-xl p-6 space-y-5">
           <h2 className="text-base font-semibold text-slate-800 text-center">
-            تسجيل متجر جديد
+            {t(tr => tr.register.title)}
           </h2>
 
           {error && (
@@ -104,14 +119,14 @@ export default function Register() {
             {/* Store Name */}
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                اسم المتجر
+                {t(tr => tr.register.storeNameLabel)}
               </label>
               <input
                 type="text"
                 required
                 value={storeName}
                 onChange={e => setStoreName(e.target.value)}
-                placeholder="متجر الإلكترونيات"
+                placeholder={t(tr => tr.register.storeNamePh)}
                 className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-lg
                            focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
                            placeholder:text-slate-300"
@@ -121,7 +136,7 @@ export default function Register() {
             {/* Email */}
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                البريد الإلكتروني
+                {t(tr => tr.register.emailLabel)}
               </label>
               <input
                 type="email"
@@ -137,17 +152,19 @@ export default function Register() {
               />
             </div>
 
-            {/* Phone (optional) */}
+            {/* Phone */}
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                رقم الجوال
-                <span className="text-slate-400 font-normal me-1">(اختياري)</span>
+                {t(tr => tr.register.phoneLabel)}
+                <span className="text-slate-400 font-normal me-1">
+                  ({t(tr => tr.common.optional)})
+                </span>
               </label>
               <input
                 type="tel"
                 value={phone}
                 onChange={e => setPhone(e.target.value)}
-                placeholder="05xxxxxxxx"
+                placeholder={t(tr => tr.register.phonePh)}
                 dir="ltr"
                 className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-lg
                            focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
@@ -158,7 +175,7 @@ export default function Register() {
             {/* Password */}
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                كلمة المرور
+                {t(tr => tr.register.passwordLabel)}
               </label>
               <div className="relative">
                 <input
@@ -167,7 +184,7 @@ export default function Register() {
                   autoComplete="new-password"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
-                  placeholder="8 أحرف على الأقل"
+                  placeholder={lang === 'ar' ? '8 أحرف على الأقل' : 'At least 8 characters'}
                   dir="ltr"
                   className="w-full px-3 py-2.5 pe-10 text-sm border border-slate-200 rounded-lg
                              focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
@@ -186,7 +203,7 @@ export default function Register() {
             {/* Confirm Password */}
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                تأكيد كلمة المرور
+                {lang === 'ar' ? 'تأكيد كلمة المرور' : 'Confirm Password'}
               </label>
               <div className="relative">
                 <input
@@ -195,7 +212,7 @@ export default function Register() {
                   autoComplete="new-password"
                   value={confirm}
                   onChange={e => setConfirm(e.target.value)}
-                  placeholder="أعد إدخال كلمة المرور"
+                  placeholder={lang === 'ar' ? 'أعد إدخال كلمة المرور' : 'Re-enter password'}
                   dir="ltr"
                   className="w-full px-3 py-2.5 pe-10 text-sm border border-slate-200 rounded-lg
                              focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent
@@ -219,30 +236,25 @@ export default function Register() {
                          flex items-center justify-center gap-2"
             >
               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              {loading ? 'جارٍ إنشاء الحساب...' : 'إنشاء الحساب'}
+              {loading ? t(tr => tr.register.submitting) : t(tr => tr.register.submitBtn)}
             </button>
           </form>
 
           <p className="text-center text-xs text-slate-500">
-            لديك حساب بالفعل؟{' '}
+            {t(tr => tr.register.hasAccount)}{' '}
             <Link to="/login" className="text-brand-600 font-medium hover:underline">
-              تسجيل الدخول
+              {t(tr => tr.register.loginLink)}
             </Link>
           </p>
         </div>
 
         <p className="text-center text-slate-600 text-xs mt-6">
-          مدعوم بواسطة نحلة AI
+          {t(tr => tr.common.poweredBy)}
         </p>
 
         <div className="text-center mt-4 pb-2">
-          <p className="text-slate-400 text-xs">
-            تطوير وإدارة:{' '}
-            <span className="text-slate-500 font-medium">تركي بن عايد الحارثي</span>
-          </p>
-          <p className="text-slate-400 text-xs">
-            المدير التنفيذي والمؤسس · nahlah.ai
-          </p>
+          <p className="text-slate-400 text-xs">{t(tr => tr.login.dev)}</p>
+          <p className="text-slate-400 text-xs">{t(tr => tr.login.devRole)}</p>
         </div>
       </div>
     </div>

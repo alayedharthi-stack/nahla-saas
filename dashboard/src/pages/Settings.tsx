@@ -6,6 +6,7 @@ import {
   Sparkles, Play, Zap, ShoppingCart, RotateCcw, Heart,
   ChevronDown, ChevronUp, Clock, BrainCircuit, ShieldCheck, ExternalLink as LinkOut,
 } from 'lucide-react'
+import { useLanguage } from '../i18n/context'
 import { settingsApi, type AllSettings, type WhatsAppSettings, type AISettings, type StoreSettings, type NotificationSettings } from '../api/settings'
 import {
   autopilotApi,
@@ -115,17 +116,18 @@ function ReadonlyInput({ value, copyable }: { value: string; copyable?: boolean 
 function SaveBar({
   onSave, saving, saved, error,
 }: { onSave: () => void; saving: boolean; saved: boolean; error: string | null }) {
+  const { t } = useLanguage()
   return (
     <div className="flex items-center gap-3 flex-wrap">
       <button onClick={onSave} disabled={saving} className="btn-primary text-sm">
         {saving
           ? <Loader2 className="w-4 h-4 animate-spin" />
           : <Save className="w-4 h-4" />}
-        {saving ? 'جارٍ الحفظ...' : 'حفظ التغييرات'}
+        {saving ? t(tr => tr.settings.saveBar.saving) : t(tr => tr.settings.saveBar.save)}
       </button>
       {saved && (
         <span className="flex items-center gap-1.5 text-sm text-emerald-600">
-          <CheckCircle className="w-4 h-4" /> تم الحفظ بنجاح
+          <CheckCircle className="w-4 h-4" /> {t(tr => tr.settings.saveBar.saved)}
         </span>
       )}
       {error && (
@@ -139,17 +141,18 @@ function SaveBar({
 
 // ── Tab definitions ─────────────────────────────────────────────────────────
 
-const TABS = [
-  { id: 'whatsapp',      label: 'واتساب',              icon: MessageSquare },
-  { id: 'ai',           label: 'الذكاء الاصطناعي',    icon: Bot },
-  { id: 'automation',   label: 'الأتمتة',              icon: Sparkles },
-  { id: 'ai_sales',     label: 'وكيل المبيعات',       icon: BrainCircuit },
-  { id: 'store',        label: 'المتجر والتكاملات',   icon: Store },
-  { id: 'team',         label: 'الفريق والصلاحيات',   icon: Users },
-  { id: 'notifications',label: 'الإشعارات',            icon: Bell },
-] as const
+const TAB_IDS = ['whatsapp', 'ai', 'automation', 'ai_sales', 'store', 'team', 'notifications'] as const
+type TabId = typeof TAB_IDS[number]
 
-type TabId = typeof TABS[number]['id']
+const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
+  whatsapp:      MessageSquare,
+  ai:            Bot,
+  automation:    Sparkles,
+  ai_sales:      BrainCircuit,
+  store:         Store,
+  team:          Users,
+  notifications: Bell,
+}
 
 // ── Tab: WhatsApp ────────────────────────────────────────────────────────────
 
@@ -163,6 +166,8 @@ function WhatsAppTab({
   saved: boolean
   saveError: string | null
 }) {
+  const { t } = useLanguage()
+  const s = t(tr => tr.settings.whatsapp)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
 
@@ -173,7 +178,7 @@ function WhatsAppTab({
       const result = await settingsApi.testWhatsApp()
       setTestResult(result)
     } catch {
-      setTestResult({ success: false, message: 'فشل الاتصال – تحقق من بيانات الاعتماد' })
+      setTestResult({ success: false, message: s.testFail })
     } finally {
       setTesting(false)
     }
@@ -181,15 +186,15 @@ function WhatsAppTab({
 
   return (
     <div className="space-y-5">
-      <Section title="بيانات حساب واتساب" description="ربط متجرك بـ WhatsApp Business API">
+      <Section title={s.accountTitle} description={s.accountDesc}>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="اسم العمل التجاري">
-            <input className="input" value={data.business_display_name} onChange={e => onChange({ business_display_name: e.target.value })} placeholder="مثال: متجر أحمد للملابس" />
+          <Field label={s.businessName}>
+            <input className="input" value={data.business_display_name} onChange={e => onChange({ business_display_name: e.target.value })} placeholder="e.g. Ahmed's Fashion Store" />
           </Field>
-          <Field label="رقم الهاتف" hint="الرقم المسجّل في WhatsApp Business">
+          <Field label={s.phoneNumber} hint={s.phoneHint}>
             <input className="input" value={data.phone_number} onChange={e => onChange({ phone_number: e.target.value })} placeholder="+966 50 123 4567" dir="ltr" />
           </Field>
-          <Field label="Phone Number ID" hint="من لوحة Meta for Developers">
+          <Field label="Phone Number ID" hint={s.phoneIdHint}>
             <input className="input" value={data.phone_number_id} onChange={e => onChange({ phone_number_id: e.target.value })} placeholder="123456789012345" dir="ltr" />
           </Field>
           <Field label="Access Token">
@@ -198,49 +203,49 @@ function WhatsAppTab({
         </div>
       </Section>
 
-      <Section title="إعداد Webhook" description="استخدم هذه البيانات في إعدادات تطبيق Meta">
+      <Section title={s.webhookTitle} description={s.webhookDesc}>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Verify Token" hint="أنشئ رمزاً سرياً وأدخله هنا وفي Meta">
+          <Field label="Verify Token" hint={s.verifyHint}>
             <SecretInput value={data.verify_token} onChange={v => onChange({ verify_token: v })} placeholder="nahla_secret_token" />
           </Field>
-          <Field label="Webhook URL" hint="انسخ هذا الرابط وأضفه في Meta for Developers">
+          <Field label="Webhook URL" hint={s.webhookHint}>
             <ReadonlyInput value={data.webhook_url || 'https://api.nahlah.ai/webhook/whatsapp'} copyable />
           </Field>
         </div>
         <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
           <p className="text-xs text-blue-700 flex items-start gap-2">
             <ExternalLink className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-            اذهب إلى Meta for Developers → تطبيقك → WhatsApp → Configuration، وأدخل Webhook URL وVerify Token أعلاه.
+            {s.webhookNote}
           </p>
         </div>
       </Section>
 
-      <Section title="أزرار المتجر في الرسائل" description="تُظهر نحلة هذه الأزرار للعملاء أسفل الرسائل">
+      <Section title={s.buttonsTitle} description={s.buttonsDesc}>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="نص زر المتجر">
-            <input className="input" value={data.store_button_label} onChange={e => onChange({ store_button_label: e.target.value })} placeholder="زيارة المتجر" />
+          <Field label={s.storeBtnLabel}>
+            <input className="input" value={data.store_button_label} onChange={e => onChange({ store_button_label: e.target.value })} />
           </Field>
-          <Field label="رابط المتجر">
+          <Field label={s.storeBtnUrl}>
             <input className="input" value={data.store_button_url} onChange={e => onChange({ store_button_url: e.target.value })} placeholder="https://..." dir="ltr" />
           </Field>
-          <Field label="نص زر التواصل مع المالك">
-            <input className="input" value={data.owner_contact_label} onChange={e => onChange({ owner_contact_label: e.target.value })} placeholder="تواصل مع المالك" />
+          <Field label={s.ownerBtnLabel}>
+            <input className="input" value={data.owner_contact_label} onChange={e => onChange({ owner_contact_label: e.target.value })} />
           </Field>
-          <Field label="رقم واتساب المالك">
+          <Field label={s.ownerWhatsapp}>
             <input className="input" value={data.owner_whatsapp_number} onChange={e => onChange({ owner_whatsapp_number: e.target.value })} placeholder="+966 50 000 0000" dir="ltr" />
           </Field>
         </div>
       </Section>
 
-      <Section title="الردود والتحويل التلقائي">
-        <Toggle label="تفعيل الردود التلقائية" hint="نحلة ترد على العملاء تلقائياً" value={data.auto_reply_enabled} onChange={v => onChange({ auto_reply_enabled: v })} />
-        <Toggle label="تحويل المحادثة للمالك" hint="إرسال تنبيه للمالك عند الحاجة للتدخل البشري" value={data.transfer_to_owner_enabled} onChange={v => onChange({ transfer_to_owner_enabled: v })} />
+      <Section title={s.autoReplyTitle}>
+        <Toggle label={s.autoReplyLabel} hint={s.autoReplyHint} value={data.auto_reply_enabled} onChange={v => onChange({ auto_reply_enabled: v })} />
+        <Toggle label={s.transferLabel} hint={s.transferHint} value={data.transfer_to_owner_enabled} onChange={v => onChange({ transfer_to_owner_enabled: v })} />
       </Section>
 
       <div className="flex items-center gap-3 flex-wrap">
         <button onClick={handleTest} disabled={testing} className="btn-secondary text-sm">
           {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          {testing ? 'جارٍ الاختبار...' : 'اختبار الاتصال'}
+          {testing ? s.testingBtn : s.testBtn}
         </button>
         {testResult && (
           <span className={`flex items-center gap-1.5 text-sm ${testResult.success ? 'text-emerald-600' : 'text-red-600'}`}>
@@ -267,32 +272,34 @@ function AITab({
   saved: boolean
   saveError: string | null
 }) {
+  const { t } = useLanguage()
+  const s = t(tr => tr.settings.ai)
   return (
     <div className="space-y-5">
-      <Section title="شخصية المساعدة" description="كيف تقدّم نحلة نفسها للعملاء">
+      <Section title={s.personalityTitle} description={s.personalityDesc}>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="اسم المساعدة">
-            <input className="input" value={data.assistant_name} onChange={e => onChange({ assistant_name: e.target.value })} placeholder="نحلة" />
+          <Field label={s.assistantName}>
+            <input className="input" value={data.assistant_name} onChange={e => onChange({ assistant_name: e.target.value })} placeholder="نحلة / Nahlah" />
           </Field>
-          <Field label="نبرة الرد">
+          <Field label={s.replyTone}>
             <select className="input" value={data.reply_tone} onChange={e => onChange({ reply_tone: e.target.value as AISettings['reply_tone'] })}>
-              <option value="friendly">ودية وقريبة</option>
-              <option value="professional">مهنية ورسمية</option>
-              <option value="sales">تجارية وترويجية</option>
+              <option value="friendly">{s.toneOptions.friendly}</option>
+              <option value="professional">{s.toneOptions.formal}</option>
+              <option value="sales">{s.toneOptions.luxury}</option>
             </select>
           </Field>
-          <Field label="طول الرد">
+          <Field label={t(tr => tr.lang === 'ar' ? 'طول الرد' : 'Reply Length')}>
             <select className="input" value={data.reply_length} onChange={e => onChange({ reply_length: e.target.value as AISettings['reply_length'] })}>
-              <option value="short">قصير ومختصر</option>
-              <option value="medium">متوسط</option>
-              <option value="detailed">تفصيلي وشامل</option>
+              <option value="short">{t(tr => tr.meta.code === 'ar' ? 'قصير ومختصر' : 'Short & concise')}</option>
+              <option value="medium">{t(tr => tr.meta.code === 'ar' ? 'متوسط' : 'Medium')}</option>
+              <option value="detailed">{t(tr => tr.meta.code === 'ar' ? 'تفصيلي وشامل' : 'Detailed & comprehensive')}</option>
             </select>
           </Field>
-          <Field label="اللغة الافتراضية">
+          <Field label={s.languageLabel}>
             <select className="input" value={data.default_language} onChange={e => onChange({ default_language: e.target.value as AISettings['default_language'] })}>
-              <option value="arabic">العربية</option>
-              <option value="english">الإنجليزية</option>
-              <option value="bilingual">ثنائية اللغة</option>
+              <option value="arabic">{s.langOptions.arabic}</option>
+              <option value="english">{s.langOptions.english}</option>
+              <option value="bilingual">{s.langOptions.both}</option>
             </select>
           </Field>
           <div className="sm:col-span-2">
@@ -303,25 +310,37 @@ function AITab({
         </div>
       </Section>
 
-      <Section title="تعليمات المالك" description="تُضاف إلى كل محادثة كقواعد أساسية لنحلة">
+      <Section
+        title={t(tr => tr.meta.code === 'ar' ? 'تعليمات المالك' : 'Owner Instructions')}
+        description={t(tr => tr.meta.code === 'ar' ? 'تُضاف إلى كل محادثة كقواعد أساسية لنحلة' : 'Added to every conversation as base rules for Nahlah')}
+      >
         <div className="space-y-4">
-          <Field label="تعليمات عامة" hint="قواعد وسياسات يجب أن تلتزم بها نحلة دائماً">
-            <textarea className="input min-h-[100px] resize-y" value={data.owner_instructions} onChange={e => onChange({ owner_instructions: e.target.value })} placeholder="مثال: لا تعد بتوصيل خلال يوم واحد إلا بعد التأكيد. لا تذكر أسماء منافسين..." />
+          <Field
+            label={t(tr => tr.meta.code === 'ar' ? 'تعليمات عامة' : 'General Instructions')}
+            hint={t(tr => tr.meta.code === 'ar' ? 'قواعد وسياسات يجب أن تلتزم بها نحلة دائماً' : 'Rules and policies Nahlah must always follow')}
+          >
+            <textarea className="input min-h-[100px] resize-y" value={data.owner_instructions} onChange={e => onChange({ owner_instructions: e.target.value })} placeholder={t(tr => tr.settings.ai.storePolicyPh)} />
           </Field>
-          <Field label="قواعد تقديم الكوبونات" hint="متى تعرض نحلة خصماً على العميل">
-            <textarea className="input min-h-[80px] resize-y" value={data.coupon_rules} onChange={e => onChange({ coupon_rules: e.target.value })} placeholder="مثال: قدّمي كوبون خصم 10% للعملاء الذين يسألون عن السعر مرتين دون شراء..." />
+          <Field
+            label={t(tr => tr.meta.code === 'ar' ? 'قواعد تقديم الكوبونات' : 'Coupon Rules')}
+            hint={t(tr => tr.meta.code === 'ar' ? 'متى تعرض نحلة خصماً على العميل' : 'When Nahlah should offer a discount')}
+          >
+            <textarea className="input min-h-[80px] resize-y" value={data.coupon_rules} onChange={e => onChange({ coupon_rules: e.target.value })} />
           </Field>
-          <Field label="قواعد التصعيد للإنسان" hint="متى تحوّل نحلة المحادثة للمالك أو الدعم">
-            <textarea className="input min-h-[80px] resize-y" value={data.escalation_rules} onChange={e => onChange({ escalation_rules: e.target.value })} placeholder="مثال: صعّدي المحادثة عند وجود شكاوى، أو طلبات استرداد، أو غضب واضح..." />
+          <Field
+            label={t(tr => tr.meta.code === 'ar' ? 'قواعد التصعيد للإنسان' : 'Escalation Rules')}
+            hint={t(tr => tr.meta.code === 'ar' ? 'متى تحوّل نحلة المحادثة للمالك أو الدعم' : 'When Nahlah should transfer to human support')}
+          >
+            <textarea className="input min-h-[80px] resize-y" value={data.escalation_rules} onChange={e => onChange({ escalation_rules: e.target.value })} placeholder={t(tr => tr.settings.ai.handoffMsgPh)} />
           </Field>
         </div>
       </Section>
 
-      <Section title="الخصومات والتوصيات">
+      <Section title={t(tr => tr.meta.code === 'ar' ? 'الخصومات والتوصيات' : 'Discounts & Recommendations')}>
         <div className="space-y-4">
-          <Field label="الحد الأقصى للخصم المسموح به">
+          <Field label={t(tr => tr.meta.code === 'ar' ? 'الحد الأقصى للخصم المسموح به' : 'Max Allowed Discount')}>
             <select className="input" value={data.allowed_discount_levels} onChange={e => onChange({ allowed_discount_levels: e.target.value })}>
-              <option value="0">بدون خصم</option>
+              <option value="0">{t(tr => tr.meta.code === 'ar' ? 'بدون خصم' : 'No discount')}</option>
               <option value="5">5%</option>
               <option value="10">10%</option>
               <option value="15">15%</option>
@@ -330,8 +349,8 @@ function AITab({
             </select>
           </Field>
           <Toggle
-            label="تفعيل توصيات المنتجات"
-            hint="نحلة تقترح منتجات ذات صلة أثناء المحادثة"
+            label={t(tr => tr.meta.code === 'ar' ? 'تفعيل توصيات المنتجات' : 'Enable Product Recommendations')}
+            hint={t(tr => tr.meta.code === 'ar' ? 'نحلة تقترح منتجات ذات صلة أثناء المحادثة' : 'Nahlah suggests related products during conversation')}
             value={data.recommendations_enabled}
             onChange={v => onChange({ recommendations_enabled: v })}
           />
@@ -340,7 +359,9 @@ function AITab({
         <div className="mt-4 p-3 bg-amber-50 rounded-lg border border-amber-200">
           <p className="text-xs text-amber-700 flex items-start gap-2">
             <Bot className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-            التغييرات تُطبَّق فوراً على المحادثات الجديدة. المحادثات الجارية لا تتأثر.
+            {t(tr => tr.meta.code === 'ar'
+              ? 'التغييرات تُطبَّق فوراً على المحادثات الجديدة. المحادثات الجارية لا تتأثر.'
+              : 'Changes apply immediately to new conversations. Ongoing conversations are not affected.')}
           </p>
         </div>
       </Section>
@@ -362,38 +383,41 @@ function StoreTab({
   saved: boolean
   saveError: string | null
 }) {
+  const { t } = useLanguage()
+  const s = t(tr => tr.settings.store)
+  const isAr = t(tr => tr.meta.code) === 'ar'
   return (
     <div className="space-y-5">
-      <Section title="معلومات المتجر">
+      <Section title={s.title}>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="اسم المتجر">
-            <input className="input" value={data.store_name} onChange={e => onChange({ store_name: e.target.value })} placeholder="متجر أحمد للملابس" />
+          <Field label={s.nameLabel}>
+            <input className="input" value={data.store_name} onChange={e => onChange({ store_name: e.target.value })} placeholder={isAr ? 'متجر أحمد للملابس' : "Ahmed's Fashion Store"} />
           </Field>
-          <Field label="رابط المتجر">
-            <input className="input" value={data.store_url} onChange={e => onChange({ store_url: e.target.value })} placeholder="https://ahmed-clothing.salla.sa" dir="ltr" />
+          <Field label={s.domainLabel}>
+            <input className="input" value={data.store_url} onChange={e => onChange({ store_url: e.target.value })} placeholder="https://your-store.salla.sa" dir="ltr" />
           </Field>
           <div className="sm:col-span-2">
-            <Field label="رابط شعار المتجر" hint="رابط مباشر لصورة الشعار (PNG أو SVG)">
+            <Field label={isAr ? 'رابط شعار المتجر' : 'Store Logo URL'} hint={isAr ? 'رابط مباشر لصورة الشعار (PNG أو SVG)' : 'Direct link to your logo image (PNG or SVG)'}>
               <input className="input" value={data.store_logo_url} onChange={e => onChange({ store_logo_url: e.target.value })} placeholder="https://cdn.example.com/logo.png" dir="ltr" />
             </Field>
           </div>
         </div>
       </Section>
 
-      <Section title="المنصة والتكامل" description="اختر منصة متجرك وأدخل بيانات الربط">
+      <Section title={isAr ? 'المنصة والتكامل' : 'Platform & Integration'} description={isAr ? 'اختر منصة متجرك وأدخل بيانات الربط' : 'Choose your store platform and enter connection details'}>
         <div className="space-y-4">
-          <Field label="نوع المنصة">
+          <Field label={isAr ? 'نوع المنصة' : 'Platform Type'}>
             <select className="input" value={data.platform_type} onChange={e => onChange({ platform_type: e.target.value as StoreSettings['platform_type'] })}>
-              <option value="salla">سلة – Salla</option>
-              <option value="zid">زد – Zid</option>
+              <option value="salla">Salla {isAr ? '– سلة' : ''}</option>
+              <option value="zid">Zid {isAr ? '– زد' : ''}</option>
               <option value="shopify">Shopify</option>
-              <option value="custom">منصة مخصصة</option>
+              <option value="custom">{isAr ? 'منصة مخصصة' : 'Custom platform'}</option>
             </select>
           </Field>
 
           {data.platform_type === 'salla' && (
             <div className="grid sm:grid-cols-2 gap-4 p-4 bg-slate-50 rounded-lg border border-slate-100">
-              <p className="sm:col-span-2 text-xs font-medium text-slate-500 uppercase tracking-wide">بيانات سلة</p>
+              <p className="sm:col-span-2 text-xs font-medium text-slate-500 uppercase tracking-wide">Salla {isAr ? 'بيانات' : 'Credentials'}</p>
               <Field label="Client ID">
                 <input className="input" value={data.salla_client_id} onChange={e => onChange({ salla_client_id: e.target.value })} placeholder="salla_client_id" dir="ltr" />
               </Field>
@@ -401,7 +425,7 @@ function StoreTab({
                 <SecretInput value={data.salla_client_secret} onChange={v => onChange({ salla_client_secret: v })} placeholder="salla_client_secret" />
               </Field>
               <div className="sm:col-span-2">
-                <Field label="Access Token" hint="من إعدادات التطبيق في لوحة سلة للمطورين">
+                <Field label="Access Token" hint={isAr ? 'من إعدادات التطبيق في لوحة سلة للمطورين' : 'From Salla Developer Dashboard → App Settings'}>
                   <SecretInput value={data.salla_access_token} onChange={v => onChange({ salla_access_token: v })} placeholder="Bearer token..." />
                 </Field>
               </div>
@@ -410,7 +434,7 @@ function StoreTab({
 
           {data.platform_type === 'zid' && (
             <div className="grid sm:grid-cols-2 gap-4 p-4 bg-slate-50 rounded-lg border border-slate-100">
-              <p className="sm:col-span-2 text-xs font-medium text-slate-500 uppercase tracking-wide">بيانات زد</p>
+              <p className="sm:col-span-2 text-xs font-medium text-slate-500 uppercase tracking-wide">Zid {isAr ? 'بيانات' : 'Credentials'}</p>
               <Field label="Client ID">
                 <input className="input" value={data.zid_client_id} onChange={e => onChange({ zid_client_id: e.target.value })} placeholder="zid_client_id" dir="ltr" />
               </Field>
@@ -422,7 +446,7 @@ function StoreTab({
 
           {data.platform_type === 'shopify' && (
             <div className="grid sm:grid-cols-2 gap-4 p-4 bg-slate-50 rounded-lg border border-slate-100">
-              <p className="sm:col-span-2 text-xs font-medium text-slate-500 uppercase tracking-wide">بيانات Shopify</p>
+              <p className="sm:col-span-2 text-xs font-medium text-slate-500 uppercase tracking-wide">Shopify {isAr ? 'بيانات' : 'Credentials'}</p>
               <Field label="Shop Domain">
                 <input className="input" value={data.shopify_shop_domain} onChange={e => onChange({ shopify_shop_domain: e.target.value })} placeholder="your-store.myshopify.com" dir="ltr" />
               </Field>
@@ -434,29 +458,29 @@ function StoreTab({
         </div>
       </Section>
 
-      <Section title="الشحن والموقع">
+      <Section title={isAr ? 'الشحن والموقع' : 'Shipping & Location'}>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="شركة الشحن" hint="اسم أو رابط واجهة API لشركة الشحن">
-            <input className="input" value={data.shipping_provider} onChange={e => onChange({ shipping_provider: e.target.value })} placeholder="أرامكس، سمسا، SMSA..." />
+          <Field label={isAr ? 'شركة الشحن' : 'Shipping Provider'} hint={isAr ? 'اسم أو رابط واجهة API لشركة الشحن' : 'Name or API link of your shipping provider'}>
+            <input className="input" value={data.shipping_provider} onChange={e => onChange({ shipping_provider: e.target.value })} placeholder={isAr ? 'أرامكس، سمسا...' : 'Aramex, SMSA...'} />
           </Field>
-          <Field label="رابط الموقع على خرائط قوقل">
+          <Field label={isAr ? 'رابط الموقع على خرائط قوقل' : 'Google Maps Location'}>
             <input className="input" value={data.google_maps_location} onChange={e => onChange({ google_maps_location: e.target.value })} placeholder="https://maps.google.com/..." dir="ltr" />
           </Field>
         </div>
       </Section>
 
-      <Section title="روابط التواصل الاجتماعي">
+      <Section title={isAr ? 'روابط التواصل الاجتماعي' : 'Social Media Links'}>
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="إنستغرام">
+          <Field label="Instagram">
             <input className="input" value={data.instagram_url} onChange={e => onChange({ instagram_url: e.target.value })} placeholder="https://instagram.com/..." dir="ltr" />
           </Field>
-          <Field label="تويتر / X">
+          <Field label="X / Twitter">
             <input className="input" value={data.twitter_url} onChange={e => onChange({ twitter_url: e.target.value })} placeholder="https://x.com/..." dir="ltr" />
           </Field>
-          <Field label="سناب شات">
+          <Field label="Snapchat">
             <input className="input" value={data.snapchat_url} onChange={e => onChange({ snapchat_url: e.target.value })} placeholder="https://snapchat.com/add/..." dir="ltr" />
           </Field>
-          <Field label="تيك توك">
+          <Field label="TikTok">
             <input className="input" value={data.tiktok_url} onChange={e => onChange({ tiktok_url: e.target.value })} placeholder="https://tiktok.com/@..." dir="ltr" />
           </Field>
         </div>
@@ -578,32 +602,35 @@ function NotificationsTab({
   saved: boolean
   saveError: string | null
 }) {
+  const { t } = useLanguage()
+  const s = t(tr => tr.settings.notifications)
+  const isAr = t(tr => tr.meta.code) === 'ar'
   return (
     <div className="space-y-5">
-      <Section title="تنبيهات واتساب" description="تُرسَل مباشرة لرقم المالك على واتساب">
-        <Toggle label="تنبيهات واتساب" hint="استلام رسائل تنبيه عبر واتساب" value={data.whatsapp_alerts} onChange={v => onChange({ whatsapp_alerts: v })} />
+      <Section title={s.whatsappEnabled} description={isAr ? 'تُرسَل مباشرة لرقم المالك على واتساب' : 'Sent directly to the owner\'s WhatsApp number'}>
+        <Toggle label={s.whatsappEnabled} hint={s.whatsappHint} value={data.whatsapp_alerts} onChange={v => onChange({ whatsapp_alerts: v })} />
       </Section>
 
-      <Section title="تنبيهات البريد الإلكتروني">
-        <Toggle label="تنبيهات البريد الإلكتروني" hint="استلام تقارير ومنبهات عبر الإيميل" value={data.email_alerts} onChange={v => onChange({ email_alerts: v })} />
+      <Section title={s.emailEnabled}>
+        <Toggle label={s.emailEnabled} hint={s.emailHint} value={data.email_alerts} onChange={v => onChange({ email_alerts: v })} />
       </Section>
 
-      <Section title="تنبيهات النظام" description="أحداث داخلية تؤثر على أداء نحلة">
+      <Section title={isAr ? 'تنبيهات النظام' : 'System Alerts'} description={isAr ? 'أحداث داخلية تؤثر على أداء نحلة' : 'Internal events affecting Nahlah performance'}>
         <Toggle
-          label="تنبيهات النظام العامة"
-          hint="أخطاء، توقف الخدمة، استهلاك عالٍ"
+          label={isAr ? 'تنبيهات النظام العامة' : 'General System Alerts'}
+          hint={isAr ? 'أخطاء، توقف الخدمة، استهلاك عالٍ' : 'Errors, service downtime, high usage'}
           value={data.system_alerts}
           onChange={v => onChange({ system_alerts: v })}
         />
         <Toggle
-          label="فشل Webhook"
-          hint="تنبيه عند فشل إرسال أو استقبال بيانات Webhook"
+          label={isAr ? 'فشل Webhook' : 'Webhook Failures'}
+          hint={isAr ? 'تنبيه عند فشل إرسال أو استقبال بيانات Webhook' : 'Alert when webhook send/receive fails'}
           value={data.failed_webhook_alerts}
           onChange={v => onChange({ failed_webhook_alerts: v })}
         />
         <Toggle
-          label="رصيد منخفض / مشكلة في API"
-          hint="تنبيه عند قُرب نفاد رصيد API أو خطأ في المصادقة"
+          label={isAr ? 'رصيد منخفض / مشكلة في API' : 'Low Balance / API Issue'}
+          hint={isAr ? 'تنبيه عند قُرب نفاد رصيد API أو خطأ في المصادقة' : 'Alert when API credits are low or auth fails'}
           value={data.low_balance_alerts}
           onChange={v => onChange({ low_balance_alerts: v })}
         />
@@ -1181,6 +1208,7 @@ function AiSalesAgentTab() {
 // ── Main Settings page ───────────────────────────────────────────────────────
 
 export default function Settings() {
+  const { t } = useLanguage()
   const [activeTab, setActiveTab] = useState<TabId>('whatsapp')
   const [settings, setSettings] = useState<AllSettings | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1189,10 +1217,18 @@ export default function Settings() {
   const [savedTab, setSavedTab] = useState<TabId | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
+  const TABS = TAB_IDS.map(id => ({
+    id,
+    label: t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]),
+    icon: TAB_ICONS[id],
+  }))
+
   useEffect(() => {
     settingsApi.getAll()
       .then(setSettings)
-      .catch(() => setLoadError('تعذّر تحميل الإعدادات. تأكد من تشغيل الخادم الخلفي.'))
+      .catch(() => setLoadError(t(tr => tr.meta.code) === 'ar'
+        ? 'تعذّر تحميل الإعدادات. تأكد من تشغيل الخادم الخلفي.'
+        : 'Failed to load settings. Make sure the backend is running.'))
       .finally(() => setLoading(false))
   }, [])
 
