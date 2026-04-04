@@ -204,7 +204,7 @@ function WhatsAppTab({
             <SecretInput value={data.verify_token} onChange={v => onChange({ verify_token: v })} placeholder="nahla_secret_token" />
           </Field>
           <Field label="Webhook URL" hint="انسخ هذا الرابط وأضفه في Meta for Developers">
-            <ReadonlyInput value={data.webhook_url || 'https://app.nahla.ai/webhook/whatsapp'} copyable />
+            <ReadonlyInput value={data.webhook_url || 'https://api.nahlah.ai/webhook/whatsapp'} copyable />
           </Field>
         </div>
         <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-100">

@@ -162,7 +162,7 @@ async def create_invitation(
         raise HTTPException(status_code=503, detail="Auth service unavailable")
     email = body.email.strip().lower()
     token = create_invite_token(email=email)
-    invite_url = f"https://app.nahlaai.com/register?invite={token}"
+    invite_url = f"https://app.nahlah.ai/register?invite={token}"
     audit(
         "invitation_created",
         admin=_admin.get("sub"),

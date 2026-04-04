@@ -26,7 +26,7 @@ DEFAULT_WHATSAPP: Dict[str, Any] = {
     "phone_number_id":          "",
     "access_token":             "",
     "verify_token":             "",
-    "webhook_url":              "https://app.nahla.ai/webhook/whatsapp",
+    "webhook_url":              "https://api.nahlah.ai/webhook/whatsapp",
     "store_button_label":       "زيارة المتجر",
     "store_button_url":         "",
     "owner_contact_label":      "تواصل مع المالك",

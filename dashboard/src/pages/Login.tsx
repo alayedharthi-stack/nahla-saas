@@ -62,7 +62,7 @@ export default function Login() {
                 autoComplete="email"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="admin@nahlaai.com"
+                placeholder="admin@nahlah.ai"
                 dir="ltr"
                 className="w-full px-3 py-2.5 text-sm border border-slate-200 rounded-lg
                            focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent

@@ -34,7 +34,7 @@ from core.tenant import get_or_create_tenant, resolve_tenant_id
 
 # Strip accidental "KEY=value" prefix if DASHBOARD_URL was set incorrectly
 _DASHBOARD = DASHBOARD_URL.split("=", 1)[-1] if "=" in DASHBOARD_URL else DASHBOARD_URL
-_DASHBOARD = _DASHBOARD.rstrip("/") or "https://app.nahlaai.com"
+_DASHBOARD = _DASHBOARD.rstrip("/") or "https://app.nahlah.ai"
 
 logger = logging.getLogger("nahla-backend")
 

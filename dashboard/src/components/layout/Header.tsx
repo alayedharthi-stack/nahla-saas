@@ -116,7 +116,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
             <div className="absolute end-0 top-full mt-1 w-44 bg-white rounded-xl shadow-lg border border-slate-100 py-1 z-50">
               <div className="px-3 py-2 border-b border-slate-100">
                 <p className="text-xs font-semibold text-slate-900">المدير</p>
-                <p className="text-xs text-slate-400">admin@nahlaai.com</p>
+                <p className="text-xs text-slate-400">admin@nahlah.ai</p>
               </div>
               <button
                 onClick={() => { setProfileOpen(false); navigate('/settings') }}

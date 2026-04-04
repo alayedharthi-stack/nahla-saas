@@ -1,5 +1,5 @@
 // Defined locally to avoid circular dependency with api/client.ts
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://app.nahlaai.com'
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://api.nahlah.ai'
 
 const AUTH_KEY  = 'nahla_auth'
 const TOKEN_KEY = 'nahla_token'

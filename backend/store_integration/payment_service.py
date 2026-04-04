@@ -62,7 +62,7 @@ async def generate_payment_link(
             invoice = await client.create_invoice(
                 amount_sar=amount,
                 description=description or f"طلب #{order_id}",
-                callback_url=moyasar_cfg.get("callback_url") or "https://api.nahla.ai/payments/webhook/moyasar",
+                callback_url=moyasar_cfg.get("callback_url") or "https://api.nahlah.ai/payments/webhook/moyasar",
                 success_url=moyasar_cfg.get("success_url", ""),
                 error_url=moyasar_cfg.get("error_url", ""),
                 metadata={"order_id": order_id, "tenant_id": str(tenant_id)},
@@ -93,7 +93,7 @@ async def generate_payment_link(
 
     # ── Priority 3: Placeholder ────────────────────────────────────────────────
     ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-    placeholder = f"https://pay.nahla.ai/checkout/{tenant_id}-{ts}"
+    placeholder = f"https://pay.nahlah.ai/checkout/{tenant_id}-{ts}"
     logger.warning(
         f"[PaymentService] No gateway configured for tenant={tenant_id} — "
         f"returning placeholder payment link"

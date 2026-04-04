@@ -187,7 +187,7 @@ async def create_payment_session(
             invoice = await client.create_invoice(
                 amount_sar=amount_sar,
                 description=description,
-                callback_url=cfg.get("callback_url") or "https://api.nahla.ai/payments/webhook/moyasar",
+                callback_url=cfg.get("callback_url") or "https://api.nahlah.ai/payments/webhook/moyasar",
                 success_url=cfg.get("success_url", ""),
                 error_url=cfg.get("error_url", ""),
                 metadata={"order_id": str(order_id), "tenant_id": str(tenant_id)},
@@ -201,7 +201,7 @@ async def create_payment_session(
     else:
         gateway_id   = ""
         payment_link = (
-            f"https://pay.nahla.ai/checkout/{tenant_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            f"https://pay.nahlah.ai/checkout/{tenant_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
         )
         gateway = "placeholder"
         logger.warning("[Payment] Moyasar not configured for tenant=%s, returning placeholder", tenant_id)

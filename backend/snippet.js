@@ -1,7 +1,7 @@
 /**
  * Nahla AI — Storefront Tracking Snippet
  * Version: 1.0
- * Loaded async from: https://api.nahlaai.com/snippet.js
+ * Loaded async from: https://api.nahlah.ai/snippet.js
  *
  * Tracks storefront events and feeds them into the Nahla autopilot engine.
  * Supports: page_view, product_view, add_to_cart, begin_checkout, cart_abandon
@@ -9,7 +9,7 @@
 ;(function (w, d) {
   'use strict';
 
-  var TRACK_URL = 'https://api.nahlaai.com/track/event';
+  var TRACK_URL = 'https://api.nahlah.ai/track/event';
   var cfg = w.__nahla_config || {};
   var tenantId = cfg.tenant_id || '';
   var storeId  = cfg.store_id  || '';

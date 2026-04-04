@@ -17,12 +17,12 @@ REQUIRE_INVITE  = os.environ.get("REQUIRE_INVITE", "true").lower() != "false"
 INVITE_EXPIRE_H = 168  # 7 days
 
 # ── Admin bootstrap credentials ────────────────────────────────────────────────
-ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL",    "admin@nahlaai.com")
+ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL",    "admin@nahlah.ai")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "nahla-admin-2026")
 
 # ── Notification services ──────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlaai.com>")
+EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlah.ai>")
 DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlah.ai")
 
 # WhatsApp Business (Meta Cloud API — platform-level, not per-tenant)

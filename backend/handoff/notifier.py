@@ -16,7 +16,7 @@ Notification payload:
   "customer_phone": "966...",
   "customer_name":  "...",
   "last_message":   "...",
-  "dashboard_url":  "https://app.nahla.ai/handoff-queue",
+  "dashboard_url":  "https://app.nahlah.ai/handoff-queue",
   "timestamp":      "2026-01-01T00:00:00Z"
 }
 """
@@ -58,7 +58,7 @@ async def notify_handoff(
         "customer_phone": customer_phone,
         "customer_name": customer_name,
         "last_message": last_message[:300],
-        "dashboard_url": "https://app.nahla.ai/handoff-queue",
+        "dashboard_url": "https://app.nahlah.ai/handoff-queue",
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
 

@@ -37,7 +37,7 @@ export default function SallaOAuthError() {
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700 text-start">
           <p className="font-semibold text-red-900 mb-1">خطوات لحل المشكلة:</p>
           <p>• تأكد أن التطبيق مفعّل في لوحة تحكم سلة</p>
-          <p>• تأكد أن Redirect URI صحيح: <span className="font-mono text-xs">api.nahlaai.com/oauth/salla/callback</span></p>
+          <p>• تأكد أن Redirect URI صحيح: <span className="font-mono text-xs">api.nahlah.ai/oauth/salla/callback</span></p>
           <p>• تواصل مع الدعم إذا استمرت المشكلة</p>
         </div>
 
