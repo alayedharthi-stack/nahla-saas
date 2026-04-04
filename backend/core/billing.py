@@ -175,11 +175,13 @@ def get_moyasar_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
 def get_billing_gateway(db: Session, tenant_id: int):
     """
     Return (gateway_client, gateway_name, gateway_cfg) for billing checkout.
-    Priority: Moyasar → demo.
+    Priority: Moyasar (tenant config) → Moyasar (env vars) → demo.
     Returns (None, 'demo', {}) when no gateway is configured.
     """
     import sys as _sys, os as _os
     _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    # 1. Tenant-specific Moyasar config from DB
     cfg = get_moyasar_settings(db, tenant_id)
     if cfg.get("enabled") and cfg.get("secret_key"):
         from payment_gateways.moyasar import MoyasarClient  # noqa: PLC0415
@@ -191,4 +193,26 @@ def get_billing_gateway(db: Session, tenant_id: int):
             "moyasar",
             cfg,
         )
+
+    # 2. Platform-level Moyasar env vars fallback
+    from core.config import MOYASAR_SECRET_KEY, MOYASAR_PUBLISHABLE_KEY  # noqa: PLC0415
+    if MOYASAR_SECRET_KEY:
+        from payment_gateways.moyasar import MoyasarClient  # noqa: PLC0415
+        env_cfg = {
+            "enabled": True,
+            "secret_key": MOYASAR_SECRET_KEY,
+            "publishable_key": MOYASAR_PUBLISHABLE_KEY,
+            "callback_url": "",
+            "success_url": "",
+            "error_url": "",
+        }
+        return (
+            MoyasarClient(
+                secret_key=MOYASAR_SECRET_KEY,
+                publishable_key=MOYASAR_PUBLISHABLE_KEY,
+            ),
+            "moyasar",
+            env_cfg,
+        )
+
     return None, "demo", {}
