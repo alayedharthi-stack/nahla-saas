@@ -32,6 +32,7 @@ from core.auth import (
     BCRYPT_AVAILABLE,
     JWT_AVAILABLE,
     create_invite_token,
+    create_token,
     hash_password,
     require_admin,
 )
@@ -300,6 +301,57 @@ async def get_platform_stats(
             }
             for u in recent_merchants
         ],
+    }
+
+
+@router.post("/admin/merchants/{user_id}/impersonate")
+async def impersonate_merchant(
+    user_id: int,
+    request: Request,
+    db:      Session          = Depends(get_db),
+    _admin:  Dict[str, Any]  = Depends(require_admin),
+):
+    """
+    Generate a short-lived token (2 h) scoped to the merchant's tenant.
+    The admin can use it to view/edit the merchant's dashboard on their behalf.
+    """
+    if not JWT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+
+    user = db.query(User).filter(User.id == user_id, User.role == "merchant").first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    if not user.tenant_id:
+        raise HTTPException(status_code=400, detail="هذا التاجر ليس لديه tenant مرتبط")
+
+    from datetime import timedelta
+    from jose import jwt as _jwt
+    from core.config import JWT_SECRET, JWT_ALGORITHM
+
+    payload = {
+        "sub":              user.email,
+        "role":             "merchant",
+        "tenant_id":        user.tenant_id,
+        "impersonated_by":  _admin.get("sub", "admin"),
+        "exp":              datetime.utcnow() + timedelta(hours=2),
+    }
+    token = _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    audit(
+        "admin_impersonate_merchant",
+        admin=_admin.get("sub"),
+        merchant_id=user_id,
+        merchant_email=user.email,
+        tenant_id=user.tenant_id,
+    )
+
+    return {
+        "access_token":   token,
+        "token_type":     "bearer",
+        "expires_in":     7200,
+        "merchant_email": user.email,
+        "store_name":     user.tenant.name if user.tenant else "",
+        "tenant_id":      user.tenant_id,
     }
 
 

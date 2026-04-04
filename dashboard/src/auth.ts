@@ -1,9 +1,10 @@
 // Defined locally to avoid circular dependency with api/client.ts
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://api.nahlah.ai'
 
-const AUTH_KEY  = 'nahla_auth'
-const TOKEN_KEY = 'nahla_token'
-const ROLE_KEY  = 'nahla_role'
+const AUTH_KEY          = 'nahla_auth'
+const TOKEN_KEY         = 'nahla_token'
+const ROLE_KEY          = 'nahla_role'
+const IMPERSONATE_KEY   = 'nahla_impersonate'   // JSON: { token, storeName, adminToken }
 
 export async function login(email: string, password: string): Promise<boolean> {
   try {
@@ -43,6 +44,43 @@ export function getRole(): string {
 
 export function isAdmin(): boolean {
   return getRole() === 'admin'
+}
+
+// ── Impersonation helpers ──────────────────────────────────────────────────────
+
+export interface ImpersonationInfo {
+  storeName: string
+  merchantEmail: string
+  adminToken: string   // original admin token to restore on exit
+}
+
+export function startImpersonation(
+  merchantToken: string,
+  storeName: string,
+  merchantEmail: string,
+): void {
+  const adminToken = localStorage.getItem(TOKEN_KEY) ?? ''
+  localStorage.setItem(IMPERSONATE_KEY, JSON.stringify({ storeName, merchantEmail, adminToken }))
+  localStorage.setItem(TOKEN_KEY, merchantToken)
+  localStorage.setItem(ROLE_KEY, 'merchant')
+}
+
+export function stopImpersonation(): void {
+  const raw = localStorage.getItem(IMPERSONATE_KEY)
+  if (!raw) return
+  const { adminToken } = JSON.parse(raw) as ImpersonationInfo & { adminToken: string }
+  localStorage.setItem(TOKEN_KEY, adminToken)
+  localStorage.setItem(ROLE_KEY, 'admin')
+  localStorage.removeItem(IMPERSONATE_KEY)
+}
+
+export function getImpersonation(): (ImpersonationInfo & { adminToken: string }) | null {
+  const raw = localStorage.getItem(IMPERSONATE_KEY)
+  return raw ? JSON.parse(raw) : null
+}
+
+export function isImpersonating(): boolean {
+  return !!localStorage.getItem(IMPERSONATE_KEY)
 }
 
 export async function register(

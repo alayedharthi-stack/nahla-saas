@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { UserPlus, ToggleLeft, ToggleRight, Trash2, Loader2, Store, Link2, Copy, CheckCircle } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { UserPlus, ToggleLeft, ToggleRight, Trash2, Loader2, Store, Link2, Copy, CheckCircle, LogIn } from 'lucide-react'
 import { merchantsApi, type Merchant } from '../api/merchants'
-import { apiCall } from '../api/client'
+import { apiCall, API_BASE } from '../api/client'
+import { getToken, startImpersonation } from '../auth'
 
 interface FormState {
   email: string
@@ -25,6 +27,8 @@ export default function Merchants() {
   const [inviting,     setInviting]     = useState(false)
   const [showInvite,   setShowInvite]   = useState(false)
   const [copied,       setCopied]       = useState(false)
+  const [entering,     setEntering]     = useState<number | null>(null)
+  const navigate = useNavigate()
 
   const load = () => {
     setLoading(true)
@@ -83,6 +87,26 @@ export default function Merchants() {
     navigator.clipboard.writeText(inviteUrl)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
+  }
+
+  const handleEnterStore = async (m: Merchant) => {
+    setEntering(m.id)
+    try {
+      const token = getToken()
+      const res = await fetch(`${API_BASE}/admin/merchants/${m.id}/impersonate`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error('فشل الدخول للمتجر')
+      const data = await res.json()
+      startImpersonation(data.access_token, m.store_name || m.email, m.email)
+      navigate('/overview', { replace: true })
+      window.location.reload()
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : 'حدث خطأ')
+    } finally {
+      setEntering(null)
+    }
   }
 
   const handleDelete = async (id: number, email: string) => {
@@ -278,6 +302,17 @@ export default function Merchants() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2 justify-end">
+                      <button
+                        onClick={() => handleEnterStore(m)}
+                        disabled={entering === m.id}
+                        title="الدخول كالتاجر"
+                        className="flex items-center gap-1 text-xs bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1.5 rounded-lg transition disabled:opacity-50"
+                      >
+                        {entering === m.id
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <LogIn className="w-3.5 h-3.5" />}
+                        دخول
+                      </button>
                       <button
                         onClick={() => handleToggle(m.id)}
                         title={m.is_active ? 'تعطيل' : 'تفعيل'}

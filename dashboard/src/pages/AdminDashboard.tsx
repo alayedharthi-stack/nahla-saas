@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { apiCall, API_BASE } from '../api/client'
-import { getToken } from '../auth'
+import { useNavigate } from 'react-router-dom'
+import { API_BASE } from '../api/client'
+import { getToken, startImpersonation } from '../auth'
 
 interface PlatformStats {
   merchants:     { total: number; active: number }
@@ -15,6 +16,8 @@ export default function AdminDashboard() {
   const [stats, setStats]   = useState<PlatformStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]   = useState('')
+  const [entering, setEntering] = useState<number | null>(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     const token = getToken()
@@ -26,6 +29,26 @@ export default function AdminDashboard() {
       .catch(() => setError('تعذّر تحميل إحصائيات المنصة'))
       .finally(() => setLoading(false))
   }, [])
+
+  const handleEnterStore = async (merchantId: number, storeName: string, email: string) => {
+    setEntering(merchantId)
+    try {
+      const token = getToken()
+      const res = await fetch(`${API_BASE}/admin/merchants/${merchantId}/impersonate`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) throw new Error('فشل الدخول للمتجر')
+      const data = await res.json()
+      startImpersonation(data.access_token, storeName, email)
+      navigate('/overview', { replace: true })
+      window.location.reload()
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : 'حدث خطأ')
+    } finally {
+      setEntering(null)
+    }
+  }
 
   if (loading) return (
     <div className="flex items-center justify-center h-64">
@@ -78,13 +101,17 @@ export default function AdminDashboard() {
             <div className="space-y-3">
               {stats?.recent_merchants.map((m: any) => (
                 <div key={m.id} className="flex items-center justify-between py-2 border-b border-slate-100 last:border-0">
-                  <div>
+                  <button
+                    onClick={() => handleEnterStore(m.id, m.store_name || m.email, m.email)}
+                    disabled={entering === m.id}
+                    className="text-xs bg-brand-500 hover:bg-brand-600 text-white px-3 py-1.5 rounded-lg transition disabled:opacity-50 flex items-center gap-1"
+                  >
+                    {entering === m.id ? '...' : '🔑 دخول'}
+                  </button>
+                  <div className="text-right">
                     <p className="text-sm font-medium text-slate-700">{m.store_name || m.email}</p>
                     <p className="text-xs text-slate-400">{m.email}</p>
                   </div>
-                  <span className={`text-xs px-2 py-1 rounded-full ${m.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                    {m.is_active ? 'نشط' : 'موقوف'}
-                  </span>
                 </div>
               ))}
             </div>
