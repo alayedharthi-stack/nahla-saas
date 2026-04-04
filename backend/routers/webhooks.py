@@ -38,8 +38,6 @@ from core.billing import get_moyasar_settings
 from core.config import (
     HYPERPAY_WEBHOOK_SECRET,
     SALLA_WEBHOOK_SECRET,
-    STRIPE_SECRET_KEY,
-    STRIPE_WEBHOOK_SECRET,
 )
 from core.database import get_db
 
@@ -437,95 +435,6 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
         )
 
     db.commit()
-    return {"received": True}
-
-
-# ── Stripe webhook ─────────────────────────────────────────────────────────────
-
-@router.post("/webhook/stripe")
-async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
-    """
-    Stripe webhook endpoint — source of truth for subscription state changes.
-    Handles: invoice.paid, invoice.payment_failed,
-             customer.subscription.deleted, customer.subscription.updated
-    """
-    payload    = await request.body()
-    sig_header = request.headers.get("stripe-signature", "")
-
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=503, detail="Stripe is not configured.")
-
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from payment_gateways.stripe_client import StripeClient  # noqa: PLC0415
-    stripe_client = StripeClient(
-        secret_key=STRIPE_SECRET_KEY, webhook_secret=STRIPE_WEBHOOK_SECRET,
-    )
-    try:
-        event = stripe_client.construct_webhook_event(payload, sig_header)
-    except Exception as exc:
-        logger.warning("[Stripe] Webhook signature verification failed: %s", exc)
-        raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature")
-
-    event_type = event["type"]
-    data_obj   = event["data"]["object"]
-
-    customer_id     = data_obj.get("customer")
-    subscription_id = (
-        data_obj.get("id")
-        if event_type.startswith("customer.subscription")
-        else data_obj.get("subscription")
-    )
-
-    tenant = None
-    if customer_id:
-        tenant = db.query(Tenant).filter(Tenant.stripe_customer_id == customer_id).first()
-    if tenant is None and subscription_id:
-        tenant = db.query(Tenant).filter(Tenant.stripe_subscription_id == subscription_id).first()
-
-    if tenant is None:
-        logger.info(
-            "[Stripe] Webhook %s: no tenant found for customer=%s", event_type, customer_id,
-        )
-        return {"received": True}
-
-    if event_type == "invoice.paid":
-        period_end_ts = (
-            data_obj.get("lines", {}).get("data", [{}])[0]
-            .get("period", {}).get("end")
-        )
-        if period_end_ts:
-            tenant.current_period_end = datetime.utcfromtimestamp(period_end_ts)
-        tenant.subscription_status = "active"
-        tenant.is_active           = True
-        tenant.billing_status      = "paid"
-        db.commit()
-        logger.info("[Stripe] invoice.paid → tenant %s activated", tenant.id)
-
-    elif event_type == "invoice.payment_failed":
-        tenant.subscription_status = "past_due"
-        tenant.billing_status      = "failed"
-        db.commit()
-        logger.warning("[Stripe] invoice.payment_failed → tenant %s marked past_due", tenant.id)
-
-    elif event_type == "customer.subscription.deleted":
-        tenant.subscription_status = "canceled"
-        tenant.is_active           = False
-        tenant.billing_status      = "failed"
-        db.commit()
-        logger.warning("[Stripe] subscription.deleted → tenant %s disabled", tenant.id)
-
-    elif event_type == "customer.subscription.updated":
-        new_status = data_obj.get("status")
-        if new_status:
-            tenant.subscription_status = new_status
-        period_end_ts = data_obj.get("current_period_end")
-        if period_end_ts:
-            tenant.current_period_end = datetime.utcfromtimestamp(period_end_ts)
-        db.commit()
-        logger.info(
-            "[Stripe] subscription.updated → tenant %s status=%s", tenant.id, new_status,
-        )
-
     return {"received": True}
 
 

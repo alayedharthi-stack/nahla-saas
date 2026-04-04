@@ -47,12 +47,6 @@ ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8016")
 ENVIRONMENT      = os.environ.get("ENVIRONMENT", "development")
 IS_PRODUCTION    = ENVIRONMENT == "production"
 
-# ── Stripe ─────────────────────────────────────────────────────────────────────
-STRIPE_SECRET_KEY      = os.environ.get("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET  = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID        = os.environ.get("STRIPE_PRICE_ID", "")
-STRIPE_TRIAL_DAYS      = int(os.environ.get("STRIPE_TRIAL_DAYS", "14"))
-
 # ── Moyasar ────────────────────────────────────────────────────────────────────
 MOYASAR_SECRET_KEY      = os.environ.get("MOYASAR_SECRET_KEY", "")
 MOYASAR_PUBLISHABLE_KEY = os.environ.get("MOYASAR_PUBLISHABLE_KEY", "")

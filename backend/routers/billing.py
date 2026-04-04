@@ -53,10 +53,6 @@ from core.config import (
     HYPERPAY_ENTITY_ID,
     HYPERPAY_LIVE_MODE,
     HYPERPAY_WEBHOOK_SECRET,
-    STRIPE_PRICE_ID,
-    STRIPE_SECRET_KEY,
-    STRIPE_TRIAL_DAYS,
-    STRIPE_WEBHOOK_SECRET,
 )
 from core.database import get_db
 from core.middleware import rate_limit
@@ -68,18 +64,6 @@ router = APIRouter(tags=["Billing"])
 
 _MOYASAR_FAIL_STATUSES = frozenset({"failed", "expired", "canceled", "voided", "refunded"})
 _BILLING_ACTIVATABLE   = frozenset({"pending_payment"})
-
-
-# ── Stripe helpers ─────────────────────────────────────────────────────────────
-
-def _get_stripe_client():
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(
-            status_code=503, detail="Stripe is not configured. Set STRIPE_SECRET_KEY.",
-        )
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from payment_gateways.stripe_client import StripeClient  # noqa: PLC0415
-    return StripeClient(secret_key=STRIPE_SECRET_KEY, webhook_secret=STRIPE_WEBHOOK_SECRET)
 
 
 def _get_hyperpay_client():
@@ -118,16 +102,6 @@ class CheckoutRequest(BaseModel):
     plan_slug:   str
     success_url: Optional[str] = None
     error_url:   Optional[str] = None
-
-
-class StripeSetupIntentRequest(BaseModel):
-    email: str
-    name:  str
-
-
-class StripeSubscribeRequest(BaseModel):
-    payment_method_id: str
-    price_id:          Optional[str] = None
 
 
 class HyperPayPaymentLinkRequest(BaseModel):
@@ -577,95 +551,7 @@ async def billing_payment_result(
     }
 
 
-# ── Stripe billing ─────────────────────────────────────────────────────────────
 
-@router.post("/billing/stripe/setup-intent")
-async def stripe_create_setup_intent(
-    body:    StripeSetupIntentRequest,
-    request: Request,
-    db:      Session = Depends(get_db),
-):
-    """
-    Step 1 of Stripe flow: create (or reuse) a Stripe Customer and return a
-    SetupIntent so the frontend can collect a card via Stripe Elements.
-    """
-    tenant_id = resolve_tenant_id(request)
-    tenant    = get_or_create_tenant(db, tenant_id)
-    stripe    = _get_stripe_client()
-
-    if not tenant.stripe_customer_id:
-        customer = stripe.create_customer(
-            email=body.email, name=body.name,
-            metadata={"tenant_id": str(tenant_id)},
-        )
-        tenant.stripe_customer_id = customer["id"]
-        db.commit()
-        logger.info("[Stripe] New customer %s for tenant %s", customer["id"], tenant_id)
-
-    si = stripe.create_setup_intent(
-        customer_id=tenant.stripe_customer_id,
-        metadata={"tenant_id": str(tenant_id)},
-    )
-    return {
-        "stripe_customer_id": tenant.stripe_customer_id,
-        "setup_intent_id":    si["setup_intent_id"],
-        "client_secret":      si["client_secret"],
-    }
-
-
-@router.post("/billing/stripe/subscribe")
-async def stripe_create_subscription(
-    body:    StripeSubscribeRequest,
-    request: Request,
-    db:      Session = Depends(get_db),
-):
-    """
-    Step 2 of Stripe flow: create a Stripe Subscription with a 14-day trial.
-    Requires the tenant to already have a stripe_customer_id.
-    """
-    tenant_id = resolve_tenant_id(request)
-    tenant    = get_or_create_tenant(db, tenant_id)
-    stripe    = _get_stripe_client()
-
-    if not tenant.stripe_customer_id:
-        raise HTTPException(
-            status_code=400,
-            detail="No Stripe customer found. Call /billing/stripe/setup-intent first.",
-        )
-
-    price_id = body.price_id or STRIPE_PRICE_ID
-    if not price_id:
-        raise HTTPException(status_code=503, detail="STRIPE_PRICE_ID is not configured.")
-
-    sub = stripe.create_subscription(
-        customer_id=tenant.stripe_customer_id,
-        price_id=price_id,
-        trial_period_days=STRIPE_TRIAL_DAYS,
-        payment_method_id=body.payment_method_id,
-        metadata={"tenant_id": str(tenant_id)},
-    )
-
-    now       = datetime.utcnow()
-    trial_end = now + timedelta(days=STRIPE_TRIAL_DAYS)
-
-    tenant.stripe_subscription_id = sub["id"]
-    tenant.stripe_price_id         = price_id
-    tenant.subscription_status     = sub.get("status", "trialing")
-    tenant.billing_provider        = "stripe"
-    tenant.trial_started_at        = now
-    tenant.trial_ends_at           = trial_end
-    db.commit()
-
-    logger.info(
-        "[Stripe] Tenant %s subscribed: sub=%s status=%s trial_ends=%s",
-        tenant_id, sub["id"], sub.get("status"), trial_end.date(),
-    )
-    return {
-        "success":         True,
-        "subscription_id": sub["id"],
-        "status":          sub.get("status"),
-        "trial_ends_at":   trial_end.isoformat(),
-    }
 
 
 # ── HyperPay billing ───────────────────────────────────────────────────────────
