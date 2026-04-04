@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 import { getToken, startImpersonation } from '../auth'
 
@@ -17,16 +16,28 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError]   = useState('')
   const [entering, setEntering] = useState<number | null>(null)
-  const navigate = useNavigate()
 
   useEffect(() => {
     const token = getToken()
+    if (!token) {
+      setError('غير مصرح — يرجى تسجيل الدخول كمسؤول')
+      setLoading(false)
+      return
+    }
     fetch(`${API_BASE}/admin/stats`, {
       headers: { Authorization: `Bearer ${token}` }
     })
-      .then(r => r.json())
+      .then(async r => {
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}))
+          throw new Error(body?.detail ?? `خطأ ${r.status}`)
+        }
+        return r.json()
+      })
       .then((data: PlatformStats) => setStats(data))
-      .catch(() => setError('تعذّر تحميل إحصائيات المنصة'))
+      .catch((e: unknown) =>
+        setError('تعذّر تحميل إحصائيات المنصة — ' + (e instanceof Error ? e.message : ''))
+      )
       .finally(() => setLoading(false))
   }, [])
 
@@ -41,8 +52,7 @@ export default function AdminDashboard() {
       if (!res.ok) throw new Error('فشل الدخول للمتجر')
       const data = await res.json()
       startImpersonation(data.access_token, storeName, email)
-      navigate('/overview', { replace: true })
-      window.location.reload()
+      window.location.href = '/overview'
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'حدث خطأ')
     } finally {

@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { UserPlus, ToggleLeft, ToggleRight, Trash2, Loader2, Store, Link2, Copy, CheckCircle, LogIn } from 'lucide-react'
 import { merchantsApi, type Merchant } from '../api/merchants'
 import { apiCall, API_BASE } from '../api/client'
@@ -31,7 +30,6 @@ export default function Merchants() {
   const [showInvite,   setShowInvite]   = useState(false)
   const [copied,       setCopied]       = useState(false)
   const [entering,     setEntering]     = useState<number | null>(null)
-  const navigate = useNavigate()
 
   const load = () => {
     setLoading(true)
@@ -103,8 +101,7 @@ export default function Merchants() {
       if (!res.ok) throw new Error('فشل الدخول للمتجر')
       const data = await res.json()
       startImpersonation(data.access_token, m.store_name || m.email, m.email)
-      navigate('/overview', { replace: true })
-      window.location.reload()
+      window.location.href = '/overview'
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'حدث خطأ')
     } finally {

@@ -1,16 +1,14 @@
-import { useNavigate } from 'react-router-dom'
 import { getImpersonation, stopImpersonation } from '../../auth'
 
 export default function ImpersonationBanner() {
   const info = getImpersonation()
-  const navigate = useNavigate()
 
   if (!info) return null
 
   const handleExit = () => {
     stopImpersonation()
-    navigate('/admin', { replace: true })
-    window.location.reload()   // reload to re-init admin context
+    // Hard redirect to admin — ensures token is freshly read on mount
+    window.location.href = '/admin'
   }
 
   return (
