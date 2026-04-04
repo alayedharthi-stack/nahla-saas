@@ -1066,12 +1066,20 @@ export default function Landing() {
             </div>
           </div>
 
-          <div className="pt-6 border-t border-white/6 flex flex-col sm:flex-row items-center justify-between gap-4 text-slate-600 text-xs">
-            <p>© 2025 نحلة AI — جميع الحقوق محفوظة</p>
-            <div className="flex items-center gap-2">
-              <img src="/logo.png" alt="نحلة" className="w-5 h-5 object-contain" />
-              <span>صُنع بعناية في المملكة العربية السعودية 🇸🇦</span>
+          <div className="pt-6 border-t border-white/6 flex flex-col items-center gap-3 text-slate-600 text-xs">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 w-full">
+              <p>© 2025 نحلة AI — جميع الحقوق محفوظة</p>
+              <div className="flex items-center gap-2">
+                <img src="/logo.png" alt="نحلة" className="w-5 h-5 object-contain" />
+                <span>صُنع بعناية في المملكة العربية السعودية 🇸🇦</span>
+              </div>
             </div>
+            <p className="text-slate-500 text-center">
+              تطوير وإدارة:{' '}
+              <span className="text-slate-400 font-medium">تركي بن عايد الحارثي</span>
+              {' '}·{' '}
+              <span className="text-slate-500">المدير التنفيذي والمؤسس · nahlah.ai</span>
+            </p>
           </div>
         </div>
       </footer>
