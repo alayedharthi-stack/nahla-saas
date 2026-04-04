@@ -28,6 +28,13 @@ with engine.connect() as conn:
     conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS whatsapp_token VARCHAR\"))
     conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS salla_access_token VARCHAR\"))
     conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS salla_store_id VARCHAR\"))
+    # Billing columns (migration 0010)
+    conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR\"))
+    conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR\"))
+    conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_price_id VARCHAR\"))
+    conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMP\"))
+    conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS hyperpay_payment_id VARCHAR\"))
+    conn.execute(text(\"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_status VARCHAR\"))
     conn.commit()
 print('Tables ready.')
 "
