@@ -35,7 +35,7 @@ export interface BillingStatus {
 export interface CheckoutResult {
   subscription_id:         number
   checkout_url:            string | null
-  gateway:                 'moyasar' | 'stripe' | 'demo'
+  gateway:                 'moyasar' | 'demo'
   amount_sar:              number
   plan_slug:               string
   demo_mode:               boolean

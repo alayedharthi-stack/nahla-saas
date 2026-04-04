@@ -415,8 +415,8 @@ async def create_billing_checkout(
     is_launch  = now <= LAUNCH_PROMO_UNTIL
     price_sar  = int(plan_meta.get("launch_price_sar", plan.price_sar)) if is_launch else int(plan.price_sar)
 
-    base_success = (body.success_url or "").rstrip("/") or "https://app.nahlaai.com"
-    base_error   = (body.error_url   or "").rstrip("/") or base_success
+    base_success = (body.success_url or "").rstrip("/") or "https://app.nahlah.ai/billing"
+    base_error   = (body.error_url   or "").rstrip("/") or "https://app.nahlah.ai/billing"
 
     gateway_client, gateway_name, gateway_cfg = get_billing_gateway(db, tenant_id)
 
@@ -448,7 +448,7 @@ async def create_billing_checkout(
             invoice = await gateway_client.create_invoice(
                 amount_sar=float(price_sar),
                 description=f"نحلة — خطة {plan_meta.get('name_ar', plan.name)} (شهري)",
-                callback_url="https://api.nahlaai.com/billing/webhook/moyasar/subscription",
+                callback_url="https://api.nahlah.ai/billing/webhook/moyasar/subscription",
                 success_url=success_redirect,
                 error_url=error_redirect,
                 metadata={
