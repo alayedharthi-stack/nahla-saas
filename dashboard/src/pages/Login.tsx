@@ -128,6 +128,16 @@ export default function Login() {
         <p className="text-center text-slate-600 text-xs mt-3">
           مدعوم بواسطة نحلة AI
         </p>
+
+        <div className="text-center mt-4 pb-2">
+          <p className="text-slate-400 text-xs">
+            تطوير وإدارة:{' '}
+            <span className="text-slate-500 font-medium">تركي بن عايد الحارثي</span>
+          </p>
+          <p className="text-slate-400 text-xs">
+            المدير التنفيذي والمؤسس · nahlah.ai
+          </p>
+        </div>
       </div>
     </div>
   )
