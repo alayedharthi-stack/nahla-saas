@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { apiClient } from '../api/client'
+import { apiCall, API_BASE } from '../api/client'
+import { getToken } from '../auth'
 
 interface PlatformStats {
   merchants:     { total: number; active: number }
@@ -16,8 +17,12 @@ export default function AdminDashboard() {
   const [error, setError]   = useState('')
 
   useEffect(() => {
-    apiClient.get('/admin/stats')
-      .then(r => setStats(r.data))
+    const token = getToken()
+    fetch(`${API_BASE}/admin/stats`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then((data: PlatformStats) => setStats(data))
       .catch(() => setError('تعذّر تحميل إحصائيات المنصة'))
       .finally(() => setLoading(false))
   }, [])
