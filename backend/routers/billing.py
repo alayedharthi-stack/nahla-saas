@@ -56,7 +56,19 @@ from core.config import (
 )
 from core.database import get_db
 from core.middleware import rate_limit
-from core.tenant import get_or_create_settings, get_or_create_tenant, resolve_tenant_id
+from core.tenant import (
+    DEFAULT_STORE,
+    DEFAULT_WHATSAPP,
+    get_or_create_settings,
+    get_or_create_tenant,
+    merge_defaults,
+    resolve_tenant_id,
+)
+from core.wa_notify import (
+    notify_payment_invoice,
+    notify_payment_link,
+    notify_subscription_confirmed,
+)
 
 logger = logging.getLogger("nahla-backend")
 
@@ -380,6 +392,29 @@ async def subscribe_to_plan(
     logger.info(
         "[Billing] Tenant %s subscribed to plan '%s' (launch=%s)", tenant_id, body.plan_slug, launch,
     )
+
+    # ── WhatsApp notification ─────────────────────────────────────────────────
+    try:
+        import asyncio  # noqa: PLC0415
+        from datetime import timedelta  # noqa: PLC0415
+        _settings    = get_or_create_settings(db, tenant_id)
+        _wa_cfg      = merge_defaults(_settings.whatsapp_settings, DEFAULT_WHATSAPP)
+        _store_cfg   = merge_defaults(_settings.store_settings,    DEFAULT_STORE)
+        owner_phone  = _wa_cfg.get("owner_whatsapp_number", "")
+        store_name   = _store_cfg.get("store_name") or f"متجر #{tenant_id}"
+        plan_name    = meta.get("name_ar", plan.name)
+        if owner_phone:
+            next_billing = now + timedelta(days=30)
+            asyncio.create_task(notify_subscription_confirmed(
+                owner_phone, store_name, plan_name, int(price), next_billing,
+            ))
+            asyncio.create_task(notify_payment_invoice(
+                owner_phone, store_name, plan_name, int(price),
+                str(sub.id), now,
+            ))
+    except Exception as _exc:
+        logger.warning("[Billing] WA notify failed: %s", _exc)
+
     return {
         "success":               True,
         "subscription_id":       sub.id,
@@ -474,6 +509,24 @@ async def create_billing_checkout(
             "[Billing] Checkout created tenant=%s plan=%s amount=%s SAR invoice=%s",
             tenant_id, plan.slug, price_sar, invoice_id,
         )
+
+        # ── Send payment link via WhatsApp ────────────────────────────────────
+        try:
+            import asyncio  # noqa: PLC0415
+            _s        = get_or_create_settings(db, tenant_id)
+            _wa       = merge_defaults(_s.whatsapp_settings, DEFAULT_WHATSAPP)
+            _st       = merge_defaults(_s.store_settings,    DEFAULT_STORE)
+            _phone    = _wa.get("owner_whatsapp_number", "")
+            _sname    = _st.get("store_name") or f"متجر #{tenant_id}"
+            if _phone and checkout_url:
+                asyncio.create_task(notify_payment_link(
+                    _phone, _sname,
+                    plan_meta.get("name_ar", plan.name),
+                    price_sar, checkout_url,
+                ))
+        except Exception as _exc:
+            logger.warning("[Billing] WA payment link notify failed: %s", _exc)
+
         return {
             "subscription_id": sub.id,
             "checkout_url":    checkout_url,

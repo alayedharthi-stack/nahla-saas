@@ -58,6 +58,7 @@ from core.config import (
 )
 from core.database import get_db
 from core.notifications import email_reset, email_verify, email_welcome, send_email
+from core.wa_notify import notify_welcome
 
 logger = logging.getLogger("nahla.auth")
 router = APIRouter()
@@ -275,6 +276,10 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
         html    = email_verify(body.store_name.strip(), verify_url),
     ))
     logger.info("Verification email queued for %s", email)
+
+    # ── WhatsApp welcome message (fire-and-forget) ─────────────────────────────
+    if body.phone:
+        asyncio.ensure_future(notify_welcome(body.phone.strip(), body.store_name.strip()))
 
     token = create_token(email=email, role="merchant", tenant_id=tenant.id)
     return {

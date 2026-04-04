@@ -17,6 +17,8 @@ import logging
 import os
 import sys
 
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -123,6 +125,18 @@ app.include_router(_tracking_router)
 app.include_router(_wa_connect_router)
 app.include_router(_wa_webhook_router)
 app.include_router(_store_sync_router)
+
+
+# ── Background scheduler ────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def start_scheduler() -> None:
+    """Start the subscription expiry / trial warning scheduler."""
+    try:
+        from core.scheduler import run_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_scheduler())
+        logger.info("Background scheduler started.")
+    except Exception as exc:
+        logger.warning("Scheduler could not start: %s", exc)
 
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.
