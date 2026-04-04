@@ -206,8 +206,32 @@ function PlanCard({
 
 // ── Feature card ──────────────────────────────────────────────────────────────
 function FeatureCard({
-  icon: Icon, title, desc, outcome,
-}: { icon: React.ElementType; title: string; desc: string; outcome?: string }) {
+  icon: Icon, title, desc, outcome, highlight = false,
+}: { icon: React.ElementType; title: string; desc: string; outcome?: string; highlight?: boolean }) {
+  if (highlight) {
+    return (
+      <div className="group relative p-6 rounded-2xl bg-gradient-to-b from-amber-500/12 to-amber-500/4 border border-amber-400/30 hover:border-amber-400/60 hover:from-amber-500/18 transition-all duration-300 hover:-translate-y-1 backdrop-blur-sm shadow-lg shadow-amber-500/8">
+        {/* "مميز" badge */}
+        <div className="absolute -top-2.5 start-4">
+          <span className="bg-amber-500 text-slate-900 text-[10px] font-black px-2.5 py-0.5 rounded-full shadow-md shadow-amber-500/30">
+            ⭐ مميزة
+          </span>
+        </div>
+        <div className="w-11 h-11 rounded-xl bg-amber-500/25 flex items-center justify-center mb-4 group-hover:bg-amber-500/35 transition-colors ring-1 ring-amber-400/30">
+          <Icon size={20} className="text-amber-300" />
+        </div>
+        <h3 className="text-white font-black text-base mb-1.5">{title}</h3>
+        <p className="text-slate-300 text-sm leading-relaxed mb-3">{desc}</p>
+        {outcome && (
+          <div className="flex items-center gap-1.5 text-amber-400 text-xs font-bold">
+            <TrendingUp size={12} />
+            {outcome}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="group p-6 rounded-2xl bg-slate-800/60 border border-white/8 hover:border-amber-400/35 hover:bg-amber-500/4 transition-all duration-300 hover:-translate-y-0.5 backdrop-blur-sm">
       <div className="w-11 h-11 rounded-xl bg-amber-500/12 flex items-center justify-center mb-4 group-hover:bg-amber-500/22 transition-colors">
@@ -617,7 +641,7 @@ export default function Landing() {
           <div className="text-center mb-14">
             <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">قدرات نحلة</p>
             <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-4">
-              نحلة تعمل كـ 4 موظفين في واحد
+              نحلة تعمل كفريق مبيعات متكامل
             </h2>
             <p className="text-slate-400 max-w-xl mx-auto leading-relaxed text-base">
               لا توظيف، لا رواتب، لا إجازات — فقط مبيعات متواصلة على مدار الساعة.
@@ -632,10 +656,24 @@ export default function Landing() {
               outcome="يقلل متوسط وقت الرد من ساعات إلى ثوانٍ"
             />
             <FeatureCard
+              icon={Zap}
+              title="الطيار الآلي"
+              desc="شغّله مرة واحدة ثم ارتاح — نحلة تتولى الرد والمتابعة وإتمام الطلب من أوله لآخره بدون أي تدخل منك."
+              outcome="متجرك يبيع وأنت نائم، 24/7 بلا انقطاع"
+              highlight
+            />
+            <FeatureCard
               icon={ShoppingCart}
               title="استرجاع السلات المتروكة"
               desc="تراقب من يترك الطلب وترسل تذكيرات ذكية في الوقت المناسب."
               outcome="تسترجع ما يصل إلى 30٪ من الطلبات المفقودة"
+            />
+            <FeatureCard
+              icon={RefreshCw}
+              title="إعادة الطلب التنبؤي"
+              desc='نحلة تتذكر كل عميل وتُرسل له رسالة في اللحظة المناسبة — مثال: "سلمى، مرت 3 أسابيع على طلبك الأخير من كريم الترطيب، هل تريدين إعادة الطلب؟ 🍯"'
+              outcome="يزيد معدل تكرار الشراء حتى 40٪ — بدون إعلانات"
+              highlight
             />
             <FeatureCard
               icon={Star}
