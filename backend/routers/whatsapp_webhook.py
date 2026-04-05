@@ -111,7 +111,19 @@ async def _dispatch_message(
     sender   = msg.get("from", "")
     msg_id   = msg.get("id", "")
 
-    # Only handle text messages for now
+    # Handle reply button taps (e.g. "تواصل مع المؤسس")
+    if msg_type == "interactive":
+        interactive = msg.get("interactive", {})
+        if interactive.get("type") == "button_reply":
+            btn_id = interactive.get("button_reply", {}).get("id", "")
+            if btn_id == "contact_founder":
+                await _send_whatsapp_message(
+                    phone_id=phone_number_id or WA_PHONE_ID,
+                    to=sender,
+                    text="تقدر تتواصل مع المؤسس والمدير التنفيذي مباشرةً على واتساب:\nhttps://wa.me/966555906901",
+                )
+            return
+
     if msg_type != "text":
         logger.debug("Skipping non-text message type=%s from=%s", msg_type, sender)
         return
@@ -304,17 +316,35 @@ async def _send_cta_buttons(phone_id: str, to: str) -> None:
             },
         }
 
+    # Founder contact: Reply button (stays inside WhatsApp — no external link icon)
+    founder_payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": "تواصل مع المؤسس والمدير التنفيذي مباشرةً 👋"},
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "contact_founder",
+                            "title": "تواصل معي الآن",
+                        },
+                    }
+                ]
+            },
+        },
+    }
+
     messages = [
         ("register", _cta(
             "جرّب نحلة مجاناً 14 يوم — بدون بطاقة ائتمان 🎁",
             "سجّل مجاناً الآن",
             "https://app.nahlah.ai/register",
         )),
-        ("founder", _cta(
-            "تواصل مع المؤسس والمدير التنفيذي مباشرةً 👋",
-            "تواصل مع المؤسس",
-            "https://wa.me/966555906901",
-        )),
+        ("founder", founder_payload),
         ("billing", _cta(
             "شوف كل الباقات والأسعار بالتفصيل 💎",
             "عرض الباقات",
