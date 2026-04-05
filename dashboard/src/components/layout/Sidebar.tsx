@@ -34,6 +34,7 @@ interface NavItem {
   to:    string
   icon:  LucideIcon
   label: (tr: Translations) => string
+  isAI?: boolean
 }
 
 interface NavGroup {
@@ -76,7 +77,7 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/overview',          icon: LayoutDashboard, label: tr  => tr.nav.items.overview      },
       { to: '/conversations',     icon: MessageSquare,   label: tr  => tr.nav.items.conversations },
       { to: '/orders',            icon: ShoppingCart,    label: tr  => tr.nav.items.orders        },
-      { to: '/smart-automations', icon: Bot,             label: _tr => 'الطيار الآلي'             },
+      { to: '/smart-automations', icon: Bot,             label: _tr => 'الطيار الآلي',  isAI: true },
       { to: '/coupons',           icon: Tag,             label: tr  => tr.nav.items.coupons       },
       { to: '/campaigns',         icon: Megaphone,       label: tr  => tr.nav.items.campaigns     },
       { to: '/templates',         icon: FileText,        label: tr  => tr.nav.items.templates     },
@@ -85,9 +86,9 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
   {
     groupLabel: 'الذكاء الاصطناعي',
     items: [
-      { to: '/intelligence',  icon: Brain,        label: tr  => tr.nav.items.intelligence },
-      { to: '/analytics',     icon: BarChart2,    label: tr  => tr.nav.items.analyticsAI  },
-      { to: '/ai-sales-logs', icon: BrainCircuit, label: _tr => 'وكيل المبيعات'           },
+      { to: '/intelligence',  icon: Brain,        label: tr  => tr.nav.items.intelligence, isAI: true },
+      { to: '/analytics',     icon: BarChart2,    label: tr  => tr.nav.items.analyticsAI,  isAI: true },
+      { to: '/ai-sales-logs', icon: BrainCircuit, label: _tr => 'وكيل المبيعات',           isAI: true },
       { to: '/handoff-queue', icon: UserCheck,    label: _tr => 'طابور التحويل'            },
     ],
   },
@@ -178,7 +179,7 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                 {group.groupLabel}
               </p>
               <div className="space-y-0.5">
-                {group.items.map(({ to, icon: Icon, label }) => (
+                {group.items.map(({ to, icon: Icon, label, isAI }) => (
                   <NavLink
                     key={to}
                     to={to}
@@ -196,7 +197,15 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                         {isActive && (
                           <span className={`absolute start-0 inset-y-1.5 w-0.5 ${accentColor} rounded-e-full`} />
                         )}
-                        <Icon className="w-4 h-4 shrink-0" />
+                        {/* Icon with optional AI badge */}
+                        <span className="relative shrink-0">
+                          <Icon className="w-4 h-4" />
+                          {isAI && (
+                            <span className="absolute -bottom-1.5 -end-1.5 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.7)]">
+                              <span className="text-[6px] font-black text-slate-900 leading-none tracking-tight">AI</span>
+                            </span>
+                          )}
+                        </span>
                         {t(label)}
                       </>
                     )}
