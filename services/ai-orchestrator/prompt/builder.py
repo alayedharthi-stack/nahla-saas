@@ -158,31 +158,36 @@ def build_system_prompt(ctx: Dict[str, Any]) -> str:
 
     # ── 10. Response instructions ──────────────────────────────────────────────
     lang_instruction = (
-        "Reply in Arabic." if lang == "ar"
-        else "Reply in English." if lang == "en"
-        else "Reply in the same language the customer uses."
+        "تحدث بالعربية واللهجة السعودية العامية الصحيحة دائماً. "
+        "إذا بدأ العميل بالإنجليزية أو طلب التحدث بالإنجليزية، انتقل للإنجليزية."
+        if lang == "ar"
+        else "Reply in English. If the customer switches to Arabic, follow along in Arabic."
+        if lang == "en"
+        else
+        "تحدث بالعربية واللهجة السعودية افتراضياً. "
+        "إذا بدأ العميل بالإنجليزية أو طلب الإنجليزية، انتقل إليها."
     )
     style_map = {
-        "formal": "Use formal, respectful language.",
-        "casual": "Keep it conversational and friendly.",
-        "brief": "Be very concise — short messages only.",
-        "neutral": "Be warm, professional, and clear.",
+        "formal": "استخدم أسلوباً رسمياً ومحترماً.",
+        "casual": "تحدث بأسلوب ودي ومريح.",
+        "brief": "اجعل ردودك قصيرة جداً.",
+        "neutral": "كن ودوداً ومهنياً وواضحاً.",
     }
     style_instruction = style_map.get(comm_style, style_map["neutral"])
 
     sections.append(
-        "RESPONSE INSTRUCTIONS:\n"
+        "تعليمات الرد:\n"
         f"  • {lang_instruction}\n"
         f"  • {style_instruction}\n"
-        "  • WhatsApp messages must be short — avoid long paragraphs.\n"
-        "  • When suggesting a product, use its product ID in brackets, e.g. [42].\n"
-        "  • When proposing a coupon, state the code clearly.\n"
-        "  • Do not add any AI disclosure or branding footer — that is added separately.\n"
-        "  • Use action tools to propose products, coupons, bundles, or draft orders.\n"
-        "  • When collecting a shipping address for Saudi Arabia, ask for the national address "
-        "fields in order: رقم المبنى (building number), اسم الشارع (street name), الحي (district), "
-        "الرمز البريدي (postal code), المدينة (city). Collect them step by step if the customer "
-        "has not provided all fields. Include all five fields in the create_draft_order action."
+        "  • لا تستخدم كلمة 'شنو' أبداً — استخدم 'وش' أو 'إيش' أو 'كيف أقدر أساعدك'.\n"
+        "  • رسائل واتساب يجب أن تكون قصيرة — تجنب الفقرات الطويلة.\n"
+        "  • لا تستخدم تنسيق markdown مثل ** أو * — واتساب لا يدعمها بشكل صحيح.\n"
+        "  • عند اقتراح منتج، اذكر رقم المنتج بين قوسين، مثل [42].\n"
+        "  • عند اقتراح كوبون، اذكر الكود بوضوح.\n"
+        "  • لا تضف أي تذييل أو إفصاح عن الذكاء الاصطناعي.\n"
+        "  • استخدم أدوات الإجراءات لاقتراح المنتجات والكوبونات والطلبات.\n"
+        "  • عند جمع عنوان الشحن في السعودية، اطلب: رقم المبنى، اسم الشارع، الحي، "
+        "الرمز البريدي، المدينة — خطوة بخطوة إذا لم يقدمها العميل كاملة."
     )
 
     return "\n\n".join(sections)
