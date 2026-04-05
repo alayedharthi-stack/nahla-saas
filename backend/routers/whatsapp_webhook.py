@@ -274,39 +274,44 @@ async def _send_cta_buttons(phone_id: str, to: str) -> None:
         "Content-Type": "application/json",
     }
 
-    # Primary CTA: registration button
-    cta_payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "interactive",
-        "interactive": {
-            "type": "cta_url",
-            "body": {"text": "جرّب نحلة مجاناً 14 يوم — بدون بطاقة ائتمان 🎁"},
-            "action": {
-                "name": "cta_url",
-                "parameters": {
-                    "display_text": "سجّل مجاناً الآن",
-                    "url": "https://app.nahlah.ai/register",
+    def _cta(body_text: str, btn_label: str, btn_url: str) -> dict:
+        return {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "cta_url",
+                "body": {"text": body_text},
+                "action": {
+                    "name": "cta_url",
+                    "parameters": {
+                        "display_text": btn_label,
+                        "url": btn_url,
+                    },
                 },
             },
-        },
-    }
+        }
 
-    # Secondary: text with billing & support links
-    links_text = (
-        "روابط مفيدة:\n"
-        "💎 الباقات والأسعار: https://app.nahlah.ai/billing\n"
-        "💬 الدعم: support@nahlah.ai"
-    )
-    text_payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": links_text},
-    }
+    messages = [
+        ("register", _cta(
+            "جرّب نحلة مجاناً 14 يوم — بدون بطاقة ائتمان 🎁",
+            "سجّل مجاناً الآن",
+            "https://app.nahlah.ai/register",
+        )),
+        ("founder", _cta(
+            "تواصل مع المؤسس والمدير التنفيذي مباشرةً 👋",
+            "تواصل مع المؤسس",
+            "https://wa.me/966555906901",
+        )),
+        ("billing", _cta(
+            "شوف كل الباقات والأسعار بالتفصيل 💎",
+            "عرض الباقات",
+            "https://app.nahlah.ai/billing",
+        )),
+    ]
 
     async with httpx.AsyncClient(timeout=15) as client:
-        for label, payload in [("cta_button", cta_payload), ("links_text", text_payload)]:
+        for label, payload in messages:
             try:
                 resp = await client.post(url_endpoint, json=payload, headers=headers)
                 if resp.status_code not in (200, 201):
