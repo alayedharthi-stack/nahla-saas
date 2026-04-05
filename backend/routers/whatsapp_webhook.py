@@ -31,7 +31,7 @@ from core.config import (
 from core.database import get_db
 
 _ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-_CLAUDE_MODEL  = os.getenv("AI_MODEL_ID", "claude-3-5-haiku-20241022")
+_CLAUDE_MODEL  = os.getenv("AI_MODEL_ID", "claude-3-haiku-20240307")
 
 _SYSTEM_PROMPT = """أنت نحلة، مساعد مبيعات ذكي لمتجر إلكتروني عبر واتساب.
 مهمتك: مساعدة العملاء بأسلوب ودي وطبيعي بالعربية.
