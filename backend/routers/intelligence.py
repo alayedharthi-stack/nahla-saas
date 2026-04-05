@@ -208,11 +208,18 @@ def _seed_demo_customers(db: Session, tenant_id: int) -> None:
 @router.get("/intelligence/dashboard")
 async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)):
     """Return intelligence summary for the current tenant."""
+    import logging as _log
+    _logger = _log.getLogger("nahla-backend")
     tenant_id = resolve_tenant_id(request)
-    get_or_create_tenant(db, tenant_id)
-    _seed_automations_if_empty(db, tenant_id)
-    _seed_demo_customers(db, tenant_id)
-    db.commit()
+    _logger.info("intelligence/dashboard called for tenant_id=%s", tenant_id)
+    try:
+        get_or_create_tenant(db, tenant_id)
+        _seed_automations_if_empty(db, tenant_id)
+        _seed_demo_customers(db, tenant_id)
+        db.commit()
+    except Exception as exc:
+        _logger.error("intelligence seed failed: %s", exc, exc_info=True)
+        db.rollback()
 
     autos = db.query(SmartAutomation).filter(SmartAutomation.tenant_id == tenant_id).all()
     active_automations = sum(1 for a in autos if a.enabled)

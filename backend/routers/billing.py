@@ -256,7 +256,10 @@ async def create_payment_session(
 @router.get("/billing/plans")
 async def list_billing_plans(db: Session = Depends(get_db)):
     """Return all available Nahla SaaS subscription plans."""
-    ensure_billing_plans(db)
+    try:
+        ensure_billing_plans(db)
+    except Exception as exc:
+        logger.error("ensure_billing_plans failed: %s", exc, exc_info=True)
     plans = (
         db.query(BillingPlan)
         .filter(BillingPlan.tenant_id == None)  # noqa: E711
@@ -285,7 +288,11 @@ async def list_billing_plans(db: Session = Depends(get_db)):
 async def get_billing_status(request: Request, db: Session = Depends(get_db)):
     """Return the current subscription status for the tenant."""
     tenant_id = resolve_tenant_id(request)
-    ensure_billing_plans(db)
+    logger.info("billing/status called for tenant_id=%s", tenant_id)
+    try:
+        ensure_billing_plans(db)
+    except Exception as exc:
+        logger.error("ensure_billing_plans failed in status: %s", exc, exc_info=True)
 
     sub = get_tenant_subscription(db, tenant_id)
 

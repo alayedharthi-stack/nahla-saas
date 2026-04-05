@@ -102,6 +102,24 @@ async def health_whatsapp(request: Request, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/health/tables")
+async def health_tables(db: Session = Depends(get_db)):
+    """Check if key DB tables exist and have data — for diagnosing startup issues."""
+    from sqlalchemy import text, inspect
+    results = {}
+    tables_to_check = [
+        "billing_plans", "billing_subscriptions", "smart_automations",
+        "customer_profiles", "tenants", "users",
+    ]
+    for table in tables_to_check:
+        try:
+            count = db.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+            results[table] = {"exists": True, "rows": count}
+        except Exception as exc:
+            results[table] = {"exists": False, "error": str(exc)[:100]}
+    return {"status": "ok", "tables": results}
+
+
 @router.get("/health/detailed")
 async def health_detailed(request: Request, db: Session = Depends(get_db)):
     """Full readiness probe: database + WhatsApp configuration."""
