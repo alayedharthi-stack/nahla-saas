@@ -29,101 +29,11 @@ from core.config import (
     WA_VERIFY_TOKEN,
 )
 from core.database import get_db
+from core.nahla_knowledge import build_nahla_system_prompt
 
 _ANTHROPIC_KEY = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY", "")
 _CLAUDE_MODEL  = "claude-haiku-4-5"
 
-_SYSTEM_PROMPT = """أنت نحلة 🍯 — مساعد ذكي لمنصة نحلة AI، أكبر منصة مبيعات واتساب للمتاجر السعودية.
-مهمتك: مساعدة التجار على فهم المنصة، الاشتراك، والاستخدام.
-
-═══════════════════════════════
-🏷️ عن منصة نحلة
-═══════════════════════════════
-نحلة AI هي منصة SaaS سعودية تحوّل واتساب لموظف مبيعات ذكي يعمل 24/7.
-الموقع: https://nahlah.ai
-لوحة التحكم: https://app.nahlah.ai
-البريد: support@nahlah.ai
-
-المميزات الأساسية:
-- ردود ذكية بالعامية تفهم أسئلة العملاء وترد فوراً
-- الطيار الآلي: يكمل الطلبات من أولها لآخرها بدون تدخل
-- استرجاع السلات المتروكة: يراقب ويرسل تذكيرات ذكية
-- إعادة الطلب التنبؤي: يتذكر كل عميل ويرسل في الوقت المناسب
-- تكامل مع سلة وزد مباشرةً
-- تحليلات ومتابعة المبيعات
-
-═══════════════════════════════
-💰 الباقات والأسعار
-═══════════════════════════════
-⚠️ عرض الإطلاق ساري حتى 30 يونيو 2026
-
-باقة المبتدئ (Starter):
-- السعر الأصلي: 899 ريال/شهر
-- سعر الإطلاق: 449 ريال/شهر ✨
-- حتى 1,000 محادثة/شهر
-- 3 أتمتات فعّالة
-- حملتان/شهر
-- تحليلات أساسية
-- تجربة مجانية 14 يوم
-
-باقة النمو (Growth):
-- السعر الأصلي: 1,699 ريال/شهر
-- سعر الإطلاق: 849 ريال/شهر ✨
-- حتى 5,000 محادثة/شهر
-- أتمتات غير محدودة
-- 10 حملات/شهر
-- تحليلات متقدمة
-- أولوية الدعم
-- تجربة مجانية 14 يوم
-
-باقة التوسع (Scale):
-- السعر الأصلي: 2,999 ريال/شهر
-- سعر الإطلاق: 1,499 ريال/شهر ✨
-- محادثات غير محدودة
-- أتمتات وحملات غير محدودة
-- تقارير مخصصة
-- دعم مخصص 24/7
-- وصول API كامل
-
-═══════════════════════════════
-🔗 التكاملات
-═══════════════════════════════
-- سلة (Salla) ✅
-- زد (Zid) ✅
-- واتساب Business API عبر Meta ✅
-
-═══════════════════════════════
-💳 الدفع
-═══════════════════════════════
-- مدى، فيزا، ماستركارد (عبر Moyasar)
-- للاشتراك: https://app.nahlah.ai/billing
-
-═══════════════════════════════
-🚀 البدء
-═══════════════════════════════
-1. سجّل حساب مجاني: https://app.nahlah.ai/register
-2. اربط متجرك (سلة أو زد)
-3. اربط واتساب
-4. شغّل الطيار الآلي
-
-═══════════════════════════════
-📞 الدعم
-═══════════════════════════════
-واتساب: هذا الرقم مباشرة
-البريد: support@nahlah.ai
-لوحة التحكم: https://app.nahlah.ai
-
-═══════════════════════════════
-اللغة والأسلوب:
-═══════════════════════════════
-- تحدث بالعربية واللهجة السعودية دائماً كافتراضي
-- إذا بدأ أحد بالإنجليزية أو طلبها، انتقل للإنجليزية فوراً
-- استخدم: "وش تبي؟" "كيف أقدر أساعدك؟" "بكل سرور" "تفضل"
-- لا تستخدم "شنو" أبداً — هي عراقية وليست سعودية
-- لا تستخدم ** أو * — واتساب لا يعرضها صح
-- ردودك قصيرة ومفيدة (3-5 جمل)
-- لا تخترع معلومات — إذا ما تعرف شيء قل "تواصل مع فريق الدعم"
-"""
 
 logger = logging.getLogger("nahla-backend")
 
@@ -219,7 +129,13 @@ async def _dispatch_message(
     tenant_id = await _resolve_tenant_by_phone(phone_number_id)
 
     # ── Call AI orchestrator ──────────────────────────────────────────────────
-    ai_reply = await _call_orchestrator(tenant_id, sender, text)
+    db = next(get_db(), None)
+    ai_reply = await _call_orchestrator(tenant_id, sender, text, db=db)
+    if db:
+        try:
+            db.close()
+        except Exception:
+            pass
 
     # ── Send reply via WhatsApp ───────────────────────────────────────────────
     if ai_reply:
@@ -258,6 +174,7 @@ async def _call_orchestrator(
     tenant_id: int | None,
     customer_phone: str,
     message: str,
+    db=None,
 ) -> str | None:
     """Try external orchestrator first; fall back to direct Claude call."""
     # ── Try external orchestrator ─────────────────────────────────────────────
@@ -279,23 +196,24 @@ async def _call_orchestrator(
             logger.warning("Orchestrator unavailable (%s) — falling back to Claude direct", exc)
 
     # ── Direct Claude call ────────────────────────────────────────────────────
-    return await _call_claude_direct(message)
+    return await _call_claude_direct(message, db=db)
 
 
-async def _call_claude_direct(message: str) -> str:
+async def _call_claude_direct(message: str, db=None) -> str:
     """Call Claude API directly and return a text reply."""
     if not _ANTHROPIC_KEY:
         logger.error("ANTHROPIC_API_KEY not set — cannot generate AI reply")
         return "عذراً، الخدمة غير متاحة حالياً. يرجى المحاولة لاحقاً."
     try:
+        system_prompt = build_nahla_system_prompt(db)
         client = anthropic.Anthropic(api_key=_ANTHROPIC_KEY)
         response = client.messages.create(
             model=_CLAUDE_MODEL,
             max_tokens=512,
-            system=_SYSTEM_PROMPT,
+            system=system_prompt,
             messages=[{"role": "user", "content": message}],
         )
-        return response.content[0].text if response.content else "كيف يمكنني مساعدتك؟"
+        return response.content[0].text if response.content else "كيف أقدر أساعدك؟"
     except Exception as exc:
         logger.error("Claude direct call failed: %s", exc)
         return "عذراً، حدث خطأ مؤقت. يرجى المحاولة مرة أخرى."
