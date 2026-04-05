@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { LanguageProvider } from './i18n/context'
 import Layout from './components/layout/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
+import { isPlatformOwner } from './auth'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
@@ -24,6 +25,9 @@ import HandoffQueue from './pages/HandoffQueue'
 import SystemStatus from './pages/SystemStatus'
 import Merchants from './pages/Merchants'
 import AdminDashboard from './pages/AdminDashboard'
+import AdminMerchants from './pages/AdminMerchants'
+import AdminRevenue from './pages/AdminRevenue'
+import AdminTeam from './pages/AdminTeam'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import Register from './pages/Register'
@@ -60,7 +64,7 @@ export default function App() {
               </ProtectedRoute>
             }
           >
-            <Route index element={<Navigate to="/overview" replace />} />
+            <Route index element={<Navigate to={isPlatformOwner() ? '/admin' : '/overview'} replace />} />
             <Route path="overview"           element={<Overview />} />
             <Route path="conversations"      element={<Conversations />} />
             <Route path="orders"             element={<Orders />} />
@@ -79,7 +83,10 @@ export default function App() {
             <Route path="handoff-queue"      element={<HandoffQueue />} />
             <Route path="system-status"      element={<SystemStatus />} />
             <Route path="merchants"          element={<Merchants />} />
-            <Route path="admin"             element={<AdminDashboard />} />
+            <Route path="admin"              element={<AdminDashboard />} />
+            <Route path="admin/merchants"    element={<AdminMerchants />} />
+            <Route path="admin/revenue"      element={<AdminRevenue />} />
+            <Route path="admin/team"         element={<AdminTeam />} />
             <Route path="billing"            element={<Billing />} />
           </Route>
         </Routes>

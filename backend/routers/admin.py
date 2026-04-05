@@ -230,27 +230,61 @@ async def get_platform_stats(
 ):
     """Platform-wide statistics for the owner dashboard."""
     from sqlalchemy import func
-    from models import BillingSubscription, BillingPayment  # noqa: E402
+    from datetime import date
+    from models import BillingSubscription, BillingPayment, BillingPlan, WhatsAppConnection  # noqa: E402
 
     total_merchants  = db.query(func.count(User.id)).filter(User.role == "merchant").scalar() or 0
     active_merchants = db.query(func.count(User.id)).filter(User.role == "merchant", User.is_active == True).scalar() or 0  # noqa: E712
     total_tenants    = db.query(func.count(Tenant.id)).scalar() or 0
 
-    # Subscriptions
+    # Subscriptions by plan
     try:
         active_subs = db.query(func.count(BillingSubscription.id)).filter(
             BillingSubscription.status.in_(["active", "trialing"])
         ).scalar() or 0
+        trial_subs = db.query(func.count(BillingSubscription.id)).filter(
+            BillingSubscription.status == "trialing"
+        ).scalar() or 0
         total_subs = db.query(func.count(BillingSubscription.id)).scalar() or 0
+
+        # Per-plan counts
+        plans = db.query(BillingPlan).all()
+        plan_counts = {}
+        for plan in plans:
+            cnt = db.query(func.count(BillingSubscription.id)).filter(
+                BillingSubscription.plan_id == plan.id,
+                BillingSubscription.status.in_(["active", "trialing"]),
+            ).scalar() or 0
+            plan_counts[plan.slug] = {"name_ar": plan.name_ar or plan.name, "count": cnt, "price": float(plan.price_sar)}
     except Exception:
-        active_subs = 0
-        total_subs  = 0
+        active_subs  = 0
+        trial_subs   = 0
+        total_subs   = 0
+        plan_counts  = {}
 
     # Revenue
     try:
+        today = date.today()
         total_revenue = db.query(func.sum(BillingPayment.amount)).filter(
             BillingPayment.status == "paid"
         ).scalar() or 0
+        today_revenue = db.query(func.sum(BillingPayment.amount)).filter(
+            BillingPayment.status == "paid",
+            func.date(BillingPayment.created_at) == today,
+        ).scalar() or 0
+        # MRR: sum of active subscription plan prices
+        mrr = 0.0
+        try:
+            active_sub_list = db.query(BillingSubscription).filter(
+                BillingSubscription.status.in_(["active", "trialing"])
+            ).all()
+            for sub in active_sub_list:
+                plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+                if plan:
+                    mrr += float(plan.price_sar)
+        except Exception:
+            mrr = 0.0
+
         recent_payments = db.query(BillingPayment).order_by(
             BillingPayment.created_at.desc()
         ).limit(10).all()
@@ -258,7 +292,7 @@ async def get_platform_stats(
             {
                 "id":         p.id,
                 "tenant_id":  p.tenant_id,
-                "amount":     p.amount,
+                "amount":     float(p.amount),
                 "currency":   p.currency,
                 "status":     p.status,
                 "gateway":    p.gateway,
@@ -268,39 +302,73 @@ async def get_platform_stats(
         ]
     except Exception:
         total_revenue   = 0
+        today_revenue   = 0
+        mrr             = 0.0
         payments_list   = []
 
-    # Recent merchants
-    recent_merchants = db.query(User).filter(User.role == "merchant").order_by(
+    # All merchants with details
+    all_merchants = db.query(User).filter(User.role == "merchant").order_by(
         User.created_at.desc()
-    ).limit(5).all()
+    ).limit(100).all()
+
+    def _merchant_detail(u: User) -> dict:
+        sub = None
+        plan_name = "—"
+        sub_status = "none"
+        try:
+            sub = db.query(BillingSubscription).filter(
+                BillingSubscription.tenant_id == u.tenant_id
+            ).order_by(BillingSubscription.created_at.desc()).first()
+            if sub:
+                plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+                plan_name  = plan.name_ar or plan.name if plan else "—"
+                sub_status = sub.status
+        except Exception:
+            pass
+        wa_status = "not_connected"
+        try:
+            wa = db.query(WhatsAppConnection).filter(
+                WhatsAppConnection.tenant_id == u.tenant_id
+            ).first()
+            if wa:
+                wa_status = wa.status
+        except Exception:
+            pass
+        return {
+            "id":           u.id,
+            "email":        u.email,
+            "store_name":   u.username,
+            "phone":        getattr(u, "phone", ""),
+            "is_active":    u.is_active,
+            "plan":         plan_name,
+            "sub_status":   sub_status,
+            "wa_status":    wa_status,
+            "created_at":   u.created_at.isoformat() if u.created_at else None,
+        }
 
     return {
         "merchants": {
             "total":  total_merchants,
             "active": active_merchants,
+            "trial":  trial_subs,
         },
         "tenants": {
             "total": total_tenants,
         },
         "subscriptions": {
-            "active": active_subs,
-            "total":  total_subs,
+            "active":  active_subs,
+            "trial":   trial_subs,
+            "total":   total_subs,
+            "by_plan": plan_counts,
         },
         "revenue": {
             "total_sar": float(total_revenue),
+            "today_sar": float(today_revenue),
+            "mrr_sar":   mrr,
         },
         "recent_payments":  payments_list,
-        "recent_merchants": [
-            {
-                "id":         u.id,
-                "email":      u.email,
-                "store_name": u.username,
-                "is_active":  u.is_active,
-                "created_at": u.created_at.isoformat() if u.created_at else None,
-            }
-            for u in recent_merchants
-        ],
+        "recent_merchants": [_merchant_detail(u) for u in all_merchants[:5]],
+        "all_merchants":    [_merchant_detail(u) for u in all_merchants],
     }
 
 

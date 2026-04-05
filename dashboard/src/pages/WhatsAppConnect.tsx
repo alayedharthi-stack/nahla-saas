@@ -382,8 +382,8 @@ export default function WhatsAppConnect() {
 
       {/* Primary action */}
       <div className="space-y-3">
-        {/* Connect button — for not_connected or disconnected */}
-        {(status === 'not_connected' || status === 'disconnected') && (
+        {/* Connect button — for not_connected, disconnected, or stuck pending */}
+        {(status === 'not_connected' || status === 'disconnected' || status === 'pending') && (
           <button
             onClick={handleConnect}
             disabled={connecting}

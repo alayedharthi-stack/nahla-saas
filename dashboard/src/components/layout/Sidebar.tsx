@@ -46,24 +46,24 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
   {
     groupLabel: 'المنصة',
     items: [
-      { to: '/admin',     icon: Crown,        label: _tr => 'لوحة المالك'      },
-      { to: '/merchants', icon: Users,         label: _tr => 'إدارة التجار'     },
-      { to: '/billing',   icon: TrendingUp,    label: _tr => 'الإيرادات والباقات'},
-      { to: '/system-status', icon: Activity,  label: _tr => 'حالة النظام'      },
+      { to: '/admin',          icon: Crown,         label: _tr => 'Dashboard'        },
+      { to: '/admin/merchants',icon: Users,         label: _tr => 'Merchants'        },
+      { to: '/admin/revenue',  icon: TrendingUp,    label: _tr => 'Revenue'          },
+      { to: '/admin/team',     icon: Layers,        label: _tr => 'Team'             },
+      { to: '/system-status',  icon: Activity,      label: _tr => 'System Status'    },
     ],
   },
   {
     groupLabel: 'نحلة AI',
     items: [
-      { to: '/whatsapp-connect', icon: MessageCircle, label: _tr => 'بوت نحلة (واتساب)' },
-      { to: '/templates',        icon: FileText,       label: _tr => 'قوالب الرسائل'     },
-      { to: '/analytics',        icon: BarChart2,      label: _tr => 'تحليلات المنصة'    },
+      { to: '/whatsapp-connect', icon: MessageCircle, label: _tr => 'بوت نحلة' },
+      { to: '/templates',        icon: FileText,       label: _tr => 'قوالب الرسائل' },
     ],
   },
   {
     groupLabel: 'الإعدادات',
     items: [
-      { to: '/settings', icon: Settings, label: _tr => 'إعدادات المنصة' },
+      { to: '/settings', icon: Settings, label: _tr => 'Settings' },
     ],
   },
 ]

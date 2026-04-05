@@ -42,8 +42,34 @@ export function getRole(): string {
   return localStorage.getItem(ROLE_KEY) ?? 'merchant'
 }
 
+// Role hierarchy
+// owner / super_admin → Platform Owner Dashboard
+// staff              → Staff Dashboard
+// merchant_admin / merchant_user / merchant → Merchant Dashboard
+
 export function isAdmin(): boolean {
-  return getRole() === 'admin'
+  const r = getRole()
+  return r === 'admin' || r === 'owner' || r === 'super_admin'
+}
+
+export function isPlatformOwner(): boolean {
+  const r = getRole()
+  return r === 'owner' || r === 'super_admin' || r === 'admin'
+}
+
+export function isStaff(): boolean {
+  return getRole() === 'staff'
+}
+
+export function isMerchant(): boolean {
+  const r = getRole()
+  return r === 'merchant' || r === 'merchant_admin' || r === 'merchant_user'
+}
+
+export function getDefaultRoute(): string {
+  if (isPlatformOwner()) return '/admin'
+  if (isStaff())         return '/overview'
+  return '/overview'
 }
 
 // ── Impersonation helpers ──────────────────────────────────────────────────────
