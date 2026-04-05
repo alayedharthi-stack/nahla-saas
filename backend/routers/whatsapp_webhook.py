@@ -136,11 +136,12 @@ async def _dispatch_message(
 
     # ── Send reply via WhatsApp ───────────────────────────────────────────────
     if ai_reply:
-        await _send_whatsapp_message(
-            phone_id=phone_number_id or WA_PHONE_ID,
-            to=sender,
-            text=ai_reply,
-        )
+        used_phone_id = phone_number_id or WA_PHONE_ID
+        await _send_whatsapp_message(phone_id=used_phone_id, to=sender, text=ai_reply)
+
+        # Send CTA buttons when reply is about pricing, plans, or registration
+        if _should_send_cta_buttons(text, ai_reply):
+            await _send_cta_buttons(phone_id=used_phone_id, to=sender)
 
 
 async def _resolve_tenant_by_phone(phone_number_id: str) -> int | None:
@@ -242,3 +243,75 @@ async def _send_whatsapp_message(phone_id: str, to: str, text: str) -> None:
                 logger.info("WhatsApp reply sent to=%s", to)
     except Exception as exc:
         logger.error("WhatsApp send error: %s", exc)
+
+
+# ── CTA Button helpers ─────────────────────────────────────────────────────────
+
+# Keywords that trigger the CTA buttons
+_CTA_KEYWORDS = (
+    "باقة", "باقات", "سعر", "أسعار", "اشتراك", "تسجيل", "مجاني", "تجربة",
+    "ريال", "خطة", "plan", "price", "pricing", "register", "trial", "free",
+)
+
+
+def _should_send_cta_buttons(user_text: str, ai_reply: str) -> bool:
+    """Return True when the conversation is about pricing or registration."""
+    combined = (user_text + " " + ai_reply).lower()
+    return any(kw in combined for kw in _CTA_KEYWORDS)
+
+
+async def _send_cta_buttons(phone_id: str, to: str) -> None:
+    """
+    Send a CTA URL button (register) + a follow-up text with other links.
+    WhatsApp Cloud API supports one URL button per interactive message (cta_url type).
+    """
+    if not WA_TOKEN:
+        return
+
+    url_endpoint = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {WA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    # Primary CTA: registration button
+    cta_payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "cta_url",
+            "body": {"text": "جرّب نحلة مجاناً 14 يوم — بدون بطاقة ائتمان 🎁"},
+            "action": {
+                "name": "cta_url",
+                "parameters": {
+                    "display_text": "سجّل مجاناً الآن",
+                    "url": "https://app.nahlah.ai/register",
+                },
+            },
+        },
+    }
+
+    # Secondary: text with billing & support links
+    links_text = (
+        "روابط مفيدة:\n"
+        "💎 الباقات والأسعار: https://app.nahlah.ai/billing\n"
+        "💬 الدعم: support@nahlah.ai"
+    )
+    text_payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": links_text},
+    }
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        for label, payload in [("cta_button", cta_payload), ("links_text", text_payload)]:
+            try:
+                resp = await client.post(url_endpoint, json=payload, headers=headers)
+                if resp.status_code not in (200, 201):
+                    logger.warning("CTA %s send failed: %s %s", label, resp.status_code, resp.text)
+                else:
+                    logger.info("CTA %s sent to=%s", label, to)
+            except Exception as exc:
+                logger.error("CTA %s send error: %s", label, exc)
