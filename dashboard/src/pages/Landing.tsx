@@ -1186,10 +1186,11 @@ export default function Landing() {
               </div>
             </div>
             <p className="text-slate-500 text-center">
-              تطوير وإدارة:{' '}
-              <span className="text-slate-400 font-medium">تركي بن عايد الحارثي</span>
+              <span className="text-slate-400 font-medium">Founder & CEO</span>
               {' '}·{' '}
-              <span className="text-slate-500">المدير التنفيذي والمؤسس · nahlah.ai</span>
+              <span className="text-slate-400 font-medium">Turki Alharthi</span>
+              {' '}·{' '}
+              <span className="text-slate-500">nahlah.ai</span>
             </p>
           </div>
         </div>
