@@ -14,6 +14,7 @@ import os
 import sys
 from typing import Any, Dict
 
+import anthropic
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
@@ -28,6 +29,17 @@ from core.config import (
     WA_VERIFY_TOKEN,
 )
 from core.database import get_db
+
+_ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+_CLAUDE_MODEL  = os.getenv("AI_MODEL_ID", "claude-3-5-haiku-20241022")
+
+_SYSTEM_PROMPT = """أنت نحلة، مساعد مبيعات ذكي لمتجر إلكتروني عبر واتساب.
+مهمتك: مساعدة العملاء بأسلوب ودي وطبيعي بالعربية.
+- أجب على أسئلة المنتجات والأسعار والطلبات بثقة
+- استخدم العامية السعودية بشكل طبيعي
+- اجعل ردودك قصيرة ومفيدة (3-5 جمل كحد أقصى)
+- إذا لم تعرف شيئاً بالتفصيل، اعتذر بلطف واقترح التواصل مع الدعم
+"""
 
 logger = logging.getLogger("nahla-backend")
 
@@ -163,20 +175,45 @@ async def _call_orchestrator(
     customer_phone: str,
     message: str,
 ) -> str | None:
-    """Call the Nahla AI orchestrator and return its text reply."""
-    payload = {
-        "tenant_id": tenant_id or 1,
-        "customer_phone": customer_phone,
-        "message": message,
-    }
+    """Try external orchestrator first; fall back to direct Claude call."""
+    # ── Try external orchestrator ─────────────────────────────────────────────
+    if ORCHESTRATOR_URL:
+        payload = {
+            "tenant_id": tenant_id or 1,
+            "customer_phone": customer_phone,
+            "message": message,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(f"{ORCHESTRATOR_URL}/orchestrate", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                reply = data.get("reply") or data.get("response") or data.get("message")
+                if reply:
+                    return reply
+        except Exception as exc:
+            logger.warning("Orchestrator unavailable (%s) — falling back to Claude direct", exc)
+
+    # ── Direct Claude call ────────────────────────────────────────────────────
+    return await _call_claude_direct(message)
+
+
+async def _call_claude_direct(message: str) -> str:
+    """Call Claude API directly and return a text reply."""
+    if not _ANTHROPIC_KEY:
+        logger.error("ANTHROPIC_API_KEY not set — cannot generate AI reply")
+        return "عذراً، الخدمة غير متاحة حالياً. يرجى المحاولة لاحقاً."
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{ORCHESTRATOR_URL}/orchestrate", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("reply") or data.get("response") or data.get("message")
+        client = anthropic.Anthropic(api_key=_ANTHROPIC_KEY)
+        response = client.messages.create(
+            model=_CLAUDE_MODEL,
+            max_tokens=512,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": message}],
+        )
+        return response.content[0].text if response.content else "كيف يمكنني مساعدتك؟"
     except Exception as exc:
-        logger.error("Orchestrator call failed: %s", exc)
+        logger.error("Claude direct call failed: %s", exc)
         return "عذراً، حدث خطأ مؤقت. يرجى المحاولة مرة أخرى."
 
 
