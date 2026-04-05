@@ -111,18 +111,17 @@ async def _dispatch_message(
     sender   = msg.get("from", "")
     msg_id   = msg.get("id", "")
 
-    # Handle reply button taps (e.g. "تواصل مع المؤسس")
+    # Handle reply button taps
     if msg_type == "interactive":
         interactive = msg.get("interactive", {})
         if interactive.get("type") == "button_reply":
             btn_id = interactive.get("button_reply", {}).get("id", "")
-            if btn_id == "contact_founder":
-                await _send_whatsapp_message(
-                    phone_id=phone_number_id or WA_PHONE_ID,
-                    to=sender,
-                    text="تقدر تتواصل مع المؤسس والمدير التنفيذي مباشرةً على واتساب:\nhttps://wa.me/966555906901",
-                )
-            return
+            await _handle_button_reply(
+                btn_id=btn_id,
+                phone_id=phone_number_id or WA_PHONE_ID,
+                to=sender,
+            )
+        return
 
     if msg_type != "text":
         logger.debug("Skipping non-text message type=%s from=%s", msg_type, sender)
@@ -130,6 +129,11 @@ async def _dispatch_message(
 
     text = msg.get("text", {}).get("body", "").strip()
     if not text:
+        return
+
+    # Send welcome menu on greetings before AI call
+    if _is_greeting(text):
+        await _send_welcome_menu(phone_id=phone_number_id or WA_PHONE_ID, to=sender)
         return
 
     logger.info("Incoming WhatsApp message from=%s phone_id=%s", sender, phone_number_id)
@@ -255,6 +259,191 @@ async def _send_whatsapp_message(phone_id: str, to: str, text: str) -> None:
                 logger.info("WhatsApp reply sent to=%s", to)
     except Exception as exc:
         logger.error("WhatsApp send error: %s", exc)
+
+
+# ── Greeting detection & welcome menu ─────────────────────────────────────────
+
+_GREETINGS = (
+    "هلا", "هلو", "هاي", "مرحبا", "مرحباً", "السلام", "سلام", "صباح", "مساء",
+    "أهلاً", "أهلا", "ايش عندكم", "وش عندكم", "hi", "hello", "hey", "good morning",
+    "good evening", "sup", "yo",
+)
+
+
+def _is_greeting(text: str) -> bool:
+    """Return True if the message is a greeting with no real question."""
+    t = text.strip().lower()
+    # Short message that starts with a greeting word
+    if len(t) > 60:
+        return False
+    return any(t.startswith(g) or t == g for g in _GREETINGS)
+
+
+async def _send_welcome_menu(phone_id: str, to: str) -> None:
+    """Send a warm welcome message followed by a quick-reply menu."""
+    if not WA_TOKEN:
+        return
+
+    url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
+
+    menu_payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": "هلا! أنا نحلة 🍯\nأساعد أصحاب المتاجر يبيعون أكثر عبر واتساب.\n\nوش تبي تعرف؟"
+            },
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": "menu_how",   "title": "كيف تشتغل؟ 🤔"}},
+                    {"type": "reply", "reply": {"id": "menu_price", "title": "كم الأسعار؟ 💰"}},
+                    {"type": "reply", "reply": {"id": "menu_trial", "title": "أبي أجرب 🚀"}},
+                ]
+            },
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            resp = await client.post(url, json=menu_payload, headers=headers)
+            if resp.status_code not in (200, 201):
+                logger.warning("Welcome menu failed: %s %s", resp.status_code, resp.text)
+            else:
+                logger.info("Welcome menu sent to=%s", to)
+        except Exception as exc:
+            logger.error("Welcome menu error: %s", exc)
+
+
+async def _handle_button_reply(btn_id: str, phone_id: str, to: str) -> None:
+    """Handle quick-reply and menu button taps."""
+    if btn_id == "contact_founder":
+        await _send_whatsapp_message(
+            phone_id=phone_id,
+            to=to,
+            text="زين! تقدر تتواصل مع المؤسس مباشرةً على واتساب 👇\nhttps://wa.me/966555906901",
+        )
+
+    elif btn_id == "menu_how":
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {
+                    "text": "نحلة ترد على عملاء متجرك في واتساب وتساعدهم يكملون طلباتهم لوحدها — بدون ما تتدخل أنت 🤖\n\nمتجرك على أي منصة؟"
+                },
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": "store_salla", "title": "سلة 🛒"}},
+                        {"type": "reply", "reply": {"id": "store_zid",   "title": "زد 🛒"}},
+                        {"type": "reply", "reply": {"id": "store_other", "title": "منصة ثانية"}},
+                    ]
+                },
+            },
+        }
+        await _post_wa(phone_id, payload)
+
+    elif btn_id == "menu_price":
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {
+                    "text": "عندنا باقات تبدأ من 899 ريال بالشهر 💎\nوفي تجربة مجانية 14 يوم — بدون بطاقة.\n\nمتجرك كبير ولا صغير؟"
+                },
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": "store_small", "title": "صغير / ناشئ"}},
+                        {"type": "reply", "reply": {"id": "store_big",   "title": "متوسط / كبير"}},
+                        {"type": "reply", "reply": {"id": "menu_trial",  "title": "أبي أجرب 🚀"}},
+                    ]
+                },
+            },
+        }
+        await _post_wa(phone_id, payload)
+
+    elif btn_id == "menu_trial":
+        cta = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "cta_url",
+                "body": {"text": "زين! سجّل الحين وابدأ تجربتك المجانية 14 يوم — بدون بطاقة ائتمان 🎁"},
+                "action": {
+                    "name": "cta_url",
+                    "parameters": {
+                        "display_text": "سجّل مجاناً الآن",
+                        "url": "https://app.nahlah.ai/register",
+                    },
+                },
+            },
+        }
+        await _post_wa(phone_id, cta)
+
+    elif btn_id in ("store_salla", "store_zid"):
+        store = "سلة" if btn_id == "store_salla" else "زد"
+        await _send_whatsapp_message(
+            phone_id=phone_id,
+            to=to,
+            text=f"ممتاز! نحلة تتكامل مع {store} مباشرةً — بدون أي إعداد تقني معقد 🔗\nعندك رقم واتساب Business جاهز؟",
+        )
+
+    elif btn_id == "store_other":
+        await _send_whatsapp_message(
+            phone_id=phone_id,
+            to=to,
+            text="حالياً نحلة تدعم سلة وزد بشكل كامل.\nأي منصة تستخدم؟ ممكن نشوف إذا في حل 🤝",
+        )
+
+    elif btn_id in ("store_small", "store_big"):
+        cta = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "cta_url",
+                "body": {
+                    "text": (
+                        "باقة Starter مناسبة لك — 899 ريال/شهر ✨\nجرّبها 14 يوم مجاناً بدون بطاقة."
+                        if btn_id == "store_small"
+                        else "باقة Pro أو Business هي الأنسب لمتجرك 💎\nشوف كل التفاصيل وابدأ مجاناً."
+                    )
+                },
+                "action": {
+                    "name": "cta_url",
+                    "parameters": {
+                        "display_text": "شوف الباقات وسجّل",
+                        "url": "https://app.nahlah.ai/billing",
+                    },
+                },
+            },
+        }
+        await _post_wa(phone_id, cta)
+
+    else:
+        logger.debug("Unhandled button_reply id=%s", btn_id)
+
+
+async def _post_wa(phone_id: str, payload: dict) -> None:
+    """Helper: POST a payload to WhatsApp Cloud API."""
+    if not WA_TOKEN:
+        return
+    url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code not in (200, 201):
+                logger.warning("WA post failed: %s %s", resp.status_code, resp.text)
+        except Exception as exc:
+            logger.error("WA post error: %s", exc)
 
 
 # ── CTA Button helpers ─────────────────────────────────────────────────────────
