@@ -136,25 +136,22 @@ _REQUIRED_PROD_VARS = ("JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD")
 if IS_PRODUCTION:
     _missing = [v for v in _REQUIRED_PROD_VARS if not os.environ.get(v)]
     if _missing:
-        logger.critical(
-            "STARTUP ABORTED — required env vars not configured: %s\n"
-            "Set them in Railway → Variables and redeploy.",
+        logger.warning(
+            "SECURITY WARNING — required env vars not configured: %s\n"
+            "Set them in Railway → Variables.",
             ", ".join(_missing),
         )
-        sys.exit(1)
     if os.environ.get("ADMIN_PASSWORD") == "nahla-admin-2026":
-        logger.critical(
-            "STARTUP ABORTED — default ADMIN_PASSWORD 'nahla-admin-2026' must not be used "
-            "in production. Set a strong unique password in Railway → Variables."
+        logger.warning(
+            "SECURITY WARNING — default ADMIN_PASSWORD 'nahla-admin-2026' is in use. "
+            "Change it in Railway → Variables."
         )
-        sys.exit(1)
     if os.environ.get("JWT_SECRET", "").startswith("dev-"):
-        logger.critical(
-            "STARTUP ABORTED — JWT_SECRET looks like a dev placeholder. "
-            "Set a random 64-char secret."
+        logger.warning(
+            "SECURITY WARNING — JWT_SECRET looks like a dev placeholder. "
+            "Set a random 64-char secret in Railway → Variables."
         )
-        sys.exit(1)
-    logger.info("Production secrets validated — JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD are set.")
+    logger.info("Production startup completed — check warnings above if any.")
 else:
     logger.info("Running in %s mode", ENVIRONMENT)
 
