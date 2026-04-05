@@ -247,17 +247,29 @@ async def _send_whatsapp_message(phone_id: str, to: str, text: str) -> None:
 
 # ── CTA Button helpers ─────────────────────────────────────────────────────────
 
-# Keywords that trigger the CTA buttons
-_CTA_KEYWORDS = (
-    "باقة", "باقات", "سعر", "أسعار", "اشتراك", "تسجيل", "مجاني", "تجربة",
-    "ريال", "خطة", "plan", "price", "pricing", "register", "trial", "free",
+# Keywords that signal CLEAR BUYING INTENT — only then send CTA buttons
+_BUYING_INTENT_KEYWORDS = (
+    # Arabic intent signals
+    "أبي أجرب", "ابي اجرب", "أبي أبدأ", "ابي ابدا", "أبي أشترك", "ابي اشترك",
+    "كيف أسجل", "كيف اسجل", "وين الرابط", "ارسل الرابط", "أرسل الرابط",
+    "أبي أشوف الباقات", "ابدأ التجربة", "ابدا التجربة", "جاهز", "أبدأ الآن",
+    "سجّلني", "سجلني", "اشتراك", "أشترك",
+    # English intent signals
+    "sign me up", "register now", "let's start", "how do i start",
+    "send the link", "i want to try", "start trial", "sign up",
 )
 
 
 def _should_send_cta_buttons(user_text: str, ai_reply: str) -> bool:
-    """Return True when the conversation is about pricing or registration."""
-    combined = (user_text + " " + ai_reply).lower()
-    return any(kw in combined for kw in _CTA_KEYWORDS)
+    """
+    Return True only when the user shows CLEAR buying intent.
+    Avoids sending buttons on general questions about pricing/features.
+    """
+    user_lower = user_text.lower()
+    # Also trigger if the AI reply itself contains the registration link
+    if "app.nahlah.ai/register" in ai_reply:
+        return True
+    return any(kw in user_lower for kw in _BUYING_INTENT_KEYWORDS)
 
 
 async def _send_cta_buttons(phone_id: str, to: str) -> None:
