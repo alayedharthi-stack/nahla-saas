@@ -143,6 +143,91 @@ def email_subscription(store_name: str, plan_name: str, ends_at: str) -> str:
   <p>مرحباً <strong>{store_name}</strong>،</p>
   <p>تم تفعيل خطة <strong>{plan_name}</strong> بنجاح.</p>
   <p style="color:#64748b">ينتهي الاشتراك في: <strong>{ends_at}</strong></p>
+  <a href="https://app.nahlah.ai/billing"
+     style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    إدارة اشتراكي
+  </a>
   <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
-  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI</p>
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI · <a href="https://nahlah.ai" style="color:#f59e0b">nahlah.ai</a></p>
+</div>"""
+
+
+def email_payment_failed(store_name: str, plan_name: str, amount_sar: float) -> str:
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3 style="color:#ef4444">فشل عملية الدفع ❌</h3>
+  <p>مرحباً <strong>{store_name}</strong>،</p>
+  <p>لم تتم عملية الدفع بنجاح لخطة <strong>{plan_name}</strong> بقيمة <strong>{amount_sar:.0f} ريال</strong>.</p>
+  <p>يرجى التحقق من بيانات البطاقة أو طريقة الدفع والمحاولة مجدداً.</p>
+  <a href="https://app.nahlah.ai/billing"
+     style="display:inline-block;background:#ef4444;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    تجديد الاشتراك الآن
+  </a>
+  <p style="color:#64748b;font-size:13px">إذا استمرت المشكلة، تواصل معنا على support@nahlah.ai</p>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI · <a href="https://nahlah.ai" style="color:#f59e0b">nahlah.ai</a></p>
+</div>"""
+
+
+def email_subscription_expiring(store_name: str, plan_name: str, days_left: int, ends_at: str) -> str:
+    urgency_color = "#ef4444" if days_left <= 3 else "#f59e0b"
+    urgency_icon  = "🔴" if days_left <= 3 else "🟡"
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3 style="color:{urgency_color}">{urgency_icon} اشتراكك على وشك الانتهاء</h3>
+  <p>مرحباً <strong>{store_name}</strong>،</p>
+  <p>اشتراكك في خطة <strong>{plan_name}</strong> سينتهي خلال <strong>{days_left} {'يوم' if days_left > 1 else 'يوم واحد'}</strong> بتاريخ {ends_at}.</p>
+  <p>جدّد الآن لتجنب انقطاع الخدمة وفقدان تقدمك.</p>
+  <a href="https://app.nahlah.ai/billing"
+     style="display:inline-block;background:{urgency_color};color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    تجديد الاشتراك الآن
+  </a>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI · <a href="https://nahlah.ai" style="color:#f59e0b">nahlah.ai</a></p>
+</div>"""
+
+
+def email_subscription_expired(store_name: str, plan_name: str) -> str:
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3 style="color:#ef4444">انتهى اشتراكك 😔</h3>
+  <p>مرحباً <strong>{store_name}</strong>،</p>
+  <p>انتهى اشتراكك في خطة <strong>{plan_name}</strong>. تم إيقاف الردود الذكية مؤقتاً على متجرك.</p>
+  <p>جدّد اشتراكك لاستعادة كل المميزات وإعادة تشغيل الطيار الآلي.</p>
+  <a href="https://app.nahlah.ai/billing"
+     style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    تجديد الاشتراك الآن
+  </a>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI · <a href="https://nahlah.ai" style="color:#f59e0b">nahlah.ai</a></p>
+</div>"""
+
+
+def email_invoice(store_name: str, plan_name: str, amount_sar: float,
+                  invoice_id: str, payment_date: str) -> str:
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3>فاتورة دفع #{{invoice_id}} 🧾</h3>
+  <p>مرحباً <strong>{store_name}</strong>،</p>
+  <table style="width:100%;border-collapse:collapse;margin:16px 0">
+    <tr style="background:#f8fafc"><td style="padding:10px;border:1px solid #e2e8f0">الخطة</td><td style="padding:10px;border:1px solid #e2e8f0"><strong>{plan_name}</strong></td></tr>
+    <tr><td style="padding:10px;border:1px solid #e2e8f0">المبلغ</td><td style="padding:10px;border:1px solid #e2e8f0"><strong>{amount_sar:.0f} ريال</strong></td></tr>
+    <tr style="background:#f8fafc"><td style="padding:10px;border:1px solid #e2e8f0">تاريخ الدفع</td><td style="padding:10px;border:1px solid #e2e8f0">{payment_date}</td></tr>
+    <tr><td style="padding:10px;border:1px solid #e2e8f0">رقم الفاتورة</td><td style="padding:10px;border:1px solid #e2e8f0">#{invoice_id}</td></tr>
+  </table>
+  <a href="https://app.nahlah.ai/billing"
+     style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    عرض تفاصيل الاشتراك
+  </a>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI · <a href="https://nahlah.ai" style="color:#f59e0b">nahlah.ai</a></p>
 </div>"""

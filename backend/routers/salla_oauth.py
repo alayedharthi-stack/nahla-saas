@@ -195,6 +195,19 @@ async def salla_oauth_callback(
             url=f"{_DASHBOARD}/store-integration?salla_error=db_save_failed", status_code=302,
         )
 
+    # Notify merchant that store was connected
+    try:
+        import asyncio as _asyncio  # noqa: PLC0415
+        from core.wa_notify import notify_store_connected  # noqa: PLC0415
+        from core.tenant import get_or_create_settings, merge_defaults, DEFAULT_WHATSAPP  # noqa: PLC0415
+        _s     = get_or_create_settings(db, tenant_id)
+        _wa    = merge_defaults(_s.whatsapp_settings or {}, DEFAULT_WHATSAPP)
+        _phone = _wa.get("owner_whatsapp_number", "")
+        if _phone:
+            _asyncio.ensure_future(notify_store_connected(_phone, store_name, "سلة"))
+    except Exception as _exc:
+        logger.warning("Salla OAuth: store-connected notification error: %s", _exc)
+
     logger.info("Salla OAuth: flow complete — redirecting to success page")
     store_name_enc = urllib.parse.quote(store_name)
     return RedirectResponse(

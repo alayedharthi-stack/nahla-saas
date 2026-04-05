@@ -58,10 +58,13 @@ async def _check_subscription_expiry() -> None:
         return
 
     try:
-        from models import BillingSubscription, Tenant  # noqa: PLC0415
+        from models import BillingSubscription, Tenant, User  # noqa: PLC0415
         from core.tenant import (  # noqa: PLC0415
             DEFAULT_STORE, DEFAULT_WHATSAPP,
             get_or_create_settings, merge_defaults,
+        )
+        from core.notifications import (  # noqa: PLC0415
+            send_email, email_subscription_expiring, email_subscription_expired,
         )
 
         now = datetime.now(timezone.utc)
@@ -83,24 +86,51 @@ async def _check_subscription_expiry() -> None:
             store_name = _st.get("store_name") or f"متجر #{sub.tenant_id}"
             plan_name  = sub.plan.name if sub.plan else "الباقة الحالية"
 
-            if not phone:
-                continue
+            # Get merchant email for dual-channel notifications
+            merchant = db.query(User).filter(
+                User.tenant_id == sub.tenant_id,
+                User.role == "merchant",
+                User.is_active == True,  # noqa: E712
+            ).first()
+            email_addr = getattr(merchant, "email", "") if merchant else ""
 
-            days_left = (sub.ends_at - now).days
+            ends_raw = sub.ends_at
+            if ends_raw and ends_raw.tzinfo is None:
+                ends_raw = ends_raw.replace(tzinfo=timezone.utc)
+            days_left = (ends_raw - now).days if ends_raw else 999
 
             if days_left < 0:
-                # Already expired — notify and mark cancelled
                 logger.info("[Scheduler] Sub %s expired for tenant %s", sub.id, sub.tenant_id)
                 sub.status = "expired"
                 db.commit()
                 await notify_subscription_expired(phone, store_name)
+                if email_addr:
+                    await send_email(
+                        to=email_addr,
+                        subject=f"😔 انتهى اشتراكك في {plan_name} — نحلة AI",
+                        html=email_subscription_expired(store_name, plan_name),
+                    )
 
             elif days_left <= 3 and not _already_notified(sub, "warn_3"):
                 await notify_subscription_expiring(phone, store_name, plan_name, days_left)
+                ends_str = (sub.ends_at.strftime("%Y-%m-%d") if sub.ends_at else "—")
+                if email_addr:
+                    await send_email(
+                        to=email_addr,
+                        subject=f"🔴 اشتراكك ينتهي خلال {days_left} أيام — نحلة AI",
+                        html=email_subscription_expiring(store_name, plan_name, days_left, ends_str),
+                    )
                 _mark_notified(db, sub, "warn_3")
 
             elif days_left <= 7 and not _already_notified(sub, "warn_7"):
                 await notify_subscription_expiring(phone, store_name, plan_name, days_left)
+                ends_str = (sub.ends_at.strftime("%Y-%m-%d") if sub.ends_at else "—")
+                if email_addr:
+                    await send_email(
+                        to=email_addr,
+                        subject=f"🟡 اشتراكك ينتهي خلال {days_left} أيام — نحلة AI",
+                        html=email_subscription_expiring(store_name, plan_name, days_left, ends_str),
+                    )
                 _mark_notified(db, sub, "warn_7")
 
     finally:
@@ -156,16 +186,53 @@ async def _check_trial_expiry() -> None:
             if not phone:
                 continue
 
+            from core.notifications import send_email, email_subscription_expiring, email_subscription_expired  # noqa: PLC0415
+            from models import User  # noqa: PLC0415
+            merchant   = db.query(User).filter(
+                User.tenant_id == tenant.id, User.role == "merchant",
+                User.is_active == True,  # noqa: E712
+            ).first()
+            email_addr = getattr(merchant, "email", "") if merchant else ""
+
             meta = (_s.extra_metadata or {}).get("_scheduler_flags", {})
             if days_remaining == 7 and not meta.get("trial_warn_7"):
                 await notify_trial_ending(phone, store_name, 7)
+                if email_addr:
+                    await send_email(
+                        to=email_addr,
+                        subject="🟡 تجربتك المجانية تنتهي خلال 7 أيام — نحلة AI",
+                        html=email_subscription_expiring(store_name, "التجربة المجانية", 7, "—"),
+                    )
                 _update_tenant_flag(db, tenant.id, _s, "trial_warn_7")
             elif days_remaining == 3 and not meta.get("trial_warn_3"):
                 await notify_trial_ending(phone, store_name, 3)
+                if email_addr:
+                    await send_email(
+                        to=email_addr,
+                        subject="🔴 تجربتك المجانية تنتهي خلال 3 أيام — نحلة AI",
+                        html=email_subscription_expiring(store_name, "التجربة المجانية", 3, "—"),
+                    )
                 _update_tenant_flag(db, tenant.id, _s, "trial_warn_3")
             elif days_remaining == 1 and not meta.get("trial_warn_1"):
                 await notify_trial_ending(phone, store_name, 1)
+                if email_addr:
+                    await send_email(
+                        to=email_addr,
+                        subject="🔴 آخر يوم في تجربتك المجانية — نحلة AI",
+                        html=email_subscription_expiring(store_name, "التجربة المجانية", 1, "—"),
+                    )
                 _update_tenant_flag(db, tenant.id, _s, "trial_warn_1")
+            elif days_remaining <= 0 and not meta.get("trial_expired"):
+                # Trial fully ended — send expired notification
+                from core.wa_notify import notify_subscription_expired  # noqa: PLC0415
+                await notify_subscription_expired(phone, store_name)
+                if email_addr:
+                    await send_email(
+                        to=email_addr,
+                        subject="😔 انتهت تجربتك المجانية — اشترك الآن",
+                        html=email_subscription_expired(store_name, "التجربة المجانية"),
+                    )
+                _update_tenant_flag(db, tenant.id, _s, "trial_expired")
 
     finally:
         db.close()

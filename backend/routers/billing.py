@@ -568,6 +568,33 @@ async def create_billing_checkout(
     db.refresh(sub)
 
     logger.info("[Billing] Demo checkout: tenant=%s plan=%s activated directly", tenant_id, plan.slug)
+
+    # Notify merchant (demo mode — no gateway)
+    try:
+        import asyncio as _asyncio  # noqa: PLC0415
+        from core.notifications import send_email, email_subscription  # noqa: PLC0415
+        from core.wa_notify import notify_subscription_confirmed  # noqa: PLC0415
+        merchant = db.query(User).filter(
+            User.tenant_id == tenant_id, User.role == "merchant",
+            User.is_active == True,  # noqa: E712
+        ).first()
+        tenant_obj = get_or_create_tenant(db, tenant_id)
+        store_name = tenant_obj.name or f"Tenant {tenant_id}"
+        ends_str   = sub.ends_at.strftime("%Y-%m-%d") if sub.ends_at else "—"
+        meta_name  = (plan.extra_metadata or {}).get("name_ar", plan.name)
+        if merchant and merchant.email:
+            _asyncio.ensure_future(send_email(
+                to=merchant.email,
+                subject=f"✅ تم تفعيل اشتراك {meta_name} — نحلة AI",
+                html=email_subscription(store_name, meta_name, ends_str),
+            ))
+        if merchant and merchant.username:
+            _asyncio.ensure_future(notify_subscription_confirmed(
+                merchant.username, store_name, meta_name, price_sar, ends_str,
+            ))
+    except Exception as _notify_exc:
+        logger.warning("[Billing] Demo checkout notification error: %s", _notify_exc)
+
     return {
         "subscription_id":        sub.id,
         "checkout_url":           None,

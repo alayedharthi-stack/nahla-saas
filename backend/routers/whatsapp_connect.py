@@ -292,6 +292,22 @@ async def embedded_signup_callback(
             "tenant=%s WhatsApp connected — WABA=%s phone=%s",
             tenant_id, conn.whatsapp_business_account_id, conn.phone_number,
         )
+
+        # Notify merchant — WhatsApp connected
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+            from core.wa_notify import notify_whatsapp_connected  # noqa: PLC0415
+            from core.tenant import get_or_create_settings, merge_defaults, DEFAULT_WHATSAPP, DEFAULT_STORE  # noqa: PLC0415
+            _s      = get_or_create_settings(db, tenant_id)
+            _wa     = merge_defaults(_s.whatsapp_settings or {}, DEFAULT_WHATSAPP)
+            _st     = merge_defaults(_s.store_settings    or {}, DEFAULT_STORE)
+            _phone  = _wa.get("owner_whatsapp_number", "") or conn.phone_number or ""
+            _sname  = _st.get("store_name", "") or f"متجر #{tenant_id}"
+            if _phone:
+                _asyncio.ensure_future(notify_whatsapp_connected(_phone, _sname))
+        except Exception as _exc:
+            logger.warning("tenant=%s WhatsApp-connected notification error: %s", tenant_id, _exc)
+
         return {"status": "connected", **_safe_view(conn)}
 
     except HTTPException:

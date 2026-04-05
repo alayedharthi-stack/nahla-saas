@@ -384,33 +384,43 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
         )
 
         try:
+            import asyncio  # noqa: PLC0415
+            from core.notifications import send_email, email_subscription, email_invoice  # noqa: PLC0415
+            from core.wa_notify import notify_subscription_confirmed, notify_payment_invoice  # noqa: PLC0415
+
             tenant_obj = db.query(Tenant).filter(Tenant.id == sub.tenant_id).first()
             merchant   = db.query(User).filter(
                 User.tenant_id == sub.tenant_id,
                 User.role == "merchant",
                 User.is_active == True,  # noqa: E712
             ).first()
-            plan_obj   = sub.plan if hasattr(sub, "plan") and sub.plan else None
-            plan_name  = plan_obj.name if plan_obj else payment_meta.get("plan_slug", "")
+            plan_obj   = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first() if sub.plan_id else None
+            plan_name  = (plan_obj.name if plan_obj else None) or payment_meta.get("plan_slug", "الخطة")
             store_name = tenant_obj.name if tenant_obj else f"Tenant {sub.tenant_id}"
             ends_str   = sub.ends_at.strftime("%Y-%m-%d") if sub.ends_at else "—"
+            amount_sar = float(payment_meta.get("amount", 0)) / 100  # Moyasar stores in halalas
+            invoice_id = str(payment_id)[:12]
+            pay_date   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-            if merchant:
-                import asyncio  # noqa: PLC0415
-                from core.notifications import send_email, send_whatsapp, email_subscription  # noqa: PLC0415
+            if merchant and merchant.email:
                 asyncio.ensure_future(send_email(
                     to=merchant.email,
-                    subject=f"تم تفعيل اشتراك {plan_name} — نحلة AI",
+                    subject=f"✅ تم تفعيل اشتراك {plan_name} — نحلة AI",
                     html=email_subscription(store_name, plan_name, ends_str),
                 ))
-                asyncio.ensure_future(send_whatsapp(
-                    to=merchant.username,
-                    text=(
-                        f"🐝 نحلة AI\n"
-                        f"مرحباً {store_name}!\n"
-                        f"تم تفعيل خطة {plan_name} بنجاح ✅\n"
-                        f"ينتهي الاشتراك في: {ends_str}"
-                    ),
+                asyncio.ensure_future(send_email(
+                    to=merchant.email,
+                    subject=f"🧾 فاتورة دفع #{invoice_id} — نحلة AI",
+                    html=email_invoice(store_name, plan_name, amount_sar, invoice_id, pay_date),
+                ))
+
+            phone = getattr(merchant, "username", "") if merchant else ""
+            if phone:
+                asyncio.ensure_future(notify_subscription_confirmed(
+                    phone, store_name, plan_name, amount_sar, ends_str,
+                ))
+                asyncio.ensure_future(notify_payment_invoice(
+                    phone, store_name, plan_name, amount_sar, invoice_id, pay_date,
                 ))
         except Exception as notify_exc:
             logger.warning("[Billing Webhook] Notification error: %s", notify_exc)
@@ -426,6 +436,41 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
         logger.info(
             "[Billing Webhook] Payment %r for subscription %s", status, subscription_id,
         )
+
+        # Notify merchant about payment failure
+        try:
+            import asyncio  # noqa: PLC0415
+            from core.notifications import send_email, email_payment_failed  # noqa: PLC0415
+            from core.wa_notify import _send  # noqa: PLC0415
+
+            tenant_obj = db.query(Tenant).filter(Tenant.id == sub.tenant_id).first()
+            merchant   = db.query(User).filter(
+                User.tenant_id == sub.tenant_id, User.role == "merchant",
+                User.is_active == True,  # noqa: E712
+            ).first()
+            plan_obj   = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first() if sub.plan_id else None
+            plan_name  = (plan_obj.name if plan_obj else None) or "الخطة"
+            store_name = tenant_obj.name if tenant_obj else f"Tenant {sub.tenant_id}"
+            amount_sar = float(payment_meta.get("amount", 0)) / 100
+
+            if merchant and merchant.email:
+                asyncio.ensure_future(send_email(
+                    to=merchant.email,
+                    subject=f"❌ فشل الدفع — يرجى تجديد اشتراك {plan_name}",
+                    html=email_payment_failed(store_name, plan_name, amount_sar),
+                ))
+            phone = getattr(merchant, "username", "") if merchant else ""
+            if phone:
+                from core.wa_notify import _normalize_phone  # noqa: PLC0415
+                wa_text = (
+                    f"🔴 نحلة AI — فشل الدفع\n"
+                    f"مرحباً {store_name}،\n"
+                    f"لم تتم عملية الدفع لخطة {plan_name} بنجاح.\n"
+                    f"يرجى تحديث بيانات الدفع:\nhttps://app.nahlah.ai/billing"
+                )
+                asyncio.ensure_future(_send(_normalize_phone(phone), wa_text))
+        except Exception as notify_exc:
+            logger.warning("[Billing Webhook] Payment-fail notification error: %s", notify_exc)
     else:
         logger.info(
             "[Billing Webhook] Unhandled status %r for sub %s — no action taken",
@@ -481,6 +526,15 @@ async def hyperpay_webhook(request: Request, db: Session = Depends(get_db)):
         logger.info("[HyperPay] Webhook: no tenant found for checkout_id=%s", checkout_id)
         return {"received": True}
 
+    merchant = db.query(User).filter(
+        User.tenant_id == tenant.id,
+        User.role == "merchant",
+        User.is_active == True,  # noqa: E712
+    ).first()
+    store_name = tenant.name or f"Tenant {tenant.id}"
+    phone = getattr(merchant, "username", "") if merchant else ""
+    email_addr = getattr(merchant, "email", "") if merchant else ""
+
     if hp.is_payment_successful(data):
         now = datetime.now(timezone.utc)
         tenant.subscription_status = "active"
@@ -493,6 +547,24 @@ async def hyperpay_webhook(request: Request, db: Session = Depends(get_db)):
             "[HyperPay] Payment SUCCESS for tenant %s: code=%s period_end=%s",
             tenant.id, result_code, tenant.current_period_end.date(),
         )
+        # Notify merchant — success
+        try:
+            import asyncio  # noqa: PLC0415
+            from core.notifications import send_email, email_subscription  # noqa: PLC0415
+            from core.wa_notify import notify_subscription_confirmed  # noqa: PLC0415
+            ends_str = tenant.current_period_end.strftime("%Y-%m-%d")
+            if email_addr:
+                asyncio.ensure_future(send_email(
+                    to=email_addr,
+                    subject="✅ تم تفعيل اشتراكك — نحلة AI",
+                    html=email_subscription(store_name, "HyperPay", ends_str),
+                ))
+            if phone:
+                asyncio.ensure_future(notify_subscription_confirmed(
+                    phone, store_name, "HyperPay", 0, ends_str,
+                ))
+        except Exception as exc:
+            logger.warning("[HyperPay] Success notification error: %s", exc)
     else:
         tenant.billing_status = "failed"
         db.commit()
@@ -500,5 +572,23 @@ async def hyperpay_webhook(request: Request, db: Session = Depends(get_db)):
             "[HyperPay] Payment FAILED for tenant %s: code=%s desc=%s",
             tenant.id, result_code, data.get("result", {}).get("description", ""),
         )
+        # Notify merchant — failure
+        try:
+            import asyncio  # noqa: PLC0415
+            from core.notifications import send_email, email_payment_failed  # noqa: PLC0415
+            from core.wa_notify import _send, _normalize_phone  # noqa: PLC0415
+            if email_addr:
+                asyncio.ensure_future(send_email(
+                    to=email_addr,
+                    subject="❌ فشل الدفع — يرجى تجديد اشتراكك",
+                    html=email_payment_failed(store_name, "HyperPay", 0),
+                ))
+            if phone:
+                asyncio.ensure_future(_send(
+                    _normalize_phone(phone),
+                    f"🔴 نحلة AI\nفشل الدفع لـ {store_name}.\nيرجى تحديث طريقة الدفع:\nhttps://app.nahlah.ai/billing",
+                ))
+        except Exception as exc:
+            logger.warning("[HyperPay] Failure notification error: %s", exc)
 
     return {"received": True}
