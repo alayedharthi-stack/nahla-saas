@@ -249,21 +249,23 @@ export default function Register() {
           </p>
         </div>
 
-        {/* App Store Badges — credibility boost */}
-        <div className="mt-5 flex flex-col items-center gap-2">
-          <p className="text-slate-500 text-xs">
-            {lang === 'ar' ? 'التطبيق متاح قريباً على' : 'App coming soon on'}
+        {/* Footer */}
+        <div className="mt-6 pb-6 flex flex-col items-center gap-4">
+          {/* App Store Badges */}
+          <div className="flex flex-col items-center gap-1.5">
+            <p className="text-slate-500 text-xs">
+              {lang === 'ar' ? 'التطبيق متاح قريباً على' : 'App coming soon on'}
+            </p>
+            <AppStoreBadges lang={lang} size="sm" showPwa={false} />
+          </div>
+
+          {/* Divider */}
+          <div className="w-24 h-px bg-slate-700/50" />
+
+          {/* Made in Saudi Arabia */}
+          <p className="text-slate-500 text-xs font-medium tracking-wide">
+            {t(tr => tr.login.dev)}
           </p>
-          <AppStoreBadges lang={lang} size="sm" showPwa={true} />
-        </div>
-
-        <p className="text-center text-slate-600 text-xs mt-4">
-          {t(tr => tr.common.poweredBy)}
-        </p>
-
-        <div className="text-center mt-3 pb-6">
-          <p className="text-slate-400 text-xs">{t(tr => tr.login.dev)}</p>
-          <p className="text-slate-400 text-xs">{t(tr => tr.login.devRole)}</p>
         </div>
       </div>
     </div>

@@ -113,8 +113,8 @@ const ar: Translations = {
     noAccount:        'متجر جديد؟',
     registerLink:     'أنشئ حساباً مجاناً',
     invalidCreds:     'البريد الإلكتروني أو كلمة المرور غير صحيحة',
-    dev:              'تطوير وإدارة: تركي بن عايد الحارثي',
-    devRole:          'المدير التنفيذي والمؤسس · nahlah.ai',
+    dev:              'بأيدي سعودية 100% 🇸🇦',
+    devRole:          'nahlah.ai',
   },
 
   register: {

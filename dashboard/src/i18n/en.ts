@@ -109,8 +109,8 @@ const en: Translations = {
     noAccount:        'New store?',
     registerLink:     'Create a free account',
     invalidCreds:     'Incorrect email or password',
-    dev:              'Developed & managed by: Turki bin Ayyad Al-Harthi',
-    devRole:          'CEO & Founder · nahlah.ai',
+    dev:              '100% Made in Saudi Arabia 🇸🇦',
+    devRole:          'nahlah.ai',
   },
 
   register: {
