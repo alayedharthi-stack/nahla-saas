@@ -302,8 +302,12 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
 
     tenant = get_or_create_tenant(db, tenant_id)
     now = datetime.now(timezone.utc)
-    trial_start        = tenant.created_at or now
-    trial_elapsed      = (now - trial_start).days
+    _raw_start = tenant.created_at or now
+    # Ensure trial_start is timezone-aware (DB stores naive UTC datetimes)
+    if hasattr(_raw_start, 'tzinfo') and _raw_start.tzinfo is None:
+        _raw_start = _raw_start.replace(tzinfo=timezone.utc)
+    trial_start          = _raw_start
+    trial_elapsed        = (now - trial_start).days
     trial_days_remaining = max(0, FREE_TRIAL_DAYS - trial_elapsed)
     is_trial     = sub is None and trial_days_remaining > 0
     trial_expired = sub is None and trial_days_remaining == 0

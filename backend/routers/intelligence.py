@@ -32,6 +32,15 @@ from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
 from core.automations_seed import seed_automations_if_empty as _seed_automations_if_empty
 
+
+def _utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Make a datetime timezone-aware (UTC). DB stores naive UTC datetimes."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
 router = APIRouter()
 
 
@@ -277,7 +286,7 @@ async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)
                 "customer_name": c.name or "—",
                 "phone": c.phone or "",
                 "last_purchase": (p.last_order_at or now).isoformat(),
-                "days_inactive": max(0, (now - (p.last_order_at or now)).days),
+                "days_inactive": max(0, (now - (_utc(p.last_order_at) or now)).days),
                 "risk_score": round((p.churn_risk_score or 0) * 100),
             }
             for p, c in churn_rows
@@ -373,7 +382,7 @@ async def analyze_customers(request: Request, db: Session = Depends(get_db)):
 
     for profile in profiles:
         days_inactive = (
-            (datetime.now(timezone.utc) - profile.last_order_at).days
+            (datetime.now(timezone.utc) - _utc(profile.last_order_at)).days
             if profile.last_order_at
             else 999
         )
@@ -463,7 +472,7 @@ async def get_customer_profile(customer_id: int, request: Request, db: Session =
 
     if profile:
         days_inactive = (
-            (datetime.now(timezone.utc) - profile.last_order_at).days
+            (datetime.now(timezone.utc) - _utc(profile.last_order_at)).days
             if profile.last_order_at
             else None
         )
