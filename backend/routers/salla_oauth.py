@@ -16,7 +16,6 @@ import logging
 import os
 import urllib.parse
 from datetime import datetime, timezone
-, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request

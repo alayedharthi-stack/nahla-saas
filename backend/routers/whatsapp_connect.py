@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-, timezone
 from typing import Optional
 
 import httpx

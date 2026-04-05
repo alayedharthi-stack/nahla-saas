@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
-, timezone
 from typing import Optional
 
 import httpx
