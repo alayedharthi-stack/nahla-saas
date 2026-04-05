@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nahla.observability")
@@ -41,7 +41,7 @@ def log_event(
             summary=summary[:250] if summary else "",
             payload=payload or {},
             reference_id=str(reference_id) if reference_id else None,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         db.add(event)
     except Exception as exc:
@@ -105,7 +105,7 @@ def write_trace(
             payment_link_sent=payment_link_sent,
             handoff_triggered=handoff_triggered,
             latency_ms=latency_ms,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         db.add(trace)
     except Exception as exc:

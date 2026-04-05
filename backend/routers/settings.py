@@ -7,7 +7,7 @@ POST /settings/test-whatsapp — test WhatsApp connection
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -145,7 +145,7 @@ async def update_settings(
         current.update(body.notifications.model_dump())
         settings.notification_settings = current
 
-    settings.updated_at = datetime.utcnow()
+    settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)
 

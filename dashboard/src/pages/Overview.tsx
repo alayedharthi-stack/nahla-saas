@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
@@ -9,29 +10,17 @@ import StatCard from '../components/ui/StatCard'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
+import { apiCall } from '../api/client'
 
-const revenueData = [
-  { day: 'الاثنين', revenue: 4200 },
-  { day: 'الثلاثاء', revenue: 5800 },
-  { day: 'الأربعاء', revenue: 3900 },
-  { day: 'الخميس', revenue: 7200 },
-  { day: 'الجمعة', revenue: 6100 },
-  { day: 'السبت', revenue: 9400 },
-  { day: 'الأحد', revenue: 8700 },
-]
-
-const recentConversations = [
-  { id: 'c1', customer: 'Ahmed Al-Rashid',  phone: '+966 50 123 4567', lastMsg: 'هل الهودي الأحمر متوفر بمقاس XL؟', time: 'منذ دقيقتين',   isAI: true,  status: 'active' },
-  { id: 'c2', customer: 'Sara Al-Zahrani',  phone: '+966 55 987 6543', lastMsg: 'متى يصل طلبي؟',                        time: 'منذ 11 دقيقة', isAI: false, status: 'human'  },
-  { id: 'c3', customer: 'Mohammed Khalid',  phone: '+966 56 222 3344', lastMsg: 'هل عندكم خصم على الكميات؟',            time: 'منذ 34 دقيقة', isAI: true,  status: 'active' },
-  { id: 'c4', customer: 'Fatima Al-Hassan', phone: '+966 54 551 2200', lastMsg: 'شكراً، قدّمت الطلب ✅',               time: 'منذ ساعة',     isAI: true,  status: 'closed' },
-]
-
-const recentOrders = [
-  { id: '#3812', customer: 'Ahmed Al-Rashid', amount: '342 ر.س', status: 'paid',    source: 'AI',     time: 'منذ 5 دقائق' },
-  { id: '#3811', customer: 'Nora Al-Mutairi', amount: '180 ر.س', status: 'pending', source: 'AI',     time: 'منذ 22 دقيقة' },
-  { id: '#3810', customer: 'Khalid Ibrahim',  amount: '510 ر.س', status: 'paid',    source: 'manual', time: 'منذ ساعة' },
-  { id: '#3809', customer: 'Lina Al-Saud',    amount: '95 ر.س',  status: 'failed',  source: 'AI',     time: 'منذ ساعتين' },
+// Placeholder chart data — replaced with real data when store is synced
+const PLACEHOLDER_CHART = [
+  { day: 'الاثنين', revenue: 0 },
+  { day: 'الثلاثاء', revenue: 0 },
+  { day: 'الأربعاء', revenue: 0 },
+  { day: 'الخميس', revenue: 0 },
+  { day: 'الجمعة', revenue: 0 },
+  { day: 'السبت', revenue: 0 },
+  { day: 'الأحد', revenue: 0 },
 ]
 
 const statusVariant = (s: string) =>
@@ -39,11 +28,50 @@ const statusVariant = (s: string) =>
   s === 'pending' ? 'amber'  :
   s === 'failed'  ? 'red'    : 'slate'
 
-// statusLabel is computed inside component to support i18n
+interface OverviewStats {
+  conversations_today: number
+  orders_today: number
+  revenue_today: number
+  ai_rate: number
+  ai_revenue: number
+  ai_orders: number
+  recent_conversations: any[]
+  recent_orders: any[]
+  revenue_chart: { day: string; revenue: number }[]
+}
 
 export default function Overview() {
   const { t } = useLanguage()
   const ov = t(tr => tr.overview)
+  const [stats, setStats]     = useState<OverviewStats | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    // Try to load real stats; gracefully ignore errors (no store connected yet)
+    Promise.all([
+      apiCall<any>('/store-sync/status').catch(() => null),
+      apiCall<any>('/store-sync/knowledge').catch(() => null),
+    ]).then(([syncStatus]) => {
+      if (syncStatus) {
+        setStats({
+          conversations_today: syncStatus.conversations_today ?? 0,
+          orders_today:        syncStatus.orders_today        ?? 0,
+          revenue_today:       syncStatus.revenue_today       ?? 0,
+          ai_rate:             syncStatus.ai_rate             ?? 0,
+          ai_revenue:          syncStatus.ai_revenue          ?? 0,
+          ai_orders:           syncStatus.ai_orders           ?? 0,
+          recent_conversations: syncStatus.recent_conversations ?? [],
+          recent_orders:        syncStatus.recent_orders        ?? [],
+          revenue_chart:        syncStatus.revenue_chart        ?? PLACEHOLDER_CHART,
+        })
+      }
+    }).finally(() => setLoading(false))
+  }, [])
+
+  const revenueData         = stats?.revenue_chart        ?? PLACEHOLDER_CHART
+  const recentConversations = stats?.recent_conversations ?? []
+  const recentOrders        = stats?.recent_orders        ?? []
+  const hasRealData         = (stats?.orders_today ?? 0) > 0 || recentOrders.length > 0
 
   const statusLabel = (s: string) => {
     if (s === 'paid')    return ov.statusPaid
@@ -64,14 +92,14 @@ export default function Overview() {
             <div>
               <p className="text-xs text-white/80 font-medium">{ov.aiSalesLabel}</p>
               <p className="text-2xl font-black text-white leading-none mt-0.5">
-                4,320 <span className="text-sm font-bold text-white/90">ر.س</span>
+                {(stats?.ai_revenue ?? 0).toLocaleString('ar-SA')} <span className="text-sm font-bold text-white/90">ر.س</span>
               </p>
             </div>
           </div>
           <div className="flex items-center gap-4">
             <div className="text-center hidden sm:block">
               <p className="text-xs text-white/80 font-medium">{ov.aiOrdersLabel}</p>
-              <p className="text-lg font-bold text-white">28</p>
+              <p className="text-lg font-bold text-white">{stats?.ai_orders ?? 0}</p>
             </div>
             <div className="h-8 w-px bg-slate-200 hidden sm:block" />
             <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-white rounded-xl px-3 py-2 border border-slate-200">
@@ -86,32 +114,28 @@ export default function Overview() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label={ov.kpiRevenue}
-          value="8,740 SAR"
-          change={12.4}
+          value={loading ? '—' : `${(stats?.revenue_today ?? 0).toLocaleString('ar-SA')} ر.س`}
           icon={DollarSign}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
         />
         <StatCard
           label={ov.kpiConversations}
-          value="124"
-          change={7.1}
+          value={loading ? '—' : String(stats?.conversations_today ?? 0)}
           icon={MessageSquare}
           iconColor="text-blue-600"
           iconBg="bg-blue-50"
         />
         <StatCard
           label={ov.kpiOrders}
-          value="37"
-          change={-3.2}
+          value={loading ? '—' : String(stats?.orders_today ?? 0)}
           icon={ShoppingCart}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
         />
         <StatCard
           label={ov.kpiAiRate}
-          value="29.8%"
-          change={4.5}
+          value={loading ? '—' : `${(stats?.ai_rate ?? 0).toFixed(1)}%`}
           icon={TrendingUp}
           iconColor="text-purple-600"
           iconBg="bg-purple-50"
@@ -161,34 +185,40 @@ export default function Overview() {
               {t(tr => tr.actions.viewAll)} <ExternalLink className="w-3 h-3" />
             </a>
           </div>
-          <ul className="divide-y divide-slate-100">
-            {recentConversations.map((c) => (
-              <li key={c.id} className="flex items-start gap-3 px-5 py-3 hover:bg-slate-50 transition-colors">
-                <div className="w-8 h-8 bg-slate-100 rounded-full flex items-center justify-center shrink-0 mt-0.5">
-                  <span className="text-slate-600 text-xs font-semibold">
-                    {c.customer.split(' ').map(n => n[0]).join('').slice(0, 2)}
-                  </span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-xs font-medium text-slate-900 truncate">{c.customer}</p>
-                    {c.isAI
-                      ? <Bot  className="w-3 h-3 text-brand-500 shrink-0" />
-                      : <User className="w-3 h-3 text-slate-400 shrink-0" />}
+          {recentConversations.length === 0 ? (
+            <div className="py-10 text-center text-xs text-slate-400">
+              {loading ? 'جاري التحميل...' : 'لا توجد محادثات بعد — ابدأ بتفعيل WhatsApp'}
+            </div>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {recentConversations.map((c: any) => (
+                <li key={c.id} className="flex items-start gap-3 px-5 py-3 hover:bg-slate-50 transition-colors">
+                  <div className="w-8 h-8 bg-slate-100 rounded-full flex items-center justify-center shrink-0 mt-0.5">
+                    <span className="text-slate-600 text-xs font-semibold">
+                      {String(c.customer ?? '?').split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
+                    </span>
                   </div>
-                  <p className="text-xs text-slate-500 truncate mt-0.5">{c.lastMsg}</p>
-                </div>
-                <div className="flex flex-col items-end gap-1 shrink-0">
-                  <span className="text-xs text-slate-400">{c.time}</span>
-                  <Badge
-                    label={c.status === 'active' ? 'نشطة' : c.status === 'human' ? 'بشري' : 'مغلقة'}
-                    variant={c.status === 'active' ? 'green' : c.status === 'human' ? 'amber' : 'slate'}
-                    dot
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="text-xs font-medium text-slate-900 truncate">{c.customer}</p>
+                      {c.isAI
+                        ? <Bot  className="w-3 h-3 text-brand-500 shrink-0" />
+                        : <User className="w-3 h-3 text-slate-400 shrink-0" />}
+                    </div>
+                    <p className="text-xs text-slate-500 truncate mt-0.5">{c.lastMsg}</p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1 shrink-0">
+                    <span className="text-xs text-slate-400">{c.time}</span>
+                    <Badge
+                      label={c.status === 'active' ? 'نشطة' : c.status === 'human' ? 'بشري' : 'مغلقة'}
+                      variant={c.status === 'active' ? 'green' : c.status === 'human' ? 'amber' : 'slate'}
+                      dot
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         {/* Recent Orders */}
@@ -199,8 +229,13 @@ export default function Overview() {
               {t(tr => tr.actions.viewAll)} <ExternalLink className="w-3 h-3" />
             </a>
           </div>
+          {recentOrders.length === 0 ? (
+            <div className="py-10 text-center text-xs text-slate-400">
+              {loading ? 'جاري التحميل...' : 'لا توجد طلبات بعد — قم بربط متجرك'}
+            </div>
+          ) : (
           <ul className="divide-y divide-slate-100">
-            {recentOrders.map((o) => (
+            {recentOrders.map((o: any) => (
               <li key={o.id} className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50 transition-colors">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
@@ -218,6 +253,7 @@ export default function Overview() {
               </li>
             ))}
           </ul>
+          )}
         </div>
       </div>
     </div>

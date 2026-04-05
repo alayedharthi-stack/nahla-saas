@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from typing import Any, Dict
 
 import anthropic
@@ -19,10 +18,11 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import Tenant, WhatsAppConnection  # noqa: E402
 
 from core.config import (
+    ANTHROPIC_API_KEY,
+    CLAUDE_MODEL,
     ORCHESTRATOR_URL,
     WA_PHONE_ID,
     WA_TOKEN,
@@ -30,9 +30,6 @@ from core.config import (
 )
 from core.database import get_db
 from core.nahla_knowledge import build_nahla_system_prompt
-
-_ANTHROPIC_KEY = os.getenv("CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY", "")
-_CLAUDE_MODEL  = "claude-haiku-4-5"
 
 
 logger = logging.getLogger("nahla-backend")
@@ -201,14 +198,14 @@ async def _call_orchestrator(
 
 async def _call_claude_direct(message: str, db=None) -> str:
     """Call Claude API directly and return a text reply."""
-    if not _ANTHROPIC_KEY:
+    if not ANTHROPIC_API_KEY:
         logger.error("ANTHROPIC_API_KEY not set — cannot generate AI reply")
         return "عذراً، الخدمة غير متاحة حالياً. يرجى المحاولة لاحقاً."
     try:
         system_prompt = build_nahla_system_prompt(db)
-        client = anthropic.Anthropic(api_key=_ANTHROPIC_KEY)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model=_CLAUDE_MODEL,
+            model=CLAUDE_MODEL,
             max_tokens=512,
             system=system_prompt,
             messages=[{"role": "user", "content": message}],

@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -92,7 +92,7 @@ async def generate_payment_link(
             logger.error(f"[PaymentService] Adapter payment link failed: {exc}")
 
     # ── Priority 3: Placeholder ────────────────────────────────────────────────
-    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     placeholder = f"https://pay.nahlah.ai/checkout/{tenant_id}-{ts}"
     logger.warning(
         f"[PaymentService] No gateway configured for tenant={tenant_id} — "

@@ -14,9 +14,8 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -25,7 +24,6 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import (  # noqa: E402
     AutomationEvent,
     Customer,
@@ -196,7 +194,7 @@ def _save_ai_sales_settings(db: Session, tenant_id: int, patch: Dict[str, Any]) 
     current.update(patch)
     meta["ai_sales_agent"] = current
     s.extra_metadata = meta
-    s.updated_at = datetime.utcnow()
+    s.updated_at = datetime.now(timezone.utc)
     flag_modified(s, "extra_metadata")
     return current
 
@@ -496,7 +494,7 @@ def _log_ai_sales_event(
             "order_id":          order_id,
         },
         processed=True,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(event)
     return event

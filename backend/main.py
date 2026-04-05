@@ -52,19 +52,10 @@ app = FastAPI(
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
+from core.config import CORS_ORIGINS  # noqa: E402 (after app init)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-                "https://nahlah.ai",
-                "https://www.nahlah.ai",
-                "https://app.nahlah.ai",
-                "https://api.nahlah.ai",
-        "https://creative-intuition-production-c193.up.railway.app",
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

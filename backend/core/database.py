@@ -4,10 +4,8 @@ core/database.py
 SQLAlchemy session dependency shared across all routers.
 """
 import os
-import sys
 
 # Allow imports from the database/ sibling directory
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 
 from session import SessionLocal  # noqa: E402
 

@@ -17,7 +17,7 @@ Recommendation types:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -39,7 +39,7 @@ def evaluate_templates(templates: List[Any]) -> List[Dict[str, Any]]:
     }
     """
     results = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # Build objective → templates map for duplicate detection
     obj_map: Dict[str, List[Any]] = {}

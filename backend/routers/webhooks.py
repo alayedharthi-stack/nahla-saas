@@ -16,14 +16,12 @@ import hmac
 import json as _json
 import logging
 import os
-import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import (  # noqa: E402
     BillingPayment,
     BillingSubscription,
@@ -127,7 +125,7 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
 
 async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> None:
     """Save Salla OAuth tokens received via webhook (app.store.authorize / app.installed)."""
-    from datetime import datetime
+    from datetime import datetime, timezone
     import sys, os
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
     from models import Integration, Tenant
@@ -162,7 +160,7 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         "store_id":      salla_store_id,
         "store_name":    store_name,
         "expires_in":    expires_in,
-        "connected_at":  datetime.utcnow().isoformat(),
+        "connected_at":  datetime.now(timezone.utc).isoformat(),
     }
 
     if integration:
@@ -244,7 +242,7 @@ async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
         if ps:
             ps.status        = "paid" if payment_status in ("paid", "authorized") else "failed"
             ps.callback_data = data
-            ps.updated_at    = datetime.utcnow()
+            ps.updated_at    = datetime.now(timezone.utc)
 
         if order_id_str:
             try:
@@ -364,7 +362,7 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
         sub.status = "active"
         m = dict(sub.extra_metadata or {})
         m["moyasar_payment_id"] = payment_id
-        m["paid_at"] = datetime.utcnow().isoformat()
+        m["paid_at"] = datetime.now(timezone.utc).isoformat()
         sub.extra_metadata = m
 
         billing_payment = BillingPayment(
@@ -375,7 +373,7 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
             gateway="moyasar",
             transaction_reference=payment_id,
             status="paid",
-            paid_at=datetime.utcnow(),
+            paid_at=datetime.now(timezone.utc),
             extra_metadata={"moyasar_event": event},
         )
         db.add(billing_payment)
@@ -484,7 +482,7 @@ async def hyperpay_webhook(request: Request, db: Session = Depends(get_db)):
         return {"received": True}
 
     if hp.is_payment_successful(data):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         tenant.subscription_status = "active"
         tenant.billing_status      = "paid"
         tenant.is_active           = True

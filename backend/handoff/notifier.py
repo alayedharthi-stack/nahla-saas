@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
@@ -59,7 +59,7 @@ async def notify_handoff(
         "customer_name": customer_name,
         "last_message": last_message[:300],
         "dashboard_url": "https://app.nahlah.ai/handoff-queue",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
     }
 
     success = False

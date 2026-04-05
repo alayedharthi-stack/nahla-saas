@@ -6,14 +6,12 @@ Billing plan seed data and helper functions shared by billing routers.
 from __future__ import annotations
 
 import os
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import BillingPlan, BillingSubscription  # noqa: E402
 
 # ── Billing constants ──────────────────────────────────────────────────────────
@@ -134,7 +132,7 @@ def is_launch_discount_active(sub: BillingSubscription) -> bool:
     """True if the subscription is still within the launch promo window."""
     if not sub.started_at:
         return False
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     months_active = (
         (now.year - sub.started_at.year) * 12
         + (now.month - sub.started_at.month)

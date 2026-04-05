@@ -21,15 +21,13 @@ Routes:
 from __future__ import annotations
 
 import os
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import Customer, TenantSettings, WhatsAppTemplate  # noqa: E402
 
 from core.database import get_db
@@ -316,9 +314,9 @@ def _seed_templates_if_empty(db: Session, tenant_id: int) -> None:
                 category=seed["category"],
                 status=seed["status"],
                 components=seed["components"],
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-                synced_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+                synced_at=datetime.now(timezone.utc),
             )
             db.add(tpl)
         db.flush()
@@ -372,7 +370,7 @@ def _tpl_bump_usage(db: Session, template_id: int, tenant_id: int | None = None)
     tpl = q.first()
     if tpl:
         tpl.usage_count = (getattr(tpl, "usage_count", 0) or 0) + 1
-        tpl.last_used_at = datetime.utcnow()
+        tpl.last_used_at = datetime.now(timezone.utc)
 
 
 def _submit_template_to_meta(waba_id: str, token: str, body: "CreateTemplateIn") -> Optional[str]:
@@ -445,8 +443,8 @@ async def create_template(body: CreateTemplateIn, request: Request, db: Session 
         category=body.category,
         status="PENDING",
         components=[c.model_dump(exclude_none=True) for c in body.components],
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     db.add(tpl)
     db.commit()
@@ -474,7 +472,7 @@ async def update_template_status(
         tpl.rejection_reason = body.rejection_reason
     if body.meta_template_id:
         tpl.meta_template_id = body.meta_template_id
-    tpl.updated_at = datetime.utcnow()
+    tpl.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(tpl)
     return _tpl_to_dict(tpl)
@@ -569,7 +567,7 @@ async def generate_template(body: GenerateTemplateIn, request: Request, db: Sess
             if meta_id:
                 tpl.meta_template_id = meta_id
                 tpl.status = "PENDING"
-                tpl.synced_at = datetime.utcnow()
+                tpl.synced_at = datetime.now(timezone.utc)
                 submitted = True
 
     db.commit()
@@ -620,8 +618,8 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
 
     tpl.meta_template_id = meta_id
     tpl.status = "PENDING"
-    tpl.synced_at = datetime.utcnow()
-    tpl.updated_at = datetime.utcnow()
+    tpl.synced_at = datetime.now(timezone.utc)
+    tpl.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(tpl)
 
@@ -683,7 +681,7 @@ async def action_template_recommendation(
         raise HTTPException(status_code=422, detail="action يجب أن يكون 'accepted' أو 'dismissed'")
 
     tpl.recommendation_state = body.action
-    tpl.updated_at = datetime.utcnow()
+    tpl.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(tpl)
 
@@ -743,8 +741,8 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
         if existing:
             existing.status = item.get("status", existing.status)
             existing.components = item.get("components", existing.components)
-            existing.synced_at = datetime.utcnow()
-            existing.updated_at = datetime.utcnow()
+            existing.synced_at = datetime.now(timezone.utc)
+            existing.updated_at = datetime.now(timezone.utc)
         else:
             tpl = WhatsAppTemplate(
                 tenant_id=tenant_id,
@@ -754,9 +752,9 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
                 category=item.get("category", "MARKETING"),
                 status=item.get("status", "PENDING"),
                 components=item.get("components", []),
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-                synced_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+                synced_at=datetime.now(timezone.utc),
             )
             db.add(tpl)
         synced += 1

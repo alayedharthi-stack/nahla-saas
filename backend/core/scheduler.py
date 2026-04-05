@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -64,7 +64,7 @@ async def _check_subscription_expiry() -> None:
             get_or_create_settings, merge_defaults,
         )
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         active_subs = (
             db.query(BillingSubscription)
@@ -129,7 +129,7 @@ async def _check_trial_expiry() -> None:
             get_or_create_settings, merge_defaults,
         )
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Tenants with no active subscription = in trial
         subbed_tenants = {

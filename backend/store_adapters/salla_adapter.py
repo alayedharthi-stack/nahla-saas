@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -334,7 +334,7 @@ class SallaAdapter(BaseStoreAdapter):
         if expires_raw:
             try:
                 exp = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
-                if exp < datetime.utcnow().replace(tzinfo=exp.tzinfo):
+                if exp < datetime.now(timezone.utc).replace(tzinfo=exp.tzinfo):
                     valid = False
             except Exception:
                 pass

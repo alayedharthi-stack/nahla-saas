@@ -13,13 +13,11 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import Integration  # noqa: E402
 
 from core.database import get_db

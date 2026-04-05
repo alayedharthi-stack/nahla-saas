@@ -6,7 +6,7 @@ All auth logic lives here — routers import what they need.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -61,7 +61,7 @@ def create_token(email: str, role: str, tenant_id: int) -> str:
         "sub":       email,
         "role":      role,
         "tenant_id": tenant_id,
-        "exp":       datetime.utcnow() + timedelta(hours=JWT_EXPIRE_H),
+        "exp":       datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_H),
     }
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -72,7 +72,7 @@ def create_invite_token(email: str, tenant_id_hint: Optional[int] = None) -> str
         "type":           "invite",
         "invited_email":  email,
         "tenant_id_hint": tenant_id_hint,
-        "exp":            datetime.utcnow() + timedelta(hours=INVITE_EXPIRE_H),
+        "exp":            datetime.now(timezone.utc) + timedelta(hours=INVITE_EXPIRE_H),
     }
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -82,7 +82,7 @@ def create_verify_token(email: str) -> str:
     payload = {
         "type": "verify_email",
         "sub":  email,
-        "exp":  datetime.utcnow() + timedelta(hours=24),
+        "exp":  datetime.now(timezone.utc) + timedelta(hours=24),
     }
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -92,7 +92,7 @@ def create_reset_token(email: str) -> str:
     payload = {
         "type": "password_reset",
         "sub":  email,
-        "exp":  datetime.utcnow() + timedelta(hours=1),
+        "exp":  datetime.now(timezone.utc) + timedelta(hours=1),
     }
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 

@@ -12,15 +12,13 @@ Routes:
 from __future__ import annotations
 
 import os
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import Campaign  # noqa: E402
 
 from core.database import get_db
@@ -120,7 +118,7 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
     schedule_dt = None
     if body.schedule_time:
         try:
-            from datetime import datetime as _dt
+            from datetime import datetime as _dt, timezone
             schedule_dt = _dt.fromisoformat(body.schedule_time)
         except ValueError:
             pass
@@ -142,8 +140,8 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
         schedule_time=schedule_dt,
         delay_minutes=body.delay_minutes,
         coupon_code=body.coupon_code or None,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     db.add(campaign)
     db.commit()
@@ -167,8 +165,8 @@ async def update_campaign_status(
         raise HTTPException(status_code=404, detail="Campaign not found")
     campaign.status = body.status
     if body.status == "active" and not campaign.launched_at:
-        campaign.launched_at = datetime.utcnow()
-    campaign.updated_at = datetime.utcnow()
+        campaign.launched_at = datetime.now(timezone.utc)
+    campaign.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(campaign)
     return _campaign_to_dict(campaign)

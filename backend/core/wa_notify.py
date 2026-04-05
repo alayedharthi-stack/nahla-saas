@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -143,7 +143,7 @@ async def notify_payment_invoice(
     """Send invoice details after payment."""
     if not phone:
         return False
-    date_str = (payment_date or datetime.utcnow()).strftime("%Y/%m/%d")
+    date_str = (payment_date or datetime.now(timezone.utc)).strftime("%Y/%m/%d")
     msg = (
         f"🧾 *فاتورة نحلة AI*\n"
         f"{'─' * 25}\n"

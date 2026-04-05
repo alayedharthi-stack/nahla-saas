@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -93,7 +93,7 @@ class StoreKnowledgeLoader:
         snap = self.snapshot()
         if not snap or not snap.last_full_sync_at:
             return False
-        age = (datetime.utcnow() - snap.last_full_sync_at).total_seconds() / 3600
+        age = (datetime.now(timezone.utc) - snap.last_full_sync_at).total_seconds() / 3600
         return age < max_age_hours
 
 
@@ -368,7 +368,7 @@ class CouponContextBuilder:
             self.db.query(Coupon)
             .filter(
                 Coupon.tenant_id == self.tenant_id,
-                (Coupon.expires_at == None) | (Coupon.expires_at > datetime.utcnow()),  # noqa: E711
+                (Coupon.expires_at == None) | (Coupon.expires_at > datetime.now(timezone.utc)),  # noqa: E711
             )
             .limit(10)
             .all()

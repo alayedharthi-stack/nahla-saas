@@ -22,8 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -31,7 +30,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import WhatsAppConnection  # noqa: E402
 
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION
@@ -198,7 +196,7 @@ async def get_connection_status(request: Request, db: Session = Depends(get_db))
 
     # Surface needs_reauth if token has expired
     if conn.status == "connected" and conn.token_expires_at:
-        if datetime.utcnow() > conn.token_expires_at:
+        if datetime.now(timezone.utc) > conn.token_expires_at:
             conn.status = "needs_reauth"
             db.commit()
 
@@ -216,7 +214,7 @@ async def start_connection(request: Request, db: Session = Depends(get_db)):
     conn = _get_or_create_connection(db, tenant_id)
 
     conn.status           = "pending"
-    conn.last_attempt_at  = datetime.utcnow()
+    conn.last_attempt_at  = datetime.now(timezone.utc)
     conn.last_error       = None
     db.commit()
 
@@ -247,7 +245,7 @@ async def embedded_signup_callback(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
     conn = _get_or_create_connection(db, tenant_id)
-    conn.last_attempt_at = datetime.utcnow()
+    conn.last_attempt_at = datetime.now(timezone.utc)
 
     try:
         # 1. Exchange code → short-lived user token
@@ -272,7 +270,7 @@ async def embedded_signup_callback(
         conn.status                       = "connected"
         conn.access_token                 = token
         conn.token_type                   = token_type
-        conn.token_expires_at             = datetime.utcnow() + timedelta(seconds=expires_in)
+        conn.token_expires_at             = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
         conn.whatsapp_business_account_id = waba_id or waba_info.get("id")
         conn.phone_number_id              = phone_id or phone_info.get("id")
         conn.phone_number                 = phone_info.get("display_phone_number")
@@ -284,7 +282,7 @@ async def embedded_signup_callback(
             body.business_id
             or (waba_info.get("on_behalf_of_business_info") or {}).get("id")
         )
-        conn.connected_at                 = datetime.utcnow()
+        conn.connected_at                 = datetime.now(timezone.utc)
         conn.last_error                   = None
         conn.webhook_verified             = False  # must be checked separately
         conn.sending_enabled              = bool(conn.phone_number_id and conn.whatsapp_business_account_id)
@@ -342,7 +340,7 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
         if resp.status_code == 200:
             data = resp.json()
             conn.status           = "connected"
-            conn.last_verified_at = datetime.utcnow()
+            conn.last_verified_at = datetime.now(timezone.utc)
             conn.sending_enabled  = data.get("code_verification_status") == "VERIFIED"
             conn.last_error       = None
             db.commit()
@@ -384,7 +382,7 @@ async def reconnect(request: Request, db: Session = Depends(get_db)):
     conn = _get_or_create_connection(db, tenant_id)
 
     conn.status          = "pending"
-    conn.last_attempt_at = datetime.utcnow()
+    conn.last_attempt_at = datetime.now(timezone.utc)
     conn.last_error      = None
     db.commit()
     return {
@@ -419,7 +417,7 @@ async def connection_health(request: Request, db: Session = Depends(get_db)):
     token_present = bool(conn.access_token)
     token_valid   = (
         token_present
-        and (not conn.token_expires_at or datetime.utcnow() < conn.token_expires_at)
+        and (not conn.token_expires_at or datetime.now(timezone.utc) < conn.token_expires_at)
     )
 
     checks = {

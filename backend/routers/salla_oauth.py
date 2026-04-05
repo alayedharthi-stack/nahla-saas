@@ -14,16 +14,14 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import Integration  # noqa: E402
 
 from core.audit import audit
@@ -169,7 +167,7 @@ async def salla_oauth_callback(
             "refresh_token": refresh_token,
             "store_name":    store_name,
             "expires_in":    expires_in,
-            "connected_at":  datetime.utcnow().isoformat(),
+            "connected_at":  datetime.now(timezone.utc).isoformat(),
         }
 
         if integration:

@@ -20,15 +20,13 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import (  # noqa: E402
     BillingPlan,
     BillingSubscription,
@@ -213,7 +211,7 @@ async def create_payment_session(
     else:
         gateway_id   = ""
         payment_link = (
-            f"https://pay.nahlah.ai/checkout/{tenant_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            f"https://pay.nahlah.ai/checkout/{tenant_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
         )
         gateway = "placeholder"
         logger.warning("[Payment] Moyasar not configured for tenant=%s, returning placeholder", tenant_id)
@@ -227,8 +225,8 @@ async def create_payment_session(
         currency="SAR",
         status="pending",
         payment_link=payment_link,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     db.add(session)
 
@@ -296,7 +294,7 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
     )
 
     tenant = get_or_create_tenant(db, tenant_id)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     trial_start        = tenant.created_at or now
     trial_elapsed      = (now - trial_start).days
     trial_days_remaining = max(0, FREE_TRIAL_DAYS - trial_elapsed)
@@ -372,7 +370,7 @@ async def subscribe_to_plan(
         BillingSubscription.status == "active",
     ).update({"status": "cancelled"}, synchronize_session=False)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     sub = BillingSubscription(
         tenant_id=tenant_id,
         plan_id=plan.id,
@@ -396,7 +394,7 @@ async def subscribe_to_plan(
     # ── WhatsApp notification ─────────────────────────────────────────────────
     try:
         import asyncio  # noqa: PLC0415
-        from datetime import timedelta  # noqa: PLC0415
+        from datetime import timedelta  # noqa: PLC0415, timezone
         _settings    = get_or_create_settings(db, tenant_id)
         _wa_cfg      = merge_defaults(_settings.whatsapp_settings, DEFAULT_WHATSAPP)
         _store_cfg   = merge_defaults(_settings.store_settings,    DEFAULT_STORE)
@@ -446,7 +444,7 @@ async def create_billing_checkout(
         raise HTTPException(status_code=404, detail="Plan not found")
 
     plan_meta = plan.extra_metadata or {}
-    now        = datetime.utcnow()
+    now        = datetime.now(timezone.utc)
     is_launch  = now <= LAUNCH_PROMO_UNTIL
     price_sar  = int(plan_meta.get("launch_price_sar", plan.price_sar)) if is_launch else int(plan.price_sar)
 
@@ -627,7 +625,7 @@ async def hyperpay_create_payment_link(
         amount=body.amount_sar,
         currency="SAR",
         brand=body.brand,
-        merchant_transaction_id=f"nahla-{tenant_id}-{int(datetime.utcnow().timestamp())}",
+        merchant_transaction_id=f"nahla-{tenant_id}-{int(datetime.now(timezone.utc).timestamp())}",
         description=body.description,
         metadata={"tenant_id": str(tenant_id)},
     )

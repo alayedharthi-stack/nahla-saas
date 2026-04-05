@@ -15,16 +15,15 @@ All mutating routes require role=admin (enforced by require_admin dependency).
 """
 from __future__ import annotations
 
-from datetime import datetime
+import logging
+import os
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-import os
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import Tenant, User  # noqa: E402
 
 from core.audit import audit
@@ -39,6 +38,7 @@ from core.auth import (
 from core.config import INVITE_EXPIRE_H
 from core.database import get_db
 
+logger = logging.getLogger("nahla.admin")
 router = APIRouter()
 
 
@@ -70,9 +70,6 @@ def _merchant_row(user: User) -> Dict[str, Any]:
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
-
-import logging
-logger = logging.getLogger("nahla.admin")
 
 
 @router.get("/admin/merchants")
@@ -110,7 +107,7 @@ async def create_merchant(
         name=f"{body.store_name} ({slug})",
         domain=f"store-{slug}.nahla.sa",
         is_active=True,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(tenant)
     try:
@@ -126,7 +123,7 @@ async def create_merchant(
         password_hash=hash_password(body.password),
         role="merchant",
         is_active=True,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         tenant_id=tenant.id,
     )
     db.add(user)
@@ -230,7 +227,7 @@ async def get_platform_stats(
 ):
     """Platform-wide statistics for the owner dashboard."""
     from sqlalchemy import func
-    from datetime import date
+    from datetime import date, timezone
     from models import BillingSubscription, BillingPayment, BillingPlan, WhatsAppConnection  # noqa: E402
 
     total_merchants  = db.query(func.count(User.id)).filter(User.role == "merchant").scalar() or 0
@@ -392,7 +389,7 @@ async def impersonate_merchant(
     if not user.tenant_id:
         raise HTTPException(status_code=400, detail="هذا التاجر ليس لديه tenant مرتبط")
 
-    from datetime import timedelta
+    from datetime import timedelta, timezone
     from jose import jwt as _jwt
     from core.config import JWT_SECRET, JWT_ALGORITHM
 
@@ -401,7 +398,7 @@ async def impersonate_merchant(
         "role":             "merchant",
         "tenant_id":        user.tenant_id,
         "impersonated_by":  _admin.get("sub", "admin"),
-        "exp":              datetime.utcnow() + timedelta(hours=2),
+        "exp":              datetime.now(timezone.utc) + timedelta(hours=2),
     }
     token = _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 

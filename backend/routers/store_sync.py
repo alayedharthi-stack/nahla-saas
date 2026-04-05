@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import StoreKnowledgeSnapshot, StoreSyncJob  # noqa: E402
 
 from core.database import get_db

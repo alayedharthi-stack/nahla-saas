@@ -6,14 +6,12 @@ Tenant resolution and settings helpers shared across all routers.
 from __future__ import annotations
 
 import os
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import Request
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import Tenant, TenantSettings  # noqa: E402
 
 
@@ -111,7 +109,7 @@ def get_or_create_tenant(db: Session, tenant_id: int) -> Tenant:
             name=f"متجر رقم {tenant_id}",
             domain=f"store-{tenant_id}.nahla.sa",
             is_active=True,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         db.add(tenant)
         db.flush()
@@ -127,8 +125,8 @@ def get_or_create_settings(db: Session, tenant_id: int) -> TenantSettings:
             tenant_id=tenant_id,
             show_nahla_branding=True,
             branding_text="🐝 Powered by Nahla",
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
         db.add(settings)
         db.flush()

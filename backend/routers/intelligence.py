@@ -14,14 +14,12 @@ Routes:
 from __future__ import annotations
 
 import os
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import (  # noqa: E402
     Customer,
     CustomerProfile,
@@ -32,7 +30,7 @@ from models import (  # noqa: E402
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
-from routers.automations import _seed_automations_if_empty
+from core.automations_seed import seed_automations_if_empty as _seed_automations_if_empty
 
 router = APIRouter()
 
@@ -163,7 +161,7 @@ def _seed_demo_customers(db: Session, tenant_id: int) -> None:
     if count > 0:
         return
 
-    from datetime import timedelta
+    from datetime import timedelta, timezone
 
     for demo in DEMO_CUSTOMERS_DATA:
         customer = Customer(
@@ -176,7 +174,7 @@ def _seed_demo_customers(db: Session, tenant_id: int) -> None:
         db.flush()
 
         days = demo["days_since_last_order"]
-        last_order_at = datetime.utcnow() - timedelta(days=days)
+        last_order_at = datetime.now(timezone.utc) - timedelta(days=days)
         first_seen_at = last_order_at - timedelta(days=demo["total_orders"] * 14)
 
         segment, churn_risk = _compute_customer_segment(
@@ -196,9 +194,9 @@ def _seed_demo_customers(db: Session, tenant_id: int) -> None:
             churn_risk_score=churn_risk,
             is_returning=demo["total_orders"] > 1,
             first_seen_at=first_seen_at,
-            last_seen_at=datetime.utcnow() - timedelta(days=max(1, days - 2)),
+            last_seen_at=datetime.now(timezone.utc) - timedelta(days=max(1, days - 2)),
             last_order_at=last_order_at,
-            updated_at=datetime.utcnow(),
+            updated_at=datetime.now(timezone.utc),
         )
         db.add(profile)
 
@@ -224,7 +222,7 @@ async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)
     )
 
     if profiles_exist:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         from sqlalchemy import func as sqlfunc
         seg_rows = (
@@ -368,7 +366,7 @@ async def analyze_customers(request: Request, db: Session = Depends(get_db)):
 
     for profile in profiles:
         days_inactive = (
-            (datetime.utcnow() - profile.last_order_at).days
+            (datetime.now(timezone.utc) - profile.last_order_at).days
             if profile.last_order_at
             else 999
         )
@@ -379,7 +377,7 @@ async def analyze_customers(request: Request, db: Session = Depends(get_db)):
         )
         profile.segment = segment
         profile.churn_risk_score = churn_risk
-        profile.updated_at = datetime.utcnow()
+        profile.updated_at = datetime.now(timezone.utc)
         updated += 1
 
     db.commit()
@@ -458,7 +456,7 @@ async def get_customer_profile(customer_id: int, request: Request, db: Session =
 
     if profile:
         days_inactive = (
-            (datetime.utcnow() - profile.last_order_at).days
+            (datetime.now(timezone.utc) - profile.last_order_at).days
             if profile.last_order_at
             else None
         )
@@ -511,10 +509,10 @@ async def create_reorder_estimate(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    from datetime import timedelta
-    purchase_dt = datetime.utcnow()
+    from datetime import timedelta, timezone
+    purchase_dt = datetime.now(timezone.utc)
     try:
-        purchase_dt = datetime.fromisoformat(body.get("purchase_date", datetime.utcnow().isoformat()))
+        purchase_dt = datetime.fromisoformat(body.get("purchase_date", datetime.now(timezone.utc).isoformat()))
     except (ValueError, TypeError):
         pass
 
@@ -529,8 +527,8 @@ async def create_reorder_estimate(
         purchase_date=purchase_dt,
         consumption_rate_days=consumption_days,
         predicted_reorder_date=predicted,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     db.add(estimate)
     db.commit()

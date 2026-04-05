@@ -14,7 +14,7 @@ Routes:
 Dependencies: core/database, core/tenant, observability/health
 """
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -125,6 +125,6 @@ async def health_detailed(request: Request, db: Session = Depends(get_db)):
             "database":             db_ok,
             "whatsapp_configured":  wa_configured,
             "uptime_seconds":       round(_time.monotonic() - _START_TIME),
-            "timestamp":            datetime.utcnow().isoformat() + "Z",
+            "timestamp":            datetime.now(timezone.utc).isoformat() + "Z",
         },
     )

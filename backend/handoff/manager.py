@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -62,7 +62,7 @@ def create_handoff_session(
         handoff_reason=reason,
         last_message=last_message[:500],
         context_snapshot=context_snapshot or {},
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(session)
     db.flush()
@@ -91,7 +91,7 @@ def resolve_handoff_session(
         return None
     session.status = "resolved"
     session.resolved_by = resolved_by
-    session.resolved_at = datetime.utcnow()
+    session.resolved_at = datetime.now(timezone.utc)
     db.flush()
     logger.info(f"[Handoff] Resolved session #{session_id} by {resolved_by}")
     return session

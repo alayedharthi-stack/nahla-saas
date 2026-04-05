@@ -17,15 +17,13 @@ Routes:
 from __future__ import annotations
 
 import os
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import (  # noqa: E402
     AutomationEvent,
     Customer,
@@ -222,8 +220,8 @@ def _seed_automations_if_empty(db: Session, tenant_id: int) -> None:
                 name=seed["name"],
                 enabled=seed["enabled"],
                 config=seed["config"],
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
             )
             db.add(auto)
         db.flush()
@@ -276,12 +274,12 @@ def _save_autopilot_settings(db: Session, tenant_id: int, autopilot: Dict[str, A
     extra: Dict[str, Any] = dict(settings.extra_metadata or {})
     extra["autopilot"] = autopilot
     settings.extra_metadata = extra
-    settings.updated_at = datetime.utcnow()
+    settings.updated_at = datetime.now(timezone.utc)
 
 
 def _get_daily_summary(db: Session, tenant_id: int) -> List[Dict[str, Any]]:
     """Count today's autopilot actions from AutomationEvent."""
-    from datetime import date
+    from datetime import date, timezone
     today_start = datetime.combine(date.today(), datetime.min.time())
     summary = []
     for evt_type, label in AUTOPILOT_SUMMARY_LABELS.items():
@@ -317,13 +315,13 @@ def _log_autopilot_event(
         customer_id=customer_id,
         payload=payload,
         processed=True,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(event)
 
 
 def _job_cod_confirmation(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    from datetime import timedelta
+    from datetime import timedelta, timezone
 
     sent = 0
     cod_orders = db.query(Order).filter(
@@ -366,10 +364,10 @@ def _job_cod_confirmation(db: Session, tenant_id: int, config: Dict[str, Any]) -
 
 
 def _job_predictive_reorder(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    from datetime import timedelta
+    from datetime import timedelta, timezone
 
     days_before = int(config.get("days_before", 3))
-    window_end = datetime.utcnow() + timedelta(days=days_before)
+    window_end = datetime.now(timezone.utc) + timedelta(days=days_before)
     sent = 0
 
     estimates = db.query(PredictiveReorderEstimate).filter(
@@ -464,13 +462,13 @@ def _job_abandoned_cart(db: Session, tenant_id: int, config: Dict[str, Any]) -> 
 
 
 def _job_inactive_customers(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    from datetime import timedelta
+    from datetime import timedelta, timezone
 
     inactive_days = int(config.get("inactive_days", 60))
     discount_pct = int(config.get("discount_pct", 15))
     sent = 0
 
-    threshold = datetime.utcnow() - timedelta(days=inactive_days)
+    threshold = datetime.now(timezone.utc) - timedelta(days=inactive_days)
     at_risk = (
         db.query(CustomerProfile, Customer)
         .join(Customer, CustomerProfile.customer_id == Customer.id)
@@ -483,7 +481,7 @@ def _job_inactive_customers(db: Session, tenant_id: int, config: Dict[str, Any])
     )
 
     for profile, customer in at_risk:
-        cutoff = datetime.utcnow() - timedelta(days=inactive_days // 2)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=inactive_days // 2)
         already = db.query(AutomationEvent).filter(
             AutomationEvent.tenant_id == tenant_id,
             AutomationEvent.event_type == AUTOPILOT_EVENT_TYPES["inactive_recovery"],
@@ -500,7 +498,7 @@ def _job_inactive_customers(db: Session, tenant_id: int, config: Dict[str, Any])
             customer.id,
             {
                 "customer_name": customer.name,
-                "days_inactive": (datetime.utcnow() - profile.last_order_at).days if profile.last_order_at else inactive_days,
+                "days_inactive": (datetime.now(timezone.utc) - profile.last_order_at).days if profile.last_order_at else inactive_days,
                 "template": config.get("template_name", "win_back"),
                 "discount_pct": discount_pct,
                 "vars": {
@@ -548,7 +546,7 @@ async def toggle_automation(
     if not auto:
         raise HTTPException(status_code=404, detail="Automation not found")
     auto.enabled = body.enabled
-    auto.updated_at = datetime.utcnow()
+    auto.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(auto)
     return _auto_to_dict(auto)
@@ -571,7 +569,7 @@ async def update_automation_config(
     auto.config = body.config
     if body.template_id is not None:
         auto.template_id = body.template_id
-    auto.updated_at = datetime.utcnow()
+    auto.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(auto)
     return _auto_to_dict(auto)
@@ -589,7 +587,7 @@ async def set_autopilot(
     current = merge_defaults(settings.ai_settings, DEFAULT_AI)
     current["autopilot_enabled"] = body.enabled
     settings.ai_settings = current
-    settings.updated_at = datetime.utcnow()
+    settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {"autopilot_enabled": body.enabled}
 
@@ -605,7 +603,7 @@ async def emit_event(body: EmitEventIn, request: Request, db: Session = Depends(
         customer_id=body.customer_id,
         payload=body.payload or {},
         processed=False,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(event)
     db.commit()
@@ -706,6 +704,6 @@ async def run_autopilot(request: Request, db: Session = Depends(get_db)):
         "ran": True,
         "total_actions": total,
         "breakdown": results,
-        "ran_at": datetime.utcnow().isoformat(),
+        "ran_at": datetime.now(timezone.utc).isoformat(),
         "message": f"الطيار التلقائي أرسل {total} رسالة في هذه الجلسة",
     }

@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 import sqlalchemy
@@ -34,8 +34,6 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 import os
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import Tenant, User  # noqa: E402
 
 from core.audit import audit
@@ -233,7 +231,7 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
         name=f"{body.store_name.strip()} ({slug})",
         domain=f"store-{slug}.nahla.sa",
         is_active=True,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(tenant)
     try:
@@ -248,7 +246,7 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
         password_hash=hash_password(body.password),
         role="merchant",
         is_active=True,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         tenant_id=tenant.id,
     )
     db.add(user)

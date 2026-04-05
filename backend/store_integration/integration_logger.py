@@ -6,7 +6,7 @@ so they appear in the AI Sales Logs UI.
 """
 from __future__ import annotations
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nahla.store_integration.logger")
@@ -42,7 +42,7 @@ def log_integration_event(
                 "error": error_message,
             },
             processed=True,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         db.add(event)
     except Exception as exc:

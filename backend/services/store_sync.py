@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -133,7 +133,7 @@ class StoreSyncService:
             status       = "running",
             sync_type    = sync_type,
             triggered_by = triggered_by,
-            started_at   = datetime.utcnow(),
+            started_at   = datetime.now(timezone.utc),
         )
         self.db.add(job)
         self.db.flush()
@@ -141,7 +141,7 @@ class StoreSyncService:
 
     def _finish_job(self, job: StoreSyncJob, **counts):
         job.status       = "completed"
-        job.completed_at = datetime.utcnow()
+        job.completed_at = datetime.now(timezone.utc)
         for k, v in counts.items():
             if hasattr(job, k):
                 setattr(job, k, v)
@@ -149,7 +149,7 @@ class StoreSyncService:
 
     def _fail_job(self, job: StoreSyncJob, error: str):
         job.status        = "failed"
-        job.completed_at  = datetime.utcnow()
+        job.completed_at  = datetime.now(timezone.utc)
         job.error_message = error[:2000]
         self.db.commit()
 
@@ -197,7 +197,7 @@ class StoreSyncService:
             self.db.query(Coupon)
             .filter(
                 Coupon.tenant_id == self.tenant_id,
-                (Coupon.expires_at == None) | (Coupon.expires_at > datetime.utcnow()),  # noqa: E711
+                (Coupon.expires_at == None) | (Coupon.expires_at > datetime.now(timezone.utc)),  # noqa: E711
             )
             .all()
         )
@@ -258,8 +258,8 @@ class StoreSyncService:
         snap.coupon_count   = len(coupon_list)
         snap.category_count = len(categories)
         snap.sync_version   = (snap.sync_version or 0) + 1
-        snap.last_full_sync_at = datetime.utcnow()
-        snap.updated_at        = datetime.utcnow()
+        snap.last_full_sync_at = datetime.now(timezone.utc)
+        snap.updated_at        = datetime.now(timezone.utc)
         self.db.commit()
 
     # ── Products sync ──────────────────────────────────────────────────────────
@@ -476,8 +476,8 @@ class StoreSyncService:
             snap.product_count             = (
                 self.db.query(Product).filter_by(tenant_id=self.tenant_id).count()
             )
-            snap.last_incremental_sync_at  = datetime.utcnow()
-            snap.updated_at                = datetime.utcnow()
+            snap.last_incremental_sync_at  = datetime.now(timezone.utc)
+            snap.updated_at                = datetime.now(timezone.utc)
             self.db.commit()
 
     # ── Status ─────────────────────────────────────────────────────────────────

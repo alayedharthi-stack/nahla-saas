@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import BillingPlan  # noqa: E402
 
 logger = logging.getLogger("nahla-backend")
@@ -78,7 +76,7 @@ def _build_plans_block(db: Session) -> str:
     if not plans:
         return "الباقات: تواصل مع الدعم للحصول على أحدث الأسعار."
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     promo_active = now < datetime(2026, 6, 30, 23, 59, 59)
     promo_note = "⚠️ عرض الإطلاق ساري حتى 30 يونيو 2026\n\n" if promo_active else ""
 
@@ -124,7 +122,7 @@ def build_nahla_system_prompt(db: Optional[Session] = None) -> str:
     Build the full Nahla system prompt with live plan data from DB.
     Result is cached for 10 minutes.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cached_at = _cache.get("built_at")
     if (
         _cache.get("prompt")

@@ -12,13 +12,11 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
 from models import ConversationTrace, SystemEvent  # noqa: E402
 
 from core.billing import get_moyasar_settings
@@ -55,7 +53,7 @@ async def system_health(request: Request, db: Session = Depends(get_db)):
         "environment": ENVIRONMENT,
         "production":  IS_PRODUCTION,
         "components":  components,
-        "timestamp":   datetime.utcnow().isoformat() + "Z",
+        "timestamp":   datetime.now(timezone.utc).isoformat() + "Z",
     }
 
 

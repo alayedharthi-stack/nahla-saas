@@ -66,3 +66,23 @@ META_GRAPH_API_VERSION   = os.environ.get("META_GRAPH_API_VERSION", "v20.0")
 # ── Store Sync ─────────────────────────────────────────────────────────────────
 STORE_SYNC_MAX_PRODUCTS  = int(os.environ.get("STORE_SYNC_MAX_PRODUCTS", "500"))
 STORE_SYNC_MAX_ORDERS    = int(os.environ.get("STORE_SYNC_MAX_ORDERS", "200"))
+
+# ── AI / Claude ────────────────────────────────────────────────────────────────
+# Priority: CLAUDE_API_KEY (used by nahla-bot) → ANTHROPIC_API_KEY
+ANTHROPIC_API_KEY = (
+    os.environ.get("CLAUDE_API_KEY") or
+    os.environ.get("ANTHROPIC_API_KEY", "")
+)
+CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
+
+# ── CORS ───────────────────────────────────────────────────────────────────────
+_default_origins = (
+    "http://localhost:3000,http://localhost:5173,"
+    "https://nahlah.ai,https://www.nahlah.ai,"
+    "https://app.nahlah.ai,https://api.nahlah.ai"
+)
+CORS_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.environ.get("CORS_ORIGINS", _default_origins).split(",")
+    if o.strip()
+]
