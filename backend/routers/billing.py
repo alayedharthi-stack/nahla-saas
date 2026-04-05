@@ -1,4 +1,4 @@
-"""
+﻿"""
 routers/billing.py
 ───────────────────
 Billing, subscription, and payment gateway configuration endpoints.
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -394,7 +394,7 @@ async def subscribe_to_plan(
     # ── WhatsApp notification ─────────────────────────────────────────────────
     try:
         import asyncio  # noqa: PLC0415
-        from datetime import timedelta  # noqa: PLC0415, timezone
+        from datetime import timedelta  # noqa: PLC0415
         _settings    = get_or_create_settings(db, tenant_id)
         _wa_cfg      = merge_defaults(_settings.whatsapp_settings, DEFAULT_WHATSAPP)
         _store_cfg   = merge_defaults(_settings.store_settings,    DEFAULT_STORE)
