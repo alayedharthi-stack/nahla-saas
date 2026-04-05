@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone
+, timezone
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session

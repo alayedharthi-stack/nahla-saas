@@ -16,7 +16,8 @@ import hmac
 import json as _json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -125,7 +126,8 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
 
 async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> None:
     """Save Salla OAuth tokens received via webhook (app.store.authorize / app.installed)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
+, timezone
     import sys, os
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
     from models import Integration, Tenant
