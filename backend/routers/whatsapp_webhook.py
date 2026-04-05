@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
-from models import Tenant  # noqa: E402
+from models import Tenant, WhatsAppConnection  # noqa: E402
 
 from core.config import (
     ORCHESTRATOR_URL,
@@ -145,12 +145,12 @@ async def _resolve_tenant_by_phone(phone_number_id: str) -> int | None:
     try:
         db = next(get_db())
         try:
-            tenant = (
-                db.query(Tenant)
-                .filter(Tenant.whatsapp_phone_id == phone_number_id)
+            conn = (
+                db.query(WhatsAppConnection)
+                .filter(WhatsAppConnection.phone_number_id == phone_number_id)
                 .first()
             )
-            return tenant.id if tenant else 1
+            return conn.tenant_id if conn else 1
         finally:
             db.close()
     except Exception as exc:
@@ -166,13 +166,12 @@ async def _call_orchestrator(
     """Call the Nahla AI orchestrator and return its text reply."""
     payload = {
         "tenant_id": tenant_id or 1,
-        "customer_id": customer_phone,
+        "customer_phone": customer_phone,
         "message": message,
-        "channel": "whatsapp",
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{ORCHESTRATOR_URL}/chat", json=payload)
+            resp = await client.post(f"{ORCHESTRATOR_URL}/orchestrate", json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data.get("reply") or data.get("response") or data.get("message")
