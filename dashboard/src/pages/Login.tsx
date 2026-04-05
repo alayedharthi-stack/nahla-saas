@@ -3,8 +3,6 @@ import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react'
 import { login } from '../auth'
 import { useLanguage } from '../i18n/context'
-import AppStoreBadges from '../components/ui/AppStoreBadges'
-
 export default function Login() {
   const navigate = useNavigate()
   const { t, lang, setLang, dir } = useLanguage()
@@ -138,18 +136,7 @@ export default function Login() {
         </p>
 
         {/* Footer */}
-        <div className="mt-6 pb-4 flex flex-col items-center gap-4">
-          {/* App Store Badges */}
-          <div className="flex flex-col items-center gap-1.5">
-            <p className="text-slate-500 text-xs">
-              {lang === 'ar' ? 'التطبيق متاح قريباً على' : 'App coming soon on'}
-            </p>
-            <AppStoreBadges lang={lang} size="sm" showPwa={false} />
-          </div>
-
-          {/* Divider */}
-          <div className="w-24 h-px bg-slate-700/50" />
-
+        <div className="mt-6 pb-4 flex flex-col items-center gap-2">
           {/* Made in Saudi Arabia */}
           <p className="text-slate-500 text-xs font-medium tracking-wide">
             {t(tr => tr.login.dev)}
