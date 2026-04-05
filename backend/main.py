@@ -118,10 +118,57 @@ app.include_router(_wa_webhook_router)
 app.include_router(_store_sync_router)
 
 
-# ── Background scheduler ────────────────────────────────────────────────────────
+# ── Startup events ────────────────────────────────────────────────────────────────
 @app.on_event("startup")
-async def start_scheduler() -> None:
-    """Start the subscription expiry / trial warning scheduler."""
+async def on_startup() -> None:
+    """Run database migrations and start background scheduler."""
+    # 1. DB table creation / column migrations (non-fatal)
+    try:
+        from database.session import engine  # noqa: PLC0415
+        from database.models import Base     # noqa: PLC0415
+        from sqlalchemy import text          # noqa: PLC0415
+
+        def _run_migrations():
+            Base.metadata.create_all(engine)
+            safe_alters = [
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR NOT NULL DEFAULT 'merchant'",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_provider VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_status VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_started_at TIMESTAMP",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_name VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_price FLOAT",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS max_messages_per_month INTEGER DEFAULT 1000",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS whatsapp_phone_id VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS whatsapp_token VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS salla_access_token VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS salla_store_id VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_price_id VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMP",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS hyperpay_payment_id VARCHAR",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_status VARCHAR",
+            ]
+            with engine.connect() as conn:
+                for stmt in safe_alters:
+                    try:
+                        conn.execute(text(stmt))
+                    except Exception:
+                        pass
+                conn.commit()
+
+        # Run in thread pool to avoid blocking the event loop
+        await asyncio.get_event_loop().run_in_executor(None, _run_migrations)
+        logger.info("Database tables ready.")
+    except Exception as exc:
+        logger.warning("DB migration skipped (non-fatal): %s", exc)
+
+    # 2. Background scheduler
     try:
         from core.scheduler import run_scheduler  # noqa: PLC0415
         asyncio.create_task(run_scheduler())
