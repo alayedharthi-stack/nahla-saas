@@ -295,7 +295,7 @@ async def get_platform_stats(
             {
                 "id":         u.id,
                 "email":      u.email,
-                "store_name": u.name,
+                "store_name": u.username,
                 "is_active":  u.is_active,
                 "created_at": u.created_at.isoformat() if u.created_at else None,
             }
