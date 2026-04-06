@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 import anthropic
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
 from models import WhatsAppConnection
@@ -71,9 +71,29 @@ async def whatsapp_verify(
     hub_mode: str = Query(None, alias="hub.mode"),
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
     hub_challenge: str = Query(None, alias="hub.challenge"),
+    db=Depends(get_db),
 ):
-    if hub_mode == "subscribe" and hub_verify_token == WA_VERIFY_TOKEN:
+    if hub_mode != "subscribe" or not hub_verify_token:
+        raise HTTPException(status_code=403, detail="Verification failed")
+
+    # 1) Check platform-level token (Nahla's own WhatsApp)
+    if hub_verify_token == WA_VERIFY_TOKEN:
         return PlainTextResponse(hub_challenge)
+
+    # 2) Check per-tenant tokens (merchant WhatsApp connections)
+    from models import TenantSettings  # noqa: PLC0415
+    try:
+        matches = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.whatsapp_settings.op("->>")("verify_token") == hub_verify_token)
+            .first()
+        )
+        if matches:
+            logger.info("[Webhook] Verified tenant webhook token for tenant_id=%s", matches.tenant_id)
+            return PlainTextResponse(hub_challenge)
+    except Exception as exc:
+        logger.warning("[Webhook] Per-tenant token lookup failed: %s", exc)
+
     raise HTTPException(status_code=403, detail="Verification failed")
 
 
