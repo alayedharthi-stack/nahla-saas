@@ -98,7 +98,12 @@ export default function Register() {
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
           <img src="/logo.png" alt="نحلة" className="w-20 h-20 object-contain mb-3 drop-shadow-xl" />
-          <h1 className="text-2xl font-bold text-white">{t(tr => tr.login.title)}</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold text-white">{t(tr => tr.login.title)}</h1>
+            <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/50 shadow-[0_0_10px_rgba(245,158,11,0.35)]">
+              <span className="text-[11px] font-black text-amber-400 leading-none tracking-wide">AI</span>
+            </span>
+          </div>
           <p className="text-slate-400 text-sm mt-1">{t(tr => tr.register.subtitle)}</p>
         </div>
 
