@@ -18,12 +18,23 @@ export default {
         },
       },
       fontFamily: {
-        // Uses a CSS custom property that switches between Cairo (RTL) and Inter (LTR).
-        // Defined in index.css under :root and [dir="rtl"].
-        sans: ['var(--font-ui)', 'system-ui', 'sans-serif'],
-        // Named families available as escape hatches (font-cairo, font-inter)
+        sans:  ['var(--font-ui)', 'system-ui', 'sans-serif'],
         cairo: ['Cairo', 'system-ui', 'sans-serif'],
         inter: ['Inter', 'system-ui', 'sans-serif'],
+      },
+      // Dynamic viewport height (100dvh) — prevents iOS address-bar resize jump
+      height: {
+        dvh:    '100dvh',
+        'svh':  '100svh',
+        'lvh':  '100lvh',
+      },
+      minHeight: {
+        dvh:   '100dvh',
+        'svh': '100svh',
+        'lvh': '100lvh',
+      },
+      screens: {
+        xs: '375px',   // iPhone SE / small Android
       },
     },
   },

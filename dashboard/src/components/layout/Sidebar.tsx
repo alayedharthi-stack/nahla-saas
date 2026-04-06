@@ -185,7 +185,7 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                     to={to}
                     onClick={onClose}
                     className={({ isActive }) =>
-                      `relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                      `relative flex items-center gap-3 px-3 py-3 lg:py-2.5 rounded-lg text-sm font-medium transition-all touch-manipulation ${
                         isActive
                           ? 'bg-white/10 text-white'
                           : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
@@ -216,8 +216,8 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
           ))}
         </nav>
 
-        {/* Bottom badge */}
-        <div className="px-3 py-4 border-t border-slate-800">
+        {/* Bottom badge — with safe area for iOS home bar */}
+        <div className="px-3 py-4 pb-[max(1rem,env(safe-area-inset-bottom,1rem))] border-t border-slate-800">
           <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/5">
             <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${adminMode ? 'bg-amber-500/20' : 'bg-brand-500/20'}`}>
               {adminMode

@@ -33,7 +33,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   }
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-6 sticky top-0 z-20">
+    <header className="h-14 md:h-16 bg-white border-b border-slate-200 flex items-center justify-between px-3 md:px-6 sticky top-0 z-20 pt-safe-top">
 
       {/* Left side: hamburger (mobile) + page title */}
       <div className="flex items-center gap-3">
@@ -113,7 +113,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
           </button>
 
           {profileOpen && (
-            <div className="absolute end-0 top-full mt-1 w-44 bg-white rounded-xl shadow-lg border border-slate-100 py-1 z-50">
+            <div className="absolute end-0 top-full mt-1 w-44 max-w-[calc(100vw-1rem)] bg-white rounded-xl shadow-lg border border-slate-100 py-1 z-50">
               <div className="px-3 py-2 border-b border-slate-100">
                 <p className="text-xs font-semibold text-slate-900">المدير</p>
                 <p className="text-xs text-slate-400">admin@nahlah.ai</p>

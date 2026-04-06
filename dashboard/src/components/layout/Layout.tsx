@@ -31,14 +31,14 @@ export default function Layout() {
   const meta = t(metaSelector)
 
   return (
-    <div className="min-h-screen flex bg-slate-50">
+    <div className="min-h-dvh flex bg-slate-50 overflow-x-hidden">
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
       {/*
        * ms-0 on mobile (sidebar overlays as a drawer).
        * ms-60 on lg+ (sidebar is always visible and takes up 240 px).
        */}
-      <div className="flex-1 ms-0 lg:ms-60 flex flex-col min-h-screen">
+      <div className="flex-1 ms-0 lg:ms-60 flex flex-col min-h-dvh overflow-x-hidden">
         <Header
           title={meta.title}
           subtitle={meta.subtitle}
@@ -46,9 +46,11 @@ export default function Layout() {
         />
         <ImpersonationBanner />
         <TrialBanner />
-        <main className="flex-1 p-4 md:p-6">
+        <main className="flex-1 p-3 md:p-6 overflow-x-auto">
           <Outlet />
         </main>
+        {/* iOS home-bar safe area */}
+        <div className="pb-safe-bottom" />
       </div>
     </div>
   )

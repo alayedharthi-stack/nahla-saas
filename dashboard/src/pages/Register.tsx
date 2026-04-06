@@ -3,7 +3,6 @@ import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
 import { register } from '../auth'
 import { useLanguage } from '../i18n/context'
-import AppStoreBadges from '../components/ui/AppStoreBadges'
 
 export default function Register() {
   const navigate = useNavigate()
@@ -82,7 +81,7 @@ export default function Register() {
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center bg-slate-900 px-4 py-8"
+      className="min-h-dvh flex items-center justify-center bg-slate-900 px-4 py-safe-top pb-safe-bottom"
       dir={dir}
     >
       <div className="w-full max-w-sm">
@@ -250,19 +249,7 @@ export default function Register() {
         </div>
 
         {/* Footer */}
-        <div className="mt-6 pb-6 flex flex-col items-center gap-4">
-          {/* App Store Badges */}
-          <div className="flex flex-col items-center gap-1.5">
-            <p className="text-slate-500 text-xs">
-              {lang === 'ar' ? 'التطبيق متاح قريباً على' : 'App coming soon on'}
-            </p>
-            <AppStoreBadges lang={lang} size="sm" showPwa={false} />
-          </div>
-
-          {/* Divider */}
-          <div className="w-24 h-px bg-slate-700/50" />
-
-          {/* Made in Saudi Arabia */}
+        <div className="mt-5 pb-4 flex flex-col items-center">
           <p className="text-slate-500 text-xs font-medium tracking-wide">
             {t(tr => tr.login.dev)}
           </p>

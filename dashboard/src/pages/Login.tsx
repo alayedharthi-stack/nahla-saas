@@ -27,7 +27,7 @@ export default function Login() {
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center bg-slate-900 px-4"
+      className="min-h-dvh flex items-center justify-center bg-slate-900 px-4 py-safe-top pb-safe-bottom"
       dir={dir}
     >
       <div className="w-full max-w-sm">

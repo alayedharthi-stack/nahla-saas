@@ -2,6 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Mobile safe-area & dynamic viewport ───────────────────────────────────── */
+@layer utilities {
+  /* iOS notch / home-bar safe areas */
+  .pt-safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
+  .pb-safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .ps-safe-start  { padding-inline-start: env(safe-area-inset-left,  0px); }
+  .pe-safe-end    { padding-inline-end:   env(safe-area-inset-right, 0px); }
+
+  /* Dynamic viewport height — prevents iOS browser-chrome resize jump */
+  .min-h-dvh { min-height: 100dvh; }
+  .h-dvh     { height:     100dvh; }
+
+  /* Prevent overscroll bounce on iOS for fixed-layout pages */
+  .no-overscroll { overscroll-behavior: none; }
+}
+
 /*
  * ── Arabic-first font system ───────────────────────────────────────────────
  * Cairo is the default (RTL / Arabic).
