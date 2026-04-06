@@ -95,6 +95,20 @@ def _error_url(reason: str, detail: str = "") -> str:
 # PUBLIC ROUTES — OAuth flow (no JWT required)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@router.get("/settings/validate")
+async def salla_settings_validate(request: Request):
+    """
+    Salla Partner Portal — "رابط التحقق من الإعدادات"
+    Salla calls this endpoint to confirm the app is live and reachable.
+    Must be public (no JWT) and always return HTTP 200.
+    """
+    return {
+        "status":  "ok",
+        "app":     "nahla-ai",
+        "version": "2.0",
+    }
+
+
 @router.get("/salla/start")
 async def salla_start(request: Request):
     """

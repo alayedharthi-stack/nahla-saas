@@ -24,9 +24,10 @@ JWT_PUBLIC_PREFIXES = (
     "/health",
     "/webhook",
     "/auth",
-    "/oauth",          # Salla/WhatsApp OAuth callbacks
-    "/integrations",   # Salla success/error landing pages
-    "/salla",          # /salla/start (new merchant install entry point)
+    "/oauth",             # Salla/WhatsApp OAuth callbacks
+    "/integrations",      # Salla success/error landing pages
+    "/salla",             # /salla/start (new merchant install entry point)
+    "/settings/validate", # Salla Partner Portal validation probe
     "/snippet.js",
     "/track",
 )
