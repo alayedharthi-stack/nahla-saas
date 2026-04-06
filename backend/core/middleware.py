@@ -99,6 +99,24 @@ async def request_logging_middleware(request: Request, call_next):
     return response
 
 
+async def salla_iframe_middleware(request: Request, call_next):
+    """
+    Allow app.nahlaai.com to be embedded in Salla's iframe viewer (s.salla.sa).
+    Sets Content-Security-Policy frame-ancestors instead of X-Frame-Options
+    so Salla can load the app inside their embedded app viewer.
+    """
+    response = await call_next(request)
+    # Allow embedding only from trusted Salla domains
+    response.headers["Content-Security-Policy"] = (
+        "frame-ancestors 'self' https://s.salla.sa https://*.salla.sa "
+        "https://store.salla.sa https://app.nahlaai.com https://apps.salla.sa"
+    )
+    # Remove restrictive X-Frame-Options if it was set
+    if "x-frame-options" in response.headers:
+        del response.headers["x-frame-options"]
+    return response
+
+
 async def jwt_enforcement_middleware(request: Request, call_next):
     """
     Require a valid JWT for all non-public routes.
