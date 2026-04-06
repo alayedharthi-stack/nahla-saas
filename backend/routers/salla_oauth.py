@@ -95,6 +95,165 @@ def _error_url(reason: str, detail: str = "") -> str:
 # PUBLIC ROUTES — OAuth flow (no JWT required)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@router.get("/salla/app", response_class=HTMLResponse)
+async def salla_embedded_app(request: Request):
+    """
+    *** SET THIS AS THE IFRAME URL IN SALLA PARTNER PORTAL ***
+
+    Lightweight HTML page served inside Salla's embedded app iframe.
+    - No React / no heavy JS bundle — loads instantly in iframe
+    - Button opens Nahla dashboard in a new tab
+    - Works for both new and returning merchants
+    """
+    dashboard_url = "https://app.nahlaai.com"
+    return HTMLResponse(content=f"""<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>نحلة الذكية</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Cairo', Arial, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: white;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }}
+    .card {{
+      text-align: center;
+      max-width: 420px;
+      width: 100%;
+      padding: 48px 32px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(245,158,11,0.2);
+      border-radius: 20px;
+      backdrop-filter: blur(12px);
+    }}
+    .bee {{ font-size: 56px; margin-bottom: 16px; display: block; }}
+    .brand {{
+      font-size: 28px;
+      font-weight: 900;
+      color: #f59e0b;
+      letter-spacing: -0.5px;
+      margin-bottom: 4px;
+    }}
+    .ai-badge {{
+      display: inline-block;
+      background: rgba(245,158,11,0.15);
+      border: 1px solid rgba(245,158,11,0.5);
+      color: #f59e0b;
+      font-size: 10px;
+      font-weight: 900;
+      padding: 2px 8px;
+      border-radius: 6px;
+      margin-right: 6px;
+      vertical-align: middle;
+    }}
+    .subtitle {{
+      color: #94a3b8;
+      font-size: 14px;
+      margin: 12px 0 32px;
+      line-height: 1.6;
+    }}
+    .features {{
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 32px;
+      text-align: right;
+    }}
+    .feature {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: #cbd5e1;
+    }}
+    .feature-icon {{
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: rgba(245,158,11,0.15);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }}
+    .btn {{
+      display: block;
+      width: 100%;
+      background: #f59e0b;
+      color: #1e293b;
+      font-family: 'Cairo', Arial, sans-serif;
+      font-weight: 700;
+      font-size: 16px;
+      padding: 14px 24px;
+      border-radius: 12px;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+    }}
+    .btn:hover {{ background: #d97706; transform: translateY(-1px); }}
+    .btn:active {{ transform: translateY(0); }}
+    .trial-badge {{
+      margin-top: 12px;
+      font-size: 12px;
+      color: #64748b;
+    }}
+    .trial-badge span {{ color: #f59e0b; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <span class="bee">🐝</span>
+    <div class="brand">نحلة <span class="ai-badge">AI</span></div>
+    <p class="subtitle">
+      مساعد مبيعات ذكي يرد على عملاء متجرك عبر واتساب<br>
+      على مدار الساعة — بدون تدخل منك
+    </p>
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">💬</div>
+        <span>يرد تلقائياً على كل سؤال عن المنتجات والطلبات</span>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">📦</div>
+        <span>يتابع الطلبات ويرسل تحديثات الشحن للعملاء</span>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🎯</div>
+        <span>يرسل عروض وكوبونات للعملاء في الوقت المناسب</span>
+      </div>
+    </div>
+    <a href="{dashboard_url}" target="_blank" class="btn" id="cta-btn">
+      ابدأ تجربتك المجانية 14 يوم ←
+    </a>
+    <p class="trial-badge">مجاناً <span>14 يوماً</span> — لا يلزم بطاقة ائتمانية</p>
+  </div>
+  <script>
+    // If already logged in, update button to go directly to dashboard
+    try {{
+      const token = localStorage.getItem('nahla_token');
+      if (token) {{
+        const btn = document.getElementById('cta-btn');
+        btn.textContent = 'افتح لوحة التحكم ←';
+        btn.href = '{dashboard_url}/overview';
+      }}
+    }} catch(e) {{}}
+  </script>
+</body>
+</html>""")
+
+
 @router.get("/settings/validate")
 async def salla_settings_validate(request: Request):
     """
