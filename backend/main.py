@@ -71,6 +71,28 @@ app.middleware("http")(global_rate_limit_middleware)
 app.middleware("http")(request_logging_middleware)
 app.middleware("http")(jwt_enforcement_middleware)
 
+
+# ── Salla iframe embedding — allow app.nahlaai.com inside Salla frames ─────────
+from fastapi import Request as _Request  # noqa: E402
+from fastapi.responses import Response as _Response  # noqa: E402
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+
+class _SallaFrameMiddleware(BaseHTTPMiddleware):
+    """
+    Remove X-Frame-Options and set CSP frame-ancestors to allow
+    app.nahlaai.com to be embedded in Salla's iframe viewer (s.salla.sa).
+    """
+    async def dispatch(self, request: _Request, call_next):
+        response = await call_next(request)
+        response.headers.pop("X-Frame-Options", None)
+        response.headers["Content-Security-Policy"] = (
+            "frame-ancestors 'self' https://s.salla.sa https://*.salla.sa "
+            "https://store.salla.sa https://app.nahlaai.com"
+        )
+        return response
+
+app.add_middleware(_SallaFrameMiddleware)
+
 # ── Routers ───────────────────────────────────────────────────────────────────
 # Previously extracted routers
 from routers.health       import router as _health_router        # noqa: E402
