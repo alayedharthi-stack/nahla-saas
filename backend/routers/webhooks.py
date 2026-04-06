@@ -125,61 +125,112 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
 
 async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> None:
     """Save Salla OAuth tokens received via webhook (app.store.authorize / app.installed)."""
-    from datetime import datetime
-    import sys, os
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../database")))
-    from models import Integration, Tenant
-    from core.tenant import get_or_create_tenant
+    from models import Integration, Tenant, User  # noqa: PLC0415
+    from core.auth import hash_password, create_token  # noqa: PLC0415
+    from core.tenant import get_or_create_tenant  # noqa: PLC0415
+    import secrets as _sec  # noqa: PLC0415
 
-    # Token may be nested under data or at root
-    access_token  = data.get("access_token")  or payload.get("access_token", "")
-    refresh_token = data.get("refresh_token") or payload.get("refresh_token", "")
+    # Token may be nested under data or at root level
+    access_token  = (data.get("access_token")  or payload.get("access_token",  "")).strip()
+    refresh_token = (data.get("refresh_token") or payload.get("refresh_token", "")).strip()
     expires_in    = data.get("expires_in")    or payload.get("expires_in", 0)
     salla_store_id = str(data.get("merchant_id") or data.get("store_id") or store_id or "")
-    store_name     = data.get("store", {}).get("name", "") if isinstance(data.get("store"), dict) else ""
+    store_name     = (
+        data.get("store", {}).get("name", "")
+        if isinstance(data.get("store"), dict) else
+        data.get("name", "")
+    ) or f"متجر سلة {salla_store_id}"
 
-    if not access_token:
-        logger.warning("Salla authorize webhook: no access_token in payload | store=%s", store_id)
+    logger.info(
+        "[Salla Webhook] _handle_salla_authorize | store_id=%s has_token=%s store_name=%s",
+        salla_store_id, bool(access_token), store_name,
+    )
+
+    # ── Find existing integration by salla store_id in config ─────────────────
+    # (Tenant model has no salla_store_id column — search via Integration.config)
+    existing_integration = None
+    try:
+        all_salla = db.query(Integration).filter(
+            Integration.provider == "salla",
+            Integration.enabled  == True,  # noqa: E712
+        ).all()
+        for intg in all_salla:
+            cfg = intg.config or {}
+            if str(cfg.get("store_id", "")) == salla_store_id:
+                existing_integration = intg
+                break
+    except Exception as _e:
+        logger.warning("[Salla Webhook] Integration lookup error: %s", _e)
+
+    if existing_integration:
+        # Update tokens for existing integration
+        tenant_id = existing_integration.tenant_id
+        new_cfg = dict(existing_integration.config or {})
+        new_cfg.update({
+            "api_key":       access_token or new_cfg.get("api_key", ""),
+            "refresh_token": refresh_token or new_cfg.get("refresh_token", ""),
+            "expires_in":    expires_in,
+            "store_name":    store_name,
+            "connected_at":  datetime.now(timezone.utc).isoformat(),
+        })
+        existing_integration.config  = new_cfg
+        existing_integration.enabled = True
+        db.commit()
+        logger.info("[Salla Webhook] Updated existing integration | tenant=%s", tenant_id)
         return
 
-    # Find or create tenant by salla_store_id
-    tenant = db.query(Tenant).filter(Tenant.salla_store_id == salla_store_id).first()
-    if not tenant:
-        # Fall back to tenant 1 (admin) for single-tenant setups
-        tenant = db.query(Tenant).filter(Tenant.id == 1).first()
-    tenant_id = tenant.id if tenant else 1
+    # ── No existing integration: auto-create a new Nahla merchant account ─────
+    if not access_token:
+        # app.installed without a token — just log and return (token comes via OAuth later)
+        logger.info(
+            "[Salla Webhook] app.installed with no token — merchant will link via OAuth | store=%s",
+            salla_store_id,
+        )
+        return
 
-    integration = db.query(Integration).filter(
-        Integration.tenant_id == tenant_id,
-        Integration.provider  == "salla",
-    ).first()
+    try:
+        # Auto-create tenant + user for this Salla store
+        new_tenant = Tenant(name=store_name)
+        db.add(new_tenant)
+        db.flush()
+        tenant_id = new_tenant.id
 
-    new_config = {
-        "api_key":       access_token,
-        "refresh_token": refresh_token,
-        "store_id":      salla_store_id,
-        "store_name":    store_name,
-        "expires_in":    expires_in,
-        "connected_at":  datetime.now(timezone.utc).isoformat(),
-    }
+        salla_email = f"salla-{salla_store_id}@salla-merchant.nahlaai.com"
+        new_user = User(
+            email=salla_email,
+            password_hash=hash_password(_sec.token_urlsafe(16)),
+            role="merchant",
+            tenant_id=tenant_id,
+            is_active=True,
+        )
+        db.add(new_user)
+        db.flush()
 
-    if integration:
-        integration.config  = new_config
-        integration.enabled = True
-    else:
         integration = Integration(
             tenant_id=tenant_id,
             provider="salla",
-            config=new_config,
+            config={
+                "api_key":       access_token,
+                "refresh_token": refresh_token,
+                "store_id":      salla_store_id,
+                "store_name":    store_name,
+                "expires_in":    expires_in,
+                "connected_at":  datetime.now(timezone.utc).isoformat(),
+            },
             enabled=True,
         )
         db.add(integration)
-
-    db.commit()
-    logger.info(
-        "Salla authorize saved via webhook | tenant=%s store_id=%s store_name=%s",
-        tenant_id, salla_store_id, store_name,
-    )
+        db.commit()
+        logger.info(
+            "[Salla Webhook] Auto-created merchant | tenant=%s email=%s store=%s",
+            tenant_id, salla_email, salla_store_id,
+        )
+    except Exception as exc:
+        logger.exception("[Salla Webhook] Auto-create failed: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def _disable_salla_integration(db, store_id: str) -> None:

@@ -173,7 +173,12 @@ async def _check_trial_expiry() -> None:
             if tenant.id in subbed_tenants:
                 continue  # already subscribed, skip
 
-            trial_start    = tenant.created_at or now
+            _raw = tenant.created_at or now
+            # Ensure trial_start is timezone-aware before subtracting
+            if _raw.tzinfo is None:
+                trial_start = _raw.replace(tzinfo=timezone.utc)
+            else:
+                trial_start = _raw
             trial_elapsed  = (now - trial_start).days
             days_remaining = FREE_TRIAL_DAYS - trial_elapsed
 
