@@ -215,30 +215,36 @@ export default function WhatsAppConnect() {
       await loadFbSdk(startData.meta_app_id, startData.graph_version)
 
       // 3. Open Meta Embedded Signup popup
+      // NOTE: FB.login callback must be a plain function (not async) — use void IIFE inside
       window.FB!.login(
-        async (response: FBLoginResponse) => {
+        (response: FBLoginResponse) => {
           if (response.status === 'connected' && response.authResponse?.code) {
-            try {
-              // 4. Exchange code with our backend
-              const result = await whatsappConnectApi.callback({
-                code: response.authResponse.code,
-              })
-              setConn(result as WaConnection)
-              await loadStatus()
-              setError(null)
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : 'فشل في إتمام الربط'
-              setError(msg)
-              await loadStatus()
-            }
+            void (async () => {
+              try {
+                // 4. Exchange code with our backend
+                const result = await whatsappConnectApi.callback({
+                  code: response.authResponse!.code!,
+                })
+                setConn(result as WaConnection)
+                await loadStatus()
+                setError(null)
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : 'فشل في إتمام الربط'
+                setError(msg)
+                await loadStatus()
+              } finally {
+                setConnecting(false)
+              }
+            })()
           } else if (response.status === 'not_authorized') {
             setError('لم يتم منح الصلاحيات المطلوبة. يرجى قبول الأذونات عند الطلب.')
-            await loadStatus()
+            void loadStatus()
+            setConnecting(false)
           } else {
             setError('أُلغي الربط أو لم تكتمل العملية.')
-            await loadStatus()
+            void loadStatus()
+            setConnecting(false)
           }
-          setConnecting(false)
         },
         {
           config_id:    '',   // Meta App config ID (optional)
