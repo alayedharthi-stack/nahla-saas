@@ -239,12 +239,23 @@ async def salla_embedded_app(request: Request):
     </a>
     <p class="trial-badge">مجاناً <span>14 يوماً</span> — لا يلزم بطاقة ائتمانية</p>
   </div>
+  <!-- Salla Embedded SDK — REQUIRED to dismiss skeleton loaders -->
+  <script src="https://unpkg.com/@salla.sa/embedded-sdk/dist/umd/index.js"></script>
   <script>
-    // Notify Salla parent frame that app is ready (removes skeleton loaders)
+    // Initialize Salla SDK and signal ready (removes skeleton loaders)
     try {{
-      window.parent.postMessage(JSON.stringify({{ event: 'app.ready' }}), '*');
-      window.parent.postMessage({{ event: 'app.ready' }}, '*');
-    }} catch(e) {{}}
+      const embedded = window.Salla && window.Salla.embedded;
+      if (embedded) {{
+        embedded.init({{ debug: false }}).then(function() {{
+          embedded.ready();
+        }}).catch(function() {{
+          embedded.ready(); // still signal ready on error
+        }});
+      }}
+    }} catch(e) {{
+      // fallback postMessage if SDK fails
+      try {{ window.parent.postMessage(JSON.stringify({{ event: 'app.ready' }}), '*'); }} catch(_) {{}}
+    }}
 
     // If already logged in, update button to go directly to dashboard
     try {{
