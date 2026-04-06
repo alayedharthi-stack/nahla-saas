@@ -240,6 +240,12 @@ async def salla_embedded_app(request: Request):
     <p class="trial-badge">مجاناً <span>14 يوماً</span> — لا يلزم بطاقة ائتمانية</p>
   </div>
   <script>
+    // Notify Salla parent frame that app is ready (removes skeleton loaders)
+    try {{
+      window.parent.postMessage(JSON.stringify({{ event: 'app.ready' }}), '*');
+      window.parent.postMessage({{ event: 'app.ready' }}, '*');
+    }} catch(e) {{}}
+
     // If already logged in, update button to go directly to dashboard
     try {{
       const token = localStorage.getItem('nahla_token');
