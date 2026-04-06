@@ -24,7 +24,8 @@ JWT_PUBLIC_PREFIXES = (
     "/health",
     "/webhook",
     "/auth",
-    "/oauth",
+    "/oauth",          # Salla/WhatsApp OAuth callbacks
+    "/integrations",   # Salla success/error landing pages (OAuth redirects arrive here without JWT)
     "/snippet.js",
     "/track",
 )

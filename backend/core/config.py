@@ -40,6 +40,14 @@ SALLA_REDIRECT_URI   = os.environ.get(
 )
 SALLA_WEBHOOK_SECRET = os.environ.get("SALLA_WEBHOOK_SECRET", "")
 
+# Where to redirect after Salla OAuth completes (the embedded app landing page).
+# Set SALLA_EMBEDDED_URL in Railway env to override.
+# For Salla embedded apps this is typically the partner app iframe URL.
+SALLA_EMBEDDED_URL = os.environ.get(
+    "SALLA_EMBEDDED_URL",
+    "https://app.nahlaai.com/landing",
+)
+
 # ── API key protection ─────────────────────────────────────────────────────────
 API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
 
@@ -80,7 +88,9 @@ CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 _default_origins = (
     "http://localhost:3000,http://localhost:5173,"
     "https://nahlah.ai,https://www.nahlah.ai,"
-    "https://app.nahlah.ai,https://api.nahlah.ai"
+    "https://app.nahlah.ai,https://api.nahlah.ai,"
+    "https://nahlaai.com,https://app.nahlaai.com,"
+    "https://store.salla.sa,https://salla.sa"
 )
 CORS_ORIGINS: list[str] = [
     o.strip()
