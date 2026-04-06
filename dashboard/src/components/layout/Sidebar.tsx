@@ -163,12 +163,10 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
               <p className="text-white font-semibold text-sm leading-none truncate">
                 {adminMode ? 'نحلة' : storeName}
               </p>
-              {/* AI brand badge — shown for admin (platform brand) */}
-              {adminMode && (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/50 shadow-[0_0_8px_rgba(245,158,11,0.3)]">
-                  <span className="text-[9px] font-black text-amber-400 leading-none tracking-wide">AI</span>
-                </span>
-              )}
+              {/* AI brand badge — always visible */}
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/50 shadow-[0_0_8px_rgba(245,158,11,0.3)]">
+                <span className="text-[9px] font-black text-amber-400 leading-none tracking-wide">AI</span>
+              </span>
             </div>
             <p className={`text-xs mt-0.5 ${adminMode ? 'text-amber-500/70' : 'text-slate-500'}`}>
               {adminMode ? 'لوحة المالك' : t(tr => tr.nav.logoTagline)}
@@ -241,12 +239,10 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                 <p className={`text-xs truncate ${adminMode ? 'text-amber-500/60' : 'text-slate-500'}`}>
                   {adminMode ? 'مالك المنصة' : t(tr => tr.nav.storeBadge.plan)}
                 </p>
-                {/* AI badge next to platform label */}
-                {adminMode && (
-                  <span className="inline-flex items-center px-1 py-px rounded bg-amber-500/15 border border-amber-500/40 shadow-[0_0_6px_rgba(245,158,11,0.25)]">
-                    <span className="text-[7px] font-black text-amber-400 leading-none tracking-wide">AI</span>
-                  </span>
-                )}
+                {/* AI badge — always visible */}
+                <span className="inline-flex items-center px-1 py-px rounded bg-amber-500/15 border border-amber-500/40 shadow-[0_0_6px_rgba(245,158,11,0.25)]">
+                  <span className="text-[7px] font-black text-amber-400 leading-none tracking-wide">AI</span>
+                </span>
               </div>
             </div>
           </div>
