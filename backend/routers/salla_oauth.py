@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets as _secrets
 import sys
 import urllib.parse
 from datetime import datetime, timezone
@@ -37,10 +38,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from models import Integration
+from models import Integration, Tenant, User
 
 from core.audit import audit
-from core.auth import get_jwt_tenant_id
+from core.auth import create_token, get_jwt_tenant_id, hash_password
 from core.config import (
     DASHBOARD_URL,
     SALLA_CLIENT_ID,
@@ -65,6 +66,12 @@ _DASHBOARD = _DASHBOARD.rstrip("/") or "https://app.nahlah.ai"
 # This must be the iframe URL registered in Salla partner portal
 _SALLA_APP  = SALLA_EMBEDDED_URL.rstrip("/")
 
+# The Salla callback page on the dashboard (for new merchants auto-logged in via Salla)
+_SALLA_CALLBACK_BASE = _SALLA_APP.rsplit("/", 1)[0] if "/" in _SALLA_APP else _SALLA_APP
+
+# Prefix used in state param to identify new-merchant installs from Salla
+_NEW_MERCHANT_PREFIX = "salla_new_"
+
 
 def _success_url(store_id: str = "", store_name: str = "") -> str:
     """Build the post-OAuth success redirect URL."""
@@ -87,6 +94,38 @@ def _error_url(reason: str, detail: str = "") -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 # PUBLIC ROUTES — OAuth flow (no JWT required)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/salla/start")
+async def salla_start(request: Request):
+    """
+    *** SET THIS AS THE APP URL IN SALLA PARTNER PORTAL ***
+
+    Direct browser redirect to Salla OAuth authorization page.
+    Used when a merchant opens the Nahla app from their Salla store for the first time.
+    No JSON response — only a 302 redirect so Salla/browsers follow it immediately.
+
+    State is marked with prefix so the callback knows this is a NEW merchant install.
+    """
+    if not SALLA_CLIENT_ID:
+        logger.error("[Salla Start] SALLA_CLIENT_ID not configured!")
+        return RedirectResponse(
+            url=_error_url("app_not_configured", "SALLA_CLIENT_ID missing"),
+            status_code=302,
+        )
+
+    # Unique state to detect new-merchant flow in the callback
+    state = _NEW_MERCHANT_PREFIX + _secrets.token_urlsafe(12)
+    params = urllib.parse.urlencode({
+        "client_id":     SALLA_CLIENT_ID,
+        "redirect_uri":  SALLA_REDIRECT_URI,
+        "response_type": "code",
+        "scope":         "offline_access",
+        "state":         state,
+    })
+    auth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
+    logger.info("[Salla Start] Redirecting new merchant to OAuth | state=%s", state)
+    return RedirectResponse(url=auth_url, status_code=302)
+
 
 @router.get("/api/salla/authorize")
 async def salla_authorize(request: Request):
@@ -146,11 +185,17 @@ async def salla_oauth_callback(
     )
 
     # ── Resolve tenant from state param ────────────────────────────────────────
+    # state = integer  → existing merchant linking their Salla store
+    # state = "salla_new_*" → brand-new merchant installing from Salla (no Nahla account yet)
+    is_new_merchant = (state or "").startswith(_NEW_MERCHANT_PREFIX)
     try:
-        tenant_id = int(state) if state else 1
+        tenant_id = int(state) if (state and not is_new_merchant) else 0
     except (ValueError, TypeError):
-        tenant_id = 1
-    logger.info("[Salla OAuth] tenant_id=%s", tenant_id)
+        tenant_id = 0
+    logger.info(
+        "[Salla OAuth] tenant_id=%s is_new_merchant=%s",
+        tenant_id, is_new_merchant,
+    )
 
     # ── Handle provider-side errors ────────────────────────────────────────────
     if error:
@@ -259,10 +304,97 @@ async def salla_oauth_callback(
         logger.exception("[Salla OAuth] Unexpected error during token exchange: %s", exc)
         return RedirectResponse(url=_error_url("network_error"), status_code=302)
 
-    # ── Step 4: Save integration to DB ─────────────────────────────────────────
+    # ── Step 4: Resolve / create Nahla account for this merchant ───────────────
+    auto_jwt: str = ""
+
+    if is_new_merchant:
+        # ── Auto-register new merchant from Salla ────────────────────────────
+        logger.info("[Salla OAuth] Auto-registering new merchant | store=%s", store_name)
+        try:
+            # Derive email: use Salla store info or generate a placeholder
+            salla_email = ""
+            try:
+                store_resp2 = await httpx.AsyncClient(timeout=10).get(
+                    "https://api.salla.dev/admin/v2/settings/account",
+                    headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                )
+                if store_resp2.status_code == 200:
+                    acc = store_resp2.json().get("data", {})
+                    salla_email = (
+                        acc.get("email") or
+                        acc.get("mobile") or
+                        ""
+                    )
+            except Exception:
+                pass
+
+            # Fallback email if Salla didn't return one
+            if not salla_email:
+                safe_store = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
+                salla_email = f"{safe_store or 'store'}-{salla_store_id}@salla-merchant.nahlaai.com"
+
+            salla_email = salla_email.strip().lower()
+            logger.info("[Salla OAuth] Merchant email resolved: %s", salla_email)
+
+            # Check for existing Nahla account with this email
+            existing_user = db.query(User).filter(User.email == salla_email).first()
+
+            if existing_user:
+                tenant_id = existing_user.tenant_id
+                logger.info(
+                    "[Salla OAuth] Found existing Nahla account | email=%s tenant=%s",
+                    salla_email, tenant_id,
+                )
+                auto_jwt = create_token(
+                    email=existing_user.email,
+                    role=existing_user.role or "merchant",
+                    tenant_id=tenant_id,
+                )
+            else:
+                # Create new Tenant + User
+                new_tenant = Tenant(name=store_name or "متجر سلة")
+                db.add(new_tenant)
+                db.flush()   # get new_tenant.id
+                tenant_id = new_tenant.id
+
+                temp_password = _secrets.token_urlsafe(16)
+                new_user = User(
+                    email=salla_email,
+                    password_hash=hash_password(temp_password),
+                    role="merchant",
+                    tenant_id=tenant_id,
+                    is_active=True,
+                )
+                db.add(new_user)
+                db.flush()
+
+                auto_jwt = create_token(
+                    email=salla_email,
+                    role="merchant",
+                    tenant_id=tenant_id,
+                )
+                logger.info(
+                    "[Salla OAuth] Auto-registered new merchant | email=%s tenant=%s",
+                    salla_email, tenant_id,
+                )
+
+        except Exception as exc:
+            logger.exception("[Salla OAuth] Auto-register failed: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return RedirectResponse(url=_error_url("registration_failed"), status_code=302)
+
+    else:
+        # Existing merchant — tenant_id came from state
+        if tenant_id == 0:
+            tenant_id = 1  # last resort fallback (should not happen)
+        get_or_create_tenant(db, tenant_id)
+
+    # ── Step 4b: Save Salla integration to DB ──────────────────────────────────
     logger.info("[Salla OAuth] Saving integration to DB | tenant=%s", tenant_id)
     try:
-        get_or_create_tenant(db, tenant_id)
         integration = db.query(Integration).filter(
             Integration.tenant_id == tenant_id,
             Integration.provider  == "salla",
@@ -276,14 +408,13 @@ async def salla_oauth_callback(
             "store_id":      salla_store_id,
             "store_name":    store_name,
             "merchant_id":   merchant_id,
-            "redirect_uri":  SALLA_REDIRECT_URI,   # stored for future refresh calls
+            "redirect_uri":  SALLA_REDIRECT_URI,
             "connected_at":  datetime.now(timezone.utc).isoformat(),
         }
 
         if integration:
             integration.config  = new_config
             integration.enabled = True
-            logger.info("[Salla OAuth] Updated existing integration for tenant=%s", tenant_id)
         else:
             db.add(Integration(
                 tenant_id=tenant_id,
@@ -291,12 +422,11 @@ async def salla_oauth_callback(
                 config=new_config,
                 enabled=True,
             ))
-            logger.info("[Salla OAuth] Created new integration for tenant=%s", tenant_id)
 
         db.commit()
         logger.info(
-            "[Salla OAuth] DB save SUCCESS | tenant=%s store_id=%s store_name=%s",
-            tenant_id, salla_store_id, store_name,
+            "[Salla OAuth] DB save SUCCESS | tenant=%s store_id=%s",
+            tenant_id, salla_store_id,
         )
     except Exception as exc:
         logger.exception("[Salla OAuth] DB save FAILED: %s", exc)
@@ -319,9 +449,23 @@ async def salla_oauth_callback(
     except Exception as _exc:
         logger.warning("[Salla OAuth] WA notification error: %s", _exc)
 
-    # ── Step 5: Redirect to embedded app ───────────────────────────────────────
+    # ── Step 5: Redirect ────────────────────────────────────────────────────────
+    if auto_jwt:
+        # New merchant: redirect to /salla-callback with the JWT so they land logged-in
+        params = urllib.parse.urlencode({
+            "token":     auto_jwt,
+            "status":    "connected",
+            "store":     salla_store_id,
+            "name":      store_name,
+            "new":       "1" if is_new_merchant else "0",
+        })
+        redirect_url = f"{_SALLA_CALLBACK_BASE}/salla-callback?{params}"
+        logger.info("[Salla OAuth] New-merchant redirect → %s", redirect_url)
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    # Existing merchant: original flow
     success_url = _success_url(salla_store_id, store_name)
-    logger.info("[Salla OAuth] Flow complete — redirecting to %s", success_url)
+    logger.info("[Salla OAuth] Existing-merchant redirect → %s", success_url)
     return RedirectResponse(url=success_url, status_code=302)
 
 

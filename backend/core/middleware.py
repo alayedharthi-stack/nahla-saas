@@ -25,7 +25,8 @@ JWT_PUBLIC_PREFIXES = (
     "/webhook",
     "/auth",
     "/oauth",          # Salla/WhatsApp OAuth callbacks
-    "/integrations",   # Salla success/error landing pages (OAuth redirects arrive here without JWT)
+    "/integrations",   # Salla success/error landing pages
+    "/salla",          # /salla/start (new merchant install entry point)
     "/snippet.js",
     "/track",
 )

@@ -30,6 +30,7 @@ import AdminRevenue from './pages/AdminRevenue'
 import AdminTeam from './pages/AdminTeam'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
+import SallaCallback from './pages/SallaCallback'
 import Register from './pages/Register'
 import WhatsAppConnect from './pages/WhatsAppConnect'
 import VerifyEmail from './pages/VerifyEmail'
@@ -54,6 +55,7 @@ export default function App() {
           <Route path="/reset-password"             element={<ResetPassword />} />
           <Route path="/integrations/salla/success" element={<SallaOAuthSuccess />} />
           <Route path="/integrations/salla/error"   element={<SallaOAuthError />} />
+          <Route path="/salla-callback"             element={<SallaCallback />} />
 
           {/* Protected dashboard — all existing routes unchanged */}
           <Route
