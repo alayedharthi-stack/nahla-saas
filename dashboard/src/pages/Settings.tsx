@@ -1,13 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import {
   Save, Bot, Store, Users, Bell, MessageSquare,
   CheckCircle, AlertCircle, Loader2, Copy, ExternalLink,
   Eye, EyeOff, RefreshCw, UserPlus, Shield, ToggleLeft, ToggleRight,
   Sparkles, Play, Zap, ShoppingCart, RotateCcw, Heart,
   ChevronDown, ChevronUp, Clock, BrainCircuit, ShieldCheck, ExternalLink as LinkOut,
+  Wifi, WifiOff, BadgeCheck, RefreshCw as ReconnectIcon,
 } from 'lucide-react'
 import { useLanguage } from '../i18n/context'
 import { settingsApi, type AllSettings, type WhatsAppSettings, type AISettings, type StoreSettings, type NotificationSettings } from '../api/settings'
+import { whatsappConnectApi, type WaConnection } from '../api/whatsappConnect'
 import {
   autopilotApi,
   type AutopilotStatus,
@@ -156,6 +159,106 @@ const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
 
 // ── Tab: WhatsApp ────────────────────────────────────────────────────────────
 
+function WhatsAppConnectionCard() {
+  const [conn, setConn] = useState<WaConnection | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    whatsappConnectApi.getStatus()
+      .then(setConn)
+      .catch(() => setConn(null))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const isConnected = conn?.status === 'connected'
+  const needsReauth = conn?.status === 'needs_reauth' || conn?.status === 'error'
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 py-4 text-slate-400 text-sm">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        جاري التحقق من حالة الاتصال...
+      </div>
+    )
+  }
+
+  return (
+    <div className={`rounded-xl border p-4 ${
+      isConnected
+        ? 'bg-emerald-50 border-emerald-200'
+        : needsReauth
+          ? 'bg-amber-50 border-amber-200'
+          : 'bg-slate-50 border-slate-200'
+    }`}>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+            isConnected ? 'bg-emerald-100' : 'bg-white/70'
+          }`}>
+            {isConnected
+              ? <BadgeCheck className="w-5 h-5 text-emerald-600" />
+              : <WifiOff className="w-5 h-5 text-slate-400" />
+            }
+          </div>
+          <div>
+            <p className={`text-sm font-bold ${
+              isConnected ? 'text-emerald-800'
+              : needsReauth ? 'text-amber-800'
+              : 'text-slate-600'
+            }`}>
+              {isConnected
+                ? 'متصل بواتساب ✅'
+                : needsReauth
+                  ? 'انتهت صلاحية الاتصال ⚠️'
+                  : 'غير متصل بواتساب'
+              }
+            </p>
+            {isConnected && conn?.phone_number && (
+              <p className="text-xs font-mono text-emerald-700 mt-0.5 dir-ltr">
+                {conn.business_display_name
+                  ? `${conn.business_display_name} · ${conn.phone_number}`
+                  : conn.phone_number
+                }
+              </p>
+            )}
+            {!isConnected && (
+              <p className="text-xs text-slate-500 mt-0.5">
+                اربط رقم واتساب للأعمال لتفعيل الردود التلقائية
+              </p>
+            )}
+          </div>
+        </div>
+
+        <Link
+          to="/whatsapp-connect"
+          className={`flex items-center gap-2 text-sm font-bold px-4 py-2 rounded-xl transition-all ${
+            isConnected
+              ? 'bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50'
+              : needsReauth
+                ? 'bg-amber-500 text-white hover:bg-amber-400'
+                : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20'
+          }`}
+        >
+          {isConnected
+            ? <><ReconnectIcon className="w-4 h-4" /> إعادة ربط واتساب</>
+            : <><MessageSquare className="w-4 h-4" /> ربط واتساب</>
+          }
+        </Link>
+      </div>
+
+      {isConnected && conn?.connected_at && (
+        <p className="text-xs text-emerald-600/70 mt-3 border-t border-emerald-200 pt-2">
+          تم الربط في {new Date(conn.connected_at).toLocaleDateString('ar-SA')}
+          {conn.whatsapp_business_account_id && (
+            <span className="ms-3 font-mono">WABA: {conn.whatsapp_business_account_id}</span>
+          )}
+        </p>
+      )}
+    </div>
+  )
+}
+
+
 function WhatsAppTab({
   data, onChange, onSave, saving, saved, saveError,
 }: {
@@ -170,6 +273,7 @@ function WhatsAppTab({
   const s = t(tr => tr.settings.whatsapp)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
+  const [webhookOpen, setWebhookOpen] = useState(false)
 
   const handleTest = async () => {
     setTesting(true)
@@ -186,62 +290,121 @@ function WhatsAppTab({
 
   return (
     <div className="space-y-5">
-      <Section title={s.accountTitle} description={s.accountDesc}>
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label={s.businessName}>
-            <input className="input" value={data.business_display_name} onChange={e => onChange({ business_display_name: e.target.value })} placeholder="e.g. Ahmed's Fashion Store" />
-          </Field>
-          <Field label={s.phoneNumber} hint={s.phoneHint}>
-            <input className="input" value={data.phone_number} onChange={e => onChange({ phone_number: e.target.value })} placeholder="+966 50 123 4567" dir="ltr" />
-          </Field>
-          <Field label="Phone Number ID" hint={s.phoneIdHint}>
-            <input className="input" value={data.phone_number_id} onChange={e => onChange({ phone_number_id: e.target.value })} placeholder="123456789012345" dir="ltr" />
-          </Field>
-          <Field label="Access Token">
-            <SecretInput value={data.access_token} onChange={v => onChange({ access_token: v })} placeholder="EAAxxxxxxx..." />
-          </Field>
-        </div>
+
+      {/* ── 1. Connection status (no technical fields) ── */}
+      <Section
+        title="حالة الاتصال بواتساب للأعمال"
+        description="اربط رقم واتساب للأعمال الخاص بمتجرك بخطوة واحدة"
+      >
+        <WhatsAppConnectionCard />
+        <p className="text-xs text-slate-400 mt-3 flex items-start gap-1.5">
+          <Shield className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
+          جميع بيانات الاتصال (Phone Number ID، Access Token) تُحفظ بشكل آمن على الخادم
+          ولا تظهر في الواجهة.
+        </p>
       </Section>
 
-      <Section title={s.webhookTitle} description={s.webhookDesc}>
+      {/* ── 2. Notification contact ── */}
+      <Section
+        title={s.buttonsTitle}
+        description={s.buttonsDesc}
+      >
         <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Verify Token" hint={s.verifyHint}>
-            <SecretInput value={data.verify_token} onChange={v => onChange({ verify_token: v })} placeholder="nahla_secret_token" />
+          <Field label={s.ownerWhatsapp} hint="رقم الواتساب الذي تصله إشعارات المنصة (مثل: تم الدفع، اشتراك جديد)">
+            <input
+              className="input"
+              value={data.owner_whatsapp_number}
+              onChange={e => onChange({ owner_whatsapp_number: e.target.value })}
+              placeholder="+966 50 000 0000"
+              dir="ltr"
+            />
           </Field>
-          <Field label="Webhook URL" hint={s.webhookHint}>
-            <ReadonlyInput value={data.webhook_url || 'https://api.nahlah.ai/webhook/whatsapp'} copyable />
-          </Field>
-        </div>
-        <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
-          <p className="text-xs text-blue-700 flex items-start gap-2">
-            <ExternalLink className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-            {s.webhookNote}
-          </p>
-        </div>
-      </Section>
-
-      <Section title={s.buttonsTitle} description={s.buttonsDesc}>
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label={s.storeBtnLabel}>
-            <input className="input" value={data.store_button_label} onChange={e => onChange({ store_button_label: e.target.value })} />
+          <Field label={s.storeBtnLabel} hint="نص زر رابط المتجر في محادثات واتساب">
+            <input
+              className="input"
+              value={data.store_button_label}
+              onChange={e => onChange({ store_button_label: e.target.value })}
+            />
           </Field>
           <Field label={s.storeBtnUrl}>
-            <input className="input" value={data.store_button_url} onChange={e => onChange({ store_button_url: e.target.value })} placeholder="https://..." dir="ltr" />
+            <input
+              className="input"
+              value={data.store_button_url}
+              onChange={e => onChange({ store_button_url: e.target.value })}
+              placeholder="https://..."
+              dir="ltr"
+            />
           </Field>
           <Field label={s.ownerBtnLabel}>
-            <input className="input" value={data.owner_contact_label} onChange={e => onChange({ owner_contact_label: e.target.value })} />
-          </Field>
-          <Field label={s.ownerWhatsapp}>
-            <input className="input" value={data.owner_whatsapp_number} onChange={e => onChange({ owner_whatsapp_number: e.target.value })} placeholder="+966 50 000 0000" dir="ltr" />
+            <input
+              className="input"
+              value={data.owner_contact_label}
+              onChange={e => onChange({ owner_contact_label: e.target.value })}
+            />
           </Field>
         </div>
       </Section>
 
+      {/* ── 3. Auto-reply ── */}
       <Section title={s.autoReplyTitle}>
-        <Toggle label={s.autoReplyLabel} hint={s.autoReplyHint} value={data.auto_reply_enabled} onChange={v => onChange({ auto_reply_enabled: v })} />
-        <Toggle label={s.transferLabel} hint={s.transferHint} value={data.transfer_to_owner_enabled} onChange={v => onChange({ transfer_to_owner_enabled: v })} />
+        <Toggle
+          label={s.autoReplyLabel}
+          hint={s.autoReplyHint}
+          value={data.auto_reply_enabled}
+          onChange={v => onChange({ auto_reply_enabled: v })}
+        />
+        <Toggle
+          label={s.transferLabel}
+          hint={s.transferHint}
+          value={data.transfer_to_owner_enabled}
+          onChange={v => onChange({ transfer_to_owner_enabled: v })}
+        />
       </Section>
 
+      {/* ── 4. Webhook reference (collapsed by default) ── */}
+      <div className="rounded-xl border border-slate-200 overflow-hidden">
+        <button
+          onClick={() => setWebhookOpen(v => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors"
+        >
+          <span className="flex items-center gap-2 text-sm font-medium text-slate-600">
+            <ShieldCheck className="w-4 h-4 text-slate-400" />
+            إعدادات Webhook (للمطورين فقط)
+          </span>
+          {webhookOpen
+            ? <ChevronUp className="w-4 h-4 text-slate-400" />
+            : <ChevronDown className="w-4 h-4 text-slate-400" />
+          }
+        </button>
+
+        {webhookOpen && (
+          <div className="p-4 space-y-4 border-t border-slate-100">
+            <div className="grid sm:grid-cols-2 gap-4">
+              <Field label="Webhook URL" hint={s.webhookHint}>
+                <ReadonlyInput
+                  value={data.webhook_url || 'https://api.nahlah.ai/webhook/whatsapp'}
+                  copyable
+                />
+              </Field>
+              <Field label="Verify Token" hint={s.verifyHint}>
+                <SecretInput
+                  value={data.verify_token}
+                  onChange={v => onChange({ verify_token: v })}
+                  placeholder="nahla_secret_token"
+                />
+              </Field>
+            </div>
+            <div className="p-3 bg-blue-50 rounded-lg border border-blue-100">
+              <p className="text-xs text-blue-700 flex items-start gap-2">
+                <ExternalLink className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                {s.webhookNote}
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Save bar + test ── */}
       <div className="flex items-center gap-3 flex-wrap">
         <button onClick={handleTest} disabled={testing} className="btn-secondary text-sm">
           {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
