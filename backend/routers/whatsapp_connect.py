@@ -491,3 +491,276 @@ async def connection_health(request: Request, db: Session = Depends(get_db)):
         "last_verified": conn.last_verified_at.isoformat() if conn.last_verified_at else None,
         "last_error":    conn.last_error,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Shared-WABA Direct Registration Flow
+# ─────────────────────────────────────
+# Merchant enters phone number in their dashboard → Nahla calls Meta API to
+# register the number under Nahla's WABA → Meta sends OTP to merchant's phone
+# → Merchant enters OTP → number is verified and saved.
+#
+# Endpoints:
+#   POST /whatsapp/direct/request-otp   — register number + send OTP
+#   POST /whatsapp/direct/verify-otp    — verify OTP + save connection
+#   GET  /whatsapp/direct/status        — registration progress
+# ══════════════════════════════════════════════════════════════════════════════
+
+class DirectOTPRequest(BaseModel):
+    phone_number:  str   # e.g. "+966501234567" or "0501234567"
+    display_name:  str   # merchant's store display name on WhatsApp
+    method:        str = "SMS"   # "SMS" or "VOICE"
+
+
+class DirectVerifyRequest(BaseModel):
+    phone_number_id: str   # returned from request-otp step
+    code:            str   # 6-digit OTP from Meta
+
+
+def _normalize_phone(raw: str) -> tuple[str, str]:
+    """
+    Return (country_code, national_number) from a raw phone string.
+    Handles +966XXXXXXXXX, 00966XXXXXXXXX, 05XXXXXXXX formats.
+    """
+    raw = raw.strip().replace(" ", "").replace("-", "")
+    if raw.startswith("+"):
+        raw = raw[1:]
+    if raw.startswith("00"):
+        raw = raw[2:]
+    # Saudi: 966XXXXXXXXX or 05XXXXXXXX
+    if raw.startswith("966"):
+        return "966", raw[3:]
+    if raw.startswith("0"):
+        return "966", raw[1:]
+    # Default: assume Saudi
+    return "966", raw
+
+
+@router.post("/direct/request-otp")
+async def direct_request_otp(
+    body: DirectOTPRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Step 1 — Register the merchant's phone number under Nahla's WABA and
+    send an OTP to that number via SMS or voice call.
+    """
+    from core.config import WA_BUSINESS_ACCOUNT_ID, WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+
+    if not WA_TOKEN or not WA_BUSINESS_ACCOUNT_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="خدمة واتساب غير مُهيَّأة. تواصل مع الدعم.",
+        )
+
+    cc, national = _normalize_phone(body.phone_number)
+    graph        = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+    headers      = {
+        "Authorization": f"Bearer {WA_TOKEN}",
+        "Content-Type":  "application/json",
+    }
+
+    logger.info(
+        "[WA Direct] request-otp | tenant=%s cc=%s number=%s",
+        tenant_id, cc, national,
+    )
+
+    # ── Step A: Add phone number to WABA ────────────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            add_resp = await client.post(
+                f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
+                headers=headers,
+                json={
+                    "cc":            cc,
+                    "phone_number":  national,
+                    "verified_name": body.display_name,
+                    "migrate_phone_number": False,
+                },
+            )
+            add_data = add_resp.json()
+    except Exception as exc:
+        logger.error("[WA Direct] Add phone API error: %s", exc)
+        raise HTTPException(status_code=503, detail="خطأ في الاتصال بـ Meta")
+
+    if "error" in add_data:
+        err = add_data["error"]
+        code = err.get("code", 0)
+        msg  = err.get("message", "")
+        logger.warning("[WA Direct] Add phone error %s: %s", code, msg)
+
+        # Code 100 subcode 2388053 = number already registered → proceed to OTP
+        if code == 100 and "already" in msg.lower():
+            phone_number_id = add_data.get("id", "")
+        else:
+            friendly = _meta_error_to_arabic(code, msg)
+            raise HTTPException(status_code=400, detail=friendly)
+    else:
+        phone_number_id = add_data.get("id", "")
+
+    if not phone_number_id:
+        raise HTTPException(
+            status_code=400,
+            detail="لم يتم الحصول على معرّف الرقم. تحقق من الرقم وأعد المحاولة.",
+        )
+
+    # ── Step B: Request OTP ──────────────────────────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            otp_resp = await client.post(
+                f"{graph}/{phone_number_id}/request_code",
+                headers=headers,
+                json={
+                    "code_method": body.method.upper(),
+                    "language":    "ar",
+                },
+            )
+            otp_data = otp_resp.json()
+    except Exception as exc:
+        logger.error("[WA Direct] Request OTP API error: %s", exc)
+        raise HTTPException(status_code=503, detail="خطأ في إرسال رمز التحقق")
+
+    if "error" in otp_data:
+        err = otp_data["error"]
+        friendly = _meta_error_to_arabic(err.get("code", 0), err.get("message", ""))
+        raise HTTPException(status_code=400, detail=friendly)
+
+    logger.info(
+        "[WA Direct] OTP sent | tenant=%s phone_number_id=%s",
+        tenant_id, phone_number_id,
+    )
+
+    return {
+        "status":          "otp_sent",
+        "phone_number_id": phone_number_id,
+        "message":         f"تم إرسال رمز التحقق إلى +{cc}{national}",
+    }
+
+
+@router.post("/direct/verify-otp")
+async def direct_verify_otp(
+    body: DirectVerifyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Step 2 — Verify the OTP code and save the WhatsApp connection.
+    """
+    from core.config import WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    graph     = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+    headers   = {
+        "Authorization": f"Bearer {WA_TOKEN}",
+        "Content-Type":  "application/json",
+    }
+
+    logger.info(
+        "[WA Direct] verify-otp | tenant=%s phone_number_id=%s",
+        tenant_id, body.phone_number_id,
+    )
+
+    # ── Step A: Verify code with Meta ────────────────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            verify_resp = await client.post(
+                f"{graph}/{body.phone_number_id}/verify_code",
+                headers=headers,
+                json={"code": body.code},
+            )
+            verify_data = verify_resp.json()
+    except Exception as exc:
+        logger.error("[WA Direct] Verify code API error: %s", exc)
+        raise HTTPException(status_code=503, detail="خطأ في التحقق من الرمز")
+
+    if "error" in verify_data:
+        err = verify_data["error"]
+        code = err.get("code", 0)
+        if code in (136012, 136013):
+            raise HTTPException(status_code=400, detail="رمز التحقق غير صحيح أو منتهي الصلاحية")
+        friendly = _meta_error_to_arabic(code, err.get("message", ""))
+        raise HTTPException(status_code=400, detail=friendly)
+
+    # ── Step B: Fetch phone number details ───────────────────────────────────
+    phone_number   = ""
+    display_name   = ""
+    waba_id        = ""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            info_resp = await client.get(
+                f"{graph}/{body.phone_number_id}",
+                headers=headers,
+                params={"fields": "display_phone_number,verified_name,status"},
+            )
+            info = info_resp.json()
+            phone_number = info.get("display_phone_number", "")
+            display_name = info.get("verified_name", "")
+    except Exception:
+        pass
+
+    # ── Step C: Save connection to DB ────────────────────────────────────────
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if conn is None:
+        conn = WhatsAppConnection(tenant_id=tenant_id)
+        db.add(conn)
+
+    conn.status           = "connected"
+    conn.phone_number_id  = body.phone_number_id
+    conn.phone_number     = phone_number
+    conn.display_name     = display_name
+    conn.waba_id          = waba_id or ""
+    conn.access_token     = WA_TOKEN   # shared WABA uses platform token
+    conn.webhook_verified = True
+    conn.sending_enabled  = True
+    conn.connected_at     = datetime.now(timezone.utc)
+    conn.last_error       = None
+
+    # Also update tenant-level fields for quick access
+    tenant = get_or_create_tenant(db, tenant_id)
+    tenant.whatsapp_phone_id = body.phone_number_id
+    tenant.whatsapp_token    = WA_TOKEN
+
+    db.commit()
+
+    logger.info(
+        "[WA Direct] ✅ Connected | tenant=%s phone=%s name=%s",
+        tenant_id, phone_number, display_name,
+    )
+
+    return {
+        "status":       "connected",
+        "phone_number": phone_number,
+        "display_name": display_name,
+        "message":      "تم ربط واتساب بنجاح! 🎉",
+    }
+
+
+@router.get("/direct/status")
+async def direct_status(request: Request, db: Session = Depends(get_db)):
+    """Return the current direct-registration connection status."""
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if not conn or conn.status == "not_connected":
+        return {"connected": False, "status": "not_connected"}
+    return {
+        "connected":    conn.status == "connected",
+        "status":       conn.status,
+        "phone_number": conn.phone_number,
+        "display_name": conn.display_name,
+        "connected_at": conn.connected_at.isoformat() if conn.connected_at else None,
+    }
+
+
+def _meta_error_to_arabic(code: int, message: str) -> str:
+    """Convert common Meta API error codes to friendly Arabic messages."""
+    mapping = {
+        136023: "هذا الرقم مسجَّل بالفعل على واتساب الشخصي. يجب استخدام رقم غير مسجَّل.",
+        136031: "تجاوزت عدد الأرقام المسموح بها. تواصل مع الدعم.",
+        100:    "بيانات غير صحيحة. تحقق من رقم الهاتف.",
+        190:    "انتهت صلاحية رمز الوصول. تواصل مع الدعم.",
+        10:     "صلاحيات غير كافية. تواصل مع الدعم.",
+    }
+    return mapping.get(code, f"خطأ من Meta: {message or code}")

@@ -1,141 +1,97 @@
 /**
  * WhatsAppConnect.tsx
  * ────────────────────
- * Merchant-facing WhatsApp / Meta Embedded Signup flow.
+ * Direct WhatsApp registration wizard (Shared-WABA model).
  *
  * Flow:
- *  1. Load page → GET /whatsapp/connection for current state
- *  2. Merchant clicks "ربط واتساب"
- *  3. We POST /whatsapp/connection/start to mark as pending + get Meta config
- *  4. We open FB.login() popup using the Facebook JavaScript SDK
- *  5. On success, POST /whatsapp/connection/callback with the code
- *  6. Backend exchanges code with Meta, persists tokens, returns connected state
- *  7. UI updates to "مرتبط" with phone number
+ *  Step 1 → Merchant enters phone number + display name
+ *  Step 2 → Merchant enters OTP sent by Meta to their phone
+ *  Step 3 → Success — number connected under Nahla's WABA
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
-  AlertCircle,
-  AlertTriangle,
   BadgeCheck,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
-  ExternalLink,
+  ChevronRight,
   Loader2,
   MessageCircle,
+  Phone,
   RefreshCw,
   ShieldCheck,
   Unplug,
-  Wifi,
-  WifiOff,
   XCircle,
-  Zap,
 } from 'lucide-react'
-import { whatsappConnectApi, type WaConnection, type WaConnectionStatus, type WaHealthResult } from '../api/whatsappConnect'
-import { useLanguage } from '../i18n/context'
+import { apiClient } from '../api/client'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── API helpers ───────────────────────────────────────────────────────────────
 
-declare global {
-  interface Window {
-    FB?: {
-      init: (options: Record<string, unknown>) => void
-      login: (callback: (response: FBLoginResponse) => void, options: Record<string, unknown>) => void
-    }
-    fbAsyncInit?: () => void
+async function requestOtp(phoneNumber: string, displayName: string, method = 'SMS') {
+  const res = await apiClient.post('/whatsapp/direct/request-otp', {
+    phone_number: phoneNumber,
+    display_name: displayName,
+    method,
+  })
+  return res.data as { status: string; phone_number_id: string; message: string }
+}
+
+async function verifyOtp(phoneNumberId: string, code: string) {
+  const res = await apiClient.post('/whatsapp/direct/verify-otp', {
+    phone_number_id: phoneNumberId,
+    code,
+  })
+  return res.data as { status: string; phone_number: string; display_name: string; message: string }
+}
+
+async function getDirectStatus() {
+  const res = await apiClient.get('/whatsapp/direct/status')
+  return res.data as {
+    connected: boolean
+    status: string
+    phone_number?: string
+    display_name?: string
+    connected_at?: string
   }
 }
 
-interface FBLoginResponse {
-  status: 'connected' | 'not_authorized' | 'unknown'
-  authResponse?: {
-    code?: string
-    accessToken?: string
-    userID?: string
-  }
+async function disconnectWhatsApp() {
+  await apiClient.post('/whatsapp/connection/disconnect')
 }
 
-// ── Status config map ─────────────────────────────────────────────────────────
+// ── Step indicator ────────────────────────────────────────────────────────────
 
-const STATUS_STYLE: Record<WaConnectionStatus, {
-  color: string
-  bg: string
-  border: string
-  icon: React.ElementType
-}> = {
-  not_connected: { color: 'text-slate-500',   bg: 'bg-slate-100',  border: 'border-slate-200',  icon: WifiOff },
-  pending:       { color: 'text-amber-600',   bg: 'bg-amber-50',   border: 'border-amber-200',  icon: Loader2 },
-  connected:     { color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200',icon: Wifi },
-  error:         { color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-200',    icon: XCircle },
-  disconnected:  { color: 'text-slate-500',   bg: 'bg-slate-100',  border: 'border-slate-200',  icon: WifiOff },
-  needs_reauth:  { color: 'text-orange-600',  bg: 'bg-orange-50',  border: 'border-orange-200', icon: AlertTriangle },
-}
-
-// ── Small helper components ───────────────────────────────────────────────────
-
-function StatusBadge({ status }: { status: WaConnectionStatus }) {
-  const { t } = useLanguage()
-  const cfg  = STATUS_STYLE[status] ?? STATUS_STYLE.not_connected
-  const Icon = cfg.icon
-  const label = t(tr => tr.whatsappConnect.status[status] ?? status)
+function StepDot({ n, current }: { n: number; current: number }) {
+  const done   = n < current
+  const active = n === current
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-full border ${cfg.color} ${cfg.bg} ${cfg.border}`}>
-      <Icon className={`w-3.5 h-3.5 ${status === 'pending' ? 'animate-spin' : ''}`} />
-      {label}
-    </span>
+    <div className="flex items-center gap-1">
+      <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all
+        ${done   ? 'bg-emerald-500 text-white'   : ''}
+        ${active ? 'bg-violet-600 text-white ring-4 ring-violet-100' : ''}
+        ${!done && !active ? 'bg-slate-100 text-slate-400' : ''}
+      `}>
+        {done ? <CheckCircle2 className="w-4 h-4" /> : n}
+      </div>
+    </div>
   )
 }
 
-function HealthCheck({ health }: { health: WaHealthResult }) {
-  const [open, setOpen] = useState(false)
-  const checks = health.checks
-
+function StepBar({ step }: { step: number }) {
+  const labels = ['رقم الهاتف', 'التحقق', 'تم الربط']
   return (
-    <div className="rounded-xl border border-slate-200 overflow-hidden">
-      <button
-        onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors"
-      >
-        <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-          <ShieldCheck className="w-4 h-4 text-slate-500" />
-          فحص المتطلبات
-        </span>
-        <div className="flex items-center gap-2">
-          {health.healthy
-            ? <span className="text-xs text-emerald-600 font-bold">كل شيء يعمل</span>
-            : <span className="text-xs text-red-500 font-bold">تحقق مطلوب</span>
-          }
-          {open ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
-        </div>
-      </button>
-
-      {open && (
-        <div className="divide-y divide-slate-100">
-          {(Object.entries(checks) as [string, boolean][]).map(([key, val]) => {
-            const labels: Record<string, string> = {
-              has_connection:   'اتصال موجود',
-              token_present:    'رمز التوثيق محفوظ',
-              token_valid:      'رمز التوثيق سليم',
-              webhook_verified: 'Webhook مفعّل',
-              sending_enabled:  'الإرسال مفعّل',
-            }
-            return (
-              <div key={key} className="flex items-center justify-between px-4 py-2.5">
-                <span className="text-sm text-slate-600">{labels[key] ?? key}</span>
-                {val
-                  ? <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                  : <XCircle className="w-4 h-4 text-slate-300" />
-                }
-              </div>
-            )
-          })}
-          {health.last_error && (
-            <div className="px-4 py-2.5 bg-red-50">
-              <p className="text-xs text-red-600 font-mono break-all">{health.last_error}</p>
-            </div>
+    <div className="flex items-center justify-center gap-2 mb-8">
+      {labels.map((label, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <div className="flex flex-col items-center gap-1">
+            <StepDot n={i + 1} current={step} />
+            <span className={`text-[10px] font-medium ${i + 1 === step ? 'text-violet-600' : 'text-slate-400'}`}>
+              {label}
+            </span>
+          </div>
+          {i < labels.length - 1 && (
+            <div className={`w-10 h-0.5 mb-4 rounded ${i + 1 < step ? 'bg-emerald-400' : 'bg-slate-200'}`} />
           )}
         </div>
-      )}
+      ))}
     </div>
   )
 }
@@ -143,357 +99,344 @@ function HealthCheck({ health }: { health: WaHealthResult }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function WhatsAppConnect() {
-  const { t } = useLanguage()
-  const wt = t(tr => tr.whatsappConnect)
-  const [conn, setConn]           = useState<WaConnection | null>(null)
-  const [health, setHealth]       = useState<WaHealthResult | null>(null)
-  const [loading, setLoading]     = useState(true)
-  const [connecting, setConnecting] = useState(false)
-  const [verifying, setVerifying] = useState(false)
-  const [error, setError]         = useState<string | null>(null)
-  const sdkReady                  = useRef(false)
+  const [step, setStep]               = useState<1 | 2 | 3>(1)
+  const [loading, setLoading]         = useState(true)
+  const [busy, setBusy]               = useState(false)
+  const [error, setError]             = useState('')
 
-  // ── Load current state ─────────────────────────────────────────────────────
+  // Step 1 fields
+  const [phone, setPhone]             = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [otpMethod, setOtpMethod]     = useState<'SMS' | 'VOICE'>('SMS')
 
-  const loadStatus = useCallback(async () => {
-    try {
-      const [status, h] = await Promise.all([
-        whatsappConnectApi.getStatus(),
-        whatsappConnectApi.health(),
-      ])
-      setConn(status)
-      setHealth(h)
-    } catch {
-      // silent
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  // Step 2 fields
+  const [otp, setOtp]                 = useState('')
+  const [phoneNumberId, setPhoneNumberId] = useState('')
+  const [sentTo, setSentTo]           = useState('')
 
-  useEffect(() => { loadStatus() }, [loadStatus])
+  // Step 3 — connected info
+  const [connectedPhone, setConnectedPhone] = useState('')
+  const [connectedName, setConnectedName]   = useState('')
+  const [connectedAt, setConnectedAt]       = useState('')
 
-  // ── Load Facebook JS SDK ───────────────────────────────────────────────────
-
-  const loadFbSdk = useCallback((appId: string, version: string) => {
-    return new Promise<void>((resolve) => {
-      if (window.FB) { resolve(); return }
-      window.fbAsyncInit = () => {
-        window.FB!.init({
-          appId,
-          autoLogAppEvents: true,
-          xfbml:            true,
-          version:          version || 'v20.0',
-        })
-        sdkReady.current = true
-        resolve()
-      }
-      const script = document.createElement('script')
-      script.src   = 'https://connect.facebook.net/en_US/sdk.js'
-      script.async = true
-      script.defer = true
-      document.body.appendChild(script)
-    })
-  }, [])
-
-  // ── Embedded Signup flow ───────────────────────────────────────────────────
-
-  const handleConnect = useCallback(async () => {
-    setConnecting(true)
-    setError(null)
-
-    try {
-      // 1. Mark as pending + get Meta config from backend
-      const startData = await whatsappConnectApi.start()
-
-      if (!startData.meta_app_id || startData.meta_app_id === 'CONFIGURE_META_APP_ID') {
-        setError('META_APP_ID غير مهيأ على الخادم. يرجى إضافة متغيرات البيئة أولاً.')
-        setConnecting(false)
-        return
-      }
-
-      // 2. Load FB SDK
-      await loadFbSdk(startData.meta_app_id, startData.graph_version)
-
-      // 3. Open Meta Embedded Signup popup
-      // NOTE: FB.login callback must be a plain function (not async) — use void IIFE inside
-      window.FB!.login(
-        (response: FBLoginResponse) => {
-          if (response.status === 'connected' && response.authResponse?.code) {
-            void (async () => {
-              try {
-                // 4. Exchange code with our backend
-                const result = await whatsappConnectApi.callback({
-                  code: response.authResponse!.code!,
-                })
-                setConn(result as WaConnection)
-                await loadStatus()
-                setError(null)
-              } catch (err) {
-                const msg = err instanceof Error ? err.message : 'فشل في إتمام الربط'
-                setError(msg)
-                await loadStatus()
-              } finally {
-                setConnecting(false)
-              }
-            })()
-          } else if (response.status === 'not_authorized') {
-            setError('لم يتم منح الصلاحيات المطلوبة. يرجى قبول الأذونات عند الطلب.')
-            void loadStatus()
-            setConnecting(false)
-          } else {
-            setError('أُلغي الربط أو لم تكتمل العملية.')
-            void loadStatus()
-            setConnecting(false)
-          }
-        },
-        {
-          // config_id comes from META_WA_CONFIG_ID env var on backend.
-          // Omit it entirely when not set — passing an empty string causes
-          // Meta to reject the request.
-          ...(startData.config_id ? { config_id: startData.config_id } : {}),
-          response_type: 'code',
-          override_default_response_type: true,
-          scope: startData.scope,
-          extras: startData.extras,
+  // Load existing connection
+  useEffect(() => {
+    getDirectStatus()
+      .then(s => {
+        if (s.connected) {
+          setConnectedPhone(s.phone_number ?? '')
+          setConnectedName(s.display_name ?? '')
+          setConnectedAt(s.connected_at ?? '')
+          setStep(3)
         }
-      )
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'حدث خطأ أثناء التهيئة'
-      setError(msg)
-      setConnecting(false)
-    }
-  }, [loadFbSdk, loadStatus])
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
 
-  // ── Verify ─────────────────────────────────────────────────────────────────
+  // ── Step 1: Request OTP ──────────────────────────────────────────────────
 
-  const handleVerify = useCallback(async () => {
-    setVerifying(true)
+  const handleRequestOtp = useCallback(async () => {
+    if (!phone.trim()) { setError('أدخل رقم الهاتف'); return }
+    if (!displayName.trim()) { setError('أدخل اسم العرض على واتساب'); return }
+
+    setBusy(true)
+    setError('')
     try {
-      await whatsappConnectApi.verify()
-      await loadStatus()
+      const res = await requestOtp(phone.trim(), displayName.trim(), otpMethod)
+      setPhoneNumberId(res.phone_number_id)
+      setSentTo(res.message)
+      setStep(2)
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? 'حدث خطأ. تحقق من الرقم وأعد المحاولة.'
+      setError(msg)
     } finally {
-      setVerifying(false)
+      setBusy(false)
     }
-  }, [loadStatus])
+  }, [phone, displayName, otpMethod])
 
-  // ── Disconnect ─────────────────────────────────────────────────────────────
+  // ── Step 2: Verify OTP ───────────────────────────────────────────────────
+
+  const handleVerifyOtp = useCallback(async () => {
+    if (otp.trim().length < 6) { setError('أدخل الرمز المكوّن من 6 أرقام'); return }
+
+    setBusy(true)
+    setError('')
+    try {
+      const res = await verifyOtp(phoneNumberId, otp.trim())
+      setConnectedPhone(res.phone_number)
+      setConnectedName(res.display_name)
+      setConnectedAt(new Date().toISOString())
+      setStep(3)
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? 'رمز التحقق غير صحيح. أعد المحاولة.'
+      setError(msg)
+    } finally {
+      setBusy(false)
+    }
+  }, [otp, phoneNumberId])
+
+  // ── Disconnect ───────────────────────────────────────────────────────────
 
   const handleDisconnect = useCallback(async () => {
     if (!confirm('هل أنت متأكد من فصل واتساب؟ سيتوقف الرد التلقائي فوراً.')) return
-    await whatsappConnectApi.disconnect()
-    await loadStatus()
-  }, [loadStatus])
-
-  // ── Reconnect ──────────────────────────────────────────────────────────────
-
-  const handleReconnect = useCallback(async () => {
-    await whatsappConnectApi.reconnect()
-    await handleConnect()
-  }, [handleConnect])
+    setBusy(true)
+    try {
+      await disconnectWhatsApp()
+      setStep(1)
+      setPhone('')
+      setDisplayName('')
+      setOtp('')
+      setConnectedPhone('')
+      setConnectedName('')
+    } catch {
+      setError('فشل في قطع الاتصال')
+    } finally {
+      setBusy(false)
+    }
+  }, [])
 
   // ─────────────────────────────────────────────────────────────────────────
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <Loader2 className="w-6 h-6 animate-spin text-brand-500" />
+        <Loader2 className="w-6 h-6 animate-spin text-violet-500" />
       </div>
     )
   }
 
-  const status   = conn?.status ?? 'not_connected'
-  const cfg      = STATUS_STYLE[status]
-  const isActive = status === 'connected'
-  const needsAction = status === 'error' || status === 'needs_reauth' || status === 'disconnected'
-
   return (
-    <div className="max-w-xl mx-auto space-y-5">
-
+    <div className="max-w-lg mx-auto space-y-2" dir="rtl">
       {/* Header */}
-      <div>
+      <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
           <MessageCircle className="w-6 h-6 text-emerald-500" />
-          {wt.title}
+          ربط واتساب للأعمال
         </h1>
         <p className="text-slate-500 mt-1 text-sm">
-          {wt.subtitle}
+          أضف رقم واتساب متجرك ليبدأ الرد التلقائي على عملائك
         </p>
       </div>
 
-      {/* Status card */}
-      <div className={`rounded-2xl border p-5 ${cfg.bg} ${cfg.border}`}>
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className={`w-11 h-11 rounded-xl flex items-center justify-center ${isActive ? 'bg-emerald-100' : 'bg-white/60'}`}>
-              {isActive
-                ? <BadgeCheck className="w-6 h-6 text-emerald-600" />
-                : <cfg.icon className={`w-6 h-6 ${cfg.color} ${status === 'pending' ? 'animate-spin' : ''}`} />
-              }
+      {/* Step bar — only show for steps 1 and 2 */}
+      {step < 3 && <StepBar step={step} />}
+
+      {/* ── Step 1: Phone number ─────────────────────────────────────────── */}
+      {step === 1 && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
+          <div className="flex items-center gap-3 mb-1">
+            <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center">
+              <Phone className="w-5 h-5 text-violet-600" />
             </div>
             <div>
-              <StatusBadge status={status} />
-              {conn?.phone_number && (
-                <p className="text-sm font-semibold text-slate-800 mt-1">
-                  {conn.business_display_name ?? conn.phone_number}
-                </p>
-              )}
-              {conn?.phone_number && (
-                <p className="text-xs text-slate-500 mt-0.5 font-mono">{conn.phone_number}</p>
-              )}
-              {!isActive && !conn?.phone_number && (
-                <p className="text-xs text-slate-500 mt-1">
-                  {wt.statusHint}
-                </p>
-              )}
+              <p className="font-semibold text-slate-800">رقم الهاتف</p>
+              <p className="text-xs text-slate-500">رقم لم يُسجَّل على واتساب من قبل</p>
             </div>
           </div>
 
-          {isActive && conn?.connected_at && (
-            <p className="text-xs text-slate-400 shrink-0">
-              {new Date(conn.connected_at).toLocaleDateString('ar-SA')}
-            </p>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                رقم الهاتف <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="tel"
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                placeholder="+966 5X XXX XXXX"
+                className="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 text-left"
+                dir="ltr"
+              />
+              <p className="text-xs text-slate-400 mt-1">مثال: +966501234567 أو 0501234567</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                الاسم على واتساب <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={displayName}
+                onChange={e => setDisplayName(e.target.value)}
+                placeholder="مثال: متجر النور"
+                className="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400"
+              />
+              <p className="text-xs text-slate-400 mt-1">هذا الاسم سيظهر للعملاء على واتساب</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-2">
+                طريقة التحقق
+              </label>
+              <div className="flex gap-3">
+                {(['SMS', 'VOICE'] as const).map(m => (
+                  <button
+                    key={m}
+                    onClick={() => setOtpMethod(m)}
+                    className={`flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all
+                      ${otpMethod === m
+                        ? 'bg-violet-600 text-white border-violet-600'
+                        : 'bg-white text-slate-600 border-slate-300 hover:border-violet-300'
+                      }`}
+                  >
+                    {m === 'SMS' ? '📱 رسالة نصية' : '📞 مكالمة هاتفية'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+              <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+              <p className="text-sm text-red-700">{error}</p>
+            </div>
           )}
-        </div>
 
-        {/* Connected metadata */}
-        {isActive && (
-          <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
-            {conn?.whatsapp_business_account_id && (
-              <div className="bg-white/60 rounded-lg p-2.5">
-                <p className="text-slate-400 mb-0.5">WABA ID</p>
-                <p className="font-mono text-slate-700 truncate">{conn.whatsapp_business_account_id}</p>
-              </div>
-            )}
-            {conn?.phone_number_id && (
-              <div className="bg-white/60 rounded-lg p-2.5">
-                <p className="text-slate-400 mb-0.5">Phone Number ID</p>
-                <p className="font-mono text-slate-700 truncate">{conn.phone_number_id}</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Error message */}
-        {conn?.last_error && (status === 'error' || status === 'needs_reauth') && (
-          <div className="mt-3 flex items-start gap-2 bg-white/60 rounded-lg p-3">
-            <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-            <p className="text-xs text-red-600 font-mono break-all">{conn.last_error}</p>
-          </div>
-        )}
-      </div>
-
-      {/* Error from connect attempt */}
-      {error && (
-        <div className="flex items-start gap-2.5 bg-red-50 border border-red-200 rounded-xl p-4">
-          <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-          <p className="text-sm text-red-700">{error}</p>
+          <button
+            onClick={handleRequestOtp}
+            disabled={busy}
+            className="w-full flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-violet-600/20"
+          >
+            {busy
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> جاري الإرسال...</>
+              : <>إرسال رمز التحقق <ChevronRight className="w-4 h-4" /></>
+            }
+          </button>
         </div>
       )}
 
-      {/* Primary action */}
-      <div className="space-y-3">
-        {/* Connect button — for not_connected, disconnected, or stuck pending */}
-        {(status === 'not_connected' || status === 'disconnected' || status === 'pending') && (
+      {/* ── Step 2: OTP ──────────────────────────────────────────────────── */}
+      {step === 2 && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
+          <div className="flex items-center gap-3 mb-1">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
+              <ShieldCheck className="w-5 h-5 text-amber-600" />
+            </div>
+            <div>
+              <p className="font-semibold text-slate-800">رمز التحقق</p>
+              <p className="text-xs text-slate-500 mt-0.5">{sentTo}</p>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1.5">
+              الرمز المُرسَل <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={otp}
+              onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              placeholder="123456"
+              maxLength={6}
+              className="w-full border border-slate-300 rounded-xl px-4 py-3 text-center text-2xl font-mono tracking-widest focus:outline-none focus:ring-2 focus:ring-amber-400"
+              dir="ltr"
+              autoFocus
+            />
+            <p className="text-xs text-slate-400 mt-1 text-center">
+              الرمز مكوّن من 6 أرقام
+            </p>
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+              <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+              <p className="text-sm text-red-700">{error}</p>
+            </div>
+          )}
+
           <button
-            onClick={handleConnect}
-            disabled={connecting}
-            className="w-full flex items-center justify-center gap-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-emerald-600/20"
+            onClick={handleVerifyOtp}
+            disabled={busy || otp.length < 6}
+            className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-emerald-600/20"
           >
-            {connecting
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> {t(tr => tr.common.loading)}</>
-              : <><MessageCircle className="w-4 h-4" /> {wt.connectBtn}</>
+            {busy
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> جاري التحقق...</>
+              : <>تأكيد الربط <CheckCircle2 className="w-4 h-4" /></>
             }
           </button>
-        )}
 
-        {/* Reconnect — for error or needs_reauth */}
-        {needsAction && (
           <button
-            onClick={handleReconnect}
-            disabled={connecting}
-            className="w-full flex items-center justify-center gap-2.5 bg-amber-500 hover:bg-amber-400 text-white font-bold text-sm py-3.5 rounded-xl transition-all disabled:opacity-60"
+            onClick={() => { setStep(1); setError(''); setOtp('') }}
+            className="w-full text-sm text-slate-400 hover:text-slate-600 py-2"
           >
-            {connecting
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> {t(tr => tr.common.loading)}</>
-              : <><RefreshCw className="w-4 h-4" /> {wt.reconnectBtn}</>
-            }
+            ← تغيير رقم الهاتف
           </button>
-        )}
+        </div>
+      )}
 
-        {/* Actions for connected state */}
-        {isActive && (
-          <div className="flex gap-2.5">
+      {/* ── Step 3: Connected ─────────────────────────────────────────────── */}
+      {step === 3 && (
+        <div className="space-y-4">
+          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-6 text-center space-y-3">
+            <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto">
+              <BadgeCheck className="w-9 h-9 text-emerald-600" />
+            </div>
+            <div>
+              <p className="font-bold text-emerald-800 text-lg">واتساب مرتبط ✅</p>
+              {connectedName && (
+                <p className="font-semibold text-slate-700 mt-1">{connectedName}</p>
+              )}
+              {connectedPhone && (
+                <p className="text-sm font-mono text-slate-500 mt-0.5">{connectedPhone}</p>
+              )}
+              {connectedAt && (
+                <p className="text-xs text-slate-400 mt-2">
+                  تم الربط: {new Date(connectedAt).toLocaleDateString('ar-SA')}
+                </p>
+              )}
+            </div>
+
+            <div className="bg-white rounded-xl p-4 text-right space-y-2 mt-2">
+              <div className="flex items-center gap-2 text-sm text-emerald-700">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                الرد التلقائي على العملاء مفعّل
+              </div>
+              <div className="flex items-center gap-2 text-sm text-emerald-700">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                نحلة AI جاهز للمحادثات
+              </div>
+              <div className="flex items-center gap-2 text-sm text-emerald-700">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                الحملات التسويقية متاحة
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
             <button
-              onClick={handleVerify}
-              disabled={verifying}
-              className="flex-1 flex items-center justify-center gap-2 border border-slate-300 hover:border-brand-400 text-slate-700 font-medium text-sm py-2.5 rounded-xl transition-all hover:bg-slate-50"
+              onClick={() => window.location.href = '/overview'}
+              className="flex-1 flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3 rounded-xl transition-all"
             >
-              {verifying
-                ? <Loader2 className="w-4 h-4 animate-spin" />
-                : <Zap className="w-4 h-4" />
-              }
-              {t(tr => tr.common.test)}
+              <RefreshCw className="w-4 h-4" />
+              لوحة التحكم
             </button>
             <button
               onClick={handleDisconnect}
-              className="flex items-center justify-center gap-2 border border-red-200 text-red-500 hover:bg-red-50 font-medium text-sm px-4 py-2.5 rounded-xl transition-all"
+              disabled={busy}
+              className="flex items-center justify-center gap-2 border border-red-200 text-red-500 hover:bg-red-50 font-medium text-sm px-4 py-3 rounded-xl transition-all"
             >
               <Unplug className="w-4 h-4" />
-              {wt.disconnectBtn}
+              فصل
             </button>
-          </div>
-        )}
-      </div>
-
-      {/* Health check panel */}
-      {health && status !== 'not_connected' && (
-        <HealthCheck health={health} />
-      )}
-
-      {/* Sending prerequisites notice */}
-      {isActive && !conn?.sending_enabled && (
-        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
-          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-          <div className="text-sm">
-            <p className="font-semibold text-amber-800">
-              {t(tr => tr.meta.code === 'ar' ? 'الإرسال غير مفعّل بعد' : 'Sending not yet enabled')}
-            </p>
-            <p className="text-amber-700 mt-0.5 text-xs">
-              {t(tr => tr.meta.code === 'ar'
-                ? 'تحقق من إعدادات رقم الهاتف في Meta Business Manager وتأكد من اجتياز التحقق.'
-                : 'Check your phone number settings in Meta Business Manager and ensure verification is complete.')}
-            </p>
           </div>
         </div>
       )}
 
-      {/* How it works */}
-      <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 space-y-3">
-        <p className="font-semibold text-blue-900 text-sm flex items-center gap-2">
-          <ExternalLink className="w-4 h-4" />
-          {wt.howTitle}
-        </p>
-        <ol className="space-y-2 text-xs text-blue-700 list-none">
-          {[wt.howStep1, wt.howStep2, wt.howStep3, wt.howStep4, wt.howStep5].map((step, i) => (
-            <li key={i} className="flex gap-2">
-              <span className="shrink-0 w-4 h-4 rounded-full bg-blue-200 text-blue-700 flex items-center justify-center font-bold text-[10px]">
-                {i + 1}
-              </span>
-              {step}
-            </li>
-          ))}
-        </ol>
-      </div>
-
-      {/* Meta prerequisites */}
-      <div className="text-xs text-slate-400 space-y-1 border-t border-slate-100 pt-4">
-        <p className="font-medium text-slate-500">{wt.prereqTitle}:</p>
-        <ul className="list-disc list-inside space-y-0.5">
-          <li>{wt.prereq1}</li>
-          <li>{wt.prereq2}</li>
-          <li>META_APP_ID / META_APP_SECRET (environment variables)</li>
-          <li>{t(tr => tr.meta.code === 'ar' ? 'اتصال Webhook مُهيأ في Meta Developer Portal' : 'Webhook configured in Meta Developer Portal')}</li>
-        </ul>
-      </div>
+      {/* Info box */}
+      {step === 1 && (
+        <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 space-y-2 text-xs text-blue-700">
+          <p className="font-semibold text-blue-800">📋 متطلبات الرقم:</p>
+          <ul className="space-y-1 list-disc list-inside">
+            <li>رقم هاتف سعودي أو دولي غير مسجَّل على واتساب</li>
+            <li>يجب أن تتمكن من استقبال رسائل SMS على هذا الرقم</li>
+            <li>الرقم سيُستخدم فقط لخدمة عملاء متجرك</li>
+          </ul>
+        </div>
+      )}
     </div>
   )
 }
