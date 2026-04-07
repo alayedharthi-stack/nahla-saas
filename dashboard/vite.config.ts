@@ -5,7 +5,7 @@ import react from '@vitejs/plugin-react'
 const SALLA_IFRAME_HEADERS = {
   'Content-Security-Policy':
     "frame-ancestors 'self' https://s.salla.sa https://*.salla.sa " +
-    "https://store.salla.sa https://apps.salla.sa https://app.nahlaai.com",
+    "https://store.salla.sa https://apps.salla.sa https://app.nahlah.ai",
   // Explicitly unset X-Frame-Options so browsers use CSP instead
   'X-Frame-Options': '',
 }

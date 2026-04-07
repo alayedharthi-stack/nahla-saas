@@ -101,7 +101,7 @@ async def request_logging_middleware(request: Request, call_next):
 
 async def salla_iframe_middleware(request: Request, call_next):
     """
-    Allow app.nahlaai.com to be embedded in Salla's iframe viewer (s.salla.sa).
+    Allow app.nahlah.ai to be embedded in Salla's iframe viewer (s.salla.sa).
     Sets Content-Security-Policy frame-ancestors instead of X-Frame-Options
     so Salla can load the app inside their embedded app viewer.
     """
@@ -109,7 +109,7 @@ async def salla_iframe_middleware(request: Request, call_next):
     # Allow embedding only from trusted Salla domains
     response.headers["Content-Security-Policy"] = (
         "frame-ancestors 'self' https://s.salla.sa https://*.salla.sa "
-        "https://store.salla.sa https://app.nahlaai.com https://apps.salla.sa"
+        "https://store.salla.sa https://app.nahlah.ai https://apps.salla.sa"
     )
     # Remove restrictive X-Frame-Options if it was set
     if "x-frame-options" in response.headers:

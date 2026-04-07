@@ -105,7 +105,7 @@ async def salla_embedded_app(request: Request):
     - Button opens Nahla dashboard in a new tab
     - Works for both new and returning merchants
     """
-    dashboard_url = "https://app.nahlaai.com"
+    dashboard_url = "https://app.nahlah.ai"
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html dir="rtl" lang="ar">
 <head>

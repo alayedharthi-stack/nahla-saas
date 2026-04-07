@@ -45,7 +45,7 @@ SALLA_WEBHOOK_SECRET = os.environ.get("SALLA_WEBHOOK_SECRET", "")
 # For Salla embedded apps this is typically the partner app iframe URL.
 SALLA_EMBEDDED_URL = os.environ.get(
     "SALLA_EMBEDDED_URL",
-    "https://app.nahlaai.com/landing",
+    "https://app.nahlah.ai",
 )
 
 # ── API key protection ─────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ _default_origins = (
     "http://localhost:3000,http://localhost:5173,"
     "https://nahlah.ai,https://www.nahlah.ai,"
     "https://app.nahlah.ai,https://api.nahlah.ai,"
-    "https://nahlaai.com,https://app.nahlaai.com,"
+    "https://nahlah.ai,https://app.nahlah.ai,"
     "https://store.salla.sa,https://salla.sa"
 )
 CORS_ORIGINS: list[str] = [
