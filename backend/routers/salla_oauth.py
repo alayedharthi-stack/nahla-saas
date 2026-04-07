@@ -95,6 +95,192 @@ def _error_url(reason: str, detail: str = "") -> str:
 # PUBLIC ROUTES — OAuth flow (no JWT required)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+# ── Salla Embedded Token Login ─────────────────────────────────────────────────
+
+@router.post("/salla/token-login")
+async def salla_token_login(request: Request, db: Session = Depends(get_db)):
+    """
+    PUBLIC — no JWT required.
+
+    Called by /salla/app iframe when a merchant opens the embedded app.
+
+    Flow:
+      1. Read Salla embedded token (v4.public.*) + app_id from request body
+      2. Introspect token via Salla API → get merchant/store info
+      3. Find existing Nahla Tenant+User by store_id   (returning merchant)
+         or create new ones                            (first-time merchant)
+      4. Return Nahla JWT so the frontend can store it in localStorage
+
+    The caller (/salla/app JS) then builds a link to:
+      https://app.nahlah.ai/salla-callback?token=<JWT>
+    which stores the JWT on the correct domain and redirects to /overview.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    salla_token = (body.get("token") or "").strip()
+    app_id      = str(body.get("app_id") or SALLA_CLIENT_ID or "")
+
+    if not salla_token:
+        raise HTTPException(status_code=400, detail="token required")
+
+    logger.info("[SallaTokenLogin] Introspecting Salla token | app_id=%s", app_id)
+
+    # ── Step 1: Introspect the Salla embedded token ────────────────────────────
+    merchant_id_str = ""
+    store_name      = ""
+    owner_email     = ""
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.salla.dev/exchange-authority/v1/introspect",
+                json={
+                    "env":     "prod",
+                    "token":   salla_token,
+                    "iss":     "merchant-dashboard",
+                    "subject": "embedded-page",
+                },
+                headers={
+                    "S-Source":     app_id,
+                    "Content-Type": "application/json",
+                    "Accept":       "application/json",
+                },
+            )
+            logger.info(
+                "[SallaTokenLogin] Introspect response: status=%s body=%.300s",
+                resp.status_code, resp.text,
+            )
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    payload = data.get("data") or {}
+                    # Support different shapes Salla might return
+                    merchant = payload.get("merchant") or {}
+                    merchant_id_str = str(
+                        merchant.get("id") or
+                        payload.get("merchant_id") or
+                        payload.get("store_id") or
+                        ""
+                    )
+                    store_name  = merchant.get("name") or payload.get("store_name") or ""
+                    owner_email = (
+                        merchant.get("email") or
+                        payload.get("email")  or
+                        merchant.get("mobile") or
+                        ""
+                    ).strip().lower()
+                    logger.info(
+                        "[SallaTokenLogin] Introspect success | merchant_id=%s store=%s email=%s",
+                        merchant_id_str, store_name, owner_email,
+                    )
+                else:
+                    logger.warning("[SallaTokenLogin] Introspect: success=false | %s", data)
+            else:
+                logger.warning(
+                    "[SallaTokenLogin] Introspect HTTP error: %s %.200s",
+                    resp.status_code, resp.text,
+                )
+    except Exception as exc:
+        logger.error("[SallaTokenLogin] Introspect call failed: %s", exc)
+
+    # ── Step 2: Derive email fallback ──────────────────────────────────────────
+    if not owner_email and merchant_id_str:
+        safe_name  = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
+        owner_email = f"{safe_name or 'store'}-{merchant_id_str}@salla-merchant.nahlaai.com"
+        logger.info("[SallaTokenLogin] Derived fallback email: %s", owner_email)
+
+    if not owner_email:
+        # Cannot identify merchant — ask them to register manually
+        raise HTTPException(status_code=401, detail="Could not identify merchant from Salla token")
+
+    # ── Step 3: Find or create Nahla Tenant + User ─────────────────────────────
+    try:
+        existing_user = db.query(User).filter(User.email == owner_email).first()
+
+        if existing_user:
+            tenant_id = existing_user.tenant_id
+            role      = existing_user.role or "merchant"
+            is_new    = False
+            logger.info(
+                "[SallaTokenLogin] Returning merchant | email=%s tenant=%s",
+                owner_email, tenant_id,
+            )
+        else:
+            # First-time merchant via embedded app
+            new_tenant = Tenant(name=store_name or "متجر سلة")
+            db.add(new_tenant)
+            db.flush()
+            tenant_id = new_tenant.id
+            role      = "merchant"
+            is_new    = True
+
+            new_user = User(
+                email=owner_email,
+                password_hash=hash_password(_secrets.token_urlsafe(16)),
+                role=role,
+                tenant_id=tenant_id,
+                is_active=True,
+            )
+            db.add(new_user)
+            db.flush()
+            logger.info(
+                "[SallaTokenLogin] Auto-created merchant | email=%s tenant=%s",
+                owner_email, tenant_id,
+            )
+
+        # If we got a store_id from introspect, also save/update the Integration
+        if merchant_id_str:
+            integration = db.query(Integration).filter(
+                Integration.tenant_id == tenant_id,
+                Integration.provider  == "salla",
+            ).first()
+            if not integration:
+                db.add(Integration(
+                    tenant_id=tenant_id,
+                    provider="salla",
+                    config={
+                        "store_id":   merchant_id_str,
+                        "store_name": store_name,
+                        "salla_token_login": True,
+                        "connected_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    enabled=True,
+                ))
+
+        db.commit()
+
+    except Exception as exc:
+        logger.exception("[SallaTokenLogin] DB error: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Database error")
+
+    # ── Step 4: Generate Nahla JWT ─────────────────────────────────────────────
+    nahla_jwt = create_token(email=owner_email, role=role, tenant_id=tenant_id)
+    logger.info(
+        "[SallaTokenLogin] JWT generated | tenant=%s role=%s is_new=%s",
+        tenant_id, role, is_new,
+    )
+
+    return {
+        "access_token": nahla_jwt,
+        "role":         role,
+        "tenant_id":    tenant_id,
+        "store_name":   store_name,
+        "email":        owner_email,
+        "is_new":       is_new,
+    }
+
+
+# ── Salla Embedded App Page ────────────────────────────────────────────────────
+
 @router.get("/salla/app", response_class=HTMLResponse)
 async def salla_embedded_app(request: Request):
     """
@@ -341,67 +527,93 @@ async def salla_embedded_app(request: Request):
   <div class="footer">بأيدي سعودية 100% 🇸🇦 · Nahla AI</div>
 
   <!--
-    IMPORTANT: SDK must load SYNCHRONOUSLY before our script runs.
-    embedded.ready() requires embedded.init() to complete first.
-    The correct Salla message format is: {{event: "embedded::ready", source: "embedded-app"}}
+    SDK loaded synchronously so embedded.init() → embedded.ready() can fire immediately.
+    embedded.ready() requires init() to complete first — the SDK enforces this.
   -->
   <script src="https://cdn.jsdelivr.net/npm/@salla.sa/embedded-sdk@0.2.4/dist/umd/index.js"></script>
   <script>
-    var APP_URL  = '{dashboard_url}';
-    var statusEl = document.getElementById('status-msg');
-    var ctaBtn   = document.getElementById('cta-btn');
+    var APP_URL    = '{dashboard_url}';
+    var API_URL    = 'https://api.nahlah.ai';
+    var statusEl   = document.getElementById('status-msg');
+    var ctaBtn     = document.getElementById('cta-btn');
 
-    console.log('[Nahla] /salla/app mounted', {{ sdk: !!(window.Salla && window.Salla.embedded) }});
+    console.log('[Nahla] /salla/app mounted', {{
+      sdk: !!(window.Salla && window.Salla.embedded),
+      hasToken: !!new URLSearchParams(location.search).get('token'),
+    }});
 
-    // ── 1. Restore state for returning merchants ─────────────────────────────
-    try {{
-      var nahlaToken = localStorage.getItem('nahla_token');
-      if (nahlaToken) {{
-        ctaBtn.textContent = 'افتح لوحة التحكم ←';
-        ctaBtn.href = APP_URL + '/overview';
-        if (statusEl) statusEl.textContent = 'مرحباً بعودتك ✓';
-        console.log('[Nahla] returning merchant — showing dashboard link');
-      }}
-    }} catch(e) {{ console.warn('[Nahla] localStorage error', e); }}
-
-    // ── 2. Raw postMessage fallback (correct Salla format) ───────────────────
-    //   Source: embedded-sdk source code — event must be "embedded::ready"
+    // ── 1. Salla SDK handshake — dismisses skeleton loaders ─────────────────
     function sendRawReady() {{
       var msg = {{ event: 'embedded::ready', payload: {{}}, timestamp: Date.now(), source: 'embedded-app', metadata: {{ version: '0.2.4' }} }};
       try {{ window.parent.postMessage(msg, '*'); }} catch(_) {{}}
-      console.log('[Nahla] sent raw embedded::ready postMessage');
     }}
 
-    // ── 3. Main SDK init flow ────────────────────────────────────────────────
     function runSDK() {{
       var sdk = window.Salla && window.Salla.embedded;
-      if (!sdk) {{
-        console.warn('[Nahla] SDK not available — using raw postMessage');
-        sendRawReady();
-        return;
-      }}
-      console.log('[Nahla] SDK found — calling embedded.init()');
-      sdk.init({{ debug: true }})
-        .then(function(result) {{
-          console.log('[Nahla] embedded.init() resolved', result);
-          sdk.ready();
-          console.log('[Nahla] embedded.ready() called — skeleton loaders should dismiss');
-          sendRawReady(); // belt-and-suspenders
-        }})
-        .catch(function(err) {{
-          console.error('[Nahla] embedded.init() failed:', err);
-          sendRawReady(); // fallback when Salla doesn't respond in time
-        }});
+      if (!sdk) {{ sendRawReady(); return; }}
+      sdk.init({{ debug: false }})
+        .then(function() {{ sdk.ready(); sendRawReady(); }})
+        .catch(function() {{ sendRawReady(); }});
     }}
-
-    // Run SDK immediately (it's already loaded — sync script above)
     runSDK();
+    setTimeout(sendRawReady, 3000);  // safety fallback
 
-    // Safety fallback in case runSDK() above hasn't resolved after 4s
-    setTimeout(function() {{
-      console.log('[Nahla] safety fallback timeout — sending ready again');
-      sendRawReady();
-    }}, 4000);
+    // ── 2. Merchant auto-login via Salla embedded token ──────────────────────
+    //
+    //  The Salla token in the URL identifies WHICH merchant opened the app.
+    //  We call /salla/token-login (backend) → introspects token with Salla API
+    //  → finds/creates Nahla account → returns a Nahla JWT.
+    //
+    //  We then build a link to app.nahlah.ai/salla-callback?token=JWT
+    //  Because localStorage is domain-scoped, the JWT must be stored on
+    //  app.nahlah.ai (not api.nahlah.ai). SallaCallback.tsx handles this.
+
+    var params    = new URLSearchParams(location.search);
+    var sallaToken = params.get('token');
+    var appId      = params.get('app_id');
+
+    if (sallaToken) {{
+      if (statusEl) statusEl.textContent = 'جاري التحقق من هويتك...';
+
+      fetch(API_URL + '/salla/token-login', {{
+        method:  'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body:    JSON.stringify({{ token: sallaToken, app_id: appId }}),
+      }})
+      .then(function(r) {{ return r.json(); }})
+      .then(function(data) {{
+        if (data.access_token) {{
+          var cbParams = new URLSearchParams({{
+            token:  data.access_token,
+            status: 'connected',
+            new:    data.is_new ? '1' : '0',
+          }});
+          var dashLink = APP_URL + '/salla-callback?' + cbParams.toString();
+          ctaBtn.textContent = data.is_new
+            ? 'أكمل إعداد متجرك ←'
+            : 'افتح لوحة التحكم ←';
+          ctaBtn.href   = dashLink;
+          ctaBtn.target = '_blank';
+          if (statusEl) statusEl.textContent = data.is_new
+            ? 'مرحباً! حسابك جاهز ✓'
+            : 'مرحباً بعودتك ' + (data.store_name || '') + ' ✓';
+          console.log('[Nahla] token-login success', {{
+            is_new: data.is_new,
+            tenant: data.tenant_id,
+            link: dashLink,
+          }});
+        }} else {{
+          console.warn('[Nahla] token-login: no access_token in response', data);
+          if (statusEl) statusEl.textContent = '';
+        }}
+      }})
+      .catch(function(err) {{
+        console.error('[Nahla] token-login fetch error:', err);
+        if (statusEl) statusEl.textContent = '';
+      }});
+    }} else {{
+      console.log('[Nahla] No Salla token in URL — showing default register link');
+    }}
   </script>
 </body>
 </html>""")

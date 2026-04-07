@@ -41,6 +41,7 @@ export default function SallaCallback() {
       const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
 
       // Persist the session — same localStorage keys used by auth.ts
+      localStorage.setItem('nahla_auth',      '1')           // required by isAuthenticated()
       localStorage.setItem('nahla_token',     token)
       localStorage.setItem('nahla_role',      payload.role      || 'merchant')
       localStorage.setItem('nahla_email',     payload.sub       || '')
