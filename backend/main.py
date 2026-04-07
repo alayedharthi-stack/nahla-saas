@@ -163,6 +163,9 @@ async def on_startup() -> None:
                 "ALTER TABLE whatsapp_usage ADD COLUMN IF NOT EXISTS alert_80_sent BOOLEAN NOT NULL DEFAULT false",
                 "ALTER TABLE whatsapp_usage ADD COLUMN IF NOT EXISTS alert_100_sent BOOLEAN NOT NULL DEFAULT false",
                 "ALTER TABLE whatsapp_usage ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+                # old column: set default so INSERT without it doesn't violate NOT NULL
+                "ALTER TABLE whatsapp_usage ALTER COLUMN conversations_used SET DEFAULT 0",
+                "ALTER TABLE whatsapp_usage ALTER COLUMN conversations_used DROP NOT NULL",
             ]
             with engine.connect() as conn:
                 for stmt in safe_alters:
