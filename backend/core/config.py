@@ -71,6 +71,9 @@ HYPERPAY_LIVE_MODE      = os.environ.get("HYPERPAY_LIVE_MODE", "false").lower() 
 META_APP_ID              = os.environ.get("META_APP_ID", "")
 META_APP_SECRET          = os.environ.get("META_APP_SECRET", "")
 META_GRAPH_API_VERSION   = os.environ.get("META_GRAPH_API_VERSION", "v20.0")
+# Configuration ID from Meta Business Manager → WhatsApp → Embedded Signup
+# (Optional but recommended — ensures correct permissions/features are requested)
+META_WA_CONFIG_ID        = os.environ.get("META_WA_CONFIG_ID", "")
 
 # ── Store Sync ─────────────────────────────────────────────────────────────────
 STORE_SYNC_MAX_PRODUCTS  = int(os.environ.get("STORE_SYNC_MAX_PRODUCTS", "500"))

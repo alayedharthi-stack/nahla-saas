@@ -247,7 +247,10 @@ export default function WhatsAppConnect() {
           }
         },
         {
-          config_id:    '',   // Meta App config ID (optional)
+          // config_id comes from META_WA_CONFIG_ID env var on backend.
+          // Omit it entirely when not set — passing an empty string causes
+          // Meta to reject the request.
+          ...(startData.config_id ? { config_id: startData.config_id } : {}),
           response_type: 'code',
           override_default_response_type: true,
           scope: startData.scope,

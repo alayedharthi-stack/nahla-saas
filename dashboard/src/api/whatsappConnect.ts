@@ -27,11 +27,12 @@ export interface WaConnection {
 }
 
 export interface WaStartResult {
-  status: string
-  meta_app_id: string
+  status:        string
+  meta_app_id:   string
   graph_version: string
-  scope: string
-  extras: Record<string, unknown>
+  scope:         string
+  extras:        Record<string, unknown>
+  config_id?:    string   // present only when META_WA_CONFIG_ID is set on server
 }
 
 export interface WaHealthResult {

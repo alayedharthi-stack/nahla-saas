@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from models import WhatsAppConnection  # noqa: E402
 
-from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION
+from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION, META_WA_CONFIG_ID
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
 
@@ -218,18 +218,20 @@ async def start_connection(request: Request, db: Session = Depends(get_db)):
     conn.last_error       = None
     db.commit()
 
-    return {
-        "status":      "pending",
-        "meta_app_id": META_APP_ID or "CONFIGURE_META_APP_ID",
+    resp: dict = {
+        "status":        "pending",
+        "meta_app_id":   META_APP_ID or "CONFIGURE_META_APP_ID",
         "graph_version": META_GRAPH_API_VERSION,
-        "scope":       "whatsapp_business_management,whatsapp_business_messaging",
+        "scope":         "whatsapp_business_management,whatsapp_business_messaging",
         "extras": {
-            "feature":        "whatsapp_embedded_signup",
-            "setup": {
-                "solutionID": "",   # optional: your Meta Solution ID
-            },
+            "feature": "whatsapp_embedded_signup",
+            "setup":   {},
         },
     }
+    # Include config_id only when set — avoids Meta rejecting an empty string
+    if META_WA_CONFIG_ID:
+        resp["config_id"] = META_WA_CONFIG_ID
+    return resp
 
 
 @router.post("/connection/callback")
