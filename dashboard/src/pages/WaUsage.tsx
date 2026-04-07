@@ -25,7 +25,8 @@ interface WaUsageDetail {
   usage_pct:                     number
   exceeded:                      boolean
   near_limit:                    boolean
-  hard_stop:                     boolean
+  marketing_blocked:             boolean
+  emergency_stop:                boolean
   unlimited:                     boolean
   month:                         number
   year:                          number
@@ -47,17 +48,17 @@ const MONTH_NAMES: Record<number, string> = {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function StatusBadge({ exceeded, near_limit, hard_stop }: {
-  exceeded: boolean; near_limit: boolean; hard_stop: boolean
+function StatusBadge({ marketing_blocked, near_limit, emergency_stop }: {
+  marketing_blocked: boolean; near_limit: boolean; emergency_stop: boolean
 }) {
-  if (hard_stop) return (
+  if (emergency_stop) return (
     <span className="inline-flex items-center gap-1 text-xs font-bold text-red-700 bg-red-100 px-2.5 py-1 rounded-full">
-      <AlertTriangle className="w-3.5 h-3.5" /> إيقاف كامل
+      <AlertTriangle className="w-3.5 h-3.5" /> إيقاف طارئ
     </span>
   )
-  if (exceeded) return (
+  if (marketing_blocked) return (
     <span className="inline-flex items-center gap-1 text-xs font-bold text-orange-700 bg-orange-100 px-2.5 py-1 rounded-full">
-      <AlertTriangle className="w-3.5 h-3.5" /> الحد مُستنفَد
+      <AlertTriangle className="w-3.5 h-3.5" /> الحملات متوقفة
     </span>
   )
   if (near_limit) return (
@@ -72,11 +73,14 @@ function StatusBadge({ exceeded, near_limit, hard_stop }: {
   )
 }
 
-function ProgressBar({ pct, exceeded, near_limit }: {
-  pct: number; exceeded: boolean; near_limit: boolean
+function ProgressBar({ pct, marketing_blocked, near_limit, emergency_stop }: {
+  pct: number; marketing_blocked: boolean; near_limit: boolean; emergency_stop: boolean
 }) {
-  const barColor = exceeded ? 'bg-red-500' : near_limit ? 'bg-amber-400' : 'bg-emerald-500'
-  const width    = Math.min(pct, 100)
+  const barColor = emergency_stop    ? 'bg-red-500'
+                 : marketing_blocked ? 'bg-orange-500'
+                 : near_limit         ? 'bg-amber-400'
+                 : 'bg-emerald-500'
+  const width = Math.min(pct, 100)
   return (
     <div className="relative w-full h-4 bg-slate-100 rounded-full overflow-hidden">
       {/* 80% marker */}
@@ -116,18 +120,28 @@ function BlockingPolicyCard() {
         <ShieldCheck className="w-4 h-4 text-slate-600" />
         <h3 className="text-sm font-semibold text-slate-700">سياسة الإيقاف عند بلوغ الحد</h3>
       </div>
-      <div className="space-y-2 text-xs text-slate-600">
+      <div className="space-y-2.5 text-xs text-slate-600">
         <div className="flex items-start gap-2">
           <span className="w-2 h-2 rounded-full bg-emerald-400 mt-1 shrink-0" />
-          <span><strong>أقل من 100%</strong> — كل الرسائل تعمل بشكل طبيعي.</span>
+          <span><strong>أقل من 100%</strong> — جميع الرسائل تعمل بشكل طبيعي (خدمة العملاء + الحملات).</span>
         </div>
         <div className="flex items-start gap-2">
           <span className="w-2 h-2 rounded-full bg-orange-400 mt-1 shrink-0" />
-          <span><strong>100% مُستنفَد</strong> — إيقاف الحملات التسويقية فقط. ردود خدمة العملاء لا تزال تعمل.</span>
+          <div>
+            <strong>100% مُستنفَد</strong> — إيقاف الحملات التسويقية فقط:
+            <ul className="mt-1 space-y-0.5 list-none pr-3">
+              <li>✅ ردود خدمة العملاء تعمل (العملاء الذين راسلوك يحصلون على رد)</li>
+              <li>❌ الحملات التسويقية والرسائل الجماعية متوقفة</li>
+              <li>❌ رسائل السلة المتروكة متوقفة</li>
+            </ul>
+          </div>
         </div>
         <div className="flex items-start gap-2">
           <span className="w-2 h-2 rounded-full bg-red-500 mt-1 shrink-0" />
-          <span><strong>تجاوز 110%</strong> — إيقاف كامل لجميع الرسائل. ارقِّ باقتك لاستئناف الخدمة.</span>
+          <span>
+            <strong>تجاوز 300%</strong> — إيقاف طارئ كامل (حماية المنصة من الأتمتة المفرطة).
+            هذا السيناريو نادر جداً ولن يحدث في الاستخدام الطبيعي.
+          </span>
         </div>
       </div>
     </div>
@@ -188,9 +202,9 @@ export default function WaUsage() {
         <>
           {/* ── Main usage card ─────────────────────────────────────────── */}
           <div className={`rounded-2xl border p-5 ${
-            data.hard_stop  ? 'bg-red-50 border-red-200'
-            : data.exceeded ? 'bg-orange-50 border-orange-200'
-            : data.near_limit ? 'bg-amber-50 border-amber-200'
+            data.emergency_stop     ? 'bg-red-50    border-red-300'
+            : data.marketing_blocked ? 'bg-orange-50 border-orange-200'
+            : data.near_limit         ? 'bg-amber-50  border-amber-200'
             : 'bg-white border-slate-200'
           }`}>
             <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
@@ -205,11 +219,20 @@ export default function WaUsage() {
                   يُعاد التصفير في: {data.reset_date}
                 </p>
               </div>
-              <StatusBadge exceeded={data.exceeded} near_limit={data.near_limit} hard_stop={data.hard_stop} />
+              <StatusBadge
+                marketing_blocked={data.marketing_blocked}
+                near_limit={data.near_limit}
+                emergency_stop={data.emergency_stop}
+              />
             </div>
 
             {/* Progress bar */}
-            <ProgressBar pct={data.usage_pct} exceeded={data.exceeded} near_limit={data.near_limit} />
+            <ProgressBar
+              pct={data.usage_pct}
+              marketing_blocked={data.marketing_blocked}
+              near_limit={data.near_limit}
+              emergency_stop={data.emergency_stop}
+            />
 
             <div className="flex items-center justify-between mt-2 text-sm">
               <span className="font-semibold text-slate-700">
@@ -219,9 +242,9 @@ export default function WaUsage() {
                 </span>
               </span>
               <span className={`font-bold text-sm ${
-                data.hard_stop  ? 'text-red-600'
-                : data.exceeded ? 'text-orange-600'
-                : data.near_limit ? 'text-amber-600'
+                data.emergency_stop     ? 'text-red-600'
+                : data.marketing_blocked ? 'text-orange-600'
+                : data.near_limit         ? 'text-amber-600'
                 : 'text-emerald-600'
               }`}>
                 {data.usage_pct}%
@@ -230,16 +253,33 @@ export default function WaUsage() {
 
             {/* 80% marker label */}
             <p className="text-xs text-slate-400 mt-1">
-              الخط الأحمر: 80% ({Math.round(data.conversations_limit * 0.8).toLocaleString('ar-SA')} محادثة)
+              حد التنبيه: 80% ({Math.round(data.conversations_limit * 0.8).toLocaleString('ar-SA')} محادثة)
             </p>
 
-            {(data.exceeded || data.hard_stop) && (
+            {/* Status explanation */}
+            {data.emergency_stop && (
+              <div className="mt-3 text-xs text-red-700 bg-red-100 rounded-lg px-3 py-2">
+                ⛔ جميع الرسائل متوقفة — تجاوزت الحد بشكل كبير. يرجى ترقية باقتك.
+              </div>
+            )}
+            {data.marketing_blocked && !data.emergency_stop && (
+              <div className="mt-3 text-xs text-orange-700 bg-orange-50 border border-orange-100 rounded-lg px-3 py-2 space-y-1">
+                <p>
+                  📣 <strong>الحملات التسويقية متوقفة</strong> حتى نهاية الشهر.
+                </p>
+                <p>
+                  ✅ <strong>ردود خدمة العملاء تعمل بشكل طبيعي</strong> — العملاء الذين تواصلوا معك يحصلون على ردود كالمعتاد.
+                </p>
+              </div>
+            )}
+
+            {(data.marketing_blocked || data.emergency_stop) && (
               <Link
                 to="/billing"
-                className="mt-4 inline-flex items-center gap-2 bg-brand-600 text-white text-sm font-bold px-4 py-2 rounded-xl hover:bg-brand-500 transition-colors"
+                className="mt-3 inline-flex items-center gap-2 bg-brand-600 text-white text-sm font-bold px-4 py-2 rounded-xl hover:bg-brand-500 transition-colors"
               >
                 <TrendingUp className="w-4 h-4" />
-                ارقِّ باقتك الآن
+                ارقِّ باقتك لاستئناف الحملات
               </Link>
             )}
           </div>

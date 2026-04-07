@@ -45,12 +45,14 @@ interface OverviewStats {
 }
 
 interface WaUsage {
-  conversations_used:   number
-  conversations_limit:  number
-  usage_pct:            number
-  exceeded:             boolean
-  near_limit:           boolean
-  unlimited:            boolean
+  conversations_used:    number
+  conversations_limit:   number
+  usage_pct:             number
+  exceeded:              boolean
+  near_limit:            boolean
+  marketing_blocked:     boolean
+  emergency_stop:        boolean
+  unlimited:             boolean
 }
 
 export default function Overview() {
@@ -130,26 +132,35 @@ export default function Overview() {
       {/* WhatsApp Conversation Usage Widget */}
       {waUsage && (
         <div className={`rounded-2xl border p-4 ${
-          waUsage.exceeded  ? 'bg-red-50    border-red-200'
-          : waUsage.near_limit ? 'bg-amber-50  border-amber-200'
+          waUsage.emergency_stop   ? 'bg-red-50    border-red-300'
+          : waUsage.marketing_blocked ? 'bg-orange-50 border-orange-200'
+          : waUsage.near_limit         ? 'bg-amber-50  border-amber-200'
           : 'bg-white border-slate-200'
         }`}>
           <div className="flex items-center justify-between gap-3 flex-wrap">
             {/* Left: label + bar */}
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-2">
-                <MessageSquare className={`w-4 h-4 ${
-                  waUsage.exceeded ? 'text-red-500' : waUsage.near_limit ? 'text-amber-500' : 'text-emerald-500'
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <MessageSquare className={`w-4 h-4 shrink-0 ${
+                  waUsage.emergency_stop    ? 'text-red-500'
+                  : waUsage.marketing_blocked ? 'text-orange-500'
+                  : waUsage.near_limit          ? 'text-amber-500'
+                  : 'text-emerald-500'
                 }`} />
                 <span className="text-sm font-semibold text-slate-700">
                   استخدام واتساب هذا الشهر
                 </span>
-                {waUsage.exceeded && (
-                  <span className="flex items-center gap-1 text-xs font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full">
-                    <AlertTriangle className="w-3 h-3" /> تجاوزت الحد
+                {waUsage.emergency_stop && (
+                  <span className="flex items-center gap-1 text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
+                    <AlertTriangle className="w-3 h-3" /> إيقاف طارئ
                   </span>
                 )}
-                {waUsage.near_limit && !waUsage.exceeded && (
+                {waUsage.marketing_blocked && !waUsage.emergency_stop && (
+                  <span className="flex items-center gap-1 text-xs font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full">
+                    <AlertTriangle className="w-3 h-3" /> الحملات متوقفة
+                  </span>
+                )}
+                {waUsage.near_limit && !waUsage.marketing_blocked && (
                   <span className="flex items-center gap-1 text-xs font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">
                     <AlertTriangle className="w-3 h-3" /> 80% مستخدم
                   </span>
@@ -160,32 +171,31 @@ export default function Overview() {
               <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
                 <div
                   className={`h-full rounded-full transition-all duration-500 ${
-                    waUsage.exceeded  ? 'bg-red-500'
-                    : waUsage.near_limit ? 'bg-amber-400'
+                    waUsage.emergency_stop    ? 'bg-red-500'
+                    : waUsage.marketing_blocked ? 'bg-orange-500'
+                    : waUsage.near_limit          ? 'bg-amber-400'
                     : 'bg-emerald-500'
                   }`}
-                  style={{ width: `${Math.min(waUsage.unlimited ? 0 : waUsage.usage_pct, 100)}%` }}
+                  style={{ width: `${Math.min(waUsage.usage_pct, 100)}%` }}
                 />
               </div>
 
               <div className="flex items-center justify-between mt-1.5">
                 <span className="text-xs text-slate-500">
-                  {waUsage.unlimited
-                    ? `${waUsage.conversations_used.toLocaleString('ar-SA')} محادثة (غير محدودة)`
-                    : `${waUsage.conversations_used.toLocaleString('ar-SA')} / ${waUsage.conversations_limit.toLocaleString('ar-SA')} محادثة`
-                  }
+                  {`${waUsage.conversations_used.toLocaleString('ar-SA')} / ${waUsage.conversations_limit.toLocaleString('ar-SA')} محادثة`}
                 </span>
-                {!waUsage.unlimited && (
-                  <span className={`text-xs font-bold ${
-                    waUsage.exceeded ? 'text-red-600' : waUsage.near_limit ? 'text-amber-600' : 'text-slate-400'
-                  }`}>
-                    {waUsage.usage_pct}%
-                  </span>
-                )}
+                <span className={`text-xs font-bold ${
+                  waUsage.emergency_stop    ? 'text-red-600'
+                  : waUsage.marketing_blocked ? 'text-orange-600'
+                  : waUsage.near_limit          ? 'text-amber-600'
+                  : 'text-slate-400'
+                }`}>
+                  {waUsage.usage_pct}%
+                </span>
               </div>
             </div>
 
-            {/* Right: upgrade CTA if near/over limit */}
+            {/* Right: details + upgrade CTA */}
             <div className="flex flex-col gap-2 shrink-0">
               <Link
                 to="/wa-usage"
@@ -194,12 +204,12 @@ export default function Overview() {
                 <ExternalLink className="w-3 h-3" />
                 تفاصيل
               </Link>
-              {(waUsage.exceeded || waUsage.near_limit) && (
+              {(waUsage.marketing_blocked || waUsage.near_limit) && (
                 <Link
                   to="/billing"
                   className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl transition-all ${
-                    waUsage.exceeded
-                      ? 'bg-red-600 text-white hover:bg-red-500'
+                    waUsage.marketing_blocked
+                      ? 'bg-orange-600 text-white hover:bg-orange-500'
                       : 'bg-amber-500 text-white hover:bg-amber-400'
                   }`}
                 >
@@ -210,9 +220,17 @@ export default function Overview() {
             </div>
           </div>
 
-          {waUsage.exceeded && (
-            <p className="text-xs text-red-600 mt-2 font-medium">
-              ⛔ تم إيقاف الردود التلقائية — ارقِّ باقتك لاستئنافها
+          {/* Contextual status note — explains what's happening clearly */}
+          {waUsage.emergency_stop && (
+            <p className="text-xs text-red-700 mt-2 font-medium bg-red-100 rounded-lg px-3 py-2">
+              ⛔ جميع الرسائل متوقفة — تجاوزت الحد بشكل كبير. يرجى ترقية باقتك.
+            </p>
+          )}
+          {waUsage.marketing_blocked && !waUsage.emergency_stop && (
+            <p className="text-xs text-orange-700 mt-2 font-medium bg-orange-50 rounded-lg px-3 py-2">
+              📣 الحملات التسويقية متوقفة حتى نهاية الشهر.
+              ردود خدمة العملاء <strong>تعمل بشكل طبيعي</strong>.
+              <Link to="/billing" className="underline mr-1 font-bold">ارقِّ باقتك</Link> لاستئناف الحملات.
             </p>
           )}
         </div>
