@@ -197,6 +197,7 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
 
         salla_email = f"salla-{salla_store_id}@salla-merchant.nahlaai.com"
         new_user = User(
+            username=f"salla-{salla_store_id}",
             email=salla_email,
             password_hash=hash_password(_sec.token_urlsafe(16)),
             role="merchant",

@@ -264,6 +264,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             is_new    = True
 
             new_user = User(
+                username      = owner_email.split("@")[0],
                 email         = owner_email,
                 password_hash = hash_password(_secrets.token_urlsafe(16)),
                 role          = role,
@@ -1063,6 +1064,7 @@ async def salla_oauth_callback(
 
                 temp_password = _secrets.token_urlsafe(16)
                 new_user = User(
+                    username=salla_email.split("@")[0],
                     email=salla_email,
                     password_hash=hash_password(temp_password),
                     role="merchant",
