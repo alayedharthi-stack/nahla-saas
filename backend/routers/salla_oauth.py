@@ -107,7 +107,7 @@ async def salla_embedded_app(request: Request):
     - Opens Nahla dashboard in a new tab on CTA click
     """
     dashboard_url = "https://app.nahlah.ai"
-    logo_url = "https://app.nahlah.ai/logo.png.png"
+    logo_url = "https://app.nahlah.ai/logo.png"
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html dir="rtl" lang="ar">
 <head>
@@ -340,12 +340,13 @@ async def salla_embedded_app(request: Request):
 
   <div class="footer">بأيدي سعودية 100% 🇸🇦 · Nahla AI</div>
 
-  <!-- Salla Embedded SDK -->
-  <script src="https://unpkg.com/@salla.sa/embedded-sdk/dist/umd/index.js"></script>
   <script>
-    var APP_URL = '{dashboard_url}';
+    var APP_URL  = '{dashboard_url}';
     var statusEl = document.getElementById('status-msg');
     var ctaBtn   = document.getElementById('cta-btn');
+    var _readySent = false;
+
+    console.log('[Nahla] /salla/app — page script start');
 
     // ── 1. Restore state for returning merchants ─────────────────────────────
     try {{
@@ -354,38 +355,73 @@ async def salla_embedded_app(request: Request):
         ctaBtn.textContent = 'افتح لوحة التحكم ←';
         ctaBtn.href = APP_URL + '/overview';
         if (statusEl) statusEl.textContent = 'مرحباً بعودتك ✓';
+        console.log('[Nahla] returning merchant detected');
       }}
-    }} catch(e) {{}}
+    }} catch(e) {{ console.warn('[Nahla] localStorage check failed', e); }}
 
-    // ── 2. Signal Salla iframe ready ─────────────────────────────────────────
-    function signalReady() {{
-      // Official Salla SDK
+    // ── 2. Core ready signal (no SDK dependency) ─────────────────────────────
+    function signalReady(src) {{
+      if (_readySent) return;
+      _readySent = true;
+      console.log('[Nahla] signalReady called from:', src);
+      try {{ window.parent.postMessage(JSON.stringify({{ event: 'app.ready' }}), '*'); }} catch(_) {{}}
+      try {{ window.parent.postMessage({{ event: 'app.ready', type: 'app.ready' }}, '*'); }} catch(_) {{}}
+      try {{ window.parent.postMessage('app-ready', '*'); }} catch(_) {{}}
+    }}
+
+    // ── 3. Try Salla SDK (optional enhancement) ──────────────────────────────
+    function initSallaSDK() {{
       try {{
         var s = window.Salla;
         if (s && s.embedded) {{
-          s.embedded.init({{ debug: false }})
-            .then(function() {{ s.embedded.ready(); }})
-            .catch(function() {{ s.embedded.ready(); }});
-          return;
+          console.log('[Nahla] Salla SDK found — calling init()');
+          _readySent = false; // allow SDK to fire its own ready
+          s.embedded.init({{ debug: true }})
+            .then(function() {{
+              console.log('[Nahla] SDK init success — calling embedded.ready()');
+              s.embedded.ready();
+              signalReady('sdk-success');
+            }})
+            .catch(function(err) {{
+              console.warn('[Nahla] SDK init failed:', err);
+              signalReady('sdk-error-fallback');
+            }});
+        }} else {{
+          console.warn('[Nahla] Salla SDK not found on window.Salla');
+          signalReady('no-sdk-fallback');
         }}
-      }} catch(e) {{}}
-      // postMessage fallback
-      try {{ window.parent.postMessage(JSON.stringify({{ event: 'app.ready' }}), '*'); }} catch(_) {{}}
-      try {{ window.parent.postMessage({{ event: 'app.ready' }}, '*'); }} catch(_) {{}}
+      }} catch(err) {{
+        console.error('[Nahla] SDK error:', err);
+        signalReady('sdk-exception-fallback');
+      }}
     }}
 
-    // Fire immediately, on load, and with delays as fallback
-    signalReady();
-    window.addEventListener('load', function() {{ signalReady(); }});
-    setTimeout(signalReady, 300);
-    setTimeout(signalReady, 1000);
-    setTimeout(signalReady, 2500);
+    // Fire postMessage immediately (before SDK even loads)
+    signalReady('immediate');
 
-    // ── 3. Console logs for debugging ────────────────────────────────────────
-    console.log('[Nahla] /salla/app mounted — signaling Salla ready');
+    // Re-allow after immediate send for SDK attempt
+    setTimeout(function() {{
+      _readySent = false;
+      initSallaSDK();
+    }}, 50);
+
+    // Hard fallbacks at increasing intervals
+    setTimeout(function() {{ signalReady('t500'); }},  500);
+    setTimeout(function() {{ signalReady('t1500'); }}, 1500);
+    setTimeout(function() {{ signalReady('t3000'); }}, 3000);
+
     window.addEventListener('load', function() {{
-      console.log('[Nahla] page fully loaded — ready signals sent');
+      console.log('[Nahla] window.load fired — re-signaling ready');
+      _readySent = false;
+      signalReady('window-load');
+      setTimeout(function() {{ _readySent = false; initSallaSDK(); }}, 100);
     }});
+
+    console.log('[Nahla] /salla/app — script setup complete');
+  </script>
+  <!-- Salla Embedded SDK (loaded AFTER inline script to avoid blocking) -->
+  <script async src="https://cdn.jsdelivr.net/npm/@salla.sa/embedded-sdk@0.2.4/dist/umd/index.js"
+    onerror="console.warn('[Nahla] SDK CDN failed — using postMessage fallback')">
   </script>
 </body>
 </html>""")
