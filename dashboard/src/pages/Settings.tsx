@@ -159,16 +159,16 @@ const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
 
 // ── Tab: WhatsApp ────────────────────────────────────────────────────────────
 
-function WhatsAppConnectionCard() {
+function WhatsAppConnectionCard({ onConnected }: { onConnected?: (v: boolean) => void } = {}) {
   const [conn, setConn] = useState<WaConnection | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     whatsappConnectApi.getStatus()
-      .then(setConn)
-      .catch(() => setConn(null))
+      .then(c => { setConn(c); onConnected?.(c?.status === 'connected') })
+      .catch(() => { setConn(null); onConnected?.(false) })
       .finally(() => setLoading(false))
-  }, [])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const isConnected = conn?.status === 'connected'
   const needsReauth = conn?.status === 'needs_reauth' || conn?.status === 'error'
@@ -274,6 +274,13 @@ function WhatsAppTab({
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const [webhookOpen, setWebhookOpen] = useState(false)
+  const [waConnected, setWaConnected] = useState(false)
+
+  useEffect(() => {
+    whatsappConnectApi.getStatus()
+      .then(c => setWaConnected(c?.status === 'connected'))
+      .catch(() => setWaConnected(false))
+  }, [])
 
   const handleTest = async () => {
     setTesting(true)
@@ -296,7 +303,7 @@ function WhatsAppTab({
         title="حالة الاتصال بواتساب للأعمال"
         description="اربط رقم واتساب للأعمال الخاص بمتجرك بخطوة واحدة"
       >
-        <WhatsAppConnectionCard />
+        <WhatsAppConnectionCard onConnected={setWaConnected} />
         <p className="text-xs text-slate-400 mt-3 flex items-start gap-1.5">
           <Shield className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
           جميع بيانات الاتصال (Phone Number ID، Access Token) تُحفظ بشكل آمن على الخادم
@@ -304,7 +311,16 @@ function WhatsAppTab({
         </p>
       </Section>
 
-      {/* ── 2. Notification contact ── */}
+      {/* ── 2+ Settings: only shown when WhatsApp is connected ── */}
+      {!waConnected && (
+        <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center space-y-2">
+          <MessageSquare className="w-8 h-8 text-slate-300 mx-auto" />
+          <p className="text-sm font-medium text-slate-500">اربط واتساب أولاً لتفعيل هذه الإعدادات</p>
+          <p className="text-xs text-slate-400">بعد الربط ستظهر إعدادات الإشعارات والردود التلقائية</p>
+        </div>
+      )}
+
+      {waConnected && (<>
       <Section
         title={s.buttonsTitle}
         description={s.buttonsDesc}
@@ -419,6 +435,7 @@ function WhatsAppTab({
       </div>
 
       <SaveBar onSave={onSave} saving={saving} saved={saved} error={saveError} />
+      </>)} {/* end waConnected */}
     </div>
   )
 }
