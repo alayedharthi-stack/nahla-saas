@@ -302,6 +302,21 @@ function TestimonialCard({ quote, name, store, result }: {
   )
 }
 
+// ── Salla embedded SDK signal helper ──────────────────────────────────────────
+function signalSallaReady() {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const s = (window as any).Salla
+    if (s?.embedded) {
+      s.embedded.init({ debug: false })
+        .then(() => s.embedded.ready())
+        .catch(() => s.embedded.ready())
+    }
+  } catch { /* ignore */ }
+  try { window.parent.postMessage(JSON.stringify({ event: 'app.ready' }), '*') } catch { /* ignore */ }
+  try { window.parent.postMessage({ event: 'app.ready', type: 'app.ready' }, '*') } catch { /* ignore */ }
+}
+
 // ── Main landing page ─────────────────────────────────────────────────────────
 export default function Landing() {
   const [scrolled, setScrolled]         = useState(false)
@@ -312,6 +327,14 @@ export default function Landing() {
     const fn = () => setScrolled(window.scrollY > 50)
     window.addEventListener('scroll', fn, { passive: true })
     return () => window.removeEventListener('scroll', fn)
+  }, [])
+
+  // Signal Salla iframe ready (dismisses skeleton loaders when embedded in Salla)
+  useEffect(() => {
+    signalSallaReady()
+    const t1 = setTimeout(signalSallaReady, 800)
+    const t2 = setTimeout(signalSallaReady, 2000)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
   }, [])
 
   const scrollTo = (id: string) => {

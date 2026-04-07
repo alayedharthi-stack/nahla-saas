@@ -242,26 +242,34 @@ async def salla_embedded_app(request: Request):
   <!-- Salla Embedded SDK — REQUIRED to dismiss skeleton loaders -->
   <script src="https://unpkg.com/@salla.sa/embedded-sdk/dist/umd/index.js"></script>
   <script>
-    // Initialize Salla SDK and signal ready (removes skeleton loaders)
-    try {{
-      const embedded = window.Salla && window.Salla.embedded;
-      if (embedded) {{
-        embedded.init({{ debug: false }}).then(function() {{
-          embedded.ready();
-        }}).catch(function() {{
-          embedded.ready(); // still signal ready on error
-        }});
-      }}
-    }} catch(e) {{
-      // fallback postMessage if SDK fails
+    // Signal ready IMMEDIATELY (belt-and-suspenders approach)
+    function signalReady() {{
+      try {{
+        // Method 1: Official Salla SDK
+        var s = window.Salla;
+        if (s && s.embedded) {{
+          s.embedded.init({{ debug: false }})
+            .then(function() {{ s.embedded.ready(); }})
+            .catch(function() {{ s.embedded.ready(); }});
+        }}
+      }} catch(e) {{}}
+      // Method 2: postMessage fallback (multiple formats)
       try {{ window.parent.postMessage(JSON.stringify({{ event: 'app.ready' }}), '*'); }} catch(_) {{}}
+      try {{ window.parent.postMessage({{ event: 'app.ready', type: 'app.ready' }}, '*'); }} catch(_) {{}}
+      try {{ window.parent.postMessage('app-ready', '*'); }} catch(_) {{}}
     }}
+
+    // Fire immediately + after SDK loads
+    signalReady();
+    window.addEventListener('load', signalReady);
+    setTimeout(signalReady, 500);
+    setTimeout(signalReady, 1500);
 
     // If already logged in, update button to go directly to dashboard
     try {{
-      const token = localStorage.getItem('nahla_token');
+      var token = localStorage.getItem('nahla_token');
       if (token) {{
-        const btn = document.getElementById('cta-btn');
+        var btn = document.getElementById('cta-btn');
         btn.textContent = 'افتح لوحة التحكم ←';
         btn.href = '{dashboard_url}/overview';
       }}
