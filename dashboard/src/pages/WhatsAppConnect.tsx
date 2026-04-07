@@ -21,40 +21,42 @@ import {
   Unplug,
   XCircle,
 } from 'lucide-react'
-import { apiClient } from '../api/client'
+import { apiCall } from '../api/client'
 
 // ── API helpers ───────────────────────────────────────────────────────────────
 
 async function requestOtp(phoneNumber: string, displayName: string, method = 'SMS') {
-  const res = await apiClient.post('/whatsapp/direct/request-otp', {
-    phone_number: phoneNumber,
-    display_name: displayName,
-    method,
-  })
-  return res.data as { status: string; phone_number_id: string; message: string }
+  return apiCall<{ status: string; phone_number_id: string; message: string }>(
+    '/whatsapp/direct/request-otp',
+    {
+      method: 'POST',
+      body: JSON.stringify({ phone_number: phoneNumber, display_name: displayName, method }),
+    }
+  )
 }
 
 async function verifyOtp(phoneNumberId: string, code: string) {
-  const res = await apiClient.post('/whatsapp/direct/verify-otp', {
-    phone_number_id: phoneNumberId,
-    code,
-  })
-  return res.data as { status: string; phone_number: string; display_name: string; message: string }
+  return apiCall<{ status: string; phone_number: string; display_name: string; message: string }>(
+    '/whatsapp/direct/verify-otp',
+    {
+      method: 'POST',
+      body: JSON.stringify({ phone_number_id: phoneNumberId, code }),
+    }
+  )
 }
 
 async function getDirectStatus() {
-  const res = await apiClient.get('/whatsapp/direct/status')
-  return res.data as {
+  return apiCall<{
     connected: boolean
     status: string
     phone_number?: string
     display_name?: string
     connected_at?: string
-  }
+  }>('/whatsapp/direct/status')
 }
 
 async function disconnectWhatsApp() {
-  await apiClient.post('/whatsapp/connection/disconnect')
+  await apiCall('/whatsapp/connection/disconnect', { method: 'POST', body: JSON.stringify({}) })
 }
 
 // ── Step indicator ────────────────────────────────────────────────────────────
@@ -148,8 +150,7 @@ export default function WhatsAppConnect() {
       setSentTo(res.message)
       setStep(2)
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'حدث خطأ. تحقق من الرقم وأعد المحاولة.'
+      const msg = e instanceof Error ? e.message : 'حدث خطأ. تحقق من الرقم وأعد المحاولة.'
       setError(msg)
     } finally {
       setBusy(false)
@@ -170,8 +171,7 @@ export default function WhatsAppConnect() {
       setConnectedAt(new Date().toISOString())
       setStep(3)
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'رمز التحقق غير صحيح. أعد المحاولة.'
+      const msg = e instanceof Error ? e.message : 'رمز التحقق غير صحيح. أعد المحاولة.'
       setError(msg)
     } finally {
       setBusy(false)
