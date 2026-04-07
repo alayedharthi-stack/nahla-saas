@@ -701,8 +701,28 @@ async def salla_embedded_app(request: Request):
     var sallaToken = params.get('token');
     var appId      = params.get('app_id');
 
+    // ── Auto-redirect helper ────────────────────────────────────────────────
+    //  Opens the Nahla dashboard in the PARENT frame (top-level Salla window).
+    //  Falls back to a new tab if top-frame navigation is blocked by the browser.
+    function goToDashboard(link) {{
+      ctaBtn.href   = link;
+      ctaBtn.target = '_blank';
+
+      // Try navigating the top-level Salla frame first so the merchant
+      // doesn't have to click anything
+      try {{
+        window.top.location.href = link;
+      }} catch(e) {{
+        // Cross-origin policy blocked top-frame navigation — open new tab
+        window.open(link, '_blank');
+      }}
+    }}
+
     if (sallaToken) {{
       if (statusEl) statusEl.textContent = 'جاري التحقق من هويتك...';
+      ctaBtn.textContent = 'جاري التحميل…';
+      ctaBtn.style.opacity = '0.7';
+      ctaBtn.style.pointerEvents = 'none';
 
       fetch(API_URL + '/salla/token-login', {{
         method:  'POST',
@@ -718,30 +738,47 @@ async def salla_embedded_app(request: Request):
             new:    data.is_new ? '1' : '0',
           }});
           var dashLink = APP_URL + '/salla-callback?' + cbParams.toString();
-          ctaBtn.textContent = data.is_new
-            ? 'أكمل إعداد متجرك ←'
-            : 'افتح لوحة التحكم ←';
-          ctaBtn.href   = dashLink;
-          ctaBtn.target = '_blank';
-          if (statusEl) statusEl.textContent = data.is_new
-            ? 'مرحباً! حسابك جاهز ✓'
+
+          var greeting = data.is_new
+            ? 'مرحباً! جاري إعداد حسابك...'
             : 'مرحباً بعودتك ' + (data.store_name || '') + ' ✓';
-          console.log('[Nahla] token-login success', {{
-            is_new: data.is_new,
-            tenant: data.tenant_id,
-            link: dashLink,
+          if (statusEl) statusEl.textContent = greeting;
+
+          ctaBtn.textContent    = data.is_new ? 'أكمل إعداد متجرك ←' : 'افتح لوحة التحكم ←';
+          ctaBtn.style.opacity  = '1';
+          ctaBtn.style.pointerEvents = 'auto';
+
+          console.log('[Nahla] token-login OK', {{
+            is_new: data.is_new, tenant: data.tenant_id,
           }});
+
+          // ── Auto-redirect after 1.2 s ────────────────────────────────────
+          setTimeout(function() {{ goToDashboard(dashLink); }}, 1200);
+
         }} else {{
-          console.warn('[Nahla] token-login: no access_token in response', data);
-          if (statusEl) statusEl.textContent = '';
+          // token-login returned an error payload
+          var errMsg = data.detail || data.error || 'تعذّر التحقق';
+          if (statusEl) statusEl.textContent = errMsg;
+          ctaBtn.textContent = 'سجّل متجرك يدوياً ←';
+          ctaBtn.href   = APP_URL + '/register';
+          ctaBtn.target = '_blank';
+          ctaBtn.style.opacity = '1';
+          ctaBtn.style.pointerEvents = 'auto';
+          console.warn('[Nahla] token-login: no access_token', data);
         }}
       }})
       .catch(function(err) {{
-        console.error('[Nahla] token-login fetch error:', err);
         if (statusEl) statusEl.textContent = '';
+        ctaBtn.textContent = 'افتح نحلة ←';
+        ctaBtn.href   = APP_URL + '/register';
+        ctaBtn.target = '_blank';
+        ctaBtn.style.opacity = '1';
+        ctaBtn.style.pointerEvents = 'auto';
+        console.error('[Nahla] token-login error:', err);
       }});
     }} else {{
-      console.log('[Nahla] No Salla token in URL — showing default register link');
+      // No Salla token — show default register CTA
+      console.log('[Nahla] No Salla token in URL — showing default CTA');
     }}
   </script>
 </body>

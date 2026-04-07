@@ -40,8 +40,15 @@ export default function SallaCallback() {
       const parts   = token.split('.')
       const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
 
-      // Persist the session — same localStorage keys used by auth.ts
-      localStorage.setItem('nahla_auth',      '1')           // required by isAuthenticated()
+      // Clear any existing session (e.g. admin account) before storing
+      // the merchant's JWT — prevents the old account from leaking through.
+      localStorage.removeItem('nahla_token')
+      localStorage.removeItem('nahla_role')
+      localStorage.removeItem('nahla_email')
+      localStorage.removeItem('nahla_tenant_id')
+
+      // Persist the merchant session
+      localStorage.setItem('nahla_auth',      '1')
       localStorage.setItem('nahla_token',     token)
       localStorage.setItem('nahla_role',      payload.role      || 'merchant')
       localStorage.setItem('nahla_email',     payload.sub       || '')
