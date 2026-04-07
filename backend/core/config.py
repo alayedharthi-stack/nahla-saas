@@ -48,6 +48,12 @@ SALLA_EMBEDDED_URL = os.environ.get(
     "https://app.nahlah.ai",
 )
 
+# ── Zid OAuth ──────────────────────────────────────────────────────────────────
+ZID_CLIENT_ID      = os.environ.get("ZID_CLIENT_ID", "")
+ZID_CLIENT_SECRET  = os.environ.get("ZID_CLIENT_SECRET", "")
+ZID_REDIRECT_URI   = os.environ.get("ZID_REDIRECT_URI", "https://api.nahlah.ai/zid/redirect")
+ZID_WEBHOOK_SECRET = os.environ.get("ZID_WEBHOOK_SECRET", "")
+
 # ── API key protection ─────────────────────────────────────────────────────────
 API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
 
@@ -93,7 +99,8 @@ _default_origins = (
     "https://nahlah.ai,https://www.nahlah.ai,"
     "https://app.nahlah.ai,https://api.nahlah.ai,"
     "https://nahlah.ai,https://app.nahlah.ai,"
-    "https://store.salla.sa,https://salla.sa"
+    "https://store.salla.sa,https://salla.sa,"
+    "https://zid.sa,https://web.zid.sa,https://partner.zid.sa"
 )
 CORS_ORIGINS: list[str] = [
     o.strip()

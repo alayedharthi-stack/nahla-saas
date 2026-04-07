@@ -31,6 +31,7 @@ import AdminTeam from './pages/AdminTeam'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
+import ZidCallback   from './pages/ZidCallback'
 import Register from './pages/Register'
 import WhatsAppConnect from './pages/WhatsAppConnect'
 import WaUsage        from './pages/WaUsage'
@@ -59,6 +60,7 @@ export default function App() {
           <Route path="/integrations/salla/success" element={<SallaOAuthSuccess />} />
           <Route path="/integrations/salla/error"   element={<SallaOAuthError />} />
           <Route path="/salla-callback"             element={<SallaCallback />} />
+          <Route path="/zid-callback"               element={<ZidCallback />} />
 
           {/* Protected dashboard — all existing routes unchanged */}
           <Route
