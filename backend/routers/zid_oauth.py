@@ -43,7 +43,7 @@ from core.config import (
     ZID_WEBHOOK_SECRET,
 )
 from core.auth import create_token, hash_password
-from database.session import get_db
+from core.database import get_db
 
 logger = logging.getLogger("nahla.zid")
 router = APIRouter(tags=["Zid"])
