@@ -1,19 +1,22 @@
 /**
  * WhatsAppConnect.tsx
  * ────────────────────
- * Direct WhatsApp registration wizard (Shared-WABA model).
+ * Full Meta-compliant WhatsApp Business registration wizard.
  *
- * Flow:
- *  Step 1 → Merchant enters phone number + display name
- *  Step 2 → Merchant enters OTP sent by Meta to their phone
- *  Step 3 → Success — number connected under Nahla's WABA
+ * Step 1 — Phone & Business Identity  (Meta: phone_numbers API)
+ * Step 2 — OTP Verification
+ * Step 3 — Business Profile            (Meta: whatsapp_business_profile API)
+ * Step 4 — Success
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
   BadgeCheck,
+  Building2,
   CheckCircle2,
   ChevronRight,
+  Globe,
   Loader2,
+  Mail,
   MessageCircle,
   Phone,
   RefreshCw,
@@ -23,420 +26,466 @@ import {
 } from 'lucide-react'
 import { apiCall } from '../api/client'
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface OtpResponse   { status: string; phone_number_id: string; message: string }
+interface VerifyResponse { status: string; phone_number: string; display_name: string; message: string }
+interface StatusResponse {
+  connected: boolean; status: string
+  phone_number?: string; display_name?: string; connected_at?: string
+}
+
+// ── Meta business verticals ───────────────────────────────────────────────────
+
+const VERTICALS = [
+  { value: 'RETAIL',                    label: 'تجزئة وتسوق'           },
+  { value: 'APPAREL',                   label: 'ملابس وأزياء'           },
+  { value: 'BEAUTY_SPA_SALON',          label: 'تجميل وعناية'           },
+  { value: 'FOOD_AND_GROCERY',          label: 'طعام وبقالة'            },
+  { value: 'RESTAURANT',               label: 'مطعم وكافيه'            },
+  { value: 'HEALTH_AND_MEDICAL',        label: 'صحة وطب'               },
+  { value: 'EDUCATION',                label: 'تعليم وتدريب'           },
+  { value: 'HOTEL_AND_LODGING',         label: 'فنادق وضيافة'           },
+  { value: 'TRAVEL_AND_TRANSPORTATION', label: 'سفر ونقل'              },
+  { value: 'AUTOMOTIVE',               label: 'سيارات'                },
+  { value: 'ENTERTAINMENT',            label: 'ترفيه وفعاليات'         },
+  { value: 'PROFESSIONAL_SERVICES',     label: 'خدمات مهنية'            },
+  { value: 'NONPROFIT',                label: 'منظمة غير ربحية'        },
+  { value: 'OTHER',                    label: 'أخرى'                  },
+]
+
 // ── API helpers ───────────────────────────────────────────────────────────────
 
-async function requestOtp(phoneNumber: string, displayName: string, method = 'SMS') {
-  return apiCall<{ status: string; phone_number_id: string; message: string }>(
-    '/whatsapp/direct/request-otp',
-    {
-      method: 'POST',
-      body: JSON.stringify({ phone_number: phoneNumber, display_name: displayName, method }),
-    }
-  )
-}
+const post = <T,>(path: string, body: unknown) =>
+  apiCall<T>(path, { method: 'POST', body: JSON.stringify(body) })
 
+async function requestOtp(phone: string, displayName: string, method: string) {
+  return post<OtpResponse>('/whatsapp/direct/request-otp', {
+    phone_number: phone, display_name: displayName, method,
+  })
+}
 async function verifyOtp(phoneNumberId: string, code: string) {
-  return apiCall<{ status: string; phone_number: string; display_name: string; message: string }>(
-    '/whatsapp/direct/verify-otp',
-    {
-      method: 'POST',
-      body: JSON.stringify({ phone_number_id: phoneNumberId, code }),
-    }
-  )
+  return post<VerifyResponse>('/whatsapp/direct/verify-otp', { phone_number_id: phoneNumberId, code })
 }
-
-async function getDirectStatus() {
-  return apiCall<{
-    connected: boolean
-    status: string
-    phone_number?: string
-    display_name?: string
-    connected_at?: string
-  }>('/whatsapp/direct/status')
+async function saveProfile(phoneNumberId: string, profile: Record<string, string>) {
+  return post('/whatsapp/direct/save-profile', { phone_number_id: phoneNumberId, ...profile })
+    .catch(() => {}) // non-fatal
 }
-
-async function disconnectWhatsApp() {
-  await apiCall('/whatsapp/connection/disconnect', { method: 'POST', body: JSON.stringify({}) })
+async function getStatus() {
+  return apiCall<StatusResponse>('/whatsapp/direct/status')
+}
+async function disconnect() {
+  return post('/whatsapp/connection/disconnect', {})
 }
 
 // ── Step indicator ────────────────────────────────────────────────────────────
 
-function StepDot({ n, current }: { n: number; current: number }) {
-  const done   = n < current
-  const active = n === current
+const STEPS = ['الهوية', 'التحقق', 'الملف التجاري', 'تم']
+
+function StepBar({ step }: { step: number }) {
   return (
-    <div className="flex items-center gap-1">
-      <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all
-        ${done   ? 'bg-emerald-500 text-white'   : ''}
-        ${active ? 'bg-violet-600 text-white ring-4 ring-violet-100' : ''}
-        ${!done && !active ? 'bg-slate-100 text-slate-400' : ''}
-      `}>
-        {done ? <CheckCircle2 className="w-4 h-4" /> : n}
-      </div>
+    <div className="flex items-center justify-center gap-1 mb-7">
+      {STEPS.map((label, i) => {
+        const n    = i + 1
+        const done = n < step
+        const active = n === step
+        return (
+          <div key={i} className="flex items-center gap-1">
+            <div className="flex flex-col items-center gap-1">
+              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all
+                ${done   ? 'bg-emerald-500 text-white' : ''}
+                ${active ? 'bg-violet-600 text-white ring-4 ring-violet-100' : ''}
+                ${!done && !active ? 'bg-slate-100 text-slate-400' : ''}`}>
+                {done ? <CheckCircle2 className="w-4 h-4" /> : n}
+              </div>
+              <span className={`text-[10px] font-medium whitespace-nowrap
+                ${active ? 'text-violet-600' : 'text-slate-400'}`}>
+                {label}
+              </span>
+            </div>
+            {i < STEPS.length - 1 && (
+              <div className={`w-8 h-0.5 mb-4 rounded ${n < step ? 'bg-emerald-400' : 'bg-slate-200'}`} />
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
 
-function StepBar({ step }: { step: number }) {
-  const labels = ['رقم الهاتف', 'التحقق', 'تم الربط']
+// ── Field component ───────────────────────────────────────────────────────────
+
+function Field({
+  label, hint, required, children,
+}: { label: string; hint?: string; required?: boolean; children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-center gap-2 mb-8">
-      {labels.map((label, i) => (
-        <div key={i} className="flex items-center gap-2">
-          <div className="flex flex-col items-center gap-1">
-            <StepDot n={i + 1} current={step} />
-            <span className={`text-[10px] font-medium ${i + 1 === step ? 'text-violet-600' : 'text-slate-400'}`}>
-              {label}
-            </span>
-          </div>
-          {i < labels.length - 1 && (
-            <div className={`w-10 h-0.5 mb-4 rounded ${i + 1 < step ? 'bg-emerald-400' : 'bg-slate-200'}`} />
-          )}
-        </div>
-      ))}
+    <div className="space-y-1.5">
+      <label className="block text-sm font-medium text-slate-700">
+        {label} {required && <span className="text-red-500">*</span>}
+      </label>
+      {children}
+      {hint && <p className="text-xs text-slate-400">{hint}</p>}
     </div>
   )
 }
+
+const inputCls = "w-full border border-slate-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-white"
 
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function WhatsAppConnect() {
-  const [step, setStep]               = useState<1 | 2 | 3>(1)
-  const [loading, setLoading]         = useState(true)
-  const [busy, setBusy]               = useState(false)
-  const [error, setError]             = useState('')
+  const [step, setStep]       = useState<1|2|3|4>(1)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy]       = useState(false)
+  const [error, setError]     = useState('')
 
-  // Step 1 fields
+  // Step 1
   const [phone, setPhone]             = useState('')
   const [displayName, setDisplayName] = useState('')
-  const [otpMethod, setOtpMethod]     = useState<'SMS' | 'VOICE'>('SMS')
+  const [otpMethod, setOtpMethod]     = useState<'SMS'|'VOICE'>('SMS')
 
-  // Step 2 fields
-  const [otp, setOtp]                 = useState('')
+  // Step 2
+  const [otp, setOtp]                     = useState('')
   const [phoneNumberId, setPhoneNumberId] = useState('')
-  const [sentTo, setSentTo]           = useState('')
+  const [sentMsg, setSentMsg]             = useState('')
 
-  // Step 3 — connected info
-  const [connectedPhone, setConnectedPhone] = useState('')
-  const [connectedName, setConnectedName]   = useState('')
-  const [connectedAt, setConnectedAt]       = useState('')
+  // Step 3 — business profile
+  const [vertical, setVertical]     = useState('RETAIL')
+  const [about, setAbout]           = useState('')
+  const [address, setAddress]       = useState('')
+  const [email, setEmail]           = useState('')
+  const [website, setWebsite]       = useState('')
 
-  // Load existing connection
+  // Step 4 — connected
+  const [connPhone, setConnPhone]   = useState('')
+  const [connName, setConnName]     = useState('')
+  const [connAt, setConnAt]         = useState('')
+
   useEffect(() => {
-    getDirectStatus()
-      .then(s => {
-        if (s.connected) {
-          setConnectedPhone(s.phone_number ?? '')
-          setConnectedName(s.display_name ?? '')
-          setConnectedAt(s.connected_at ?? '')
-          setStep(3)
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false))
+    getStatus()
+      .then(s => { if (s.connected) { setConnPhone(s.phone_number??''); setConnName(s.display_name??''); setConnAt(s.connected_at??''); setStep(4) } })
+      .catch(()=>{})
+      .finally(()=>setLoading(false))
   }, [])
 
-  // ── Step 1: Request OTP ──────────────────────────────────────────────────
+  // ── Step 1 → 2 ──────────────────────────────────────────────────────────
 
   const handleRequestOtp = useCallback(async () => {
-    if (!phone.trim()) { setError('أدخل رقم الهاتف'); return }
-    if (!displayName.trim()) { setError('أدخل اسم العرض على واتساب'); return }
-
-    setBusy(true)
-    setError('')
+    if (!phone.trim())       { setError('أدخل رقم الهاتف'); return }
+    if (!displayName.trim()) { setError('أدخل اسم العرض'); return }
+    setBusy(true); setError('')
     try {
-      const res = await requestOtp(phone.trim(), displayName.trim(), otpMethod)
-      setPhoneNumberId(res.phone_number_id)
-      setSentTo(res.message)
+      const r = await requestOtp(phone.trim(), displayName.trim(), otpMethod)
+      setPhoneNumberId(r.phone_number_id)
+      setSentMsg(r.message)
       setStep(2)
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'حدث خطأ. تحقق من الرقم وأعد المحاولة.'
-      setError(msg)
-    } finally {
-      setBusy(false)
-    }
+    } catch (e) { setError(e instanceof Error ? e.message : 'حدث خطأ') }
+    finally { setBusy(false) }
   }, [phone, displayName, otpMethod])
 
-  // ── Step 2: Verify OTP ───────────────────────────────────────────────────
+  // ── Step 2 → 3 ──────────────────────────────────────────────────────────
 
   const handleVerifyOtp = useCallback(async () => {
-    if (otp.trim().length < 6) { setError('أدخل الرمز المكوّن من 6 أرقام'); return }
-
-    setBusy(true)
-    setError('')
+    if (otp.trim().length < 6) { setError('أدخل الرمز كاملاً (6 أرقام)'); return }
+    setBusy(true); setError('')
     try {
-      const res = await verifyOtp(phoneNumberId, otp.trim())
-      setConnectedPhone(res.phone_number)
-      setConnectedName(res.display_name)
-      setConnectedAt(new Date().toISOString())
+      const r = await verifyOtp(phoneNumberId, otp.trim())
+      setConnPhone(r.phone_number)
+      setConnName(r.display_name)
       setStep(3)
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'رمز التحقق غير صحيح. أعد المحاولة.'
-      setError(msg)
-    } finally {
-      setBusy(false)
-    }
+    } catch (e) { setError(e instanceof Error ? e.message : 'رمز غير صحيح') }
+    finally { setBusy(false) }
   }, [otp, phoneNumberId])
 
-  // ── Disconnect ───────────────────────────────────────────────────────────
+  // ── Step 3 → 4 ──────────────────────────────────────────────────────────
+
+  const handleSaveProfile = useCallback(async () => {
+    setBusy(true); setError('')
+    try {
+      await saveProfile(phoneNumberId, {
+        vertical, about, address, email,
+        ...(website ? { websites: website } : {}),
+      })
+      setConnAt(new Date().toISOString())
+      setStep(4)
+    } catch (e) { setError(e instanceof Error ? e.message : 'خطأ في الحفظ') }
+    finally { setBusy(false) }
+  }, [phoneNumberId, vertical, about, address, email, website])
 
   const handleDisconnect = useCallback(async () => {
-    if (!confirm('هل أنت متأكد من فصل واتساب؟ سيتوقف الرد التلقائي فوراً.')) return
+    if (!confirm('فصل واتساب؟ سيتوقف الرد التلقائي.')) return
     setBusy(true)
     try {
-      await disconnectWhatsApp()
-      setStep(1)
-      setPhone('')
-      setDisplayName('')
-      setOtp('')
-      setConnectedPhone('')
-      setConnectedName('')
-    } catch {
-      setError('فشل في قطع الاتصال')
-    } finally {
-      setBusy(false)
-    }
+      await disconnect()
+      setStep(1); setPhone(''); setDisplayName(''); setOtp('')
+      setConnPhone(''); setConnName('')
+    } catch { setError('فشل الفصل') }
+    finally { setBusy(false) }
   }, [])
 
   // ─────────────────────────────────────────────────────────────────────────
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="w-6 h-6 animate-spin text-violet-500" />
-      </div>
-    )
-  }
+  if (loading) return (
+    <div className="flex items-center justify-center h-64">
+      <Loader2 className="w-6 h-6 animate-spin text-violet-500" />
+    </div>
+  )
 
   return (
-    <div className="max-w-lg mx-auto space-y-2" dir="rtl">
+    <div className="max-w-lg mx-auto space-y-4" dir="rtl">
+
       {/* Header */}
-      <div className="mb-6">
+      <div>
         <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
           <MessageCircle className="w-6 h-6 text-emerald-500" />
           ربط واتساب للأعمال
         </h1>
         <p className="text-slate-500 mt-1 text-sm">
-          أضف رقم واتساب متجرك ليبدأ الرد التلقائي على عملائك
+          أضف رقم واتساب متجرك ليبدأ نحلة AI بالرد على عملائك
         </p>
       </div>
 
-      {/* Step bar — only show for steps 1 and 2 */}
-      {step < 3 && <StepBar step={step} />}
+      {step < 4 && <StepBar step={step} />}
 
-      {/* ── Step 1: Phone number ─────────────────────────────────────────── */}
+      {/* ── Step 1: Identity ─────────────────────────────────────────────── */}
       {step === 1 && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
-          <div className="flex items-center gap-3 mb-1">
+          <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center">
               <Phone className="w-5 h-5 text-violet-600" />
             </div>
             <div>
-              <p className="font-semibold text-slate-800">رقم الهاتف</p>
-              <p className="text-xs text-slate-500">رقم لم يُسجَّل على واتساب من قبل</p>
+              <p className="font-semibold text-slate-800">بيانات هوية النشاط التجاري</p>
+              <p className="text-xs text-slate-500">تُستخدم لتسجيل الرقم في Meta</p>
             </div>
           </div>
 
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                رقم الهاتف <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="tel"
-                value={phone}
-                onChange={e => setPhone(e.target.value)}
-                placeholder="+966 5X XXX XXXX"
-                className="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 text-left"
-                dir="ltr"
-              />
-              <p className="text-xs text-slate-400 mt-1">مثال: +966501234567 أو 0501234567</p>
-            </div>
+          <Field label="رقم الهاتف" hint="رقم لم يُسجَّل على واتساب من قبل — مثال: +966501234567" required>
+            <input
+              type="tel" value={phone}
+              onChange={e => setPhone(e.target.value)}
+              placeholder="+966 5X XXX XXXX"
+              className={inputCls} dir="ltr"
+            />
+          </Field>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                الاسم على واتساب <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={displayName}
-                onChange={e => setDisplayName(e.target.value)}
-                placeholder="مثال: متجر النور"
-                className="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400"
-              />
-              <p className="text-xs text-slate-400 mt-1">هذا الاسم سيظهر للعملاء على واتساب</p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                طريقة التحقق
-              </label>
-              <div className="flex gap-3">
-                {(['SMS', 'VOICE'] as const).map(m => (
-                  <button
-                    key={m}
-                    onClick={() => setOtpMethod(m)}
-                    className={`flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all
-                      ${otpMethod === m
-                        ? 'bg-violet-600 text-white border-violet-600'
-                        : 'bg-white text-slate-600 border-slate-300 hover:border-violet-300'
-                      }`}
-                  >
-                    {m === 'SMS' ? '📱 رسالة نصية' : '📞 مكالمة هاتفية'}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {error && (
-            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
-              <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-              <p className="text-sm text-red-700">{error}</p>
-            </div>
-          )}
-
-          <button
-            onClick={handleRequestOtp}
-            disabled={busy}
-            className="w-full flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-violet-600/20"
+          <Field
+            label="الاسم المعروض (Verified Name)"
+            hint="الاسم الذي سيظهر للعملاء على واتساب — يجب أن يطابق اسم نشاطك التجاري الرسمي"
+            required
           >
+            <input
+              type="text" value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              placeholder="مثال: متجر النور للإلكترونيات"
+              className={inputCls}
+            />
+            <p className="text-xs text-amber-600 mt-1">
+              ⚠️ يجب أن يتطابق مع اسم نشاطك في السجل التجاري
+            </p>
+          </Field>
+
+          <Field label="طريقة استقبال رمز التحقق">
+            <div className="flex gap-3">
+              {(['SMS','VOICE'] as const).map(m => (
+                <button key={m} onClick={() => setOtpMethod(m)}
+                  className={`flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all
+                    ${otpMethod===m ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-600 border-slate-300 hover:border-violet-300'}`}>
+                  {m==='SMS' ? '📱 رسالة نصية' : '📞 مكالمة هاتفية'}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          {error && <ErrorBox msg={error} />}
+
+          <button onClick={handleRequestOtp} disabled={busy}
+            className="w-full flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-violet-600/20">
             {busy
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> جاري الإرسال...</>
-              : <>إرسال رمز التحقق <ChevronRight className="w-4 h-4" /></>
-            }
+              ? <><Loader2 className="w-4 h-4 animate-spin"/>جاري الإرسال...</>
+              : <>إرسال رمز التحقق <ChevronRight className="w-4 h-4"/></>}
           </button>
+
+          {/* Info */}
+          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-xs text-blue-700 space-y-1">
+            <p className="font-semibold text-blue-800">📋 متطلبات الرقم:</p>
+            <ul className="space-y-1 list-disc list-inside">
+              <li>رقم غير مسجَّل على واتساب الشخصي أو للأعمال</li>
+              <li>يجب استقبال SMS أو مكالمة على هذا الرقم</li>
+              <li>رقم سعودي (+966) أو دولي</li>
+            </ul>
+          </div>
         </div>
       )}
 
       {/* ── Step 2: OTP ──────────────────────────────────────────────────── */}
       {step === 2 && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
-          <div className="flex items-center gap-3 mb-1">
+          <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
-              <ShieldCheck className="w-5 h-5 text-amber-600" />
+              <ShieldCheck className="w-5 h-5 text-amber-600"/>
             </div>
             <div>
-              <p className="font-semibold text-slate-800">رمز التحقق</p>
-              <p className="text-xs text-slate-500 mt-0.5">{sentTo}</p>
+              <p className="font-semibold text-slate-800">التحقق من الرقم</p>
+              <p className="text-xs text-slate-500 mt-0.5">{sentMsg}</p>
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">
-              الرمز المُرسَل <span className="text-red-500">*</span>
-            </label>
+          <Field label="رمز التحقق (6 أرقام)" required>
             <input
-              type="text"
-              value={otp}
-              onChange={e => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-              placeholder="123456"
-              maxLength={6}
-              className="w-full border border-slate-300 rounded-xl px-4 py-3 text-center text-2xl font-mono tracking-widest focus:outline-none focus:ring-2 focus:ring-amber-400"
+              type="text" value={otp}
+              onChange={e => setOtp(e.target.value.replace(/\D/g,'').slice(0,6))}
+              placeholder="• • • • • •"
+              maxLength={6} autoFocus
+              className={`${inputCls} text-center text-2xl font-mono tracking-[0.5em]`}
               dir="ltr"
-              autoFocus
             />
-            <p className="text-xs text-slate-400 mt-1 text-center">
-              الرمز مكوّن من 6 أرقام
-            </p>
-          </div>
+          </Field>
 
-          {error && (
-            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
-              <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-              <p className="text-sm text-red-700">{error}</p>
-            </div>
-          )}
+          {error && <ErrorBox msg={error} />}
 
-          <button
-            onClick={handleVerifyOtp}
-            disabled={busy || otp.length < 6}
-            className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-emerald-600/20"
-          >
+          <button onClick={handleVerifyOtp} disabled={busy||otp.length<6}
+            className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-emerald-600/20">
             {busy
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> جاري التحقق...</>
-              : <>تأكيد الربط <CheckCircle2 className="w-4 h-4" /></>
-            }
+              ? <><Loader2 className="w-4 h-4 animate-spin"/>جاري التحقق...</>
+              : <>تأكيد الرقم <CheckCircle2 className="w-4 h-4"/></>}
           </button>
 
-          <button
-            onClick={() => { setStep(1); setError(''); setOtp('') }}
-            className="w-full text-sm text-slate-400 hover:text-slate-600 py-2"
-          >
+          <button onClick={()=>{setStep(1);setError('');setOtp('')}}
+            className="w-full text-sm text-slate-400 hover:text-slate-600 py-1">
             ← تغيير رقم الهاتف
           </button>
         </div>
       )}
 
-      {/* ── Step 3: Connected ─────────────────────────────────────────────── */}
+      {/* ── Step 3: Business Profile ─────────────────────────────────────── */}
       {step === 3 && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center">
+              <Building2 className="w-5 h-5 text-emerald-600"/>
+            </div>
+            <div>
+              <p className="font-semibold text-slate-800">ملف النشاط التجاري</p>
+              <p className="text-xs text-slate-500">يظهر للعملاء في صفحة نشاطك على واتساب</p>
+            </div>
+          </div>
+
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0"/>
+            <p className="text-xs text-emerald-700">
+              تم التحقق من الرقم بنجاح — أكمل بيانات نشاطك التجاري
+            </p>
+          </div>
+
+          <Field label="نوع النشاط التجاري" required>
+            <select value={vertical} onChange={e=>setVertical(e.target.value)} className={inputCls}>
+              {VERTICALS.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
+            </select>
+          </Field>
+
+          <Field label="وصف النشاط التجاري" hint="ما يظهر في قسم 'نبذة' على واتساب للأعمال — حد أقصى 256 حرف">
+            <textarea
+              value={about} onChange={e=>setAbout(e.target.value.slice(0,256))}
+              placeholder="مثال: نوفر أفضل منتجات الإلكترونيات بأسعار منافسة مع توصيل سريع"
+              rows={3} className={`${inputCls} resize-none`}
+            />
+            <p className="text-xs text-slate-400 text-left">{about.length}/256</p>
+          </Field>
+
+          <Field label="عنوان النشاط التجاري" hint="العنوان الذي سيظهر في الملف التجاري">
+            <input type="text" value={address} onChange={e=>setAddress(e.target.value)}
+              placeholder="مثال: الرياض، حي العليا، شارع التحلية"
+              className={inputCls}/>
+          </Field>
+
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="البريد الإلكتروني" hint="للتواصل التجاري">
+              <div className="relative">
+                <Mail className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/>
+                <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
+                  placeholder="info@store.com"
+                  className={`${inputCls} pr-9`} dir="ltr"/>
+              </div>
+            </Field>
+
+            <Field label="الموقع الإلكتروني">
+              <div className="relative">
+                <Globe className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/>
+                <input type="url" value={website} onChange={e=>setWebsite(e.target.value)}
+                  placeholder="https://store.com"
+                  className={`${inputCls} pr-9`} dir="ltr"/>
+              </div>
+            </Field>
+          </div>
+
+          {error && <ErrorBox msg={error}/>}
+
+          <div className="flex gap-3">
+            <button onClick={handleSaveProfile} disabled={busy}
+              className="flex-1 flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-violet-600/20">
+              {busy
+                ? <><Loader2 className="w-4 h-4 animate-spin"/>جاري الحفظ...</>
+                : <>حفظ وإكمال الربط <CheckCircle2 className="w-4 h-4"/></>}
+            </button>
+            <button onClick={()=>{setConnAt(new Date().toISOString());setStep(4)}}
+              className="px-4 border border-slate-300 text-slate-500 hover:bg-slate-50 rounded-xl text-sm transition-all">
+              تخطي
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Step 4: Connected ─────────────────────────────────────────────── */}
+      {step === 4 && (
         <div className="space-y-4">
           <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-6 text-center space-y-3">
             <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto">
-              <BadgeCheck className="w-9 h-9 text-emerald-600" />
+              <BadgeCheck className="w-9 h-9 text-emerald-600"/>
             </div>
             <div>
               <p className="font-bold text-emerald-800 text-lg">واتساب مرتبط ✅</p>
-              {connectedName && (
-                <p className="font-semibold text-slate-700 mt-1">{connectedName}</p>
-              )}
-              {connectedPhone && (
-                <p className="text-sm font-mono text-slate-500 mt-0.5">{connectedPhone}</p>
-              )}
-              {connectedAt && (
+              {connName && <p className="font-semibold text-slate-700 mt-1">{connName}</p>}
+              {connPhone && <p className="text-sm font-mono text-slate-500 mt-0.5">{connPhone}</p>}
+              {connAt && (
                 <p className="text-xs text-slate-400 mt-2">
-                  تم الربط: {new Date(connectedAt).toLocaleDateString('ar-SA')}
+                  تم الربط: {new Date(connAt).toLocaleDateString('ar-SA')}
                 </p>
               )}
             </div>
-
-            <div className="bg-white rounded-xl p-4 text-right space-y-2 mt-2">
-              <div className="flex items-center gap-2 text-sm text-emerald-700">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                الرد التلقائي على العملاء مفعّل
-              </div>
-              <div className="flex items-center gap-2 text-sm text-emerald-700">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                نحلة AI جاهز للمحادثات
-              </div>
-              <div className="flex items-center gap-2 text-sm text-emerald-700">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                الحملات التسويقية متاحة
-              </div>
+            <div className="bg-white rounded-xl p-4 text-right space-y-2">
+              {[
+                'الرد التلقائي على العملاء مفعّل',
+                'نحلة AI جاهز للمحادثات',
+                'الحملات التسويقية متاحة',
+              ].map(t => (
+                <div key={t} className="flex items-center gap-2 text-sm text-emerald-700">
+                  <CheckCircle2 className="w-4 h-4 shrink-0"/>{t}
+                </div>
+              ))}
             </div>
           </div>
 
           <div className="flex gap-3">
-            <button
-              onClick={() => window.location.href = '/overview'}
-              className="flex-1 flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3 rounded-xl transition-all"
-            >
-              <RefreshCw className="w-4 h-4" />
-              لوحة التحكم
+            <button onClick={()=>window.location.href='/overview'}
+              className="flex-1 flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3 rounded-xl transition-all">
+              <RefreshCw className="w-4 h-4"/>لوحة التحكم
             </button>
-            <button
-              onClick={handleDisconnect}
-              disabled={busy}
-              className="flex items-center justify-center gap-2 border border-red-200 text-red-500 hover:bg-red-50 font-medium text-sm px-4 py-3 rounded-xl transition-all"
-            >
-              <Unplug className="w-4 h-4" />
-              فصل
+            <button onClick={handleDisconnect} disabled={busy}
+              className="flex items-center justify-center gap-2 border border-red-200 text-red-500 hover:bg-red-50 font-medium text-sm px-4 py-3 rounded-xl transition-all">
+              <Unplug className="w-4 h-4"/>فصل
             </button>
           </div>
         </div>
       )}
+    </div>
+  )
+}
 
-      {/* Info box */}
-      {step === 1 && (
-        <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 space-y-2 text-xs text-blue-700">
-          <p className="font-semibold text-blue-800">📋 متطلبات الرقم:</p>
-          <ul className="space-y-1 list-disc list-inside">
-            <li>رقم هاتف سعودي أو دولي غير مسجَّل على واتساب</li>
-            <li>يجب أن تتمكن من استقبال رسائل SMS على هذا الرقم</li>
-            <li>الرقم سيُستخدم فقط لخدمة عملاء متجرك</li>
-          </ul>
-        </div>
-      )}
+function ErrorBox({ msg }: { msg: string }) {
+  return (
+    <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+      <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5"/>
+      <p className="text-sm text-red-700">{msg}</p>
     </div>
   )
 }

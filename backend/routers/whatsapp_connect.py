@@ -754,6 +754,65 @@ async def direct_status(request: Request, db: Session = Depends(get_db)):
     }
 
 
+class SaveProfileRequest(BaseModel):
+    phone_number_id: str
+    vertical:  Optional[str] = "OTHER"
+    about:     Optional[str] = None
+    address:   Optional[str] = None
+    email:     Optional[str] = None
+    websites:  Optional[str] = None
+
+
+@router.post("/direct/save-profile")
+async def direct_save_profile(
+    body: SaveProfileRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Step 3 — Update the WhatsApp Business Profile for the registered number.
+    Calls POST /{phone_number_id}/whatsapp_business_profile
+    """
+    from core.config import WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    graph     = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+    headers   = {
+        "Authorization": f"Bearer {WA_TOKEN}",
+        "Content-Type":  "application/json",
+    }
+
+    profile_payload: dict = {"messaging_product": "whatsapp"}
+    if body.vertical: profile_payload["vertical"]    = body.vertical
+    if body.about:    profile_payload["about"]       = body.about
+    if body.address:  profile_payload["address"]     = body.address
+    if body.email:    profile_payload["email"]       = body.email
+    if body.websites: profile_payload["websites"]    = [body.websites]
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{graph}/{body.phone_number_id}/whatsapp_business_profile",
+                headers=headers,
+                json=profile_payload,
+            )
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("[WA Direct] save-profile API error: %s", exc)
+        raise HTTPException(status_code=503, detail="خطأ في حفظ الملف التجاري")
+
+    if "error" in data:
+        err = data["error"]
+        logger.warning("[WA Direct] save-profile error: %s", err)
+        raise HTTPException(
+            status_code=400,
+            detail=_meta_error_to_arabic(err.get("code", 0), err.get("message", "")),
+        )
+
+    logger.info("[WA Direct] ✅ Business profile saved | tenant=%s", tenant_id)
+    return {"status": "profile_saved", "message": "تم حفظ الملف التجاري بنجاح"}
+
+
 def _meta_error_to_arabic(code: int, message: str) -> str:
     """Convert common Meta API error codes to friendly Arabic messages."""
     mapping = {
