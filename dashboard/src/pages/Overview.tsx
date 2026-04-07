@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
 import {
   DollarSign, MessageSquare, ShoppingCart, TrendingUp, Bot, User, ExternalLink,
-  Sparkles, Clock,
+  Sparkles, Clock, AlertTriangle, TrendingUp as ArrowUp,
 } from 'lucide-react'
 import StatCard from '../components/ui/StatCard'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { apiCall } from '../api/client'
+import { whatsappConnectApi } from '../api/whatsappConnect'
 
 // Placeholder chart data — replaced with real data when store is synced
 const PLACEHOLDER_CHART = [
@@ -40,13 +42,26 @@ interface OverviewStats {
   revenue_chart: { day: string; revenue: number }[]
 }
 
+interface WaUsage {
+  conversations_used:   number
+  conversations_limit:  number
+  usage_pct:            number
+  exceeded:             boolean
+  near_limit:           boolean
+  unlimited:            boolean
+}
+
 export default function Overview() {
   const { t } = useLanguage()
   const ov = t(tr => tr.overview)
   const [stats, setStats]     = useState<OverviewStats | null>(null)
   const [loading, setLoading] = useState(true)
+  const [waUsage, setWaUsage] = useState<WaUsage | null>(null)
 
   useEffect(() => {
+    // Load WhatsApp usage stats
+    apiCall<WaUsage>('/whatsapp/usage').then(setWaUsage).catch(() => null)
+
     // Try to load real stats; gracefully ignore errors (no store connected yet)
     Promise.all([
       apiCall<any>('/store-sync/status').catch(() => null),
@@ -109,6 +124,88 @@ export default function Overview() {
           </div>
         </div>
       </div>
+
+      {/* WhatsApp Conversation Usage Widget */}
+      {waUsage && (
+        <div className={`rounded-2xl border p-4 ${
+          waUsage.exceeded  ? 'bg-red-50    border-red-200'
+          : waUsage.near_limit ? 'bg-amber-50  border-amber-200'
+          : 'bg-white border-slate-200'
+        }`}>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            {/* Left: label + bar */}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-2">
+                <MessageSquare className={`w-4 h-4 ${
+                  waUsage.exceeded ? 'text-red-500' : waUsage.near_limit ? 'text-amber-500' : 'text-emerald-500'
+                }`} />
+                <span className="text-sm font-semibold text-slate-700">
+                  استخدام واتساب هذا الشهر
+                </span>
+                {waUsage.exceeded && (
+                  <span className="flex items-center gap-1 text-xs font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full">
+                    <AlertTriangle className="w-3 h-3" /> تجاوزت الحد
+                  </span>
+                )}
+                {waUsage.near_limit && !waUsage.exceeded && (
+                  <span className="flex items-center gap-1 text-xs font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">
+                    <AlertTriangle className="w-3 h-3" /> 80% مستخدم
+                  </span>
+                )}
+              </div>
+
+              {/* Progress bar */}
+              <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${
+                    waUsage.exceeded  ? 'bg-red-500'
+                    : waUsage.near_limit ? 'bg-amber-400'
+                    : 'bg-emerald-500'
+                  }`}
+                  style={{ width: `${Math.min(waUsage.unlimited ? 0 : waUsage.usage_pct, 100)}%` }}
+                />
+              </div>
+
+              <div className="flex items-center justify-between mt-1.5">
+                <span className="text-xs text-slate-500">
+                  {waUsage.unlimited
+                    ? `${waUsage.conversations_used.toLocaleString('ar-SA')} محادثة (غير محدودة)`
+                    : `${waUsage.conversations_used.toLocaleString('ar-SA')} / ${waUsage.conversations_limit.toLocaleString('ar-SA')} محادثة`
+                  }
+                </span>
+                {!waUsage.unlimited && (
+                  <span className={`text-xs font-bold ${
+                    waUsage.exceeded ? 'text-red-600' : waUsage.near_limit ? 'text-amber-600' : 'text-slate-400'
+                  }`}>
+                    {waUsage.usage_pct}%
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Right: upgrade CTA if near/over limit */}
+            {(waUsage.exceeded || waUsage.near_limit) && (
+              <Link
+                to="/billing"
+                className={`flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-xl shrink-0 transition-all ${
+                  waUsage.exceeded
+                    ? 'bg-red-600 text-white hover:bg-red-500'
+                    : 'bg-amber-500 text-white hover:bg-amber-400'
+                }`}
+              >
+                <ArrowUp className="w-3.5 h-3.5" />
+                ارقِّ باقتك
+              </Link>
+            )}
+          </div>
+
+          {waUsage.exceeded && (
+            <p className="text-xs text-red-600 mt-2 font-medium">
+              ⛔ تم إيقاف الردود التلقائية — ارقِّ باقتك لاستئنافها
+            </p>
+          )}
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

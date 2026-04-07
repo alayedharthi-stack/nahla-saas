@@ -37,6 +37,7 @@ async def _run_checks() -> None:
     logger.info("[Scheduler] Running periodic checks...")
     await _check_subscription_expiry()
     await _check_trial_expiry()
+    await _maybe_reset_monthly_wa_usage()
     logger.info("[Scheduler] Checks complete.")
 
 
@@ -269,3 +270,32 @@ def _update_tenant_flag(db: Session, tenant_id: int, settings_obj: object, flag:
         db.commit()
     except Exception:
         db.rollback()
+
+
+async def _maybe_reset_monthly_wa_usage() -> None:
+    """
+    Reset all tenants' WhatsApp conversation counters on the 1st of the month.
+    Safe to call multiple times per day — uses DB unique index as guard.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    now = datetime.now(timezone.utc)
+    if now.day != 1:
+        return   # only act on the 1st of the month
+
+    logger.info("[Scheduler] 1st of month — resetting WhatsApp usage counters")
+    try:
+        import sys as _sys, os as _os  # noqa: PLC0415
+        _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "../../database")))
+
+        from core.database import SessionLocal  # noqa: PLC0415
+        from core.wa_usage  import reset_all_monthly_usage  # noqa: PLC0415
+
+        db = SessionLocal()
+        try:
+            n = reset_all_monthly_usage(db)
+            logger.info("[Scheduler] WhatsApp usage reset | tenants_refreshed=%d", n)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error("[Scheduler] WA usage reset failed: %s", exc, exc_info=True)

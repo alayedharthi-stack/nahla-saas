@@ -78,6 +78,7 @@ class Tenant(Base):
 
     # Goal A — WhatsApp Embedded Signup
     whatsapp_connection = relationship('WhatsAppConnection', back_populates='tenant', uselist=False)
+    whatsapp_usages     = relationship('WhatsAppUsage', back_populates='tenant')
 
     # Goal B — Store Knowledge Sync
     store_sync_jobs   = relationship('StoreSyncJob', back_populates='tenant')
@@ -933,4 +934,44 @@ class ConversationTrace(Base):
     # Performance
     latency_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    tenant = relationship('Tenant')
+
+
+# ── WhatsApp Conversation Usage Tracking ─────────────────────────────────────
+
+class WhatsAppUsage(Base):
+    """
+    Monthly WhatsApp conversation usage counter per tenant.
+
+    Meta bills per "conversation" (24-hour window), not per message.
+    This table tracks how many Meta conversations a tenant has consumed
+    this month so we can enforce plan limits and protect platform costs.
+
+    One row per (tenant_id, year, month).
+    """
+    __tablename__ = 'whatsapp_usage'
+    __table_args__ = (
+        # Ensure one row per tenant per calendar month
+        {'extend_existing': True},
+    )
+
+    id                   = Column(Integer, primary_key=True)
+    tenant_id            = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+
+    # Calendar period
+    year                 = Column(Integer, nullable=False)
+    month                = Column(Integer, nullable=False)          # 1-12
+
+    # Counters
+    conversations_used   = Column(Integer, default=0, nullable=False)
+    conversations_limit  = Column(Integer, default=1000, nullable=False)  # copied from plan at creation
+
+    # Alert state (prevent duplicate notifications)
+    alert_80_sent        = Column(Boolean, default=False, nullable=False)
+    alert_100_sent       = Column(Boolean, default=False, nullable=False)
+
+    # Timestamps
+    created_at           = Column(DateTime, default=datetime.utcnow)
+    updated_at           = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
     tenant = relationship('Tenant')

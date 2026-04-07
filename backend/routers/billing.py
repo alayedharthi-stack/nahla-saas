@@ -296,9 +296,10 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
 
     sub = get_tenant_subscription(db, tenant_id)
 
-    conversations_used = (
-        db.query(Conversation).filter(Conversation.tenant_id == tenant_id).count()
-    )
+    # Use real monthly usage from the WhatsApp usage tracker
+    from core.wa_usage import get_usage_this_month  # noqa: PLC0415
+    _usage_data        = get_usage_this_month(db, tenant_id)
+    conversations_used = _usage_data["conversations_used"]
 
     tenant = get_or_create_tenant(db, tenant_id)
     now = datetime.now(timezone.utc)
@@ -321,7 +322,9 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
             "trial_days_remaining":   trial_days_remaining,
             "trial_expired":          trial_expired,
             "conversations_used":     conversations_used,
-            "conversations_limit":    100,
+            "conversations_limit":    _usage_data["conversations_limit"],
+            "usage_pct":              _usage_data["usage_pct"],
+            "conversations_exceeded": _usage_data["exceeded"],
             "launch_discount_active": False,
             "current_price_sar":      0,
             "integration_fee_sar":    INTEGRATION_FEE_SAR,
@@ -351,7 +354,9 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
         "trial_expired":           False,
         "started_at":              sub.started_at.isoformat() if sub.started_at else None,
         "conversations_used":      conversations_used,
-        "conversations_limit":     limits.get("conversations_per_month", -1),
+        "conversations_limit":     _usage_data["conversations_limit"],
+        "usage_pct":               _usage_data["usage_pct"],
+        "conversations_exceeded":  _usage_data["exceeded"],
         "launch_discount_active":  launch,
         "current_price_sar":       price,
         "integration_fee_sar":     INTEGRATION_FEE_SAR,

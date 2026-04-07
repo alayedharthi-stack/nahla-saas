@@ -412,6 +412,32 @@ async def reconnect(request: Request, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/usage")
+async def get_usage(request: Request, db: Session = Depends(get_db)):
+    """
+    Return this month's WhatsApp conversation usage for the tenant.
+    Used by the dashboard progress bar widget.
+
+    Response
+    --------
+    {
+      conversations_used:   int,
+      conversations_limit:  int,   // -1 = unlimited
+      usage_pct:            float, // 0-100
+      exceeded:             bool,
+      near_limit:           bool,  // pct >= 80
+      unlimited:            bool,
+      month:                int,
+      year:                 int
+    }
+    """
+    from core.wa_usage import get_usage_this_month  # noqa: PLC0415
+    from core.tenant import resolve_tenant_id        # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    return get_usage_this_month(db, tenant_id)
+
+
 @router.get("/connection/health")
 async def connection_health(request: Request, db: Session = Depends(get_db)):
     """Quick health-check endpoint for the merchant troubleshooting panel."""
