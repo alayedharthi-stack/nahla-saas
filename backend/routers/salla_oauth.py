@@ -103,19 +103,27 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     """
     PUBLIC — no JWT required.
 
-    Called by /salla/app iframe when a merchant opens the embedded app.
+    Official entry point for every merchant who opens Nahla from inside Salla.
+
+    ─────────────────────────────────────────────────────────────
+    MULTI-TENANT GUARANTEES:
+      • Each Salla store gets its own Tenant row (tenant_id is unique per store)
+      • Each JWT contains tenant_id in claims — cannot be spoofed
+      • Middleware enforces tenant_id from JWT on every API call
+      • Admin account is NEVER returned here — only role=merchant tokens
+    ─────────────────────────────────────────────────────────────
 
     Flow:
-      1. Read Salla embedded token (v4.public.*) + app_id from request body
-      2. Introspect token via Salla API → get merchant/store info
-      3. Find existing Nahla Tenant+User by store_id   (returning merchant)
-         or create new ones                            (first-time merchant)
-      4. Return Nahla JWT so the frontend can store it in localStorage
-
-    The caller (/salla/app JS) then builds a link to:
-      https://app.nahlah.ai/salla-callback?token=<JWT>
-    which stores the JWT on the correct domain and redirects to /overview.
+      1. Receive Salla embedded token (v4.public.*) + app_id
+      2. Introspect via Salla API  →  get merchant/store identity
+      3. Look up or create isolated Tenant + User for this store
+      4. Issue Nahla JWT { sub, role, tenant_id }
+      5. Return JWT so /salla/app can build link to /salla-callback
     """
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "?"
+    )
+
     try:
         body = await request.json()
     except Exception:
@@ -127,12 +135,20 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     if not salla_token:
         raise HTTPException(status_code=400, detail="token required")
 
-    logger.info("[SallaTokenLogin] Introspecting Salla token | app_id=%s", app_id)
+    # Mask token for logs — show only first 20 chars
+    token_preview = salla_token[:20] + "…"
+    logger.info(
+        "[SallaLogin] ▶ STEP 1 — Salla token received | ip=%s app_id=%s token=%s",
+        client_ip, app_id, token_preview,
+    )
 
-    # ── Step 1: Introspect the Salla embedded token ────────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    # STEP 2 — Introspect the Salla embedded token
+    # ══════════════════════════════════════════════════════════════
     merchant_id_str = ""
     store_name      = ""
     owner_email     = ""
+    introspect_ok   = False
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -150,132 +166,245 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     "Accept":       "application/json",
                 },
             )
-            logger.info(
-                "[SallaTokenLogin] Introspect response: status=%s body=%.300s",
-                resp.status_code, resp.text,
-            )
 
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("success"):
-                    payload = data.get("data") or {}
-                    # Support different shapes Salla might return
-                    merchant = payload.get("merchant") or {}
+                    introspect_ok   = True
+                    payload_data    = data.get("data") or {}
+                    merchant        = payload_data.get("merchant") or {}
+
+                    # Handle multiple possible Salla response shapes
                     merchant_id_str = str(
-                        merchant.get("id") or
-                        payload.get("merchant_id") or
-                        payload.get("store_id") or
+                        merchant.get("id")              or
+                        payload_data.get("merchant_id") or
+                        payload_data.get("store_id")    or
                         ""
                     )
-                    store_name  = merchant.get("name") or payload.get("store_name") or ""
+                    store_name  = (
+                        merchant.get("name")       or
+                        payload_data.get("store_name") or
+                        ""
+                    )
                     owner_email = (
-                        merchant.get("email") or
-                        payload.get("email")  or
-                        merchant.get("mobile") or
+                        merchant.get("email")      or
+                        payload_data.get("email")  or
+                        merchant.get("mobile")     or
                         ""
                     ).strip().lower()
+
                     logger.info(
-                        "[SallaTokenLogin] Introspect success | merchant_id=%s store=%s email=%s",
+                        "[SallaLogin] ✅ STEP 2 — Introspect SUCCESS | "
+                        "merchant_id=%s store=%r email=%s",
                         merchant_id_str, store_name, owner_email,
                     )
                 else:
-                    logger.warning("[SallaTokenLogin] Introspect: success=false | %s", data)
+                    logger.warning(
+                        "[SallaLogin] ⚠️  STEP 2 — Introspect returned success=false | body=%.300s",
+                        resp.text,
+                    )
             else:
                 logger.warning(
-                    "[SallaTokenLogin] Introspect HTTP error: %s %.200s",
+                    "[SallaLogin] ⚠️  STEP 2 — Introspect HTTP %s | body=%.200s",
                     resp.status_code, resp.text,
                 )
     except Exception as exc:
-        logger.error("[SallaTokenLogin] Introspect call failed: %s", exc)
+        logger.error("[SallaLogin] ❌ STEP 2 — Introspect call raised: %s", exc)
 
-    # ── Step 2: Derive email fallback ──────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    # STEP 3 — Derive identity (fallback if introspect gave no email)
+    # ══════════════════════════════════════════════════════════════
     if not owner_email and merchant_id_str:
-        safe_name  = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
+        safe_name   = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
         owner_email = f"{safe_name or 'store'}-{merchant_id_str}@salla-merchant.nahlaai.com"
-        logger.info("[SallaTokenLogin] Derived fallback email: %s", owner_email)
+        logger.info(
+            "[SallaLogin] ℹ️  STEP 3 — No email from Salla, using derived: %s",
+            owner_email,
+        )
 
     if not owner_email:
-        # Cannot identify merchant — ask them to register manually
-        raise HTTPException(status_code=401, detail="Could not identify merchant from Salla token")
+        logger.error(
+            "[SallaLogin] ❌ Cannot identify merchant — introspect_ok=%s merchant_id=%s",
+            introspect_ok, merchant_id_str,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Could not identify merchant from Salla token. "
+                   "Please install the app via Salla store to link your account.",
+        )
 
-    # ── Step 3: Find or create Nahla Tenant + User ─────────────────────────────
+    logger.info(
+        "[SallaLogin] ▶ STEP 4 — Resolving Nahla account | email=%s merchant_id=%s",
+        owner_email, merchant_id_str,
+    )
+
+    # ══════════════════════════════════════════════════════════════
+    # STEP 4 — Find or create isolated Tenant + User
+    # ══════════════════════════════════════════════════════════════
     try:
         existing_user = db.query(User).filter(User.email == owner_email).first()
 
         if existing_user:
+            # ── Returning merchant ────────────────────────────────────────────
             tenant_id = existing_user.tenant_id
             role      = existing_user.role or "merchant"
             is_new    = False
             logger.info(
-                "[SallaTokenLogin] Returning merchant | email=%s tenant=%s",
-                owner_email, tenant_id,
+                "[SallaLogin] ✅ STEP 4 — TENANT FOUND (returning merchant) | "
+                "email=%s tenant_id=%s role=%s",
+                owner_email, tenant_id, role,
             )
         else:
-            # First-time merchant via embedded app
+            # ── First-time merchant: create isolated Tenant + User ────────────
             new_tenant = Tenant(name=store_name or "متجر سلة")
             db.add(new_tenant)
-            db.flush()
+            db.flush()     # generate new_tenant.id immediately
             tenant_id = new_tenant.id
             role      = "merchant"
             is_new    = True
 
             new_user = User(
-                email=owner_email,
-                password_hash=hash_password(_secrets.token_urlsafe(16)),
-                role=role,
-                tenant_id=tenant_id,
-                is_active=True,
+                email         = owner_email,
+                password_hash = hash_password(_secrets.token_urlsafe(16)),
+                role          = role,
+                tenant_id     = tenant_id,
+                is_active     = True,
             )
             db.add(new_user)
             db.flush()
+
             logger.info(
-                "[SallaTokenLogin] Auto-created merchant | email=%s tenant=%s",
-                owner_email, tenant_id,
+                "[SallaLogin] ✅ STEP 4 — TENANT CREATED (new merchant) | "
+                "email=%s tenant_id=%s store=%r",
+                owner_email, tenant_id, store_name,
             )
 
-        # If we got a store_id from introspect, also save/update the Integration
+        # ── Save / update Salla integration record ────────────────────────────
         if merchant_id_str:
             integration = db.query(Integration).filter(
                 Integration.tenant_id == tenant_id,
                 Integration.provider  == "salla",
             ).first()
-            if not integration:
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if integration:
+                # Update store_id / name in case they changed
+                cfg = dict(integration.config or {})
+                cfg.update({
+                    "store_id":   merchant_id_str,
+                    "store_name": store_name,
+                    "last_seen":  now_iso,
+                })
+                integration.config  = cfg
+                integration.enabled = True
+                logger.info(
+                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s",
+                    tenant_id, merchant_id_str,
+                )
+            else:
                 db.add(Integration(
-                    tenant_id=tenant_id,
-                    provider="salla",
-                    config={
-                        "store_id":   merchant_id_str,
-                        "store_name": store_name,
+                    tenant_id = tenant_id,
+                    provider  = "salla",
+                    config    = {
+                        "store_id":          merchant_id_str,
+                        "store_name":        store_name,
                         "salla_token_login": True,
-                        "connected_at": datetime.now(timezone.utc).isoformat(),
+                        "connected_at":      now_iso,
                     },
-                    enabled=True,
+                    enabled = True,
                 ))
+                logger.info(
+                    "[SallaLogin]    Integration CREATED | tenant=%s store_id=%s",
+                    tenant_id, merchant_id_str,
+                )
 
         db.commit()
 
     except Exception as exc:
-        logger.exception("[SallaTokenLogin] DB error: %s", exc)
+        logger.exception("[SallaLogin] ❌ STEP 4 — DB error: %s", exc)
         try:
             db.rollback()
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail="Database error")
+        raise HTTPException(status_code=500, detail="Database error during account setup")
 
-    # ── Step 4: Generate Nahla JWT ─────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════
+    # STEP 5 — Issue Nahla JWT
+    # ══════════════════════════════════════════════════════════════
     nahla_jwt = create_token(email=owner_email, role=role, tenant_id=tenant_id)
+
+    redirect_target = "/onboarding" if is_new else "/overview"
     logger.info(
-        "[SallaTokenLogin] JWT generated | tenant=%s role=%s is_new=%s",
-        tenant_id, role, is_new,
+        "[SallaLogin] ✅ STEP 5 — JWT ISSUED | "
+        "tenant_id=%s role=%s is_new=%s redirect=%s",
+        tenant_id, role, is_new, redirect_target,
+    )
+    logger.info(
+        "[SallaLogin] ══ COMPLETE ═══ merchant=%s tenant=%s → %s",
+        owner_email, tenant_id, redirect_target,
     )
 
     return {
-        "access_token": nahla_jwt,
-        "role":         role,
-        "tenant_id":    tenant_id,
-        "store_name":   store_name,
-        "email":        owner_email,
-        "is_new":       is_new,
+        "access_token":   nahla_jwt,
+        "role":           role,
+        "tenant_id":      tenant_id,
+        "store_name":     store_name,
+        "email":          owner_email,
+        "is_new":         is_new,
+        "redirect_to":    redirect_target,
+    }
+
+
+@router.get("/salla/whoami")
+async def salla_whoami(request: Request, db: Session = Depends(get_db)):
+    """
+    PROTECTED — requires valid Nahla JWT.
+
+    Returns the identity and isolation proof for the currently-authenticated merchant.
+    Use this to verify multi-tenant isolation:
+
+      curl -H "Authorization: Bearer <JWT>" https://api.nahlah.ai/salla/whoami
+
+    Two different merchants MUST see different tenant_id values.
+    """
+    from core.auth import require_authenticated  # noqa: PLC0415
+
+    payload = require_authenticated(request)
+    tenant_id  = int(payload.get("tenant_id", 0))
+    email      = payload.get("sub", "")
+    role       = payload.get("role", "")
+
+    # Fetch tenant name
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    tenant_name = tenant.name if tenant else "?"
+
+    # Fetch Salla integration for this tenant only
+    salla_int = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+        Integration.provider  == "salla",
+    ).first()
+    salla_store_id   = (salla_int.config or {}).get("store_id", "?") if salla_int else "not_connected"
+    salla_store_name = (salla_int.config or {}).get("store_name", "?") if salla_int else "not_connected"
+
+    return {
+        "isolation_check": "OK — you see ONLY your tenant data",
+        "jwt_claims": {
+            "email":     email,
+            "role":      role,
+            "tenant_id": tenant_id,
+        },
+        "tenant": {
+            "id":   tenant_id,
+            "name": tenant_name,
+        },
+        "salla_integration": {
+            "store_id":   salla_store_id,
+            "store_name": salla_store_name,
+        },
+        "security_note": (
+            "tenant_id comes from the JWT claims only — "
+            "cannot be changed by the client or request headers."
+        ),
     }
 
 

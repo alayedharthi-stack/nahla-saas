@@ -50,9 +50,8 @@ export default function SallaCallback() {
       if (name)  localStorage.setItem('nahla_salla_store_name', name)
 
       // Route: new merchants → onboarding, returning → overview
-      setTimeout(() => {
-        navigate(isNew ? '/onboarding' : '/overview', { replace: true })
-      }, 800)
+      const dest = isNew ? '/onboarding' : '/overview'
+      setTimeout(() => navigate(dest, { replace: true }), 800)
     } catch (e) {
       setError('invalid_token')
       setTimeout(() => navigate('/login?from=salla&error=invalid_token', { replace: true }), 3000)
