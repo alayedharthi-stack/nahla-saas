@@ -34,6 +34,7 @@ import SallaCallback from './pages/SallaCallback'
 import Register from './pages/Register'
 import WhatsAppConnect from './pages/WhatsAppConnect'
 import WaUsage        from './pages/WaUsage'
+import PrivacyPolicy  from './pages/PrivacyPolicy'
 import VerifyEmail from './pages/VerifyEmail'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
@@ -45,6 +46,7 @@ export default function App() {
         <Routes>
           {/* Public — marketing */}
           <Route path="/landing"              element={<Landing />} />
+          <Route path="/privacy"              element={<PrivacyPolicy />} />
 
           {/* Public — auth */}
           <Route path="/login"                element={<Login />} />
