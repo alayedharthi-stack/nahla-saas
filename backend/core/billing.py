@@ -74,7 +74,7 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
         "billing_cycle": "monthly",
         "features": [
             "ردود ذكاء اصطناعي تلقائية",
-            "محادثات غير محدودة",
+            "حتى 15,000 محادثة/شهر",
             "أتمتات غير محدودة",
             "حملات غير محدودة",
             "تحليلات متقدمة + تقارير مخصصة",
@@ -82,7 +82,7 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
             "وصول API كامل",
         ],
         "limits": {
-            "conversations_per_month": -1,
+            "conversations_per_month": 15000,
             "automations": -1,
             "campaigns_per_month": -1,
         },

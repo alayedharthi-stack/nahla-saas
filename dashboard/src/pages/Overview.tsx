@@ -5,8 +5,10 @@ import {
 } from 'recharts'
 import {
   DollarSign, MessageSquare, ShoppingCart, TrendingUp, Bot, User, ExternalLink,
-  Sparkles, Clock, AlertTriangle, TrendingUp as ArrowUp,
+  Sparkles, Clock, AlertTriangle,
 } from 'lucide-react'
+
+const ArrowUp = TrendingUp
 import StatCard from '../components/ui/StatCard'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -184,19 +186,28 @@ export default function Overview() {
             </div>
 
             {/* Right: upgrade CTA if near/over limit */}
-            {(waUsage.exceeded || waUsage.near_limit) && (
+            <div className="flex flex-col gap-2 shrink-0">
               <Link
-                to="/billing"
-                className={`flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-xl shrink-0 transition-all ${
-                  waUsage.exceeded
-                    ? 'bg-red-600 text-white hover:bg-red-500'
-                    : 'bg-amber-500 text-white hover:bg-amber-400'
-                }`}
+                to="/wa-usage"
+                className="flex items-center gap-1.5 text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 bg-white px-3 py-1.5 rounded-xl transition-colors"
               >
-                <ArrowUp className="w-3.5 h-3.5" />
-                ارقِّ باقتك
+                <ExternalLink className="w-3 h-3" />
+                تفاصيل
               </Link>
-            )}
+              {(waUsage.exceeded || waUsage.near_limit) && (
+                <Link
+                  to="/billing"
+                  className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl transition-all ${
+                    waUsage.exceeded
+                      ? 'bg-red-600 text-white hover:bg-red-500'
+                      : 'bg-amber-500 text-white hover:bg-amber-400'
+                  }`}
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                  ارقِّ
+                </Link>
+              )}
+            </div>
           </div>
 
           {waUsage.exceeded && (

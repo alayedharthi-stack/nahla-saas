@@ -78,7 +78,7 @@ class Tenant(Base):
 
     # Goal A — WhatsApp Embedded Signup
     whatsapp_connection = relationship('WhatsAppConnection', back_populates='tenant', uselist=False)
-    whatsapp_usages     = relationship('WhatsAppUsage', back_populates='tenant')
+    whatsapp_usages      = relationship('WhatsAppUsage',          back_populates='tenant')
 
     # Goal B — Store Knowledge Sync
     store_sync_jobs   = relationship('StoreSyncJob', back_populates='tenant')
@@ -950,28 +950,77 @@ class WhatsAppUsage(Base):
     One row per (tenant_id, year, month).
     """
     __tablename__ = 'whatsapp_usage'
-    __table_args__ = (
-        # Ensure one row per tenant per calendar month
-        {'extend_existing': True},
-    )
 
-    id                   = Column(Integer, primary_key=True)
-    tenant_id            = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+    id                          = Column(Integer, primary_key=True)
+    tenant_id                   = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
 
-    # Calendar period
-    year                 = Column(Integer, nullable=False)
-    month                = Column(Integer, nullable=False)          # 1-12
+    # Calendar period — unique per (tenant, year, month) enforced by DB index
+    year                        = Column(Integer, nullable=False)
+    month                       = Column(Integer, nullable=False)
 
-    # Counters
-    conversations_used   = Column(Integer, default=0, nullable=False)
-    conversations_limit  = Column(Integer, default=1000, nullable=False)  # copied from plan at creation
+    # Counters split by Meta category
+    service_conversations_used  = Column(Integer, default=0, nullable=False)
+    marketing_conversations_used = Column(Integer, default=0, nullable=False)
+    conversations_limit         = Column(Integer, default=1000, nullable=False)
 
-    # Alert state (prevent duplicate notifications)
-    alert_80_sent        = Column(Boolean, default=False, nullable=False)
-    alert_100_sent       = Column(Boolean, default=False, nullable=False)
+    # Alert state (prevent duplicate notifications per month)
+    alert_80_sent               = Column(Boolean, default=False, nullable=False)
+    alert_100_sent              = Column(Boolean, default=False, nullable=False)
 
-    # Timestamps
-    created_at           = Column(DateTime, default=datetime.utcnow)
-    updated_at           = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship('Tenant', back_populates='whatsapp_usages')
+
+
+# ── Per-customer Conversation Window (race-safe 24h tracking) ─────────────────
+
+class WaConversationWindow(Base):
+    """
+    One row per (tenant_id, customer_phone).
+    Tracks the start timestamp of the CURRENT open Meta conversation window
+    for each customer. Used to determine whether a new inbound/outbound message
+    opens a NEW billable window (>24 h since last window_start) or falls
+    inside an already-counted one.
+
+    SELECT FOR UPDATE on this row serialises concurrent webhook calls for the
+    same customer, eliminating race conditions.
+    """
+    __tablename__ = 'wa_conversation_windows'
+
+    id             = Column(Integer, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_phone = Column(String, nullable=False)
+    window_start   = Column(DateTime, nullable=False)   # UTC, naive
+    category       = Column(String, default='service', nullable=False)  # service | marketing
+    created_at     = Column(DateTime, default=datetime.utcnow)
+    updated_at     = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship('Tenant')
+
+
+# ── Conversation Audit Log ────────────────────────────────────────────────────
+
+class ConversationLog(Base):
+    """
+    Immutable audit record written every time a NEW billable Meta conversation
+    window opens for a tenant's customer.
+
+    Purpose:
+      - Explain counter increments to merchants ("why did my count go up?")
+      - Support cost analysis (service vs. marketing per day)
+      - Multi-tenant isolation — every query filters on tenant_id
+    """
+    __tablename__ = 'conversation_logs'
+
+    id                       = Column(Integer, primary_key=True)
+    tenant_id                = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+    customer_phone           = Column(String, nullable=False, index=True)
+    conversation_started_at  = Column(DateTime, nullable=False)          # UTC, naive
+    # source: inbound | campaign | template | api
+    source                   = Column(String, default='inbound', nullable=False)
+    # category: service | marketing
+    category                 = Column(String, default='service', nullable=False)
+    created_at               = Column(DateTime, default=datetime.utcnow)
 
     tenant = relationship('Tenant')

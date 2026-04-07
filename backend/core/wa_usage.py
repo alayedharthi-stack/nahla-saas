@@ -1,85 +1,112 @@
 """
 core/wa_usage.py
 ────────────────
-WhatsApp Conversation Usage Tracking & Limit Enforcement.
+WhatsApp Conversation Usage Tracking — Production-grade SaaS implementation.
 
-Context
--------
-Meta charges per "conversation" (a 24-hour window), NOT per message.
-A new conversation opens when:
-  • A customer sends the first message in >24 h
-  • OR we send a template message outside a 24-h window
+Architecture
+------------
+Meta charges per "conversation" (a 24-hour rolling window per customer),
+NOT per message.  Nahla pays this cost on behalf of merchants, so we enforce
+per-plan monthly limits.
 
-Since Nahla pays Meta on behalf of merchants during the early SaaS phase,
-we must enforce per-plan monthly conversation limits.
+Three tables work together:
+
+  wa_conversation_windows   — One row per (tenant, customer_phone).
+                              Tracks the start time of the CURRENT open window.
+                              SELECT FOR UPDATE on this row serialises concurrent
+                              webhook calls, eliminating race conditions.
+
+  conversation_logs         — Immutable audit record written each time a new
+                              billable window opens.  Used for the usage details
+                              page and merchant support queries.
+
+  whatsapp_usage            — Monthly counter per tenant, split by category.
+                              Drives the dashboard widget and limit checks.
+
+Conversation categories (Meta terminology)
+------------------------------------------
+  service    — Customer-initiated reply within the 24-h window.
+               Cheaper, always allowed even when approaching the limit.
+  marketing  — Merchant-initiated template message outside 24-h window.
+               More expensive; blocked first when tenant is over limit.
+
+Smart blocking policy
+---------------------
+  used < limit              → allow ALL messages
+  limit reached             → block MARKETING; allow SERVICE
+  exceeded by >10 %         → block ALL (hard stop)
 
 Public API
 ----------
-  track_conversation(db, tenant_id, customer_phone)
-      → (counted: bool, used: int, limit: int)
-      Call this on EVERY incoming/outgoing message.
-      Returns (True, …) only the first time a new 24-h window opens.
+  track_conversation(db, tenant_id, customer_phone, source, category)
+      → TrackResult
 
-  check_limit(db, tenant_id)
-      → UsageSummary  (used, limit, pct, exceeded, near_limit)
-      Call this BEFORE sending any message to block when over limit.
+  check_limit(db, tenant_id, category)
+      → AllowResult   (allowed: bool, reason: str)
 
   get_usage_this_month(db, tenant_id)
-      → dict  (safe for frontend / API)
+      → dict  (safe to return as API response)
+
+  get_daily_breakdown(db, tenant_id, year, month)
+      → list[dict]  (for the detail page chart)
 
   reset_all_monthly_usage(db)
-      → int  (number of rows reset)
-      Called by scheduler on the 1st of each month.
-
-Plan limits (conversations_per_month)
---------------------------------------
-  trial         →   100
-  starter       → 1 000
-  growth        → 5 000
-  scale         →    -1  (unlimited)
+      → int  (rows reset)
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("nahla-backend")
 
-# ── Sentinel values ───────────────────────────────────────────────────────────
-TRIAL_LIMIT     = 100
-UNLIMITED       = -1
-WINDOW_HOURS    = 24          # Meta conversation window
-ALERT_PCT_LOW   = 80          # warn at 80 %
-ALERT_PCT_HIGH  = 100         # block at 100 %
+# ── Constants ─────────────────────────────────────────────────────────────────
+TRIAL_LIMIT        = 100
+WINDOW_HOURS       = 24          # Meta billing window
+ALERT_PCT_LOW      = 80          # first alert threshold
+HARD_STOP_OVERAGE  = 1.10        # 10 % over limit → block service too
+
+ConvCategory = Literal["service", "marketing"]
+ConvSource   = Literal["inbound", "campaign", "template", "api"]
 
 
-# ── Data class ────────────────────────────────────────────────────────────────
+# ── Result dataclasses ────────────────────────────────────────────────────────
 
 @dataclass
-class UsageSummary:
-    used:        int
-    limit:       int           # -1 = unlimited
-    pct:         float         # 0-100; 0 when unlimited
-    exceeded:    bool
-    near_limit:  bool          # True when pct >= 80 and not yet exceeded
+class TrackResult:
+    counted:     bool           # True if a new billable window was opened
+    category:    str
+    used_service:     int
+    used_marketing:   int
+    used_total:       int
+    limit:       int
+
+
+@dataclass
+class AllowResult:
+    allowed:     bool
+    reason:      str            # "ok" | "marketing_blocked" | "hard_stop"
+    used_total:  int
+    limit:       int
+    pct:         float
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _now_utc() -> datetime:
+def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _naive(dt: datetime) -> datetime:
+    """Strip timezone info — DB stores naive UTC datetimes."""
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
 def _get_plan_limit(db: Session, tenant_id: int) -> int:
-    """
-    Return conversations_per_month for this tenant's active plan.
-    Falls back to TRIAL_LIMIT if no subscription exists.
-    """
-    # Lazy import to avoid circular dependencies
     from models import BillingSubscription, BillingPlan  # noqa: PLC0415
 
     sub = (
@@ -98,9 +125,8 @@ def _get_plan_limit(db: Session, tenant_id: int) -> int:
     if plan is None:
         return TRIAL_LIMIT
 
-    limits = plan.limits or {}
-    val = limits.get("conversations_per_month", TRIAL_LIMIT)
-    return int(val) if val is not None else TRIAL_LIMIT
+    val = (plan.limits or {}).get("conversations_per_month", TRIAL_LIMIT)
+    return int(val) if val and val != -1 else TRIAL_LIMIT
 
 
 def _get_or_create_usage(
@@ -109,7 +135,6 @@ def _get_or_create_usage(
     year: int,
     month: int,
 ) -> "WhatsAppUsage":  # noqa: F821
-    """Return (or create) the monthly usage row for this tenant."""
     from models import WhatsAppUsage  # noqa: PLC0415
 
     row = (
@@ -124,13 +149,14 @@ def _get_or_create_usage(
     if row is None:
         limit = _get_plan_limit(db, tenant_id)
         row   = WhatsAppUsage(
-            tenant_id           = tenant_id,
-            year                = year,
-            month               = month,
-            conversations_used  = 0,
-            conversations_limit = limit,
-            alert_80_sent       = False,
-            alert_100_sent      = False,
+            tenant_id                    = tenant_id,
+            year                         = year,
+            month                        = month,
+            service_conversations_used   = 0,
+            marketing_conversations_used = 0,
+            conversations_limit          = limit,
+            alert_80_sent                = False,
+            alert_100_sent               = False,
         )
         db.add(row)
         db.flush()
@@ -141,35 +167,67 @@ def _get_or_create_usage(
     return row
 
 
-def _is_new_meta_conversation(
+# ── Core: race-safe 24-h window check ────────────────────────────────────────
+
+def _open_new_window(
     db: Session,
     tenant_id: int,
     customer_phone: str,
+    category: ConvCategory,
+    source: ConvSource,
+    now_naive: datetime,
 ) -> bool:
     """
-    Return True if this is the START of a new 24-h Meta conversation window.
-    A window is new when no message has been exchanged with this customer
-    in the last WINDOW_HOURS hours.
+    Atomically check and update the conversation window for this customer.
+    Uses SELECT FOR UPDATE to serialise concurrent calls for the same customer.
 
-    We check ConversationTrace because it's keyed on (tenant_id, customer_phone)
-    and written for every AI-handled message turn.
+    Returns True  → a NEW billable window was opened (counter must be incremented)
+    Returns False → still inside an existing window (no charge)
     """
-    from models import ConversationTrace  # noqa: PLC0415
+    from models import WaConversationWindow, ConversationLog  # noqa: PLC0415
 
-    cutoff = _now_utc() - timedelta(hours=WINDOW_HOURS)
-    # ConversationTrace.created_at uses datetime.utcnow (naive)
-    cutoff_naive = cutoff.replace(tzinfo=None)
+    cutoff = now_naive - timedelta(hours=WINDOW_HOURS)
 
-    recent = (
-        db.query(ConversationTrace.id)
+    # Lock the row for this tenant+customer — prevents race conditions
+    window = (
+        db.query(WaConversationWindow)
         .filter(
-            ConversationTrace.tenant_id      == tenant_id,
-            ConversationTrace.customer_phone == customer_phone,
-            ConversationTrace.created_at     >= cutoff_naive,
+            WaConversationWindow.tenant_id      == tenant_id,
+            WaConversationWindow.customer_phone == customer_phone,
         )
+        .with_for_update()
         .first()
     )
-    return recent is None   # True → no recent trace → new conversation
+
+    if window is not None and window.window_start >= cutoff:
+        # Still inside the 24-h window — no new conversation
+        return False
+
+    # ── New window starts now ────────────────────────────────────────────────
+    if window is None:
+        window = WaConversationWindow(
+            tenant_id      = tenant_id,
+            customer_phone = customer_phone,
+            window_start   = now_naive,
+            category       = category,
+        )
+        db.add(window)
+    else:
+        window.window_start = now_naive
+        window.category     = category
+        window.updated_at   = now_naive
+
+    # Write audit log
+    log = ConversationLog(
+        tenant_id               = tenant_id,
+        customer_phone          = customer_phone,
+        conversation_started_at = now_naive,
+        source                  = source,
+        category                = category,
+    )
+    db.add(log)
+
+    return True
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -178,113 +236,195 @@ def track_conversation(
     db: Session,
     tenant_id: int,
     customer_phone: str,
-) -> Tuple[bool, int, int]:
+    source: ConvSource = "inbound",
+    category: ConvCategory = "service",
+) -> TrackResult:
     """
     Check whether this message opens a new Meta conversation window.
-    If so, increment conversations_used for this month.
+    If so, increment the relevant monthly counter.
 
-    Returns
-    -------
-    (counted, used, limit)
-      counted : True if this was counted as a new conversation
-      used    : total conversations used this month (after incrementing)
-      limit   : plan limit for this month (-1 = unlimited)
+    Thread/process safety
+    ---------------------
+    _open_new_window() uses SELECT FOR UPDATE, so concurrent webhook calls
+    for the same tenant+customer are serialised at the DB level.
+
+    Parameters
+    ----------
+    source   : "inbound" for customer messages, "campaign"/"template" for
+               merchant-initiated bulk or one-off messages
+    category : "service" (customer-initiated) | "marketing" (merchant-initiated)
     """
-    now   = _now_utc()
-    year  = now.year
-    month = now.month
+    now        = _utcnow()
+    now_naive  = _naive(now)
+    year, month = now.year, now.month
 
     usage = _get_or_create_usage(db, tenant_id, year, month)
-    limit = usage.conversations_limit
 
-    is_new = _is_new_meta_conversation(db, tenant_id, customer_phone)
+    is_new = _open_new_window(db, tenant_id, customer_phone, category, source, now_naive)
+
     if not is_new:
-        # Still inside the 24-h window — no new conversation charged
-        return False, usage.conversations_used, limit
+        total = usage.service_conversations_used + usage.marketing_conversations_used
+        return TrackResult(
+            counted=False,
+            category=category,
+            used_service=usage.service_conversations_used,
+            used_marketing=usage.marketing_conversations_used,
+            used_total=total,
+            limit=usage.conversations_limit,
+        )
 
-    # ── New conversation window ────────────────────────────────────────────────
-    usage.conversations_used += 1
-    usage.updated_at          = now.replace(tzinfo=None)   # DB stores naive UTC
-    used = usage.conversations_used
+    # ── Increment the right counter ──────────────────────────────────────────
+    if category == "marketing":
+        usage.marketing_conversations_used += 1
+    else:
+        usage.service_conversations_used   += 1
+
+    usage.updated_at = now_naive
+    total = usage.service_conversations_used + usage.marketing_conversations_used
 
     logger.info(
-        "[WaUsage] New conversation counted | tenant=%s phone=***%s used=%d limit=%s",
-        tenant_id, customer_phone[-4:], used, limit,
+        "[WaUsage] New %s window | tenant=%s phone=***%s total=%d/%d",
+        category, tenant_id, customer_phone[-4:], total, usage.conversations_limit,
     )
 
-    # ── Alert thresholds ─────────────────────────────────────────────────────
+    # ── Check alert thresholds ───────────────────────────────────────────────
+    limit = usage.conversations_limit
     if limit > 0:
-        pct = (used / limit) * 100
-        if pct >= ALERT_PCT_LOW and not usage.alert_80_sent:
+        pct = (total / limit) * 100
+        if pct >= 80 and not usage.alert_80_sent:
             usage.alert_80_sent = True
-            _fire_usage_alert(db, tenant_id, used, limit, pct, "80%")
-        if pct >= ALERT_PCT_HIGH and not usage.alert_100_sent:
+            _fire_alert(db, tenant_id, total, limit, "80%")
+        if pct >= 100 and not usage.alert_100_sent:
             usage.alert_100_sent = True
-            _fire_usage_alert(db, tenant_id, used, limit, pct, "100%")
+            _fire_alert(db, tenant_id, total, limit, "100%")
 
     db.commit()
-    return True, used, limit
+    return TrackResult(
+        counted=True,
+        category=category,
+        used_service=usage.service_conversations_used,
+        used_marketing=usage.marketing_conversations_used,
+        used_total=total,
+        limit=limit,
+    )
 
 
-def check_limit(db: Session, tenant_id: int) -> UsageSummary:
+def check_limit(
+    db: Session,
+    tenant_id: int,
+    category: ConvCategory = "service",
+) -> AllowResult:
     """
-    Return the current usage status for this tenant this month.
-    Call this BEFORE sending any WhatsApp message to enforce limits.
+    Decide whether a message of this category is allowed.
+
+    Blocking policy
+    ---------------
+    total < limit                → allow all
+    total >= limit               → block MARKETING, allow SERVICE
+    total >= limit * 1.10        → block ALL (hard stop to protect cost)
     """
-    now   = _now_utc()
+    now   = _utcnow()
     usage = _get_or_create_usage(db, tenant_id, now.year, now.month)
 
-    used  = usage.conversations_used
-    limit = usage.conversations_limit
-
-    if limit == UNLIMITED or limit <= 0:
-        return UsageSummary(used=used, limit=UNLIMITED, pct=0.0, exceeded=False, near_limit=False)
-
-    pct       = (used / limit) * 100
-    exceeded  = used >= limit
-    near      = pct >= ALERT_PCT_LOW and not exceeded
-
-    return UsageSummary(used=used, limit=limit, pct=round(pct, 1), exceeded=exceeded, near_limit=near)
-
-
-def get_usage_this_month(db: Session, tenant_id: int) -> dict:
-    """Return a dict safe to serialize as API response."""
-    now   = _now_utc()
-    usage = _get_or_create_usage(db, tenant_id, now.year, now.month)
-
-    used  = usage.conversations_used
+    used  = usage.service_conversations_used + usage.marketing_conversations_used
     limit = usage.conversations_limit
     pct   = round((used / limit) * 100, 1) if limit > 0 else 0.0
 
+    if limit <= 0:
+        return AllowResult(allowed=True, reason="ok", used_total=used, limit=limit, pct=0.0)
+
+    if used >= int(limit * HARD_STOP_OVERAGE):
+        return AllowResult(allowed=False, reason="hard_stop",       used_total=used, limit=limit, pct=pct)
+
+    if used >= limit and category == "marketing":
+        return AllowResult(allowed=False, reason="marketing_blocked", used_total=used, limit=limit, pct=pct)
+
+    return AllowResult(allowed=True, reason="ok", used_total=used, limit=limit, pct=pct)
+
+
+def get_usage_this_month(db: Session, tenant_id: int) -> dict:
+    """Return a dict safe to serialise as an API response."""
+    now   = _utcnow()
+    usage = _get_or_create_usage(db, tenant_id, now.year, now.month)
+
+    svc   = usage.service_conversations_used
+    mkt   = usage.marketing_conversations_used
+    total = svc + mkt
+    limit = usage.conversations_limit
+    pct   = round((total / limit) * 100, 1) if limit > 0 else 0.0
+
     return {
-        "conversations_used":    used,
-        "conversations_limit":   limit,
-        "usage_pct":             pct,
-        "exceeded":              (limit > 0 and used >= limit),
-        "near_limit":            (limit > 0 and pct >= ALERT_PCT_LOW and used < limit),
-        "unlimited":             (limit == UNLIMITED),
-        "month":                 now.month,
-        "year":                  now.year,
-        "alert_80_sent":         usage.alert_80_sent,
-        "alert_100_sent":        usage.alert_100_sent,
+        "service_conversations_used":   svc,
+        "marketing_conversations_used": mkt,
+        "conversations_used":           total,          # kept for backward compat
+        "conversations_limit":          limit,
+        "usage_pct":                    pct,
+        "exceeded":                     (limit > 0 and total >= limit),
+        "near_limit":                   (limit > 0 and pct >= 80 and total < limit),
+        "hard_stop":                    (limit > 0 and total >= int(limit * HARD_STOP_OVERAGE)),
+        "unlimited":                    False,           # no plan is truly unlimited
+        "month":                        now.month,
+        "year":                         now.year,
+        "reset_date":                   f"01/{now.month + 1 if now.month < 12 else 1}/{now.year if now.month < 12 else now.year + 1}",
+        "alert_80_sent":                usage.alert_80_sent,
+        "alert_100_sent":               usage.alert_100_sent,
     }
+
+
+def get_daily_breakdown(
+    db: Session,
+    tenant_id: int,
+    year: int,
+    month: int,
+) -> list:
+    """
+    Return a day-by-day breakdown of new conversation windows for the given
+    month, split by category.  Used by the usage detail page chart.
+    """
+    from models import ConversationLog  # noqa: PLC0415
+    from sqlalchemy import func, extract  # noqa: PLC0415
+
+    rows = (
+        db.query(
+            func.date(ConversationLog.conversation_started_at).label("day"),
+            ConversationLog.category,
+            func.count().label("count"),
+        )
+        .filter(
+            ConversationLog.tenant_id == tenant_id,
+            extract("year",  ConversationLog.conversation_started_at) == year,
+            extract("month", ConversationLog.conversation_started_at) == month,
+        )
+        .group_by("day", ConversationLog.category)
+        .order_by("day")
+        .all()
+    )
+
+    # Aggregate into dict[day] → {service, marketing}
+    days: dict = {}
+    for row in rows:
+        day_str = str(row.day)
+        if day_str not in days:
+            days[day_str] = {"day": day_str, "service": 0, "marketing": 0, "total": 0}
+        days[day_str][row.category] = row.count
+        days[day_str]["total"]     += row.count
+
+    return list(days.values())
 
 
 def reset_all_monthly_usage(db: Session) -> int:
     """
-    Reset all tenants' conversations_used to 0 for the new month.
-    Also refreshes conversations_limit from the current plan.
     Called by the scheduler on the 1st of each month.
-
-    Returns the number of rows updated.
+    Creates fresh usage rows (with updated plan limits) for every tenant
+    that had activity in the previous month.
+    Returns the number of tenants processed.
     """
     from models import WhatsAppUsage  # noqa: PLC0415
 
-    now   = _now_utc()
+    now   = _utcnow()
     year  = now.year
     month = now.month
 
-    # Find tenants that already have a row (prior months)
     prior = (
         db.query(WhatsAppUsage)
         .filter(
@@ -295,64 +435,63 @@ def reset_all_monthly_usage(db: Session) -> int:
     )
 
     count = 0
+    seen  = set()
     for row in prior:
-        new_limit = _get_plan_limit(db, row.tenant_id)
-        # Create fresh row for this month if it doesn't exist
-        _get_or_create_usage(db, row.tenant_id, year, month)
-        count += 1
+        if row.tenant_id not in seen:
+            seen.add(row.tenant_id)
+            _get_or_create_usage(db, row.tenant_id, year, month)
+            count += 1
 
     db.commit()
-    logger.info("[WaUsage] Monthly reset complete | tenants_refreshed=%d %04d-%02d", count, year, month)
+    logger.info("[WaUsage] Monthly reset | tenants_refreshed=%d %04d-%02d", count, year, month)
     return count
 
 
-# ── Alert helper (fire-and-forget) ────────────────────────────────────────────
+# ── Alert notifications ───────────────────────────────────────────────────────
 
-def _fire_usage_alert(
+def _fire_alert(
     db: Session,
     tenant_id: int,
     used: int,
     limit: int,
-    pct: float,
     threshold: str,
 ) -> None:
-    """Send WhatsApp + email alert to the merchant when they hit a usage threshold."""
+    """Send a concise WhatsApp alert to the merchant."""
     try:
-        import asyncio as _asyncio  # noqa: PLC0415
+        import asyncio  # noqa: PLC0415
         from core.wa_notify import _send  # noqa: PLC0415
-        from core.tenant import get_or_create_settings, merge_defaults, DEFAULT_WHATSAPP, DEFAULT_STORE  # noqa: PLC0415
+        from core.tenant import get_or_create_settings, merge_defaults  # noqa: PLC0415
 
-        settings    = get_or_create_settings(db, tenant_id)
-        wa_settings = merge_defaults(settings.whatsapp_settings or {}, DEFAULT_WHATSAPP)
-        st_settings = merge_defaults(settings.store_settings    or {}, DEFAULT_STORE)
-        owner_phone = wa_settings.get("owner_whatsapp_number", "")
-        store_name  = st_settings.get("store_name", f"متجر #{tenant_id}")
-
+        settings = get_or_create_settings(db, tenant_id)
+        wa       = merge_defaults(settings.whatsapp_settings or {}, {})
+        owner_phone = wa.get("owner_whatsapp_number", "")
         if not owner_phone:
             return
 
         if threshold == "100%":
+            remaining = 0
             msg = (
-                f"🚨 *{store_name}* — وصلت إلى حد محادثات واتساب لهذا الشهر\n\n"
-                f"استخدمت *{used:,}* من *{limit:,}* محادثة.\n\n"
-                "⛔ تم إيقاف الردود التلقائية تلقائياً.\n"
-                "⬆️ ارقِّ باقتك لاستئناف الخدمة 👇\n"
+                f"⛔ *تجاوزت حد محادثات واتساب لهذا الشهر*\n\n"
+                f"الاستخدام: *{used:,} / {limit:,}* محادثة\n\n"
+                "📌 الحملات التسويقية متوقفة مؤقتاً.\n"
+                "الردود على العملاء لا تزال تعمل.\n\n"
+                "⬆️ *ارقِّ باقتك لاستئناف الحملات:*\n"
                 "https://app.nahlah.ai/billing"
             )
         else:
             remaining = limit - used
             msg = (
-                f"⚠️ *{store_name}* — استخدمت {threshold} من محادثات واتساب\n\n"
-                f"الاستخدام: *{used:,}* / *{limit:,}* محادثة\n"
+                f"⚠️ *استخدمت 80% من محادثات واتساب هذا الشهر*\n\n"
+                f"الاستخدام: *{used:,} / {limit:,}* محادثة\n"
                 f"المتبقي: *{remaining:,}* محادثة\n\n"
-                "💡 فكر في ترقية باقتك قبل نهاية الشهر 👇\n"
+                "💡 ارقِّ باقتك الآن لتجنب توقف الحملات:\n"
                 "https://app.nahlah.ai/billing"
             )
 
-        _asyncio.ensure_future(_send(owner_phone, msg))
+        asyncio.ensure_future(_send(owner_phone, msg))
         logger.info(
             "[WaUsage] Alert sent | tenant=%s threshold=%s used=%d/%d",
             tenant_id, threshold, used, limit,
         )
     except Exception as exc:
-        logger.warning("[WaUsage] Alert send failed: %s", exc)
+        logger.warning("[WaUsage] Alert failed: %s", exc)

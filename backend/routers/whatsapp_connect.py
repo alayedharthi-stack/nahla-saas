@@ -413,29 +413,39 @@ async def reconnect(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/usage")
-async def get_usage(request: Request, db: Session = Depends(get_db)):
+async def get_usage(
+    request:  Request,
+    db:       Session = Depends(get_db),
+    breakdown: bool   = False,
+):
     """
     Return this month's WhatsApp conversation usage for the tenant.
-    Used by the dashboard progress bar widget.
 
-    Response
-    --------
-    {
-      conversations_used:   int,
-      conversations_limit:  int,   // -1 = unlimited
-      usage_pct:            float, // 0-100
-      exceeded:             bool,
-      near_limit:           bool,  // pct >= 80
-      unlimited:            bool,
-      month:                int,
-      year:                 int
-    }
+    Query params
+    ------------
+    breakdown=true  — also include daily_breakdown list (for detail page chart)
+
+    Response always includes
+    ------------------------
+    service_conversations_used, marketing_conversations_used,
+    conversations_used (sum), conversations_limit, usage_pct,
+    exceeded, near_limit, hard_stop, unlimited, month, year, reset_date
+
+    With breakdown=true also includes
+    ----------------------------------
+    daily_breakdown: [{day, service, marketing, total}, ...]
     """
-    from core.wa_usage import get_usage_this_month  # noqa: PLC0415
-    from core.tenant import resolve_tenant_id        # noqa: PLC0415
+    from core.wa_usage import get_usage_this_month, get_daily_breakdown  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
-    return get_usage_this_month(db, tenant_id)
+    data      = get_usage_this_month(db, tenant_id)
+
+    if breakdown:
+        data["daily_breakdown"] = get_daily_breakdown(
+            db, tenant_id, data["year"], data["month"]
+        )
+
+    return data
 
 
 @router.get("/connection/health")

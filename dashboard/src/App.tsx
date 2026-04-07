@@ -33,6 +33,7 @@ import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
 import Register from './pages/Register'
 import WhatsAppConnect from './pages/WhatsAppConnect'
+import WaUsage        from './pages/WaUsage'
 import VerifyEmail from './pages/VerifyEmail'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
@@ -82,6 +83,7 @@ export default function App() {
             <Route path="ai-sales-logs"      element={<AiSalesLogs />} />
             <Route path="store-integration"  element={<StoreIntegration />} />
             <Route path="whatsapp-connect"   element={<WhatsAppConnect />} />
+            <Route path="wa-usage"           element={<WaUsage />} />
             <Route path="handoff-queue"      element={<HandoffQueue />} />
             <Route path="system-status"      element={<SystemStatus />} />
             <Route path="merchants"          element={<Merchants />} />
