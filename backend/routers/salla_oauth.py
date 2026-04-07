@@ -100,130 +100,226 @@ async def salla_embedded_app(request: Request):
     """
     *** SET THIS AS THE IFRAME URL IN SALLA PARTNER PORTAL ***
 
-    Lightweight HTML page served inside Salla's embedded app iframe.
-    - No React / no heavy JS bundle — loads instantly in iframe
-    - Button opens Nahla dashboard in a new tab
-    - Works for both new and returning merchants
+    Nahla-branded page served inside Salla's embedded app iframe.
+    - Matches Nahla platform visual identity exactly
+    - Uses the official Nahla logo and color system
+    - Handles Salla SDK handshake to dismiss skeleton loaders
+    - Opens Nahla dashboard in a new tab on CTA click
     """
     dashboard_url = "https://app.nahlah.ai"
+    logo_url = "https://app.nahlah.ai/logo.png.png"
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html dir="rtl" lang="ar">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>نحلة الذكية</title>
+  <title>نحلة AI — مساعد مبيعات واتساب</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;900&display=swap" rel="stylesheet">
   <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+    :root {{
+      --bg-900:  #0f172a;
+      --bg-800:  #1e293b;
+      --bg-700:  #334155;
+      --amber:   #f59e0b;
+      --amber-d: #d97706;
+      --amber-l: rgba(245,158,11,0.15);
+      --amber-b: rgba(245,158,11,0.35);
+      --text:    #f1f5f9;
+      --muted:   #94a3b8;
+      --border:  rgba(245,158,11,0.2);
+    }}
+
+    html, body {{ height: 100%; }}
+
     body {{
-      font-family: 'Cairo', Arial, sans-serif;
-      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-      color: white;
+      font-family: 'Cairo', system-ui, sans-serif;
+      background: var(--bg-900);
+      color: var(--text);
       min-height: 100vh;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 20px;
+      padding: 24px 16px;
+      background-image:
+        radial-gradient(ellipse 80% 60% at 50% -10%, rgba(245,158,11,0.08) 0%, transparent 70%);
     }}
-    .card {{
-      text-align: center;
-      max-width: 420px;
-      width: 100%;
-      padding: 48px 32px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(245,158,11,0.2);
-      border-radius: 20px;
-      backdrop-filter: blur(12px);
+
+    /* ── Header / Logo ── */
+    .logo-wrap {{
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-bottom: 28px;
     }}
-    .bee {{ font-size: 56px; margin-bottom: 16px; display: block; }}
-    .brand {{
-      font-size: 28px;
+    .logo-img {{
+      width: 80px;
+      height: 80px;
+      object-fit: contain;
+      margin-bottom: 12px;
+      filter: drop-shadow(0 0 18px rgba(245,158,11,0.4));
+    }}
+    .logo-name {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .logo-name h1 {{
+      font-size: 26px;
       font-weight: 900;
-      color: #f59e0b;
+      color: var(--text);
       letter-spacing: -0.5px;
-      margin-bottom: 4px;
     }}
     .ai-badge {{
-      display: inline-block;
-      background: rgba(245,158,11,0.15);
-      border: 1px solid rgba(245,158,11,0.5);
-      color: #f59e0b;
-      font-size: 10px;
-      font-weight: 900;
+      display: inline-flex;
+      align-items: center;
       padding: 2px 8px;
       border-radius: 6px;
-      margin-right: 6px;
-      vertical-align: middle;
+      background: var(--amber-l);
+      border: 1px solid var(--amber-b);
+      box-shadow: 0 0 10px rgba(245,158,11,0.3);
+      font-size: 11px;
+      font-weight: 900;
+      color: var(--amber);
+      letter-spacing: 0.5px;
     }}
-    .subtitle {{
-      color: #94a3b8;
-      font-size: 14px;
-      margin: 12px 0 32px;
+    .tagline {{
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 6px;
+      text-align: center;
       line-height: 1.6;
     }}
+
+    /* ── Card ── */
+    .card {{
+      width: 100%;
+      max-width: 400px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px 24px;
+      backdrop-filter: blur(16px);
+    }}
+
+    /* ── Features ── */
     .features {{
       display: flex;
       flex-direction: column;
-      gap: 10px;
-      margin-bottom: 32px;
-      text-align: right;
+      gap: 12px;
+      margin-bottom: 24px;
     }}
     .feature {{
       display: flex;
       align-items: center;
-      gap: 10px;
-      font-size: 13px;
-      color: #cbd5e1;
+      gap: 12px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px;
     }}
     .feature-icon {{
-      width: 28px;
-      height: 28px;
-      border-radius: 8px;
-      background: rgba(245,158,11,0.15);
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: var(--amber-l);
+      border: 1px solid var(--amber-b);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 14px;
+      font-size: 16px;
       flex-shrink: 0;
     }}
+    .feature span {{
+      font-size: 13px;
+      color: #cbd5e1;
+      line-height: 1.4;
+    }}
+
+    /* ── CTA Button ── */
     .btn {{
-      display: block;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
       width: 100%;
-      background: #f59e0b;
-      color: #1e293b;
-      font-family: 'Cairo', Arial, sans-serif;
+      background: var(--amber);
+      color: var(--bg-900);
+      font-family: 'Cairo', system-ui, sans-serif;
       font-weight: 700;
-      font-size: 16px;
+      font-size: 15px;
       padding: 14px 24px;
       border-radius: 12px;
       text-decoration: none;
       border: none;
       cursor: pointer;
-      transition: background 0.2s, transform 0.1s;
+      transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
+      box-shadow: 0 4px 20px rgba(245,158,11,0.35);
     }}
-    .btn:hover {{ background: #d97706; transform: translateY(-1px); }}
+    .btn:hover {{
+      background: var(--amber-d);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 24px rgba(245,158,11,0.5);
+    }}
     .btn:active {{ transform: translateY(0); }}
-    .trial-badge {{
-      margin-top: 12px;
+
+    .trial-note {{
+      text-align: center;
+      margin-top: 10px;
       font-size: 12px;
-      color: #64748b;
+      color: #475569;
     }}
-    .trial-badge span {{ color: #f59e0b; font-weight: 600; }}
+    .trial-note b {{ color: var(--amber); font-weight: 600; }}
+
+    /* ── Footer ── */
+    .footer {{
+      margin-top: 20px;
+      font-size: 11px;
+      color: #334155;
+      text-align: center;
+    }}
+
+    /* ── Loading state ── */
+    #status-msg {{
+      font-size: 12px;
+      color: var(--muted);
+      text-align: center;
+      margin-top: 8px;
+      min-height: 18px;
+    }}
   </style>
 </head>
 <body>
+
+  <!-- Logo & Brand -->
+  <div class="logo-wrap">
+    <img
+      src="{logo_url}"
+      alt="نحلة"
+      class="logo-img"
+      onerror="this.style.display='none'; document.getElementById('fallback-emoji').style.display='block'"
+    />
+    <span id="fallback-emoji" style="display:none;font-size:56px;margin-bottom:8px;">🐝</span>
+    <div class="logo-name">
+      <h1>نحلة</h1>
+      <span class="ai-badge">AI</span>
+    </div>
+    <p class="tagline">مساعد مبيعات ذكي يرد على عملاء متجرك عبر واتساب<br>على مدار الساعة — بدون تدخل منك</p>
+  </div>
+
+  <!-- Features Card -->
   <div class="card">
-    <span class="bee">🐝</span>
-    <div class="brand">نحلة <span class="ai-badge">AI</span></div>
-    <p class="subtitle">
-      مساعد مبيعات ذكي يرد على عملاء متجرك عبر واتساب<br>
-      على مدار الساعة — بدون تدخل منك
-    </p>
     <div class="features">
       <div class="feature">
         <div class="feature-icon">💬</div>
         <span>يرد تلقائياً على كل سؤال عن المنتجات والطلبات</span>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">🚀</div>
+        <span>الطيار الآلي — يُدير محادثات المبيعات بدون تدخل</span>
       </div>
       <div class="feature">
         <div class="feature-icon">📦</div>
@@ -234,46 +330,62 @@ async def salla_embedded_app(request: Request):
         <span>يرسل عروض وكوبونات للعملاء في الوقت المناسب</span>
       </div>
     </div>
-    <a href="{dashboard_url}" target="_blank" class="btn" id="cta-btn">
+
+    <a href="{dashboard_url}/register" target="_blank" class="btn" id="cta-btn">
       ابدأ تجربتك المجانية 14 يوم ←
     </a>
-    <p class="trial-badge">مجاناً <span>14 يوماً</span> — لا يلزم بطاقة ائتمانية</p>
+    <p class="trial-note">مجاناً <b>14 يوماً</b> — لا يلزم بطاقة ائتمانية</p>
+    <p id="status-msg"></p>
   </div>
-  <!-- Salla Embedded SDK — REQUIRED to dismiss skeleton loaders -->
+
+  <div class="footer">بأيدي سعودية 100% 🇸🇦 · Nahla AI</div>
+
+  <!-- Salla Embedded SDK -->
   <script src="https://unpkg.com/@salla.sa/embedded-sdk/dist/umd/index.js"></script>
   <script>
-    // Signal ready IMMEDIATELY (belt-and-suspenders approach)
+    var APP_URL = '{dashboard_url}';
+    var statusEl = document.getElementById('status-msg');
+    var ctaBtn   = document.getElementById('cta-btn');
+
+    // ── 1. Restore state for returning merchants ─────────────────────────────
+    try {{
+      var token = localStorage.getItem('nahla_token');
+      if (token) {{
+        ctaBtn.textContent = 'افتح لوحة التحكم ←';
+        ctaBtn.href = APP_URL + '/overview';
+        if (statusEl) statusEl.textContent = 'مرحباً بعودتك ✓';
+      }}
+    }} catch(e) {{}}
+
+    // ── 2. Signal Salla iframe ready ─────────────────────────────────────────
     function signalReady() {{
+      // Official Salla SDK
       try {{
-        // Method 1: Official Salla SDK
         var s = window.Salla;
         if (s && s.embedded) {{
           s.embedded.init({{ debug: false }})
             .then(function() {{ s.embedded.ready(); }})
             .catch(function() {{ s.embedded.ready(); }});
+          return;
         }}
       }} catch(e) {{}}
-      // Method 2: postMessage fallback (multiple formats)
+      // postMessage fallback
       try {{ window.parent.postMessage(JSON.stringify({{ event: 'app.ready' }}), '*'); }} catch(_) {{}}
-      try {{ window.parent.postMessage({{ event: 'app.ready', type: 'app.ready' }}, '*'); }} catch(_) {{}}
-      try {{ window.parent.postMessage('app-ready', '*'); }} catch(_) {{}}
+      try {{ window.parent.postMessage({{ event: 'app.ready' }}, '*'); }} catch(_) {{}}
     }}
 
-    // Fire immediately + after SDK loads
+    // Fire immediately, on load, and with delays as fallback
     signalReady();
-    window.addEventListener('load', signalReady);
-    setTimeout(signalReady, 500);
-    setTimeout(signalReady, 1500);
+    window.addEventListener('load', function() {{ signalReady(); }});
+    setTimeout(signalReady, 300);
+    setTimeout(signalReady, 1000);
+    setTimeout(signalReady, 2500);
 
-    // If already logged in, update button to go directly to dashboard
-    try {{
-      var token = localStorage.getItem('nahla_token');
-      if (token) {{
-        var btn = document.getElementById('cta-btn');
-        btn.textContent = 'افتح لوحة التحكم ←';
-        btn.href = '{dashboard_url}/overview';
-      }}
-    }} catch(e) {{}}
+    // ── 3. Console logs for debugging ────────────────────────────────────────
+    console.log('[Nahla] /salla/app mounted — signaling Salla ready');
+    window.addEventListener('load', function() {{
+      console.log('[Nahla] page fully loaded — ready signals sent');
+    }});
   </script>
 </body>
 </html>""")
