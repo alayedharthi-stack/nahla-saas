@@ -297,8 +297,26 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
     sub = get_tenant_subscription(db, tenant_id)
 
     # Use real monthly usage from the WhatsApp usage tracker
-    from core.wa_usage import get_usage_this_month  # noqa: PLC0415
-    _usage_data        = get_usage_this_month(db, tenant_id)
+    try:
+        from core.wa_usage import get_usage_this_month  # noqa: PLC0415
+        _usage_data = get_usage_this_month(db, tenant_id)
+    except Exception as exc:
+        logger.warning("get_usage_this_month failed (non-fatal): %s", exc)
+        _usage_data = {
+            "conversations_used":           0,
+            "conversations_limit":          1000,
+            "usage_pct":                    0.0,
+            "exceeded":                     False,
+            "near_limit":                   False,
+            "marketing_blocked":            False,
+            "emergency_stop":               False,
+            "unlimited":                    False,
+            "month":                        1,
+            "year":                         2025,
+            "reset_date":                   "01/2/2025",
+            "alert_80_sent":                False,
+            "alert_100_sent":               False,
+        }
     conversations_used = _usage_data["conversations_used"]
 
     tenant = get_or_create_tenant(db, tenant_id)

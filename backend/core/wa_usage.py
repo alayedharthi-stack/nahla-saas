@@ -178,11 +178,16 @@ def _get_or_create_usage(
             alert_100_sent               = False,
         )
         db.add(row)
-        db.flush()
-        logger.info(
-            "[WaUsage] Created usage row | tenant=%s %04d-%02d limit=%s",
-            tenant_id, year, month, limit,
-        )
+        try:
+            db.flush()
+            logger.info(
+                "[WaUsage] Created usage row | tenant=%s %04d-%02d limit=%s",
+                tenant_id, year, month, limit,
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.warning("[WaUsage] flush failed (table may be missing columns): %s", exc)
+            raise
     return row
 
 
