@@ -587,16 +587,26 @@ async def direct_request_otp(
         raise HTTPException(status_code=503, detail="خطأ في الاتصال بـ Meta")
 
     if "error" in add_data:
-        err = add_data["error"]
-        code = err.get("code", 0)
-        msg  = err.get("message", "")
-        logger.warning("[WA Direct] Add phone error %s: %s", code, msg)
+        err      = add_data["error"]
+        code     = err.get("code", 0)
+        subcode  = err.get("error_subcode", 0)
+        msg      = err.get("message", "")
+        user_msg = err.get("error_user_msg", "") or err.get("error_user_title", "")
+        logger.warning(
+            "[WA Direct] Add phone error code=%s subcode=%s msg=%s user_msg=%s full=%s",
+            code, subcode, msg, user_msg, add_data,
+        )
 
         # Code 100 subcode 2388053 = number already registered → proceed to OTP
-        if code == 100 and "already" in msg.lower():
-            phone_number_id = add_data.get("id", "")
+        already_registered = (
+            (code == 100 and subcode == 2388053)
+            or (code == 100 and "already" in msg.lower())
+        )
+        if already_registered:
+            phone_number_id = add_data.get("error", {}).get("error_data", {}).get("id", "") or ""
+            # even without ID we can still try to request OTP by looking up number
         else:
-            friendly = _meta_error_to_arabic(code, msg)
+            friendly = _meta_error_to_arabic(code, msg, subcode, user_msg)
             raise HTTPException(status_code=400, detail=friendly)
     else:
         phone_number_id = add_data.get("id", "")
@@ -813,13 +823,27 @@ async def direct_save_profile(
     return {"status": "profile_saved", "message": "تم حفظ الملف التجاري بنجاح"}
 
 
-def _meta_error_to_arabic(code: int, message: str) -> str:
+def _meta_error_to_arabic(code: int, message: str, subcode: int = 0, user_msg: str = "") -> str:
     """Convert common Meta API error codes to friendly Arabic messages."""
-    mapping = {
-        136023: "هذا الرقم مسجَّل بالفعل على واتساب الشخصي. يجب استخدام رقم غير مسجَّل.",
-        136031: "تجاوزت عدد الأرقام المسموح بها. تواصل مع الدعم.",
-        100:    "بيانات غير صحيحة. تحقق من رقم الهاتف.",
+    # Subcode-specific messages take priority
+    subcode_map = {
+        2388053: "الرقم مسجَّل بالفعل في هذا الحساب.",
+        2361002: "صيغة رقم الهاتف غير صحيحة. تأكد من إدخال الرقم كاملاً مع رمز الدولة.",
+        2388001: "اسم العرض غير مقبول من Meta. استخدم اسم النشاط التجاري الرسمي.",
+        2388055: "الرقم مسجَّل على واتساب الشخصي. يجب حذفه من الواتساب الشخصي أولاً.",
+        2388049: "تجاوزت الحد الأقصى لعدد الأرقام المسموح بها في هذا الحساب.",
+    }
+    if subcode and subcode in subcode_map:
+        return subcode_map[subcode]
+
+    code_map = {
+        136023: "هذا الرقم مسجَّل على واتساب الشخصي. يجب إلغاء تسجيله أولاً.",
+        136031: "تجاوزت الحد الأقصى لعدد الأرقام المسموح بها. تواصل مع الدعم.",
         190:    "انتهت صلاحية رمز الوصول. تواصل مع الدعم.",
         10:     "صلاحيات غير كافية. تواصل مع الدعم.",
+        100:    f"بيانات غير صحيحة من Meta{': ' + user_msg if user_msg else (' — ' + message[:120] if message else '')}",
     }
-    return mapping.get(code, f"خطأ من Meta: {message or code}")
+    if code in code_map:
+        return code_map[code]
+    detail = user_msg or message or str(code)
+    return f"خطأ من Meta ({code}): {detail[:200]}"
