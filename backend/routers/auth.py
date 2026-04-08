@@ -113,21 +113,40 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
             if verify_password(body.password, user.password_hash):
                 role = user.role or "merchant"
 
-                # ── Auto-repair: if user has no tenant_id, create/assign one ──────
+                # ── Auto-repair: if user has no tenant_id, recover from existing data ──
                 tenant_id = user.tenant_id
                 if not tenant_id:
-                    # Try to find an existing tenant by name/email
-                    existing = db.query(Tenant).filter(Tenant.name == email).first()
-                    if existing:
-                        tenant_id = existing.id
-                    else:
-                        new_tenant = Tenant(
-                            name=email,
-                            slug=email.split("@")[0].replace(".", "-")[:40],
-                        )
-                        db.add(new_tenant)
+                    from models import WhatsAppConnection, Integration  # noqa: PLC0415
+                    recovered = None
+
+                    # 1. Look for an existing tenant assigned to this user by email match
+                    recovered = db.query(Tenant).filter(Tenant.name == email).first()
+
+                    # 2. If not found, check if there's a WhatsAppConnection under tenant_id=1
+                    #    (data stored before tenant_id was required falls back to 1)
+                    if not recovered:
+                        wa = db.query(WhatsAppConnection).filter(
+                            WhatsAppConnection.tenant_id == 1,
+                        ).first()
+                        if wa:
+                            recovered = db.query(Tenant).filter(Tenant.id == 1).first()
+
+                    # 3. Check Integration table under tenant_id=1
+                    if not recovered:
+                        integ = db.query(Integration).filter(
+                            Integration.tenant_id == 1,
+                        ).first()
+                        if integ:
+                            recovered = db.query(Tenant).filter(Tenant.id == 1).first()
+
+                    # 4. Still nothing — create a fresh tenant for this user
+                    if not recovered:
+                        slug_base = email.split("@")[0].replace(".", "-")[:40]
+                        recovered = Tenant(name=email, slug=slug_base)
+                        db.add(recovered)
                         db.flush()
-                        tenant_id = new_tenant.id
+
+                    tenant_id = recovered.id
                     user.tenant_id = tenant_id
                     db.commit()
                     logger.warning(
