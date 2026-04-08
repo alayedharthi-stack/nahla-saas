@@ -420,36 +420,38 @@ function initDiscountPopup(c,fromSlide){{
   var cta=document.getElementById('nahla-popup-cta');
   if(cta)cta.addEventListener('click',function(){{
     ls(SEEN_KEY,1);
-    var btn=cta;
-    btn.textContent='⏳ جاري الحصول على الكوبون…';
-    btn.disabled=true;
+    cta.textContent='⏳ جاري…';cta.disabled=true;
 
-    // 1. Ask backend for a unique coupon code
-    fetch('{_API_BASE}/merchant/widgets/'+TENANT_ID+'/create-coupon',{{method:'POST'}})
-      .then(function(r){{return r.json();}})
-      .then(function(data){{
-        if(!data.success||!data.code){{btn.textContent='احصل على الخصم';btn.disabled=false;hide();return;}}
-        var code=data.code;
+    function _doApply(code){{
+      if(!code){{cta.textContent='احصل على الخصم';cta.disabled=false;hide();return;}}
 
-        // 2a. Try Salla Twilight SDK — applyCoupon
-        if(window.salla&&salla.cart&&typeof salla.cart.applyCoupon==='function'){{
-          salla.cart.applyCoupon(code)
-            .then(function(){{_showApplied(code,btn);}})
-            .catch(function(){{_fallbackCart(code,btn);}});
+      // 1. Try Salla SDK methods
+      var sdk=window.salla||window.Salla;
+      if(sdk&&sdk.cart){{
+        var fn=sdk.cart.applyCoupon||sdk.cart.addCoupon||sdk.cart.setCoupon;
+        if(typeof fn==='function'){{
+          fn.call(sdk.cart,code)
+            .then(function(){{_showApplied(code,cta);}})
+            .catch(function(){{_fallbackCart(code,cta);}});
           return;
         }}
-        // 2b. Try Salla event system
-        if(window.Salla&&Salla.event){{
-          try{{
-            Salla.event.dispatch('cart::coupon.apply',{{coupon_code:code}});
-            setTimeout(function(){{_showApplied(code,btn);}},800);
-            return;
-          }}catch(e){{}}
-        }}
-        // 2c. Fallback: fill coupon field + show code
-        _fallbackCart(code,btn);
-      }})
-      .catch(function(){{btn.textContent='احصل على الخصم';btn.disabled=false;hide();}});
+      }}
+      // 2. Try Salla Custom Event
+      try{{
+        document.dispatchEvent(new CustomEvent('cart::coupon.apply',{{bubbles:true,detail:{{coupon_code:code}}}}));
+        setTimeout(function(){{_showApplied(code,cta);}},600);
+        return;
+      }}catch(e){{}}
+      // 3. DOM + redirect fallback
+      _fallbackCart(code,cta);
+    }}
+
+    // Try backend for unique coupon, fallback to static code on ANY failure
+    var staticCode=N.popupCfg&&N.popupCfg.coupon_code?N.popupCfg.coupon_code:'';
+    fetch('{_API_BASE}/merchant/widgets/'+TENANT_ID+'/create-coupon',{{method:'POST'}})
+      .then(function(r){{return r.ok?r.json():Promise.resolve({{success:false}});}}  )
+      .then(function(d){{_doApply((d.success&&d.code)?d.code:staticCode);}})
+      .catch(function(){{_doApply(staticCode);}});
   }});
 
   function _showApplied(code,btn){{
@@ -460,7 +462,19 @@ function initDiscountPopup(c,fromSlide){{
     setTimeout(hide,1800);
   }}
 
+  function _fillInput(inp,code){{
+    inp.value=code;
+    try{{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(inp,code);}}catch(e){{}}
+    ['input','change'].forEach(function(e){{inp.dispatchEvent(new Event(e,{{bubbles:true}}));}});
+  }}
+
   function _applyCouponToDOM(code){{
+    // 0. Try Salla Web Component Shadow DOM first
+    var sc=document.querySelector('salla-coupon,salla-coupon-form,[is="salla-coupon"]');
+    if(sc&&sc.shadowRoot){{
+      var si=sc.shadowRoot.querySelector('input');
+      if(si){{_fillInput(si,code);var sb=sc.shadowRoot.querySelector('button');if(sb)setTimeout(function(){{sb.click();}},150);return true;}}
+    }}
     // Try every possible Salla coupon input selector
     var sel=[
       'input[name="coupon"]',
@@ -480,14 +494,7 @@ function initDiscountPopup(c,fromSlide){{
     var inp=null;
     for(var i=0;i<sel.length;i++){{inp=document.querySelector(sel[i]);if(inp)break;}}
     if(!inp)return false;
-
-    // Fill the field
-    inp.value=code;
-    // Trigger React/Vue reactivity
-    var nativeInputSetter=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-    if(nativeInputSetter)nativeInputSetter.call(inp,code);
-    inp.dispatchEvent(new Event('input',{{bubbles:true}}));
-    inp.dispatchEvent(new Event('change',{{bubbles:true}}));
+    _fillInput(inp,code);
 
     // Find and click the apply button
     var btnSel=[
@@ -515,23 +522,20 @@ function initDiscountPopup(c,fromSlide){{
   function _fallbackCart(code,btn){{
     try{{navigator.clipboard.writeText(code);}}catch(e){{}}
 
-    // 1. Try DOM injection (works if coupon field is on current page)
+    // 1. Try DOM injection — handle normal DOM + Shadow DOM (Salla Web Components)
     var domOk=_applyCouponToDOM(code);
-    if(domOk){{
-      btn.textContent='✓ تم تطبيق الخصم!';btn.style.background='#22c55e';
-      setTimeout(hide,1500);
-      return;
-    }}
+    if(domOk){{btn.textContent='✓ جاري التطبيق…';setTimeout(function(){{_showApplied(code,btn);}},800);return;}}
 
-    // 2. Try redirect to cart with coupon in URL (100% reliable on Salla)
-    var cartUrl='/cart?coupon='+encodeURIComponent(code);
+    // 2. GUARANTEED fallback — redirect to /cart?coupon=CODE (Salla reads it automatically)
+    btn.textContent='✓ جاهز!';btn.style.background='#22c55e';
     hide();
-    // Show toast then redirect
     var toast=document.createElement('div');
-    toast.style.cssText='position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#1e293b;color:#fff;padding:14px 24px;border-radius:14px;z-index:999999;font-size:14px;font-weight:700;direction:rtl;box-shadow:0 8px 30px rgba(0,0,0,.3);text-align:center;';
-    toast.innerHTML='🎁 كود الخصم: <span style="color:#fbbf24;letter-spacing:2px;font-size:16px;">'+code+'</span><br><small style="font-weight:400;opacity:.8;">جاري تطبيق الخصم…</small>';
+    toast.style.cssText='position:fixed;top:24px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:16px 28px;border-radius:16px;z-index:999999;font-size:14px;font-weight:700;direction:rtl;box-shadow:0 10px 40px rgba(0,0,0,.35);text-align:center;min-width:280px;';
+    toast.innerHTML='🎁 تم! كود خصمك: <span style="color:#fbbf24;letter-spacing:3px;font-size:17px;display:block;margin-top:4px;">'+code+'</span><small style="font-weight:400;opacity:.7;font-size:12px;">جاري تطبيق الخصم على سلتك…</small>';
     document.body.appendChild(toast);
-    setTimeout(function(){{window.location.href=cartUrl;}},1200);
+    setTimeout(function(){{
+      window.location.href='/cart?coupon='+encodeURIComponent(code);
+    }},1400);
   }}
 
   return {{show:show,hide:hide}};
