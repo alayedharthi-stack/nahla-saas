@@ -828,6 +828,53 @@ async def direct_verify_otp(
     }
 
 
+@router.get("/direct/debug-token")
+async def direct_debug_token():
+    """
+    Diagnostic endpoint — checks WHATSAPP_TOKEN permissions and WABA access.
+    TEMPORARY: Remove after debugging is done.
+    """
+    from core.config import WA_BUSINESS_ACCOUNT_ID, WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+    graph   = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+    headers = {"Authorization": f"Bearer {WA_TOKEN}"}
+    result: dict = {
+        "waba_id":        WA_BUSINESS_ACCOUNT_ID,
+        "token_prefix":   (WA_TOKEN or "")[:12] + "...",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        # 1. Check token info
+        try:
+            r = await client.get(f"{graph}/me", headers=headers)
+            result["me"] = r.json()
+        except Exception as e:
+            result["me_error"] = str(e)
+
+        # 2. Check WABA access
+        try:
+            r = await client.get(
+                f"{graph}/{WA_BUSINESS_ACCOUNT_ID}",
+                headers=headers,
+                params={"fields": "id,name,currency,timezone_id"},
+            )
+            result["waba"] = r.json()
+        except Exception as e:
+            result["waba_error"] = str(e)
+
+        # 3. List phone numbers under WABA
+        try:
+            r = await client.get(
+                f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
+                headers=headers,
+                params={"fields": "id,display_phone_number,verified_name,status"},
+            )
+            result["phone_numbers"] = r.json()
+        except Exception as e:
+            result["phone_numbers_error"] = str(e)
+
+    logger.info("[WA Debug] Token diagnostic result: %s", result)
+    return result
+
+
 @router.get("/direct/status")
 async def direct_status(request: Request, db: Session = Depends(get_db)):
     """Return the current direct-registration connection status."""
