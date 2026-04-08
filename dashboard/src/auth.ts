@@ -1,10 +1,32 @@
 // Defined locally to avoid circular dependency with api/client.ts
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://api.nahlah.ai'
 
-const AUTH_KEY          = 'nahla_auth'
-const TOKEN_KEY         = 'nahla_token'
-const ROLE_KEY          = 'nahla_role'
-const IMPERSONATE_KEY   = 'nahla_impersonate'   // JSON: { token, storeName, adminToken }
+const AUTH_KEY        = 'nahla_auth'
+const TOKEN_KEY       = 'nahla_token'
+const ROLE_KEY        = 'nahla_role'
+const TENANT_ID_KEY   = 'nahla_tenant_id'
+const USER_ID_KEY     = 'nahla_user_id'
+const IMPERSONATE_KEY = 'nahla_impersonate'   // JSON: { token, storeName, adminToken }
+
+/** Decode the middle (payload) segment of a JWT without verifying the signature. */
+function _decodeJwtPayload(token: string): Record<string, unknown> {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    return JSON.parse(atob(b64))
+  } catch {
+    return {}
+  }
+}
+
+/** Persist a session from any token + optional metadata. */
+function _persistSession(token: string, overrides: { role?: string; tenant_id?: number | string; user_id?: number | string } = {}): void {
+  const payload = _decodeJwtPayload(token)
+  localStorage.setItem(AUTH_KEY,      '1')
+  localStorage.setItem(TOKEN_KEY,     token)
+  localStorage.setItem(ROLE_KEY,      String(overrides.role      ?? payload.role      ?? 'merchant'))
+  localStorage.setItem(TENANT_ID_KEY, String(overrides.tenant_id ?? payload.tenant_id ?? ''))
+  localStorage.setItem(USER_ID_KEY,   String(overrides.user_id   ?? payload.user_id   ?? ''))
+}
 
 export async function login(email: string, password: string): Promise<boolean> {
   try {
@@ -15,9 +37,11 @@ export async function login(email: string, password: string): Promise<boolean> {
     })
     if (!res.ok) return false
     const data = await res.json()
-    localStorage.setItem(AUTH_KEY,  '1')
-    localStorage.setItem(TOKEN_KEY, data.access_token ?? '')
-    localStorage.setItem(ROLE_KEY,  data.role ?? 'merchant')
+    _persistSession(data.access_token ?? '', {
+      role:      data.role,
+      tenant_id: data.tenant_id,
+      user_id:   data.user_id,
+    })
     return true
   } catch {
     return false
@@ -28,6 +52,8 @@ export function logout(): void {
   localStorage.removeItem(AUTH_KEY)
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(ROLE_KEY)
+  localStorage.removeItem(TENANT_ID_KEY)
+  localStorage.removeItem(USER_ID_KEY)
 }
 
 export function isAuthenticated(): boolean {
@@ -40,6 +66,22 @@ export function getToken(): string {
 
 export function getRole(): string {
   return localStorage.getItem(ROLE_KEY) ?? 'merchant'
+}
+
+/** Returns the tenant_id from the current session (read from JWT claim, cached in localStorage). */
+export function getTenantId(): number | null {
+  const raw = localStorage.getItem(TENANT_ID_KEY)
+  if (!raw) return null
+  const n = parseInt(raw, 10)
+  return isNaN(n) ? null : n
+}
+
+/** Returns the user_id from the current session (read from JWT claim, cached in localStorage). */
+export function getUserId(): number | null {
+  const raw = localStorage.getItem(USER_ID_KEY)
+  if (!raw) return null
+  const n = parseInt(raw, 10)
+  return isNaN(n) ? null : n
 }
 
 // Role hierarchy
@@ -85,18 +127,30 @@ export function startImpersonation(
   storeName: string,
   merchantEmail: string,
 ): void {
-  const adminToken = localStorage.getItem(TOKEN_KEY) ?? ''
-  localStorage.setItem(IMPERSONATE_KEY, JSON.stringify({ storeName, merchantEmail, adminToken }))
-  localStorage.setItem(TOKEN_KEY, merchantToken)
-  localStorage.setItem(ROLE_KEY, 'merchant')
+  // Save the admin's full session state before switching
+  const adminToken    = localStorage.getItem(TOKEN_KEY)    ?? ''
+  const adminRole     = localStorage.getItem(ROLE_KEY)     ?? 'admin'
+  const adminTenantId = localStorage.getItem(TENANT_ID_KEY) ?? ''
+  const adminUserId   = localStorage.getItem(USER_ID_KEY)  ?? ''
+  localStorage.setItem(IMPERSONATE_KEY, JSON.stringify({
+    storeName, merchantEmail, adminToken, adminRole, adminTenantId, adminUserId,
+  }))
+  // Switch to merchant session
+  _persistSession(merchantToken, { role: 'merchant' })
 }
 
 export function stopImpersonation(): void {
   const raw = localStorage.getItem(IMPERSONATE_KEY)
   if (!raw) return
-  const { adminToken } = JSON.parse(raw) as ImpersonationInfo & { adminToken: string }
-  localStorage.setItem(TOKEN_KEY, adminToken)
-  localStorage.setItem(ROLE_KEY, 'admin')
+  const saved = JSON.parse(raw) as ImpersonationInfo & {
+    adminToken: string; adminRole: string; adminTenantId: string; adminUserId: string
+  }
+  // Restore the admin session
+  _persistSession(saved.adminToken, {
+    role:      saved.adminRole,
+    tenant_id: saved.adminTenantId,
+    user_id:   saved.adminUserId,
+  })
   localStorage.removeItem(IMPERSONATE_KEY)
 }
 
@@ -124,9 +178,11 @@ export async function register(
     })
     const data = await res.json()
     if (!res.ok) return { ok: false, error: data.detail ?? 'فشل التسجيل' }
-    localStorage.setItem(AUTH_KEY,  '1')
-    localStorage.setItem(TOKEN_KEY, data.access_token ?? '')
-    localStorage.setItem(ROLE_KEY,  data.role ?? 'merchant')
+    _persistSession(data.access_token ?? '', {
+      role:      data.role,
+      tenant_id: data.tenant_id,
+      user_id:   data.user_id,
+    })
     return { ok: true }
   } catch {
     return { ok: false, error: 'تعذّر الاتصال بالخادم' }

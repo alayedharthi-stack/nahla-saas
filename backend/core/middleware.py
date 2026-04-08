@@ -154,8 +154,25 @@ async def jwt_enforcement_middleware(request: Request, call_next):
             content={"detail": "Token expired or invalid", "code": "invalid_token"},
         )
 
+    # Attach the full payload so route handlers can read any claim
     request.state.jwt_payload = payload
-    request.state.tenant_id = str(payload.get("tenant_id", 1))
+
+    # Tenant ID comes strictly from the JWT — never from headers or defaults.
+    # Admin tokens carry tenant_id=1 by convention; all merchant tokens carry
+    # the actual tenant that was assigned at registration time.
+    tid = payload.get("tenant_id")
+    if tid is None:
+        logger.warning(
+            "[JWT] Token has no tenant_id claim — path=%s sub=%s role=%s",
+            request.url.path, payload.get("sub"), payload.get("role"),
+        )
+        # Refuse to proceed without a tenant scope; old tokens must be refreshed.
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Token missing tenant_id — please log in again", "code": "no_tenant_claim"},
+        )
+
+    request.state.tenant_id = str(int(tid))
     return await call_next(request)
 
 

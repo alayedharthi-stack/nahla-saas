@@ -382,10 +382,12 @@ async def zid_oauth_redirect(
             f"{DASHBOARD_URL}/error?reason=zid_db_error", status_code=302
         )
 
+    email_for_jwt = owner_email or f"zid-{zid_store_id}@zid-merchant.nahlah.ai"
     nahla_token = create_token(
-        email=owner_email or f"zid-{zid_store_id}@zid-merchant.nahlah.ai",
+        email=email_for_jwt,
         role="merchant",
         tenant_id=tenant_id,
+        user_id=_user_id,
     )
     path = "/onboarding" if is_new else "/overview"
     redirect_url = (
@@ -393,8 +395,8 @@ async def zid_oauth_redirect(
         f"&redirect={path}"
     )
     logger.info(
-        "[Zid] ✅ OAuth complete | tenant_id=%s is_new=%s → %s",
-        tenant_id, is_new, path,
+        "[Zid] ✅ OAuth complete | tenant_id=%s user_id=%s is_new=%s → %s",
+        tenant_id, _user_id, is_new, path,
     )
     return RedirectResponse(redirect_url, status_code=302)
 
@@ -441,14 +443,16 @@ async def zid_token_login(request: Request, db: Session = Depends(get_db)):
         email=email_for_jwt,
         role="merchant",
         tenant_id=tenant_id,
+        user_id=_user_id,
     )
     logger.info(
-        "[Zid] ✅ token-login success | tenant_id=%s is_new=%s email=%s",
-        tenant_id, is_new, email_for_jwt,
+        "[Zid] ✅ token-login success | tenant_id=%s user_id=%s is_new=%s email=%s",
+        tenant_id, _user_id, is_new, email_for_jwt,
     )
     return {
         "access_token": nahla_token,
         "tenant_id":    tenant_id,
+        "user_id":      _user_id,
         "is_new":       is_new,
         "store_name":   store_name,
     }
@@ -612,12 +616,13 @@ async def _handle_manager_token(manager_token: str, store_id: Optional[str], db:
         email=email_for_jwt,
         role="merchant",
         tenant_id=tenant_id,
+        user_id=_user_id,
     )
     path = "/onboarding" if is_new else "/overview"
     redirect_url = (
         f"{DASHBOARD_URL}/zid-callback?token={nahla_token}&redirect={path}"
     )
-    logger.info("[Zid] ✅ Manager-token flow complete | tenant_id=%s", tenant_id)
+    logger.info("[Zid] ✅ Manager-token flow complete | tenant_id=%s user_id=%s", tenant_id, _user_id)
     return RedirectResponse(redirect_url, status_code=302)
 
 

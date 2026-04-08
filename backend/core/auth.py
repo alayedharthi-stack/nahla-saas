@@ -56,13 +56,32 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 # ── Token creation ─────────────────────────────────────────────────────────────
 
-def create_token(email: str, role: str, tenant_id: int) -> str:
-    payload = {
+def create_token(
+    email: str,
+    role: str,
+    tenant_id: int,
+    user_id: Optional[int] = None,
+) -> str:
+    """
+    Issue a signed JWT for a user session.
+
+    Claims
+    ------
+    sub        — user email (standard JWT subject)
+    role       — merchant | admin | staff | owner
+    tenant_id  — immutable tenant scope (every merchant call must be scoped to this)
+    user_id    — database user.id (present for all real accounts; absent only for
+                 legacy admin tokens issued before this was added)
+    exp        — expiry timestamp
+    """
+    payload: Dict[str, Any] = {
         "sub":       email,
         "role":      role,
         "tenant_id": tenant_id,
         "exp":       datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_H),
     }
+    if user_id is not None:
+        payload["user_id"] = user_id
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 

@@ -5,6 +5,7 @@ Tenant resolution and settings helpers shared across all routers.
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -86,18 +87,57 @@ def merge_defaults(stored: Optional[Dict], defaults: Dict) -> Dict:
     return result
 
 
+_tenant_logger = logging.getLogger("nahla.tenant")
+
+
 def resolve_tenant_id(request: Request) -> int:
     """
     Resolve tenant_id for the current request.
-    Priority: JWT payload (authoritative) → X-Tenant-ID header (dev) → 1.
+
+    Priority (authoritative → fallback)
+    ------------------------------------
+    1. JWT payload claim   — set by jwt_enforcement_middleware; always present on
+                             authenticated routes after the middleware fix.
+    2. request.state       — set by multi_tenant_middleware from X-Tenant-ID header
+                             (dev/testing only).
+    3. Hard fallback = 1   — NEVER acceptable in production; logged as CRITICAL.
+
+    The hard fallback exists only to prevent a 500 crash in edge cases.
+    Every call that hits the fallback indicates a middleware or auth bug.
     """
+    # Path 1 — JWT claim (expected path for all authenticated requests)
     jwt_payload = getattr(request.state, "jwt_payload", None)
     if jwt_payload:
-        return int(jwt_payload.get("tenant_id", 1))
-    try:
-        return int(request.state.tenant_id)
-    except (ValueError, AttributeError):
+        tid = jwt_payload.get("tenant_id")
+        if tid is not None:
+            return int(tid)
+        # JWT present but missing tenant_id — should have been caught by middleware
+        _tenant_logger.critical(
+            "[tenant] JWT has no tenant_id! path=%s sub=%s role=%s — using 1 (DATA ISOLATION AT RISK)",
+            request.url.path, jwt_payload.get("sub"), jwt_payload.get("role"),
+        )
         return 1
+
+    # Path 2 — header/state (dev testing only)
+    try:
+        tid = int(request.state.tenant_id)
+        if tid > 0:
+            _tenant_logger.warning(
+                "[tenant] resolve_tenant_id used X-Tenant-ID header fallback — path=%s tid=%s "
+                "(only acceptable in dev; JWT middleware should set this in production)",
+                request.url.path, tid,
+            )
+            return tid
+    except (ValueError, AttributeError):
+        pass
+
+    # Path 3 — hard fallback (SHOULD NEVER REACH HERE)
+    _tenant_logger.critical(
+        "[tenant] resolve_tenant_id fell back to 1! path=%s — THIS IS A BUG. "
+        "Data isolation is compromised. Check JWT middleware.",
+        request.url.path,
+    )
+    return 1
 
 
 def get_or_create_tenant(db: Session, tenant_id: int) -> Tenant:

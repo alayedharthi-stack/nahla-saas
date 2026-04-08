@@ -330,9 +330,13 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Database error during account setup")
 
     # ══════════════════════════════════════════════════════════════
-    # STEP 5 — Issue Nahla JWT
+    # STEP 5 — Issue Nahla JWT (must carry user_id for tenant isolation)
     # ══════════════════════════════════════════════════════════════
-    nahla_jwt = create_token(email=owner_email, role=role, tenant_id=tenant_id)
+    db_user   = db.query(User).filter(User.email == owner_email).first()
+    db_user_id = db_user.id if db_user else None
+    nahla_jwt = create_token(
+        email=owner_email, role=role, tenant_id=tenant_id, user_id=db_user_id
+    )
 
     # Check WhatsApp connection status for smart redirect
     wa_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
@@ -1059,13 +1063,14 @@ async def salla_oauth_callback(
             if existing_user:
                 tenant_id = existing_user.tenant_id
                 logger.info(
-                    "[Salla OAuth] Found existing Nahla account | email=%s tenant=%s",
-                    salla_email, tenant_id,
+                    "[Salla OAuth] Found existing Nahla account | email=%s tenant=%s user_id=%s",
+                    salla_email, tenant_id, existing_user.id,
                 )
                 auto_jwt = create_token(
                     email=existing_user.email,
                     role=existing_user.role or "merchant",
                     tenant_id=tenant_id,
+                    user_id=existing_user.id,
                 )
             else:
                 # Create new Tenant + User
@@ -1090,10 +1095,11 @@ async def salla_oauth_callback(
                     email=salla_email,
                     role="merchant",
                     tenant_id=tenant_id,
+                    user_id=new_user.id,
                 )
                 logger.info(
-                    "[Salla OAuth] Auto-registered new merchant | email=%s tenant=%s",
-                    salla_email, tenant_id,
+                    "[Salla OAuth] Auto-registered new merchant | email=%s tenant=%s user_id=%s",
+                    salla_email, tenant_id, new_user.id,
                 )
 
         except Exception as exc:

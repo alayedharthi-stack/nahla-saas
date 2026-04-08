@@ -40,19 +40,17 @@ export default function SallaCallback() {
       const parts   = token.split('.')
       const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
 
-      // Clear any existing session (e.g. admin account) before storing
-      // the merchant's JWT — prevents the old account from leaking through.
-      localStorage.removeItem('nahla_token')
-      localStorage.removeItem('nahla_role')
-      localStorage.removeItem('nahla_email')
-      localStorage.removeItem('nahla_tenant_id')
+      // Clear any stale session before persisting the merchant JWT
+      ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
+        'nahla_tenant_id', 'nahla_user_id'].forEach(k => localStorage.removeItem(k))
 
-      // Persist the merchant session
+      // Persist the full merchant session — tenant_id and user_id come from JWT claims
       localStorage.setItem('nahla_auth',      '1')
       localStorage.setItem('nahla_token',     token)
-      localStorage.setItem('nahla_role',      payload.role || 'merchant')
-      localStorage.setItem('nahla_email',     payload.sub  || '')
+      localStorage.setItem('nahla_role',      String(payload.role      || 'merchant'))
+      localStorage.setItem('nahla_email',     String(payload.sub       || ''))
       localStorage.setItem('nahla_tenant_id', String(payload.tenant_id ?? ''))
+      localStorage.setItem('nahla_user_id',   String(payload.user_id   ?? ''))
       if (store) localStorage.setItem('nahla_salla_store_id',   store)
       if (name)  localStorage.setItem('nahla_salla_store_name', name)
 

@@ -112,11 +112,16 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
         if user and getattr(user, "password_hash", None):
             if verify_password(body.password, user.password_hash):
                 role = user.role or "merchant"
-                token = create_token(email=user.email, role=role, tenant_id=user.tenant_id)
+                token = create_token(
+                    email=user.email,
+                    role=role,
+                    tenant_id=user.tenant_id,
+                    user_id=user.id,
+                )
                 audit("login_success", role=role, sub=user.email, tenant_id=user.tenant_id, ip=client_ip)
                 logger.info(
-                    "[auth/login] MERCHANT LOGIN | email=%s role=%s tenant_id=%s",
-                    user.email, role, user.tenant_id,
+                    "[auth/login] MERCHANT LOGIN | email=%s role=%s tenant_id=%s user_id=%s",
+                    user.email, role, user.tenant_id, user.id,
                 )
                 return {
                     "access_token": token,
@@ -124,6 +129,7 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
                     "role":         role,
                     "email":        user.email,
                     "tenant_id":    user.tenant_id,
+                    "user_id":      user.id,
                 }
 
     # 2. Admin credentials (env-var fallback — only if no merchant account matched)
@@ -332,11 +338,13 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
     if body.phone:
         asyncio.ensure_future(notify_welcome(body.phone.strip(), body.store_name.strip()))
 
-    token = create_token(email=email, role="merchant", tenant_id=tenant.id)
+    token = create_token(email=email, role="merchant", tenant_id=tenant.id, user_id=user.id)
     return {
         "access_token":   token,
         "token_type":     "bearer",
         "role":           "merchant",
+        "tenant_id":      tenant.id,
+        "user_id":        user.id,
         "email_verified": False,
     }
 
