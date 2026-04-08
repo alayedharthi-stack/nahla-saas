@@ -885,17 +885,41 @@ async def direct_debug_token():
         except Exception as e:
             result["me_extended_error"] = str(e)
 
-        # 5. Query known BM directly for WABAs
-        BM_ID = "1496011678713805"
+        # 5. Query CORRECT BM for WABAs
+        CORRECT_BM_ID   = "1426011678718054"
+        CORRECT_WABA_ID = "1978068943136517"
+        result["correct_ids"] = {"bm_id": CORRECT_BM_ID, "waba_id": CORRECT_WABA_ID}
         try:
             r = await client.get(
-                f"{graph}/{BM_ID}/whatsapp_business_accounts",
+                f"{graph}/{CORRECT_BM_ID}/whatsapp_business_accounts",
                 headers=headers,
-                params={"fields": "id,name,currency,timezone_id,phone_numbers{id,display_phone_number,verified_name}"},
+                params={"fields": "id,name,currency,timezone_id"},
             )
-            result["bm_wabas"] = r.json()
+            result["correct_bm_wabas"] = r.json()
         except Exception as e:
-            result["bm_wabas_error"] = str(e)
+            result["correct_bm_wabas_error"] = str(e)
+
+        # 6. Try accessing correct WABA directly
+        try:
+            r = await client.get(
+                f"{graph}/{CORRECT_WABA_ID}",
+                headers=headers,
+                params={"fields": "id,name,currency,timezone_id"},
+            )
+            result["correct_waba_direct"] = r.json()
+        except Exception as e:
+            result["correct_waba_direct_error"] = str(e)
+
+        # 7. Try phone numbers under correct WABA
+        try:
+            r = await client.get(
+                f"{graph}/{CORRECT_WABA_ID}/phone_numbers",
+                headers=headers,
+                params={"fields": "id,display_phone_number,verified_name,status"},
+            )
+            result["correct_waba_phones"] = r.json()
+        except Exception as e:
+            result["correct_waba_phones_error"] = str(e)
 
         # 3. Direct WABA access attempt
         try:
