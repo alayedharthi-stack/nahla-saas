@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship
@@ -1022,5 +1023,29 @@ class ConversationLog(Base):
     # category: service | marketing
     category                 = Column(String, default='service', nullable=False)
     created_at               = Column(DateTime, default=datetime.utcnow)
+
+    tenant = relationship('Tenant')
+
+
+# ── Merchant Addons ────────────────────────────────────────────────────────────
+
+class MerchantAddon(Base):
+    """
+    Stores per-tenant addon state.
+    Each row = one addon for one tenant.
+    settings_json holds addon-specific configuration.
+    """
+    __tablename__ = 'merchant_addons'
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'addon_key', name='uq_merchant_addon_tenant_key'),
+    )
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id     = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+    addon_key     = Column(String(64), nullable=False)
+    is_enabled    = Column(Boolean, default=False, nullable=False)
+    settings_json = Column(JSONB, nullable=True, default=dict)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     tenant = relationship('Tenant')
