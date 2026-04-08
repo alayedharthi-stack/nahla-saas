@@ -94,14 +94,22 @@ ANTHROPIC_API_KEY = (
 CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
-_default_origins = (
-    "http://localhost:3000,http://localhost:5173,"
-    "https://nahlah.ai,https://www.nahlah.ai,"
-    "https://app.nahlah.ai,https://api.nahlah.ai,"
-    "https://nahlah.ai,https://app.nahlah.ai,"
-    "https://store.salla.sa,https://salla.sa,"
-    "https://zid.sa,https://web.zid.sa,https://partner.zid.sa"
-)
+# Canonical list — no duplicates. Override via CORS_ORIGINS env-var (comma-separated).
+_default_origins = ",".join([
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://nahlah.ai",
+    "https://www.nahlah.ai",
+    "https://app.nahlah.ai",       # dashboard
+    "https://api.nahlah.ai",       # backend self-calls / health checks
+    "https://store.salla.sa",      # Salla embedded app
+    "https://salla.sa",
+    "https://s.salla.sa",
+    "https://apps.salla.sa",
+    "https://zid.sa",
+    "https://web.zid.sa",
+    "https://partner.zid.sa",
+])
 CORS_ORIGINS: list[str] = [
     o.strip()
     for o in os.environ.get("CORS_ORIGINS", _default_origins).split(",")

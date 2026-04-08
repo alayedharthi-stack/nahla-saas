@@ -121,6 +121,26 @@ async def salla_iframe_middleware(request: Request, call_next):
     return response
 
 
+def _cors_error_headers(request: Request) -> dict:
+    """
+    Return CORS headers for error responses emitted directly by this middleware.
+
+    Although CORSMiddleware is registered as the outermost layer (so it adds
+    headers to all responses that pass through it), any JSONResponse returned
+    directly from *inner* middleware bypasses CORSMiddleware entirely.
+    This helper adds the minimum required headers so browsers don't mask the
+    real error with a misleading CORS failure message.
+    """
+    from core.config import CORS_ORIGINS as _origins  # noqa: PLC0415 (local import avoids circular)
+    origin = request.headers.get("origin", "")
+    if origin and (origin in _origins or "*" in _origins):
+        return {
+            "Access-Control-Allow-Origin":      origin,
+            "Access-Control-Allow-Credentials": "true",
+        }
+    return {}
+
+
 async def jwt_enforcement_middleware(request: Request, call_next):
     """
     Require a valid JWT for all non-public routes.
@@ -145,6 +165,7 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=401,
             content={"detail": "Authentication required", "code": "missing_token"},
+            headers=_cors_error_headers(request),
         )
 
     payload = decode_token(auth_header[7:])
@@ -152,6 +173,7 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=401,
             content={"detail": "Token expired or invalid", "code": "invalid_token"},
+            headers=_cors_error_headers(request),
         )
 
     # Attach the full payload so route handlers can read any claim
@@ -170,6 +192,7 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         return JSONResponse(
             status_code=401,
             content={"detail": "Token missing tenant_id — please log in again", "code": "no_tenant_claim"},
+            headers=_cors_error_headers(request),
         )
 
     request.state.tenant_id = str(int(tid))

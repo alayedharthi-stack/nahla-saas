@@ -52,26 +52,37 @@ app = FastAPI(
     version="2.0.0",
 )
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
-from core.config import CORS_ORIGINS  # noqa: E402 (after app init)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # ── Middleware stack ───────────────────────────────────────────────────────────
-# Registration order matters: last registered = outermost = executes first.
-# Stack (outermost → innermost):
-#   jwt_enforcement → request_logging → global_rate_limit → api_key → multi_tenant
+# Registration order: LAST registered = OUTERMOST = first to process requests
+# and LAST to process responses.
+#
+# Desired execution order (request direction →):
+#   CORS → salla_iframe → jwt_enforcement → request_logging
+#        → global_rate_limit → api_key → multi_tenant → Route handler
+#
+# To achieve CORS as outermost, register it LAST via add_middleware()
+# (every add_middleware call wraps all previously registered middleware).
+#
+# Inner middleware (registered first → innermost):
 app.middleware("http")(multi_tenant_middleware)
 app.middleware("http")(api_key_middleware)
 app.middleware("http")(global_rate_limit_middleware)
 app.middleware("http")(request_logging_middleware)
 app.middleware("http")(jwt_enforcement_middleware)
 app.middleware("http")(salla_iframe_middleware)
+
+# CORS must be outermost so it adds Access-Control-* headers to ALL responses,
+# including 401 / 429 error responses returned by inner middleware.
+# add_middleware() wraps everything above it → CORS becomes the outermost layer.
+from core.config import CORS_ORIGINS  # noqa: E402
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Nahla-Error-Code"],
+)
 
 
 
