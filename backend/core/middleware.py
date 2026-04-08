@@ -33,6 +33,10 @@ JWT_PUBLIC_PREFIXES = (
     "/settings/validate",               # Salla Partner Portal validation probe
     "/snippet.js",
     "/track",
+    # ── Public store scripts (loaded by external stores — no JWT) ──────────────
+    "/merchant/addons/widget/",         # legacy widget embed.js
+    "/merchant/widgets/salla-auto.js",  # universal Salla snippet
+    "/merchant/widgets/salla/",         # by-salla-store widgets
 )
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
 
@@ -154,6 +158,17 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         return await call_next(request)
 
     if any(path.startswith(p) for p in JWT_PUBLIC_PREFIXES):
+        return await call_next(request)
+
+    # Public store scripts — loaded by external stores, never have a JWT
+    # Pattern: /merchant/widgets/{anything}.js  or .json
+    if path.startswith("/merchant/widgets/") and (
+        path.endswith(".js") or path.endswith(".json")
+    ):
+        return await call_next(request)
+
+    # Legacy addon embed scripts
+    if path.startswith("/merchant/addons/widget/") and path.endswith(".js"):
         return await call_next(request)
 
     if not JWT_AVAILABLE:
