@@ -936,9 +936,11 @@ async def direct_verify_otp(
         raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
     # ── Step B: Fetch phone number details ───────────────────────────────────
+    from core.config import WA_BUSINESS_ACCOUNT_ID  # noqa: PLC0415
     phone_number   = ""
     display_name   = ""
-    waba_id        = ""
+    # Always use the platform WABA — this is the shared-WABA direct registration flow
+    waba_id        = WA_BUSINESS_ACCOUNT_ID
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             info_resp = await client.get(
@@ -962,7 +964,7 @@ async def direct_verify_otp(
     conn.phone_number_id              = body.phone_number_id
     conn.phone_number                 = phone_number
     conn.business_display_name        = display_name
-    conn.whatsapp_business_account_id = waba_id or ""
+    conn.whatsapp_business_account_id = waba_id
     conn.access_token                 = WA_TOKEN   # shared WABA uses platform token
     conn.webhook_verified             = True
     conn.sending_enabled              = True
@@ -1055,7 +1057,8 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         return {"updated": False, "already_connected": True, **_build_wa_status(conn)}
 
     # Query Meta for current verification status
-    graph   = "https://graph.facebook.com/v19.0"
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+    graph   = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
     headers = {"Authorization": f"Bearer {WA_TOKEN}"}
 
     try:

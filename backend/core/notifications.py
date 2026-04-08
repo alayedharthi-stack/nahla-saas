@@ -57,7 +57,7 @@ async def send_whatsapp(to: str, text: str) -> bool:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                f"https://graph.facebook.com/v19.0/{WA_PHONE_ID}/messages",
+                f"https://graph.facebook.com/v20.0/{WA_PHONE_ID}/messages",
                 headers={
                     "Authorization": f"Bearer {WA_TOKEN}",
                     "Content-Type": "application/json",

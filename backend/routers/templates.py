@@ -350,7 +350,7 @@ def _fetch_meta_templates(waba_id: str, access_token: str) -> Optional[List[Dict
         import urllib.request
         # Fetch all statuses (APPROVED, PENDING, REJECTED, PAUSED) — no status filter
         url = (
-            f"https://graph.facebook.com/v18.0/{waba_id}/message_templates"
+            f"https://graph.facebook.com/v20.0/{waba_id}/message_templates"
             f"?access_token={access_token}&limit=100"
             f"&fields=id,name,language,category,status,components,quality_score,rejected_reason"
         )
@@ -403,7 +403,7 @@ def _submit_template_to_meta(waba_id: str, token: str, body: "CreateTemplateIn")
         import json as _json
         import urllib.parse
         import urllib.request
-        url = f"https://graph.facebook.com/v18.0/{waba_id}/message_templates"
+        url = f"https://graph.facebook.com/v20.0/{waba_id}/message_templates"
         payload = _json.dumps({
             "name": body.name,
             "language": body.language,

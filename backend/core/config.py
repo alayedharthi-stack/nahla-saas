@@ -27,9 +27,9 @@ DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlah.ai")
 
 # WhatsApp Business (Meta Cloud API — platform-level, not per-tenant)
 WA_TOKEN           = os.environ.get("WHATSAPP_TOKEN", "")
-WA_PHONE_ID        = os.environ.get("PHONE_NUMBER_ID", "984562351417493")
+WA_PHONE_ID        = os.environ.get("PHONE_NUMBER_ID", "100253985293107")
 WA_VERIFY_TOKEN    = os.environ.get("WHATSAPP_VERIFY_TOKEN", "nahla2025")
-WA_BUSINESS_ACCOUNT_ID = os.environ.get("WA_BUSINESS_ACCOUNT_ID", "4279353439004375")
+WA_BUSINESS_ACCOUNT_ID = os.environ.get("WA_BUSINESS_ACCOUNT_ID", "1496851652450181")
 
 # ── Salla OAuth ────────────────────────────────────────────────────────────────
 SALLA_CLIENT_ID      = os.environ.get("SALLA_CLIENT_ID", "")

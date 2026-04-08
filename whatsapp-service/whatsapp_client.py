@@ -2,7 +2,7 @@ import httpx
 import os
 import logging
 
-WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "https://graph.facebook.com/v17.0")
+WHATSAPP_API_URL = os.getenv("WHATSAPP_API_URL", "https://graph.facebook.com/v20.0")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "your_whatsapp_token")
 
 logger = logging.getLogger("whatsapp-client")

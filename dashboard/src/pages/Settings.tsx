@@ -1662,7 +1662,7 @@ export default function Settings() {
   }
 
   return (
-    <div className="space-y-5 max-w-3xl">
+    <div className="space-y-5">
       {/* Tab bar */}
       <div className="flex gap-1 overflow-x-auto pb-1 -mb-1">
         {TABS.map(({ id, label, icon: Icon }) => (
