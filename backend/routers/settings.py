@@ -95,6 +95,15 @@ class AllSettingsIn(BaseModel):
     notifications: Optional[NotificationSettingsIn] = None
 
 
+class WidgetSettingsIn(BaseModel):
+    enabled: bool = False
+    phone: str = ""
+    message: str = "السلام عليكم، أبغى الاستفسار"
+    logo_url: str = ""
+    position: str = "left"          # "left" | "right"
+    scroll_threshold: int = 250
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/settings")
@@ -159,6 +168,40 @@ async def update_settings(
         "store":         apply_masks(store_saved, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
     }
+
+
+@router.get("/settings/widget")
+async def get_widget_settings(request: Request, db: Session = Depends(get_db)):
+    """Return WhatsApp widget embed settings for the current tenant."""
+    tenant_id = resolve_tenant_id(request)
+    settings = get_or_create_settings(db, tenant_id)
+    db.commit()
+    ws = dict((settings.extra_metadata or {}).get("widget_settings", {}))
+    return {
+        "enabled":          ws.get("enabled",          False),
+        "phone":            ws.get("phone",            ""),
+        "message":          ws.get("message",          "السلام عليكم، أبغى الاستفسار"),
+        "logo_url":         ws.get("logo_url",         ""),
+        "position":         ws.get("position",         "left"),
+        "scroll_threshold": ws.get("scroll_threshold", 250),
+    }
+
+
+@router.put("/settings/widget")
+async def update_widget_settings(
+    body: WidgetSettingsIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Save WhatsApp widget embed settings for the current tenant."""
+    tenant_id = resolve_tenant_id(request)
+    settings = get_or_create_settings(db, tenant_id)
+    meta = dict(settings.extra_metadata or {})
+    meta["widget_settings"] = body.model_dump()
+    settings.extra_metadata = meta
+    settings.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return meta["widget_settings"]
 
 
 @router.post("/settings/test-whatsapp")

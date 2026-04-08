@@ -143,6 +143,7 @@ const ar: Translations = {
       team:          'الفريق والصلاحيات',
       notifications: 'الإشعارات',
       security:      'الأمان',
+      widget:        'ويدجت المتجر',
     },
     whatsapp: {
       accountTitle:   'بيانات حساب واتساب',
