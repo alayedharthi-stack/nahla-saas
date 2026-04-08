@@ -160,10 +160,12 @@ async def jwt_enforcement_middleware(request: Request, call_next):
     if any(path.startswith(p) for p in JWT_PUBLIC_PREFIXES):
         return await call_next(request)
 
-    # Public store scripts — loaded by external stores, never have a JWT
-    # Pattern: /merchant/widgets/{anything}.js  or .json
+    # Public store scripts + store-facing widget APIs — no JWT possible from external stores
+    # Pattern: /merchant/widgets/{id}/*.js | *.json | /create-coupon
     if path.startswith("/merchant/widgets/") and (
-        path.endswith(".js") or path.endswith(".json")
+        path.endswith(".js")
+        or path.endswith(".json")
+        or path.endswith("/create-coupon")
     ):
         return await call_next(request)
 

@@ -233,7 +233,7 @@ _NAHLA_CDN_LOGO = (
 )
 
 
-def _build_nahla_widgets_js(widgets: list[Dict[str, Any]]) -> str:
+def _build_nahla_widgets_js(widgets: list[Dict[str, Any]], tenant_id: int = 0) -> str:
     """
     Render the full nahla-widgets.js bundle with tenant config baked in.
     All widget code is self-contained — no additional network requests needed.
@@ -264,6 +264,7 @@ def _build_nahla_widgets_js(widgets: list[Dict[str, Any]]) -> str:
 'use strict';
 
 // ── Config (server-rendered per tenant) ──────────────────────
+var TENANT_ID='{tenant_id}';
 N.waCfg    = {wa_json};
 N.popupCfg = {popup_json};
 N.slideCfg = {slide_cfg if isinstance(slide_cfg, str) else slide_json};
@@ -406,14 +407,81 @@ function initDiscountPopup(c,fromSlide){{
   var closeBtn=document.getElementById('nahla-popup-close');
   if(closeBtn)closeBtn.addEventListener('click',hide);
   ov.addEventListener('click',function(e){{if(e.target===ov)hide();}});
-  var cta=document.getElementById('nahla-popup-cta');
-  if(cta)cta.addEventListener('click',function(){{ls(SEEN_KEY,1);hide();}});
+
+  // ── Copy button ────────────────────────────────────────────────────────────
   var copyBtn=document.getElementById('nahla-copy-btn');
   if(copyBtn)copyBtn.addEventListener('click',function(){{
     try{{navigator.clipboard.writeText(c.coupon_code);}}catch(e){{}}
     copyBtn.textContent='تم النسخ ✓';copyBtn.classList.add('copied');
     setTimeout(function(){{copyBtn.textContent='نسخ';copyBtn.classList.remove('copied');}},2000);
   }});
+
+  // ── Main CTA — get coupon + apply to cart ──────────────────────────────────
+  var cta=document.getElementById('nahla-popup-cta');
+  if(cta)cta.addEventListener('click',function(){{
+    ls(SEEN_KEY,1);
+    var btn=cta;
+    btn.textContent='⏳ جاري الحصول على الكوبون…';
+    btn.disabled=true;
+
+    // 1. Ask backend for a unique coupon code
+    fetch('{_API_BASE}/merchant/widgets/'+TENANT_ID+'/create-coupon',{{method:'POST'}})
+      .then(function(r){{return r.json();}})
+      .then(function(data){{
+        if(!data.success||!data.code){{btn.textContent='احصل على الخصم';btn.disabled=false;hide();return;}}
+        var code=data.code;
+
+        // 2a. Try Salla Twilight SDK — applyCoupon
+        if(window.salla&&salla.cart&&typeof salla.cart.applyCoupon==='function'){{
+          salla.cart.applyCoupon(code)
+            .then(function(){{_showApplied(code,btn);}})
+            .catch(function(){{_fallbackCart(code,btn);}});
+          return;
+        }}
+        // 2b. Try Salla event system
+        if(window.Salla&&Salla.event){{
+          try{{
+            Salla.event.dispatch('cart::coupon.apply',{{coupon_code:code}});
+            setTimeout(function(){{_showApplied(code,btn);}},800);
+            return;
+          }}catch(e){{}}
+        }}
+        // 2c. Fallback: fill coupon field + show code
+        _fallbackCart(code,btn);
+      }})
+      .catch(function(){{btn.textContent='احصل على الخصم';btn.disabled=false;hide();}});
+  }});
+
+  function _showApplied(code,btn){{
+    btn.textContent='✓ تم تطبيق الخصم!';
+    btn.style.background='#22c55e';
+    // Show code for reference
+    var badge=document.querySelector('#nahla-popup .np-badge');
+    if(badge)badge.innerHTML='تم الخصم ✓';
+    setTimeout(hide,2000);
+  }}
+
+  function _fallbackCart(code,btn){{
+    // Try to fill Salla coupon input field
+    var inp=document.querySelector('input[name="coupon_code"],input[placeholder*="كوبون"],input[placeholder*="coupon"],input[id*="coupon"]');
+    if(inp){{
+      inp.value=code;
+      var form=inp.closest('form');
+      if(form){{var ev=new Event('submit',{{bubbles:true}});form.dispatchEvent(ev);}}
+    }}
+    // Show code with auto-copy
+    try{{navigator.clipboard.writeText(code);}}catch(e){{}}
+    var couponDiv=document.getElementById('nahla-coupon-display');
+    if(!couponDiv){{
+      couponDiv=document.createElement('div');
+      couponDiv.id='nahla-coupon-display';
+      couponDiv.style.cssText='position:fixed;top:20px;right:50%;transform:translateX(50%);background:#1e293b;color:#fff;padding:14px 24px;border-radius:12px;z-index:999999;font-size:15px;font-weight:700;direction:rtl;box-shadow:0 8px 30px rgba(0,0,0,.3);';
+      document.body.appendChild(couponDiv);
+    }}
+    couponDiv.innerHTML='تم النسخ ✓ — كود الخصم: <span style="color:#fbbf24;letter-spacing:2px;">'+code+'</span><br><small style="font-weight:400;opacity:.8;">الصقه في حقل الكوبون عند الدفع</small>';
+    btn.textContent='✓ الكوبون جاهز';btn.style.background='#22c55e';
+    setTimeout(function(){{if(couponDiv)couponDiv.remove();hide();}},5000);
+  }}
 
   return {{show:show,hide:hide}};
 }}
@@ -654,6 +722,94 @@ async def salla_auto_install_widgets(request: Request, db: Session = Depends(get
 
 # ── Public store-script endpoints ─────────────────────────────────────────────
 
+@router.post("/merchant/widgets/{tenant_id}/create-coupon", include_in_schema=False)
+async def create_unique_coupon(tenant_id: int, db: Session = Depends(get_db)):
+    """
+    Called from the store's discount popup (no JWT — public, tenant_id in URL).
+    1. Looks up merchant's Salla access token.
+    2. Creates a unique one-time coupon via Salla Admin API.
+    3. Returns the coupon code so the widget can apply it to the cart.
+
+    Falls back to the configured static coupon_code if Salla API fails.
+    """
+    import httpx as _httpx  # noqa: PLC0415
+    import random, string  # noqa: PLC0415
+
+    from models import Integration, MerchantWidget  # noqa: PLC0415
+
+    # ── Get popup settings (for discount type / value / static code) ──────────
+    popup = (
+        db.query(MerchantWidget)
+        .filter(MerchantWidget.tenant_id == tenant_id, MerchantWidget.widget_key == "discount_popup")
+        .first()
+    )
+    settings = dict(popup.settings_json or {}) if popup else {}
+    static_code   = settings.get("coupon_code", "")
+    discount_type = settings.get("discount_type", "percentage")   # percentage | fixed
+    discount_value = int(settings.get("discount_value", 10))
+
+    # ── Lookup Salla token ────────────────────────────────────────────────────
+    integration = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .first()
+    )
+    salla_token = (integration.config or {}).get("token") if integration else None
+
+    if not salla_token:
+        # No Salla token → return static code if set
+        if static_code:
+            return {"success": True, "code": static_code, "method": "static"}
+        return {"success": False, "reason": "no_token", "code": ""}
+
+    # ── Generate unique one-time coupon code ──────────────────────────────────
+    suffix   = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    uniq_code = f"NAHLA{suffix}"
+
+    # ── Call Salla Admin API ──────────────────────────────────────────────────
+    from datetime import datetime, timedelta  # noqa: PLC0415
+    expiry = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    salla_type = "PERCENT" if discount_type == "percentage" else "FIXED"
+
+    payload = {
+        "code":               uniq_code,
+        "type":               salla_type,
+        "percent_off":        discount_value if salla_type == "PERCENT" else 0,
+        "amount_off":         discount_value if salla_type == "FIXED"   else 0,
+        "limit":              1,          # one use total
+        "limit_per_user":     1,
+        "status":             "active",
+        "expiry_date":        expiry,
+    }
+
+    try:
+        async with _httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                "https://api.salla.dev/admin/v2/coupons",
+                headers={
+                    "Authorization": f"Bearer {salla_token}",
+                    "Content-Type":  "application/json",
+                    "Accept":        "application/json",
+                },
+                json=payload,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                code = (data.get("data") or {}).get("code", uniq_code)
+                logger.info("[widgets/create-coupon] Salla coupon created tenant=%s code=%s", tenant_id, code)
+                return {"success": True, "code": code, "method": "salla_api"}
+            else:
+                logger.info("[widgets/create-coupon] Salla API %s — fallback static", resp.status_code)
+    except Exception as exc:
+        logger.info("[widgets/create-coupon] Salla API error: %s — fallback static", exc)
+
+    # ── Fallback to static code ───────────────────────────────────────────────
+    if static_code:
+        return {"success": True, "code": static_code, "method": "static"}
+    return {"success": False, "reason": "api_failed", "code": ""}
+
+
 @router.get("/merchant/widgets/{tenant_id}/nahla-widgets.js", include_in_schema=False)
 async def serve_widgets_js(tenant_id: int, db: Session = Depends(get_db)):
     """
@@ -681,7 +837,7 @@ async def serve_widgets_js(tenant_id: int, db: Session = Depends(get_db)):
     if not any(w["is_enabled"] for w in widgets):
         return Response(content=_STUB, headers=_JS_HEADERS)
 
-    js = _build_nahla_widgets_js(widgets)
+    js = _build_nahla_widgets_js(widgets, tenant_id)
     logger.info("[widgets/js] tenant=%s widgets=%d", tenant_id, len(rows))
     return Response(content=js, headers=_JS_HEADERS)
 
@@ -771,4 +927,4 @@ async def serve_widgets_js_by_salla(salla_store_id: str, db: Session = Depends(g
         return Response(content=_STUB, headers=_JS_HEADERS)
 
     logger.info("[widgets/by-salla] store=%s tenant=%s", salla_store_id, tenant_id)
-    return Response(content=_build_nahla_widgets_js(widgets), headers=_JS_HEADERS)
+    return Response(content=_build_nahla_widgets_js(widgets, tenant_id), headers=_JS_HEADERS)
