@@ -134,6 +134,7 @@ WIDGET_REGISTRY: Dict[str, Dict[str, Any]] = {
             "description":       "احصل على خصم على طلبك الأول",
             "discount_type":     "percentage",  # percentage | fixed | text
             "discount_value":    10,
+            "coupon_code":       "",             # shown with copy button when set
             "input_type":        "none",         # none | email | whatsapp
             "input_placeholder": "أدخل بريدك الإلكتروني",
             "button_text":       "احصل على الخصم",
@@ -372,15 +373,28 @@ function initDiscountPopup(c,fromSlide){{
     #nahla-popup .np-btn:hover{{opacity:.88;}}
     #nahla-popup .np-close{{position:absolute;top:14px;left:14px;background:none;border:none;font-size:22px;color:#94a3b8;cursor:pointer;line-height:1;padding:4px;}}
     #nahla-popup .np-close:hover{{color:#475569;}}
+    #nahla-popup .np-coupon{{display:flex;align-items:center;gap:8px;background:#f8fafc;border:2px dashed ${{btnColor}};border-radius:10px;padding:10px 14px;margin-bottom:12px;}}
+    #nahla-popup .np-coupon-code{{flex:1;font-size:18px;font-weight:800;color:#1e293b;letter-spacing:2px;text-align:center;direction:ltr;}}
+    #nahla-popup .np-copy{{background:${{btnColor}};color:#fff;border:none;border-radius:7px;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:opacity .2s;}}
+    #nahla-popup .np-copy:hover{{opacity:.85;}}
+    #nahla-popup .np-copy.copied{{background:#22c55e;}}
   `);
 
   var ov=document.createElement('div');
   ov.id='nahla-popup-ov';
+  var couponHtml='';
+  if(c.coupon_code){{
+    couponHtml='<div class="np-coupon">'
+      +'<span class="np-coupon-code">'+c.coupon_code+'</span>'
+      +'<button class="np-copy" id="nahla-copy-btn">نسخ</button>'
+      +'</div>';
+  }}
   ov.innerHTML=`<div id="nahla-popup">
     ${{c.show_close_button!==false?'<button class="np-close" id="nahla-popup-close">✕</button>':''}}
     ${{discountLabel?'<div class="np-badge">-'+discountLabel+'</div>':''}}
     <h2>${{c.title||'عرض حصري لك!'}}</h2>
     <p>${{c.description||''}}</p>
+    ${{couponHtml}}
     ${{c.input_type&&c.input_type!=='none'?'<input type="'+(c.input_type==='email'?'email':'tel')+'" placeholder="'+(c.input_placeholder||'')+'" id="nahla-popup-input">':''}}
     <button class="np-btn" id="nahla-popup-cta">${{c.button_text||'احصل على الخصم'}}</button>
   </div>`;
@@ -394,6 +408,12 @@ function initDiscountPopup(c,fromSlide){{
   ov.addEventListener('click',function(e){{if(e.target===ov)hide();}});
   var cta=document.getElementById('nahla-popup-cta');
   if(cta)cta.addEventListener('click',function(){{ls(SEEN_KEY,1);hide();}});
+  var copyBtn=document.getElementById('nahla-copy-btn');
+  if(copyBtn)copyBtn.addEventListener('click',function(){{
+    try{{navigator.clipboard.writeText(c.coupon_code);}}catch(e){{}}
+    copyBtn.textContent='تم النسخ ✓';copyBtn.classList.add('copied');
+    setTimeout(function(){{copyBtn.textContent='نسخ';copyBtn.classList.remove('copied');}},2000);
+  }});
 
   return {{show:show,hide:hide}};
 }}

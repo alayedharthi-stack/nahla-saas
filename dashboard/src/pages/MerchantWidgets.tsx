@@ -385,6 +385,21 @@ function DiscountPopupSettingsForm({
             onChange={e => onChange('input_placeholder', e.target.value)} />
         </div>
       )}
+      {/* Coupon code */}
+      <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-2">
+        <label className="label flex items-center gap-1.5">
+          <Tag className="w-3.5 h-3.5 text-amber-600" />
+          كود الكوبون (اختياري — يظهر مع زر نسخ)
+        </label>
+        <input className="input font-mono tracking-widest uppercase"
+          dir="ltr" placeholder="مثال: HONEY10"
+          value={String(settings.coupon_code ?? '')}
+          onChange={e => onChange('coupon_code', e.target.value.toUpperCase())} />
+        <p className="text-xs text-amber-700">
+          أنشئ الكوبون في سلة أولاً ← الإعدادات ← الخصومات والكوبونات ← ثم ضع الكود هنا
+        </p>
+      </div>
+
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="label">نص الزر</label>
