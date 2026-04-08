@@ -828,6 +828,64 @@ async def direct_request_otp(
     }
 
 
+@router.post("/direct/resend-otp")
+async def direct_resend_otp(
+    body: DirectVerifyRequest,   # reuse — only phone_number_id is needed
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Resend OTP to an already-registered phone number (uses saved phone_number_id)."""
+    from core.config import WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+    tenant_id = resolve_tenant_id(request)
+    graph   = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+    headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
+
+    # Prefer phone_number_id from DB to avoid spoofing
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    phone_number_id = (conn.phone_number_id if conn else None) or body.phone_number_id
+
+    if not phone_number_id:
+        raise HTTPException(status_code=400, detail="لا يوجد رقم هاتف مرتبط. ابدأ من الخطوة الأولى.")
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                f"{graph}/{phone_number_id}/request_code",
+                headers=headers,
+                json={"code_method": "SMS", "language": "ar"},
+            )
+            data = r.json()
+    except Exception as exc:
+        logger.error("[WA Resend] API error: %s", exc)
+        raise HTTPException(status_code=503, detail="خطأ في الاتصال بـ Meta")
+
+    if "error" in data:
+        err = data["error"]
+        logger.warning("[WA Resend] raw_error code=%s full=%s", err.get("code"), data)
+        # Rate limited or cooldown — tell user to wait
+        RATE_CODES = {131056, 131042, 368, 4, 17, 80007}
+        if err.get("code") in RATE_CODES or "rate" in err.get("message","").lower():
+            return {
+                "status":          META_CODE_SENT,
+                "phone_number_id": phone_number_id,
+                "message":         "انتظر بضع دقائق قبل طلب رمز جديد — الرمز السابق لا يزال صالحاً.",
+                "rate_limited":    True,
+            }
+        ic, ux = _normalize_meta_error(err.get("code",0), err.get("message",""), err.get("error_subcode",0))
+        raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
+
+    # Update last_attempt_at
+    if conn:
+        conn.last_attempt_at = datetime.now(timezone.utc)
+        db.commit()
+
+    return {
+        "status":          META_CODE_SENT,
+        "phone_number_id": phone_number_id,
+        "message":         "تم إرسال رمز تحقق جديد إلى رقمك.",
+    }
+
+
 @router.post("/direct/verify-otp")
 async def direct_verify_otp(
     body: DirectVerifyRequest,

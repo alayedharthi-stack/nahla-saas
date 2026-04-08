@@ -112,6 +112,9 @@ async function requestOtp(phone: string, displayName: string, method: string) {
 async function verifyOtp(phoneNumberId: string, code: string) {
   return post<VerifyResponse>('/whatsapp/direct/verify-otp', { phone_number_id: phoneNumberId, code })
 }
+async function resendOtp(phoneNumberId: string) {
+  return post<OtpResponse>('/whatsapp/direct/resend-otp', { phone_number_id: phoneNumberId, code: '' })
+}
 async function saveProfile(phoneNumberId: string, profile: Record<string, string>) {
   return post('/whatsapp/direct/save-profile', { phone_number_id: phoneNumberId, ...profile })
     .catch(() => {}) // non-fatal
@@ -470,7 +473,16 @@ export default function WhatsAppConnect() {
               ← تغيير رقم الهاتف
             </button>
             <button
-              onClick={() => { setOtp(''); setError(''); handleRequestOtp() }}
+              onClick={async () => {
+                setOtp(''); setError(''); setBusy(true)
+                try {
+                  const r = await resendOtp(phoneNumberId)
+                  setSentMsg(sanitizeMessage(r.message))
+                  setResendCooldown(60)
+                } catch(e) {
+                  setError(sanitizeMessage(e instanceof Error ? e.message : ''))
+                } finally { setBusy(false) }
+              }}
               disabled={resendCooldown > 0 || busy}
               className="text-violet-600 hover:text-violet-800 disabled:text-slate-400 disabled:cursor-not-allowed font-medium">
               {resendCooldown > 0
