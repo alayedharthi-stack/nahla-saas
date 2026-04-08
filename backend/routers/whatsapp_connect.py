@@ -672,79 +672,69 @@ async def direct_request_otp(
             "already_sent":    True,
         }
 
-    # ── Step A: Add phone number to WABA ────────────────────────────────────
+    # ── Step A: Check if phone already exists in WABA ───────────────────────
+    phone_number_id = ""
+    bare_number = f"{cc}{national}"
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            add_resp = await client.post(
+        async with httpx.AsyncClient(timeout=15) as client:
+            list_resp = await client.get(
                 f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
                 headers=headers,
-                json={
-                    "cc":            cc,
-                    "phone_number":  national,
-                    "verified_name": body.display_name,
-                    "migrate_phone_number": False,
-                },
+                params={"fields": "id,display_phone_number,code_verification_status"},
             )
-            add_data = add_resp.json()
-    except Exception as exc:
-        logger.error("[WA Direct] Add phone API error: %s", exc)
-        raise HTTPException(status_code=503, detail="خطأ في الاتصال بـ Meta")
+            list_data = list_resp.json()
+        for entry in list_data.get("data", []):
+            dp = entry.get("display_phone_number", "").replace(" ", "").replace("-", "").replace("+", "")
+            if bare_number in dp or dp in bare_number:
+                phone_number_id = entry["id"]
+                logger.info(
+                    "[WA Direct] Phone already in WABA id=%s dp=%s status=%s",
+                    phone_number_id, dp, entry.get("code_verification_status"),
+                )
+                break
+    except Exception as lookup_exc:
+        logger.warning("[WA Direct] WABA phone list lookup failed: %s", lookup_exc)
 
-    if "error" in add_data:
-        err      = add_data["error"]
-        code     = err.get("code", 0)
-        subcode  = err.get("error_subcode", 0)
-        msg      = err.get("message", "")
-        user_msg = err.get("error_user_msg", "") or err.get("error_user_title", "")
-        # Log full raw Meta response for debugging — never forwarded to UI
-        logger.warning(
-            "[WA Direct] Add phone raw_error code=%s subcode=%s msg=%s user_msg=%s full=%s",
-            code, subcode, msg, user_msg, add_data,
-        )
+    # ── Step B: Add phone number to WABA only if not already there ───────────
+    if not phone_number_id:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                add_resp = await client.post(
+                    f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
+                    headers=headers,
+                    json={
+                        "cc":            cc,
+                        "phone_number":  national,
+                        "verified_name": body.display_name,
+                        "migrate_phone_number": False,
+                    },
+                )
+                add_data = add_resp.json()
+        except Exception as exc:
+            logger.error("[WA Direct] Add phone API error: %s", exc)
+            raise HTTPException(status_code=503, detail="خطأ في الاتصال بـ Meta")
 
-        internal_code, ux_message = _normalize_meta_error(code, msg, subcode, user_msg)
-
-        # Already registered → look up the existing phone number ID in WABA
-        if internal_code == META_ALREADY_REGISTERED:
-            # First try to get ID from error_data (Meta sometimes includes it)
-            phone_number_id = (
-                err.get("error_data", {}).get("id", "") or
-                add_data.get("error", {}).get("error_data", {}).get("id", "") or ""
+        if "error" in add_data:
+            err      = add_data["error"]
+            code     = err.get("code", 0)
+            subcode  = err.get("error_subcode", 0)
+            msg      = err.get("message", "")
+            user_msg = err.get("error_user_msg", "") or err.get("error_user_title", "")
+            logger.warning(
+                "[WA Direct] Add phone raw_error code=%s subcode=%s msg=%s full=%s",
+                code, subcode, msg, add_data,
             )
-            # If not in error, query WABA phone list to find the existing entry
-            if not phone_number_id:
-                try:
-                    async with httpx.AsyncClient(timeout=15) as c2:
-                        list_resp = await c2.get(
-                            f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
-                            headers=headers,
-                            params={"fields": "id,display_phone_number,code_verification_status"},
-                        )
-                        list_data = list_resp.json()
-                    full_number = f"+{cc}{national}"
-                    bare_number = f"{cc}{national}"
-                    for entry in list_data.get("data", []):
-                        dp = entry.get("display_phone_number", "").replace(" ", "").replace("-", "")
-                        if bare_number in dp or dp in bare_number or full_number in dp:
-                            phone_number_id = entry["id"]
-                            logger.info(
-                                "[WA Direct] Found existing phone in WABA id=%s dp=%s",
-                                phone_number_id, dp,
-                            )
-                            break
-                except Exception as lookup_exc:
-                    logger.warning("[WA Direct] WABA phone lookup failed: %s", lookup_exc)
-            logger.info(
-                "[WA Direct] ALREADY_REGISTERED resolved phone_number_id=%s", phone_number_id
-            )
+            internal_code, ux_message = _normalize_meta_error(code, msg, subcode, user_msg)
+            # Try to extract phone_number_id from error_data
+            phone_number_id = err.get("error_data", {}).get("id", "") or ""
+            if not phone_number_id and internal_code != META_ALREADY_REGISTERED:
+                raise HTTPException(
+                    status_code=400,
+                    detail=ux_message,
+                    headers={"X-Nahla-Error-Code": internal_code},
+                )
         else:
-            raise HTTPException(
-                status_code=400,
-                detail=ux_message,
-                headers={"X-Nahla-Error-Code": internal_code},
-            )
-    else:
-        phone_number_id = add_data.get("id", "")
+            phone_number_id = add_data.get("id", "")
 
     if not phone_number_id:
         raise HTTPException(
