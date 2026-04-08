@@ -235,7 +235,7 @@ export default function Billing() {
   )
 
   return (
-    <div className="space-y-6 max-w-5xl" dir="rtl">
+    <div className="space-y-6 mx-auto px-5 py-10" style={{maxWidth: '1100px'}} dir="rtl">
 
       {/* Page header */}
       <div>
