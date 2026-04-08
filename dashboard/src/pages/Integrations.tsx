@@ -1,59 +1,71 @@
-import { useState } from 'react'
-import { CheckCircle, XCircle, ExternalLink, RefreshCw, AlertCircle, Plug, Smartphone, Copy } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { CheckCircle, XCircle, ExternalLink, RefreshCw, AlertCircle, Plug, Smartphone, Copy, Loader2 } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
+import { apiCall } from '../api/client'
 
-interface Integration {
-  id: string
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface SallaStatus {
+  connected: boolean
+  store_id?: string
+  store_name?: string
+  last_sync?: string
+}
+
+interface WaStatus {
+  connected: boolean
+  phone_number?: string
+  display_name?: string
+  connected_at?: string
+}
+
+interface ZidStatus {
+  connected: boolean
+  store_id?: string
+  store_name?: string
+  connected_at?: string
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function timeAgo(isoStr?: string): string {
+  if (!isoStr) return '—'
+  try {
+    const diff = Date.now() - new Date(isoStr).getTime()
+    const mins = Math.floor(diff / 60000)
+    if (mins < 1)  return 'الآن'
+    if (mins < 60) return `منذ ${mins} دقيقة`
+    const hrs = Math.floor(mins / 60)
+    if (hrs  < 24) return `منذ ${hrs} ساعة`
+    return `منذ ${Math.floor(hrs / 24)} يوم`
+  } catch { return '—' }
+}
+
+// ── Integration Card ──────────────────────────────────────────────────────────
+
+interface CardProps {
+  logo: string
   name: string
   description: string
-  logo: string
   connected: boolean
-  storeId?: string
-  storeName?: string
-  lastSync?: string
-  syncStatus?: 'ok' | 'error' | 'syncing'
+  loading: boolean
+  accountLabel?: string
+  accountValue?: string
+  syncLabel?: string
+  syncValue?: string
+  onConnect?: () => void
+  onDisconnect?: () => void
+  externalHref?: string
+  externalLabel?: string
+  hideExternal?: boolean
 }
 
-const integrations: Integration[] = [
-  {
-    id: 'salla',
-    name: 'Salla',
-    description: 'اربط متجرك على سلة لمزامنة المنتجات والطلبات والعملاء في الوقت الفعلي.',
-    logo: '🛒',
-    connected: true,
-    storeId: 'salla-89231',
-    storeName: 'متجر أحمد للملابس',
-    lastSync: 'منذ دقيقتين',
-    syncStatus: 'ok',
-  },
-  {
-    id: 'zid',
-    name: 'Zid',
-    description: 'اربط متجرك على زد لتفعيل التجارة عبر واتساب ومساعد الذكاء الاصطناعي.',
-    logo: '🏪',
-    connected: false,
-  },
-  {
-    id: 'whatsapp',
-    name: 'WhatsApp Business API',
-    description: 'اربط رقم واتساب للأعمال لاستقبال الرسائل والرد عليها.',
-    logo: '💬',
-    connected: true,
-    storeId: '+966 50 123 4567',
-    storeName: 'WhatsApp Business Cloud API',
-    lastSync: 'منذ دقيقة',
-    syncStatus: 'ok',
-  },
-]
-
-const syncStatusIcon = (s?: Integration['syncStatus']) => {
-  if (s === 'ok')      return <CheckCircle  className="w-4 h-4 text-emerald-500" />
-  if (s === 'error')   return <XCircle      className="w-4 h-4 text-red-500" />
-  if (s === 'syncing') return <RefreshCw    className="w-4 h-4 text-brand-500 animate-spin" />
-  return null
-}
-
-function IntegrationCard({ integration }: { integration: Integration }) {
+function IntegrationCard({
+  logo, name, description, connected, loading,
+  accountLabel, accountValue, syncLabel, syncValue,
+  onConnect, onDisconnect, externalHref, externalLabel, hideExternal,
+}: CardProps) {
   const [syncing, setSyncing] = useState(false)
 
   const handleSync = () => {
@@ -65,31 +77,33 @@ function IntegrationCard({ integration }: { integration: Integration }) {
     <div className="card p-5">
       <div className="flex items-start gap-4">
         <div className="w-12 h-12 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-center text-2xl shrink-0">
-          {integration.logo}
+          {logo}
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-sm font-semibold text-slate-900">{integration.name}</h3>
-            {integration.connected
-              ? <Badge label="متصل"       variant="green" dot />
-              : <Badge label="غير متصل"  variant="slate" />}
+            <h3 className="text-sm font-semibold text-slate-900">{name}</h3>
+            {loading
+              ? <Badge label="جاري التحقق..." variant="slate" />
+              : connected
+                ? <Badge label="متصل"       variant="green" dot />
+                : <Badge label="غير متصل"  variant="slate" />}
           </div>
-          <p className="text-xs text-slate-500 mt-1">{integration.description}</p>
+          <p className="text-xs text-slate-500 mt-1">{description}</p>
 
-          {integration.connected && (
+          {!loading && connected && (
             <div className="mt-3 grid sm:grid-cols-2 gap-3">
               <div className="bg-slate-50 rounded-lg px-3 py-2.5">
-                <p className="text-xs text-slate-400">المتجر / الحساب</p>
-                <p className="text-xs font-medium text-slate-800 mt-0.5 truncate">{integration.storeName}</p>
+                <p className="text-xs text-slate-400">{accountLabel ?? 'الحساب'}</p>
+                <p className="text-xs font-medium text-slate-800 mt-0.5 truncate">{accountValue ?? '—'}</p>
               </div>
               <div className="bg-slate-50 rounded-lg px-3 py-2.5">
                 <div className="flex items-center gap-1.5">
                   {syncing
                     ? <RefreshCw className="w-3.5 h-3.5 text-brand-500 animate-spin" />
-                    : syncStatusIcon(integration.syncStatus)}
-                  <p className="text-xs text-slate-400">آخر مزامنة</p>
+                    : <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />}
+                  <p className="text-xs text-slate-400">{syncLabel ?? 'آخر مزامنة'}</p>
                 </div>
-                <p className="text-xs font-medium text-slate-800 mt-0.5">{integration.lastSync}</p>
+                <p className="text-xs font-medium text-slate-800 mt-0.5">{syncValue ?? '—'}</p>
               </div>
             </div>
           )}
@@ -97,28 +111,28 @@ function IntegrationCard({ integration }: { integration: Integration }) {
       </div>
 
       <div className="flex items-center gap-2 mt-4 pt-4 border-t border-slate-100">
-        {integration.connected ? (
+        {!loading && (connected ? (
           <>
             <button onClick={handleSync} className="btn-secondary text-xs py-1.5" disabled={syncing}>
               <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'جارٍ المزامنة…' : 'مزامنة الآن'}
+              {syncing ? 'جارٍ…' : 'مزامنة'}
             </button>
-            <button className="btn-ghost text-xs py-1.5 text-red-500 hover:bg-red-50">
-              فصل الاتصال
-            </button>
+            {onDisconnect && (
+              <button onClick={onDisconnect} className="btn-ghost text-xs py-1.5 text-red-500 hover:bg-red-50">
+                فصل الاتصال
+              </button>
+            )}
           </>
         ) : (
-          <button className="btn-primary text-xs py-1.5">
-            <Plug className="w-3.5 h-3.5" /> ربط {integration.name}
+          <button onClick={onConnect} className="btn-primary text-xs py-1.5">
+            <Plug className="w-3.5 h-3.5" /> ربط {name}
           </button>
-        )}
+        ))}
 
-        {integration.id !== 'whatsapp' && (
-          <a
-            href="#"
-            className="btn-ghost text-xs py-1.5 ms-auto text-slate-400"
-          >
-            <ExternalLink className="w-3.5 h-3.5" /> فتح في {integration.name}
+        {!hideExternal && externalHref && (
+          <a href={externalHref} target="_blank" rel="noreferrer"
+            className="btn-ghost text-xs py-1.5 ms-auto text-slate-400">
+            <ExternalLink className="w-3.5 h-3.5" /> {externalLabel ?? `فتح في ${name}`}
           </a>
         )}
       </div>
@@ -126,14 +140,65 @@ function IntegrationCard({ integration }: { integration: Integration }) {
   )
 }
 
+// ── Main Page ─────────────────────────────────────────────────────────────────
+
 export default function Integrations() {
-  const [copied, setCopied] = useState<string | null>(null)
+  const navigate = useNavigate()
+  const [copied,  setCopied]  = useState<string | null>(null)
+
+  const [sallaStatus, setSallaStatus] = useState<SallaStatus>({ connected: false })
+  const [waStatus,    setWaStatus]    = useState<WaStatus>({ connected: false })
+  const [zidStatus,   setZidStatus]   = useState<ZidStatus>({ connected: false })
+
+  const [sallaLoading, setSallaLoading] = useState(true)
+  const [waLoading,    setWaLoading]    = useState(true)
+  const [zidLoading,   setZidLoading]   = useState(true)
+
+  useEffect(() => {
+    // Salla
+    apiCall<any>('/salla/whoami')
+      .then(d => {
+        const si = d?.salla_integration ?? {}
+        setSallaStatus({
+          connected: si.store_id && si.store_id !== 'not_connected' && si.store_id !== '?',
+          store_id:   si.store_id,
+          store_name: si.store_name,
+        })
+      })
+      .catch(() => setSallaStatus({ connected: false }))
+      .finally(() => setSallaLoading(false))
+
+    // WhatsApp
+    apiCall<any>('/whatsapp/direct/status')
+      .then(d => setWaStatus({
+        connected:    d?.connected === true,
+        phone_number: d?.phone_number,
+        display_name: d?.display_name,
+        connected_at: d?.connected_at,
+      }))
+      .catch(() => setWaStatus({ connected: false }))
+      .finally(() => setWaLoading(false))
+
+    // Zid
+    apiCall<any>('/zid/status')
+      .then(d => setZidStatus({
+        connected:    d?.connected === true,
+        store_id:     d?.store_id,
+        store_name:   d?.store_name,
+        connected_at: d?.connected_at,
+      }))
+      .catch(() => setZidStatus({ connected: false }))
+      .finally(() => setZidLoading(false))
+  }, [])
 
   const handleCopy = (url: string, label: string) => {
     navigator.clipboard.writeText(url)
     setCopied(label)
     setTimeout(() => setCopied(null), 1500)
   }
+
+  const connectedCount = [sallaStatus, waStatus, zidStatus].filter(s => s.connected).length
+  const loadingAny     = sallaLoading || waLoading || zidLoading
 
   return (
     <div className="space-y-5">
@@ -143,30 +208,79 @@ export default function Integrations() {
           <CheckCircle className="w-5 h-5 text-emerald-500 shrink-0" />
           <div>
             <p className="text-xs text-slate-400">متصل</p>
-            <p className="text-sm font-bold text-slate-900">2 / 3</p>
+            <p className="text-sm font-bold text-slate-900">
+              {loadingAny
+                ? <Loader2 className="w-4 h-4 animate-spin inline" />
+                : `${connectedCount} / 3`}
+            </p>
           </div>
         </div>
         <div className="card px-5 py-4 flex items-center gap-3">
           <RefreshCw className="w-5 h-5 text-brand-500 shrink-0" />
           <div>
-            <p className="text-xs text-slate-400">آخر مزامنة شاملة</p>
-            <p className="text-sm font-bold text-slate-900">منذ دقيقتين</p>
+            <p className="text-xs text-slate-400">واتساب</p>
+            <p className="text-sm font-bold text-slate-900">
+              {waLoading ? '...' : waStatus.connected ? 'مرتبط ✓' : 'غير مرتبط'}
+            </p>
           </div>
         </div>
         <div className="card px-5 py-4 flex items-center gap-3">
           <Smartphone className="w-5 h-5 text-blue-500 shrink-0" />
           <div>
             <p className="text-xs text-slate-400">رقم واتساب</p>
-            <p className="text-sm font-bold text-slate-900" dir="ltr">+966 50 123 4567</p>
+            <p className="text-sm font-bold text-slate-900" dir="ltr">
+              {waLoading ? '...' : waStatus.phone_number ? `+${waStatus.phone_number}` : '—'}
+            </p>
           </div>
         </div>
       </div>
 
       {/* Integration cards */}
       <div className="grid lg:grid-cols-2 gap-4">
-        {integrations.map((i) => (
-          <IntegrationCard key={i.id} integration={i} />
-        ))}
+        <IntegrationCard
+          logo="🛒"
+          name="Salla"
+          description="اربط متجرك على سلة لمزامنة المنتجات والطلبات والعملاء في الوقت الفعلي."
+          connected={sallaStatus.connected}
+          loading={sallaLoading}
+          accountLabel="اسم المتجر"
+          accountValue={sallaStatus.store_name && sallaStatus.store_name !== 'not_connected' ? sallaStatus.store_name : sallaStatus.store_id}
+          syncLabel="رقم المتجر"
+          syncValue={sallaStatus.store_id && sallaStatus.store_id !== 'not_connected' ? sallaStatus.store_id : '—'}
+          onConnect={() => navigate('/store-integration')}
+          externalHref="https://salla.sa/dashboard"
+          externalLabel="فتح في Salla"
+        />
+
+        <IntegrationCard
+          logo="🏪"
+          name="Zid"
+          description="اربط متجرك على زد لتفعيل التجارة عبر واتساب ومساعد الذكاء الاصطناعي."
+          connected={zidStatus.connected}
+          loading={zidLoading}
+          accountLabel="اسم المتجر"
+          accountValue={zidStatus.store_name ?? zidStatus.store_id}
+          syncLabel="تاريخ الربط"
+          syncValue={timeAgo(zidStatus.connected_at)}
+          onConnect={() => navigate('/store-integration')}
+          externalHref="https://web.zid.sa/dashboard"
+          externalLabel="فتح في Zid"
+        />
+
+        <IntegrationCard
+          logo="💬"
+          name="WhatsApp Business API"
+          description="اربط رقم واتساب للأعمال لاستقبال الرسائل والرد عليها."
+          connected={waStatus.connected}
+          loading={waLoading}
+          accountLabel="الرقم المرتبط"
+          accountValue={waStatus.phone_number ? `+${waStatus.phone_number}` : '—'}
+          syncLabel="تاريخ الربط"
+          syncValue={timeAgo(waStatus.connected_at)}
+          onConnect={() => navigate('/whatsapp-connect')}
+          onDisconnect={() => navigate('/whatsapp-connect')}
+          hideExternal
+        />
       </div>
 
       {/* Webhook info */}
@@ -180,9 +294,9 @@ export default function Integrations() {
             </p>
             <div className="space-y-2">
               {[
-                { label: 'Salla Webhooks',   url: 'https://api.nahla.co/integrations/salla/webhooks/{products|orders|customers}' },
-                { label: 'Zid Webhooks',     url: 'https://api.nahla.co/integrations/zid/webhooks/{products|orders|customers}' },
-                { label: 'WhatsApp Webhook', url: 'https://api.nahla.co/whatsapp/webhook' },
+                { label: 'Salla Webhooks',   url: 'https://api.nahlah.ai/integrations/salla/webhooks/{products|orders|customers}' },
+                { label: 'Zid Webhooks',     url: 'https://api.nahlah.ai/integrations/zid/webhooks/{products|orders|customers}' },
+                { label: 'WhatsApp Webhook', url: 'https://api.nahlah.ai/webhook/whatsapp' },
               ].map(({ label, url }) => (
                 <div key={label} className="flex items-center gap-3 bg-slate-50 rounded-lg px-3 py-2">
                   <span className="text-xs font-medium text-slate-500 w-36 shrink-0">{label}</span>
