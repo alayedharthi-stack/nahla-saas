@@ -112,23 +112,46 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
         if user and getattr(user, "password_hash", None):
             if verify_password(body.password, user.password_hash):
                 role = user.role or "merchant"
+
+                # ── Auto-repair: if user has no tenant_id, create/assign one ──────
+                tenant_id = user.tenant_id
+                if not tenant_id:
+                    # Try to find an existing tenant by name/email
+                    existing = db.query(Tenant).filter(Tenant.name == email).first()
+                    if existing:
+                        tenant_id = existing.id
+                    else:
+                        new_tenant = Tenant(
+                            name=email,
+                            slug=email.split("@")[0].replace(".", "-")[:40],
+                        )
+                        db.add(new_tenant)
+                        db.flush()
+                        tenant_id = new_tenant.id
+                    user.tenant_id = tenant_id
+                    db.commit()
+                    logger.warning(
+                        "[auth/login] AUTO-ASSIGNED tenant_id=%s to user=%s (was null)",
+                        tenant_id, email,
+                    )
+
                 token = create_token(
                     email=user.email,
                     role=role,
-                    tenant_id=user.tenant_id,
+                    tenant_id=tenant_id,
                     user_id=user.id,
                 )
-                audit("login_success", role=role, sub=user.email, tenant_id=user.tenant_id, ip=client_ip)
+                audit("login_success", role=role, sub=user.email, tenant_id=tenant_id, ip=client_ip)
                 logger.info(
                     "[auth/login] MERCHANT LOGIN | email=%s role=%s tenant_id=%s user_id=%s",
-                    user.email, role, user.tenant_id, user.id,
+                    user.email, role, tenant_id, user.id,
                 )
                 return {
                     "access_token": token,
                     "token_type":   "bearer",
                     "role":         role,
                     "email":        user.email,
-                    "tenant_id":    user.tenant_id,
+                    "tenant_id":    tenant_id,
                     "user_id":      user.id,
                 }
 
