@@ -344,18 +344,21 @@ def _seed_templates_if_empty(db: Session, tenant_id: int) -> None:
 
 
 def _fetch_meta_templates(waba_id: str, access_token: str) -> Optional[List[Dict[str, Any]]]:
-    """Try to fetch templates from Meta Graph API. Returns None on failure."""
+    """Try to fetch ALL templates from Meta Graph API. Returns None on failure."""
     try:
         import json as _json
         import urllib.request
+        # Fetch all statuses (APPROVED, PENDING, REJECTED, PAUSED) — no status filter
         url = (
             f"https://graph.facebook.com/v18.0/{waba_id}/message_templates"
-            f"?access_token={access_token}&limit=50&status=APPROVED"
+            f"?access_token={access_token}&limit=100"
+            f"&fields=id,name,language,category,status,components,quality_score,rejected_reason"
         )
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with urllib.request.urlopen(url, timeout=10) as resp:
             data = _json.loads(resp.read())
             return data.get("data", [])
-    except Exception:
+    except Exception as exc:
+        logger.warning("[templates] _fetch_meta_templates failed waba=%s: %s", waba_id, exc)
         return None
 
 
@@ -429,9 +432,32 @@ async def list_templates(
     db: Session = Depends(get_db),
 ):
     """List all WhatsApp templates for this tenant, optionally filtered by status."""
+    from models import WhatsAppConnection  # noqa: PLC0415
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
-    _seed_templates_if_empty(db, tenant_id)
+
+    # ── Auto-clean: if WhatsApp is connected, seed templates are fake — remove them ──
+    wa_conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id,
+        WhatsAppConnection.status.in_(["connected", "pending"]),
+    ).first()
+    if wa_conn:
+        deleted = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.meta_template_id.like("seed_%"),
+            )
+            .delete(synchronize_session=False)
+        )
+        if deleted:
+            logger.info(
+                "[templates/list] Auto-removed %d seed templates for tenant=%s (WA connected)",
+                deleted, tenant_id,
+            )
+    else:
+        _seed_templates_if_empty(db, tenant_id)
+
     db.commit()
 
     q = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id)
@@ -449,7 +475,7 @@ async def create_template(body: CreateTemplateIn, request: Request, db: Session 
 
     settings = get_or_create_settings(db, tenant_id)
     wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    waba_id = wa.get("phone_number_id", "")
+    waba_id = wa.get("whatsapp_business_account_id", "")
     token = wa.get("access_token", "")
 
     meta_id = None
@@ -581,7 +607,7 @@ async def generate_template(body: GenerateTemplateIn, request: Request, db: Sess
     submitted = False
     meta_id = None
     if submission_mode == "auto_submit":
-        waba_id = wa.get("phone_number_id", "")
+        waba_id = wa.get("whatsapp_business_account_id", "")
         token = wa.get("access_token", "")
         if waba_id and token:
             meta_id = await _submit_template_to_meta(tpl.name, tpl.language, tpl.category, tpl.components or [], waba_id, token)
@@ -624,13 +650,13 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
 
     settings = get_or_create_settings(db, tenant_id)
     wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    waba_id = wa.get("phone_number_id", "")
+    waba_id = wa.get("whatsapp_business_account_id", "")
     token = wa.get("access_token", "")
 
     if not waba_id or not token:
         raise HTTPException(
             status_code=422,
-            detail="بيانات WhatsApp Business غير مُعدَّة. أضف Phone Number ID و Access Token في الإعدادات.",
+            detail="بيانات WhatsApp Business غير مُعدَّة. أضف WABA ID و Access Token في الإعدادات.",
         )
 
     meta_id = await _submit_template_to_meta(tpl.name, tpl.language, tpl.category, tpl.components or [], waba_id, token)
@@ -794,23 +820,27 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
         logger.info("[templates/sync] Removed %d seed templates for tenant=%s", deleted, tenant_id)
 
     # ── Upsert real templates from Meta ───────────────────────────────────────
-    live_ids = set()
-    synced   = 0
+    synced = 0
     for item in live:
         meta_id = str(item.get("id", ""))
         if not meta_id:
             continue
-        live_ids.add(meta_id)
         existing = db.query(WhatsAppTemplate).filter(
-            WhatsAppTemplate.tenant_id      == tenant_id,
+            WhatsAppTemplate.tenant_id        == tenant_id,
             WhatsAppTemplate.meta_template_id == meta_id,
         ).first()
         now = datetime.now(timezone.utc)
+        raw_status = (item.get("status") or "PENDING").upper()
+        rejection  = item.get("rejected_reason") or None
         if existing:
-            existing.status     = item.get("status", existing.status)
-            existing.components = item.get("components", existing.components)
-            existing.synced_at  = now
-            existing.updated_at = now
+            existing.name             = item.get("name", existing.name)
+            existing.language         = item.get("language", existing.language)
+            existing.category         = item.get("category", existing.category)
+            existing.status           = raw_status
+            existing.components       = item.get("components", existing.components)
+            existing.rejection_reason = rejection
+            existing.synced_at        = now
+            existing.updated_at       = now
         else:
             db.add(WhatsAppTemplate(
                 tenant_id=tenant_id,
@@ -818,8 +848,9 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
                 name=item.get("name", ""),
                 language=item.get("language", "ar"),
                 category=item.get("category", "MARKETING"),
-                status=item.get("status", "PENDING"),
+                status=raw_status,
                 components=item.get("components", []),
+                rejection_reason=rejection,
                 created_at=now,
                 updated_at=now,
                 synced_at=now,
@@ -829,7 +860,7 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
     db.commit()
     logger.info("[templates/sync] tenant=%s synced=%d from waba=%s", tenant_id, synced, waba_id)
     return {
-        "synced":  synced,
+        "synced":       synced,
         "deleted_seeds": deleted,
         "message": f"تمت مزامنة {synced} قالب من Meta" + (
             f" (وحُذف {deleted} قالب تجريبي)" if deleted else ""
