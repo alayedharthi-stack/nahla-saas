@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import {
   Save, Bot, Store, Users, Bell, MessageSquare,
   CheckCircle, AlertCircle, Loader2, Copy, ExternalLink,
-  Eye, EyeOff, RefreshCw, UserPlus, Shield, ToggleLeft, ToggleRight,
+  Eye, EyeOff, RefreshCw, UserPlus, Shield, ShieldOff, ToggleLeft, ToggleRight,
   Sparkles, Play, Zap, ShoppingCart, RotateCcw, Heart,
   ChevronDown, ChevronUp, Clock, BrainCircuit, ShieldCheck, ExternalLink as LinkOut,
   Wifi, WifiOff, BadgeCheck, RefreshCw as ReconnectIcon,
@@ -144,7 +144,7 @@ function SaveBar({
 
 // ── Tab definitions ─────────────────────────────────────────────────────────
 
-const TAB_IDS = ['whatsapp', 'ai', 'automation', 'ai_sales', 'store', 'team', 'notifications'] as const
+const TAB_IDS = ['whatsapp', 'ai', 'automation', 'ai_sales', 'store', 'team', 'notifications', 'security'] as const
 type TabId = typeof TAB_IDS[number]
 
 const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
@@ -155,6 +155,7 @@ const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
   store:         Store,
   team:          Users,
   notifications: Bell,
+  security:      ShieldCheck,
 }
 
 // ── Tab: WhatsApp ────────────────────────────────────────────────────────────
@@ -1385,6 +1386,199 @@ function AiSalesAgentTab() {
   )
 }
 
+// ── Support Access Tab ────────────────────────────────────────────────────────
+
+const TTL_OPTIONS = [
+  { value: 1,  label: 'ساعة واحدة' },
+  { value: 2,  label: 'ساعتان' },
+  { value: 4,  label: '4 ساعات' },
+  { value: 8,  label: '8 ساعات (الافتراضي)' },
+  { value: 24, label: '24 ساعة' },
+  { value: 48, label: '48 ساعة' },
+]
+
+function SupportAccessTab() {
+  const [status, setStatus] = useState<{
+    enabled: boolean; granted_at: string | null; expires_at: string | null; message: string
+  } | null>(null)
+  const [loading, setLoading]       = useState(true)
+  const [saving, setSaving]         = useState(false)
+  const [ttlHours, setTtlHours]     = useState(8)
+  const [successMsg, setSuccessMsg] = useState<string | null>(null)
+  const [errorMsg, setErrorMsg]     = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/merchant/support-access', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) setStatus(await res.json())
+    } catch { /* ignore */ }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const toggle = async (enable: boolean) => {
+    setSaving(true)
+    setSuccessMsg(null)
+    setErrorMsg(null)
+    try {
+      const endpoint = enable
+        ? '/api/merchant/support-access/enable'
+        : '/api/merchant/support-access/disable'
+      const body = enable ? JSON.stringify({ ttl_hours: ttlHours }) : undefined
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}`,
+        },
+        body,
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail ?? 'حدث خطأ')
+      setSuccessMsg(data.message)
+      await load()
+    } catch (e: unknown) {
+      setErrorMsg(e instanceof Error ? e.message : 'حدث خطأ غير متوقع')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const fmtDate = (iso: string | null) => {
+    if (!iso) return '—'
+    try {
+      return new Intl.DateTimeFormat('ar-SA', {
+        dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Riyadh',
+      }).format(new Date(iso))
+    } catch { return iso }
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="card p-5">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-9 h-9 bg-blue-100 rounded-lg flex items-center justify-center shrink-0">
+            <Shield className="w-5 h-5 text-blue-600" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">وصول الدعم الفني</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              امنح فريق نحلة صلاحية مؤقتة للدخول إلى لوحتك لمساعدتك في حل مشكلة.
+              لا يمكن لأي أحد — بما في ذلك فريق الدعم — الدخول بدون موافقتك الصريحة.
+            </p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="flex items-center gap-2 py-4 text-slate-400 text-sm">
+            <Loader2 className="w-4 h-4 animate-spin" /> جارٍ التحميل...
+          </div>
+        ) : (
+          <>
+            {/* Status indicator */}
+            <div className={`flex items-center gap-2 p-3 rounded-lg mb-4 ${
+              status?.enabled
+                ? 'bg-amber-50 border border-amber-200'
+                : 'bg-slate-50 border border-slate-200'
+            }`}>
+              {status?.enabled ? (
+                <>
+                  <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-amber-700">وصول الدعم الفني مفعّل</p>
+                    <p className="text-xs text-amber-600">
+                      مُفعّل منذ: {fmtDate(status.granted_at)} · ينتهي: {fmtDate(status.expires_at)}
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Shield className="w-4 h-4 text-slate-400 shrink-0" />
+                  <p className="text-xs text-slate-600">
+                    وصول الدعم الفني غير مفعّل — لوحتك محمية
+                  </p>
+                </>
+              )}
+            </div>
+
+            {/* Enable form */}
+            {!status?.enabled && (
+              <div className="space-y-3">
+                <label className="block text-xs font-medium text-slate-700">
+                  مدة الوصول المؤقت
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {TTL_OPTIONS.map(opt => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setTtlHours(opt.value)}
+                      className={`py-2 px-3 text-xs rounded-lg border transition-colors ${
+                        ttlHours === opt.value
+                          ? 'bg-brand-500 text-white border-brand-500'
+                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => toggle(true)}
+                  disabled={saving}
+                  className="btn-primary w-full flex items-center justify-center gap-2"
+                >
+                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+                  السماح للدعم الفني بالوصول لمدة {TTL_OPTIONS.find(o => o.value === ttlHours)?.label}
+                </button>
+              </div>
+            )}
+
+            {/* Disable button */}
+            {status?.enabled && (
+              <button
+                onClick={() => toggle(false)}
+                disabled={saving}
+                className="btn-secondary w-full flex items-center justify-center gap-2 border-red-200 text-red-600 hover:bg-red-50"
+              >
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldOff className="w-4 h-4" />}
+                إلغاء وصول الدعم الفني فوراً
+              </button>
+            )}
+
+            {/* Messages */}
+            {successMsg && (
+              <div className="flex items-center gap-2 mt-3 p-2.5 bg-green-50 border border-green-200 rounded-lg text-xs text-green-700">
+                <CheckCircle className="w-4 h-4 shrink-0" /> {successMsg}
+              </div>
+            )}
+            {errorMsg && (
+              <div className="flex items-center gap-2 mt-3 p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
+                <AlertCircle className="w-4 h-4 shrink-0" /> {errorMsg}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Info card */}
+      <div className="card p-5 bg-slate-50">
+        <h4 className="text-xs font-semibold text-slate-700 mb-2">كيف يعمل هذا النظام؟</h4>
+        <ul className="space-y-1.5 text-xs text-slate-500 list-none">
+          <li className="flex gap-2"><span className="text-brand-500 font-bold">1.</span> أنت من يقرر متى يُسمح للدعم الفني بالدخول</li>
+          <li className="flex gap-2"><span className="text-brand-500 font-bold">2.</span> الوصول مؤقت وينتهي تلقائياً بعد المدة التي تحددها</li>
+          <li className="flex gap-2"><span className="text-brand-500 font-bold">3.</span> يمكنك إلغاء الوصول في أي لحظة قبل انتهاء المدة</li>
+          <li className="flex gap-2"><span className="text-brand-500 font-bold">4.</span> كل دخول للدعم الفني يُسجَّل في سجلات المنصة</li>
+          <li className="flex gap-2"><span className="text-brand-500 font-bold">5.</span> بدون موافقتك، لا يستطيع أحد — بما في ذلك المالك — رؤية لوحتك</li>
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 // ── Main Settings page ───────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -1531,6 +1725,7 @@ export default function Settings() {
           saveError={activeTab === 'notifications' ? saveError : null}
         />
       )}
+      {activeTab === 'security' && <SupportAccessTab />}
     </div>
   )
 }

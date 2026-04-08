@@ -52,7 +52,10 @@ export default function SallaCallback() {
       localStorage.setItem('nahla_tenant_id', String(payload.tenant_id ?? ''))
       localStorage.setItem('nahla_user_id',   String(payload.user_id   ?? ''))
       if (store) localStorage.setItem('nahla_salla_store_id',   store)
-      if (name)  localStorage.setItem('nahla_salla_store_name', name)
+      if (name) {
+        localStorage.setItem('nahla_salla_store_name', name)
+        localStorage.setItem('nahla_store_name', name)
+      }
 
       // Routing logic:
       //  - New merchant      → /onboarding (choose plan)

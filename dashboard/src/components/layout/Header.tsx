@@ -1,8 +1,17 @@
 import { useState, useRef, useEffect } from 'react'
-import { Bell, Search, ChevronDown, Menu, LogOut, User } from 'lucide-react'
+import { Bell, Search, ChevronDown, Menu, LogOut, User, Shield, ShieldOff } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useLanguage } from '../../i18n/context'
-import { logout } from '../../auth'
+import {
+  logout,
+  getEmail,
+  getRole,
+  getStoreName,
+  isImpersonating,
+  getImpersonation,
+  stopImpersonation,
+  isPlatformOwner,
+} from '../../auth'
 import type { Lang } from '../../i18n/types'
 
 interface HeaderProps {
@@ -11,11 +20,53 @@ interface HeaderProps {
   onMenuClick?: () => void
 }
 
+/** Derive a readable display name from an email or store name. */
+function _displayName(email: string, storeName: string, role: string): string {
+  if (storeName) return storeName
+  if (email) {
+    // Take the part before @ and clean it up
+    const local = email.split('@')[0].replace(/[-_.]/g, ' ')
+    return local.charAt(0).toUpperCase() + local.slice(1)
+  }
+  if (role === 'admin' || role === 'owner') return 'المالك'
+  return 'التاجر'
+}
+
+/** First letter of display name for the avatar. */
+function _avatarLetter(name: string): string {
+  return name.trim().charAt(0).toUpperCase() || 'م'
+}
+
+/** Color class for the avatar based on role. */
+function _avatarColor(role: string): string {
+  if (role === 'admin' || role === 'owner' || role === 'super_admin') return 'bg-rose-500'
+  return 'bg-brand-500'
+}
+
 export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const { lang, setLang, t } = useLanguage()
   const navigate = useNavigate()
   const [profileOpen, setProfileOpen] = useState(false)
   const profileRef = useRef<HTMLDivElement>(null)
+
+  // Read session info from localStorage (updated on every login/session change)
+  const email      = getEmail()
+  const role       = getRole()
+  const storeName  = getStoreName()
+  const impersonating = isImpersonating()
+  const impersonInfo  = getImpersonation()
+
+  const displayName  = _displayName(email, storeName, role)
+  const avatarLetter = _avatarLetter(displayName)
+  const avatarColor  = _avatarColor(role)
+
+  const roleLabel = (() => {
+    if (impersonating)                                        return 'دعم فني — وصول مؤقت'
+    if (role === 'admin' || role === 'super_admin')           return 'مالك المنصة'
+    if (role === 'owner')                                     return 'مالك'
+    if (role === 'staff')                                     return 'موظف'
+    return 'تاجر'
+  })()
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -30,6 +81,12 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const handleLogout = () => {
     logout()
     navigate('/login')
+  }
+
+  const handleStopImpersonation = () => {
+    stopImpersonation()
+    navigate('/admin')
+    setProfileOpen(false)
   }
 
   return (
@@ -55,12 +112,16 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
       {/* Right-side actions */}
       <div className="flex items-center gap-2">
 
+        {/* Impersonation banner — shown only to support agents */}
+        {impersonating && (
+          <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 border border-amber-200 rounded-lg text-xs font-medium text-amber-700">
+            <Shield className="w-3.5 h-3.5" />
+            دعم فني: {impersonInfo?.storeName || 'متجر'}
+          </div>
+        )}
+
         {/* Search */}
         <div className="relative hidden md:block">
-          {/*
-           * start-3 = inset-inline-start: 12px
-           * Icon sits on the starting side (right in RTL, left in LTR).
-           */}
           <Search className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
           <input
             type="text"
@@ -101,23 +162,40 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
         <div ref={profileRef} className="relative">
           <button
             onClick={() => setProfileOpen(o => !o)}
-            className="flex items-center gap-2 ps-2 pe-3 py-1.5 rounded-lg hover:bg-slate-50 transition-colors"
+            className={`flex items-center gap-2 ps-2 pe-3 py-1.5 rounded-lg hover:bg-slate-50 transition-colors ${
+              impersonating ? 'ring-2 ring-amber-300' : ''
+            }`}
           >
-            <div className="w-7 h-7 bg-brand-500 rounded-full flex items-center justify-center">
-              <span className="text-white text-xs font-semibold">م</span>
+            <div className={`w-7 h-7 ${avatarColor} rounded-full flex items-center justify-center`}>
+              <span className="text-white text-xs font-semibold">{avatarLetter}</span>
             </div>
-            <span className="text-sm font-medium text-slate-700 hidden md:block">
-              {t(tr => tr.topbar.admin)}
-            </span>
+            <div className="hidden md:flex flex-col items-start leading-tight">
+              <span className="text-sm font-medium text-slate-700 max-w-[120px] truncate">
+                {displayName}
+              </span>
+              <span className="text-[10px] text-slate-400">{roleLabel}</span>
+            </div>
             <ChevronDown className={`w-3.5 h-3.5 text-slate-400 hidden md:block transition-transform ${profileOpen ? 'rotate-180' : ''}`} />
           </button>
 
           {profileOpen && (
-            <div className="absolute end-0 top-full mt-1 w-44 max-w-[calc(100vw-1rem)] bg-white rounded-xl shadow-lg border border-slate-100 py-1 z-50">
-              <div className="px-3 py-2 border-b border-slate-100">
-                <p className="text-xs font-semibold text-slate-900">المدير</p>
-                <p className="text-xs text-slate-400">admin@nahlah.ai</p>
+            <div className="absolute end-0 top-full mt-1 w-52 max-w-[calc(100vw-1rem)] bg-white rounded-xl shadow-lg border border-slate-100 py-1 z-50">
+              {/* User info */}
+              <div className="px-3 py-2.5 border-b border-slate-100">
+                <p className="text-xs font-semibold text-slate-900 truncate">{displayName}</p>
+                <p className="text-xs text-slate-400 truncate">{email || '—'}</p>
+                <span className={`mt-1 inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
+                  impersonating
+                    ? 'bg-amber-100 text-amber-700'
+                    : isPlatformOwner()
+                      ? 'bg-rose-100 text-rose-700'
+                      : 'bg-emerald-100 text-emerald-700'
+                }`}>
+                  {roleLabel}
+                </span>
               </div>
+
+              {/* Settings */}
               <button
                 onClick={() => { setProfileOpen(false); navigate('/settings') }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
@@ -125,9 +203,22 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                 <User className="w-4 h-4 text-slate-400" />
                 الإعدادات
               </button>
+
+              {/* Exit impersonation — shown only when support is active */}
+              {impersonating && (
+                <button
+                  onClick={handleStopImpersonation}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-amber-600 hover:bg-amber-50 transition-colors border-t border-slate-100"
+                >
+                  <ShieldOff className="w-4 h-4" />
+                  إنهاء وصول الدعم
+                </button>
+              )}
+
+              {/* Logout */}
               <button
                 onClick={handleLogout}
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors border-t border-slate-100"
               >
                 <LogOut className="w-4 h-4" />
                 تسجيل الخروج

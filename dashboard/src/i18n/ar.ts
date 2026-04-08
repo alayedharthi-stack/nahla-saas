@@ -142,6 +142,7 @@ const ar: Translations = {
       store:         'المتجر والتكاملات',
       team:          'الفريق والصلاحيات',
       notifications: 'الإشعارات',
+      security:      'الأمان',
     },
     whatsapp: {
       accountTitle:   'بيانات حساب واتساب',

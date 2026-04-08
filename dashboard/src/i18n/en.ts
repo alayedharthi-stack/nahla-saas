@@ -138,6 +138,7 @@ const en: Translations = {
       store:         'Store & Integrations',
       team:          'Team & Permissions',
       notifications: 'Notifications',
+      security:      'Security',
     },
     whatsapp: {
       accountTitle:   'WhatsApp Account',
