@@ -668,9 +668,39 @@ async def direct_request_otp(
 
         internal_code, ux_message = _normalize_meta_error(code, msg, subcode, user_msg)
 
-        # Already registered → proceed to OTP step
+        # Already registered → look up the existing phone number ID in WABA
         if internal_code == META_ALREADY_REGISTERED:
-            phone_number_id = add_data.get("error", {}).get("error_data", {}).get("id", "") or ""
+            # First try to get ID from error_data (Meta sometimes includes it)
+            phone_number_id = (
+                err.get("error_data", {}).get("id", "") or
+                add_data.get("error", {}).get("error_data", {}).get("id", "") or ""
+            )
+            # If not in error, query WABA phone list to find the existing entry
+            if not phone_number_id:
+                try:
+                    async with httpx.AsyncClient(timeout=15) as c2:
+                        list_resp = await c2.get(
+                            f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
+                            headers=headers,
+                            params={"fields": "id,display_phone_number,code_verification_status"},
+                        )
+                        list_data = list_resp.json()
+                    full_number = f"+{cc}{national}"
+                    bare_number = f"{cc}{national}"
+                    for entry in list_data.get("data", []):
+                        dp = entry.get("display_phone_number", "").replace(" ", "").replace("-", "")
+                        if bare_number in dp or dp in bare_number or full_number in dp:
+                            phone_number_id = entry["id"]
+                            logger.info(
+                                "[WA Direct] Found existing phone in WABA id=%s dp=%s",
+                                phone_number_id, dp,
+                            )
+                            break
+                except Exception as lookup_exc:
+                    logger.warning("[WA Direct] WABA phone lookup failed: %s", lookup_exc)
+            logger.info(
+                "[WA Direct] ALREADY_REGISTERED resolved phone_number_id=%s", phone_number_id
+            )
         else:
             raise HTTPException(
                 status_code=400,
