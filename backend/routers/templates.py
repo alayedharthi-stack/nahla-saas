@@ -20,9 +20,12 @@ Routes:
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("nahla.templates")
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -302,24 +305,42 @@ class RecommendationActionIn(BaseModel):
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 def _seed_templates_if_empty(db: Session, tenant_id: int) -> None:
-    """Seed demo templates into the DB if this tenant has none."""
+    """
+    Seed demo templates ONLY when:
+    - The tenant has zero templates in DB
+    - AND the tenant has no connected WhatsApp number
+    If WhatsApp is connected, real templates must come from Meta via /templates/sync.
+    """
+    from models import WhatsAppConnection  # noqa: PLC0415
     count = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id).count()
-    if count == 0:
-        for seed in SEED_TEMPLATES:
-            tpl = WhatsAppTemplate(
-                tenant_id=tenant_id,
-                meta_template_id=f"seed_{seed['name']}",
-                name=seed["name"],
-                language=seed["language"],
-                category=seed["category"],
-                status=seed["status"],
-                components=seed["components"],
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
-                synced_at=datetime.now(timezone.utc),
-            )
-            db.add(tpl)
-        db.flush()
+    if count > 0:
+        return
+    # Do NOT seed if the tenant already has a connected WhatsApp number
+    wa_connected = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id,
+        WhatsAppConnection.status    == "connected",
+    ).first()
+    if wa_connected:
+        logger.info(
+            "[templates] Skipping seed for tenant=%s — WhatsApp is connected, use /templates/sync",
+            tenant_id,
+        )
+        return
+    for seed in SEED_TEMPLATES:
+        tpl = WhatsAppTemplate(
+            tenant_id=tenant_id,
+            meta_template_id=f"seed_{seed['name']}",
+            name=seed["name"],
+            language=seed["language"],
+            category=seed["category"],
+            status=seed["status"],
+            components=seed["components"],
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            synced_at=datetime.now(timezone.utc),
+        )
+        db.add(tpl)
+    db.flush()
 
 
 def _fetch_meta_templates(waba_id: str, access_token: str) -> Optional[List[Dict[str, Any]]]:
@@ -715,36 +736,83 @@ async def list_template_objectives(request: Request):
 
 @router.post("/templates/sync")
 async def sync_templates_from_meta(request: Request, db: Session = Depends(get_db)):
-    """Pull all templates from Meta Graph API and upsert them into the local DB."""
-    tenant_id = resolve_tenant_id(request)
-    settings = get_or_create_settings(db, tenant_id)
-    db.commit()
+    """
+    Pull all templates from Meta Graph API and upsert them into the local DB.
 
-    wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    waba_id = wa.get("phone_number_id", "")
-    token = wa.get("access_token", "")
+    Source of truth for credentials
+    ─────────────────────────────────
+    Uses WhatsAppConnection (the record created during the number registration
+    wizard) to get the real WABA ID and the platform-level WA_TOKEN.
+    Falls back to tenant settings for backward compatibility.
+    """
+    from models import WhatsAppConnection  # noqa: PLC0415
+    from core.config import WA_TOKEN, WA_BUSINESS_ACCOUNT_ID  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+
+    # ── Prefer WhatsAppConnection row (most reliable source) ──────────────────
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(
+            WhatsAppConnection.tenant_id == tenant_id,
+            WhatsAppConnection.status == "connected",
+        )
+        .first()
+    )
+
+    if wa_conn and wa_conn.whatsapp_business_account_id:
+        waba_id = wa_conn.whatsapp_business_account_id
+        token   = WA_TOKEN  # platform-level system-user token
+    else:
+        # Fallback to tenant settings
+        settings = get_or_create_settings(db, tenant_id)
+        db.commit()
+        wa    = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
+        waba_id = wa.get("waba_id", "") or WA_BUSINESS_ACCOUNT_ID
+        token   = wa.get("access_token", "") or WA_TOKEN
 
     if not waba_id or not token:
-        return {"synced": 0, "message": "يجب إدخال Phone Number ID و Access Token في الإعدادات أولاً"}
+        return {
+            "synced":  0,
+            "message": "لم يتم العثور على WABA ID أو Access Token. تأكد من ربط واتساب أولاً.",
+        }
 
     live = _fetch_meta_templates(waba_id, token)
     if live is None:
         return {"synced": 0, "message": "تعذّر الاتصال بـ Meta. تأكد من صحة بيانات الاعتماد."}
 
-    synced = 0
+    # ── Delete seed/demo templates that were never real ───────────────────────
+    deleted = (
+        db.query(WhatsAppTemplate)
+        .filter(
+            WhatsAppTemplate.tenant_id == tenant_id,
+            WhatsAppTemplate.meta_template_id.like("seed_%"),
+        )
+        .delete(synchronize_session=False)
+    )
+    if deleted:
+        logger.info("[templates/sync] Removed %d seed templates for tenant=%s", deleted, tenant_id)
+
+    # ── Upsert real templates from Meta ───────────────────────────────────────
+    live_ids = set()
+    synced   = 0
     for item in live:
         meta_id = str(item.get("id", ""))
+        if not meta_id:
+            continue
+        live_ids.add(meta_id)
         existing = db.query(WhatsAppTemplate).filter(
-            WhatsAppTemplate.tenant_id == tenant_id,
+            WhatsAppTemplate.tenant_id      == tenant_id,
             WhatsAppTemplate.meta_template_id == meta_id,
         ).first()
+        now = datetime.now(timezone.utc)
         if existing:
-            existing.status = item.get("status", existing.status)
+            existing.status     = item.get("status", existing.status)
             existing.components = item.get("components", existing.components)
-            existing.synced_at = datetime.now(timezone.utc)
-            existing.updated_at = datetime.now(timezone.utc)
+            existing.synced_at  = now
+            existing.updated_at = now
         else:
-            tpl = WhatsAppTemplate(
+            db.add(WhatsAppTemplate(
                 tenant_id=tenant_id,
                 meta_template_id=meta_id,
                 name=item.get("name", ""),
@@ -752,15 +820,21 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
                 category=item.get("category", "MARKETING"),
                 status=item.get("status", "PENDING"),
                 components=item.get("components", []),
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
-                synced_at=datetime.now(timezone.utc),
-            )
-            db.add(tpl)
+                created_at=now,
+                updated_at=now,
+                synced_at=now,
+            ))
         synced += 1
 
     db.commit()
-    return {"synced": synced, "message": f"تمت مزامنة {synced} قالب من Meta"}
+    logger.info("[templates/sync] tenant=%s synced=%d from waba=%s", tenant_id, synced, waba_id)
+    return {
+        "synced":  synced,
+        "deleted_seeds": deleted,
+        "message": f"تمت مزامنة {synced} قالب من Meta" + (
+            f" (وحُذف {deleted} قالب تجريبي)" if deleted else ""
+        ),
+    }
 
 
 @router.get("/templates/{template_id}/var-map")
