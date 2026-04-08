@@ -863,20 +863,38 @@ async def direct_debug_token():
         except Exception as e:
             result["me_business_error"] = str(e)
 
-        # 3. List WABAs via the system user's business
-        bm_id = (result.get("me_business") or {}).get("id")
-        if bm_id:
-            try:
-                r = await client.get(
-                    f"{graph}/{bm_id}/whatsapp_business_accounts",
-                    headers=headers,
-                    params={"fields": "id,name,currency,timezone_id"},
-                )
-                result["available_wabas"] = r.json()
-            except Exception as e:
-                result["available_wabas_error"] = str(e)
-        else:
-            result["available_wabas"] = "could_not_determine_bm_id"
+        # 3. Check if WABA_ID is actually a Phone Number ID (wrong type)
+        try:
+            r = await client.get(
+                f"{graph}/{WA_BUSINESS_ACCOUNT_ID}",
+                headers=headers,
+                params={"fields": "id,display_phone_number,verified_name,status"},
+            )
+            result["id_as_phone_number"] = r.json()
+        except Exception as e:
+            result["id_as_phone_number_error"] = str(e)
+
+        # 4. Try getting System User fields with business field expanded
+        try:
+            r = await client.get(
+                f"{graph}/{user_id}",
+                headers=headers,
+                params={"fields": "id,name,business,businesses{id,name}"},
+            )
+            result["me_extended"] = r.json()
+        except Exception as e:
+            result["me_extended_error"] = str(e)
+
+        # 5. Try app-level business lookup
+        try:
+            r = await client.get(
+                f"{graph}/me/businesses",
+                headers=headers,
+                params={"fields": "id,name,whatsapp_business_accounts{id,name}"},
+            )
+            result["me_businesses"] = r.json()
+        except Exception as e:
+            result["me_businesses_error"] = str(e)
 
         # 3. Direct WABA access attempt
         try:
