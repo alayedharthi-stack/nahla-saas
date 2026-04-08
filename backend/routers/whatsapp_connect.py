@@ -850,17 +850,33 @@ async def direct_debug_token():
         except Exception as e:
             result["me_error"] = str(e)
 
-        # 2. List all WABAs accessible to this token
+        # 2. Get system user's own business
+        user_id = result.get("me", {}).get("id", "me")
         try:
-            user_id = result.get("me", {}).get("id", "me")
             r = await client.get(
-                f"{graph}/{user_id}/businesses",
+                f"{graph}/{user_id}",
                 headers=headers,
-                params={"fields": "id,name,whatsapp_business_accounts{id,name}"},
+                params={"fields": "id,name,business"},
             )
-            result["businesses"] = r.json()
+            me_full = r.json()
+            result["me_business"] = me_full.get("business")
         except Exception as e:
-            result["businesses_error"] = str(e)
+            result["me_business_error"] = str(e)
+
+        # 3. List WABAs via the system user's business
+        bm_id = (result.get("me_business") or {}).get("id")
+        if bm_id:
+            try:
+                r = await client.get(
+                    f"{graph}/{bm_id}/whatsapp_business_accounts",
+                    headers=headers,
+                    params={"fields": "id,name,currency,timezone_id"},
+                )
+                result["available_wabas"] = r.json()
+            except Exception as e:
+                result["available_wabas_error"] = str(e)
+        else:
+            result["available_wabas"] = "could_not_determine_bm_id"
 
         # 3. Direct WABA access attempt
         try:
