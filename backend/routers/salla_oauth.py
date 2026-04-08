@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from models import Integration, Tenant, User
+from models import Integration, Tenant, User, WhatsAppConnection
 
 from core.audit import audit
 from core.auth import create_token, get_jwt_tenant_id, hash_password
@@ -334,15 +334,25 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # ══════════════════════════════════════════════════════════════
     nahla_jwt = create_token(email=owner_email, role=role, tenant_id=tenant_id)
 
-    redirect_target = "/onboarding" if is_new else "/overview"
+    # Check WhatsApp connection status for smart redirect
+    wa_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    wa_connected = bool(wa_conn and wa_conn.status == "connected")
+
+    if is_new:
+        redirect_target = "/onboarding"
+    elif wa_connected:
+        redirect_target = "/overview"
+    else:
+        redirect_target = "/overview"   # Still go to overview — merchant decides when to connect WA
+
     logger.info(
         "[SallaLogin] ✅ STEP 5 — JWT ISSUED | "
-        "tenant_id=%s role=%s is_new=%s redirect=%s",
-        tenant_id, role, is_new, redirect_target,
+        "tenant_id=%s role=%s is_new=%s wa_connected=%s redirect=%s",
+        tenant_id, role, is_new, wa_connected, redirect_target,
     )
     logger.info(
-        "[SallaLogin] ══ COMPLETE ═══ merchant=%s tenant=%s → %s",
-        owner_email, tenant_id, redirect_target,
+        "[SallaLogin] ══ COMPLETE ═══ merchant=%s tenant=%s wa=%s → %s",
+        owner_email, tenant_id, wa_connected, redirect_target,
     )
 
     return {
@@ -352,6 +362,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         "store_name":     store_name,
         "email":          owner_email,
         "is_new":         is_new,
+        "wa_connected":   wa_connected,
         "redirect_to":    redirect_target,
     }
 
@@ -734,9 +745,10 @@ async def salla_embedded_app(request: Request):
       .then(function(data) {{
         if (data.access_token) {{
           var cbParams = new URLSearchParams({{
-            token:  data.access_token,
-            status: 'connected',
-            new:    data.is_new ? '1' : '0',
+            token:        data.access_token,
+            status:       'connected',
+            new:          data.is_new ? '1' : '0',
+            wa_connected: data.wa_connected ? '1' : '0',
           }});
           var dashLink = APP_URL + '/salla-callback?' + cbParams.toString();
 

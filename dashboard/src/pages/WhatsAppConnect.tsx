@@ -120,7 +120,7 @@ async function saveProfile(phoneNumberId: string, profile: Record<string, string
     .catch(() => {}) // non-fatal
 }
 async function getStatus() {
-  return apiCall<StatusResponse>('/whatsapp/direct/status')
+  return apiCall<StatusResponse>('/whatsapp/status')
 }
 async function disconnect() {
   return post('/whatsapp/connection/disconnect', {})

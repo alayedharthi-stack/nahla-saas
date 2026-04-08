@@ -20,17 +20,17 @@ export default function SallaCallback() {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    const params   = new URLSearchParams(window.location.search)
-    const token    = params.get('token')
-    const status   = params.get('status')
-    const isNew    = params.get('new') === '1'
-    const store    = params.get('store')   || ''
-    const name     = params.get('name')    || ''
+    const params      = new URLSearchParams(window.location.search)
+    const token       = params.get('token')
+    const status      = params.get('status')
+    const isNew       = params.get('new') === '1'
+    const waConnected = params.get('wa_connected') === '1'
+    const store       = params.get('store') || ''
+    const name        = params.get('name')  || ''
 
     if (!token || status !== 'connected') {
       const reason = params.get('reason') || 'oauth_failed'
       setError(reason)
-      // Redirect to login after 3 s so the merchant can try manually
       setTimeout(() => navigate('/login?from=salla&error=' + reason, { replace: true }), 3000)
       return
     }
@@ -50,14 +50,18 @@ export default function SallaCallback() {
       // Persist the merchant session
       localStorage.setItem('nahla_auth',      '1')
       localStorage.setItem('nahla_token',     token)
-      localStorage.setItem('nahla_role',      payload.role      || 'merchant')
-      localStorage.setItem('nahla_email',     payload.sub       || '')
+      localStorage.setItem('nahla_role',      payload.role || 'merchant')
+      localStorage.setItem('nahla_email',     payload.sub  || '')
       localStorage.setItem('nahla_tenant_id', String(payload.tenant_id ?? ''))
-      if (store) localStorage.setItem('nahla_salla_store_id', store)
+      if (store) localStorage.setItem('nahla_salla_store_id',   store)
       if (name)  localStorage.setItem('nahla_salla_store_name', name)
 
-      // Route: new merchants → onboarding, returning → overview
+      // Routing logic:
+      //  - New merchant      → /onboarding (choose plan)
+      //  - Returning + WA ✓  → /overview   (everything ready)
+      //  - Returning + WA ✗  → /overview   (merchant can connect WA from settings)
       const dest = isNew ? '/onboarding' : '/overview'
+      console.log('[SallaCallback] routing', { isNew, waConnected, dest })
       setTimeout(() => navigate(dest, { replace: true }), 800)
     } catch (e) {
       setError('invalid_token')

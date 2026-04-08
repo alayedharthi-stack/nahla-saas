@@ -168,8 +168,8 @@ export default function Integrations() {
       .catch(() => setSallaStatus({ connected: false }))
       .finally(() => setSallaLoading(false))
 
-    // WhatsApp
-    apiCall<any>('/whatsapp/direct/status')
+    // WhatsApp — unified single source of truth
+    apiCall<any>('/whatsapp/status')
       .then(d => setWaStatus({
         connected:    d?.connected === true,
         phone_number: d?.phone_number,

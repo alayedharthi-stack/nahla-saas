@@ -92,7 +92,9 @@ class ResetPasswordIn(BaseModel):
 async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     """
     Exchange email + password for a signed JWT.
-    Checks admin env-var credentials first, then merchant accounts in the database.
+    Merchant accounts are checked FIRST so the platform owner can log in as a
+    merchant (test store) with the same email. Admin fallback only if no merchant
+    account matched.
     """
     if not JWT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Auth service unavailable — python-jose not installed")
@@ -103,12 +105,37 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
         request.client.host if request.client else "unknown"
     )
 
-    # 1. Admin credentials (env vars — fastest path, no DB hit)
+    # 1. Merchant credentials — checked FIRST so the platform owner can also
+    #    log in as a regular merchant (e.g. test store) with the same email.
+    if BCRYPT_AVAILABLE:
+        user = db.query(User).filter(User.email == email, User.is_active == True).first()  # noqa: E712
+        if user and getattr(user, "password_hash", None):
+            if verify_password(body.password, user.password_hash):
+                role = user.role or "merchant"
+                token = create_token(email=user.email, role=role, tenant_id=user.tenant_id)
+                audit("login_success", role=role, sub=user.email, tenant_id=user.tenant_id, ip=client_ip)
+                logger.info(
+                    "[auth/login] MERCHANT LOGIN | email=%s role=%s tenant_id=%s",
+                    user.email, role, user.tenant_id,
+                )
+                return {
+                    "access_token": token,
+                    "token_type":   "bearer",
+                    "role":         role,
+                    "email":        user.email,
+                    "tenant_id":    user.tenant_id,
+                }
+
+    # 2. Admin credentials (env-var fallback — only if no merchant account matched)
     email_ok    = hmac.compare_digest(email,         ADMIN_EMAIL.lower())
     password_ok = hmac.compare_digest(body.password, ADMIN_PASSWORD)
     if email_ok and password_ok:
         token = create_token(email=ADMIN_EMAIL, role="admin", tenant_id=1)
         audit("login_success", role="admin", sub=ADMIN_EMAIL, ip=client_ip)
+        logger.info(
+            "[auth/login] ADMIN LOGIN | email=%s tenant_id=1",
+            ADMIN_EMAIL,
+        )
         return {
             "access_token": token,
             "token_type":   "bearer",
@@ -117,30 +144,10 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
             "tenant_id":    1,
         }
 
-    # 2. Merchant credentials (database)
-    if not BCRYPT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable — bcrypt not installed")
-
-    user = db.query(User).filter(User.email == email, User.is_active == True).first()  # noqa: E712
-    if not user or not getattr(user, "password_hash", None):
-        audit("login_failed", reason="user_not_found", sub=email, ip=client_ip)
-        raise _INVALID
-    if not verify_password(body.password, user.password_hash):
-        audit("login_failed", reason="wrong_password", sub=email, ip=client_ip)
-        raise _INVALID
-    if not user.is_active:
-        audit("login_failed", reason="account_inactive", sub=email, ip=client_ip)
-        raise _INVALID
-
-    token = create_token(email=user.email, role=user.role or "merchant", tenant_id=user.tenant_id)
-    audit("login_success", role=user.role, sub=user.email, tenant_id=user.tenant_id, ip=client_ip)
-    return {
-        "access_token": token,
-        "token_type":   "bearer",
-        "role":         user.role or "merchant",
-        "email":        user.email,
-        "tenant_id":    user.tenant_id,
-    }
+    # 3. Nothing matched
+    audit("login_failed", reason="invalid_credentials", sub=email, ip=client_ip)
+    logger.warning("[auth/login] FAILED | email=%s ip=%s", email, client_ip)
+    raise _INVALID
 
 
 @router.get("/auth/me")

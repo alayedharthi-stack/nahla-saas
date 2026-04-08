@@ -990,27 +990,49 @@ async def direct_verify_otp(
 
 
 
-@router.get("/direct/status")
-async def direct_status(request: Request, db: Session = Depends(get_db)):
-    """Return the current direct-registration connection status."""
-    tenant_id = resolve_tenant_id(request)
-    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
+    """Build the unified WhatsApp status response from a DB record (or None)."""
     if not conn or conn.status == "not_connected":
         return {"connected": False, "status": "not_connected"}
+
     resp: dict = {
-        "connected":    conn.status == "connected",
-        "status":       conn.status,
-        "phone_number": conn.phone_number,
-        "display_name": conn.business_display_name,
-        "connected_at": conn.connected_at.isoformat() if conn.connected_at else None,
+        "connected":              conn.status == "connected",
+        "status":                 conn.status,
+        "phone_number":           conn.phone_number,
+        "display_phone_number":   conn.phone_number,
+        "business_display_name":  conn.business_display_name,
+        "display_name":           conn.business_display_name,
+        "phone_number_id":        conn.phone_number_id,
+        "waba_id":                conn.whatsapp_business_account_id,
+        "verification_status":    "verified" if conn.status == "connected" else conn.status,
+        "connected_at":           conn.connected_at.isoformat() if conn.connected_at else None,
     }
-    # If pending verification, send phone_number_id so frontend can resume Step 2
     if conn.status == "pending" and conn.phone_number_id:
-        resp["phone_number_id"] = conn.phone_number_id
         resp["last_attempt_at"] = (
             conn.last_attempt_at.isoformat() if conn.last_attempt_at else None
         )
     return resp
+
+
+# ── Unified WhatsApp status (single source of truth) ─────────────────────────
+
+@router.get("/status")
+async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
+    """
+    Unified WhatsApp connection status — used by ALL pages.
+    Single source of truth for connected state, phone number, etc.
+    """
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    return _build_wa_status(conn)
+
+
+@router.get("/direct/status")
+async def direct_status(request: Request, db: Session = Depends(get_db)):
+    """Return the current direct-registration connection status (delegates to unified status)."""
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    return _build_wa_status(conn)
 
 
 class SaveProfileRequest(BaseModel):
