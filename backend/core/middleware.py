@@ -199,6 +199,144 @@ async def jwt_enforcement_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# ── Support-session middleware ─────────────────────────────────────────────────
+
+# Paths that support-impersonation sessions are NEVER allowed to call.
+# Keep this list conservative; add paths as new sensitive features are built.
+_SUPPORT_BLOCKED_PATHS = (
+    # Password / credential changes
+    "/auth/change-password",
+    "/auth/change-email",
+    "/auth/reset-password",
+    # Billing and payment — must never be reachable from a support session
+    "/billing",
+    "/payment",
+    "/subscription",
+    "/checkout",
+    # Secrets and integration tokens
+    "/settings/integrations",
+    "/settings/secrets",
+    "/integrations/zid/token",
+    "/integrations/salla/token",
+    "/whatsapp/direct/connect",
+    "/whatsapp/direct/verify",
+    # Tenant / account destruction
+    "/tenant/delete",
+    "/account/delete",
+    "/admin/delete-tenant",
+)
+
+_support_middleware_log = logging.getLogger("nahla.support_audit")
+
+
+async def support_session_middleware(request: Request, call_next):
+    """
+    Enforces the security model for support-impersonation JWTs.
+
+    Runs AFTER jwt_enforcement_middleware so request.state.jwt_payload is
+    already decoded and validated.
+
+    What this middleware does
+    ─────────────────────────
+    1. If role != "support_impersonation" → pass through unchanged.
+
+    2. Verify session_version matches the DB value for this tenant.
+       If the merchant revoked access (version bumped), reject immediately
+       with 403 even though the JWT itself has not expired.
+
+    3. Block any request to a sensitive path — return 403 + audit log.
+
+    4. Log every request made during a support session (actor, path, tenant, IP).
+
+    Note: localStorage is irrelevant here — all decisions are made from
+    JWT claims decoded server-side. The frontend can show whatever it likes;
+    only the backend enforces access control.
+    """
+    payload = getattr(request.state, "jwt_payload", None)
+
+    # Not a support session — skip
+    if not payload or not payload.get("impersonation"):
+        return await call_next(request)
+
+    role = payload.get("role", "")
+    if role != "support_impersonation":
+        # Impersonation=True but wrong role — treat as tampered token
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "رمز الجلسة غير صالح", "code": "invalid_support_token"},
+            headers=_cors_error_headers(request),
+        )
+
+    tenant_id   = payload.get("tenant_id")
+    actor_email = payload.get("actor_sub", "unknown")
+    token_sv    = int(payload.get("session_version", -1))
+    path        = request.url.path
+    ip          = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
+
+    # ── 1. Verify session_version against DB (revocation check) ────────────────
+    try:
+        import sys, os  # noqa: E401
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+        from core.database import SessionLocal  # noqa: PLC0415
+        from core.tenant import get_or_create_settings  # noqa: PLC0415
+
+        with SessionLocal() as db:
+            settings = get_or_create_settings(db, int(tenant_id))
+            db.commit()
+            meta = dict(settings.extra_metadata or {})
+            sa   = meta.get("support_access", {})
+            db_sv = int(sa.get("session_version", 0))
+
+        if token_sv < db_sv:
+            _support_middleware_log.warning(
+                "SUPPORT_TOKEN_REVOKED actor=%s tenant=%s sv_token=%d sv_db=%d path=%s ip=%s",
+                actor_email, tenant_id, token_sv, db_sv, path, ip,
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "تم إلغاء وصول الدعم الفني من قِبَل التاجر. الجلسة منتهية.",
+                    "code":   "support_access_revoked",
+                },
+                headers=_cors_error_headers(request),
+            )
+    except Exception as _e:
+        logger.error("[support_middleware] session_version check failed: %s", _e)
+        # Fail-open with a warning rather than blocking the request on a DB error
+        _support_middleware_log.warning(
+            "SUPPORT_SV_CHECK_FAILED actor=%s tenant=%s path=%s err=%s",
+            actor_email, tenant_id, path, _e,
+        )
+
+    # ── 2. Block sensitive paths ────────────────────────────────────────────────
+    if any(path.startswith(blocked) for blocked in _SUPPORT_BLOCKED_PATHS):
+        _support_middleware_log.warning(
+            "SUPPORT_BLOCKED_SENSITIVE actor=%s tenant=%s path=%s ip=%s",
+            actor_email, tenant_id, path, ip,
+        )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "هذه العملية محظورة خلال جلسة الدعم الفني. "
+                    "يجب على التاجر إجراء هذا التغيير بنفسه."
+                ),
+                "code": "support_sensitive_blocked",
+            },
+            headers=_cors_error_headers(request),
+        )
+
+    # ── 3. Audit log every support request ─────────────────────────────────────
+    _support_middleware_log.info(
+        "SUPPORT_ACCESS actor=%s tenant=%s path=%s method=%s ip=%s sv=%d",
+        actor_email, tenant_id, path, request.method, ip, token_sv,
+    )
+
+    return await call_next(request)
+
+
 # ── Per-route rate limit helper ────────────────────────────────────────────────
 
 def rate_limit(key: str, max_count: int, window_seconds: int) -> None:

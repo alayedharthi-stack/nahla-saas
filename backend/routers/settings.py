@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from core.auth import require_not_support_impersonation
 from core.database import get_db
 from core.secrets import apply_masks, restore_secrets
 from core.tenant import (
@@ -118,6 +119,7 @@ async def update_settings(
     body: AllSettingsIn,
     request: Request,
     db: Session = Depends(get_db),
+    _no_support: dict = Depends(require_not_support_impersonation),
 ):
     """Update settings for the current tenant (partial update — only provided groups saved)."""
     tenant_id = resolve_tenant_id(request)

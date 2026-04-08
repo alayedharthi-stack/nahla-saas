@@ -43,6 +43,7 @@ from core.middleware import (  # noqa: E402
     multi_tenant_middleware,
     request_logging_middleware,
     salla_iframe_middleware,
+    support_session_middleware,
 )
 
 # ── App init ──────────────────────────────────────────────────────────────────
@@ -68,6 +69,9 @@ app.middleware("http")(multi_tenant_middleware)
 app.middleware("http")(api_key_middleware)
 app.middleware("http")(global_rate_limit_middleware)
 app.middleware("http")(request_logging_middleware)
+# support_session_middleware runs AFTER jwt_enforcement so jwt_payload is already set.
+# It rejects revoked support tokens and blocks sensitive paths.
+app.middleware("http")(support_session_middleware)
 app.middleware("http")(jwt_enforcement_middleware)
 app.middleware("http")(salla_iframe_middleware)
 

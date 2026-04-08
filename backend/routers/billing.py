@@ -52,6 +52,7 @@ from core.config import (
     HYPERPAY_LIVE_MODE,
     HYPERPAY_WEBHOOK_SECRET,
 )
+from core.auth import require_not_support_impersonation
 from core.database import get_db
 from core.middleware import rate_limit
 from core.tenant import (
@@ -144,6 +145,7 @@ async def put_moyasar_settings(
     body: MoyasarSettingsIn,
     request: Request,
     db: Session = Depends(get_db),
+    _no_support: dict = Depends(require_not_support_impersonation),
 ):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
@@ -386,6 +388,7 @@ async def subscribe_to_plan(
     body: SubscribeRequest,
     request: Request,
     db: Session = Depends(get_db),
+    _no_support: dict = Depends(require_not_support_impersonation),
 ):
     """Activate a Nahla subscription plan for the tenant."""
     tenant_id = resolve_tenant_id(request)
@@ -461,6 +464,7 @@ async def create_billing_checkout(
     body: CheckoutRequest,
     request: Request,
     db: Session = Depends(get_db),
+    _no_support: dict = Depends(require_not_support_impersonation),
 ):
     """
     Create a payment checkout session for a Nahla subscription plan.
@@ -673,6 +677,7 @@ async def hyperpay_create_payment_link(
     body:    HyperPayPaymentLinkRequest,
     request: Request,
     db:      Session = Depends(get_db),
+    _no_support: dict = Depends(require_not_support_impersonation),
 ):
     """
     Create a HyperPay checkout session for Saudi local payment methods

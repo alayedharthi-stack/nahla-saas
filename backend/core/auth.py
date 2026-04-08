@@ -6,6 +6,8 @@ All auth logic lives here — routers import what they need.
 """
 from __future__ import annotations
 
+import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -19,6 +21,8 @@ from core.config import (
     INVITE_EXPIRE_H,
 )
 from core.audit import audit
+
+_support_audit = logging.getLogger("nahla.support_audit")
 
 # ── JWT availability ───────────────────────────────────────────────────────────
 try:
@@ -61,6 +65,7 @@ def create_token(
     role: str,
     tenant_id: int,
     user_id: Optional[int] = None,
+    extra_claims: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Issue a signed JWT for a user session.
@@ -68,11 +73,11 @@ def create_token(
     Claims
     ------
     sub        — user email (standard JWT subject)
-    role       — merchant | admin | staff | owner
+    role       — merchant | admin | staff | owner | support_impersonation
     tenant_id  — immutable tenant scope (every merchant call must be scoped to this)
-    user_id    — database user.id (present for all real accounts; absent only for
-                 legacy admin tokens issued before this was added)
+    user_id    — database user.id
     exp        — expiry timestamp
+    extra_claims — any additional structured claims (e.g. impersonation metadata)
     """
     payload: Dict[str, Any] = {
         "sub":       email,
@@ -82,7 +87,61 @@ def create_token(
     }
     if user_id is not None:
         payload["user_id"] = user_id
+    if extra_claims:
+        payload.update(extra_claims)
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def create_support_token(
+    *,
+    merchant_email: str,
+    merchant_user_id: int,
+    tenant_id: int,
+    actor_email: str,
+    actor_user_id: int,
+    session_version: int,
+    ttl_hours: int = 4,
+) -> str:
+    """
+    Issue a clearly-distinct support-impersonation JWT.
+
+    Extra claims vs a normal merchant token
+    ────────────────────────────────────────
+    role               = "support_impersonation"   (never "merchant" or "admin")
+    impersonation      = True
+    actor_sub          = admin/support email       (who is doing the impersonation)
+    actor_user_id      = admin user.id
+    session_version    = DB revocation counter at the time of issuance
+    exp                = min(ttl_hours, 4h)        (hard cap of 4 h regardless)
+
+    The role value is intentionally different from all normal roles so that:
+    - Middleware can detect and restrict sensitive operations
+    - Audit logs unambiguously identify support sessions
+    - Frontend can show a visible "support mode" banner
+    """
+    actual_ttl = min(ttl_hours, 4)          # hard cap
+    exp = datetime.now(timezone.utc) + timedelta(hours=actual_ttl)
+    payload: Dict[str, Any] = {
+        "sub":             merchant_email,
+        "role":            "support_impersonation",
+        "tenant_id":       tenant_id,
+        "user_id":         merchant_user_id,
+        "impersonation":   True,
+        "actor_sub":       actor_email,
+        "actor_user_id":   actor_user_id,
+        "session_version": session_version,
+        "exp":             exp,
+    }
+    _support_audit.info(
+        "SUPPORT_TOKEN_ISSUED actor=%s → tenant=%s merchant=%s sv=%d exp=%s",
+        actor_email, tenant_id, merchant_email, session_version, exp.isoformat(),
+    )
+    return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def token_fingerprint(token: str) -> str:
+    """Return the first 16 hex chars of SHA-256(token) — safe for audit logs."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
 def create_invite_token(email: str, tenant_id_hint: Optional[int] = None) -> str:
@@ -187,3 +246,40 @@ def get_jwt_tenant_id(request: Request) -> int:
     if tid is None:
         raise HTTPException(status_code=401, detail="Token missing tenant_id claim")
     return int(tid)
+
+
+def get_client_ip(request: Request) -> str:
+    """Extract real client IP, honouring common reverse-proxy headers."""
+    return (
+        request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or (request.client.host if request.client else "unknown")
+    )
+
+
+def require_not_support_impersonation(
+    request: Request,
+    creds: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> Dict[str, Any]:
+    """
+    Dependency that BLOCKS sensitive operations during a support session.
+
+    Attach to any endpoint that should never be reachable by a support agent:
+    password change, email change, billing edits, secret rotation, tenant deletion.
+    Raises HTTP 403 with a clear explanation that logs the attempt.
+    """
+    user = get_current_user(creds)
+    if user.get("role") == "support_impersonation" or user.get("impersonation"):
+        ip = get_client_ip(request)
+        _support_audit.warning(
+            "SUPPORT_BLOCKED_SENSITIVE actor=%s tenant=%s path=%s ip=%s",
+            user.get("actor_sub", "?"), user.get("tenant_id"), request.url.path, ip,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "هذه العملية محظورة خلال جلسة الدعم الفني. "
+                "يجب على التاجر إجراء هذا التغيير بنفسه."
+            ),
+        )
+    return user
