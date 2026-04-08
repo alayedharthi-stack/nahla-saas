@@ -885,16 +885,17 @@ async def direct_debug_token():
         except Exception as e:
             result["me_extended_error"] = str(e)
 
-        # 5. Try app-level business lookup
+        # 5. Query known BM directly for WABAs
+        BM_ID = "1496011678713805"
         try:
             r = await client.get(
-                f"{graph}/me/businesses",
+                f"{graph}/{BM_ID}/whatsapp_business_accounts",
                 headers=headers,
-                params={"fields": "id,name,whatsapp_business_accounts{id,name}"},
+                params={"fields": "id,name,currency,timezone_id,phone_numbers{id,display_phone_number,verified_name}"},
             )
-            result["me_businesses"] = r.json()
+            result["bm_wabas"] = r.json()
         except Exception as e:
-            result["me_businesses_error"] = str(e)
+            result["bm_wabas_error"] = str(e)
 
         # 3. Direct WABA access attempt
         try:
