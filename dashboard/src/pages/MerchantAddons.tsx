@@ -2,9 +2,9 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   ToggleLeft, ToggleRight, Settings2, CheckCircle, AlertCircle,
   Loader2, Copy, X, Puzzle, MessageCircle, Gift, Tag,
-  Zap, Link2, Sparkles,
+  Zap, Link2, Sparkles, ExternalLink, Rocket, ChevronRight,
 } from 'lucide-react'
-import { addonsApi, type AddonItem } from '../api/addons'
+import { addonsApi, type AddonItem, type SallaInstallResult } from '../api/addons'
 
 // ── Backend base URL ──────────────────────────────────────────────────────────
 const API_BASE = (import.meta.env.VITE_API_URL as string) || 'https://api.nahlah.ai'
@@ -89,50 +89,174 @@ function addonColor(key: string) {
 
 // ── Settings forms ─────────────────────────────────────────────────────────────
 
+// ── Quick Install Panel ───────────────────────────────────────────────────────
+
+type InstallState = 'idle' | 'trying' | 'success' | 'manual'
+
+function QuickInstallPanel({ tenantId }: { tenantId: string }) {
+  const [state,    setState]    = useState<InstallState>('idle')
+  const [result,   setResult]   = useState<SallaInstallResult | null>(null)
+  const [tagCopied, setTagCopied] = useState(false)
+
+  const embedUrl  = `${API_BASE}/merchant/addons/widget/${tenantId}/embed.js`
+  const scriptTag = `<script src="${embedUrl}"></script>`
+
+  const copyTag = () => {
+    navigator.clipboard.writeText(scriptTag)
+    setTagCopied(true)
+    setTimeout(() => setTagCopied(false), 2500)
+  }
+
+  const tryAutoInstall = async () => {
+    setState('trying')
+    try {
+      const res = await addonsApi.sallaInstallWidget()
+      setResult(res)
+      setState(res.success ? 'success' : 'manual')
+      // If manual: auto-copy the script tag
+      if (!res.success && res.script_tag) {
+        navigator.clipboard.writeText(res.script_tag).catch(() => {})
+        setTagCopied(true)
+        setTimeout(() => setTagCopied(false), 3000)
+      }
+    } catch {
+      setState('manual')
+      setResult(null)
+    }
+  }
+
+  // ── Idle: big install button ──────────────────────────────────────────────
+  if (state === 'idle') return (
+    <div className="p-4 bg-gradient-to-br from-brand-50 to-emerald-50 border border-brand-200 rounded-2xl space-y-3">
+      <div className="flex items-center gap-2 text-brand-700">
+        <Rocket className="w-4 h-4 shrink-0" />
+        <p className="text-sm font-bold">تثبيت الويدجت في متجرك</p>
+      </div>
+      <p className="text-xs text-slate-500 leading-relaxed">
+        اضغط الزر ليحاول نحلة تثبيت الويدجت تلقائياً في متجرك على سلة.
+      </p>
+      <button onClick={tryAutoInstall}
+        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 text-white text-sm font-semibold transition-colors shadow-sm shadow-brand-500/30">
+        <Rocket className="w-4 h-4" />
+        تثبيت تلقائي في سلة
+      </button>
+    </div>
+  )
+
+  // ── Trying: spinner ───────────────────────────────────────────────────────
+  if (state === 'trying') return (
+    <div className="flex items-center justify-center gap-3 p-5 bg-slate-50 border border-slate-200 rounded-2xl text-sm text-slate-600">
+      <Loader2 className="w-5 h-5 animate-spin text-brand-500" />
+      جاري التثبيت التلقائي...
+    </div>
+  )
+
+  // ── Success: auto-injected ────────────────────────────────────────────────
+  if (state === 'success') return (
+    <div className="p-4 bg-emerald-50 border border-emerald-300 rounded-2xl space-y-2">
+      <div className="flex items-center gap-2 text-emerald-700">
+        <CheckCircle className="w-5 h-5 shrink-0" />
+        <p className="text-sm font-bold">تم تثبيت الويدجت تلقائياً ✓</p>
+      </div>
+      <p className="text-xs text-emerald-600">
+        الويدجت مثبّت في متجرك على سلة — تفعيله وتعطيله من هنا يعمل مباشرة بدون أي خطوات إضافية.
+      </p>
+    </div>
+  )
+
+  // ── Manual: step-by-step wizard ───────────────────────────────────────────
+  const adminUrl = result?.salla_admin_url || 'https://s.salla.sa/settings/scripts'
+  const tag      = result?.script_tag || scriptTag
+
+  return (
+    <div className="rounded-2xl border border-amber-200 bg-amber-50 overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-4 py-3 bg-amber-100 border-b border-amber-200">
+        <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
+        <p className="text-sm font-semibold text-amber-800">خطوة واحدة فقط في سلة</p>
+        <span className="text-xs text-amber-600 me-auto">التثبيت اليدوي</span>
+      </div>
+
+      <div className="p-4 space-y-4">
+
+        {/* Step 1: Code (auto-copied) */}
+        <div className="flex gap-3">
+          <div className="w-6 h-6 rounded-full bg-brand-500 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">١</div>
+          <div className="flex-1 space-y-2">
+            <p className="text-sm font-medium text-slate-700">انسخ كود التثبيت</p>
+            <div className="relative">
+              <code dir="ltr"
+                className="block w-full bg-white border border-slate-200 rounded-lg px-3 py-2.5 text-xs font-mono text-slate-700 overflow-x-auto whitespace-nowrap pe-16">
+                {tag}
+              </code>
+              <button onClick={copyTag}
+                className={`absolute top-1.5 left-1.5 flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  tagCopied
+                    ? 'bg-emerald-500 text-white'
+                    : 'bg-slate-700 hover:bg-slate-600 text-white'
+                }`}>
+                {tagCopied ? <><CheckCircle className="w-3 h-3" /> تم النسخ</> : <><Copy className="w-3 h-3" /> نسخ</>}
+              </button>
+            </div>
+            {tagCopied && (
+              <p className="text-xs text-emerald-600 flex items-center gap-1">
+                <CheckCircle className="w-3 h-3" /> تم النسخ تلقائياً
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Divider */}
+        <div className="flex items-center gap-2 text-slate-300"><div className="flex-1 h-px bg-amber-200" /><ChevronRight className="w-3 h-3 text-amber-400" /><div className="flex-1 h-px bg-amber-200" /></div>
+
+        {/* Step 2: Open Salla */}
+        <div className="flex gap-3">
+          <div className="w-6 h-6 rounded-full bg-brand-500 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">٢</div>
+          <div className="flex-1 space-y-2">
+            <p className="text-sm font-medium text-slate-700">افتح إعدادات سلة</p>
+            <a href={adminUrl} target="_blank" rel="noopener noreferrer"
+              className="flex items-center justify-between gap-2 w-full px-4 py-2.5 rounded-xl bg-[#3D5AFE] hover:bg-[#3451E0] text-white text-sm font-semibold transition-colors">
+              <span>افتح لوحة سلة ← السكريبت المخصص</span>
+              <ExternalLink className="w-4 h-4 shrink-0" />
+            </a>
+            <p className="text-xs text-slate-500">
+              الإعدادات ← المظهر ← <strong>JavaScript مخصص</strong> ← الصق الكود ← حفظ
+            </p>
+          </div>
+        </div>
+
+        {/* Divider */}
+        <div className="flex items-center gap-2"><div className="flex-1 h-px bg-amber-200" /><ChevronRight className="w-3 h-3 text-amber-400" /><div className="flex-1 h-px bg-amber-200" /></div>
+
+        {/* Step 3: Done */}
+        <div className="flex gap-3">
+          <div className="w-6 h-6 rounded-full bg-emerald-500 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">✓</div>
+          <div className="flex-1">
+            <p className="text-sm font-medium text-slate-700">جاهز! — التحكم من نحلة فقط</p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              بعد الإضافة لا تحتاج لتعديل سلة أبداً — التفعيل والتعطيل يعمل من هنا مباشرة.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  )
+}
+
 function WidgetSettingsForm({
   settings, onChange,
 }: { settings: Record<string, unknown>; onChange: (k: string, v: unknown) => void }) {
-  const [tagCopied,  setTagCopied]  = useState(false)
   const [codeCopied, setCodeCopied] = useState(false)
-
-  const tenantId  = getTenantId()
-  const embedUrl  = `${API_BASE}/merchant/addons/widget/${tenantId}/embed.js`
-  const scriptTag = `<script src="${embedUrl}"></script>`
-  const fullCode  = generateWidgetCode(settings)
-
-  const copyTag  = () => { navigator.clipboard.writeText(scriptTag); setTagCopied(true);  setTimeout(() => setTagCopied(false),  2500) }
-  const copyCode = () => { navigator.clipboard.writeText(fullCode);  setCodeCopied(true); setTimeout(() => setCodeCopied(false), 2500) }
+  const tenantId = getTenantId()
+  const fullCode = generateWidgetCode(settings)
+  const copyCode = () => { navigator.clipboard.writeText(fullCode); setCodeCopied(true); setTimeout(() => setCodeCopied(false), 2500) }
 
   return (
     <div className="space-y-5">
 
-      {/* ── Smart embed URL (primary) ── */}
-      <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl space-y-3">
-        <div className="flex items-center gap-2 text-emerald-700">
-          <Sparkles className="w-4 h-4 shrink-0" />
-          <p className="text-sm font-semibold">الطريقة الذكية — أضفه مرة واحدة فقط</p>
-        </div>
-        <p className="text-xs text-emerald-600 leading-relaxed">
-          أضف هذا السطر مرة واحدة في سلة، وبعدها يكفي الضغط على "تفعيل / تعطيل" من هنا دون أي تعديل في المتجر.
-        </p>
-        <div className="relative">
-          <code dir="ltr" className="block w-full bg-white border border-emerald-200 rounded-lg px-3 py-2.5 text-xs font-mono text-slate-700 pe-20 overflow-x-auto whitespace-nowrap">
-            {scriptTag}
-          </code>
-          <button onClick={copyTag}
-            className="absolute top-1.5 left-1.5 flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium transition-colors shrink-0">
-            {tagCopied ? <CheckCircle className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-            {tagCopied ? 'تم' : 'نسخ'}
-          </button>
-        </div>
-        <div className="flex items-start gap-2 text-xs text-emerald-700 bg-emerald-100 rounded-lg p-2.5">
-          <Link2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-          <div>
-            <span className="font-semibold">في سلة: </span>
-            الإعدادات ← مظهر المتجر ← JavaScript مخصص ← الصق الكود
-          </div>
-        </div>
-      </div>
+      {/* ── Quick Install Panel ── */}
+      <QuickInstallPanel tenantId={tenantId} />
 
       {/* ── Settings fields ── */}
       <div>
@@ -178,12 +302,12 @@ function WidgetSettingsForm({
         </div>
       </div>
 
-      {/* ── Manual full code (fallback) ── */}
+      {/* ── Full code (advanced/fallback) ── */}
       {!!settings.phone && (
         <details className="group">
-          <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-700 select-none list-none flex items-center gap-1">
+          <summary className="cursor-pointer text-xs text-slate-400 hover:text-slate-600 select-none list-none flex items-center gap-1.5">
             <span className="group-open:rotate-90 transition-transform inline-block">▶</span>
-            أو انسخ الكود الكامل يدوياً
+            عرض الكود الكامل (خيار متقدم)
           </summary>
           <div className="mt-2 relative">
             <textarea readOnly dir="ltr" rows={6}
@@ -192,7 +316,7 @@ function WidgetSettingsForm({
             <button onClick={copyCode}
               className="absolute top-3 left-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium transition-colors">
               {codeCopied ? <CheckCircle className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              {codeCopied ? 'تم النسخ!' : 'نسخ'}
+              {codeCopied ? 'تم!' : 'نسخ'}
             </button>
           </div>
         </details>

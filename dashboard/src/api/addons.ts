@@ -16,6 +16,17 @@ export interface AddonsListResponse {
   addons: AddonItem[]
 }
 
+export interface SallaInstallResult {
+  success:         boolean
+  method?:         string
+  reason?:         string
+  message:         string
+  script_tag?:     string
+  embed_url?:      string
+  salla_admin_url?: string
+  salla_store_id?: string
+}
+
 export const addonsApi = {
   list: () =>
     apiCall<AddonsListResponse>('/merchant/addons'),
@@ -30,5 +41,10 @@ export const addonsApi = {
     apiCall<AddonItem>(`/merchant/addons/${key}/settings`, {
       method: 'PUT',
       body:   JSON.stringify({ settings }),
+    }),
+
+  sallaInstallWidget: () =>
+    apiCall<SallaInstallResult>('/merchant/addons/widget/salla-install', {
+      method: 'POST',
     }),
 }

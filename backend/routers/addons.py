@@ -16,6 +16,7 @@ Endpoints (public — no auth, loaded by external stores):
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -265,6 +266,100 @@ def _build_widget_js(s: dict) -> str:
 }})();"""
 
 
+@router.post("/merchant/addons/widget/salla-install")
+async def salla_auto_install_widget(request: Request, db: Session = Depends(get_db)):
+    """
+    Try to automatically inject the widget <script> tag into the merchant's
+    Salla store via the Salla Admin API.
+
+    Response:
+      { success: true,  method: "api" }          — script injected automatically
+      { success: false, reason: "...",            — API not available or no connection
+        script_tag: "...", salla_admin_url: "..." }
+    """
+    import httpx as _httpx  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    from models import Integration, MerchantAddon  # noqa: PLC0415
+
+    # ── 1. Get the addon row (must exist and be enabled) ─────────────────────
+    addon_row = (
+        db.query(MerchantAddon)
+        .filter(MerchantAddon.tenant_id == tenant_id, MerchantAddon.addon_key == "widget")
+        .first()
+    )
+
+    api_base = os.environ.get("BACKEND_URL", "https://api.nahlah.ai")
+    embed_url  = f"{api_base}/merchant/addons/widget/{tenant_id}/embed.js"
+    script_tag = f'<script src="{embed_url}"></script>'
+    salla_admin_url = "https://s.salla.sa/settings/scripts"
+
+    # ── 2. Locate Salla integration ───────────────────────────────────────────
+    integration = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .first()
+    )
+    if not integration:
+        return {
+            "success": False, "reason": "no_salla_connection",
+            "script_tag": script_tag, "salla_admin_url": salla_admin_url,
+            "message": "لم يتم ربط متجر سلة — أضف الكود يدوياً",
+        }
+
+    salla_token = (integration.config or {}).get("token") or (integration.config or {}).get("access_token")
+    if not salla_token:
+        return {
+            "success": False, "reason": "no_token",
+            "script_tag": script_tag, "salla_admin_url": salla_admin_url,
+            "message": "رمز سلة غير موجود — أضف الكود يدوياً",
+        }
+
+    # ── 3. Try Salla Admin v2 custom-scripts endpoint ─────────────────────────
+    try:
+        async with _httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.salla.dev/admin/v2/store/scripts",
+                headers={
+                    "Authorization": f"Bearer {salla_token}",
+                    "Content-Type":  "application/json",
+                    "Accept":        "application/json",
+                },
+                json={"src": embed_url, "event": "onload"},
+            )
+            if resp.status_code in (200, 201):
+                body = resp.json()
+                logger.info("[addons/salla-install] API success tenant=%s", tenant_id)
+                return {
+                    "success": True, "method": "api",
+                    "message": "تم تثبيت الويدجت تلقائياً في متجرك ✓",
+                    "script_id": body.get("data", {}).get("id"),
+                }
+            logger.info(
+                "[addons/salla-install] Salla scripts API returned %s — falling back",
+                resp.status_code,
+            )
+    except Exception as exc:
+        logger.info("[addons/salla-install] Salla API call failed: %s — falling back", exc)
+
+    # ── 4. Fallback: Salla doesn't expose a public scripts REST API yet ───────
+    # Return everything the frontend needs for the Quick-Install wizard.
+    store_id = (integration.config or {}).get("store_id", "")
+    return {
+        "success":        False,
+        "reason":         "api_not_available",
+        "script_tag":     script_tag,
+        "embed_url":      embed_url,
+        "salla_store_id": store_id,
+        # Deep-link to Salla admin custom scripts page (opened in new tab)
+        "salla_admin_url": "https://s.salla.sa/settings/scripts",
+        "message": (
+            "الإضافة التلقائية غير متاحة في سلة حالياً — "
+            "أضف الكود أدناه في إعدادات متجرك (خطوة واحدة فقط)"
+        ),
+    }
+
+
 @router.get(
     "/merchant/addons/widget/{tenant_id}/embed.js",
     include_in_schema=False,   # hide from OpenAPI — public unauthenticated route
@@ -304,3 +399,76 @@ async def serve_widget_embed(tenant_id: int, db: Session = Depends(get_db)):
     js = _build_widget_js(settings)
     logger.info("[addons/embed] tenant=%s serving widget JS", tenant_id)
     return Response(content=js, headers=_JS_HEADERS)
+
+
+# ── Universal Salla snippet (for Partner Portal configuration) ────────────────
+# Configure in Salla Partner Portal → App → Snippets:
+#   URL: https://api.nahlah.ai/merchant/addons/widget/salla-auto.js
+#
+# This script auto-detects the store from window.salla, resolves the tenant,
+# and conditionally loads the widget.  Once configured, every store that
+# installs the Nahla app gets the widget capability with zero merchant effort.
+
+@router.get("/merchant/addons/widget/salla-auto.js", include_in_schema=False)
+async def serve_salla_auto_snippet(db: Session = Depends(get_db)):
+    """
+    Universal Salla snippet — loaded on every Salla store that has the Nahla app.
+    Resolves tenant by Salla store ID (via Integration table) then delegates
+    to the per-tenant embed endpoint.
+    """
+    api_base = os.environ.get("BACKEND_URL", "https://api.nahlah.ai")
+    js = f"""/* Nahla Universal Salla Snippet */
+(function(){{
+  var storeId = (
+    (window.salla && window.salla.store && window.salla.store.id) ||
+    (window.salla_config && window.salla_config.store && window.salla_config.store.id)
+  );
+  if (!storeId) return;
+  var s = document.createElement('script');
+  s.src = '{api_base}/merchant/addons/widget/by-salla/' + storeId + '/embed.js';
+  s.async = true;
+  document.head.appendChild(s);
+}})();"""
+    return Response(content=js, headers=_JS_HEADERS)
+
+
+@router.get("/merchant/addons/widget/by-salla/{salla_store_id}/embed.js", include_in_schema=False)
+async def serve_widget_by_salla_store(salla_store_id: str, db: Session = Depends(get_db)):
+    """
+    Resolve tenant from Salla store ID and serve the widget embed JS.
+    Used by the universal salla-auto.js snippet above.
+    """
+    from models import Integration, MerchantAddon  # noqa: PLC0415
+
+    # Find the tenant that owns this Salla store
+    integration = (
+        db.query(Integration)
+        .filter(
+            Integration.provider == "salla",
+        )
+        .all()
+    )
+    tenant_id = None
+    for integ in integration:
+        cfg = integ.config or {}
+        if str(cfg.get("store_id", "")) == str(salla_store_id):
+            tenant_id = integ.tenant_id
+            break
+
+    if tenant_id is None:
+        return Response(content="/* Nahla: store not found */", headers=_JS_HEADERS)
+
+    row = (
+        db.query(MerchantAddon)
+        .filter(MerchantAddon.tenant_id == tenant_id, MerchantAddon.addon_key == "widget")
+        .first()
+    )
+    if not row or not row.is_enabled:
+        return Response(content=_STUB, headers=_JS_HEADERS)
+
+    settings = dict(row.settings_json or {})
+    if not str(settings.get("phone", "")).strip():
+        return Response(content="/* Nahla widget: phone not configured */", headers=_JS_HEADERS)
+
+    logger.info("[addons/by-salla] store=%s tenant=%s serving widget", salla_store_id, tenant_id)
+    return Response(content=_build_widget_js(settings), headers=_JS_HEADERS)
