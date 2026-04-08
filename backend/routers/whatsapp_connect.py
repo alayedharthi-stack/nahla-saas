@@ -797,16 +797,16 @@ async def direct_verify_otp(
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
 
-    conn.status           = "connected"
-    conn.phone_number_id  = body.phone_number_id
-    conn.phone_number     = phone_number
-    conn.display_name     = display_name
-    conn.waba_id          = waba_id or ""
-    conn.access_token     = WA_TOKEN   # shared WABA uses platform token
-    conn.webhook_verified = True
-    conn.sending_enabled  = True
-    conn.connected_at     = datetime.now(timezone.utc)
-    conn.last_error       = None
+    conn.status                       = "connected"
+    conn.phone_number_id              = body.phone_number_id
+    conn.phone_number                 = phone_number
+    conn.business_display_name        = display_name
+    conn.whatsapp_business_account_id = waba_id or ""
+    conn.access_token                 = WA_TOKEN   # shared WABA uses platform token
+    conn.webhook_verified             = True
+    conn.sending_enabled              = True
+    conn.connected_at                 = datetime.now(timezone.utc)
+    conn.last_error                   = None
 
     # Also update tenant-level fields for quick access
     tenant = get_or_create_tenant(db, tenant_id)
@@ -839,7 +839,7 @@ async def direct_status(request: Request, db: Session = Depends(get_db)):
         "connected":    conn.status == "connected",
         "status":       conn.status,
         "phone_number": conn.phone_number,
-        "display_name": conn.display_name,
+        "display_name": conn.business_display_name,
         "connected_at": conn.connected_at.isoformat() if conn.connected_at else None,
     }
 
