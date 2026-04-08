@@ -16,13 +16,7 @@ interface Coupon {
   active: boolean
 }
 
-const coupons: Coupon[] = [
-  { id: 'c1', code: 'WELCOME20',  type: 'percentage', value: 20, usages: 142, limit: 500, expires: '2026-06-30', category: 'standard', active: true },
-  { id: 'c2', code: 'VIP50',      type: 'fixed',       value: 50, usages: 38,  limit: 100, expires: '2026-04-15', category: 'vip',      active: true },
-  { id: 'c3', code: 'CART10AUTO', type: 'percentage', value: 10, usages: 89,  limit: 999, expires: '2026-12-31', category: 'auto',     active: true },
-  { id: 'c4', code: 'RAMADAN30',  type: 'percentage', value: 30, usages: 310, limit: 300, expires: '2026-04-01', category: 'standard', active: false },
-  { id: 'c5', code: 'BULK100',    type: 'fixed',       value: 100,usages: 12,  limit: 50,  expires: '2026-09-01', category: 'vip',      active: true },
-]
+const coupons: Coupon[] = []
 
 const rules = [
   { id: 'r1', label: 'إرسال كوبون تلقائي بعد ترك العربة (أكثر من 30 دقيقة)',    enabled: true },

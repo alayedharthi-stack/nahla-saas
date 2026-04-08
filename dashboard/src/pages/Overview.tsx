@@ -273,7 +273,7 @@ export default function Overview() {
         <div className="flex items-center justify-between mb-5">
           <div>
             <h2 className="text-sm font-semibold text-slate-900">الإيرادات — آخر 7 أيام</h2>
-            <p className="text-xs text-slate-400 mt-0.5">المجموع: 45,300 ر.س</p>
+            <p className="text-xs text-slate-400 mt-0.5">آخر 7 أيام</p>
           </div>
           <select className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-600 focus:outline-none">
             <option>آخر 7 أيام</option>

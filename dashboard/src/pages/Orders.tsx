@@ -21,15 +21,7 @@ interface Order {
   createdAt: string
 }
 
-const orders: Order[] = [
-  { id: '#3812', customer: 'Ahmed Al-Rashid',  phone: '+966 50 123 4567', items: 'هودي أحمر XL',              amount: '342 ر.س', status: 'paid',      source: 'AI',     createdAt: 'منذ 5 دقائق' },
-  { id: '#3811', customer: 'Nora Al-Mutairi',  phone: '+966 52 654 3210', items: 'قميص أزرق × 2',             amount: '180 ر.س', status: 'pending',   source: 'AI',     paymentLink: 'pay.nahla.co/nk3x', createdAt: 'منذ 22 دقيقة' },
-  { id: '#3810', customer: 'Khalid Ibrahim',   phone: '+966 57 888 7766', items: 'حذاء أبيض 42',              amount: '510 ر.س', status: 'paid',      source: 'manual', createdAt: 'منذ ساعة' },
-  { id: '#3809', customer: 'Lina Al-Saud',     phone: '+966 54 551 2200', items: 'فستان صيفي M',              amount: '95 ر.س',  status: 'failed',    source: 'AI',     paymentLink: 'pay.nahla.co/lx7f', createdAt: 'منذ ساعتين' },
-  { id: '#3808', customer: 'Omar Al-Ghamdi',   phone: '+966 56 321 9900', items: 'شورت رياضي L',              amount: '75 ر.س',  status: 'paid',      source: 'AI',     createdAt: 'منذ 3 ساعات' },
-  { id: '#3807', customer: 'Reem Al-Harbi',    phone: '+966 55 410 0033', items: 'حزام جلد',                  amount: '149 ر.س', status: 'cancelled', source: 'manual', createdAt: 'منذ 4 ساعات' },
-  { id: '#3806', customer: 'Yousef Al-Shehri', phone: '+966 50 775 5522', items: 'حزام ساعة ذكية أسود',      amount: '220 ر.س', status: 'pending',   source: 'AI',     paymentLink: 'pay.nahla.co/yw5v', createdAt: 'منذ 5 ساعات' },
-]
+const orders: Order[] = []
 
 const TABS = [
   { key: 'all',        label: 'الكل' },
@@ -77,10 +69,10 @@ export default function Orders() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="إجمالي الطلبات"    value="37"        change={8.2}  icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
-        <StatCard label="الإيرادات اليوم"   value="8,740 ر.س" change={12.4} icon={DollarSign}   iconColor="text-emerald-600" iconBg="bg-emerald-50" />
-        <StatCard label="بانتظار الدفع"     value="7"         change={-2.1} icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
-        <StatCard label="مكتملة اليوم"      value="28"        change={5.3}  icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
+        <StatCard label="إجمالي الطلبات"    value="0"        icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
+        <StatCard label="الإيرادات اليوم"   value="0 ر.س"   icon={DollarSign}   iconColor="text-emerald-600" iconBg="bg-emerald-50" />
+        <StatCard label="بانتظار الدفع"     value="0"        icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+        <StatCard label="مكتملة اليوم"      value="0"        icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
       </div>
 
       {/* Table card */}

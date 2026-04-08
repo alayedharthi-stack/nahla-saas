@@ -6,36 +6,31 @@ import { DollarSign, TrendingUp, ShoppingCart, MessageSquare } from 'lucide-reac
 import StatCard from '../components/ui/StatCard'
 
 const revenueData = [
-  { month: 'أكت', revenue: 42000 },
-  { month: 'نوف', revenue: 58000 },
-  { month: 'ديس', revenue: 75000 },
-  { month: 'يناير', revenue: 63000 },
-  { month: 'فبراير', revenue: 81000 },
-  { month: 'مارس', revenue: 94000 },
+  { month: 'الاثنين',    revenue: 0 },
+  { month: 'الثلاثاء',  revenue: 0 },
+  { month: 'الأربعاء',  revenue: 0 },
+  { month: 'الخميس',    revenue: 0 },
+  { month: 'الجمعة',    revenue: 0 },
+  { month: 'السبت',     revenue: 0 },
+  { month: 'الأحد',     revenue: 0 },
 ]
 
 const conversionData = [
-  { day: 'إثن', conversations: 98,  conversions: 28 },
-  { day: 'ثلا', conversations: 124, conversions: 37 },
-  { day: 'أرب', conversations: 87,  conversions: 22 },
-  { day: 'خمس', conversations: 143, conversions: 51 },
-  { day: 'جمع', conversations: 132, conversions: 44 },
-  { day: 'سبت', conversations: 188, conversions: 72 },
-  { day: 'أحد', conversations: 164, conversions: 63 },
+  { day: 'إثن', conversations: 0, conversions: 0 },
+  { day: 'ثلا', conversations: 0, conversions: 0 },
+  { day: 'أرب', conversations: 0, conversions: 0 },
+  { day: 'خمس', conversations: 0, conversions: 0 },
+  { day: 'جمع', conversations: 0, conversions: 0 },
+  { day: 'سبت', conversations: 0, conversions: 0 },
+  { day: 'أحد', conversations: 0, conversions: 0 },
 ]
 
-const topProducts = [
-  { name: 'هودي Classic الأحمر',        revenue: 18400, orders: 92,  trend: '+14%' },
-  { name: 'قميص Slim-Fit الأزرق',       revenue: 12600, orders: 140, trend: '+8%'  },
-  { name: 'حزام جلد Premium',           revenue: 8900,  orders: 60,  trend: '+22%' },
-  { name: 'شورت Running Pro',           revenue: 7200,  orders: 96,  trend: '-3%'  },
-  { name: 'حزام ساعة ذكية أسود',       revenue: 6600,  orders: 30,  trend: '+31%' },
-]
+const topProducts: { name: string; revenue: number; orders: number; trend: string }[] = []
 
 const sourceData = [
-  { name: 'محادثات الذكاء الاصطناعي', value: 68, color: '#f59e0b' },
-  { name: 'الحملات',                   value: 19, color: '#3b82f6' },
-  { name: 'مباشر / يدوي',             value: 13, color: '#94a3b8' },
+  { name: 'محادثات الذكاء الاصطناعي', value: 0, color: '#f59e0b' },
+  { name: 'الحملات',                   value: 0, color: '#3b82f6' },
+  { name: 'مباشر / يدوي',             value: 0, color: '#94a3b8' },
 ]
 
 const TABLE_HEADERS = ['#', 'المنتج', 'الطلبات', 'الإيرادات', 'الاتجاه']
@@ -45,10 +40,10 @@ export default function Analytics() {
     <div className="space-y-5">
       {/* KPIs */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="الإيرادات (الشهر الحالي)"    value="94,320 ر.س" change={15.8} icon={DollarSign}    iconColor="text-emerald-600" iconBg="bg-emerald-50" />
-        <StatCard label="معدل التحويل"                 value="31.4%"      change={4.2}  icon={TrendingUp}    iconColor="text-brand-600"   iconBg="bg-brand-50" />
-        <StatCard label="الطلبات (الشهر الحالي)"       value="1,248"      change={9.6}  icon={ShoppingCart}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
-        <StatCard label="المحادثات (الشهر الحالي)"     value="4,890"      change={22.1} icon={MessageSquare} iconColor="text-purple-600"  iconBg="bg-purple-50" />
+        <StatCard label="الإيرادات (الشهر الحالي)"    value="0 ر.س"  icon={DollarSign}    iconColor="text-emerald-600" iconBg="bg-emerald-50" />
+        <StatCard label="معدل التحويل"                 value="0%"     icon={TrendingUp}    iconColor="text-brand-600"   iconBg="bg-brand-50" />
+        <StatCard label="الطلبات (الشهر الحالي)"       value="0"      icon={ShoppingCart}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
+        <StatCard label="المحادثات (الشهر الحالي)"     value="0"      icon={MessageSquare} iconColor="text-purple-600"  iconBg="bg-purple-50" />
       </div>
 
       {/* Revenue trend */}
@@ -59,8 +54,8 @@ export default function Analytics() {
             <p className="text-xs text-slate-400 mt-0.5">آخر 6 أشهر</p>
           </div>
           <div className="text-end">
-            <p className="text-sm font-bold text-emerald-600">+15.8%</p>
-            <p className="text-xs text-slate-400">مقارنة بالفترة السابقة</p>
+            <p className="text-sm font-bold text-slate-400">—</p>
+            <p className="text-xs text-slate-400">لا توجد بيانات بعد</p>
           </div>
         </div>
         <ResponsiveContainer width="100%" height={240}>
@@ -148,7 +143,13 @@ export default function Analytics() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
-              {topProducts.map((p, i) => (
+              {topProducts.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-5 py-12 text-center text-xs text-slate-400">
+                    لا توجد بيانات منتجات بعد — ستظهر هنا بعد ربط المتجر وبدء المبيعات
+                  </td>
+                </tr>
+              ) : topProducts.map((p, i) => (
                 <tr key={p.name} className="hover:bg-slate-50 transition-colors">
                   <td className="px-5 py-3.5 text-xs font-medium text-slate-400">{i + 1}</td>
                   <td className="px-5 py-3.5 text-xs font-medium text-slate-900">{p.name}</td>
