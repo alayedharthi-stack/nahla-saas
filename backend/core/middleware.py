@@ -31,7 +31,6 @@ JWT_PUBLIC_PREFIXES = (
     "/settings/validate", # Salla Partner Portal validation probe
     "/snippet.js",
     "/track",
-    "/whatsapp/direct/debug-token",  # TEMP diagnostic — remove after debugging
 )
 
 

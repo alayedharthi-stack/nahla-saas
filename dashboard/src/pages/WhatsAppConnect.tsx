@@ -192,6 +192,7 @@ export default function WhatsAppConnect() {
   const [otp, setOtp]                     = useState('')
   const [phoneNumberId, setPhoneNumberId] = useState('')
   const [sentMsg, setSentMsg]             = useState('')
+  const [resendCooldown, setResendCooldown] = useState(0)
 
   // Step 3 — business profile
   const [vertical, setVertical]     = useState('RETAIL')
@@ -211,6 +212,13 @@ export default function WhatsAppConnect() {
       .catch(()=>{})
       .finally(()=>setLoading(false))
   }, [])
+
+  // Resend cooldown countdown
+  useEffect(() => {
+    if (resendCooldown <= 0) return
+    const t = setTimeout(() => setResendCooldown(c => c - 1), 1000)
+    return () => clearTimeout(t)
+  }, [resendCooldown])
 
   // ── Step 1 → 2 ──────────────────────────────────────────────────────────
 
@@ -242,6 +250,8 @@ export default function WhatsAppConnect() {
       setPhoneNumberId(r.phone_number_id)
       setSentMsg(sanitizeMessage(r.message))
       setStep(2)
+      // Start 60-second resend cooldown
+      setResendCooldown(60)
     } catch (e) {
       const raw = e instanceof Error ? e.message : ''
       console.error('[Nahla/OTP] api_error=', raw)
@@ -434,10 +444,21 @@ export default function WhatsAppConnect() {
               : <>تأكيد الرقم <CheckCircle2 className="w-4 h-4"/></>}
           </button>
 
-          <button onClick={()=>{setStep(1);setError('');setOtp('')}}
-            className="w-full text-sm text-slate-400 hover:text-slate-600 py-1">
-            ← تغيير رقم الهاتف
-          </button>
+          {/* Resend code */}
+          <div className="flex items-center justify-between text-sm pt-1">
+            <button onClick={()=>{setStep(1);setError('');setOtp('')}}
+              className="text-slate-400 hover:text-slate-600">
+              ← تغيير رقم الهاتف
+            </button>
+            <button
+              onClick={() => { setOtp(''); setError(''); handleRequestOtp() }}
+              disabled={resendCooldown > 0 || busy}
+              className="text-violet-600 hover:text-violet-800 disabled:text-slate-400 disabled:cursor-not-allowed font-medium">
+              {resendCooldown > 0
+                ? `إعادة الإرسال (${resendCooldown}ث)`
+                : 'إعادة إرسال الرمز'}
+            </button>
+          </div>
         </div>
       )}
 
