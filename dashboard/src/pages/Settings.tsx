@@ -165,12 +165,12 @@ function WhatsAppConnectionCard({ onConnected }: { onConnected?: (v: boolean) =>
 
   useEffect(() => {
     whatsappConnectApi.getStatus()
-      .then(c => { setConn(c); onConnected?.(c?.status === 'connected') })
+      .then(c => { setConn(c); onConnected?.(c?.connected === true) })
       .catch(() => { setConn(null); onConnected?.(false) })
       .finally(() => setLoading(false))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const isConnected = conn?.status === 'connected'
+  const isConnected = conn?.connected === true
   const needsReauth = conn?.status === 'needs_reauth' || conn?.status === 'error'
 
   if (loading) {
@@ -278,7 +278,7 @@ function WhatsAppTab({
 
   useEffect(() => {
     whatsappConnectApi.getStatus()
-      .then(c => setWaConnected(c?.status === 'connected'))
+      .then(c => setWaConnected(c?.connected === true))
       .catch(() => setWaConnected(false))
   }, [])
 

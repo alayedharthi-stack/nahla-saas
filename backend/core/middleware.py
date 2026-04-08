@@ -19,19 +19,22 @@ from core.config import API_SECRET_KEY
 
 logger = logging.getLogger("nahla-backend")
 
-# Public path prefixes that never require a JWT token
+# Public path prefixes that never require a JWT token.
+# Keep these as specific as possible — broad prefixes can accidentally
+# expose protected endpoints under the same prefix.
 JWT_PUBLIC_PREFIXES = (
     "/health",
     "/webhook",
     "/auth",
-    "/oauth",             # Salla/WhatsApp OAuth callbacks
-    "/integrations",      # Salla success/error landing pages
-    "/salla",             # /salla/start (new merchant install entry point)
-    "/zid",               # /zid/app, /zid/redirect, /zid/token-login
-    "/settings/validate", # Salla Partner Portal validation probe
+    "/oauth",                           # Salla/WhatsApp OAuth callbacks
+    "/integrations/salla/",             # Salla success/error landing HTML pages (public)
+    "/salla",                           # /salla/start (new merchant install entry point)
+    "/zid",                             # /zid/app, /zid/redirect, /zid/token-login
+    "/settings/validate",               # Salla Partner Portal validation probe
     "/snippet.js",
     "/track",
 )
+# NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
 
 
 # ── Middleware functions ───────────────────────────────────────────────────────

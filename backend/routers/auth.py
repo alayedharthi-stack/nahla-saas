@@ -160,6 +160,52 @@ async def auth_me(user: Dict[str, Any] = Depends(get_current_user)):
     }
 
 
+@router.get("/auth/me/full")
+async def auth_me_full(
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Extended identity endpoint — returns user, tenant, and WhatsApp status.
+    Use this to diagnose tenant-resolution or role issues.
+    """
+    from models import Tenant, WhatsAppConnection  # noqa: PLC0415
+    email     = user.get("sub")
+    tenant_id = int(user.get("tenant_id", 1))
+
+    db_user = db.query(User).filter_by(email=email).first()
+    tenant  = db.query(Tenant).filter_by(id=tenant_id).first()
+    wa_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+
+    return {
+        "jwt_claims": {
+            "sub":       email,
+            "role":      user.get("role"),
+            "tenant_id": tenant_id,
+        },
+        "user_in_db": {
+            "id":           db_user.id        if db_user else None,
+            "email":        db_user.email     if db_user else None,
+            "role":         db_user.role      if db_user else None,
+            "tenant_id":    db_user.tenant_id if db_user else None,
+            "is_active":    db_user.is_active if db_user else None,
+            "has_password": bool(getattr(db_user, "password_hash", None)) if db_user else False,
+        },
+        "tenant_in_db": {
+            "id":   tenant.id   if tenant else None,
+            "name": tenant.name if tenant else None,
+        },
+        "whatsapp": {
+            "connected": bool(wa_conn and wa_conn.status == "connected"),
+            "status":    wa_conn.status       if wa_conn else "none",
+            "phone":     wa_conn.phone_number if wa_conn else None,
+        },
+        "tenant_mismatch": (
+            db_user is not None and db_user.tenant_id != tenant_id
+        ),
+    }
+
+
 @router.post("/auth/logout")
 async def auth_logout():
     """Client-side logout — token invalidation is handled by the frontend."""

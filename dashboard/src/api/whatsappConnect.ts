@@ -11,11 +11,17 @@ export type WaConnectionStatus =
   | 'needs_reauth'
 
 export interface WaConnection {
+  /** Unified flag — true only when status === 'connected' */
+  connected: boolean
   status: WaConnectionStatus
   phone_number: string | null
+  display_phone_number: string | null
   business_display_name: string | null
+  display_name: string | null
   whatsapp_business_account_id: string | null
   phone_number_id: string | null
+  waba_id: string | null
+  verification_status: string | null
   meta_business_account_id: string | null
   connected_at: string | null
   last_verified_at: string | null
@@ -53,8 +59,12 @@ export interface WaHealthResult {
 // ── API ───────────────────────────────────────────────────────────────────────
 
 export const whatsappConnectApi = {
+  /**
+   * Unified WhatsApp status — single source of truth for ALL pages.
+   * Reads from GET /whatsapp/status (same data as /integrations/whatsapp/status).
+   */
   getStatus: () =>
-    apiCall<WaConnection>('/whatsapp/connection'),
+    apiCall<WaConnection>('/whatsapp/status'),
 
   start: () =>
     apiCall<WaStartResult>('/whatsapp/connection/start', { method: 'POST' }),

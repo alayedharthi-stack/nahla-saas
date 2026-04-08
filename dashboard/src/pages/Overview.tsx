@@ -14,7 +14,6 @@ import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { apiCall } from '../api/client'
-import { whatsappConnectApi } from '../api/whatsappConnect'
 
 // Placeholder chart data — replaced with real data when store is synced
 const PLACEHOLDER_CHART = [
