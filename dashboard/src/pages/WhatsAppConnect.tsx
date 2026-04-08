@@ -218,20 +218,42 @@ export default function WhatsAppConnect() {
     if (!phone.trim())       { setError('أدخل رقم الهاتف'); return }
     if (!displayName.trim()) { setError('أدخل اسم العرض'); return }
 
-    const normalized = normalizePhone(phone.trim())
-    if (!isValidSaudiPhone(normalized)) {
+    const original   = phone.trim()
+    const normalized = normalizePhone(original)
+    const valid      = isValidSaudiPhone(normalized)
+
+    console.log('[Nahla/OTP] original_input=', original,
+      '| normalized=', normalized, '| valid=', valid)
+
+    if (!valid) {
+      // PHONE_VALIDATION_ERROR — do not proceed
       setError('رقم الهاتف غير صحيح. أدخل رقماً سعودياً مثل: +966542878717 أو 0542878717')
       return
     }
 
     setBusy(true); setError('')
     try {
-      // Send normalized number so backend receives consistent input
+      const payload = { phone_number: normalized, display_name: displayName.trim(), method: otpMethod }
+      console.log('[Nahla/OTP] payload_sent_to_backend=', JSON.stringify(payload))
+
       const r = await requestOtp(normalized, displayName.trim(), otpMethod)
+      console.log('[Nahla/OTP] api_response=', r)
+
       setPhoneNumberId(r.phone_number_id)
       setSentMsg(sanitizeMessage(r.message))
       setStep(2)
-    } catch (e) { setError(sanitizeMessage(e instanceof Error ? e.message : '')) }
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : ''
+      console.error('[Nahla/OTP] api_error=', raw)
+      // Distinguish: never show phone-format error for a META_REQUEST_ERROR
+      const isPhoneFormatMsg = /صيغة رقم الهاتف|phone.*format|invalid.*phone/i.test(raw)
+      if (isPhoneFormatMsg && valid) {
+        // Backend returned phone error but frontend already validated → show generic
+        setError('تعذر إرسال رمز التحقق. تأكد من الرقم أو حاول مرة أخرى.')
+      } else {
+        setError(sanitizeMessage(raw))
+      }
+    }
     finally { setBusy(false) }
   }, [phone, displayName, otpMethod])
 
@@ -311,10 +333,14 @@ export default function WhatsAppConnect() {
             </div>
           </div>
 
-          <Field label="رقم الهاتف" hint="رقم لم يُسجَّل على واتساب من قبل — مثال: +966501234567" required>
+          <Field label="رقم الهاتف" hint="رقم لم يُسجَّل على واتساب من قبل" required>
             <input
               type="tel" value={phone}
-              onChange={e => setPhone(e.target.value)}
+              onChange={e => {
+                setPhone(e.target.value)
+                // Clear any previous error immediately when user edits the field
+                setError('')
+              }}
               placeholder="+9665XXXXXXXX"
               className={inputCls} dir="ltr"
             />
@@ -322,7 +348,7 @@ export default function WhatsAppConnect() {
               const n = normalizePhone(phone.trim())
               return isValidSaudiPhone(n)
                 ? <p className="text-xs text-emerald-600 mt-1">✓ الرقم المُرسَل: {n}</p>
-                : <p className="text-xs text-amber-600 mt-1">الصيغ المقبولة: +966542878717 أو 0542878717 أو 542878717</p>
+                : <p className="text-xs text-amber-500 mt-1">الصيغ المقبولة: +966542878717 أو 0542878717 أو 542878717</p>
             })()}
           </Field>
 

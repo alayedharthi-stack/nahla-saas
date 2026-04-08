@@ -605,14 +605,25 @@ async def direct_request_otp(
 
     cc, national = _normalize_phone(body.phone_number)
 
+    # ── Full trace log ───────────────────────────────────────────────────────
+    logger.info(
+        "[WA Direct] request-otp TRACE | tenant=%s "
+        "original_input=%r  cc=%s  national=%s  waba=%s",
+        tenant_id, body.phone_number, cc, national, WA_BUSINESS_ACCOUNT_ID,
+    )
+
     # Validate after normalization — reject early with a clear Arabic message
     phone_err = _validate_phone(cc, national)
     if phone_err:
         logger.warning(
-            "[WA Direct] Phone validation failed | tenant=%s input=%r cc=%s national=%s",
-            tenant_id, body.phone_number, cc, national,
+            "[WA Direct] PHONE_VALIDATION_ERROR | tenant=%s input=%r cc=%s national=%s reason=%s",
+            tenant_id, body.phone_number, cc, national, phone_err,
         )
-        raise HTTPException(status_code=400, detail=phone_err)
+        raise HTTPException(
+            status_code=400,
+            detail=phone_err,
+            headers={"X-Nahla-Error-Code": "PHONE_VALIDATION_ERROR"},
+        )
 
     graph        = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
     headers      = {
@@ -621,8 +632,8 @@ async def direct_request_otp(
     }
 
     logger.info(
-        "[WA Direct] request-otp | tenant=%s cc=%s number=%s",
-        tenant_id, cc, national,
+        "[WA Direct] META_REQUEST | tenant=%s WABA=%s cc=%s national=%s display_name=%r method=%s",
+        tenant_id, WA_BUSINESS_ACCOUNT_ID, cc, national, body.display_name, body.method,
     )
 
     # ── Step A: Add phone number to WABA ────────────────────────────────────
@@ -967,18 +978,25 @@ def _normalize_meta_error(
         return ic, _UX_MESSAGES[ic]
 
     # ── Heuristic: scan raw message for known patterns ───────────────────────
+    # IMPORTANT: keep these narrow to avoid misclassifying unrelated errors.
+    # Never match "invalid" alone — too broad (e.g. "invalid access token").
     raw = (message + " " + user_msg).lower()
-    if "already" in raw or "exist" in raw:
+    if "already" in raw and ("register" in raw or "exist" in raw):
         return META_ALREADY_REGISTERED, _UX_MESSAGES[META_ALREADY_REGISTERED]
     if "personal" in raw or "consumer" in raw:
         return META_PERSONAL_NUMBER, _UX_MESSAGES[META_PERSONAL_NUMBER]
-    if "limit" in raw or "maximum" in raw or "exceeded" in raw:
+    if "count exceeded" in raw or ("limit" in raw and "phone" in raw) or "exceeded" in raw:
         return META_LIMIT_EXCEEDED, _UX_MESSAGES[META_LIMIT_EXCEEDED]
-    if "permission" in raw or "authorized" in raw or "missing" in raw:
+    if "missing permissions" in raw or "does not exist" in raw:
         return META_PERMISSION_ERROR, _UX_MESSAGES[META_PERMISSION_ERROR]
-    if "invalid" in raw and ("phone" in raw or "number" in raw):
-        return META_INVALID_NUMBER, _UX_MESSAGES[META_INVALID_NUMBER]
+    if "permission" in raw and ("insufficient" in raw or "required" in raw):
+        return META_PERMISSION_ERROR, _UX_MESSAGES[META_PERMISSION_ERROR]
 
+    # Fallback — log and return generic
+    logger.info(
+        "[MetaNormalizer] unmapped error code=%s raw=%r → META_UNKNOWN_ERROR",
+        code, raw[:200],
+    )
     return META_UNKNOWN_ERROR, _UX_MESSAGES[META_UNKNOWN_ERROR]
 
 
