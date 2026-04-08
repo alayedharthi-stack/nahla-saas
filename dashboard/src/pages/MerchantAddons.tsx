@@ -1,10 +1,18 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   ToggleLeft, ToggleRight, Settings2, CheckCircle, AlertCircle,
-  Loader2, Copy, X, Puzzle, MessageCircle, Gift, Tag, ChevronDown,
-  ChevronUp, Zap,
+  Loader2, Copy, X, Puzzle, MessageCircle, Gift, Tag,
+  Zap, Link2, Sparkles,
 } from 'lucide-react'
 import { addonsApi, type AddonItem } from '../api/addons'
+
+// ── Backend base URL ──────────────────────────────────────────────────────────
+const API_BASE = (import.meta.env.VITE_API_URL as string) || 'https://api.nahlah.ai'
+
+// ── Tenant ID from session ────────────────────────────────────────────────────
+function getTenantId(): string {
+  return localStorage.getItem('nahla_tenant_id') || ''
+}
 
 // ── Nahla CDN logo (default widget logo) ─────────────────────────────────────
 const NAHLA_CDN_LOGO =
@@ -84,16 +92,49 @@ function addonColor(key: string) {
 function WidgetSettingsForm({
   settings, onChange,
 }: { settings: Record<string, unknown>; onChange: (k: string, v: unknown) => void }) {
+  const [tagCopied,  setTagCopied]  = useState(false)
   const [codeCopied, setCodeCopied] = useState(false)
-  const code = generateWidgetCode(settings)
-  const copyCode = () => {
-    navigator.clipboard.writeText(code)
-    setCodeCopied(true)
-    setTimeout(() => setCodeCopied(false), 2500)
-  }
+
+  const tenantId  = getTenantId()
+  const embedUrl  = `${API_BASE}/merchant/addons/widget/${tenantId}/embed.js`
+  const scriptTag = `<script src="${embedUrl}"></script>`
+  const fullCode  = generateWidgetCode(settings)
+
+  const copyTag  = () => { navigator.clipboard.writeText(scriptTag); setTagCopied(true);  setTimeout(() => setTagCopied(false),  2500) }
+  const copyCode = () => { navigator.clipboard.writeText(fullCode);  setCodeCopied(true); setTimeout(() => setCodeCopied(false), 2500) }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
+
+      {/* ── Smart embed URL (primary) ── */}
+      <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl space-y-3">
+        <div className="flex items-center gap-2 text-emerald-700">
+          <Sparkles className="w-4 h-4 shrink-0" />
+          <p className="text-sm font-semibold">الطريقة الذكية — أضفه مرة واحدة فقط</p>
+        </div>
+        <p className="text-xs text-emerald-600 leading-relaxed">
+          أضف هذا السطر مرة واحدة في سلة، وبعدها يكفي الضغط على "تفعيل / تعطيل" من هنا دون أي تعديل في المتجر.
+        </p>
+        <div className="relative">
+          <code dir="ltr" className="block w-full bg-white border border-emerald-200 rounded-lg px-3 py-2.5 text-xs font-mono text-slate-700 pe-20 overflow-x-auto whitespace-nowrap">
+            {scriptTag}
+          </code>
+          <button onClick={copyTag}
+            className="absolute top-1.5 left-1.5 flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium transition-colors shrink-0">
+            {tagCopied ? <CheckCircle className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+            {tagCopied ? 'تم' : 'نسخ'}
+          </button>
+        </div>
+        <div className="flex items-start gap-2 text-xs text-emerald-700 bg-emerald-100 rounded-lg p-2.5">
+          <Link2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold">في سلة: </span>
+            الإعدادات ← مظهر المتجر ← JavaScript مخصص ← الصق الكود
+          </div>
+        </div>
+      </div>
+
+      {/* ── Settings fields ── */}
       <div>
         <label className="label">رقم واتساب <span className="text-red-400">*</span></label>
         <input className="input" dir="ltr" placeholder="966555906901"
@@ -133,25 +174,28 @@ function WidgetSettingsForm({
           <input type="number" min={0} max={2000} className="input" dir="ltr"
             value={Number(settings.scroll_threshold ?? 250)}
             onChange={e => onChange('scroll_threshold', Number(e.target.value))} />
+          <p className="text-xs text-slate-400 mt-1">0 = فوري</p>
         </div>
       </div>
 
-      {/* Code preview */}
+      {/* ── Manual full code (fallback) ── */}
       {!!settings.phone && (
-        <div className="space-y-2">
-          <label className="label">كود التضمين</label>
-          <div className="relative">
+        <details className="group">
+          <summary className="cursor-pointer text-xs text-slate-500 hover:text-slate-700 select-none list-none flex items-center gap-1">
+            <span className="group-open:rotate-90 transition-transform inline-block">▶</span>
+            أو انسخ الكود الكامل يدوياً
+          </summary>
+          <div className="mt-2 relative">
             <textarea readOnly dir="ltr" rows={6}
               className="w-full font-mono text-xs bg-slate-900 text-slate-100 rounded-xl p-4 resize-none border-0 outline-none leading-relaxed"
-              value={code} />
+              value={fullCode} />
             <button onClick={copyCode}
               className="absolute top-3 left-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium transition-colors">
               {codeCopied ? <CheckCircle className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
               {codeCopied ? 'تم النسخ!' : 'نسخ'}
             </button>
           </div>
-          <p className="text-xs text-slate-400">ضع الكود في حقل JavaScript في متجرك (سلة: الإعدادات → سكريبت مخصص)</p>
-        </div>
+        </details>
       )}
     </div>
   )
@@ -371,8 +415,13 @@ function AddonCard({ addon, onToggled, onSettings }: AddonCardProps) {
     try {
       const updated = await addonsApi.toggle(addon.key, !addon.is_enabled)
       onToggled(updated)
-      setToast(updated.is_enabled ? 'تم تفعيل الإضافة ✓' : 'تم تعطيل الإضافة')
-      setTimeout(() => setToast(null), 2500)
+      if (updated.is_enabled && updated.has_settings) {
+        // Auto-open settings so the merchant gets the embed code immediately
+        onSettings(updated)
+      } else {
+        setToast('تم تعطيل الإضافة')
+        setTimeout(() => setToast(null), 2500)
+      }
     } catch {
       setToast('فشل التعديل — حاول مرة أخرى')
       setTimeout(() => setToast(null), 3000)
