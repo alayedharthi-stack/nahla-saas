@@ -466,6 +466,33 @@ export default function WhatsAppConnect() {
               : <>تأكيد الرقم <CheckCircle2 className="w-4 h-4"/></>}
           </button>
 
+          {/* Already verified in Meta? refresh button */}
+          <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-700">
+            <ShieldCheck className="w-4 h-4 shrink-0 text-blue-500"/>
+            <span>هل تحققت من الرقم مسبقاً في Meta؟</span>
+            <button
+              onClick={async () => {
+                setBusy(true); setError('')
+                try {
+                  const r = await post<{ updated: boolean; connected?: boolean; message: string }>(
+                    '/whatsapp/direct/refresh-from-meta', {}
+                  )
+                  if (r.updated || r.connected) {
+                    setStep(3)
+                    setSentMsg('✅ تم التحقق من حالة الرقم في Meta بنجاح')
+                  } else {
+                    setError(sanitizeMessage(r.message))
+                  }
+                } catch(e) {
+                  setError(sanitizeMessage(e instanceof Error ? e.message : ''))
+                } finally { setBusy(false) }
+              }}
+              disabled={busy}
+              className="mr-auto font-semibold underline hover:text-blue-900 disabled:opacity-50 whitespace-nowrap">
+              {busy ? 'جاري التحقق...' : 'تحقق من حالة الربط'}
+            </button>
+          </div>
+
           {/* Resend code */}
           <div className="flex items-center justify-between text-sm pt-1">
             <button onClick={()=>{setStep(1);setError('');setOtp('')}}

@@ -1035,6 +1035,85 @@ async def direct_status(request: Request, db: Session = Depends(get_db)):
     return _build_wa_status(conn)
 
 
+@router.post("/direct/refresh-from-meta")
+async def refresh_status_from_meta(request: Request, db: Session = Depends(get_db)):
+    """
+    Re-check the phone number status in Meta and update the DB if verified.
+
+    Useful when:
+    - The number was verified in Meta but the DB still shows 'pending'
+    - The merchant already registered the number manually in Meta Business Manager
+    - The OTP was received and verified but the Nahla UI still shows the OTP step
+    """
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+
+    if not conn or not conn.phone_number_id:
+        return {"updated": False, "message": "لا يوجد رقم هاتف مسجّل. أكمل ربط الرقم أولاً."}
+
+    if conn.status == "connected":
+        return {"updated": False, "already_connected": True, **_build_wa_status(conn)}
+
+    # Query Meta for current verification status
+    graph   = "https://graph.facebook.com/v19.0"
+    headers = {"Authorization": f"Bearer {WA_TOKEN}"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{graph}/{conn.phone_number_id}",
+                headers=headers,
+                params={"fields": "id,display_phone_number,verified_name,code_verification_status,quality_rating"},
+            )
+            data = resp.json()
+    except Exception as exc:
+        logger.error("[WA refresh] Meta API error: %s", exc)
+        return {"updated": False, "message": "تعذّر الاتصال بـ Meta. حاول مرة أخرى."}
+
+    if "error" in data:
+        err = data["error"]
+        logger.warning("[WA refresh] Meta error: %s", err)
+        return {
+            "updated": False,
+            "message": f"Meta: {err.get('message', 'خطأ غير معروف')}",
+        }
+
+    verification_status = data.get("code_verification_status", "")
+    display_phone       = data.get("display_phone_number", conn.phone_number or "")
+    verified_name       = data.get("verified_name", conn.business_display_name or "")
+
+    logger.info(
+        "[WA refresh] tenant=%s phone_id=%s meta_verification=%s",
+        tenant_id, conn.phone_number_id, verification_status,
+    )
+
+    if verification_status == "VERIFIED":
+        from datetime import datetime, timezone as _tz  # noqa: PLC0415
+        conn.status                = "connected"
+        conn.sending_enabled       = True
+        conn.phone_number          = display_phone
+        conn.business_display_name = verified_name or conn.business_display_name
+        conn.connected_at          = datetime.now(_tz.utc)
+        db.commit()
+        logger.info("[WA refresh] CONNECTED tenant=%s", tenant_id)
+        return {
+            "updated": True,
+            "message": "✅ تم التحقق من الرقم في Meta وتم تحديث حالة الاتصال.",
+            **_build_wa_status(conn),
+        }
+
+    # Not verified yet
+    return {
+        "updated":             False,
+        "meta_status":         verification_status,
+        "message":             (
+            "الرقم لم يُتحقق منه بعد في Meta. "
+            f"حالته الحالية: {verification_status}. "
+            "أدخل رمز التحقق الذي وصلك لإتمام الربط."
+        ),
+    }
+
+
 class SaveProfileRequest(BaseModel):
     phone_number_id: str
     vertical:  Optional[str] = "OTHER"
