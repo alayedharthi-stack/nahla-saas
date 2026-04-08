@@ -33,6 +33,7 @@ interface VerifyResponse { status: string; phone_number: string; display_name: s
 interface StatusResponse {
   connected: boolean; status: string
   phone_number?: string; display_name?: string; connected_at?: string
+  phone_number_id?: string; last_attempt_at?: string
 }
 
 // ── Meta business verticals ───────────────────────────────────────────────────
@@ -208,7 +209,25 @@ export default function WhatsAppConnect() {
 
   useEffect(() => {
     getStatus()
-      .then(s => { if (s.connected) { setConnPhone(s.phone_number??''); setConnName(s.display_name??''); setConnAt(s.connected_at??''); setStep(4) } })
+      .then(s => {
+        if (s.connected) {
+          setConnPhone(s.phone_number ?? '')
+          setConnName(s.display_name ?? '')
+          setConnAt(s.connected_at ?? '')
+          setStep(4)
+        } else if (s.status === 'pending' && s.phone_number_id) {
+          // Resume from Step 2 — OTP was already sent, pending verification
+          setPhoneNumberId(s.phone_number_id)
+          setSentMsg('تم إرسال رمز التحقق مسبقاً — أدخل الرمز الذي وصلك.')
+          setStep(2)
+          // Calculate remaining cooldown from last_attempt_at
+          if (s.last_attempt_at) {
+            const elapsed = Math.floor((Date.now() - new Date(s.last_attempt_at).getTime()) / 1000)
+            const remaining = Math.max(0, 60 - elapsed)
+            if (remaining > 0) setResendCooldown(remaining)
+          }
+        }
+      })
       .catch(()=>{})
       .finally(()=>setLoading(false))
   }, [])

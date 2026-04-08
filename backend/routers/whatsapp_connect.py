@@ -717,7 +717,19 @@ async def direct_request_otp(
             headers={"X-Nahla-Error-Code": META_INVALID_NUMBER},
         )
 
-    # ── Step B: Request OTP ──────────────────────────────────────────────────
+    # ── Step B: Save pending state BEFORE requesting OTP ────────────────────
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if conn is None:
+        conn = WhatsAppConnection(tenant_id=tenant_id)
+        db.add(conn)
+    conn.status          = "pending"
+    conn.phone_number_id = phone_number_id
+    conn.phone_number    = f"+{cc}{national}"
+    conn.last_attempt_at = datetime.now(timezone.utc)
+    conn.last_error      = None
+    db.commit()
+
+    # ── Step C: Request OTP ──────────────────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             otp_resp = await client.post(
@@ -734,12 +746,33 @@ async def direct_request_otp(
         raise HTTPException(status_code=503, detail=_UX_MESSAGES[META_UNKNOWN_ERROR])
 
     if "error" in otp_data:
-        err = otp_data["error"]
-        ic, ux = _normalize_meta_error(
-            err.get("code", 0), err.get("message", ""),
-            err.get("error_subcode", 0), err.get("error_user_msg", ""),
+        err      = otp_data["error"]
+        err_code = err.get("code", 0)
+        err_sub  = err.get("error_subcode", 0)
+        err_msg  = err.get("message", "")
+        logger.warning(
+            "[WA Direct] OTP request raw_error code=%s subcode=%s msg=%r fbtrace=%s full=%s",
+            err_code, err_sub, err_msg, err.get("fbtrace_id"), otp_data,
         )
-        logger.warning("[WA Direct] OTP request raw_error code=%s full=%s", err.get("code"), otp_data)
+        # Rate-limited or code already sent → tell user to use the previous code
+        RATE_LIMIT_CODES = {131056, 131042, 368, 4, 17}
+        OTP_SENT_SUBCODES = {2388016, 2388021}
+        if err_code in RATE_LIMIT_CODES or err_sub in OTP_SENT_SUBCODES or (
+            "rate" in err_msg.lower() or "too many" in err_msg.lower() or
+            "wait" in err_msg.lower() or "cooldown" in err_msg.lower()
+        ):
+            # Code was already sent — still return success so frontend goes to Step 2
+            logger.info("[WA Direct] OTP rate-limited/already-sent, resuming pending state")
+            return {
+                "status":          META_CODE_SENT,
+                "code":            META_CODE_SENT,
+                "phone_number_id": phone_number_id,
+                "message":         "تم إرسال رمز التحقق مسبقاً — أدخل الرمز الذي وصلك أو انتظر قليلاً قبل طلب رمز جديد.",
+                "already_sent":    True,
+            }
+        ic, ux = _normalize_meta_error(err_code, err_msg, err_sub, err.get("error_user_msg", ""))
+        conn.last_error = f"OTP_REQUEST_FAILED code={err_code} sub={err_sub} msg={err_msg}"
+        db.commit()
         raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
     logger.info(
@@ -866,13 +899,20 @@ async def direct_status(request: Request, db: Session = Depends(get_db)):
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn or conn.status == "not_connected":
         return {"connected": False, "status": "not_connected"}
-    return {
+    resp: dict = {
         "connected":    conn.status == "connected",
         "status":       conn.status,
         "phone_number": conn.phone_number,
         "display_name": conn.business_display_name,
         "connected_at": conn.connected_at.isoformat() if conn.connected_at else None,
     }
+    # If pending verification, send phone_number_id so frontend can resume Step 2
+    if conn.status == "pending" and conn.phone_number_id:
+        resp["phone_number_id"] = conn.phone_number_id
+        resp["last_attempt_at"] = (
+            conn.last_attempt_at.isoformat() if conn.last_attempt_at else None
+        )
+    return resp
 
 
 class SaveProfileRequest(BaseModel):
