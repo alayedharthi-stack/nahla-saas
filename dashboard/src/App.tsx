@@ -39,7 +39,6 @@ import PrivacyPolicy  from './pages/PrivacyPolicy'
 import VerifyEmail from './pages/VerifyEmail'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
-import MerchantAddons  from './pages/MerchantAddons'
 import MerchantWidgets from './pages/MerchantWidgets'
 
 export default function App() {
@@ -98,7 +97,6 @@ export default function App() {
             <Route path="admin/revenue"      element={<AdminRevenue />} />
             <Route path="admin/team"         element={<AdminTeam />} />
             <Route path="billing"            element={<Billing />} />
-            <Route path="addons"             element={<MerchantAddons />} />
             <Route path="widgets"            element={<MerchantWidgets />} />
           </Route>
         </Routes>
