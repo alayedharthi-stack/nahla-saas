@@ -519,21 +519,68 @@ class DirectVerifyRequest(BaseModel):
 
 def _normalize_phone(raw: str) -> tuple[str, str]:
     """
-    Return (country_code, national_number) from a raw phone string.
-    Handles +966XXXXXXXXX, 00966XXXXXXXXX, 05XXXXXXXX formats.
+    Normalize any common Saudi/international phone format and return
+    (country_code, national_number) ready for the Meta phone_numbers API.
+
+    Accepted inputs → all produce ("966", "5XXXXXXXX"):
+        +966542878717   966542878717   0542878717   542878717
+        ٠٥٤٢٨٧٨٧١٧  (Arabic digits)   966 54-287 8717 (spaces/dashes)
+
+    Validation after normalization:
+        Saudi mobile: ^9665\\d{8}$   (total 12 digits: 966 + 5 + 8 digits)
     """
-    raw = raw.strip().replace(" ", "").replace("-", "")
-    if raw.startswith("+"):
-        raw = raw[1:]
-    if raw.startswith("00"):
-        raw = raw[2:]
-    # Saudi: 966XXXXXXXXX or 05XXXXXXXX
-    if raw.startswith("966"):
-        return "966", raw[3:]
-    if raw.startswith("0"):
-        return "966", raw[1:]
-    # Default: assume Saudi
-    return "966", raw
+    # ── 1. Convert Arabic-Indic digits to ASCII ──────────────────────────────
+    arabic_map = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+    cleaned = raw.translate(arabic_map)
+
+    # ── 2. Strip whitespace, dashes, dots, parentheses ──────────────────────
+    import re as _re  # noqa: PLC0415
+    cleaned = _re.sub(r"[\s\-\.\(\)]+", "", cleaned)
+
+    # ── 3. Remove leading + or 00 ────────────────────────────────────────────
+    if cleaned.startswith("+"):
+        cleaned = cleaned[1:]
+    if cleaned.startswith("00"):
+        cleaned = cleaned[2:]
+
+    # ── 4. Determine country code & national number ──────────────────────────
+    if cleaned.startswith("966"):
+        cc       = "966"
+        national = cleaned[3:]
+    elif cleaned.startswith("0"):
+        # Local Saudi format: 05XXXXXXXX → remove leading 0
+        cc       = "966"
+        national = cleaned[1:]
+    elif len(cleaned) == 9 and cleaned.startswith("5"):
+        # Bare 9-digit Saudi number: 5XXXXXXXX
+        cc       = "966"
+        national = cleaned
+    else:
+        # Unknown → pass as-is, let Meta decide
+        cc       = "966"
+        national = cleaned
+
+    logger.info(
+        "[PhoneNorm] original=%r  cleaned=%r  cc=%s  national=%s  valid=%s",
+        raw, cleaned, cc, national,
+        bool(_re.match(r"^5\d{8}$", national)),
+    )
+
+    return cc, national
+
+
+def _validate_phone(cc: str, national: str) -> str | None:
+    """
+    Return an Arabic error message if the phone is invalid, else None.
+    Currently enforces Saudi mobile format only (9-digit national starting with 5).
+    """
+    import re as _re  # noqa: PLC0415
+    if cc == "966" and not _re.match(r"^5\d{8}$", national):
+        return (
+            "صيغة رقم الهاتف غير صحيحة. "
+            "أدخل رقماً سعودياً صحيحاً مثل: +966542878717 أو 0542878717 أو 542878717"
+        )
+    return None
 
 
 @router.post("/direct/request-otp")
@@ -557,6 +604,16 @@ async def direct_request_otp(
         )
 
     cc, national = _normalize_phone(body.phone_number)
+
+    # Validate after normalization — reject early with a clear Arabic message
+    phone_err = _validate_phone(cc, national)
+    if phone_err:
+        logger.warning(
+            "[WA Direct] Phone validation failed | tenant=%s input=%r cc=%s national=%s",
+            tenant_id, body.phone_number, cc, national,
+        )
+        raise HTTPException(status_code=400, detail=phone_err)
+
     graph        = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
     headers      = {
         "Authorization": f"Bearer {WA_TOKEN}",

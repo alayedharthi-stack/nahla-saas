@@ -54,6 +54,31 @@ const VERTICALS = [
   { value: 'OTHER',                    label: 'أخرى'                  },
 ]
 
+// ── Phone normalizer (frontend) ───────────────────────────────────────────────
+// Mirrors backend _normalize_phone so the user sees the normalized value live.
+
+function normalizePhone(raw: string): string {
+  // Convert Arabic-Indic digits
+  const ar = '٠١٢٣٤٥٦٧٨٩'
+  let s = raw.split('').map(c => {
+    const i = ar.indexOf(c); return i >= 0 ? String(i) : c
+  }).join('')
+  // Strip whitespace, dashes, dots, parens
+  s = s.replace(/[\s\-.()\u00A0]+/g, '')
+  // Remove leading + or 00
+  if (s.startsWith('+'))  s = s.slice(1)
+  if (s.startsWith('00')) s = s.slice(2)
+  // Normalize to full international (966XXXXXXXXX)
+  if (s.startsWith('966'))       return s          // already full
+  if (s.startsWith('0'))         return '966' + s.slice(1)
+  if (/^5\d{8}$/.test(s))        return '966' + s  // bare 9-digit Saudi
+  return s
+}
+
+function isValidSaudiPhone(normalized: string): boolean {
+  return /^9665\d{8}$/.test(normalized)
+}
+
 // ── Meta message sanitizer ────────────────────────────────────────────────────
 // Raw Meta messages (escaped unicode, HTML entities, provider text) must NEVER
 // be shown to merchants. This is a last-resort guard on the frontend side.
@@ -192,9 +217,17 @@ export default function WhatsAppConnect() {
   const handleRequestOtp = useCallback(async () => {
     if (!phone.trim())       { setError('أدخل رقم الهاتف'); return }
     if (!displayName.trim()) { setError('أدخل اسم العرض'); return }
+
+    const normalized = normalizePhone(phone.trim())
+    if (!isValidSaudiPhone(normalized)) {
+      setError('رقم الهاتف غير صحيح. أدخل رقماً سعودياً مثل: +966542878717 أو 0542878717')
+      return
+    }
+
     setBusy(true); setError('')
     try {
-      const r = await requestOtp(phone.trim(), displayName.trim(), otpMethod)
+      // Send normalized number so backend receives consistent input
+      const r = await requestOtp(normalized, displayName.trim(), otpMethod)
       setPhoneNumberId(r.phone_number_id)
       setSentMsg(sanitizeMessage(r.message))
       setStep(2)
@@ -282,9 +315,15 @@ export default function WhatsAppConnect() {
             <input
               type="tel" value={phone}
               onChange={e => setPhone(e.target.value)}
-              placeholder="+966 5X XXX XXXX"
+              placeholder="+9665XXXXXXXX"
               className={inputCls} dir="ltr"
             />
+            {phone.trim() && (() => {
+              const n = normalizePhone(phone.trim())
+              return isValidSaudiPhone(n)
+                ? <p className="text-xs text-emerald-600 mt-1">✓ الرقم المُرسَل: {n}</p>
+                : <p className="text-xs text-amber-600 mt-1">الصيغ المقبولة: +966542878717 أو 0542878717 أو 542878717</p>
+            })()}
           </Field>
 
           <Field
