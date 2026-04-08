@@ -118,6 +118,7 @@ from routers.zid_oauth         import router as _zid_oauth_router         # noqa
 from routers.integrations      import router as _integrations_router       # noqa: E402
 from routers.support_access    import router as _support_access_router     # noqa: E402
 from routers.addons            import router as _addons_router               # noqa: E402
+from routers.widgets           import router as _widgets_router              # noqa: E402
 
 app.include_router(_health_router)
 app.include_router(_admin_router)
@@ -143,6 +144,7 @@ app.include_router(_zid_oauth_router)
 app.include_router(_integrations_router)
 app.include_router(_support_access_router)
 app.include_router(_addons_router)
+app.include_router(_widgets_router)
 
 
 # ── Startup events ────────────────────────────────────────────────────────────────
@@ -201,6 +203,19 @@ async def on_startup() -> None:
                 )""",
                 "CREATE INDEX IF NOT EXISTS ix_merchant_addons_tenant_id ON merchant_addons (tenant_id)",
                 "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_merchant_addon_tenant_key') THEN ALTER TABLE merchant_addons ADD CONSTRAINT uq_merchant_addon_tenant_key UNIQUE (tenant_id, addon_key); END IF; END $$",
+                # ── merchant_widgets (migration 0015) ─────────────────────────
+                """CREATE TABLE IF NOT EXISTS merchant_widgets (
+                    id             SERIAL PRIMARY KEY,
+                    tenant_id      INTEGER NOT NULL REFERENCES tenants(id),
+                    widget_key     VARCHAR(64) NOT NULL,
+                    is_enabled     BOOLEAN NOT NULL DEFAULT false,
+                    settings_json  JSONB,
+                    display_rules  JSONB,
+                    created_at     TIMESTAMP DEFAULT NOW(),
+                    updated_at     TIMESTAMP DEFAULT NOW()
+                )""",
+                "CREATE INDEX IF NOT EXISTS ix_merchant_widgets_tenant_id ON merchant_widgets (tenant_id)",
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_merchant_widget_tenant_key') THEN ALTER TABLE merchant_widgets ADD CONSTRAINT uq_merchant_widget_tenant_key UNIQUE (tenant_id, widget_key); END IF; END $$",
             ]
             with engine.connect() as conn:
                 for stmt in safe_alters:

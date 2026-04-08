@@ -1049,3 +1049,29 @@ class MerchantAddon(Base):
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     tenant = relationship('Tenant')
+
+
+class MerchantWidget(Base):
+    """
+    Conversion Widgets System — visual sales tools rendered inside merchant stores.
+
+    Each row = one widget type for one tenant.
+    widget_key    : unique identifier (whatsapp_widget | discount_popup | slide_offer | …)
+    settings_json : widget-specific UI configuration (phone, colors, texts …)
+    display_rules : when/how/where to show the widget (delay, pages, trigger, show_once …)
+    """
+    __tablename__ = 'merchant_widgets'
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'widget_key', name='uq_merchant_widget_tenant_key'),
+    )
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id     = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+    widget_key    = Column(String(64), nullable=False)
+    is_enabled    = Column(Boolean, default=False, nullable=False)
+    settings_json = Column(JSONB, nullable=True, default=dict)
+    display_rules = Column(JSONB, nullable=True, default=dict)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship('Tenant')
