@@ -113,8 +113,35 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
             if verify_password(body.password, user.password_hash):
                 role = user.role or "merchant"
 
-                # ── Auto-repair: if user has no tenant_id, recover from existing data ──
+                # ── Auto-repair: find the correct tenant even if user already has one ──
                 tenant_id = user.tenant_id
+                # If user has a tenant assigned but it's empty (no WA, no Integration)
+                # while tenant_id=1 has data, migrate them back to tenant_id=1.
+                if tenant_id and tenant_id != 1:
+                    from models import WhatsAppConnection, Integration  # noqa: PLC0415
+                    current_has_wa = db.query(WhatsAppConnection).filter(
+                        WhatsAppConnection.tenant_id == tenant_id,
+                    ).first()
+                    current_has_int = db.query(Integration).filter(
+                        Integration.tenant_id == tenant_id,
+                    ).first()
+                    if not current_has_wa and not current_has_int:
+                        # Current tenant is empty — check if tenant_id=1 has their data
+                        t1_has_wa = db.query(WhatsAppConnection).filter(
+                            WhatsAppConnection.tenant_id == 1,
+                        ).first()
+                        t1_has_int = db.query(Integration).filter(
+                            Integration.tenant_id == 1,
+                        ).first()
+                        if t1_has_wa or t1_has_int:
+                            logger.warning(
+                                "[auth/login] Migrating user=%s from empty tenant=%s → tenant=1 (data recovery)",
+                                email, tenant_id,
+                            )
+                            tenant_id = 1
+                            user.tenant_id = 1
+                            db.commit()
+
                 if not tenant_id:
                     from models import WhatsAppConnection, Integration  # noqa: PLC0415
                     recovered = None

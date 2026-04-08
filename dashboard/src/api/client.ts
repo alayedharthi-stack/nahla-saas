@@ -43,7 +43,7 @@ export async function apiCall<T>(path: string, options?: RequestInit): Promise<T
       code = body?.code ?? ''
     } catch { /* ignore */ }
 
-    if (!code || SESSION_EXPIRED_CODES.has(code)) {
+    if (SESSION_EXPIRED_CODES.has(code)) {
       // True session expiry — clear state and send user to login
       logout()
       window.location.href = '/login'
