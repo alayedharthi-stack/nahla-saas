@@ -83,16 +83,29 @@ interface StoreSyncPanelProps {
   isStoreConnected: boolean
 }
 
+// Max time in ms to wait for a sync to complete before giving up on the frontend
+const SYNC_TIMEOUT_MS  = 3 * 60 * 1000   // 3 minutes
+const POLL_INTERVAL_MS = 3_000            // check every 3 s
+const MAX_POLL_ERRORS  = 4               // stop polling after 4 consecutive API errors
+
 export default function StoreSyncPanel({ isStoreConnected }: StoreSyncPanelProps) {
   const [status, setStatus]     = useState<SyncStatus | null>(null)
   const [knowledge, setKnow]    = useState<KnowledgeOverview | null>(null)
   const [loading, setLoading]   = useState(true)
   const [syncing, setSyncing]   = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
   const [pollTimer, setPollTimer] = useState<ReturnType<typeof setInterval> | null>(null)
+  const [syncStartedAt, setSyncStartedAt] = useState<number | null>(null)
+  const [pollErrors, setPollErrors]       = useState(0)
+
+  const stopPolling = useCallback((timer: ReturnType<typeof setInterval> | null) => {
+    if (timer) clearInterval(timer)
+    setPollTimer(null)
+  }, [])
 
   // ── Load ───────────────────────────────────────────────────────────────────
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (currentTimer?: ReturnType<typeof setInterval> | null) => {
     try {
       const [st, kn] = await Promise.all([
         storeSyncApi.getStatus(),
@@ -100,19 +113,40 @@ export default function StoreSyncPanel({ isStoreConnected }: StoreSyncPanelProps
       ])
       setStatus(st)
       setKnow(kn)
+      setPollErrors(0)   // reset error counter on success
 
       if (st.sync_running) {
         setSyncing(true)
+        // Enforce a client-side timeout so the loader never runs forever
+        if (syncStartedAt && Date.now() - syncStartedAt > SYNC_TIMEOUT_MS) {
+          setSyncing(false)
+          setSyncError('استغرقت المزامنة وقتاً طويلاً وتوقفت. يمكنك إعادة المحاولة.')
+          stopPolling(currentTimer ?? pollTimer)
+        }
       } else {
+        // Sync finished (completed, failed, or timed_out on the backend)
         setSyncing(false)
-        if (pollTimer) { clearInterval(pollTimer); setPollTimer(null) }
+        setSyncStartedAt(null)
+        stopPolling(currentTimer ?? pollTimer)
+        if (st.last_job_status === 'failed' || st.last_job_status === 'timed_out') {
+          setSyncError(st.last_job_error ?? 'فشلت المزامنة — يمكنك إعادة المحاولة.')
+        } else {
+          setSyncError(null)
+        }
       }
     } catch {
-      // silent
+      const next = pollErrors + 1
+      setPollErrors(next)
+      if (next >= MAX_POLL_ERRORS) {
+        setSyncing(false)
+        setSyncStartedAt(null)
+        stopPolling(currentTimer ?? pollTimer)
+        setSyncError('تعذّر الوصول إلى الخادم. تحقق من الاتصال وأعد المحاولة.')
+      }
     } finally {
       setLoading(false)
     }
-  }, [pollTimer])
+  }, [pollTimer, pollErrors, syncStartedAt, stopPolling])
 
   useEffect(() => { loadAll() }, [])   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -121,14 +155,18 @@ export default function StoreSyncPanel({ isStoreConnected }: StoreSyncPanelProps
   const handleSync = useCallback(async () => {
     if (syncing) return
     setSyncing(true)
+    setSyncError(null)
+    setSyncStartedAt(Date.now())
+    setPollErrors(0)
     try {
       await storeSyncApi.trigger()
-      // Poll for completion every 2 s
-      const timer = setInterval(loadAll, 2000)
+      // Poll for completion every POLL_INTERVAL_MS
+      const timer = setInterval(() => loadAll(timer), POLL_INTERVAL_MS)
       setPollTimer(timer)
     } catch (err) {
       setSyncing(false)
-      alert(err instanceof Error ? err.message : 'فشل تشغيل المزامنة')
+      setSyncStartedAt(null)
+      setSyncError(err instanceof Error ? err.message : 'فشل تشغيل المزامنة')
     }
   }, [syncing, loadAll])
 
@@ -146,8 +184,8 @@ export default function StoreSyncPanel({ isStoreConnected }: StoreSyncPanelProps
     )
   }
 
-  const ready        = knowledge?.ready ?? false
-  const hasError     = status?.last_job_status === 'failed'
+  const ready    = knowledge?.ready ?? false
+  const hasError = status?.last_job_status === 'failed' || status?.last_job_status === 'timed_out'
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -196,13 +234,15 @@ export default function StoreSyncPanel({ isStoreConnected }: StoreSyncPanelProps
           </div>
         )}
 
-        {/* Error state */}
-        {hasError && !syncing && status?.last_job_error && (
+        {/* Error state — from backend or frontend timeout */}
+        {(syncError || (hasError && !syncing && status?.last_job_error)) && (
           <div className="flex items-start gap-2.5 bg-red-50 border border-red-200 rounded-xl p-3.5">
             <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
             <div>
               <p className="text-xs font-semibold text-red-700">فشلت المزامنة الأخيرة</p>
-              <p className="text-xs text-red-600 font-mono mt-1 break-all">{status.last_job_error}</p>
+              <p className="text-xs text-red-600 mt-1 break-all">
+                {syncError ?? status?.last_job_error}
+              </p>
             </div>
           </div>
         )}

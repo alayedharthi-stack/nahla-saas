@@ -21,8 +21,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+# A job stuck in "running" for longer than this is considered timed out
+_SYNC_JOB_TIMEOUT_MINUTES = 10
 
 from sqlalchemy.orm import Session
 
@@ -495,6 +498,27 @@ class StoreSyncService:
             .order_by(StoreSyncJob.id.desc())
             .first()
         )
+        # Auto-expire stale "running" jobs so the UI never gets stuck forever.
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=_SYNC_JOB_TIMEOUT_MINUTES)
+        stale_jobs = (
+            self.db.query(StoreSyncJob)
+            .filter(
+                StoreSyncJob.tenant_id == self.tenant_id,
+                StoreSyncJob.status    == "running",
+                StoreSyncJob.created_at < stale_cutoff,
+            )
+            .all()
+        )
+        for stale in stale_jobs:
+            stale.status        = "timed_out"
+            stale.error_message = (
+                f"تجاوز الحد الزمني ({_SYNC_JOB_TIMEOUT_MINUTES} دقيقة). "
+                "قد يكون الخادم أُعيد تشغيله أثناء المزامنة."
+            )
+            stale.completed_at  = datetime.now(timezone.utc)
+        if stale_jobs:
+            self.db.commit()
+
         running_job = (
             self.db.query(StoreSyncJob)
             .filter_by(tenant_id=self.tenant_id, status="running")
