@@ -842,25 +842,38 @@ async def direct_debug_token():
         "token_prefix":   (WA_TOKEN or "")[:12] + "...",
     }
     async with httpx.AsyncClient(timeout=15) as client:
-        # 1. Check token info
+        # 1. Check token info + debug_token
         try:
-            r = await client.get(f"{graph}/me", headers=headers)
+            r = await client.get(f"{graph}/me", headers=headers,
+                                 params={"fields": "id,name"})
             result["me"] = r.json()
         except Exception as e:
             result["me_error"] = str(e)
 
-        # 2. Check WABA access
+        # 2. List all WABAs accessible to this token
+        try:
+            user_id = result.get("me", {}).get("id", "me")
+            r = await client.get(
+                f"{graph}/{user_id}/businesses",
+                headers=headers,
+                params={"fields": "id,name,whatsapp_business_accounts{id,name}"},
+            )
+            result["businesses"] = r.json()
+        except Exception as e:
+            result["businesses_error"] = str(e)
+
+        # 3. Direct WABA access attempt
         try:
             r = await client.get(
                 f"{graph}/{WA_BUSINESS_ACCOUNT_ID}",
                 headers=headers,
                 params={"fields": "id,name,currency,timezone_id"},
             )
-            result["waba"] = r.json()
+            result["waba_direct"] = r.json()
         except Exception as e:
-            result["waba_error"] = str(e)
+            result["waba_direct_error"] = str(e)
 
-        # 3. List phone numbers under WABA
+        # 4. List phone numbers under WABA
         try:
             r = await client.get(
                 f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
@@ -870,6 +883,23 @@ async def direct_debug_token():
             result["phone_numbers"] = r.json()
         except Exception as e:
             result["phone_numbers_error"] = str(e)
+
+        # 5. Try token debug info
+        try:
+            r = await client.get(
+                f"{graph}/debug_token",
+                headers=headers,
+                params={"input_token": WA_TOKEN},
+            )
+            data = r.json().get("data", {})
+            result["token_debug"] = {
+                "app_id":      data.get("app_id"),
+                "expires_at":  data.get("expires_at"),
+                "is_valid":    data.get("is_valid"),
+                "scopes":      data.get("scopes", []),
+            }
+        except Exception as e:
+            result["token_debug_error"] = str(e)
 
     logger.info("[WA Debug] Token diagnostic result: %s", result)
     return result
