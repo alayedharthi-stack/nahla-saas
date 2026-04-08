@@ -151,6 +151,8 @@ class ConversationState:
     Persisted as JSON in PostgreSQL.
     """
     phone:            str
+    # tenant that owns this conversation (set at load time, not persisted in JSON)
+    tenant_id:        Optional[int]    = field(default=None, compare=False, repr=False)
     # ── Stage (5. Stage Transition) ──────────────────────────────────────────
     stage:            str              = "discovery"
     # ── Slots ────────────────────────────────────────────────────────────────
@@ -737,13 +739,14 @@ class StateManager:
     """
 
     @classmethod
-    def load(cls, db, phone: str) -> ConversationState:
+    def load(cls, db, phone: str, tenant_id: Optional[int] = None) -> "ConversationState":
+        _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
         try:
             from models import Conversation  # noqa: PLC0415
             conv = (
                 db.query(Conversation)
                 .filter(
-                    Conversation.tenant_id == PLATFORM_TENANT_ID,
+                    Conversation.tenant_id == _tid,
                     Conversation.extra_metadata["phone"].astext == phone,
                 )
                 .order_by(Conversation.id.desc())
@@ -752,11 +755,15 @@ class StateManager:
             if conv and conv.extra_metadata and "stage" in conv.extra_metadata:
                 return ConversationState.from_dict(dict(conv.extra_metadata))
         except Exception as exc:
-            logger.warning("[StateManager] load error phone=%s: %s", phone, exc)
-        return ConversationState(phone=phone)
+            logger.warning("[StateManager] load error phone=%s tenant=%s: %s", phone, _tid, exc)
+        state = ConversationState(phone=phone)
+        state.tenant_id = _tid   # carry it for downstream save
+        return state
 
     @classmethod
-    def save(cls, db, state: ConversationState) -> Optional[Any]:
+    def save(cls, db, state: "ConversationState", tenant_id: Optional[int] = None) -> Optional[Any]:
+        # Prefer explicit tenant_id arg, then the one attached to the state, then platform default
+        _tid = tenant_id if tenant_id is not None else getattr(state, "tenant_id", None) or PLATFORM_TENANT_ID
         try:
             from models import Conversation  # noqa: PLC0415
             state.updated_at = time.time()
@@ -764,7 +771,7 @@ class StateManager:
             conv = (
                 db.query(Conversation)
                 .filter(
-                    Conversation.tenant_id == PLATFORM_TENANT_ID,
+                    Conversation.tenant_id == _tid,
                     Conversation.extra_metadata["phone"].astext == state.phone,
                 )
                 .order_by(Conversation.id.desc())
@@ -774,7 +781,7 @@ class StateManager:
                 conv.extra_metadata = meta
             else:
                 conv = Conversation(
-                    tenant_id=PLATFORM_TENANT_ID,
+                    tenant_id=_tid,
                     status="active",
                     extra_metadata=meta,
                 )
@@ -782,7 +789,7 @@ class StateManager:
             db.commit()
             return conv
         except Exception as exc:
-            logger.error("[StateManager] save error phone=%s: %s", state.phone, exc)
+            logger.error("[StateManager] save error phone=%s tenant=%s: %s", state.phone, _tid, exc)
             try:
                 db.rollback()
             except Exception:
@@ -791,11 +798,13 @@ class StateManager:
 
     @classmethod
     def save_message(cls, db, phone: str, body: str, direction: str,
-                     conversation_id: Optional[int] = None) -> None:
+                     conversation_id: Optional[int] = None,
+                     tenant_id: Optional[int] = None) -> None:
+        _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
         try:
             from models import MessageEvent  # noqa: PLC0415
             db.add(MessageEvent(
-                tenant_id=PLATFORM_TENANT_ID,
+                tenant_id=_tid,
                 conversation_id=conversation_id,
                 direction=direction,
                 body=body,

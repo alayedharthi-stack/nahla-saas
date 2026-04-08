@@ -158,11 +158,43 @@ async def _dispatch_message(
         logger.error("[Engine] Cannot open DB session for phone=%s", sender)
         return
 
+    # ── Resolve tenant from phone_number_id ───────────────────────────────────
+    # Each merchant has their own phone_number_id stored in WhatsAppConnection.
+    # We look it up here so every message is scoped to the correct tenant.
+    resolved_tenant_id: Optional[int] = None
+    if used_pid:
+        wa_conn = (
+            db.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.phone_number_id == used_pid)
+            .first()
+        )
+        if wa_conn:
+            resolved_tenant_id = wa_conn.tenant_id
+            logger.info(
+                "[Webhook] phone_number_id=%s → tenant_id=%s",
+                used_pid, resolved_tenant_id,
+            )
+        else:
+            # Fallback: try env var PHONE_NUMBER_ID for backward compat
+            if used_pid == WA_PHONE_ID:
+                logger.warning(
+                    "[Webhook] phone_number_id=%s not found in DB — using env fallback",
+                    used_pid,
+                )
+            else:
+                logger.warning(
+                    "[Webhook] Unknown phone_number_id=%s — no tenant found, dropping message from=%s",
+                    used_pid, sender,
+                )
+                return   # drop — we have no idea which tenant this belongs to
+
     turn_log: Optional[TurnLog] = None
+    # Use resolved tenant from DB, fall back to env-var default for backward compat
+    effective_tenant_id = resolved_tenant_id
 
     try:
-        # ── ① Load state ──────────────────────────────────────────────────────
-        state = StateManager.load(db, phone=sender)
+        # ── ① Load state — scoped to the correct merchant tenant ──────────────
+        state = StateManager.load(db, phone=sender, tenant_id=effective_tenant_id)
         stage_before = state.stage
 
         # ── ③ Idempotency check ──────────────────────────────────────────────
@@ -274,10 +306,10 @@ async def _dispatch_message(
                 await _send_whatsapp_message(phone_id=used_pid, to=sender, text=response_text)
 
         # ── ⑨ Persist messages + state ────────────────────────────────────────
-        StateManager.save_message(db, sender, text, "inbound")
+        StateManager.save_message(db, sender, text,          "inbound",  tenant_id=effective_tenant_id)
         if response_text:
-            StateManager.save_message(db, sender, response_text, "outbound")
-        StateManager.save(db, state)
+            StateManager.save_message(db, sender, response_text, "outbound", tenant_id=effective_tenant_id)
+        StateManager.save(db, state, tenant_id=effective_tenant_id)
 
         # ── ⑩ Observability ──────────────────────────────────────────────────
         latency_ms = int((time.monotonic() - t_start) * 1000)
