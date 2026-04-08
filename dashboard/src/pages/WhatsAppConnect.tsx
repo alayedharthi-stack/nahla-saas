@@ -54,6 +54,25 @@ const VERTICALS = [
   { value: 'OTHER',                    label: 'أخرى'                  },
 ]
 
+// ── Meta message sanitizer ────────────────────────────────────────────────────
+// Raw Meta messages (escaped unicode, HTML entities, provider text) must NEVER
+// be shown to merchants. This is a last-resort guard on the frontend side.
+
+const FALLBACK_MSG = 'تمت معالجة الطلب، ولكن تعذر عرض تفاصيل الرسالة بشكل صحيح.'
+
+function sanitizeMessage(msg: unknown): string {
+  if (typeof msg !== 'string' || !msg.trim()) return FALLBACK_MSG
+  const raw = msg.trim()
+  // Detect raw escaped unicode sequences
+  if (/\\u[0-9a-fA-F]{4}/.test(raw)) return FALLBACK_MSG
+  // Detect HTML-escaped content
+  if (/^html:/i.test(raw) || /&[a-z]+;/.test(raw)) return FALLBACK_MSG
+  // Detect obvious raw Meta provider messages (English technical text)
+  if (/\(#\d+\)/.test(raw)) return FALLBACK_MSG
+  if (/^unsupported|^object with id|^invalid oauth/i.test(raw)) return FALLBACK_MSG
+  return raw
+}
+
 // ── API helpers ───────────────────────────────────────────────────────────────
 
 const post = <T,>(path: string, body: unknown) =>
@@ -177,9 +196,9 @@ export default function WhatsAppConnect() {
     try {
       const r = await requestOtp(phone.trim(), displayName.trim(), otpMethod)
       setPhoneNumberId(r.phone_number_id)
-      setSentMsg(r.message)
+      setSentMsg(sanitizeMessage(r.message))
       setStep(2)
-    } catch (e) { setError(e instanceof Error ? e.message : 'حدث خطأ') }
+    } catch (e) { setError(sanitizeMessage(e instanceof Error ? e.message : '')) }
     finally { setBusy(false) }
   }, [phone, displayName, otpMethod])
 
@@ -193,7 +212,7 @@ export default function WhatsAppConnect() {
       setConnPhone(r.phone_number)
       setConnName(r.display_name)
       setStep(3)
-    } catch (e) { setError(e instanceof Error ? e.message : 'رمز غير صحيح') }
+    } catch (e) { setError(sanitizeMessage(e instanceof Error ? e.message : '')) }
     finally { setBusy(false) }
   }, [otp, phoneNumberId])
 
@@ -208,7 +227,7 @@ export default function WhatsAppConnect() {
       })
       setConnAt(new Date().toISOString())
       setStep(4)
-    } catch (e) { setError(e instanceof Error ? e.message : 'خطأ في الحفظ') }
+    } catch (e) { setError(sanitizeMessage(e instanceof Error ? e.message : '')) }
     finally { setBusy(false) }
   }, [phoneNumberId, vertical, about, address, email, website])
 
@@ -482,10 +501,12 @@ export default function WhatsAppConnect() {
 }
 
 function ErrorBox({ msg }: { msg: string }) {
+  // Last-resort sanitization: never render raw Meta/provider text
+  const safe = sanitizeMessage(msg)
   return (
     <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
       <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5"/>
-      <p className="text-sm text-red-700">{msg}</p>
+      <p className="text-sm text-red-700">{safe}</p>
     </div>
   )
 }

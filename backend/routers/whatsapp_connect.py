@@ -592,29 +592,31 @@ async def direct_request_otp(
         subcode  = err.get("error_subcode", 0)
         msg      = err.get("message", "")
         user_msg = err.get("error_user_msg", "") or err.get("error_user_title", "")
+        # Log full raw Meta response for debugging — never forwarded to UI
         logger.warning(
-            "[WA Direct] Add phone error code=%s subcode=%s msg=%s user_msg=%s full=%s",
+            "[WA Direct] Add phone raw_error code=%s subcode=%s msg=%s user_msg=%s full=%s",
             code, subcode, msg, user_msg, add_data,
         )
 
-        # Code 100 subcode 2388053 = number already registered → proceed to OTP
-        already_registered = (
-            (code == 100 and subcode == 2388053)
-            or (code == 100 and "already" in msg.lower())
-        )
-        if already_registered:
+        internal_code, ux_message = _normalize_meta_error(code, msg, subcode, user_msg)
+
+        # Already registered → proceed to OTP step
+        if internal_code == META_ALREADY_REGISTERED:
             phone_number_id = add_data.get("error", {}).get("error_data", {}).get("id", "") or ""
-            # even without ID we can still try to request OTP by looking up number
         else:
-            friendly = _meta_error_to_arabic(code, msg, subcode, user_msg)
-            raise HTTPException(status_code=400, detail=friendly)
+            raise HTTPException(
+                status_code=400,
+                detail=ux_message,
+                headers={"X-Nahla-Error-Code": internal_code},
+            )
     else:
         phone_number_id = add_data.get("id", "")
 
     if not phone_number_id:
         raise HTTPException(
             status_code=400,
-            detail="لم يتم الحصول على معرّف الرقم. تحقق من الرقم وأعد المحاولة.",
+            detail=_UX_MESSAGES[META_INVALID_NUMBER],
+            headers={"X-Nahla-Error-Code": META_INVALID_NUMBER},
         )
 
     # ── Step B: Request OTP ──────────────────────────────────────────────────
@@ -631,12 +633,16 @@ async def direct_request_otp(
             otp_data = otp_resp.json()
     except Exception as exc:
         logger.error("[WA Direct] Request OTP API error: %s", exc)
-        raise HTTPException(status_code=503, detail="خطأ في إرسال رمز التحقق")
+        raise HTTPException(status_code=503, detail=_UX_MESSAGES[META_UNKNOWN_ERROR])
 
     if "error" in otp_data:
         err = otp_data["error"]
-        friendly = _meta_error_to_arabic(err.get("code", 0), err.get("message", ""))
-        raise HTTPException(status_code=400, detail=friendly)
+        ic, ux = _normalize_meta_error(
+            err.get("code", 0), err.get("message", ""),
+            err.get("error_subcode", 0), err.get("error_user_msg", ""),
+        )
+        logger.warning("[WA Direct] OTP request raw_error code=%s full=%s", err.get("code"), otp_data)
+        raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
     logger.info(
         "[WA Direct] OTP sent | tenant=%s phone_number_id=%s",
@@ -644,7 +650,8 @@ async def direct_request_otp(
     )
 
     return {
-        "status":          "otp_sent",
+        "status":          META_CODE_SENT,
+        "code":            META_CODE_SENT,
         "phone_number_id": phone_number_id,
         "message":         f"تم إرسال رمز التحقق إلى +{cc}{national}",
     }
@@ -684,15 +691,20 @@ async def direct_verify_otp(
             verify_data = verify_resp.json()
     except Exception as exc:
         logger.error("[WA Direct] Verify code API error: %s", exc)
-        raise HTTPException(status_code=503, detail="خطأ في التحقق من الرمز")
+        raise HTTPException(status_code=503, detail=_UX_MESSAGES[META_UNKNOWN_ERROR])
 
     if "error" in verify_data:
         err = verify_data["error"]
         code = err.get("code", 0)
+        logger.warning("[WA Direct] Verify OTP raw_error code=%s full=%s", code, verify_data)
         if code in (136012, 136013):
-            raise HTTPException(status_code=400, detail="رمز التحقق غير صحيح أو منتهي الصلاحية")
-        friendly = _meta_error_to_arabic(code, err.get("message", ""))
-        raise HTTPException(status_code=400, detail=friendly)
+            raise HTTPException(
+                status_code=400,
+                detail="رمز التحقق غير صحيح أو منتهي الصلاحية. اطلب رمزاً جديداً.",
+                headers={"X-Nahla-Error-Code": "META_INVALID_CODE"},
+            )
+        ic, ux = _normalize_meta_error(code, err.get("message", ""), err.get("error_subcode", 0))
+        raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
     # ── Step B: Fetch phone number details ───────────────────────────────────
     phone_number   = ""
@@ -813,37 +825,107 @@ async def direct_save_profile(
 
     if "error" in data:
         err = data["error"]
-        logger.warning("[WA Direct] save-profile error: %s", err)
-        raise HTTPException(
-            status_code=400,
-            detail=_meta_error_to_arabic(err.get("code", 0), err.get("message", "")),
-        )
+        logger.warning("[WA Direct] save-profile raw_error code=%s full=%s", err.get("code"), data)
+        ic, ux = _normalize_meta_error(err.get("code", 0), err.get("message", ""), err.get("error_subcode", 0))
+        raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
     logger.info("[WA Direct] ✅ Business profile saved | tenant=%s", tenant_id)
-    return {"status": "profile_saved", "message": "تم حفظ الملف التجاري بنجاح"}
+    return {"status": META_PROFILE_SAVED, "code": META_PROFILE_SAVED, "message": _UX_MESSAGES[META_PROFILE_SAVED]}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# META RESPONSE NORMALIZER
+# All Meta API responses MUST pass through this layer before reaching the UI.
+# Raw provider messages are NEVER sent to the frontend.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Internal status codes exposed to the frontend
+META_CODE_SENT           = "META_CODE_SENT"
+META_ALREADY_REGISTERED  = "META_ALREADY_REGISTERED"
+META_INVALID_NUMBER      = "META_INVALID_NUMBER"
+META_INVALID_NAME        = "META_INVALID_NAME"
+META_PERSONAL_NUMBER     = "META_PERSONAL_NUMBER"
+META_LIMIT_EXCEEDED      = "META_LIMIT_EXCEEDED"
+META_PERMISSION_ERROR    = "META_PERMISSION_ERROR"
+META_TOKEN_EXPIRED       = "META_TOKEN_EXPIRED"
+META_VERIFIED            = "META_VERIFIED"
+META_PROFILE_SAVED       = "META_PROFILE_SAVED"
+META_UNKNOWN_ERROR       = "META_UNKNOWN_ERROR"
+
+# Arabic UX messages — defined internally, never derived from raw Meta text
+_UX_MESSAGES: dict[str, str] = {
+    META_CODE_SENT:          "تم إرسال رمز التحقق إلى رقم الهاتف.",
+    META_ALREADY_REGISTERED: "الرقم مسجَّل بالفعل في هذا الحساب.",
+    META_INVALID_NUMBER:     "صيغة رقم الهاتف غير صحيحة. تأكد من إدخال الرقم كاملاً مع رمز الدولة.",
+    META_INVALID_NAME:       "اسم العرض غير مقبول. استخدم الاسم الرسمي لنشاطك التجاري.",
+    META_PERSONAL_NUMBER:    "هذا الرقم مسجَّل على واتساب الشخصي. احذف الحساب الشخصي أولاً ثم أعد المحاولة بعد 24 ساعة.",
+    META_LIMIT_EXCEEDED:     "تجاوزت الحد الأقصى لعدد الأرقام المسموح بها. يمكنك حذف أحد الأرقام الحالية أو التواصل مع الدعم لرفع الحد.",
+    META_PERMISSION_ERROR:   "تعذر إكمال الربط بسبب إعدادات الصلاحيات في Meta. يرجى التواصل مع الدعم.",
+    META_TOKEN_EXPIRED:      "انتهت صلاحية رمز الوصول. يرجى التواصل مع الدعم لتجديده.",
+    META_VERIFIED:           "تم التحقق من الرقم بنجاح وتم ربطه بواتساب للأعمال.",
+    META_PROFILE_SAVED:      "تم حفظ بيانات الملف التجاري بنجاح.",
+    META_UNKNOWN_ERROR:      "حدث خطأ أثناء ربط واتساب. حاول مرة أخرى بعد قليل.",
+}
+
+_FALLBACK_MESSAGE = "تمت معالجة الطلب، ولكن تعذر عرض تفاصيل الرسالة بشكل صحيح."
+
+
+def _normalize_meta_error(
+    code: int,
+    message: str,
+    subcode: int = 0,
+    user_msg: str = "",
+) -> tuple[str, str]:
+    """
+    Map a raw Meta error to an (internal_code, arabic_ux_message) tuple.
+    The raw message is LOGGED but never returned to the UI.
+    """
+    logger.debug(
+        "[MetaNormalizer] raw error code=%s subcode=%s msg=%s user_msg=%s",
+        code, subcode, message, user_msg,
+    )
+
+    # ── Subcode mapping (most specific) ─────────────────────────────────────
+    subcode_map: dict[int, str] = {
+        2388053: META_ALREADY_REGISTERED,
+        2361002: META_INVALID_NUMBER,
+        2388001: META_INVALID_NAME,
+        2388055: META_PERSONAL_NUMBER,
+        2388049: META_LIMIT_EXCEEDED,
+    }
+    if subcode and subcode in subcode_map:
+        ic = subcode_map[subcode]
+        return ic, _UX_MESSAGES[ic]
+
+    # ── Code mapping ─────────────────────────────────────────────────────────
+    code_map: dict[int, str] = {
+        136023: META_PERSONAL_NUMBER,
+        136031: META_LIMIT_EXCEEDED,
+        190:    META_TOKEN_EXPIRED,
+        10:     META_PERMISSION_ERROR,
+        200:    META_PERMISSION_ERROR,
+    }
+    if code in code_map:
+        ic = code_map[code]
+        return ic, _UX_MESSAGES[ic]
+
+    # ── Heuristic: scan raw message for known patterns ───────────────────────
+    raw = (message + " " + user_msg).lower()
+    if "already" in raw or "exist" in raw:
+        return META_ALREADY_REGISTERED, _UX_MESSAGES[META_ALREADY_REGISTERED]
+    if "personal" in raw or "consumer" in raw:
+        return META_PERSONAL_NUMBER, _UX_MESSAGES[META_PERSONAL_NUMBER]
+    if "limit" in raw or "maximum" in raw or "exceeded" in raw:
+        return META_LIMIT_EXCEEDED, _UX_MESSAGES[META_LIMIT_EXCEEDED]
+    if "permission" in raw or "authorized" in raw or "missing" in raw:
+        return META_PERMISSION_ERROR, _UX_MESSAGES[META_PERMISSION_ERROR]
+    if "invalid" in raw and ("phone" in raw or "number" in raw):
+        return META_INVALID_NUMBER, _UX_MESSAGES[META_INVALID_NUMBER]
+
+    return META_UNKNOWN_ERROR, _UX_MESSAGES[META_UNKNOWN_ERROR]
 
 
 def _meta_error_to_arabic(code: int, message: str, subcode: int = 0, user_msg: str = "") -> str:
-    """Convert common Meta API error codes to friendly Arabic messages."""
-    # Subcode-specific messages take priority
-    subcode_map = {
-        2388053: "الرقم مسجَّل بالفعل في هذا الحساب.",
-        2361002: "صيغة رقم الهاتف غير صحيحة. تأكد من إدخال الرقم كاملاً مع رمز الدولة.",
-        2388001: "اسم العرض غير مقبول من Meta. استخدم اسم النشاط التجاري الرسمي.",
-        2388055: "الرقم مسجَّل على واتساب الشخصي. يجب حذفه من الواتساب الشخصي أولاً.",
-        2388049: "تجاوزت الحد الأقصى لعدد الأرقام المسموح بها في هذا الحساب.",
-    }
-    if subcode and subcode in subcode_map:
-        return subcode_map[subcode]
-
-    code_map = {
-        136023: "هذا الرقم مسجَّل على واتساب الشخصي. يجب إلغاء تسجيله أولاً.",
-        136031: "تجاوزت الحد الأقصى لعدد الأرقام المسموح بها. تواصل مع الدعم.",
-        190:    "انتهت صلاحية رمز الوصول. تواصل مع الدعم.",
-        10:     "صلاحيات غير كافية. تواصل مع الدعم.",
-        100:    f"بيانات غير صحيحة من Meta{': ' + user_msg if user_msg else (' — ' + message[:120] if message else '')}",
-    }
-    if code in code_map:
-        return code_map[code]
-    detail = user_msg or message or str(code)
-    return f"خطأ من Meta ({code}): {detail[:200]}"
+    """Thin wrapper kept for backwards compatibility — returns only the UX message."""
+    _, msg = _normalize_meta_error(code, message, subcode, user_msg)
+    return msg
