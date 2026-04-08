@@ -636,6 +636,42 @@ async def direct_request_otp(
         tenant_id, WA_BUSINESS_ACCOUNT_ID, cc, national, body.display_name, body.method,
     )
 
+    # ── Check DB: if already pending for same number, skip add step ──────────
+    existing_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    full_phone    = f"+{cc}{national}"
+    if (
+        existing_conn
+        and existing_conn.status == "pending"
+        and existing_conn.phone_number_id
+        and existing_conn.phone_number == full_phone
+    ):
+        logger.info(
+            "[WA Direct] Resuming pending state for tenant=%s phone=%s id=%s",
+            tenant_id, full_phone, existing_conn.phone_number_id,
+        )
+        phone_number_id = existing_conn.phone_number_id
+        # Jump directly to OTP request — skip add step
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                otp_resp = await client.post(
+                    f"{graph}/{phone_number_id}/request_code",
+                    headers=headers,
+                    json={"code_method": body.method.upper(), "language": "ar"},
+                )
+                otp_data = otp_resp.json()
+            if "error" in otp_data:
+                logger.warning("[WA Direct] Resend OTP error (pending resume): %s", otp_data)
+        except Exception as exc:
+            logger.warning("[WA Direct] Resend OTP exception (pending resume): %s", exc)
+        # Always proceed to Step 2 — user likely has the code or needs to wait
+        return {
+            "status":          META_CODE_SENT,
+            "code":            META_CODE_SENT,
+            "phone_number_id": phone_number_id,
+            "message":         "تم إرسال رمز التحقق — أدخل الرمز الذي وصلك أو انتظر دقيقة وأعد المحاولة.",
+            "already_sent":    True,
+        }
+
     # ── Step A: Add phone number to WABA ────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -773,6 +809,20 @@ async def direct_request_otp(
         ic, ux = _normalize_meta_error(err_code, err_msg, err_sub, err.get("error_user_msg", ""))
         conn.last_error = f"OTP_REQUEST_FAILED code={err_code} sub={err_sub} msg={err_msg}"
         db.commit()
+        # If phone is already in WABA (phone_number_id known), proceed to Step 2
+        # regardless of OTP error — user may already have the code
+        if phone_number_id:
+            logger.info(
+                "[WA Direct] OTP step failed but phone_number_id=%s known → resuming Step 2",
+                phone_number_id,
+            )
+            return {
+                "status":          META_CODE_SENT,
+                "code":            META_CODE_SENT,
+                "phone_number_id": phone_number_id,
+                "message":         "أدخل رمز التحقق الذي وصلك، أو انتظر دقائق قبل طلب رمز جديد.",
+                "already_sent":    True,
+            }
         raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
     logger.info(
