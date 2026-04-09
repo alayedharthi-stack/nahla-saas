@@ -277,6 +277,58 @@ function css(el,st){{Object.assign(el.style,st);}}
 function onReady(fn){{document.readyState!=='loading'?fn():document.addEventListener('DOMContentLoaded',fn);}}
 function addStyles(s){{var el=document.createElement('style');el.textContent=s;document.head.appendChild(el);}}
 
+// ── Shared coupon application helpers (used by popup + auto-apply) ──────────
+function _fillInput(inp,code){{
+  inp.focus();
+  try{{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(inp,code);}}catch(e){{inp.value=code;}}
+  ['input','change','keyup','keydown'].forEach(function(ev){{inp.dispatchEvent(new Event(ev,{{bubbles:true,cancelable:true}}));}});
+  inp.dispatchEvent(new KeyboardEvent('keydown',{{key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}}));
+  inp.dispatchEvent(new KeyboardEvent('keyup',{{key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}}));
+}}
+
+function _findApplyBtn(inp){{
+  var keywords=['تطبيق','Apply','apply','أضف'];
+  var allBtns=document.querySelectorAll('button');
+  for(var b=0;b<allBtns.length;b++){{
+    var txt=allBtns[b].textContent.trim();
+    for(var k=0;k<keywords.length;k++){{if(txt===keywords[k]||txt.indexOf(keywords[k])!==-1)return allBtns[b];}}
+  }}
+  var container=inp.closest('form,salla-coupon,[data-coupon],.coupon-form,.coupon');
+  if(container){{var cb=container.querySelector('button');if(cb)return cb;}}
+  var next=inp.nextElementSibling;
+  while(next){{if(next.tagName==='BUTTON')return next;next=next.nextElementSibling;}}
+  return null;
+}}
+
+function _applyCouponToPage(code){{
+  // 0. Salla web component
+  var sc=document.querySelector('salla-coupon,salla-coupon-form');
+  if(sc){{
+    try{{if(typeof sc.applyCoupon==='function'){{sc.applyCoupon(code);return true;}}}}catch(e){{}}
+    var root=sc.shadowRoot||sc;
+    var si=root.querySelector('input');
+    if(si){{
+      _fillInput(si,code);
+      var sb=_findApplyBtn(si)||root.querySelector('button');
+      if(sb)setTimeout(function(){{sb.click();}},250);
+      return true;
+    }}
+  }}
+  // 1. Regular input selectors
+  var sel=['input[name="coupon"]','input[name="coupon_code"]','input[name="discount_code"]',
+    'input[placeholder*="خصم"]','input[placeholder*="كوبون"]','input[placeholder*="coupon"]',
+    'input[id*="coupon"]','input[id*="discount"]','.coupon-field input','[data-coupon] input'];
+  var inp=null;
+  for(var i=0;i<sel.length;i++){{inp=document.querySelector(sel[i]);if(inp)break;}}
+  if(!inp)return false;
+  _fillInput(inp,code);
+  var btn=_findApplyBtn(inp);
+  if(btn){{setTimeout(function(){{btn.click();}},250);return true;}}
+  var form=inp.closest('form');
+  if(form){{form.dispatchEvent(new Event('submit',{{bubbles:true,cancelable:true}}));return true;}}
+  return false;
+}}
+
 // ── Page detection ────────────────────────────────────────────
 function matchPage(pages){{
   if(!pages||pages.indexOf('all')>-1)return true;
@@ -518,14 +570,14 @@ function initDiscountPopup(c,fromSlide){{
 
   function _domStrategy(code,btn){{
     // 2. Try DOM fill immediately
-    if(_applyCouponToDOM(code)){{btn.textContent='✓ جاري…';setTimeout(function(){{_showApplied(code,btn);}},600);return;}}
+    if(_applyCouponToPage(code)){{btn.textContent='✓ جاري…';setTimeout(function(){{_showApplied(code,btn);}},600);return;}}
 
     // 3. Use MutationObserver to wait for Salla's async component to render
     btn.textContent='⏳ جاري…';
     var done=false;
     var obs=new MutationObserver(function(){{
       if(done)return;
-      if(_applyCouponToDOM(code)){{done=true;obs.disconnect();_showApplied(code,btn);}}
+      if(_applyCouponToPage(code)){{done=true;obs.disconnect();_showApplied(code,btn);}}
     }});
     obs.observe(document.body,{{childList:true,subtree:true,attributes:true}});
 
@@ -533,7 +585,7 @@ function initDiscountPopup(c,fromSlide){{
     [400,900,1600,2600].forEach(function(ms){{
       setTimeout(function(){{
         if(done)return;
-        if(_applyCouponToDOM(code)){{done=true;obs.disconnect();_showApplied(code,btn);}}
+        if(_applyCouponToPage(code)){{done=true;obs.disconnect();_showApplied(code,btn);}}
       }},ms);
     }});
 
@@ -553,91 +605,13 @@ function initDiscountPopup(c,fromSlide){{
     setTimeout(hide,1800);
   }}
 
-  function _fillInput(inp,code){{
-    inp.focus();
-    // Use native setter for React/Vue/Lit compatibility
-    try{{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(inp,code);}}catch(e){{inp.value=code;}}
-    // Fire all events that web frameworks listen to
-    ['input','change','keyup','keydown'].forEach(function(ev){{
-      inp.dispatchEvent(new Event(ev,{{bubbles:true,cancelable:true}}));
-    }});
-    // Simulate Enter key to trigger built-in submit handlers
-    inp.dispatchEvent(new KeyboardEvent('keydown',{{key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}}));
-    inp.dispatchEvent(new KeyboardEvent('keyup',{{key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}}));
-  }}
-
-  function _findApplyBtn(inp){{
-    // 1. Search by Arabic/English text (most reliable)
-    var keywords=['تطبيق','Apply','apply','أضف','إضافة'];
-    var allBtns=document.querySelectorAll('button');
-    for(var b=0;b<allBtns.length;b++){{
-      var txt=allBtns[b].textContent.trim();
-      for(var k=0;k<keywords.length;k++){{
-        if(txt===keywords[k]||txt.indexOf(keywords[k])!==-1)return allBtns[b];
-      }}
-    }}
-    // 2. Button inside the same form/container as the input
-    var container=inp.closest('form,salla-coupon,[data-coupon],.coupon-form,.coupon');
-    if(container){{
-      var cb=container.querySelector('button');
-      if(cb)return cb;
-    }}
-    // 3. Nearest sibling button
-    var next=inp.nextElementSibling;
-    while(next){{if(next.tagName==='BUTTON')return next;next=next.nextElementSibling;}}
-    return null;
-  }}
-
-  function _applyCouponToDOM(code){{
-    // 0. Salla Web Component — try property + method approach first
-    var sc=document.querySelector('salla-coupon,salla-coupon-form');
-    if(sc){{
-      // Try component property/method
-      try{{
-        if(typeof sc.applyCoupon==='function'){{sc.applyCoupon(code);return true;}}
-        if(typeof sc.apply==='function'){{sc.value=code;sc.apply();return true;}}
-      }}catch(e){{}}
-      // Try Shadow DOM
-      var root=sc.shadowRoot||sc;
-      var si=root.querySelector('input');
-      if(si){{
-        _fillInput(si,code);
-        var sb=_findApplyBtn(si)||root.querySelector('button');
-        if(sb)setTimeout(function(){{sb.click();}},200);
-        return true;
-      }}
-    }}
-    // 1. Find input by multiple selectors
-    var sel=[
-      'input[name="coupon"]','input[name="coupon_code"]','input[name="discount_code"]',
-      'input[placeholder*="خصم"]','input[placeholder*="كوبون"]',
-      'input[placeholder*="coupon"]','input[id*="coupon"]','input[id*="discount"]',
-      '.coupon-field input','.discount-code input','[data-coupon] input',
-    ];
-    var inp=null;
-    for(var i=0;i<sel.length;i++){{inp=document.querySelector(sel[i]);if(inp)break;}}
-    if(!inp)return false;
-
-    // 2. Fill input
-    _fillInput(inp,code);
-
-    // 3. Find and click the CORRECT apply button (by text — avoids clicking "إتمام الطلب")
-    var applyBtn=_findApplyBtn(inp);
-    if(applyBtn){{
-      setTimeout(function(){{applyBtn.click();}},250);
-      return true;
-    }}
-    // 4. Submit the specific coupon form
-    var form=inp.closest('form');
-    if(form){{form.dispatchEvent(new Event('submit',{{bubbles:true,cancelable:true}}));return true;}}
-    return false;
-  }}
+  // Use shared top-level helpers: _applyCouponToPage, _fillInput, _findApplyBtn
 
   function _fallbackCart(code,btn){{
     try{{navigator.clipboard.writeText(code);}}catch(e){{}}
 
     // 1. Try DOM injection — handle normal DOM + Shadow DOM (Salla Web Components)
-    var domOk=_applyCouponToDOM(code);
+    var domOk=_applyCouponToPage(code);
     if(domOk){{btn.textContent='✓ جاري التطبيق…';setTimeout(function(){{_showApplied(code,btn);}},800);return;}}
 
     // 2. GUARANTEED fallback — retry DOM with delays then redirect
@@ -648,7 +622,7 @@ function initDiscountPopup(c,fromSlide){{
     function _retryDom(){{
       if(ri>=retries.length){{_doRedirect();return;}}
       setTimeout(function(){{
-        if(_applyCouponToDOM(code)){{_showApplied(code,btn);return;}}
+        if(_applyCouponToPage(code)){{_showApplied(code,btn);return;}}
         ri++;_retryDom();
       }},retries[ri]);
     }}
@@ -757,38 +731,7 @@ function initSlideOffer(c){{
       _domFill();
     }}
 
-    function _domFill(){{
-      // Shadow DOM: salla-coupon web component
-      var sc=document.querySelector('salla-coupon,salla-coupon-form');
-      if(sc){{
-        // Try to set value via component attribute/property
-        try{{sc.setAttribute('value',urlCode);sc.dispatchEvent(new CustomEvent('apply-coupon',{{detail:{{code:urlCode}}}}));}}catch(e){{}}
-        var root=sc.shadowRoot||sc;
-        var si=root.querySelector('input[type="text"],input[type="search"],input:not([type])');
-        if(si){{
-          si.value=urlCode;
-          si.dispatchEvent(new Event('input',{{bubbles:true}}));
-          si.dispatchEvent(new Event('change',{{bubbles:true}}));
-          var sb=root.querySelector('button[type="submit"],button');
-          if(sb)setTimeout(function(){{sb.click();}},200);
-          return;
-        }}
-      }}
-      // Regular DOM fallback
-      var inputs=['input[name="coupon"]','input[name="coupon_code"]',
-        'input[placeholder*="خصم"]','input[placeholder*="كوبون"]',
-        'input[placeholder*="coupon"]','input[id*="coupon"]'];
-      var inp=null;
-      for(var i=0;i<inputs.length;i++){{inp=document.querySelector(inputs[i]);if(inp)break;}}
-      if(!inp)return;
-      inp.value=urlCode;
-      inp.dispatchEvent(new Event('input',{{bubbles:true}}));
-      inp.dispatchEvent(new Event('change',{{bubbles:true}}));
-      var form=inp.closest('form');
-      var btn=form?form.querySelector('button'):document.querySelector('button[class*="coupon"],button[class*="apply"]');
-      if(btn)setTimeout(function(){{btn.click();}},200);
-      else if(form)form.submit();
-    }}
+    function _domFill(){{_applyCouponToPage(urlCode);}}
 
     // Wait for Salla components + retry with MutationObserver
     onReady(function(){{
