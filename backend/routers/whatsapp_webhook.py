@@ -132,17 +132,60 @@ async def _dispatch_message(
     msg: Dict[str, Any],
     value: Dict[str, Any],
 ) -> None:
-    t_start    = time.monotonic()
-    msg_type   = msg.get("type")
-    sender     = msg.get("from", "")
-    msg_id     = msg.get("id", "")
-    used_pid   = phone_number_id or WA_PHONE_ID
+    t_start  = time.monotonic()
+    msg_type = msg.get("type")
+    sender   = msg.get("from", "")
+    msg_id   = msg.get("id", "")
+
+    # NEVER fall back to WA_PHONE_ID — that would route the message to the wrong tenant.
+    # If phone_number_id is missing from the webhook metadata, drop the message.
+    if not phone_number_id:
+        logger.error(
+            "[Webhook] DROPPED — phone_number_id missing from metadata. "
+            "msg_type=%s from=%s msg_id=%s",
+            msg_type, sender, msg_id,
+        )
+        return
+
+    # ── Open DB session early (needed for tenant lookup) ─────────────────────
+    db = next(get_db(), None)
+    if not db:
+        logger.error("[Engine] Cannot open DB session for phone=%s", sender)
+        return
+
+    # ── Resolve tenant + verified phone_number_id from DB ────────────────────
+    # Look up by the phone_number_id that RECEIVED the message.
+    # This guarantees replies go back from the correct number.
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.phone_number_id == phone_number_id)
+        .first()
+    )
+
+    if wa_conn:
+        # Use the DB-stored phone_number_id (verified) — not the raw webhook value
+        used_pid            = wa_conn.phone_number_id
+        resolved_tenant_id  = wa_conn.tenant_id
+        logger.info(
+            "[Webhook] ✅ Routed | phone_number_id=%s → tenant_id=%s",
+            used_pid, resolved_tenant_id,
+        )
+    else:
+        # No connected tenant found for this phone_number_id — drop message
+        logger.warning(
+            "[Webhook] DROPPED — no WhatsAppConnection for phone_number_id=%s from=%s",
+            phone_number_id, sender,
+        )
+        return
 
     # ── Handle interactive button replies ──────────────────────────────────────
     if msg_type == "interactive":
         if msg.get("interactive", {}).get("type") == "button_reply":
             btn_id = msg["interactive"]["button_reply"].get("id", "")
-            await _handle_button_reply(btn_id=btn_id, phone_id=used_pid, to=sender)
+            await _handle_button_reply(
+                btn_id=btn_id, phone_id=used_pid, to=sender,
+                tenant_id=resolved_tenant_id, db=db,
+            )
         return
 
     if msg_type != "text":
@@ -152,44 +195,7 @@ async def _dispatch_message(
     if not text:
         return
 
-    # ── Open DB session ────────────────────────────────────────────────────────
-    db = next(get_db(), None)
-    if not db:
-        logger.error("[Engine] Cannot open DB session for phone=%s", sender)
-        return
-
-    # ── Resolve tenant from phone_number_id ───────────────────────────────────
-    # Each merchant has their own phone_number_id stored in WhatsAppConnection.
-    # We look it up here so every message is scoped to the correct tenant.
-    resolved_tenant_id: Optional[int] = None
-    if used_pid:
-        wa_conn = (
-            db.query(WhatsAppConnection)
-            .filter(WhatsAppConnection.phone_number_id == used_pid)
-            .first()
-        )
-        if wa_conn:
-            resolved_tenant_id = wa_conn.tenant_id
-            logger.info(
-                "[Webhook] phone_number_id=%s → tenant_id=%s",
-                used_pid, resolved_tenant_id,
-            )
-        else:
-            # Fallback: try env var PHONE_NUMBER_ID for backward compat
-            if used_pid == WA_PHONE_ID:
-                logger.warning(
-                    "[Webhook] phone_number_id=%s not found in DB — using env fallback",
-                    used_pid,
-                )
-            else:
-                logger.warning(
-                    "[Webhook] Unknown phone_number_id=%s — no tenant found, dropping message from=%s",
-                    used_pid, sender,
-                )
-                return   # drop — we have no idea which tenant this belongs to
-
     turn_log: Optional[TurnLog] = None
-    # Use resolved tenant from DB, fall back to env-var default for backward compat
     effective_tenant_id = resolved_tenant_id
 
     try:
@@ -476,10 +482,14 @@ async def _send_plans_message(phone_id: str, to: str, db=None) -> None:
 # BUTTON REPLY HANDLER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _handle_button_reply(btn_id: str, phone_id: str, to: str) -> None:
+async def _handle_button_reply(
+    btn_id: str, phone_id: str, to: str,
+    tenant_id: Optional[int] = None, db=None,
+) -> None:
     """Handle interactive button taps — all deterministic, no Claude."""
-    db = next(get_db(), None)
-    state = StateManager.load(db, phone=to) if db else None
+    if db is None:
+        db = next(get_db(), None)
+    state = StateManager.load(db, phone=to, tenant_id=tenant_id) if db else None
 
     if btn_id == "contact_founder":
         await _send_whatsapp_message(
