@@ -177,6 +177,18 @@ class PhoneSelectRequest(BaseModel):
     phone_number_id: str
 
 
+class AddPhoneRequest(BaseModel):
+    country_code: str          # e.g. "966"
+    phone_number: str          # without country code, e.g. "512345678"
+    verified_name: str         # display name
+    code_method: str = "SMS"   # SMS or VOICE
+
+
+class VerifyPhoneRequest(BaseModel):
+    phone_number_id: str
+    code: str
+
+
 # ── endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/config")
@@ -341,4 +353,133 @@ async def get_status(request: Request, db: Session = Depends(get_db)):
         "phone_number": conn.phone_number,
         "waba_id":      conn.whatsapp_business_account_id,
         "display_name": conn.business_display_name,
+    }
+
+
+@router.post("/add-phone")
+async def add_phone(
+    body: AddPhoneRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Add a new phone number to the merchant's WABA and send OTP.
+    Called when the merchant's WABA has no phone numbers yet.
+    """
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if not conn or not conn.whatsapp_business_account_id:
+        raise HTTPException(status_code=400, detail="لا يوجد WABA مرتبط. أكمل خطوة الربط أولاً.")
+
+    waba_id = conn.whatsapp_business_account_id
+    token   = conn.access_token
+
+    # Step 1 — Register the phone number with the WABA
+    async with httpx.AsyncClient(timeout=20) as client:
+        reg_resp = await client.post(
+            f"{GRAPH}/{waba_id}/phone_numbers",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "cc":            body.country_code,
+                "phone_number":  body.phone_number,
+                "migrate_phone_number": False,
+                "verified_name": body.verified_name,
+            },
+        )
+        reg_data = reg_resp.json()
+
+    logger.info("[EmbeddedSignup] add-phone register: %s", reg_data)
+
+    if "error" in reg_data:
+        raise HTTPException(
+            status_code=400,
+            detail=f"فشل إضافة الرقم: {reg_data['error'].get('message', '')}",
+        )
+
+    phone_number_id = reg_data.get("id")
+    if not phone_number_id:
+        raise HTTPException(status_code=500, detail="لم يُعاد phone_number_id من Meta")
+
+    # Step 2 — Request OTP
+    async with httpx.AsyncClient(timeout=15) as client:
+        otp_resp = await client.post(
+            f"{GRAPH}/{phone_number_id}/request_code",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"code_method": body.code_method, "language": "ar"},
+        )
+        otp_data = otp_resp.json()
+
+    logger.info("[EmbeddedSignup] add-phone request_code: %s", otp_data)
+
+    if "error" in otp_data:
+        raise HTTPException(
+            status_code=400,
+            detail=f"فشل إرسال رمز التحقق: {otp_data['error'].get('message', '')}",
+        )
+
+    # Save phone_number_id temporarily for verification step
+    conn.phone_number_id = phone_number_id
+    conn.status          = "otp_pending"
+    db.commit()
+
+    return {
+        "status":          "otp_sent",
+        "phone_number_id": phone_number_id,
+        "message":         f"تم إرسال رمز التحقق عبر {body.code_method}",
+    }
+
+
+@router.post("/verify-phone")
+async def verify_phone(
+    body: VerifyPhoneRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Verify OTP for a newly added phone number."""
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if not conn or not conn.access_token:
+        raise HTTPException(status_code=400, detail="لا يوجد اتصال نشط")
+
+    token = conn.access_token
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        verify_resp = await client.post(
+            f"{GRAPH}/{body.phone_number_id}/verify_code",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"code": body.code},
+        )
+        verify_data = verify_resp.json()
+
+    logger.info("[EmbeddedSignup] verify-phone: %s", verify_data)
+
+    if "error" in verify_data:
+        raise HTTPException(
+            status_code=400,
+            detail=f"رمز التحقق غير صحيح: {verify_data['error'].get('message', '')}",
+        )
+
+    # Fetch phone details to update the connection
+    async with httpx.AsyncClient(timeout=15) as client:
+        ph_resp = await client.get(
+            f"{GRAPH}/{body.phone_number_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"fields": "id,display_phone_number,verified_name,code_verification_status"},
+        )
+        ph_data = ph_resp.json()
+
+    conn.phone_number_id          = body.phone_number_id
+    conn.phone_number             = ph_data.get("display_phone_number", "")
+    conn.business_display_name    = ph_data.get("verified_name", "")
+    conn.status                   = "connected"
+    conn.sending_enabled          = True
+    conn.connected_at             = datetime.now(timezone.utc)
+    conn.last_verified_at         = datetime.now(timezone.utc)
+    db.commit()
+
+    return {
+        "status":       "connected",
+        "phone_number": conn.phone_number,
+        "display_name": conn.business_display_name,
+        "message":      "تم التحقق وربط الرقم بنجاح!",
     }

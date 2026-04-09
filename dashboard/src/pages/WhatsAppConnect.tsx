@@ -35,7 +35,7 @@ declare global {
 interface EmbeddedPhone { id: string; number: string; name: string; verified: boolean }
 
 function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
-  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'done'>('init')
+  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'verify-phone'|'done'>('init')
   const [error, setError]       = useState('')
   const [phones, setPhones]     = useState<EmbeddedPhone[]>([])
   const [wabaId, setWabaId]     = useState('')
@@ -43,6 +43,13 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
   const sdkLoaded               = useRef(false)
 
   const [configId, setConfigId] = useState('')
+
+  // Add-phone form state
+  const [newPhone, setNewPhone]         = useState('')
+  const [countryCode, setCountryCode]   = useState('966')
+  const [displayName, setDisplayName]   = useState('')
+  const [otpCode, setOtpCode]           = useState('')
+  const [newPhoneId, setNewPhoneId]     = useState('')
 
   // Load Meta config + FB SDK on mount
   useEffect(() => {
@@ -150,8 +157,17 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
         {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
         <div className="space-y-2">
           {phones.length === 0 && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-700">
-              لا توجد أرقام هاتف في حساب واتساب للأعمال. أضف رقماً من Meta Business Manager أولاً.
+            <div className="space-y-3">
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-700">
+                لا توجد أرقام هاتف في حساب واتساب للأعمال.
+              </div>
+              <button
+                onClick={() => { setError(''); setStage('add-phone') }}
+                className="w-full py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
+              >
+                <Phone className="w-4 h-4" />
+                إضافة رقم هاتف جديد
+              </button>
             </div>
           )}
           {phones.map(p => (
@@ -176,6 +192,138 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
               }
             </button>
           ))}
+        </div>
+      </div>
+    )
+  }
+
+  // ── Add phone stage ──────────────────────────────────────────────────────────
+  if (stage === 'add-phone') {
+    const submitPhone = async () => {
+      if (!newPhone || !displayName) { setError('أدخل رقم الهاتف والاسم التجاري'); return }
+      setBusy(true); setError('')
+      try {
+        const res = await apiCall<{ phone_number_id: string }>('/whatsapp/embedded/add-phone', {
+          method: 'POST',
+          body: JSON.stringify({
+            country_code:  countryCode,
+            phone_number:  newPhone,
+            verified_name: displayName,
+            code_method:   'SMS',
+          }),
+        })
+        setNewPhoneId(res.phone_number_id)
+        setStage('verify-phone')
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'فشل إضافة الرقم')
+      } finally { setBusy(false) }
+    }
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center">
+            <Phone className="w-5 h-5 text-violet-600" />
+          </div>
+          <div>
+            <p className="font-semibold text-slate-800">إضافة رقم هاتف</p>
+            <p className="text-xs text-slate-500">سيصلك رمز تحقق عبر SMS</p>
+          </div>
+        </div>
+        {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            <input
+              value={countryCode}
+              onChange={e => setCountryCode(e.target.value)}
+              placeholder="966"
+              className="w-20 px-3 py-3 border border-slate-200 rounded-xl text-sm text-center focus:outline-none focus:border-violet-400"
+            />
+            <input
+              value={newPhone}
+              onChange={e => setNewPhone(e.target.value)}
+              placeholder="5XXXXXXXX"
+              className="flex-1 px-4 py-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-violet-400"
+              dir="ltr"
+            />
+          </div>
+          <input
+            value={displayName}
+            onChange={e => setDisplayName(e.target.value)}
+            placeholder="الاسم التجاري (مثال: متجر نحلة)"
+            className="w-full px-4 py-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-violet-400"
+          />
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setStage('select-phone')}
+            className="flex-1 py-3 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            رجوع
+          </button>
+          <button
+            onClick={submitPhone}
+            disabled={busy}
+            className="flex-1 py-3 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
+          >
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}
+            إرسال رمز التحقق
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Verify phone stage ────────────────────────────────────────────────────────
+  if (stage === 'verify-phone') {
+    const submitOtp = async () => {
+      if (!otpCode) { setError('أدخل رمز التحقق'); return }
+      setBusy(true); setError('')
+      try {
+        await apiCall('/whatsapp/embedded/verify-phone', {
+          method: 'POST',
+          body: JSON.stringify({ phone_number_id: newPhoneId, code: otpCode }),
+        })
+        setStage('done')
+        setTimeout(onConnected, 1500)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'رمز التحقق غير صحيح')
+      } finally { setBusy(false) }
+    }
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center">
+            <ShieldCheck className="w-5 h-5 text-emerald-600" />
+          </div>
+          <div>
+            <p className="font-semibold text-slate-800">تحقق من رقم الهاتف</p>
+            <p className="text-xs text-slate-500">أدخل الرمز المرسل عبر SMS</p>
+          </div>
+        </div>
+        {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
+        <input
+          value={otpCode}
+          onChange={e => setOtpCode(e.target.value)}
+          placeholder="- - - - - -"
+          maxLength={6}
+          className="w-full px-4 py-4 border border-slate-200 rounded-xl text-center text-2xl font-mono tracking-widest focus:outline-none focus:border-emerald-400"
+          dir="ltr"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={() => setStage('add-phone')}
+            className="flex-1 py-3 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            رجوع
+          </button>
+          <button
+            onClick={submitOtp}
+            disabled={busy}
+            className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
+          >
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <BadgeCheck className="w-4 h-4" />}
+            تأكيد
+          </button>
         </div>
       </div>
     )
