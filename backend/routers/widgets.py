@@ -601,18 +601,17 @@ function initDiscountPopup(c,fromSlide){{
       toast.style.cssText='position:fixed;top:24px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:16px 28px;border-radius:16px;z-index:999999;font-size:14px;font-weight:700;direction:rtl;box-shadow:0 10px 40px rgba(0,0,0,.35);text-align:center;min-width:280px;';
       toast.innerHTML='🎁 كود خصمك: <span style="color:#fbbf24;letter-spacing:3px;font-size:17px;display:block;margin-top:4px;">'+code+'</span><small style="font-weight:400;opacity:.7;font-size:12px;">انسخه وضعه في حقل الكوبون</small>';
       document.body.appendChild(toast);
-      // Build correct cart URL preserving language prefix (e.g. /ar/cart)
       var curPath=window.location.pathname;
       var cartUrl;
       if(curPath.indexOf('/cart')!==-1){{
-        // Already on cart — add coupon param to current URL
         cartUrl=curPath+'?coupon='+encodeURIComponent(code);
       }}else{{
-        // Navigate to cart with language prefix preserved
         var langMatch=curPath.match(/^\/([a-z]{{2}})\//);
         cartUrl=(langMatch?'/'+langMatch[1]:'')+'/cart?coupon='+encodeURIComponent(code);
       }}
       setTimeout(function(){{window.location.href=cartUrl;}},1800);
+    }}
+    _retryDom();
   }}
 
   return {{show:show,hide:hide}};
