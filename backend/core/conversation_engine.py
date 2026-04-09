@@ -688,13 +688,14 @@ class ObservabilityLogger:
     """
 
     @staticmethod
-    def log(db, log: TurnLog) -> None:
+    def log(db, log: TurnLog, tenant_id: Optional[int] = None) -> None:
         if not db:
             return
+        _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
         try:
             from models import ConversationTrace  # noqa: PLC0415
             trace = ConversationTrace(
-                tenant_id=PLATFORM_TENANT_ID,
+                tenant_id=_tid,
                 customer_phone=log.phone,
                 session_id=log.phone,
                 turn=log.turn,
@@ -820,13 +821,15 @@ class StateManager:
                 pass
 
     @classmethod
-    def load_history(cls, db, phone: str, limit: int = HISTORY_WINDOW) -> List[Dict]:
+    def load_history(cls, db, phone: str, limit: int = HISTORY_WINDOW,
+                     tenant_id: Optional[int] = None) -> List[Dict]:
+        _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
         try:
             from models import MessageEvent  # noqa: PLC0415
             events = (
                 db.query(MessageEvent)
                 .filter(
-                    MessageEvent.tenant_id == PLATFORM_TENANT_ID,
+                    MessageEvent.tenant_id == _tid,
                     MessageEvent.extra_metadata["phone"].astext == phone,
                 )
                 .order_by(MessageEvent.id.desc())

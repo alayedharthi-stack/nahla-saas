@@ -137,6 +137,12 @@ async def _dispatch_message(
     sender   = msg.get("from", "")
     msg_id   = msg.get("id", "")
 
+    # ── TRACE: log every incoming webhook ─────────────────────────────────────
+    logger.info(
+        "[TRACE][1/6] INCOMING_WEBHOOK | phone_number_id=%s sender=%s msg_id=%s msg_type=%s",
+        phone_number_id, sender, msg_id, msg_type,
+    )
+
     # NEVER fall back to WA_PHONE_ID — that would route the message to the wrong tenant.
     # If phone_number_id is missing from the webhook metadata, drop the message.
     if not phone_number_id:
@@ -167,9 +173,16 @@ async def _dispatch_message(
         used_pid            = wa_conn.phone_number_id
         resolved_tenant_id  = wa_conn.tenant_id
         logger.info(
-            "[Webhook] ✅ Routed | phone_number_id=%s → tenant_id=%s",
-            used_pid, resolved_tenant_id,
+            "[TRACE][2/6] TENANT_RESOLVED | webhook_phone_id=%s db_phone_id=%s tenant_id=%s",
+            phone_number_id, used_pid, resolved_tenant_id,
         )
+        # Guard: mismatch between webhook phone_id and DB phone_id
+        if phone_number_id != used_pid:
+            logger.critical(
+                "[TRACE] MISMATCH DETECTED | webhook_phone_id=%s != db_phone_id=%s — DROPPING",
+                phone_number_id, used_pid,
+            )
+            return
     else:
         # No connected tenant found for this phone_number_id — drop message
         logger.warning(
@@ -202,6 +215,10 @@ async def _dispatch_message(
         # ── ① Load state — scoped to the correct merchant tenant ──────────────
         state = StateManager.load(db, phone=sender, tenant_id=effective_tenant_id)
         stage_before = state.stage
+        logger.info(
+            "[TRACE][3/6] SESSION_LOADED | tenant_id=%s sender=%s stage=%s",
+            effective_tenant_id, sender, stage_before,
+        )
 
         # ── ③ Idempotency check ──────────────────────────────────────────────
         if msg_id and IdempotencyGuard.is_duplicate(state, msg_id):
@@ -296,7 +313,11 @@ async def _dispatch_message(
 
         # ── ⑦ AI reply — only for GENERATE_AI_REPLY ─────────────────────────
         if ai_called:
-            history  = StateManager.load_history(db, phone=sender)
+            logger.info(
+                "[TRACE][4/6] CONTEXT_LOADED | tenant_id=%s sender=%s action=%s",
+                effective_tenant_id, sender, action,
+            )
+            history  = StateManager.load_history(db, phone=sender, tenant_id=effective_tenant_id)
             messages = ContextBuilder.build_messages(history, text)
             state_ctx = ContextBuilder.build_system_injection(state, action, decision_reason)
             response_text = await _call_claude_with_context(
@@ -335,9 +356,11 @@ async def _dispatch_message(
             fact_guard_issues=fact_guard_issues,
             response_text=response_text,
             latency_ms=latency_ms,
-        ))
-        logger.info("[Engine] done phone=%s intent=%s action=%s stage=%s→%s latency=%dms",
-                    sender, intent, action, stage_before, state.stage, latency_ms)
+        ), tenant_id=effective_tenant_id)
+        logger.info(
+            "[Engine] ✅ DONE | tenant=%s from_phone_id=%s to=%s intent=%s action=%s stage=%s→%s latency=%dms",
+            effective_tenant_id, used_pid, sender, intent, action, stage_before, state.stage, latency_ms,
+        )
 
     finally:
         try:
@@ -389,6 +412,10 @@ async def _call_claude_with_context(
 async def _post_wa(phone_id: str, payload: dict) -> None:
     if not WA_TOKEN:
         return
+    logger.info(
+        "[TRACE][5/6] OUTBOUND_SEND | from_phone_id=%s to=%s",
+        phone_id, payload.get("to", "?"),
+    )
     url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=15) as client:
