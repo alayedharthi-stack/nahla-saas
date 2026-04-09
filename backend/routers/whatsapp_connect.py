@@ -916,6 +916,7 @@ async def direct_verify_otp(
     )
 
     # ── Pre-check: confirm phone_number_id belongs to our WABA & token ────────
+    # If the stored ID is stale/inaccessible, try to find the fresh ID from WABA.
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             chk_resp = await client.get(
@@ -931,23 +932,65 @@ async def direct_verify_otp(
         )
         if "error" in chk_data:
             chk_err = chk_data["error"]
-            logger.error(
-                "[WA verify] pre-check FAILED — phone_number_id=%s not accessible | "
-                "error_code=%s msg=%s | WABA=%s token_tail=...%s",
-                phone_id,
-                chk_err.get("code"),
-                chk_err.get("message"),
-                WA_BUSINESS_ACCOUNT_ID,
-                token_tail,
+            logger.warning(
+                "[WA verify] pre-check FAILED for id=%s (code=%s msg=%s) — "
+                "trying fresh WABA lookup to find correct phone_number_id",
+                phone_id, chk_err.get("code"), chk_err.get("message"),
             )
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"رقم الهاتف ({phone_id}) غير متاح للتحقق عبر هذه المنصة. "
-                    f"تأكد أن الرقم مضاف لحساب WhatsApp Business الصحيح. "
-                    f"[Meta: {chk_err.get('message', '')}]"
-                ),
-            )
+            # ── Fallback: find correct phone_number_id from WABA phone list ──
+            fresh_id = ""
+            try:
+                conn_rec = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+                stored_phone = (conn_rec.phone_number or "").replace("+", "").replace(" ", "").replace("-", "")
+                logger.info(
+                    "[WA verify] fallback lookup — stored_phone=%s WABA=%s",
+                    stored_phone, WA_BUSINESS_ACCOUNT_ID,
+                )
+                async with httpx.AsyncClient(timeout=15) as client:
+                    list_resp = await client.get(
+                        f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
+                        headers=headers,
+                        params={"fields": "id,display_phone_number,code_verification_status"},
+                    )
+                    list_data = list_resp.json()
+                logger.info("[WA verify] WABA phone list: %s", list_data)
+                for entry in list_data.get("data", []):
+                    dp = entry.get("display_phone_number", "").replace(" ", "").replace("-", "").replace("+", "")
+                    if stored_phone and (stored_phone in dp or dp in stored_phone):
+                        fresh_id = entry["id"]
+                        logger.info(
+                            "[WA verify] fallback found fresh id=%s for phone=%s",
+                            fresh_id, stored_phone,
+                        )
+                        break
+            except Exception as lookup_exc:
+                logger.error("[WA verify] fallback lookup error: %s", lookup_exc)
+
+            if fresh_id:
+                logger.info(
+                    "[WA verify] replacing stale phone_number_id=%s → %s",
+                    phone_id, fresh_id,
+                )
+                phone_id = fresh_id
+                # Update DB with fresh ID
+                conn_u = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+                if conn_u:
+                    conn_u.phone_number_id = fresh_id
+                    db.commit()
+            else:
+                logger.error(
+                    "[WA verify] phone_number_id=%s not accessible and no fresh ID found | "
+                    "WABA=%s token_tail=...%s",
+                    phone_id, WA_BUSINESS_ACCOUNT_ID, token_tail,
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "رقم الهاتف غير متاح للتحقق. "
+                        "يبدو أن الرقم لم يُضف بعد لحساب WhatsApp Business أو انتهت صلاحية الجلسة. "
+                        "يرجى البدء من الخطوة الأولى مجدداً."
+                    ),
+                )
     except HTTPException:
         raise
     except Exception as pre_exc:
