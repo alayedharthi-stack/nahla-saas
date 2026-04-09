@@ -272,11 +272,13 @@ async def _dispatch_message(
 
         elif action == SEND_FOUNDER_LINK:
             response_text = "زين! تقدر تتواصل مع المؤسس مباشرةً على واتساب 👇\nhttps://wa.me/966555906901"
-            await _send_whatsapp_message(phone_id=used_pid, to=sender, text=response_text)
+            await _send_whatsapp_message(phone_id=used_pid, to=sender, text=response_text,
+                                         _tenant_id=effective_tenant_id, _db=db)
 
         elif action == ESCALATE_SUPPORT:
             response_text = "تواصل مع فريق الدعم:\n📧 support@nahlah.ai"
-            await _send_whatsapp_message(phone_id=used_pid, to=sender, text=response_text)
+            await _send_whatsapp_message(phone_id=used_pid, to=sender, text=response_text,
+                                         _tenant_id=effective_tenant_id, _db=db)
 
         elif action == FILL_SLOT_PLATFORM:
             # Slot already filled — ask store size if not yet asked
@@ -330,7 +332,8 @@ async def _dispatch_message(
                 is_clean, fact_guard_issues = FactGuard.verify_reply(response_text)
                 if not is_clean:
                     logger.warning("[FactGuard] Issues in reply: %s", fact_guard_issues)
-                await _send_whatsapp_message(phone_id=used_pid, to=sender, text=response_text)
+                await _send_whatsapp_message(phone_id=used_pid, to=sender, text=response_text,
+                                             _tenant_id=effective_tenant_id, _db=db)
 
         # ── ⑨ Persist messages + state ────────────────────────────────────────
         StateManager.save_message(db, sender, text,          "inbound",  tenant_id=effective_tenant_id)
@@ -409,29 +412,55 @@ async def _call_claude_with_context(
 # WHATSAPP SEND HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _post_wa(phone_id: str, payload: dict) -> None:
+async def _post_wa(
+    phone_id: str,
+    payload: dict,
+    _tenant_id: Optional[int] = None,
+    _store_name: str = "unknown",
+    _db=None,
+) -> None:
     if not WA_TOKEN:
         return
+
+    # Fetch store name from DB if not provided
+    if _store_name == "unknown" and _tenant_id and _db:
+        try:
+            from core.tenant import get_or_create_tenant  # noqa: PLC0415
+            t = get_or_create_tenant(_db, _tenant_id)
+            _store_name = getattr(t, "store_name", None) or getattr(t, "name", None) or f"tenant_{_tenant_id}"
+        except Exception:
+            pass
+
+    token_tail = WA_TOKEN[-6:] if WA_TOKEN and len(WA_TOKEN) >= 6 else WA_TOKEN or "EMPTY"
+
     logger.info(
-        "[TRACE][5/6] OUTBOUND_SEND | from_phone_id=%s to=%s",
-        phone_id, payload.get("to", "?"),
+        "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_tail=%s to=%s",
+        _tenant_id, _store_name, phone_id, token_tail, payload.get("to", "?"),
     )
+
     url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=15) as client:
         try:
             resp = await client.post(url, json=payload, headers=headers)
+            logger.info(
+                "[SEND_DEBUG] Meta response | status=%s phone_number_id=%s",
+                resp.status_code, phone_id,
+            )
             if resp.status_code not in (200, 201):
                 logger.warning("[WA] post failed: %s %.200s", resp.status_code, resp.text)
         except Exception as exc:
             logger.error("[WA] post error: %s", exc)
 
 
-async def _send_whatsapp_message(phone_id: str, to: str, text: str) -> None:
+async def _send_whatsapp_message(
+    phone_id: str, to: str, text: str,
+    _tenant_id: Optional[int] = None, _store_name: str = "unknown", _db=None,
+) -> None:
     await _post_wa(phone_id, {
         "messaging_product": "whatsapp", "to": to, "type": "text",
         "text": {"body": text},
-    })
+    }, _tenant_id=_tenant_id, _store_name=_store_name, _db=_db)
 
 
 async def _send_interactive_reply(phone_id: str, to: str, body_text: str, buttons: list) -> None:
