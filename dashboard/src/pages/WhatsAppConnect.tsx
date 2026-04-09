@@ -203,11 +203,13 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
       if (!newPhone || !displayName) { setError('أدخل رقم الهاتف والاسم التجاري'); return }
       setBusy(true); setError('')
       try {
+        // Strip leading zeros from phone number
+        const cleanPhone = newPhone.replace(/^0+/, '')
         const res = await apiCall<{ phone_number_id: string }>('/whatsapp/embedded/add-phone', {
           method: 'POST',
           body: JSON.stringify({
             country_code:  countryCode,
-            phone_number:  newPhone,
+            phone_number:  cleanPhone,
             verified_name: displayName,
             code_method:   'SMS',
           }),

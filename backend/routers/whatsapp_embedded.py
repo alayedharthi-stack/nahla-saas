@@ -391,9 +391,10 @@ async def add_phone(
     logger.info("[EmbeddedSignup] add-phone register: %s", reg_data)
 
     if "error" in reg_data:
+        err = reg_data["error"]
         raise HTTPException(
             status_code=400,
-            detail=f"فشل إضافة الرقم: {reg_data['error'].get('message', '')}",
+            detail=f"فشل إضافة الرقم: {err.get('message', '')} (code={err.get('code')}, subcode={err.get('error_subcode')})",
         )
 
     phone_number_id = reg_data.get("id")
@@ -412,9 +413,10 @@ async def add_phone(
     logger.info("[EmbeddedSignup] add-phone request_code: %s", otp_data)
 
     if "error" in otp_data:
+        err = otp_data["error"]
         raise HTTPException(
             status_code=400,
-            detail=f"فشل إرسال رمز التحقق: {otp_data['error'].get('message', '')}",
+            detail=f"فشل إرسال رمز التحقق: {err.get('message', '')} (code={err.get('code')}, subcode={err.get('error_subcode')})",
         )
 
     # Save phone_number_id temporarily for verification step
