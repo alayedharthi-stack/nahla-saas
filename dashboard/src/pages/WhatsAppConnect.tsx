@@ -80,9 +80,11 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
 
   const handleExchangeCode = useCallback((code: string) => {
     setBusy(true); setStage('exchanging')
+    // redirect_uri must match exactly what Meta used during FB.login()
+    const redirectUri = window.location.origin + window.location.pathname
     apiCall<{ waba_id: string; phones: EmbeddedPhone[]; message: string }>(
       '/whatsapp/embedded/exchange',
-      { method: 'POST', body: JSON.stringify({ code }) }
+      { method: 'POST', body: JSON.stringify({ code, redirect_uri: redirectUri }) }
     ).then(result => {
       setWabaId(result.waba_id)
       setPhones(result.phones)

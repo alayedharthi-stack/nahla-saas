@@ -53,10 +53,12 @@ def resolve_tenant_id(request: Request) -> int:
 
 async def _exchange_code_for_token(code: str, redirect_uri: str = "") -> dict:
     """Exchange a short-lived code for a user access token."""
+    # For FB JS SDK codes, redirect_uri must match what was used during login.
+    # If not provided, we try without it first, then with the app URL.
     params: dict = {
-        "client_id": META_APP_ID,
+        "client_id":     META_APP_ID,
         "client_secret": META_APP_SECRET,
-        "code": code,
+        "code":          code,
     }
     if redirect_uri:
         params["redirect_uri"] = redirect_uri
