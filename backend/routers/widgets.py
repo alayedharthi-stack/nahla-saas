@@ -425,25 +425,29 @@ function initDiscountPopup(c,fromSlide){{
     function _doApply(code){{
       if(!code){{cta.textContent='احصل على الخصم';cta.disabled=false;hide();return;}}
 
-      // 1. Try Salla SDK methods
+      // 1. Try Salla SDK
       var sdk=window.salla||window.Salla;
       if(sdk&&sdk.cart){{
         var fn=sdk.cart.applyCoupon||sdk.cart.addCoupon||sdk.cart.setCoupon;
         if(typeof fn==='function'){{
           fn.call(sdk.cart,code)
             .then(function(){{_showApplied(code,cta);}})
-            .catch(function(){{_fallbackCart(code,cta);}});
+            .catch(function(){{_tryRestApi(code);}});
           return;
         }}
       }}
-      // 2. Try Salla Custom Event
-      try{{
-        document.dispatchEvent(new CustomEvent('cart::coupon.apply',{{bubbles:true,detail:{{coupon_code:code}}}}));
-        setTimeout(function(){{_showApplied(code,cta);}},600);
-        return;
-      }}catch(e){{}}
-      // 3. DOM + redirect fallback
-      _fallbackCart(code,cta);
+      _tryRestApi(code);
+    }}
+
+    function _tryRestApi(code){{
+      // 2. Try Salla Store REST API
+      fetch('/api/cart/coupons',{{
+        method:'POST',
+        headers:{{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
+        body:JSON.stringify({{coupon_code:code}})
+      }}).then(function(r){{return r.ok?r.json():Promise.reject();}})
+        .then(function(){{_showApplied(code,cta);setTimeout(function(){{window.location.reload();}},1000);}})
+        .catch(function(){{_fallbackCart(code,cta);}});
     }}
 
     // Try backend for unique coupon, fallback to static code on ANY failure
@@ -587,6 +591,81 @@ function initSlideOffer(c){{
     }});
   }}
 }}
+
+// ══════════════════════════════════════════════════════════════
+// Auto-apply coupon from URL param (set by popup redirect)
+// ══════════════════════════════════════════════════════════════
+(function(){{
+  try{{
+    var p=new URLSearchParams(window.location.search);
+    var urlCode=p.get('coupon')||p.get('nahla_coupon');
+    if(!urlCode)return;
+    // Clean URL
+    p.delete('coupon');p.delete('nahla_coupon');
+    var newQ=p.toString();
+    window.history.replaceState({{}},'',window.location.pathname+(newQ?'?'+newQ:''));
+
+    function _tryApply(){{
+      // 1. Salla Twilight SDK
+      var sdk=window.salla||window.Salla;
+      if(sdk&&sdk.cart){{
+        var fn=sdk.cart.applyCoupon||sdk.cart.addCoupon||sdk.cart.setCoupon;
+        if(typeof fn==='function'){{fn.call(sdk.cart,urlCode).catch(function(){{}});return;}}
+      }}
+      // 2. Salla Store REST API (works inside Salla storefront)
+      try{{
+        fetch('/api/cart/coupons',{{
+          method:'POST',
+          headers:{{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
+          body:JSON.stringify({{coupon_code:urlCode}})
+        }}).then(function(r){{return r.ok?r.json():Promise.reject();}})
+          .then(function(){{window.location.reload();}})
+          .catch(function(){{_domFill();}});
+        return;
+      }}catch(e){{}}
+      _domFill();
+    }}
+
+    function _domFill(){{
+      // Shadow DOM: salla-coupon web component
+      var sc=document.querySelector('salla-coupon,salla-coupon-form');
+      if(sc){{
+        // Try to set value via component attribute/property
+        try{{sc.setAttribute('value',urlCode);sc.dispatchEvent(new CustomEvent('apply-coupon',{{detail:{{code:urlCode}}}}));}}catch(e){{}}
+        var root=sc.shadowRoot||sc;
+        var si=root.querySelector('input[type="text"],input[type="search"],input:not([type])');
+        if(si){{
+          si.value=urlCode;
+          si.dispatchEvent(new Event('input',{{bubbles:true}}));
+          si.dispatchEvent(new Event('change',{{bubbles:true}}));
+          var sb=root.querySelector('button[type="submit"],button');
+          if(sb)setTimeout(function(){{sb.click();}},200);
+          return;
+        }}
+      }}
+      // Regular DOM fallback
+      var inputs=['input[name="coupon"]','input[name="coupon_code"]',
+        'input[placeholder*="خصم"]','input[placeholder*="كوبون"]',
+        'input[placeholder*="coupon"]','input[id*="coupon"]'];
+      var inp=null;
+      for(var i=0;i<inputs.length;i++){{inp=document.querySelector(inputs[i]);if(inp)break;}}
+      if(!inp)return;
+      inp.value=urlCode;
+      inp.dispatchEvent(new Event('input',{{bubbles:true}}));
+      inp.dispatchEvent(new Event('change',{{bubbles:true}}));
+      var form=inp.closest('form');
+      var btn=form?form.querySelector('button'):document.querySelector('button[class*="coupon"],button[class*="apply"]');
+      if(btn)setTimeout(function(){{btn.click();}},200);
+      else if(form)form.submit();
+    }}
+
+    // Try immediately + with delay (for async-rendered components)
+    onReady(function(){{
+      setTimeout(_tryApply,600);
+      setTimeout(_tryApply,1800);
+    }});
+  }}catch(err){{}}
+}})();
 
 // ══════════════════════════════════════════════════════════════
 // Bootstrap
