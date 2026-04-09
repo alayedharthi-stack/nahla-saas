@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from 'react'
-import { Bell, Search, ChevronDown, Menu, LogOut, User, Shield, ShieldOff } from 'lucide-react'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { Bell, Search, ChevronDown, Menu, LogOut, User, Shield, ShieldOff, ShieldCheck, Clock, CheckCircle, XCircle } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useLanguage } from '../../i18n/context'
 import {
@@ -12,6 +12,7 @@ import {
   stopImpersonation,
   isPlatformOwner,
 } from '../../auth'
+import { API_BASE } from '../../api/client'
 import type { Lang } from '../../i18n/types'
 
 interface HeaderProps {
@@ -20,11 +21,15 @@ interface HeaderProps {
   onMenuClick?: () => void
 }
 
-/** Derive a readable display name from an email or store name. */
+interface AccessRequest {
+  id:           string
+  requested_by: string
+  requested_at: string
+}
+
 function _displayName(email: string, storeName: string, role: string): string {
   if (storeName) return storeName
   if (email) {
-    // Take the part before @ and clean it up
     const local = email.split('@')[0].replace(/[-_.]/g, ' ')
     return local.charAt(0).toUpperCase() + local.slice(1)
   }
@@ -32,24 +37,66 @@ function _displayName(email: string, storeName: string, role: string): string {
   return 'التاجر'
 }
 
-/** First letter of display name for the avatar. */
 function _avatarLetter(name: string): string {
   return name.trim().charAt(0).toUpperCase() || 'م'
 }
 
-/** Color class for the avatar based on role. */
 function _avatarColor(role: string): string {
   if (role === 'admin' || role === 'owner' || role === 'super_admin') return 'bg-rose-500'
   return 'bg-brand-500'
+}
+
+function useAccessRequests(role: string) {
+  const [requests, setRequests]     = useState<AccessRequest[]>([])
+  const [responding, setResponding] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    if (role === 'admin' || role === 'super_admin') return
+    try {
+      const res = await fetch(`${API_BASE}/merchant/access-requests`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) {
+        const d = await res.json()
+        setRequests(d.requests ?? [])
+      }
+    } catch { /* ignore */ }
+  }, [role])
+
+  useEffect(() => {
+    load()
+    const id = setInterval(load, 30_000)
+    return () => clearInterval(id)
+  }, [load])
+
+  const respond = async (reqId: string, approve: boolean, ttlHours = 4) => {
+    setResponding(reqId)
+    try {
+      const res = await fetch(`${API_BASE}/merchant/access-requests/${reqId}/respond`, {
+        method:  'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}`,
+        },
+        body: JSON.stringify({ approve, ttl_hours: ttlHours }),
+      })
+      if (res.ok) await load()
+    } catch { /* ignore */ }
+    finally { setResponding(null) }
+  }
+
+  return { requests, responding, respond, reload: load }
 }
 
 export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const { lang, setLang, t } = useLanguage()
   const navigate = useNavigate()
   const [profileOpen, setProfileOpen] = useState(false)
+  const [bellOpen, setBellOpen]       = useState(false)
+  const [ttlChoice, setTtlChoice]     = useState<Record<string, number>>({})
   const profileRef = useRef<HTMLDivElement>(null)
+  const bellRef    = useRef<HTMLDivElement>(null)
 
-  // Read session info from localStorage (updated on every login/session change)
   const email      = getEmail()
   const role       = getRole()
   const storeName  = getStoreName()
@@ -68,10 +115,16 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
     return 'تاجر'
   })()
 
+  const { requests, responding, respond } = useAccessRequests(role)
+  const notifCount = requests.length
+
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
         setProfileOpen(false)
+      }
+      if (bellRef.current && !bellRef.current.contains(e.target as Node)) {
+        setBellOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClick)
@@ -89,12 +142,15 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
     setProfileOpen(false)
   }
 
+  const getTtl = (reqId: string) => ttlChoice[reqId] ?? 4
+  const setTtl = (reqId: string, v: number) =>
+    setTtlChoice(prev => ({ ...prev, [reqId]: v }))
+
   return (
     <header className="h-14 md:h-16 bg-white border-b border-slate-200 flex items-center justify-between px-3 md:px-6 sticky top-0 z-20 pt-safe-top">
 
-      {/* Left side: hamburger (mobile) + page title */}
+      {/* Left side */}
       <div className="flex items-center gap-3">
-        {/* Hamburger — visible only on mobile */}
         <button
           className="lg:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 text-slate-500 transition-colors"
           onClick={onMenuClick}
@@ -102,7 +158,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
         >
           <Menu className="w-5 h-5" />
         </button>
-
         <div>
           <h1 className="text-base font-semibold text-slate-900 leading-none">{title}</h1>
           {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
@@ -112,7 +167,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
       {/* Right-side actions */}
       <div className="flex items-center gap-2">
 
-        {/* Impersonation banner — shown only to support agents */}
         {impersonating && (
           <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 border border-amber-200 rounded-lg text-xs font-medium text-amber-700">
             <Shield className="w-3.5 h-3.5" />
@@ -131,7 +185,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
           />
         </div>
 
-        {/* Language toggle — AR / EN */}
+        {/* Language toggle */}
         <div className="flex items-center rounded-lg border border-slate-200 overflow-hidden">
           {(['ar', 'en'] as Lang[]).map((code) => (
             <button
@@ -149,14 +203,108 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
           ))}
         </div>
 
-        {/* Notifications */}
-        <button
-          className="relative w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 text-slate-500 transition-colors"
-          aria-label={t(tr => tr.topbar.notifications)}
-        >
-          <Bell className="w-4 h-4" />
-          <span className="absolute top-1.5 end-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white" />
-        </button>
+        {/* ── Notifications Bell ── */}
+        <div ref={bellRef} className="relative">
+          <button
+            onClick={() => setBellOpen(o => !o)}
+            className="relative w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 text-slate-500 transition-colors"
+            aria-label="الإشعارات"
+          >
+            <Bell className="w-4 h-4" />
+            {notifCount > 0 && (
+              <span className="absolute top-1.5 end-1.5 w-4 h-4 bg-red-500 rounded-full ring-2 ring-white flex items-center justify-center">
+                <span className="text-[9px] font-bold text-white leading-none">{notifCount}</span>
+              </span>
+            )}
+          </button>
+
+          {bellOpen && (
+            <div className="absolute end-0 top-full mt-1 w-80 max-w-[calc(100vw-1rem)] bg-white rounded-xl shadow-xl border border-slate-100 z-50 overflow-hidden" dir="rtl">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                <span className="text-sm font-semibold text-slate-800">الإشعارات</span>
+                {notifCount > 0 && (
+                  <span className="text-xs px-2 py-0.5 bg-red-100 text-red-600 rounded-full font-medium">
+                    {notifCount} جديد
+                  </span>
+                )}
+              </div>
+
+              <div className="max-h-96 overflow-y-auto">
+                {notifCount === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-10 text-slate-400">
+                    <Bell className="w-8 h-8 mb-2 text-slate-200" />
+                    <p className="text-sm">لا توجد إشعارات</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-50">
+                    {requests.map(r => (
+                      <div key={r.id} className="p-4 bg-amber-50/50 space-y-3">
+                        {/* Icon + text */}
+                        <div className="flex items-start gap-3">
+                          <div className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center shrink-0">
+                            <ShieldCheck className="w-4 h-4 text-amber-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-slate-800">طلب وصول من فريق الدعم</p>
+                            <p className="text-xs text-slate-500 mt-0.5 truncate">{r.requested_by}</p>
+                            <div className="flex items-center gap-1 mt-0.5 text-slate-400">
+                              <Clock className="w-3 h-3" />
+                              <span className="text-xs">
+                                {new Date(r.requested_at).toLocaleString('ar-SA', {
+                                  dateStyle: 'short', timeStyle: 'short'
+                                })}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* TTL selector */}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs text-slate-500 shrink-0">مدة الوصول:</span>
+                          {[1, 2, 4].map(h => (
+                            <button
+                              key={h}
+                              onClick={() => setTtl(r.id, h)}
+                              className={`px-2 py-0.5 text-xs rounded-md border transition-colors ${
+                                getTtl(r.id) === h
+                                  ? 'bg-amber-500 text-white border-amber-500'
+                                  : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                              }`}
+                            >
+                              {h === 1 ? 'ساعة' : h === 2 ? 'ساعتان' : '4 ساعات'}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => respond(r.id, true, getTtl(r.id))}
+                            disabled={responding === r.id}
+                            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-green-500 hover:bg-green-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                          >
+                            {responding === r.id
+                              ? <span className="w-3.5 h-3.5 border border-white border-t-transparent rounded-full animate-spin" />
+                              : <CheckCircle className="w-3.5 h-3.5" />}
+                            موافقة
+                          </button>
+                          <button
+                            onClick={() => respond(r.id, false)}
+                            disabled={responding === r.id}
+                            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-white hover:bg-red-50 text-red-600 border border-red-200 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                            رفض
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Profile dropdown */}
         <div ref={profileRef} className="relative">
@@ -180,7 +328,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
 
           {profileOpen && (
             <div className="absolute end-0 top-full mt-1 w-52 max-w-[calc(100vw-1rem)] bg-white rounded-xl shadow-lg border border-slate-100 py-1 z-50">
-              {/* User info */}
               <div className="px-3 py-2.5 border-b border-slate-100">
                 <p className="text-xs font-semibold text-slate-900 truncate">{displayName}</p>
                 <p className="text-xs text-slate-400 truncate">{email || '—'}</p>
@@ -195,7 +342,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                 </span>
               </div>
 
-              {/* Settings */}
               <button
                 onClick={() => { setProfileOpen(false); navigate('/settings') }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
@@ -204,7 +350,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                 الإعدادات
               </button>
 
-              {/* Exit impersonation — shown only when support is active */}
               {impersonating && (
                 <button
                   onClick={handleStopImpersonation}
@@ -215,7 +360,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                 </button>
               )}
 
-              {/* Logout */}
               <button
                 onClick={handleLogout}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors border-t border-slate-100"
