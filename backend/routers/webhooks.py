@@ -195,7 +195,7 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         db.flush()
         tenant_id = new_tenant.id
 
-        salla_email = f"salla-{salla_store_id}@salla-merchant.nahlaai.com"
+        salla_email = f"salla-{salla_store_id}@salla-merchant.nahlah.ai"
         new_user = User(
             username=f"salla-{salla_store_id}",
             email=salla_email,

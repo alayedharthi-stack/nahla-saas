@@ -216,7 +216,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # ══════════════════════════════════════════════════════════════
     if not owner_email and merchant_id_str:
         safe_name   = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
-        owner_email = f"{safe_name or 'store'}-{merchant_id_str}@salla-merchant.nahlaai.com"
+        owner_email = f"{safe_name or 'store'}-{merchant_id_str}@salla-merchant.nahlah.ai"
         logger.info(
             "[SallaLogin] ℹ️  STEP 3 — No email from Salla, using derived: %s",
             owner_email,
@@ -1052,7 +1052,7 @@ async def salla_oauth_callback(
             # Fallback email if Salla didn't return one
             if not salla_email:
                 safe_store = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
-                salla_email = f"{safe_store or 'store'}-{salla_store_id}@salla-merchant.nahlaai.com"
+                salla_email = f"{safe_store or 'store'}-{salla_store_id}@salla-merchant.nahlah.ai"
 
             salla_email = salla_email.strip().lower()
             logger.info("[Salla OAuth] Merchant email resolved: %s", salla_email)
