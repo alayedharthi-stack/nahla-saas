@@ -155,6 +155,18 @@ async def jwt_enforcement_middleware(request: Request, call_next):
 
     # Always pass through CORS preflight without a token
     if request.method == "OPTIONS":
+        from fastapi.responses import Response as _Resp  # noqa: PLC0415
+        # For public widget preflight — reply immediately with wildcard CORS
+        if path.startswith("/merchant/widgets/") or path.startswith("/merchant/addons/widget/"):
+            return _Resp(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                    "Access-Control-Max-Age": "86400",
+                },
+            )
         return await call_next(request)
 
     if any(path.startswith(p) for p in JWT_PUBLIC_PREFIXES):
@@ -167,11 +179,18 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         or path.endswith(".json")
         or path.endswith("/create-coupon")
     ):
-        return await call_next(request)
+        response = await call_next(request)
+        # Allow ANY store domain to call these public endpoints (CORS wildcard)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
 
     # Legacy addon embed scripts
     if path.startswith("/merchant/addons/widget/") and path.endswith(".js"):
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return response
 
     if not JWT_AVAILABLE:
         logger.warning("JWT enforcement skipped — python-jose not installed")
