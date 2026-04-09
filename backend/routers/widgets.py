@@ -305,27 +305,90 @@ function initWhatsApp(c){{
   var logo=c.logo_url||'{logo}';
   var color=c.theme_color||'#25D366';
   var pos=c.position==='right'?'right':'left';
-  var posVal=pos+':28px';
+  var posVal=pos+':40px';
 
   addStyles(`
-    #nahla-wa{{position:fixed;bottom:28px;${{posVal}};z-index:99999;display:flex;flex-direction:column;align-items:${{pos==='right'?'flex-end':'flex-start'}};gap:10px;opacity:0;transform:translateY(20px);transition:opacity .4s,transform .4s;pointer-events:none;}}
-    #nahla-wa.show{{opacity:1;transform:translateY(0);pointer-events:auto;}}
-    #nahla-wa .nahla-btn{{width:64px;height:64px;border-radius:50%;background:${{color}};box-shadow:0 4px 20px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;cursor:pointer;text-decoration:none;border:3px solid rgba(255,255,255,.4);}}
-    #nahla-wa .nahla-btn img.wa-icon{{width:32px;height:32px;}}
-    #nahla-wa .nahla-bee-img{{width:46px;height:46px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,.5);}}
-    @keyframes nPulse{{0%,100%{{box-shadow:0 4px 20px rgba(0,0,0,.25),0 0 0 0 ${{color}}55;}}50%{{box-shadow:0 4px 20px rgba(0,0,0,.25),0 0 0 14px transparent;}}}}
-    #nahla-wa .nahla-btn{{animation:nPulse 2.4s infinite;}}
-    #nahla-wa .nahla-tooltip{{background:#1e293b;color:#fff;font-size:13px;padding:6px 12px;border-radius:8px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.2);}}
+    #nahla-wa{{
+      position:fixed;bottom:55px;${{posVal}};z-index:99999;
+      display:flex;flex-direction:column;align-items:center;gap:6px;
+      opacity:0;transform:scale(.8);
+      transition:opacity .4s,transform .4s;
+      pointer-events:none;text-decoration:none;
+    }}
+    #nahla-wa.show{{opacity:1;transform:scale(1);pointer-events:auto;}}
+    #nahla-wa .nahla-bee{{
+      width:110px;height:110px;object-fit:contain;mix-blend-mode:normal;
+      animation:bee-float 3s ease-in-out infinite;
+    }}
+    @keyframes bee-float{{
+      0%,100%{{transform:translateY(0) rotate(-4deg);}}
+      50%{{transform:translateY(-7px) rotate(4deg);}}
+    }}
+    #nahla-wa .nw-circle{{
+      position:relative;width:65px;height:65px;
+      background:${{color}};border-radius:50%;
+      display:flex;align-items:center;justify-content:center;
+      box-shadow:0 4px 18px rgba(37,211,102,.45);
+    }}
+    #nahla-wa .nw-icon{{width:30px;height:30px;z-index:2;position:relative;}}
+    #nahla-wa .nw-orbit{{
+      position:absolute;inset:0;border-radius:50%;
+      border:2.5px solid rgba(37,211,102,.65);
+      animation:apple-wave 2.8s cubic-bezier(.4,0,.2,1) infinite;
+    }}
+    #nahla-wa .o1{{animation-delay:0s;}}
+    #nahla-wa .o2{{animation-delay:.7s;}}
+    #nahla-wa .o3{{animation-delay:1.4s;}}
+    #nahla-wa .o4{{animation-delay:2.1s;}}
+    @keyframes apple-wave{{
+      0%{{transform:scale(.92) rotate(0deg);opacity:.85;}}
+      30%{{transform:scale(1.25) rotate(108deg);opacity:.55;}}
+      60%{{transform:scale(1.65) rotate(216deg);opacity:.22;}}
+      85%{{transform:scale(1.95) rotate(306deg);opacity:.05;}}
+      100%{{transform:scale(2.05) rotate(360deg);opacity:0;}}
+    }}
+    @media(max-width:600px){{
+      #nahla-wa .nw-circle{{width:58px;height:58px;}}
+      #nahla-wa .nw-icon{{width:26px;height:26px;}}
+      #nahla-wa .nahla-bee{{width:90px;height:90px;}}
+      #nahla-wa{{bottom:50px;${{pos}}:20px;}}
+    }}
   `);
 
-  var wrap=document.createElement('div');
+  var wrap=document.createElement('a');
   wrap.id='nahla-wa';
-  wrap.innerHTML=`
-    <img class="nahla-bee-img" src="${{logo}}" alt="نحلة" onerror="this.style.display='none'">
-    <a class="nahla-btn" href="https://wa.me/${{c.phone}}?text=${{encodeURIComponent(c.message||'')}}" target="_blank" rel="noopener">
-      <img class="wa-icon" src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" alt="واتساب">
-    </a>`;
+  wrap.href='https://wa.me/'+c.phone+'?text='+encodeURIComponent(c.message||'');
+  wrap.target='_blank';wrap.rel='noopener noreferrer';
+  wrap.innerHTML=
+    '<img class="nahla-bee" src="'+logo+'" alt="نحلة">'+
+    '<div class="nw-circle">'+
+      '<span class="nw-orbit o1"></span>'+
+      '<span class="nw-orbit o2"></span>'+
+      '<span class="nw-orbit o3"></span>'+
+      '<span class="nw-orbit o4"></span>'+
+      '<img class="nw-icon" src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" alt="واتساب">'+
+    '</div>';
   document.body.appendChild(wrap);
+
+  // Remove white background from bee logo via Canvas
+  var beeImg=wrap.querySelector('.nahla-bee');
+  var tmpImg=new Image();
+  tmpImg.crossOrigin='anonymous';
+  tmpImg.onload=function(){{
+    try{{
+      var cv=document.createElement('canvas');
+      cv.width=tmpImg.width;cv.height=tmpImg.height;
+      var ctx=cv.getContext('2d');
+      ctx.drawImage(tmpImg,0,0);
+      var d=ctx.getImageData(0,0,cv.width,cv.height);
+      for(var i=0;i<d.data.length;i+=4){{
+        if(d.data[i]>210&&d.data[i+1]>210&&d.data[i+2]>210)d.data[i+3]=0;
+      }}
+      ctx.putImageData(d,0,0);
+      beeImg.src=cv.toDataURL('image/png');
+    }}catch(e){{}}
+  }};
+  tmpImg.src=logo;
 
   function checkShow(){{
     var scrolled=window.scrollY/(document.body.scrollHeight-window.innerHeight||1)*100;
