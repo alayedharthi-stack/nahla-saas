@@ -46,6 +46,9 @@ export default function App() {
     <LanguageProvider>
       <BrowserRouter>
         <Routes>
+          {/* Root → landing page */}
+          <Route index element={<Navigate to="/landing" replace />} />
+
           {/* Public — marketing */}
           <Route path="/landing"              element={<Landing />} />
           <Route path="/privacy"              element={<PrivacyPolicy />} />
