@@ -78,12 +78,12 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
     return () => { cancelled = true }
   }, [])
 
-  const handleExchangeCode = useCallback((code: string) => {
+  const handleToken = useCallback((accessToken: string) => {
     setBusy(true); setStage('exchanging')
-    // JS SDK codes must NOT include redirect_uri in the exchange call
+    // Send the access_token directly — avoids redirect_uri mismatch from code exchange
     apiCall<{ waba_id: string; phones: EmbeddedPhone[]; message: string }>(
       '/whatsapp/embedded/exchange',
-      { method: 'POST', body: JSON.stringify({ code }) }
+      { method: 'POST', body: JSON.stringify({ access_token: accessToken }) }
     ).then(result => {
       setWabaId(result.waba_id)
       setPhones(result.phones)
@@ -98,8 +98,6 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
     if (!window.FB || !sdkLoaded.current) { setError('SDK غير جاهز، انتظر لحظة'); return }
     setError('')
     const loginOptions: any = {
-      response_type: 'code',
-      override_default_response_type: true,
       scope: 'whatsapp_business_management,whatsapp_business_messaging,business_management',
       extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
     }
@@ -107,9 +105,9 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
     if (configId) loginOptions.config_id = configId
     window.FB.login((response: any) => {
       if (!response?.authResponse) { setError('تم إلغاء عملية الربط'); return }
-      handleExchangeCode(response.authResponse.code)
+      handleToken(response.authResponse.accessToken)
     }, loginOptions)
-  }, [handleExchangeCode, configId])
+  }, [handleToken, configId])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')

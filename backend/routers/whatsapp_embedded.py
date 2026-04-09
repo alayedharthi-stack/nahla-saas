@@ -167,7 +167,9 @@ async def _get_phone_numbers(waba_id: str, token: str) -> List[dict]:
 # ── schemas ───────────────────────────────────────────────────────────────────
 
 class ExchangeRequest(BaseModel):
-    code: str
+    # Accept either a raw access_token (from JS SDK) or a code (legacy)
+    access_token: Optional[str] = None
+    code: Optional[str] = None
     redirect_uri: Optional[str] = None
 
 
@@ -209,9 +211,15 @@ async def exchange_code(
 
     logger.info("[EmbeddedSignup] exchange START tenant=%s", tenant_id)
 
-    # 1 — Exchange code → user token
-    token_data = await _exchange_code_for_token(body.code, body.redirect_uri or "")
-    user_token = token_data["access_token"]
+    # 1 — Get user token: either passed directly from JS SDK or exchanged from code
+    if body.access_token:
+        user_token = body.access_token
+        logger.info("[EmbeddedSignup] using access_token from JS SDK tenant=%s", tenant_id)
+    elif body.code:
+        token_data = await _exchange_code_for_token(body.code, body.redirect_uri or "")
+        user_token = token_data["access_token"]
+    else:
+        raise HTTPException(status_code=400, detail="يجب إرسال access_token أو code")
 
     # 2 — Discover WABA ID from token scopes
     waba_id = await _get_waba_id_from_token(user_token)
