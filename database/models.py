@@ -817,6 +817,10 @@ class WhatsAppConnection(Base):
     business_display_name        = Column(String, nullable=True)
     business_manager_id          = Column(String, nullable=True)
 
+    # Connection type ─────────────────────────────────────────────────────────
+    # 'direct' (platform adds number to shared WABA) | 'embedded' (merchant's own WABA)
+    connection_type   = Column(String, nullable=True, default='direct')
+
     # Token — backend-only, NEVER send to frontend ────────────────────────────
     access_token      = Column(String, nullable=True)
     token_type        = Column(String, nullable=True)   # short_lived | long_lived

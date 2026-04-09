@@ -1,14 +1,10 @@
 /**
  * WhatsAppConnect.tsx
  * ────────────────────
- * Full Meta-compliant WhatsApp Business registration wizard.
- *
- * Step 1 — Phone & Business Identity  (Meta: phone_numbers API)
- * Step 2 — OTP Verification
- * Step 3 — Business Profile            (Meta: whatsapp_business_profile API)
- * Step 4 — Success
+ * Primary: Meta Embedded Signup (merchant's own WABA)
+ * Fallback: Direct add (platform WABA — requires BSP permissions)
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   BadgeCheck,
   Building2,
@@ -25,6 +21,216 @@ import {
   XCircle,
 } from 'lucide-react'
 import { apiCall } from '../api/client'
+
+// ── Facebook SDK types ────────────────────────────────────────────────────────
+declare global {
+  interface Window {
+    FB: any
+    fbAsyncInit: () => void
+  }
+}
+
+// ── Embedded Signup Component ─────────────────────────────────────────────────
+
+interface EmbeddedPhone { id: string; number: string; name: string; verified: boolean }
+
+function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
+  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'done'>('init')
+  const [error, setError]       = useState('')
+  const [phones, setPhones]     = useState<EmbeddedPhone[]>([])
+  const [wabaId, setWabaId]     = useState('')
+  const [busy, setBusy]         = useState(false)
+  const sdkLoaded               = useRef(false)
+
+  // Load Meta config + FB SDK on mount
+  useEffect(() => {
+    let cancelled = false
+    async function loadSdk() {
+      setStage('loading-sdk')
+      try {
+        const cfg = await apiCall<{ app_id: string; config_id: string; graph_version: string }>(
+          '/whatsapp/embedded/config'
+        )
+        if (cancelled) return
+        // Init FB SDK
+        window.fbAsyncInit = () => {
+          window.FB.init({ appId: cfg.app_id, version: cfg.graph_version, xfbml: false, cookie: true })
+          if (!cancelled) { sdkLoaded.current = true; setStage('ready') }
+        }
+        if (!document.getElementById('facebook-jssdk')) {
+          const s  = document.createElement('script')
+          s.id     = 'facebook-jssdk'
+          s.src    = 'https://connect.facebook.net/ar_AR/sdk.js'
+          s.async  = true
+          s.defer  = true
+          document.body.appendChild(s)
+        } else {
+          // SDK already loaded
+          if (window.FB) { sdkLoaded.current = true; setStage('ready') }
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'تعذر تحميل إعدادات Meta')
+      }
+    }
+    loadSdk()
+    return () => { cancelled = true }
+  }, [])
+
+  const launchSignup = useCallback(async () => {
+    if (!window.FB || !sdkLoaded.current) { setError('SDK غير جاهز، انتظر لحظة'); return }
+    setError('')
+    window.FB.login(async (response: any) => {
+      if (!response?.authResponse) { setError('تم إلغاء عملية الربط'); return }
+      const code = response.authResponse.code
+      setBusy(true); setStage('exchanging')
+      try {
+        const result = await apiCall<{ waba_id: string; phones: EmbeddedPhone[]; message: string }>(
+          '/whatsapp/embedded/exchange',
+          { method: 'POST', body: JSON.stringify({ code }) }
+        )
+        setWabaId(result.waba_id)
+        setPhones(result.phones)
+        setStage(result.phones.length === 1 ? 'select-phone' : 'select-phone')
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'حدث خطأ أثناء الربط')
+        setStage('ready')
+      } finally { setBusy(false) }
+    }, {
+      config_id: '',   // populated dynamically from config if set
+      response_type: 'code',
+      override_default_response_type: true,
+      scope: 'whatsapp_business_management,whatsapp_business_messaging,business_management',
+      extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
+    })
+  }, [])
+
+  const selectPhone = useCallback(async (phoneId: string) => {
+    setBusy(true); setError('')
+    try {
+      await apiCall('/whatsapp/embedded/select-phone', {
+        method: 'POST',
+        body: JSON.stringify({ phone_number_id: phoneId }),
+      })
+      setStage('done')
+      setTimeout(onConnected, 1500)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'تعذر اختيار الرقم')
+    } finally { setBusy(false) }
+  }, [onConnected])
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  if (stage === 'done') {
+    return (
+      <div className="flex flex-col items-center gap-4 py-10">
+        <div className="w-16 h-16 rounded-full bg-emerald-100 flex items-center justify-center">
+          <CheckCircle2 className="w-8 h-8 text-emerald-600" />
+        </div>
+        <p className="font-bold text-slate-800 text-lg">تم ربط واتساب بنجاح!</p>
+      </div>
+    )
+  }
+
+  if (stage === 'select-phone') {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center">
+            <Phone className="w-5 h-5 text-emerald-600" />
+          </div>
+          <div>
+            <p className="font-semibold text-slate-800">اختر رقم الهاتف</p>
+            <p className="text-xs text-slate-500">WABA: {wabaId}</p>
+          </div>
+        </div>
+        {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
+        <div className="space-y-2">
+          {phones.length === 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-700">
+              لا توجد أرقام هاتف في حساب واتساب للأعمال. أضف رقماً من Meta Business Manager أولاً.
+            </div>
+          )}
+          {phones.map(p => (
+            <button
+              key={p.id}
+              onClick={() => selectPhone(p.id)}
+              disabled={busy}
+              className="w-full flex items-center justify-between p-4 border border-slate-200 rounded-xl hover:border-violet-400 hover:bg-violet-50 transition-all disabled:opacity-50"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center">
+                  <Phone className="w-4 h-4 text-slate-500" />
+                </div>
+                <div className="text-right">
+                  <p className="font-medium text-slate-800 text-sm">{p.number || p.id}</p>
+                  {p.name && <p className="text-xs text-slate-500">{p.name}</p>}
+                </div>
+              </div>
+              {p.verified
+                ? <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">موثّق</span>
+                : <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">غير موثّق</span>
+              }
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* Logo + Title */}
+      <div className="flex flex-col items-center gap-3 py-4">
+        <div className="w-16 h-16 rounded-2xl bg-[#25D366]/10 flex items-center justify-center">
+          <MessageCircle className="w-8 h-8 text-[#25D366]" />
+        </div>
+        <div className="text-center">
+          <p className="font-bold text-slate-800 text-lg">ربط واتساب للأعمال</p>
+          <p className="text-sm text-slate-500 mt-1">اربط حساب واتساب الخاص بمتجرك مباشرةً عبر Meta</p>
+        </div>
+      </div>
+
+      {/* Steps */}
+      <div className="bg-slate-50 rounded-xl p-4 space-y-2">
+        {[
+          { n: 1, text: 'اضغط "ربط مع Meta" أدناه' },
+          { n: 2, text: 'سجّل دخولك بحساب Facebook' },
+          { n: 3, text: 'اختر أو أنشئ حساب واتساب للأعمال' },
+          { n: 4, text: 'اختر رقم هاتف نشاطك التجاري' },
+        ].map(s => (
+          <div key={s.n} className="flex items-center gap-3">
+            <div className="w-6 h-6 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-xs font-bold shrink-0">{s.n}</div>
+            <p className="text-sm text-slate-600">{s.text}</p>
+          </div>
+        ))}
+      </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>
+      )}
+
+      {/* Main CTA */}
+      <button
+        onClick={launchSignup}
+        disabled={stage !== 'ready' || busy}
+        className="w-full flex items-center justify-center gap-3 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-blue-600/20"
+      >
+        {(stage === 'loading-sdk' || stage === 'exchanging' || busy)
+          ? <><Loader2 className="w-5 h-5 animate-spin" />جاري التحميل...</>
+          : <>
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+              </svg>
+              ربط مع Meta
+            </>
+        }
+      </button>
+
+      <p className="text-center text-xs text-slate-400">
+        ستُفتح نافذة Meta الرسمية — كل بياناتك آمنة ومشفّرة
+      </p>
+    </div>
+  )
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -182,6 +388,8 @@ const inputCls = "w-full border border-slate-300 rounded-xl px-4 py-2.5 text-sm 
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function WhatsAppConnect() {
+  // 'embedded' = Meta Embedded Signup (recommended) | 'direct' = old flow
+  const [mode, setMode]       = useState<'embedded'|'direct'>('embedded')
   const [step, setStep]       = useState<1|2|3|4>(1)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy]       = useState(false)
@@ -353,10 +561,45 @@ export default function WhatsAppConnect() {
         </p>
       </div>
 
-      {step < 4 && <StepBar step={step} />}
+      {/* ── Mode switcher (only when not connected) ─────────────────────── */}
+      {step < 4 && !loading && (
+        <div className="flex gap-2 bg-slate-100 rounded-xl p-1">
+          <button
+            onClick={() => { setMode('embedded'); setStep(1); setError('') }}
+            className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+              mode === 'embedded'
+                ? 'bg-white shadow text-violet-700'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            🔗 ربط عبر Meta (موصى به)
+          </button>
+          <button
+            onClick={() => { setMode('direct'); setStep(1); setError('') }}
+            className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+              mode === 'direct'
+                ? 'bg-white shadow text-violet-700'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            📱 إدخال مباشر
+          </button>
+        </div>
+      )}
 
+      {/* ── Embedded Signup mode ─────────────────────────────────────────── */}
+      {mode === 'embedded' && step < 4 && !loading && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+          <EmbeddedSignupFlow onConnected={() => { setStep(4); setConnAt(new Date().toISOString()) }} />
+        </div>
+      )}
+
+      {/* ── Direct mode step bar ─────────────────────────────────────────── */}
+      {mode === 'direct' && step < 4 && <StepBar step={step} />}
+
+      {/* ── Direct mode steps (1-3) ──────────────────────────────────────── */}
       {/* ── Step 1: Identity ─────────────────────────────────────────────── */}
-      {step === 1 && (
+      {mode === 'direct' && step === 1 && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center">
@@ -437,7 +680,7 @@ export default function WhatsAppConnect() {
       )}
 
       {/* ── Step 2: OTP ──────────────────────────────────────────────────── */}
-      {step === 2 && (
+      {mode === 'direct' && step === 2 && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
@@ -529,7 +772,7 @@ export default function WhatsAppConnect() {
       )}
 
       {/* ── Step 3: Business Profile ─────────────────────────────────────── */}
-      {step === 3 && (
+      {mode === 'direct' && step === 3 && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center">
