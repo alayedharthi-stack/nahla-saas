@@ -333,6 +333,7 @@ async def get_platform_stats(
             pass
         return {
             "id":           u.id,
+            "tenant_id":    u.tenant_id,
             "email":        u.email,
             "store_name":   u.username,
             "phone":        getattr(u, "phone", ""),

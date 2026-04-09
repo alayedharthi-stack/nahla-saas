@@ -5,6 +5,7 @@ import { Users, Search, LogIn, ToggleLeft, ToggleRight, Send, Clock, CheckCircle
 
 interface Merchant {
   id: number
+  tenant_id: number | null
   email: string
   store_name: string
   phone: string
@@ -60,9 +61,11 @@ export default function AdminMerchants() {
 
     // If already has access — try to enter directly
     if (state === 'has_access') {
+      const tid = m.tenant_id
+      if (!tid) { alert('هذا التاجر لا يملك متجراً مرتبطاً.'); return }
       setMState(m.id, 'entering')
       try {
-        const res = await fetch(`${API_BASE}/admin/impersonate/${m.id}`, {
+        const res = await fetch(`${API_BASE}/admin/impersonate/${tid}`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${getToken()}` },
         })
@@ -81,10 +84,16 @@ export default function AdminMerchants() {
       return
     }
 
+    const tid = m.tenant_id
+    if (!tid) {
+      alert('هذا التاجر لا يملك متجراً مرتبطاً بعد.')
+      return
+    }
+
     // First: try to enter (in case merchant already enabled access)
     setMState(m.id, 'entering')
     try {
-      const res = await fetch(`${API_BASE}/admin/impersonate/${m.id}`, {
+      const res = await fetch(`${API_BASE}/admin/impersonate/${tid}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}` },
       })
@@ -97,7 +106,7 @@ export default function AdminMerchants() {
       // 403 = no access granted yet — send request
       if (res.status === 403) {
         setMState(m.id, 'requesting')
-        const reqRes = await fetch(`${API_BASE}/admin/request-access/${m.id}`, {
+        const reqRes = await fetch(`${API_BASE}/admin/request-access/${tid}`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${getToken()}` },
         })
