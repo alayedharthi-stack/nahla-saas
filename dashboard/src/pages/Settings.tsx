@@ -1461,10 +1461,63 @@ function SupportAccessTab() {
 
   return (
     <div className="space-y-5">
+
+      {/* ── ACTIVE ACCESS ALERT — prominent red banner ── */}
+      {!loading && status?.enabled && (
+        <div className="rounded-2xl border-2 border-red-400 bg-red-50 overflow-hidden">
+          {/* Top bar */}
+          <div className="flex items-center gap-3 bg-red-500 px-5 py-3">
+            <span className="relative flex h-3 w-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-white" />
+            </span>
+            <p className="text-white font-bold text-sm flex-1">
+              ⚠️ فريق الدعم الفني يمتلك صلاحية الدخول إلى لوحتك الآن
+            </p>
+          </div>
+          {/* Details */}
+          <div className="px-5 py-4 space-y-3">
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="bg-white rounded-lg p-3 border border-red-100">
+                <p className="text-slate-400 mb-0.5">مُفعّل منذ</p>
+                <p className="font-semibold text-slate-800">{fmtDate(status.granted_at)}</p>
+              </div>
+              <div className="bg-white rounded-lg p-3 border border-red-100">
+                <p className="text-slate-400 mb-0.5">ينتهي تلقائياً</p>
+                <p className="font-semibold text-red-700">{fmtDate(status.expires_at)}</p>
+              </div>
+            </div>
+            <p className="text-xs text-red-700">
+              إذا لم تكن أنت من طلب هذا الدعم أو انتهيت من المشكلة، ألغِ الوصول فوراً.
+            </p>
+            <button
+              onClick={() => toggle(false)}
+              disabled={saving}
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm transition-colors disabled:opacity-60"
+            >
+              {saving
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <ShieldOff className="w-4 h-4" />}
+              إلغاء وصول الدعم الفني فوراً
+            </button>
+            {successMsg && (
+              <div className="flex items-center gap-2 p-2.5 bg-green-50 border border-green-200 rounded-lg text-xs text-green-700">
+                <CheckCircle className="w-4 h-4 shrink-0" /> {successMsg}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Main card ── */}
       <div className="card p-5">
         <div className="flex items-start gap-3 mb-4">
-          <div className="w-9 h-9 bg-blue-100 rounded-lg flex items-center justify-center shrink-0">
-            <Shield className="w-5 h-5 text-blue-600" />
+          <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
+            status?.enabled ? 'bg-red-100' : 'bg-green-100'
+          }`}>
+            {status?.enabled
+              ? <ShieldOff className="w-5 h-5 text-red-600" />
+              : <ShieldCheck className="w-5 h-5 text-green-600" />}
           </div>
           <div>
             <h3 className="text-sm font-semibold text-slate-900">وصول الدعم الفني</h3>
@@ -1484,30 +1537,30 @@ function SupportAccessTab() {
             {/* Status indicator */}
             <div className={`flex items-center gap-2 p-3 rounded-lg mb-4 ${
               status?.enabled
-                ? 'bg-amber-50 border border-amber-200'
-                : 'bg-slate-50 border border-slate-200'
+                ? 'bg-red-50 border border-red-200'
+                : 'bg-green-50 border border-green-200'
             }`}>
               {status?.enabled ? (
                 <>
-                  <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold text-amber-700">وصول الدعم الفني مفعّل</p>
-                    <p className="text-xs text-amber-600">
-                      مُفعّل منذ: {fmtDate(status.granted_at)} · ينتهي: {fmtDate(status.expires_at)}
-                    </p>
-                  </div>
+                  <span className="relative flex h-2.5 w-2.5 shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
+                  </span>
+                  <p className="text-xs font-bold text-red-700">
+                    الوصول مفعّل — فريق الدعم يستطيع الدخول الآن
+                  </p>
                 </>
               ) : (
                 <>
-                  <Shield className="w-4 h-4 text-slate-400 shrink-0" />
-                  <p className="text-xs text-slate-600">
-                    وصول الدعم الفني غير مفعّل — لوحتك محمية
+                  <ShieldCheck className="w-4 h-4 text-green-600 shrink-0" />
+                  <p className="text-xs font-semibold text-green-700">
+                    لوحتك محمية — لا أحد يستطيع الدخول
                   </p>
                 </>
               )}
             </div>
 
-            {/* Enable form */}
+            {/* Enable form — only when NOT active */}
             {!status?.enabled && (
               <div className="space-y-3">
                 <label className="block text-xs font-medium text-slate-700">
@@ -1537,18 +1590,6 @@ function SupportAccessTab() {
                   السماح للدعم الفني بالوصول لمدة {TTL_OPTIONS.find(o => o.value === ttlHours)?.label}
                 </button>
               </div>
-            )}
-
-            {/* Disable button */}
-            {status?.enabled && (
-              <button
-                onClick={() => toggle(false)}
-                disabled={saving}
-                className="btn-secondary w-full flex items-center justify-center gap-2 border-red-200 text-red-600 hover:bg-red-50"
-              >
-                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldOff className="w-4 h-4" />}
-                إلغاء وصول الدعم الفني فوراً
-              </button>
             )}
 
             {/* Messages */}
