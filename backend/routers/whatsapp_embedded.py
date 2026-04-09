@@ -212,6 +212,7 @@ async def exchange_code(
     logger.info("[EmbeddedSignup] exchange START tenant=%s", tenant_id)
 
     # 1 — Get user token: either passed directly from JS SDK or exchanged from code
+    token_data: dict = {}
     if body.access_token:
         user_token = body.access_token
         logger.info("[EmbeddedSignup] using access_token from JS SDK tenant=%s", tenant_id)
