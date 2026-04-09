@@ -893,39 +893,50 @@ async def direct_verify_otp(
     db: Session = Depends(get_db),
 ):
     """
-    Step 2 — Verify the OTP code and save the WhatsApp connection.
+    Step 2/3/4 of WhatsApp registration:
+      A) verify_code  — confirm OTP
+      B) register     — activate phone on WhatsApp (fixes Pending/معلق in Meta)
+      C) GET status   — fetch real Meta verification status
+      D) Save to DB   — mark as connected only after Meta confirms
     """
-    from core.config import WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+    from core.config import WA_TOKEN, WA_BUSINESS_ACCOUNT_ID, META_GRAPH_API_VERSION  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
     graph     = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+    phone_id  = body.phone_number_id
     headers   = {
         "Authorization": f"Bearer {WA_TOKEN}",
         "Content-Type":  "application/json",
     }
 
     logger.info(
-        "[WA Direct] verify-otp | tenant=%s phone_number_id=%s",
-        tenant_id, body.phone_number_id,
+        "[WA Direct] ▶ submit_otp | tenant=%s phone_number_id=%s endpoint=POST %s/%s/verify_code",
+        tenant_id, phone_id, graph, phone_id,
     )
 
-    # ── Step A: Verify code with Meta ────────────────────────────────────────
+    # ── Step A: verify_code ───────────────────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             verify_resp = await client.post(
-                f"{graph}/{body.phone_number_id}/verify_code",
+                f"{graph}/{phone_id}/verify_code",
                 headers=headers,
                 json={"code": body.code},
             )
-            verify_data = verify_resp.json()
+            verify_status = verify_resp.status_code
+            verify_data   = verify_resp.json()
     except Exception as exc:
-        logger.error("[WA Direct] Verify code API error: %s", exc)
+        logger.error("[WA Direct] submit_otp network error: %s", exc)
         raise HTTPException(status_code=503, detail=_UX_MESSAGES[META_UNKNOWN_ERROR])
 
+    logger.info(
+        "[WA Direct] submit_otp response | status=%s body=%s",
+        verify_status, verify_data,
+    )
+
     if "error" in verify_data:
-        err = verify_data["error"]
+        err  = verify_data["error"]
         code = err.get("code", 0)
-        logger.warning("[WA Direct] Verify OTP raw_error code=%s full=%s", code, verify_data)
+        logger.warning("[WA Direct] submit_otp Meta error | code=%s full=%s", code, verify_data)
         if code in (136012, 136013):
             raise HTTPException(
                 status_code=400,
@@ -935,59 +946,110 @@ async def direct_verify_otp(
         ic, ux = _normalize_meta_error(code, err.get("message", ""), err.get("error_subcode", 0))
         raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
-    # ── Step B: Fetch phone number details ───────────────────────────────────
-    from core.config import WA_BUSINESS_ACCOUNT_ID  # noqa: PLC0415
-    phone_number   = ""
-    display_name   = ""
-    # Always use the platform WABA — this is the shared-WABA direct registration flow
-    waba_id        = WA_BUSINESS_ACCOUNT_ID
+    # ── Step B: register — activates the phone on WhatsApp Cloud API ─────────
+    # Without this call the phone stays "Pending/معلق" in Meta Business Manager.
+    logger.info(
+        "[WA Direct] ▶ register | endpoint=POST %s/%s/register",
+        graph, phone_id,
+    )
+    register_data: dict = {}
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            info_resp = await client.get(
-                f"{graph}/{body.phone_number_id}",
+        async with httpx.AsyncClient(timeout=20) as client:
+            reg_resp  = await client.post(
+                f"{graph}/{phone_id}/register",
                 headers=headers,
-                params={"fields": "display_phone_number,verified_name,status"},
+                json={"messaging_product": "whatsapp", "pin": "000000"},
             )
-            info = info_resp.json()
-            phone_number = info.get("display_phone_number", "")
-            display_name = info.get("verified_name", "")
-    except Exception:
-        pass
+            reg_status = reg_resp.status_code
+            register_data = reg_resp.json()
+    except Exception as exc:
+        logger.error("[WA Direct] register network error: %s", exc)
+        register_data = {}
+        reg_status    = 0
 
-    # ── Step C: Save connection to DB ────────────────────────────────────────
+    logger.info(
+        "[WA Direct] register response | status=%s body=%s",
+        reg_status, register_data,
+    )
+
+    if "error" in register_data:
+        reg_err = register_data["error"]
+        reg_code = reg_err.get("code", 0)
+        # Error 80007 = already registered — that is acceptable
+        if reg_code != 80007:
+            logger.warning(
+                "[WA Direct] register failed | code=%s full=%s",
+                reg_code, register_data,
+            )
+            ic, ux = _normalize_meta_error(reg_code, reg_err.get("message", ""), reg_err.get("error_subcode", 0))
+            raise HTTPException(
+                status_code=400,
+                detail=f"فشل تفعيل الرقم في Meta: {ux}",
+                headers={"X-Nahla-Error-Code": ic},
+            )
+
+    # ── Step C: fetch real phone status from Meta ─────────────────────────────
+    logger.info(
+        "[WA Direct] ▶ fetch_phone_status | endpoint=GET %s/%s",
+        graph, phone_id,
+    )
+    phone_number  = ""
+    display_name  = ""
+    meta_status   = ""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            info_resp = await client.get(
+                f"{graph}/{phone_id}",
+                headers=headers,
+                params={"fields": "id,display_phone_number,verified_name,code_verification_status,quality_rating"},
+            )
+            info_status = info_resp.status_code
+            info        = info_resp.json()
+
+        logger.info(
+            "[WA Direct] fetch_phone_status response | status=%s body=%s",
+            info_status, info,
+        )
+
+        phone_number = info.get("display_phone_number", "")
+        display_name = info.get("verified_name", "")
+        meta_status  = info.get("code_verification_status", "")
+    except Exception as exc:
+        logger.error("[WA Direct] fetch_phone_status error: %s", exc)
+
+    # ── Step D: persist to DB ────────────────────────────────────────────────
+    # Mark as connected regardless of meta_status field — verify_code + register
+    # succeeded, so the number is active; meta_status field may lag briefly.
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if conn is None:
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
 
     conn.status                       = "connected"
-    conn.phone_number_id              = body.phone_number_id
+    conn.phone_number_id              = phone_id
     conn.phone_number                 = phone_number
     conn.business_display_name        = display_name
-    conn.whatsapp_business_account_id = waba_id
-    conn.access_token                 = WA_TOKEN   # shared WABA uses platform token
+    conn.whatsapp_business_account_id = WA_BUSINESS_ACCOUNT_ID
+    conn.access_token                 = WA_TOKEN
     conn.webhook_verified             = True
     conn.sending_enabled              = True
     conn.connected_at                 = datetime.now(timezone.utc)
     conn.last_error                   = None
 
-    # Also update tenant-level fields for quick access
-    tenant = get_or_create_tenant(db, tenant_id)
-    tenant.whatsapp_phone_id = body.phone_number_id
-    tenant.whatsapp_token    = WA_TOKEN
-
     db.commit()
 
     logger.info(
-        "[WA Direct] ✅ Connected | tenant=%s phone=%s name=%s",
-        tenant_id, phone_number, display_name,
+        "[WA Direct] ✅ Connected | tenant=%s phone=%s name=%s meta_verification=%s",
+        tenant_id, phone_number, display_name, meta_status,
     )
 
     return {
-        "status":       "connected",
-        "phone_number": phone_number,
-        "display_name": display_name,
-        "message":      "تم ربط واتساب بنجاح! 🎉",
+        "status":              "connected",
+        "phone_number":        phone_number,
+        "display_name":        display_name,
+        "meta_status":         meta_status,
+        "register_response":   register_data,
+        "message":             "تم ربط واتساب بنجاح! 🎉",
     }
 
 
@@ -1056,28 +1118,43 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
     if conn.status == "connected":
         return {"updated": False, "already_connected": True, **_build_wa_status(conn)}
 
-    # Query Meta for current verification status
-    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+    from core.config import WA_TOKEN as _WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
     graph   = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-    headers = {"Authorization": f"Bearer {WA_TOKEN}"}
+    phone_id = conn.phone_number_id
+    headers = {
+        "Authorization": f"Bearer {_WA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    logger.info(
+        "[WA refresh] ▶ fetch_phone_status | tenant=%s phone_id=%s endpoint=GET %s/%s",
+        tenant_id, phone_id, graph, phone_id,
+    )
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
-                f"{graph}/{conn.phone_number_id}",
+                f"{graph}/{phone_id}",
                 headers=headers,
                 params={"fields": "id,display_phone_number,verified_name,code_verification_status,quality_rating"},
             )
+            resp_status = resp.status_code
             data = resp.json()
     except Exception as exc:
         logger.error("[WA refresh] Meta API error: %s", exc)
         return {"updated": False, "message": "تعذّر الاتصال بـ Meta. حاول مرة أخرى."}
+
+    logger.info(
+        "[WA refresh] fetch_phone_status response | status=%s body=%s",
+        resp_status, data,
+    )
 
     if "error" in data:
         err = data["error"]
         logger.warning("[WA refresh] Meta error: %s", err)
         return {
             "updated": False,
+            "meta_response": data,
             "message": f"Meta: {err.get('message', 'خطأ غير معروف')}",
         }
 
@@ -1087,8 +1164,27 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
 
     logger.info(
         "[WA refresh] tenant=%s phone_id=%s meta_verification=%s",
-        tenant_id, conn.phone_number_id, verification_status,
+        tenant_id, phone_id, verification_status,
     )
+
+    # If NOT_VERIFIED: attempt register to re-activate
+    if verification_status != "VERIFIED":
+        logger.info(
+            "[WA refresh] ▶ re-register | endpoint=POST %s/%s/register",
+            graph, phone_id,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                reg = await client.post(
+                    f"{graph}/{phone_id}/register",
+                    headers=headers,
+                    json={"messaging_product": "whatsapp", "pin": "000000"},
+                )
+                reg_data = reg.json()
+            logger.info("[WA refresh] re-register response | status=%s body=%s", reg.status_code, reg_data)
+        except Exception as exc:
+            logger.error("[WA refresh] re-register error: %s", exc)
+            reg_data = {}
 
     if verification_status == "VERIFIED":
         from datetime import datetime, timezone as _tz  # noqa: PLC0415
@@ -1101,18 +1197,19 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         logger.info("[WA refresh] CONNECTED tenant=%s", tenant_id)
         return {
             "updated": True,
+            "meta_response": data,
             "message": "✅ تم التحقق من الرقم في Meta وتم تحديث حالة الاتصال.",
             **_build_wa_status(conn),
         }
 
-    # Not verified yet
+    # Not verified yet — return full Meta response for diagnosis
     return {
-        "updated":             False,
-        "meta_status":         verification_status,
-        "message":             (
-            "الرقم لم يُتحقق منه بعد في Meta. "
-            f"حالته الحالية: {verification_status}. "
-            "أدخل رمز التحقق الذي وصلك لإتمام الربط."
+        "updated":      False,
+        "meta_status":  verification_status,
+        "meta_response": data,
+        "message": (
+            f"الرقم لم يُفعَّل بعد في Meta. حالته: {verification_status or 'غير معروف'}. "
+            "إذا أدخلت OTP بنجاح، جرّب مرة أخرى أو تواصل مع الدعم."
         ),
     }
 
