@@ -903,33 +903,78 @@ async def direct_verify_otp(
 
     tenant_id = resolve_tenant_id(request)
     graph     = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-    phone_id  = body.phone_number_id
+    phone_id  = body.phone_number_id.strip()
+    token_tail = WA_TOKEN[-8:] if WA_TOKEN else "EMPTY"
     headers   = {
         "Authorization": f"Bearer {WA_TOKEN}",
         "Content-Type":  "application/json",
     }
 
     logger.info(
-        "[WA Direct] ▶ submit_otp | tenant=%s phone_number_id=%s endpoint=POST %s/%s/verify_code",
-        tenant_id, phone_id, graph, phone_id,
+        "[WA verify] ▶ START | tenant=%s phone_number_id=%s waba=%s token_tail=...%s",
+        tenant_id, phone_id, WA_BUSINESS_ACCOUNT_ID, token_tail,
     )
 
+    # ── Pre-check: confirm phone_number_id belongs to our WABA & token ────────
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            chk_resp = await client.get(
+                f"{graph}/{phone_id}",
+                headers=headers,
+                params={"fields": "id,display_phone_number,code_verification_status"},
+            )
+            chk_data   = chk_resp.json()
+            chk_status = chk_resp.status_code
+        logger.info(
+            "[WA verify] pre-check GET /%s | http=%s body=%s",
+            phone_id, chk_status, chk_data,
+        )
+        if "error" in chk_data:
+            chk_err = chk_data["error"]
+            logger.error(
+                "[WA verify] pre-check FAILED — phone_number_id=%s not accessible | "
+                "error_code=%s msg=%s | WABA=%s token_tail=...%s",
+                phone_id,
+                chk_err.get("code"),
+                chk_err.get("message"),
+                WA_BUSINESS_ACCOUNT_ID,
+                token_tail,
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"رقم الهاتف ({phone_id}) غير متاح للتحقق عبر هذه المنصة. "
+                    f"تأكد أن الرقم مضاف لحساب WhatsApp Business الصحيح. "
+                    f"[Meta: {chk_err.get('message', '')}]"
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception as pre_exc:
+        logger.warning("[WA verify] pre-check network error (non-fatal): %s", pre_exc)
+
     # ── Step A: verify_code ───────────────────────────────────────────────────
+    verify_endpoint = f"{graph}/{phone_id}/verify_code"
+    verify_payload  = {"code": body.code}
+    logger.info(
+        "[WA verify] ▶ verify_code | method=POST endpoint=%s payload=%s",
+        verify_endpoint, verify_payload,
+    )
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             verify_resp = await client.post(
-                f"{graph}/{phone_id}/verify_code",
+                verify_endpoint,
                 headers=headers,
-                json={"code": body.code},
+                json=verify_payload,
             )
             verify_status = verify_resp.status_code
             verify_data   = verify_resp.json()
     except Exception as exc:
-        logger.error("[WA Direct] submit_otp network error: %s", exc)
+        logger.error("[WA verify] verify_code network error: %s", exc)
         raise HTTPException(status_code=503, detail=_UX_MESSAGES[META_UNKNOWN_ERROR])
 
     logger.info(
-        "[WA Direct] submit_otp response | status=%s body=%s",
+        "[WA verify] verify_code response | http=%s body=%s",
         verify_status, verify_data,
     )
 
