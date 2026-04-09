@@ -539,94 +539,13 @@ function initDiscountPopup(c,fromSlide){{
     _applyCode(code,cta);
   }});
 
+  // Redirect to cart with coupon in URL — Salla applies it natively
   function _applyCode(code,btn){{
-    // If already on cart/checkout: fill the coupon field and click تطبيق
-    if(window.location.pathname.indexOf('cart')!==-1||window.location.pathname.indexOf('checkout')!==-1){{
-      _domStrategy(code,btn);
-    }}else{{
-      // On other pages: save to localStorage and redirect to cart
-      try{{localStorage.setItem('nahla_pending_coupon',code);}}catch(e){{}}
-      _showApplied(code,btn);
-      var lm=window.location.pathname.match(/^\/([a-z]{{2}})\//);
-      setTimeout(function(){{window.location.href=(lm?'/'+lm[1]:'')+'/cart?coupon='+encodeURIComponent(code);}},1200);
-    }}
-  }}
-
-  function _domStrategy(code,btn){{
-    // 2. Try DOM fill immediately
-    if(_applyCouponToPage(code)){{btn.textContent='✓ جاري…';setTimeout(function(){{_showApplied(code,btn);}},600);return;}}
-
-    // 3. Use MutationObserver to wait for Salla's async component to render
-    btn.textContent='⏳ جاري…';
-    var done=false;
-    var obs=new MutationObserver(function(){{
-      if(done)return;
-      if(_applyCouponToPage(code)){{done=true;obs.disconnect();_showApplied(code,btn);}}
-    }});
-    obs.observe(document.body,{{childList:true,subtree:true,attributes:true}});
-
-    // Retry with delays regardless
-    [400,900,1600,2600].forEach(function(ms){{
-      setTimeout(function(){{
-        if(done)return;
-        if(_applyCouponToPage(code)){{done=true;obs.disconnect();_showApplied(code,btn);}}
-      }},ms);
-    }});
-
-    // Final fallback: redirect to cart with coupon param
-    setTimeout(function(){{
-      if(done)return;
-      obs.disconnect();
-      _fallbackCart(code,btn);
-    }},3200);
-  }}
-
-  function _showApplied(code,btn){{
-    btn.textContent='✓ تم تطبيق الخصم!';
-    btn.style.background='#22c55e';
-    var badge=document.querySelector('#nahla-popup .np-badge');
-    if(badge)badge.innerHTML='تم الخصم ✓';
-    setTimeout(hide,1800);
-  }}
-
-  // Use shared top-level helpers: _applyCouponToPage, _fillInput, _findApplyBtn
-
-  function _fallbackCart(code,btn){{
-    try{{navigator.clipboard.writeText(code);}}catch(e){{}}
-
-    // 1. Try DOM injection — handle normal DOM + Shadow DOM (Salla Web Components)
-    var domOk=_applyCouponToPage(code);
-    if(domOk){{btn.textContent='✓ جاري التطبيق…';setTimeout(function(){{_showApplied(code,btn);}},800);return;}}
-
-    // 2. GUARANTEED fallback — retry DOM with delays then redirect
-    btn.textContent='✓ جاهز!';btn.style.background='#22c55e';
-    // Retry DOM fill with increasing delays (handles async-rendered components)
-    var retries=[300,800,1500,2500];
-    var ri=0;
-    function _retryDom(){{
-      if(ri>=retries.length){{_doRedirect();return;}}
-      setTimeout(function(){{
-        if(_applyCouponToPage(code)){{_showApplied(code,btn);return;}}
-        ri++;_retryDom();
-      }},retries[ri]);
-    }}
-    function _doRedirect(){{
-      hide();
-      var toast=document.createElement('div');
-      toast.style.cssText='position:fixed;top:24px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:16px 28px;border-radius:16px;z-index:999999;font-size:14px;font-weight:700;direction:rtl;box-shadow:0 10px 40px rgba(0,0,0,.35);text-align:center;min-width:280px;';
-      toast.innerHTML='🎁 كود خصمك: <span style="color:#fbbf24;letter-spacing:3px;font-size:17px;display:block;margin-top:4px;">'+code+'</span><small style="font-weight:400;opacity:.7;font-size:12px;">انسخه وضعه في حقل الكوبون</small>';
-      document.body.appendChild(toast);
-      var curPath=window.location.pathname;
-      var cartUrl;
-      if(curPath.indexOf('/cart')!==-1){{
-        cartUrl=curPath+'?coupon='+encodeURIComponent(code);
-      }}else{{
-        var langMatch=curPath.match(/^\/([a-z]{{2}})\//);
-        cartUrl=(langMatch?'/'+langMatch[1]:'')+'/cart?coupon='+encodeURIComponent(code);
-      }}
-      setTimeout(function(){{window.location.href=cartUrl;}},1800);
-    }}
-    _retryDom();
+    btn.textContent='⏳ جاري تطبيق الخصم…';
+    btn.disabled=true;
+    var lm=window.location.pathname.match(/^\/([a-z]{{2}})\//);
+    var base=(lm?'/'+lm[1]:'')+'/cart?coupon='+encodeURIComponent(code);
+    setTimeout(function(){{window.location.href=base;}},900);
   }}
 
   return {{show:show,hide:hide}};
@@ -680,38 +599,11 @@ function initSlideOffer(c){{
 }}
 
 // ══════════════════════════════════════════════════════════════
-// Auto-apply coupon from URL param (set by popup redirect)
+// Cleanup: remove any stale pending coupon from localStorage
+// (Salla handles ?coupon=CODE natively in the cart page)
 // ══════════════════════════════════════════════════════════════
 (function(){{
-  try{{
-    var p=new URLSearchParams(window.location.search);
-    var urlCode=p.get('coupon')||p.get('nahla_coupon');
-    // Also check localStorage for coupon saved from popup on another page
-    if(!urlCode){{try{{urlCode=localStorage.getItem('nahla_pending_coupon')||'';}}catch(e){{}}}}
-    if(!urlCode)return;
-    // Clear localStorage coupon
-    try{{localStorage.removeItem('nahla_pending_coupon');}}catch(e){{}}
-    // Clean URL
-    p.delete('coupon');p.delete('nahla_coupon');
-    var newQ=p.toString();
-    window.history.replaceState({{}},'',window.location.pathname+(newQ?'?'+newQ:''));
-
-    function _domFill(){{_applyCouponToPage(urlCode);}}
-
-    // Wait for Salla components + retry with MutationObserver
-    onReady(function(){{
-      var applied=false;
-      var urlObs=new MutationObserver(function(){{
-        if(applied)return;
-        _domFill();
-      }});
-      urlObs.observe(document.body,{{childList:true,subtree:true}});
-      [400,1000,2000,3500].forEach(function(ms){{
-        setTimeout(function(){{if(!applied)_domFill();}},ms);
-      }});
-      setTimeout(function(){{urlObs.disconnect();}},6000);
-    }});
-  }}catch(err){{}}
+  try{{localStorage.removeItem('nahla_pending_coupon');}}catch(e){{}}
 }})();
 
 // ══════════════════════════════════════════════════════════════
