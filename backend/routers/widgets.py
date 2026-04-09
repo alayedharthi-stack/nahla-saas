@@ -470,6 +470,8 @@ function initDiscountPopup(c,fromSlide){{
   }});
 
   function _applyCode(code,btn){{
+    // Show the code immediately as a persistent banner (copied to clipboard)
+    _showCodeBanner(code);
     // 1. Try Salla SDK (only works if app is connected/installed)
     var sdk=window.salla||window.Salla;
     if(sdk&&sdk.cart){{
@@ -480,6 +482,18 @@ function initDiscountPopup(c,fromSlide){{
       }}
     }}
     _domStrategy(code,btn);
+  }}
+
+  function _showCodeBanner(code){{
+    if(document.getElementById('nahla-code-banner'))return;
+    var b=document.createElement('div');
+    b.id='nahla-code-banner';
+    b.style.cssText='position:fixed;bottom:20px;right:20px;left:20px;max-width:400px;margin:0 auto;background:#1e293b;color:#fff;padding:14px 20px;border-radius:14px;z-index:999998;direction:rtl;box-shadow:0 8px 30px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:space-between;gap:10px;';
+    b.innerHTML='<div><div style="font-size:12px;opacity:.7;margin-bottom:2px;">كود الخصم (تم نسخه)</div>'
+      +'<div style="font-size:20px;font-weight:800;letter-spacing:3px;color:#fbbf24;">'+code+'</div></div>'
+      +'<button onclick="this.parentNode.remove()" style="background:none;border:none;color:#94a3b8;font-size:18px;cursor:pointer;padding:4px;">✕</button>';
+    document.body.appendChild(b);
+    setTimeout(function(){{if(b.parentNode)b.remove();}},12000);
   }}
 
   function _domStrategy(code,btn){{
@@ -525,54 +539,70 @@ function initDiscountPopup(c,fromSlide){{
     ['input','change'].forEach(function(e){{inp.dispatchEvent(new Event(e,{{bubbles:true}}));}});
   }}
 
-  function _applyCouponToDOM(code){{
-    // 0. Try Salla Web Component Shadow DOM first
-    var sc=document.querySelector('salla-coupon,salla-coupon-form,[is="salla-coupon"]');
-    if(sc&&sc.shadowRoot){{
-      var si=sc.shadowRoot.querySelector('input');
-      if(si){{_fillInput(si,code);var sb=sc.shadowRoot.querySelector('button');if(sb)setTimeout(function(){{sb.click();}},150);return true;}}
+  function _findApplyBtn(inp){{
+    // 1. Search by Arabic/English text (most reliable)
+    var keywords=['تطبيق','Apply','apply','أضف','إضافة'];
+    var allBtns=document.querySelectorAll('button');
+    for(var b=0;b<allBtns.length;b++){{
+      var txt=allBtns[b].textContent.trim();
+      for(var k=0;k<keywords.length;k++){{
+        if(txt===keywords[k]||txt.indexOf(keywords[k])!==-1)return allBtns[b];
+      }}
     }}
-    // Try every possible Salla coupon input selector
+    // 2. Button inside the same form/container as the input
+    var container=inp.closest('form,salla-coupon,[data-coupon],.coupon-form,.coupon');
+    if(container){{
+      var cb=container.querySelector('button');
+      if(cb)return cb;
+    }}
+    // 3. Nearest sibling button
+    var next=inp.nextElementSibling;
+    while(next){{if(next.tagName==='BUTTON')return next;next=next.nextElementSibling;}}
+    return null;
+  }}
+
+  function _applyCouponToDOM(code){{
+    // 0. Salla Web Component — try property + method approach first
+    var sc=document.querySelector('salla-coupon,salla-coupon-form');
+    if(sc){{
+      // Try component property/method
+      try{{
+        if(typeof sc.applyCoupon==='function'){{sc.applyCoupon(code);return true;}}
+        if(typeof sc.apply==='function'){{sc.value=code;sc.apply();return true;}}
+      }}catch(e){{}}
+      // Try Shadow DOM
+      var root=sc.shadowRoot||sc;
+      var si=root.querySelector('input');
+      if(si){{
+        _fillInput(si,code);
+        var sb=_findApplyBtn(si)||root.querySelector('button');
+        if(sb)setTimeout(function(){{sb.click();}},200);
+        return true;
+      }}
+    }}
+    // 1. Find input by multiple selectors
     var sel=[
-      'input[name="coupon"]',
-      'input[name="coupon_code"]',
-      'input[name="discount_code"]',
-      'input[placeholder*="كوبون"]',
-      'input[placeholder*="خصم"]',
-      'input[placeholder*="coupon"]',
-      'input[placeholder*="Coupon"]',
-      'input[id*="coupon"]',
-      'input[id*="discount"]',
-      '.coupon-field input',
-      '.discount-code input',
-      'salla-coupon input',
-      '[data-coupon] input',
+      'input[name="coupon"]','input[name="coupon_code"]','input[name="discount_code"]',
+      'input[placeholder*="خصم"]','input[placeholder*="كوبون"]',
+      'input[placeholder*="coupon"]','input[id*="coupon"]','input[id*="discount"]',
+      '.coupon-field input','.discount-code input','[data-coupon] input',
     ];
     var inp=null;
     for(var i=0;i<sel.length;i++){{inp=document.querySelector(sel[i]);if(inp)break;}}
     if(!inp)return false;
+
+    // 2. Fill input
     _fillInput(inp,code);
 
-    // Find and click the apply button
-    var btnSel=[
-      'button[type="submit"]',
-      'button[class*="coupon"]',
-      'button[class*="apply"]',
-      '.coupon-btn','[data-coupon] button',
-      'salla-coupon button',
-    ];
-    var applyBtn=null;
-    var form=inp.closest('form,salla-coupon,[data-coupon]');
-    if(form){{
-      applyBtn=form.querySelector('button');
-    }}
-    if(!applyBtn)for(var j=0;j<btnSel.length;j++){{applyBtn=document.querySelector(btnSel[j]);if(applyBtn)break;}}
+    // 3. Find and click the CORRECT apply button (by text — avoids clicking "إتمام الطلب")
+    var applyBtn=_findApplyBtn(inp);
     if(applyBtn){{
-      setTimeout(function(){{applyBtn.click();}},200);
+      setTimeout(function(){{applyBtn.click();}},250);
       return true;
     }}
-    // Submit form directly
-    if(form&&form.tagName==='FORM'){{form.dispatchEvent(new Event('submit',{{bubbles:true}}));return true;}}
+    // 4. Submit the specific coupon form
+    var form=inp.closest('form');
+    if(form){{form.dispatchEvent(new Event('submit',{{bubbles:true,cancelable:true}}));return true;}}
     return false;
   }}
 
