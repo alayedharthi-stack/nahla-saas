@@ -686,15 +686,40 @@ async def direct_request_otp(
                     )
                     otp_data = otp_resp.json()
                 if "error" in otp_data:
+                    err = otp_data["error"]
+                    err_code    = err.get("code", 0)
+                    err_subcode = err.get("error_subcode", 0)
+                    user_msg    = err.get("error_user_msg", "")
                     logger.warning("[WA Direct] Resend OTP error (pending resume): %s", otp_data)
+
+                    # Rate-limited / too many failed attempts — surface to user
+                    RATE_CODES = {136024, 131056, 131042, 368, 4, 17, 80007, 2388091}
+                    is_rate = (
+                        err_code in RATE_CODES
+                        or err_subcode in RATE_CODES
+                        or "rate" in err.get("message", "").lower()
+                        or "انتظار" in user_msg
+                        or "wait" in err.get("message", "").lower()
+                    )
+                    if is_rate:
+                        arabic_msg = user_msg or (
+                            "لقد حاولت عدة مرات — يُرجى الانتظار بضع ساعات قبل طلب رمز جديد."
+                        )
+                        raise HTTPException(
+                            status_code=429,
+                            detail=arabic_msg,
+                            headers={"X-Nahla-Error-Code": "OTP_RATE_LIMITED"},
+                        )
+            except HTTPException:
+                raise
             except Exception as exc:
                 logger.warning("[WA Direct] Resend OTP exception (pending resume): %s", exc)
-            # Always proceed to Step 2 — user likely has the code or needs to wait
+            # OTP sent successfully — proceed to Step 2
             return {
                 "status":          META_CODE_SENT,
                 "code":            META_CODE_SENT,
                 "phone_number_id": phone_number_id,
-                "message":         "تم إرسال رمز التحقق — أدخل الرمز الذي وصلك أو انتظر دقيقة وأعد المحاولة.",
+                "message":         "تم إرسال رمز التحقق — أدخل الرمز الذي وصلك.",
                 "already_sent":    True,
             }
         # else: fall through to re-add the phone number below

@@ -277,13 +277,16 @@ export default function WhatsAppConnect() {
     } catch (e) {
       const raw = e instanceof Error ? e.message : ''
       console.error('[Nahla/OTP] api_error=', raw)
-      // Distinguish: never show phone-format error for a META_REQUEST_ERROR
-      const isPhoneFormatMsg = /صيغة رقم الهاتف|phone.*format|invalid.*phone/i.test(raw)
-      if (isPhoneFormatMsg && valid) {
-        // Backend returned phone error but frontend already validated → show generic
-        setError('تعذر إرسال رمز التحقق. تأكد من الرقم أو حاول مرة أخرى.')
+      const isRateLimit = /انتظار|rate.limit|OTP_RATE_LIMITED|حاولت عدة مرات/i.test(raw)
+      if (isRateLimit) {
+        setError('⏳ ' + sanitizeMessage(raw) + ' — جرّب مرة أخرى بعد بضع ساعات أو استخدم رقماً مختلفاً.')
       } else {
-        setError(sanitizeMessage(raw))
+        const isPhoneFormatMsg = /صيغة رقم الهاتف|phone.*format|invalid.*phone/i.test(raw)
+        if (isPhoneFormatMsg && valid) {
+          setError('تعذر إرسال رمز التحقق. تأكد من الرقم أو حاول مرة أخرى.')
+        } else {
+          setError(sanitizeMessage(raw))
+        }
       }
     }
     finally { setBusy(false) }
