@@ -76,33 +76,34 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
     return () => { cancelled = true }
   }, [])
 
-  const launchSignup = useCallback(async () => {
+  const handleExchangeCode = useCallback((code: string) => {
+    setBusy(true); setStage('exchanging')
+    apiCall<{ waba_id: string; phones: EmbeddedPhone[]; message: string }>(
+      '/whatsapp/embedded/exchange',
+      { method: 'POST', body: JSON.stringify({ code }) }
+    ).then(result => {
+      setWabaId(result.waba_id)
+      setPhones(result.phones)
+      setStage('select-phone')
+    }).catch(e => {
+      setError(e instanceof Error ? e.message : 'حدث خطأ أثناء الربط')
+      setStage('ready')
+    }).finally(() => setBusy(false))
+  }, [])
+
+  const launchSignup = useCallback(() => {
     if (!window.FB || !sdkLoaded.current) { setError('SDK غير جاهز، انتظر لحظة'); return }
     setError('')
-    window.FB.login(async (response: any) => {
+    window.FB.login((response: any) => {
       if (!response?.authResponse) { setError('تم إلغاء عملية الربط'); return }
-      const code = response.authResponse.code
-      setBusy(true); setStage('exchanging')
-      try {
-        const result = await apiCall<{ waba_id: string; phones: EmbeddedPhone[]; message: string }>(
-          '/whatsapp/embedded/exchange',
-          { method: 'POST', body: JSON.stringify({ code }) }
-        )
-        setWabaId(result.waba_id)
-        setPhones(result.phones)
-        setStage(result.phones.length === 1 ? 'select-phone' : 'select-phone')
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'حدث خطأ أثناء الربط')
-        setStage('ready')
-      } finally { setBusy(false) }
+      handleExchangeCode(response.authResponse.code)
     }, {
-      config_id: '',   // populated dynamically from config if set
       response_type: 'code',
       override_default_response_type: true,
       scope: 'whatsapp_business_management,whatsapp_business_messaging,business_management',
       extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
     })
-  }, [])
+  }, [handleExchangeCode])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
