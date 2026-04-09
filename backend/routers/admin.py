@@ -377,52 +377,33 @@ async def impersonate_merchant(
     _admin:  Dict[str, Any]  = Depends(require_admin),
 ):
     """
-    Generate a short-lived token (2 h) scoped to the merchant's tenant.
-    The admin can use it to view/edit the merchant's dashboard on their behalf.
+    DEPRECATED — This endpoint is disabled for security reasons.
+    Use POST /admin/impersonate/{tenant_id} (support_access.py) which enforces
+    merchant consent, impersonation flags, sensitive-path blocking, and session revocation.
     """
-    if not JWT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable")
-
-    user = db.query(User).filter(User.id == user_id, User.role == "merchant").first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Merchant not found")
-    if not user.tenant_id:
-        raise HTTPException(status_code=400, detail="هذا التاجر ليس لديه tenant مرتبط")
-
-    from datetime import timedelta, timezone
-    from jose import jwt as _jwt
-    from core.config import JWT_SECRET, JWT_ALGORITHM
-
-    payload = {
-        "sub":              user.email,
-        "role":             "merchant",
-        "tenant_id":        user.tenant_id,
-        "impersonated_by":  _admin.get("sub", "admin"),
-        "exp":              datetime.now(timezone.utc) + timedelta(hours=2),
-    }
-    token = _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
     audit(
-        "admin_impersonate_merchant",
+        "admin_impersonate_merchant_blocked",
         admin=_admin.get("sub"),
         merchant_id=user_id,
-        merchant_email=user.email,
-        tenant_id=user.tenant_id,
+        reason="legacy_endpoint_disabled",
     )
-
-    return {
-        "access_token":   token,
-        "token_type":     "bearer",
-        "expires_in":     7200,
-        "merchant_email": user.email,
-        "store_name":     user.tenant.name if user.tenant else "",
-        "tenant_id":      user.tenant_id,
-    }
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "هذا المسار معطّل لأسباب أمنية. "
+            "استخدم POST /admin/impersonate/{tenant_id} بعد الحصول على موافقة التاجر."
+        ),
+    )
 
 
 @router.get("/tenants/{tenant_id}")
-async def get_tenant(tenant_id: int, db: Session = Depends(get_db)):
-    """Retrieve a single tenant by its numeric ID."""
+async def get_tenant(
+    tenant_id: int,
+    request:   Request,
+    db:        Session         = Depends(get_db),
+    _caller:   Dict[str, Any] = Depends(require_admin),
+):
+    """Retrieve a single tenant by its numeric ID. Admin-only."""
     tenant = db.query(Tenant).filter(
         Tenant.id == tenant_id,
         Tenant.is_active == True,  # noqa: E712

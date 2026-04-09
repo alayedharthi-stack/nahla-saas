@@ -7,8 +7,18 @@ Import from here — never call os.environ.get() scattered across route files.
 import os
 import secrets as _secrets_mod
 
+import logging as _logging
+_cfg_logger = _logging.getLogger("nahla-backend")
+
 # ── JWT ────────────────────────────────────────────────────────────────────────
-JWT_SECRET    = os.environ.get("JWT_SECRET") or _secrets_mod.token_hex(32)
+_jwt_secret_env = os.environ.get("JWT_SECRET", "")
+if not _jwt_secret_env:
+    _cfg_logger.critical(
+        "SECURITY: JWT_SECRET is not set in environment. "
+        "Generating a random secret — all sessions will be invalidated on restart. "
+        "Set JWT_SECRET in Railway environment variables immediately."
+    )
+JWT_SECRET    = _jwt_secret_env or _secrets_mod.token_hex(32)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_H  = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))  # 7 days
 
@@ -18,7 +28,13 @@ INVITE_EXPIRE_H = 168  # 7 days
 
 # ── Admin bootstrap credentials ────────────────────────────────────────────────
 ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL",    "admin@nahlah.ai")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "nahla-admin-2026")
+_admin_pass_env = os.environ.get("ADMIN_PASSWORD", "")
+if not _admin_pass_env:
+    _cfg_logger.critical(
+        "SECURITY: ADMIN_PASSWORD is not set in environment. "
+        "Set ADMIN_PASSWORD in Railway environment variables immediately."
+    )
+ADMIN_PASSWORD = _admin_pass_env or ""
 
 # ── Notification services ──────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")

@@ -193,8 +193,17 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         return response
 
     if not JWT_AVAILABLE:
-        logger.warning("JWT enforcement skipped — python-jose not installed")
-        return await call_next(request)
+        logger.critical(
+            "SECURITY HALT: python-jose is not installed. "
+            "JWT enforcement cannot be applied. Refusing all protected requests."
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Auth service unavailable — server misconfiguration.",
+                "code": "jwt_library_missing",
+            },
+        )
 
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
