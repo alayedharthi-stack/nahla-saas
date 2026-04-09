@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
-REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# Repo is always at /app (set by WORKDIR in Dockerfile)
+REPO_ROOT="/app"
 
 echo ">>> Running database migrations..."
 cd "$REPO_ROOT/database"
-alembic upgrade head
+alembic upgrade head || echo "!!! Migration warning (continuing anyway): $?"
 
 echo ">>> Starting Nahla backend on port ${PORT:-8000}..."
 cd "$REPO_ROOT"
