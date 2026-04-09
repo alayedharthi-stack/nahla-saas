@@ -1409,18 +1409,29 @@ function SupportAccessTab() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
   const [errorMsg, setErrorMsg]     = useState<string | null>(null)
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     try {
       const res = await fetch('/api/merchant/support-access', {
         headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
       })
       if (res.ok) setStatus(await res.json())
     } catch { /* ignore */ }
-    finally { setLoading(false) }
+    finally { if (!silent) setLoading(false) }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+    // Poll every 10s to catch changes from bell approval or admin entry
+    const id = setInterval(() => load(true), 10_000)
+    // Also listen for custom event dispatched by the bell when merchant approves
+    const onApproved = () => load(true)
+    window.addEventListener('nahla:support-access-changed', onApproved)
+    return () => {
+      clearInterval(id)
+      window.removeEventListener('nahla:support-access-changed', onApproved)
+    }
+  }, [load])
 
   const toggle = async (enable: boolean) => {
     setSaving(true)
@@ -1673,7 +1684,11 @@ function AccessRequestsPanel({ onApproved }: { onApproved?: () => void }) {
       })
       if (res.ok) {
         await load()
-        if (approve && onApproved) onApproved()
+        if (approve) {
+          // Notify SupportAccessTab to refresh immediately
+          window.dispatchEvent(new Event('nahla:support-access-changed'))
+          if (onApproved) onApproved()
+        }
       }
     } catch { /* ignore */ }
     finally { setResponding(null) }

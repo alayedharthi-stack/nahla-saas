@@ -84,6 +84,8 @@ function useAccessRequests(role: string) {
       if (res.ok) {
         if (approve) {
           setApproved(reqId)
+          // Notify Settings page to refresh support-access status
+          window.dispatchEvent(new Event('nahla:support-access-changed'))
           // Remove from list after 3 seconds
           setTimeout(() => {
             setApproved(null)
