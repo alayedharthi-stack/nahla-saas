@@ -286,30 +286,37 @@ function _fillInput(inp,code){{
 }}
 
 function _findApplyBtn(inp){{
-  var keywords=['تطبيق','Apply','apply','أضف'];
+  // 1. Nearest button walking up from input (most reliable)
+  var p=inp.parentElement;
+  while(p&&p!==document.body){{
+    var near=p.querySelector('button');
+    if(near)return near;
+    p=p.parentElement;
+  }}
+  // 2. Next sibling button
+  var next=inp.nextElementSibling;
+  while(next){{if(next.tagName==='BUTTON')return next;next=next.nextElementSibling;}}
+  // 3. Search all buttons by known text
+  var keywords=['تطبيق','Apply','apply'];
   var allBtns=document.querySelectorAll('button');
   for(var b=0;b<allBtns.length;b++){{
     var txt=allBtns[b].textContent.trim();
     for(var k=0;k<keywords.length;k++){{if(txt===keywords[k]||txt.indexOf(keywords[k])!==-1)return allBtns[b];}}
   }}
-  var container=inp.closest('form,salla-coupon,[data-coupon],.coupon-form,.coupon');
-  if(container){{var cb=container.querySelector('button');if(cb)return cb;}}
-  var next=inp.nextElementSibling;
-  while(next){{if(next.tagName==='BUTTON')return next;next=next.nextElementSibling;}}
   return null;
 }}
 
 function _applyCouponToPage(code){{
-  // 0. Salla web component
+  // 0. Salla web component (shadow DOM)
   var sc=document.querySelector('salla-coupon,salla-coupon-form');
   if(sc){{
-    try{{if(typeof sc.applyCoupon==='function'){{sc.applyCoupon(code);return true;}}}}catch(e){{}}
+    try{{if(typeof sc.applyCoupon==='function'){{sc.applyCoupon(code);setTimeout(function(){{window.location.reload();}},1500);return true;}}}}catch(e){{}}
     var root=sc.shadowRoot||sc;
     var si=root.querySelector('input');
     if(si){{
       _fillInput(si,code);
-      var sb=_findApplyBtn(si)||root.querySelector('button');
-      if(sb)setTimeout(function(){{sb.click();}},250);
+      var sb=root.querySelector('button[type="submit"],button');
+      if(sb)setTimeout(function(){{sb.click();setTimeout(function(){{window.location.reload();}},1500);}},600);
       return true;
     }}
   }}
@@ -322,9 +329,21 @@ function _applyCouponToPage(code){{
   if(!inp)return false;
   _fillInput(inp,code);
   var btn=_findApplyBtn(inp);
-  if(btn){{setTimeout(function(){{btn.click();}},250);return true;}}
+  if(btn){{
+    setTimeout(function(){{
+      btn.click();
+      setTimeout(function(){{window.location.reload();}},1500);
+    }},600);
+    return true;
+  }}
   var form=inp.closest('form');
-  if(form){{form.dispatchEvent(new Event('submit',{{bubbles:true,cancelable:true}}));return true;}}
+  if(form){{
+    setTimeout(function(){{
+      form.dispatchEvent(new Event('submit',{{bubbles:true,cancelable:true}}));
+      setTimeout(function(){{window.location.reload();}},1500);
+    }},600);
+    return true;
+  }}
   return false;
 }}
 
