@@ -203,14 +203,17 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
       if (!newPhone || !displayName) { setError('أدخل رقم الهاتف والاسم التجاري'); return }
       setBusy(true); setError('')
       try {
-        // Strip leading zeros from phone number
-        const cleanPhone = newPhone.replace(/^0+/, '')
+        // Normalize phone: remove spaces, dashes, dots, parentheses, leading zeros
+        const cleanPhone = newPhone.replace(/[\s\-().+]/g, '').replace(/^0+/, '')
+        const cleanCC    = countryCode.replace(/\D/g, '')
+        if (!cleanPhone) { setError('أدخل رقم الهاتف بشكل صحيح'); setBusy(false); return }
+        if (!displayName.trim()) { setError('الاسم التجاري مطلوب'); setBusy(false); return }
         const res = await apiCall<{ phone_number_id: string }>('/whatsapp/embedded/add-phone', {
           method: 'POST',
           body: JSON.stringify({
-            country_code:  countryCode,
+            country_code:  cleanCC,
             phone_number:  cleanPhone,
-            verified_name: displayName,
+            verified_name: displayName.trim(),
             code_method:   'SMS',
           }),
         })
@@ -233,27 +236,39 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
         </div>
         {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
         <div className="space-y-3">
-          <div className="flex gap-2">
-            <input
-              value={countryCode}
-              onChange={e => setCountryCode(e.target.value)}
-              placeholder="966"
-              className="w-20 px-3 py-3 border border-slate-200 rounded-xl text-sm text-center focus:outline-none focus:border-violet-400"
-            />
-            <input
-              value={newPhone}
-              onChange={e => setNewPhone(e.target.value)}
-              placeholder="5XXXXXXXX"
-              className="flex-1 px-4 py-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-violet-400"
-              dir="ltr"
-            />
+          <div>
+            <label className="block text-xs text-slate-500 mb-1 text-right">رقم الهاتف</label>
+            <div className="flex gap-2">
+              <div className="relative">
+                <input
+                  value={countryCode}
+                  onChange={e => setCountryCode(e.target.value.replace(/\D/g, ''))}
+                  placeholder="966"
+                  maxLength={4}
+                  className="w-20 px-3 py-3 border border-slate-200 rounded-xl text-sm text-center focus:outline-none focus:border-violet-400"
+                />
+                <span className="absolute -top-2 right-2 text-xs text-slate-400 bg-white px-1">+</span>
+              </div>
+              <input
+                value={newPhone}
+                onChange={e => setNewPhone(e.target.value)}
+                placeholder="512345678"
+                className="flex-1 px-4 py-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-violet-400"
+                dir="ltr"
+              />
+            </div>
+            <p className="text-xs text-slate-400 mt-1 text-right">مثال: كود الدولة <span className="font-mono">966</span> ورقم الهاتف <span className="font-mono">512345678</span> (بدون الصفر الأول)</p>
           </div>
-          <input
-            value={displayName}
-            onChange={e => setDisplayName(e.target.value)}
-            placeholder="الاسم التجاري (مثال: متجر نحلة)"
-            className="w-full px-4 py-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-violet-400"
-          />
+          <div>
+            <label className="block text-xs text-slate-500 mb-1 text-right">الاسم التجاري</label>
+            <input
+              value={displayName}
+              onChange={e => setDisplayName(e.target.value)}
+              placeholder="مثال: متجر نحلة للعطور"
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-violet-400"
+            />
+            <p className="text-xs text-slate-400 mt-1 text-right">اسم نشاطك التجاري كما سيظهر للعملاء في واتساب</p>
+          </div>
         </div>
         <div className="flex gap-2">
           <button
