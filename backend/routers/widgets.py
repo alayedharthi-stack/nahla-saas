@@ -458,47 +458,58 @@ function initDiscountPopup(c,fromSlide){{
     setTimeout(function(){{copyBtn.textContent='نسخ';copyBtn.classList.remove('copied');}},2000);
   }});
 
-  // ── Main CTA — get coupon + apply to cart ──────────────────────────────────
+  // ── Main CTA — apply coupon ────────────────────────────────────────────────
   var cta=document.getElementById('nahla-popup-cta');
   if(cta)cta.addEventListener('click',function(){{
     ls(SEEN_KEY,1);
+    var code=N.popupCfg&&N.popupCfg.coupon_code?N.popupCfg.coupon_code:'';
+    if(!code){{hide();return;}}
     cta.textContent='⏳ جاري…';cta.disabled=true;
-
-    function _doApply(code){{
-      if(!code){{cta.textContent='احصل على الخصم';cta.disabled=false;hide();return;}}
-
-      // 1. Try Salla SDK
-      var sdk=window.salla||window.Salla;
-      if(sdk&&sdk.cart){{
-        var fn=sdk.cart.applyCoupon||sdk.cart.addCoupon||sdk.cart.setCoupon;
-        if(typeof fn==='function'){{
-          fn.call(sdk.cart,code)
-            .then(function(){{_showApplied(code,cta);}})
-            .catch(function(){{_tryRestApi(code);}});
-          return;
-        }}
-      }}
-      _tryRestApi(code);
-    }}
-
-    function _tryRestApi(code){{
-      // 2. Try Salla Store REST API
-      fetch('/api/cart/coupons',{{
-        method:'POST',
-        headers:{{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
-        body:JSON.stringify({{coupon_code:code}})
-      }}).then(function(r){{return r.ok?r.json():Promise.reject();}})
-        .then(function(){{_showApplied(code,cta);setTimeout(function(){{window.location.reload();}},1000);}})
-        .catch(function(){{_fallbackCart(code,cta);}});
-    }}
-
-    // Try backend for unique coupon, fallback to static code on ANY failure
-    var staticCode=N.popupCfg&&N.popupCfg.coupon_code?N.popupCfg.coupon_code:'';
-    fetch('{_API_BASE}/merchant/widgets/'+TENANT_ID+'/create-coupon',{{method:'POST'}})
-      .then(function(r){{return r.ok?r.json():Promise.resolve({{success:false}});}}  )
-      .then(function(d){{_doApply((d.success&&d.code)?d.code:staticCode);}})
-      .catch(function(){{_doApply(staticCode);}});
+    try{{navigator.clipboard.writeText(code);}}catch(e){{}}
+    _applyCode(code,cta);
   }});
+
+  function _applyCode(code,btn){{
+    // 1. Try Salla SDK (only works if app is connected/installed)
+    var sdk=window.salla||window.Salla;
+    if(sdk&&sdk.cart){{
+      var fn=sdk.cart.applyCoupon||sdk.cart.addCoupon||sdk.cart.setCoupon;
+      if(typeof fn==='function'){{
+        fn.call(sdk.cart,code).then(function(){{_showApplied(code,btn);}}).catch(function(){{_domStrategy(code,btn);}});
+        return;
+      }}
+    }}
+    _domStrategy(code,btn);
+  }}
+
+  function _domStrategy(code,btn){{
+    // 2. Try DOM fill immediately
+    if(_applyCouponToDOM(code)){{btn.textContent='✓ جاري…';setTimeout(function(){{_showApplied(code,btn);}},600);return;}}
+
+    // 3. Use MutationObserver to wait for Salla's async component to render
+    btn.textContent='⏳ جاري…';
+    var done=false;
+    var obs=new MutationObserver(function(){{
+      if(done)return;
+      if(_applyCouponToDOM(code)){{done=true;obs.disconnect();_showApplied(code,btn);}}
+    }});
+    obs.observe(document.body,{{childList:true,subtree:true,attributes:true}});
+
+    // Retry with delays regardless
+    [400,900,1600,2600].forEach(function(ms){{
+      setTimeout(function(){{
+        if(done)return;
+        if(_applyCouponToDOM(code)){{done=true;obs.disconnect();_showApplied(code,btn);}}
+      }},ms);
+    }});
+
+    // Final fallback: redirect to cart with coupon param
+    setTimeout(function(){{
+      if(done)return;
+      obs.disconnect();
+      _fallbackCart(code,btn);
+    }},3200);
+  }}
 
   function _showApplied(code,btn){{
     btn.textContent='✓ تم تطبيق الخصم!';
@@ -572,16 +583,36 @@ function initDiscountPopup(c,fromSlide){{
     var domOk=_applyCouponToDOM(code);
     if(domOk){{btn.textContent='✓ جاري التطبيق…';setTimeout(function(){{_showApplied(code,btn);}},800);return;}}
 
-    // 2. GUARANTEED fallback — redirect to /cart?coupon=CODE (Salla reads it automatically)
+    // 2. GUARANTEED fallback — retry DOM with delays then redirect
     btn.textContent='✓ جاهز!';btn.style.background='#22c55e';
-    hide();
-    var toast=document.createElement('div');
-    toast.style.cssText='position:fixed;top:24px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:16px 28px;border-radius:16px;z-index:999999;font-size:14px;font-weight:700;direction:rtl;box-shadow:0 10px 40px rgba(0,0,0,.35);text-align:center;min-width:280px;';
-    toast.innerHTML='🎁 تم! كود خصمك: <span style="color:#fbbf24;letter-spacing:3px;font-size:17px;display:block;margin-top:4px;">'+code+'</span><small style="font-weight:400;opacity:.7;font-size:12px;">جاري تطبيق الخصم على سلتك…</small>';
-    document.body.appendChild(toast);
-    setTimeout(function(){{
-      window.location.href='/cart?coupon='+encodeURIComponent(code);
-    }},1400);
+    // Retry DOM fill with increasing delays (handles async-rendered components)
+    var retries=[300,800,1500,2500];
+    var ri=0;
+    function _retryDom(){{
+      if(ri>=retries.length){{_doRedirect();return;}}
+      setTimeout(function(){{
+        if(_applyCouponToDOM(code)){{_showApplied(code,btn);return;}}
+        ri++;_retryDom();
+      }},retries[ri]);
+    }}
+    function _doRedirect(){{
+      hide();
+      var toast=document.createElement('div');
+      toast.style.cssText='position:fixed;top:24px;left:50%;transform:translateX(-50%);background:#0f172a;color:#fff;padding:16px 28px;border-radius:16px;z-index:999999;font-size:14px;font-weight:700;direction:rtl;box-shadow:0 10px 40px rgba(0,0,0,.35);text-align:center;min-width:280px;';
+      toast.innerHTML='🎁 كود خصمك: <span style="color:#fbbf24;letter-spacing:3px;font-size:17px;display:block;margin-top:4px;">'+code+'</span><small style="font-weight:400;opacity:.7;font-size:12px;">انسخه وضعه في حقل الكوبون</small>';
+      document.body.appendChild(toast);
+      // Build correct cart URL preserving language prefix (e.g. /ar/cart)
+      var curPath=window.location.pathname;
+      var cartUrl;
+      if(curPath.indexOf('/cart')!==-1){{
+        // Already on cart — add coupon param to current URL
+        cartUrl=curPath+'?coupon='+encodeURIComponent(code);
+      }}else{{
+        // Navigate to cart with language prefix preserved
+        var langMatch=curPath.match(/^\/([a-z]{{2}})\//);
+        cartUrl=(langMatch?'/'+langMatch[1]:'')+'/cart?coupon='+encodeURIComponent(code);
+      }}
+      setTimeout(function(){{window.location.href=cartUrl;}},1800);
   }}
 
   return {{show:show,hide:hide}};
@@ -648,23 +679,12 @@ function initSlideOffer(c){{
     window.history.replaceState({{}},'',window.location.pathname+(newQ?'?'+newQ:''));
 
     function _tryApply(){{
-      // 1. Salla Twilight SDK
+      // 1. Salla SDK (only if connected)
       var sdk=window.salla||window.Salla;
       if(sdk&&sdk.cart){{
         var fn=sdk.cart.applyCoupon||sdk.cart.addCoupon||sdk.cart.setCoupon;
-        if(typeof fn==='function'){{fn.call(sdk.cart,urlCode).catch(function(){{}});return;}}
+        if(typeof fn==='function'){{fn.call(sdk.cart,urlCode).then(function(){{window.location.reload();}}).catch(function(){{_domFill();}});return;}}
       }}
-      // 2. Salla Store REST API (works inside Salla storefront)
-      try{{
-        fetch('/api/cart/coupons',{{
-          method:'POST',
-          headers:{{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}},
-          body:JSON.stringify({{coupon_code:urlCode}})
-        }}).then(function(r){{return r.ok?r.json():Promise.reject();}})
-          .then(function(){{window.location.reload();}})
-          .catch(function(){{_domFill();}});
-        return;
-      }}catch(e){{}}
       _domFill();
     }}
 
@@ -701,10 +721,18 @@ function initSlideOffer(c){{
       else if(form)form.submit();
     }}
 
-    // Try immediately + with delay (for async-rendered components)
+    // Wait for Salla components + retry with MutationObserver
     onReady(function(){{
-      setTimeout(_tryApply,600);
-      setTimeout(_tryApply,1800);
+      var applied=false;
+      var urlObs=new MutationObserver(function(){{
+        if(applied)return;
+        _domFill();
+      }});
+      urlObs.observe(document.body,{{childList:true,subtree:true}});
+      [400,1000,2000,3500].forEach(function(ms){{
+        setTimeout(function(){{if(!applied)_tryApply();}},ms);
+      }});
+      setTimeout(function(){{urlObs.disconnect();}},6000);
     }});
   }}catch(err){{}}
 }})();
