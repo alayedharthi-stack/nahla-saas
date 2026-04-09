@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { API_BASE } from '../api/client'
 import { getToken, startImpersonation } from '../auth'
-import { Users, Search, LogIn, ToggleLeft, ToggleRight } from 'lucide-react'
+import { Users, Search, LogIn, ToggleLeft, ToggleRight, Send, Clock, CheckCircle } from 'lucide-react'
 
 interface Merchant {
   id: number
@@ -29,11 +29,14 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${s.cls}`}>{s.label}</span>
 }
 
+type AccessState = 'idle' | 'requesting' | 'requested' | 'entering' | 'has_access'
+
 export default function AdminMerchants() {
-  const [merchants, setMerchants] = useState<Merchant[]>([])
-  const [loading, setLoading]     = useState(true)
-  const [search, setSearch]       = useState('')
-  const [entering, setEntering]   = useState<number | null>(null)
+  const [merchants, setMerchants]         = useState<Merchant[]>([])
+  const [loading, setLoading]             = useState(true)
+  const [search, setSearch]               = useState('')
+  const [accessState, setAccessState]     = useState<Record<number, AccessState>>({})
+  const [toggling, setToggling]           = useState<number | null>(null)
 
   useEffect(() => {
     fetch(`${API_BASE}/admin/stats`, { headers: { Authorization: `Bearer ${getToken()}` } })
@@ -49,25 +52,80 @@ export default function AdminMerchants() {
     m.email?.toLowerCase().includes(search.toLowerCase())
   )
 
+  const setMState = (id: number, state: AccessState) =>
+    setAccessState(prev => ({ ...prev, [id]: state }))
+
   const handleEnter = async (m: Merchant) => {
-    setEntering(m.id)
+    const state = accessState[m.id] ?? 'idle'
+
+    // If already has access — try to enter directly
+    if (state === 'has_access') {
+      setMState(m.id, 'entering')
+      try {
+        const res = await fetch(`${API_BASE}/admin/impersonate/${m.id}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${getToken()}` },
+        })
+        const data = await res.json()
+        if (!res.ok) {
+          alert(data.detail || 'فشل الدخول')
+          setMState(m.id, 'idle')
+          return
+        }
+        startImpersonation(data.access_token, m.store_name || m.email, m.email)
+        window.location.href = '/overview'
+      } catch {
+        alert('حدث خطأ أثناء الدخول')
+        setMState(m.id, 'idle')
+      }
+      return
+    }
+
+    // First: try to enter (in case merchant already enabled access)
+    setMState(m.id, 'entering')
     try {
-      const res = await fetch(`${API_BASE}/admin/merchants/${m.id}/impersonate`, {
+      const res = await fetch(`${API_BASE}/admin/impersonate/${m.id}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}` },
       })
-      if (!res.ok) throw new Error('فشل الدخول')
       const data = await res.json()
-      startImpersonation(data.access_token, m.store_name || m.email, m.email)
-      window.location.href = '/overview'
-    } catch (e: unknown) {
-      alert(e instanceof Error ? e.message : 'حدث خطأ')
-    } finally {
-      setEntering(null)
+      if (res.ok) {
+        startImpersonation(data.access_token, m.store_name || m.email, m.email)
+        window.location.href = '/overview'
+        return
+      }
+      // 403 = no access granted yet — send request
+      if (res.status === 403) {
+        setMState(m.id, 'requesting')
+        const reqRes = await fetch(`${API_BASE}/admin/request-access/${m.id}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${getToken()}` },
+        })
+        const reqData = await reqRes.json()
+        if (reqRes.status === 409 && reqData.detail?.includes('منح الوصول مسبقاً')) {
+          // Race condition: access was just granted
+          setMState(m.id, 'has_access')
+          handleEnter(m)
+          return
+        }
+        if (!reqRes.ok) {
+          alert(reqData.detail || 'فشل إرسال الطلب')
+          setMState(m.id, 'idle')
+          return
+        }
+        setMState(m.id, 'requested')
+      } else {
+        alert(data.detail || 'فشل الدخول')
+        setMState(m.id, 'idle')
+      }
+    } catch {
+      alert('حدث خطأ')
+      setMState(m.id, 'idle')
     }
   }
 
   const handleToggle = async (m: Merchant) => {
+    setToggling(m.id)
     const action = m.is_active ? 'suspend' : 'activate'
     try {
       const res = await fetch(`${API_BASE}/admin/merchants/${m.id}/${action}`, {
@@ -78,7 +136,54 @@ export default function AdminMerchants() {
       setMerchants(prev => prev.map(x => x.id === m.id ? { ...x, is_active: !x.is_active } : x))
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'حدث خطأ')
+    } finally {
+      setToggling(null)
     }
+  }
+
+  function AccessButton({ m }: { m: Merchant }) {
+    const state = accessState[m.id] ?? 'idle'
+
+    if (state === 'entering' || state === 'requesting') {
+      return (
+        <div className="p-1.5 rounded-lg bg-amber-50 text-amber-500">
+          <div className="w-3.5 h-3.5 border border-amber-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      )
+    }
+
+    if (state === 'requested') {
+      return (
+        <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-50 text-blue-600 text-xs font-medium">
+          <Clock className="w-3 h-3" />
+          <span>بانتظار الموافقة</span>
+        </div>
+      )
+    }
+
+    if (state === 'has_access') {
+      return (
+        <button
+          onClick={() => handleEnter(m)}
+          title="دخول للمتجر"
+          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-green-50 hover:bg-green-100 text-green-600 text-xs font-medium transition"
+        >
+          <CheckCircle className="w-3 h-3" />
+          <span>دخول</span>
+        </button>
+      )
+    }
+
+    return (
+      <button
+        onClick={() => handleEnter(m)}
+        title="طلب الوصول أو الدخول"
+        className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-600 text-xs font-medium transition"
+      >
+        <Send className="w-3 h-3" />
+        <span>طلب وصول</span>
+      </button>
+    )
   }
 
   return (
@@ -95,7 +200,6 @@ export default function AdminMerchants() {
           </div>
         </div>
 
-        {/* Search */}
         <div className="relative">
           <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
           <input
@@ -105,6 +209,15 @@ export default function AdminMerchants() {
             className="pr-9 pl-4 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 w-64"
           />
         </div>
+      </div>
+
+      {/* Info banner */}
+      <div className="flex items-start gap-3 bg-blue-50 border border-blue-100 rounded-xl px-4 py-3">
+        <LogIn className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+        <p className="text-xs text-blue-700">
+          لدخول لوحة أي تاجر، اضغط <strong>طلب وصول</strong> — سيصل إشعار للتاجر في لوحته ويمكنه الموافقة أو الرفض.
+          الوصول مؤقت ومُسجَّل بالكامل.
+        </p>
       </div>
 
       {/* Table */}
@@ -150,24 +263,18 @@ export default function AdminMerchants() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => handleEnter(m)}
-                          disabled={entering === m.id}
-                          title="دخول للمتجر"
-                          className="p-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-600 transition disabled:opacity-50"
-                        >
-                          {entering === m.id
-                            ? <div className="w-3.5 h-3.5 border border-amber-500 border-t-transparent rounded-full animate-spin" />
-                            : <LogIn className="w-3.5 h-3.5" />}
-                        </button>
+                        <AccessButton m={m} />
                         <button
                           onClick={() => handleToggle(m)}
+                          disabled={toggling === m.id}
                           title={m.is_active ? 'إيقاف' : 'تفعيل'}
-                          className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition"
+                          className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition disabled:opacity-50"
                         >
-                          {m.is_active
-                            ? <ToggleRight className="w-3.5 h-3.5 text-green-500" />
-                            : <ToggleLeft className="w-3.5 h-3.5" />}
+                          {toggling === m.id
+                            ? <div className="w-3.5 h-3.5 border border-slate-400 border-t-transparent rounded-full animate-spin" />
+                            : m.is_active
+                              ? <ToggleRight className="w-3.5 h-3.5 text-green-500" />
+                              : <ToggleLeft className="w-3.5 h-3.5" />}
                         </button>
                       </div>
                     </td>

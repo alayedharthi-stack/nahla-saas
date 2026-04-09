@@ -47,8 +47,9 @@ Admin routes (role=admin required):
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -72,6 +73,21 @@ router = APIRouter()
 # Hard cap: merchants can grant at most this many hours regardless of input
 _MAX_TTL_HOURS   = 8
 _VALID_TTL_HOURS = (1, 2, 4, 8)
+
+
+# ── Access Request Helpers ──────────────────────────────────────────────────────
+
+def _get_requests(settings) -> List[dict]:
+    """Read pending access requests from extra_metadata."""
+    return list(dict(settings.extra_metadata or {}).get("access_requests", []))
+
+
+def _put_requests(db: Session, settings, requests: List[dict]) -> None:
+    """Write access requests back to extra_metadata."""
+    meta = dict(settings.extra_metadata or {})
+    meta["access_requests"] = requests
+    settings.extra_metadata = meta
+    db.commit()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -386,6 +402,143 @@ async def admin_impersonate(
         "impersonation":   True,
         "session_version": sv,
         "ttl_hours":       ttl_hours,
-        "token_fp":        fp,          # fingerprint for client-side audit display
+        "token_fp":        fp,
         "warning":         "هذا الوصول مؤقت ومُسجَّل. سيُلغى فور إلغاء التاجر للإذن.",
     }
+
+
+# ── Access Request Flow (Admin requests → Merchant approves) ────────────────────
+
+@router.post("/admin/request-access/{tenant_id}")
+async def admin_request_access(
+    tenant_id: int,
+    request:   Request,
+    db:        Session         = Depends(get_db),
+    admin:     Dict[str, Any]  = Depends(require_admin),
+):
+    """
+    Admin sends an access request to a merchant.
+    A notification is stored; the merchant must approve before admin can enter.
+    """
+    from models import Tenant, User  # noqa: PLC0415
+
+    tenant   = db.query(Tenant).filter_by(id=tenant_id, is_active=True).first()
+    merchant = db.query(User).filter_by(tenant_id=tenant_id, is_active=True).first()
+    if not tenant or not merchant:
+        raise HTTPException(status_code=404, detail="لم يُعثر على المتجر")
+
+    settings = get_or_create_settings(db, tenant_id)
+    db.commit()
+    requests = _get_requests(settings)
+
+    # Block if already has a pending request
+    pending = [r for r in requests if r.get("status") == "pending"]
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail="يوجد طلب وصول معلّق بالفعل — انتظر موافقة التاجر.",
+        )
+
+    # Block if already has active access
+    sa = _get_sa(settings)
+    if _is_active(sa):
+        raise HTTPException(
+            status_code=409,
+            detail="التاجر منح الوصول مسبقاً — يمكنك الدخول مباشرة.",
+        )
+
+    req_id  = str(uuid.uuid4())[:8]
+    now     = datetime.now(timezone.utc)
+    new_req = {
+        "id":           req_id,
+        "requested_by": admin.get("sub"),
+        "requested_at": now.isoformat(),
+        "status":       "pending",
+        "store_name":   tenant.name,
+    }
+    requests.append(new_req)
+    _put_requests(db, settings, requests)
+
+    _audit.info(
+        "ACCESS_REQUEST_SENT admin=%s → tenant=%d req_id=%s",
+        admin.get("sub"), tenant_id, req_id,
+    )
+
+    return {
+        "request_id": req_id,
+        "status":     "pending",
+        "message":    f"تم إرسال طلب الوصول إلى {tenant.name}. في انتظار موافقة التاجر.",
+    }
+
+
+@router.get("/merchant/access-requests")
+async def merchant_get_access_requests(
+    request: Request,
+    db:      Session         = Depends(get_db),
+    user:    Dict[str, Any]  = Depends(get_current_user),
+):
+    """Return pending access requests for this tenant's merchant."""
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+    requests  = _get_requests(settings)
+    pending   = [r for r in requests if r.get("status") == "pending"]
+    return {"requests": pending, "count": len(pending)}
+
+
+class RespondAccessIn(BaseModel):
+    approve:  bool
+    ttl_hours: int = Field(default=4, ge=1, le=8)
+
+
+@router.post("/merchant/access-requests/{req_id}/respond")
+async def merchant_respond_access_request(
+    req_id:  str,
+    body:    RespondAccessIn,
+    request: Request,
+    db:      Session         = Depends(get_db),
+    user:    Dict[str, Any]  = Depends(get_current_user),
+):
+    """Merchant approves or rejects a pending admin access request."""
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+    requests  = _get_requests(settings)
+
+    target = next((r for r in requests if r.get("id") == req_id and r.get("status") == "pending"), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="الطلب غير موجود أو تمت معالجته مسبقاً")
+
+    now = datetime.now(timezone.utc)
+    target["status"]      = "approved" if body.approve else "rejected"
+    target["responded_at"] = now.isoformat()
+    target["responded_by"] = user.get("sub")
+    _put_requests(db, settings, requests)
+
+    if body.approve:
+        if body.ttl_hours not in _VALID_TTL_HOURS:
+            body.ttl_hours = 4
+        sa = _get_sa(settings)
+        expires = now + timedelta(hours=body.ttl_hours)
+        sa.update({
+            "enabled":    True,
+            "granted_at": now.isoformat(),
+            "expires_at": expires.isoformat(),
+            "granted_by": user.get("sub"),
+        })
+        _put_sa(db, settings, sa)
+        _audit.info(
+            "ACCESS_APPROVED req=%s tenant=%d by=%s ttl=%dh",
+            req_id, tenant_id, user.get("sub"), body.ttl_hours,
+        )
+        return {
+            "status":   "approved",
+            "ttl_hours": body.ttl_hours,
+            "message":  f"تم منح الوصول لمدة {body.ttl_hours} ساعة. سيُلغى تلقائياً بعد انتهاء المدة.",
+        }
+    else:
+        _audit.info(
+            "ACCESS_REJECTED req=%s tenant=%d by=%s",
+            req_id, tenant_id, user.get("sub"),
+        )
+        return {"status": "rejected", "message": "تم رفض طلب الوصول."}

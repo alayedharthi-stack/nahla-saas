@@ -1577,6 +1577,132 @@ function SupportAccessTab() {
           <li className="flex gap-2"><span className="text-brand-500 font-bold">5.</span> بدون موافقتك، لا يستطيع أحد — بما في ذلك المالك — رؤية لوحتك</li>
         </ul>
       </div>
+
+      {/* Pending access requests from admin */}
+      <AccessRequestsPanel onApproved={load} />
+    </div>
+  )
+}
+
+interface AccessRequest {
+  id: string
+  requested_by: string
+  requested_at: string
+  store_name: string
+}
+
+const TTL_OPTS_SMALL = [
+  { value: 1, label: 'ساعة'   },
+  { value: 2, label: 'ساعتان' },
+  { value: 4, label: '4 ساعات'},
+]
+
+function AccessRequestsPanel({ onApproved }: { onApproved?: () => void }) {
+  const [requests, setRequests]   = useState<AccessRequest[]>([])
+  const [loading, setLoading]     = useState(true)
+  const [responding, setResponding] = useState<string | null>(null)
+  const [ttl, setTtl]             = useState(4)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch('/api/merchant/access-requests', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) {
+        const d = await res.json()
+        setRequests(d.requests ?? [])
+      }
+    } catch { /* ignore */ }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const respond = async (reqId: string, approve: boolean) => {
+    setResponding(reqId)
+    try {
+      const res = await fetch(`/api/merchant/access-requests/${reqId}/respond`, {
+        method:  'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}`,
+        },
+        body: JSON.stringify({ approve, ttl_hours: ttl }),
+      })
+      if (res.ok) {
+        await load()
+        if (approve && onApproved) onApproved()
+      }
+    } catch { /* ignore */ }
+    finally { setResponding(null) }
+  }
+
+  if (loading || requests.length === 0) return null
+
+  return (
+    <div className="card p-5 border-amber-200 bg-amber-50">
+      <div className="flex items-center gap-2 mb-3">
+        <Bell className="w-4 h-4 text-amber-600" />
+        <h4 className="text-sm font-semibold text-amber-800">
+          طلبات وصول معلّقة ({requests.length})
+        </h4>
+      </div>
+      <div className="space-y-3">
+        {requests.map(r => (
+          <div key={r.id} className="bg-white rounded-xl p-4 border border-amber-100 space-y-3">
+            <div>
+              <p className="text-sm font-medium text-slate-800">
+                فريق نحلة يطلب الوصول إلى لوحتك
+              </p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                الطلب من: <span className="font-medium">{r.requested_by}</span>
+                {' · '}
+                {new Date(r.requested_at).toLocaleString('ar-SA')}
+              </p>
+            </div>
+
+            {/* TTL selector for approval */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-slate-500">مدة الوصول عند الموافقة:</span>
+              {TTL_OPTS_SMALL.map(o => (
+                <button
+                  key={o.value}
+                  onClick={() => setTtl(o.value)}
+                  className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${
+                    ttl === o.value
+                      ? 'bg-amber-500 text-white border-amber-500'
+                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => respond(r.id, true)}
+                disabled={responding === r.id}
+                className="flex-1 btn-primary flex items-center justify-center gap-1.5 text-xs py-2"
+              >
+                {responding === r.id
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <ShieldCheck className="w-3.5 h-3.5" />}
+                موافقة
+              </button>
+              <button
+                onClick={() => respond(r.id, false)}
+                disabled={responding === r.id}
+                className="flex-1 btn-secondary flex items-center justify-center gap-1.5 text-xs py-2 border-red-200 text-red-600 hover:bg-red-50"
+              >
+                <ShieldOff className="w-3.5 h-3.5" />
+                رفض
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
