@@ -89,18 +89,52 @@ async def _debug_token(token: str) -> dict:
 
 async def _get_waba_id_from_token(token: str) -> str:
     """
-    Extract the first WhatsApp Business Account ID the token has access to
-    by inspecting granular_scopes returned from debug_token.
+    Extract the WhatsApp Business Account ID from the token using multiple strategies:
+    1. debug_token granular_scopes (works when config_id triggers full WA signup)
+    2. GET /me/businesses → list WABAs per business (fallback without config_id)
     """
+    # Strategy 1: debug_token granular_scopes
     info = await _debug_token(token)
     for scope in info.get("granular_scopes", []):
         if scope.get("scope") == "whatsapp_business_management":
             ids = scope.get("target_ids", [])
             if ids:
+                logger.info("[EmbeddedSignup] WABA found via granular_scopes: %s", ids[0])
                 return str(ids[0])
+
+    # Strategy 2: list businesses, then their WABAs
+    logger.info("[EmbeddedSignup] Falling back to /me/businesses lookup")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            biz_resp = await client.get(
+                f"{GRAPH}/me/businesses",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"fields": "id,name"},
+            )
+            biz_data = biz_resp.json()
+        logger.info("[EmbeddedSignup] /me/businesses: %s", biz_data)
+        for biz in biz_data.get("data", []):
+            biz_id = biz["id"]
+            async with httpx.AsyncClient(timeout=15) as client:
+                wa_resp = await client.get(
+                    f"{GRAPH}/{biz_id}/whatsapp_business_accounts",
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"fields": "id,name"},
+                )
+                wa_data = wa_resp.json()
+            logger.info("[EmbeddedSignup] WABAs for biz %s: %s", biz_id, wa_data)
+            for waba in wa_data.get("data", []):
+                logger.info("[EmbeddedSignup] WABA found via businesses: %s", waba["id"])
+                return str(waba["id"])
+    except Exception as e:
+        logger.warning("[EmbeddedSignup] Business lookup failed: %s", e)
+
     raise HTTPException(
         status_code=400,
-        detail="لم يتم منح صلاحية الوصول لحساب واتساب للأعمال. تأكد من إتمام خطوات الربط.",
+        detail=(
+            "لم يُعثر على حساب واتساب للأعمال مرتبط بهذا الحساب. "
+            "تأكد من أن لديك حساب واتساب للأعمال في Meta Business Manager."
+        ),
     )
 
 

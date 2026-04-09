@@ -42,6 +42,8 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
   const [busy, setBusy]         = useState(false)
   const sdkLoaded               = useRef(false)
 
+  const [configId, setConfigId] = useState('')
+
   // Load Meta config + FB SDK on mount
   useEffect(() => {
     let cancelled = false
@@ -52,6 +54,7 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
           '/whatsapp/embedded/config'
         )
         if (cancelled) return
+        if (cfg.config_id) setConfigId(cfg.config_id)
         // Init FB SDK
         window.fbAsyncInit = () => {
           window.FB.init({ appId: cfg.app_id, version: cfg.graph_version, xfbml: false, cookie: true })
@@ -65,7 +68,6 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
           s.defer  = true
           document.body.appendChild(s)
         } else {
-          // SDK already loaded
           if (window.FB) { sdkLoaded.current = true; setStage('ready') }
         }
       } catch (e) {
@@ -94,16 +96,19 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
   const launchSignup = useCallback(() => {
     if (!window.FB || !sdkLoaded.current) { setError('SDK غير جاهز، انتظر لحظة'); return }
     setError('')
-    window.FB.login((response: any) => {
-      if (!response?.authResponse) { setError('تم إلغاء عملية الربط'); return }
-      handleExchangeCode(response.authResponse.code)
-    }, {
+    const loginOptions: any = {
       response_type: 'code',
       override_default_response_type: true,
       scope: 'whatsapp_business_management,whatsapp_business_messaging,business_management',
       extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
-    })
-  }, [handleExchangeCode])
+    }
+    // Use config_id if available — triggers full WhatsApp Business onboarding
+    if (configId) loginOptions.config_id = configId
+    window.FB.login((response: any) => {
+      if (!response?.authResponse) { setError('تم إلغاء عملية الربط'); return }
+      handleExchangeCode(response.authResponse.code)
+    }, loginOptions)
+  }, [handleExchangeCode, configId])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
