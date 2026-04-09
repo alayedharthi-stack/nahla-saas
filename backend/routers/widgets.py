@@ -281,9 +281,8 @@ function addStyles(s){{var el=document.createElement('style');el.textContent=s;d
 function _fillInput(inp,code){{
   inp.focus();
   try{{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(inp,code);}}catch(e){{inp.value=code;}}
-  ['input','change','keyup','keydown'].forEach(function(ev){{inp.dispatchEvent(new Event(ev,{{bubbles:true,cancelable:true}}));}});
-  inp.dispatchEvent(new KeyboardEvent('keydown',{{key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}}));
-  inp.dispatchEvent(new KeyboardEvent('keyup',{{key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}}));
+  inp.dispatchEvent(new Event('input',{{bubbles:true,cancelable:true}}));
+  inp.dispatchEvent(new Event('change',{{bubbles:true,cancelable:true}}));
 }}
 
 function _findApplyBtn(inp){{
@@ -522,45 +521,11 @@ function initDiscountPopup(c,fromSlide){{
   }});
 
   function _applyCode(code,btn){{
-    try{{navigator.clipboard.writeText(code);}}catch(e){{}}
-
-    // 1. Salla event system (available on ALL Salla stores via Twilight framework)
-    var sallaEvt=false;
-    try{{
-      if(window.salla&&salla.event&&typeof salla.event.dispatch==='function'){{
-        salla.event.dispatch('cart::coupon.apply',{{coupon_code:code}});
-        sallaEvt=true;
-      }}
-    }}catch(e){{}}
-    // Also fire as DOM CustomEvent (Salla listens on document)
-    try{{
-      document.dispatchEvent(new CustomEvent('cart::coupon.apply',{{bubbles:true,detail:{{coupon_code:code}}}}));
-      document.dispatchEvent(new CustomEvent('coupon:apply',{{bubbles:true,detail:{{coupon_code:code}}}}));
-    }}catch(e){{}}
-
-    // 2. Salla storefront API (session-based, no OAuth needed)
-    var sdk=window.salla||window.Salla;
-    if(sdk){{
-      var apiCall=sdk.api||sdk.request||sdk.http;
-      if(apiCall&&typeof apiCall.post==='function'){{
-        apiCall.post('/store/v1/cart/coupons',{{coupon_code:code}})
-          .then(function(){{_showApplied(code,btn);setTimeout(function(){{window.location.reload();}},800);}})
-          .catch(function(){{_domStrategy(code,btn);}});
-        return;
-      }}
-      var cartFn=sdk.cart&&(sdk.cart.applyCoupon||sdk.cart.addCoupon);
-      if(typeof cartFn==='function'){{
-        cartFn.call(sdk.cart,code).then(function(){{_showApplied(code,btn);}}).catch(function(){{_domStrategy(code,btn);}});
-        return;
-      }}
-    }}
-
-    // 3. If on cart page already, go to DOM strategy immediately
-    // Otherwise, redirect to cart with coupon param (Salla auto-applies via URL)
+    // If already on cart/checkout: fill the coupon field and click تطبيق
     if(window.location.pathname.indexOf('cart')!==-1||window.location.pathname.indexOf('checkout')!==-1){{
       _domStrategy(code,btn);
     }}else{{
-      // Save to localStorage so cart page picks it up
+      // On other pages: save to localStorage and redirect to cart
       try{{localStorage.setItem('nahla_pending_coupon',code);}}catch(e){{}}
       _showApplied(code,btn);
       var lm=window.location.pathname.match(/^\/([a-z]{{2}})\//);
@@ -712,25 +677,6 @@ function initSlideOffer(c){{
     var newQ=p.toString();
     window.history.replaceState({{}},'',window.location.pathname+(newQ?'?'+newQ:''));
 
-    function _tryApply(){{
-      // Try Salla event system (available in all Salla themes)
-      try{{
-        if(window.salla&&salla.event)salla.event.dispatch('cart::coupon.apply',{{coupon_code:urlCode}});
-        document.dispatchEvent(new CustomEvent('cart::coupon.apply',{{bubbles:true,detail:{{coupon_code:urlCode}}}}));
-      }}catch(e){{}}
-      // Try Salla SDK
-      var sdk=window.salla||window.Salla;
-      if(sdk&&sdk.cart){{
-        var fn=sdk.cart.applyCoupon||sdk.cart.addCoupon;
-        if(typeof fn==='function'){{fn.call(sdk.cart,urlCode).then(function(){{window.location.reload();}}).catch(function(){{_domFill();}});return;}}
-        var api=sdk.api||sdk.request;
-        if(api&&typeof api.post==='function'){{
-          api.post('/store/v1/cart/coupons',{{coupon_code:urlCode}}).then(function(){{window.location.reload();}}).catch(function(){{_domFill();}});return;
-        }}
-      }}
-      _domFill();
-    }}
-
     function _domFill(){{_applyCouponToPage(urlCode);}}
 
     // Wait for Salla components + retry with MutationObserver
@@ -742,7 +688,7 @@ function initSlideOffer(c){{
       }});
       urlObs.observe(document.body,{{childList:true,subtree:true}});
       [400,1000,2000,3500].forEach(function(ms){{
-        setTimeout(function(){{if(!applied)_tryApply();}},ms);
+        setTimeout(function(){{if(!applied)_domFill();}},ms);
       }});
       setTimeout(function(){{urlObs.disconnect();}},6000);
     }});
