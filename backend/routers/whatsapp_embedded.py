@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
+from typing import List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -32,7 +33,7 @@ from core.config import (
     META_GRAPH_API_VERSION,
     META_WA_CONFIG_ID,
 )
-from database.db import get_db
+from core.database import get_db
 from database.models import WhatsAppConnection
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ async def _subscribe_app_to_waba(waba_id: str, token: str) -> None:
     logger.info("[EmbeddedSignup] subscribed_apps WABA=%s result=%s", waba_id, data)
 
 
-async def _get_phone_numbers(waba_id: str, token: str) -> list[dict]:
+async def _get_phone_numbers(waba_id: str, token: str) -> List[dict]:
     """List phone numbers under the merchant's WABA."""
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
@@ -130,8 +131,8 @@ async def _get_phone_numbers(waba_id: str, token: str) -> list[dict]:
 # ── schemas ───────────────────────────────────────────────────────────────────
 
 class ExchangeRequest(BaseModel):
-    code: str                          # short-lived code from FB SDK
-    redirect_uri: str | None = None   # only needed if FB login used redirect
+    code: str
+    redirect_uri: Optional[str] = None
 
 
 class PhoneSelectRequest(BaseModel):
