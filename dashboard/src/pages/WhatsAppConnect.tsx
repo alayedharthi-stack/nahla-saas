@@ -507,7 +507,12 @@ export default function WhatsAppConnect() {
                   setSentMsg(sanitizeMessage(r.message))
                   setResendCooldown(60)
                 } catch(e) {
-                  setError(sanitizeMessage(e instanceof Error ? e.message : ''))
+                  const msg = sanitizeMessage(e instanceof Error ? e.message : '')
+                  // Stale phone_number_id — reset to step 1 so user can re-add
+                  if (msg.includes('الخطوة الأولى') || msg.includes('STALE_PHONE')) {
+                    setStep(1); setPhone(''); setOtp(''); setPhoneNumberId('')
+                  }
+                  setError(msg)
                 } finally { setBusy(false) }
               }}
               disabled={resendCooldown > 0 || busy}

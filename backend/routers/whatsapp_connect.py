@@ -636,7 +636,7 @@ async def direct_request_otp(
         tenant_id, WA_BUSINESS_ACCOUNT_ID, cc, national, body.display_name, body.method,
     )
 
-    # ── Check DB: if already pending for same number, skip add step ──────────
+    # ── Check DB: if already pending for same number, validate ID then skip add ──
     existing_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     full_phone    = f"+{cc}{national}"
     if (
@@ -645,32 +645,59 @@ async def direct_request_otp(
         and existing_conn.phone_number_id
         and existing_conn.phone_number == full_phone
     ):
+        stored_phone_id = existing_conn.phone_number_id
         logger.info(
-            "[WA Direct] Resuming pending state for tenant=%s phone=%s id=%s",
-            tenant_id, full_phone, existing_conn.phone_number_id,
+            "[WA Direct] Pending resume candidate tenant=%s phone=%s id=%s — validating with Meta",
+            tenant_id, full_phone, stored_phone_id,
         )
-        phone_number_id = existing_conn.phone_number_id
-        # Jump directly to OTP request — skip add step
+        # ── Validate the stored phone_number_id is still alive on Meta ────────
+        id_valid = False
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                otp_resp = await client.post(
-                    f"{graph}/{phone_number_id}/request_code",
+            async with httpx.AsyncClient(timeout=10) as client:
+                chk = await client.get(
+                    f"{graph}/{stored_phone_id}",
                     headers=headers,
-                    json={"code_method": body.method.upper(), "language": "ar"},
+                    params={"fields": "id,display_phone_number,code_verification_status"},
                 )
-                otp_data = otp_resp.json()
-            if "error" in otp_data:
-                logger.warning("[WA Direct] Resend OTP error (pending resume): %s", otp_data)
+                chk_data = chk.json()
+            if "error" in chk_data:
+                logger.warning(
+                    "[WA Direct] Stored phone_number_id=%s is STALE (Meta error=%s) — will re-add",
+                    stored_phone_id, chk_data["error"],
+                )
+                # Clear stale ID so the add-step runs below
+                existing_conn.phone_number_id = None
+                db.commit()
+            else:
+                id_valid = True
+                logger.info("[WA Direct] phone_number_id=%s still valid — resuming", stored_phone_id)
         except Exception as exc:
-            logger.warning("[WA Direct] Resend OTP exception (pending resume): %s", exc)
-        # Always proceed to Step 2 — user likely has the code or needs to wait
-        return {
-            "status":          META_CODE_SENT,
-            "code":            META_CODE_SENT,
-            "phone_number_id": phone_number_id,
-            "message":         "تم إرسال رمز التحقق — أدخل الرمز الذي وصلك أو انتظر دقيقة وأعد المحاولة.",
-            "already_sent":    True,
-        }
+            logger.warning("[WA Direct] Validation check failed (%s) — will re-add", exc)
+
+        if id_valid:
+            phone_number_id = stored_phone_id
+            # Jump directly to OTP request — skip add step
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    otp_resp = await client.post(
+                        f"{graph}/{phone_number_id}/request_code",
+                        headers=headers,
+                        json={"code_method": body.method.upper(), "language": "ar"},
+                    )
+                    otp_data = otp_resp.json()
+                if "error" in otp_data:
+                    logger.warning("[WA Direct] Resend OTP error (pending resume): %s", otp_data)
+            except Exception as exc:
+                logger.warning("[WA Direct] Resend OTP exception (pending resume): %s", exc)
+            # Always proceed to Step 2 — user likely has the code or needs to wait
+            return {
+                "status":          META_CODE_SENT,
+                "code":            META_CODE_SENT,
+                "phone_number_id": phone_number_id,
+                "message":         "تم إرسال رمز التحقق — أدخل الرمز الذي وصلك أو انتظر دقيقة وأعد المحاولة.",
+                "already_sent":    True,
+            }
+        # else: fall through to re-add the phone number below
 
     # ── Step A: Check if phone already exists in WABA ───────────────────────
     phone_number_id = ""
@@ -861,17 +888,82 @@ async def direct_resend_otp(
 
     if "error" in data:
         err = data["error"]
-        logger.warning("[WA Resend] raw_error code=%s full=%s", err.get("code"), data)
+        err_code    = err.get("code", 0)
+        err_subcode = err.get("error_subcode", 0)
+        logger.warning("[WA Resend] raw_error code=%s subcode=%s full=%s", err_code, err_subcode, data)
+
+        # ── Stale / invalid phone_number_id (Meta error 100, subcode 33) ──────
+        # The stored ID no longer exists on Meta — try to find the fresh one or reset.
+        if err_code == 100 or err_subcode == 33:
+            from core.config import WA_BUSINESS_ACCOUNT_ID  # noqa: PLC0415
+            fresh_id = ""
+            try:
+                stored_phone = (conn.phone_number or "").replace("+","").replace(" ","").replace("-","")
+                logger.info("[WA Resend] ID stale — searching WABA list for phone=%s", stored_phone)
+                async with httpx.AsyncClient(timeout=15) as client:
+                    lst = await client.get(
+                        f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
+                        headers=headers,
+                        params={"fields": "id,display_phone_number,code_verification_status"},
+                    )
+                    lst_data = lst.json()
+                for entry in lst_data.get("data", []):
+                    dp = entry.get("display_phone_number","").replace(" ","").replace("-","").replace("+","")
+                    if stored_phone and (stored_phone in dp or dp in stored_phone):
+                        fresh_id = entry["id"]
+                        logger.info("[WA Resend] fresh ID found: %s for phone=%s", fresh_id, stored_phone)
+                        break
+            except Exception as lookup_exc:
+                logger.error("[WA Resend] WABA lookup failed: %s", lookup_exc)
+
+            if fresh_id:
+                # Update DB and retry request_code with fresh ID
+                if conn:
+                    conn.phone_number_id = fresh_id
+                    db.commit()
+                try:
+                    async with httpx.AsyncClient(timeout=20) as client:
+                        r2 = await client.post(
+                            f"{graph}/{fresh_id}/request_code",
+                            headers=headers,
+                            json={"code_method": "SMS", "language": "ar"},
+                        )
+                        d2 = r2.json()
+                    logger.info("[WA Resend] retry with fresh_id=%s result=%s", fresh_id, d2)
+                    if "error" not in d2:
+                        if conn:
+                            conn.last_attempt_at = datetime.now(timezone.utc)
+                            db.commit()
+                        return {
+                            "status":          META_CODE_SENT,
+                            "phone_number_id": fresh_id,
+                            "message":         "تم إرسال رمز تحقق جديد إلى رقمك.",
+                        }
+                except Exception as retry_exc:
+                    logger.error("[WA Resend] retry with fresh_id failed: %s", retry_exc)
+
+            # Fresh ID not found — clear stale DB record and force restart
+            logger.warning("[WA Resend] Cannot recover stale ID for tenant=%s — clearing DB", tenant_id)
+            if conn:
+                conn.phone_number_id = None
+                conn.status          = "disconnected"
+                db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="رقم الهاتف لم يعد موجوداً في النظام. يرجى العودة للخطوة الأولى وإعادة إدخال الرقم.",
+                headers={"X-Nahla-Error-Code": "STALE_PHONE_ID"},
+            )
+
         # Rate limited or cooldown — tell user to wait
         RATE_CODES = {131056, 131042, 368, 4, 17, 80007}
-        if err.get("code") in RATE_CODES or "rate" in err.get("message","").lower():
+        if err_code in RATE_CODES or "rate" in err.get("message","").lower():
             return {
                 "status":          META_CODE_SENT,
                 "phone_number_id": phone_number_id,
                 "message":         "انتظر بضع دقائق قبل طلب رمز جديد — الرمز السابق لا يزال صالحاً.",
                 "rate_limited":    True,
             }
-        ic, ux = _normalize_meta_error(err.get("code",0), err.get("message",""), err.get("error_subcode",0))
+        ic, ux = _normalize_meta_error(err_code, err.get("message",""), err_subcode)
         raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
     # Update last_attempt_at
