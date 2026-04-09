@@ -49,6 +49,7 @@ function _avatarColor(role: string): string {
 function useAccessRequests(role: string) {
   const [requests, setRequests]     = useState<AccessRequest[]>([])
   const [responding, setResponding] = useState<string | null>(null)
+  const [approved, setApproved]     = useState<string | null>(null)
 
   const load = useCallback(async () => {
     if (role === 'admin' || role === 'super_admin') return
@@ -80,12 +81,23 @@ function useAccessRequests(role: string) {
         },
         body: JSON.stringify({ approve, ttl_hours: ttlHours }),
       })
-      if (res.ok) await load()
+      if (res.ok) {
+        if (approve) {
+          setApproved(reqId)
+          // Remove from list after 3 seconds
+          setTimeout(() => {
+            setApproved(null)
+            setRequests(prev => prev.filter(r => r.id !== reqId))
+          }, 3000)
+        } else {
+          setRequests(prev => prev.filter(r => r.id !== reqId))
+        }
+      }
     } catch { /* ignore */ }
     finally { setResponding(null) }
   }
 
-  return { requests, responding, respond, reload: load }
+  return { requests, responding, respond, reload: load, approved }
 }
 
 export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
@@ -115,7 +127,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
     return 'تاجر'
   })()
 
-  const { requests, responding, respond } = useAccessRequests(role)
+  const { requests, responding, respond, approved } = useAccessRequests(role)
   const notifCount = requests.length
 
   useEffect(() => {
@@ -238,65 +250,81 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                 ) : (
                   <div className="divide-y divide-slate-50">
                     {requests.map(r => (
-                      <div key={r.id} className="p-4 bg-amber-50/50 space-y-3">
-                        {/* Icon + text */}
-                        <div className="flex items-start gap-3">
-                          <div className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center shrink-0">
-                            <ShieldCheck className="w-4 h-4 text-amber-600" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-semibold text-slate-800">طلب وصول من فريق الدعم</p>
-                            <p className="text-xs text-slate-500 mt-0.5 truncate">{r.requested_by}</p>
-                            <div className="flex items-center gap-1 mt-0.5 text-slate-400">
-                              <Clock className="w-3 h-3" />
-                              <span className="text-xs">
-                                {new Date(r.requested_at).toLocaleString('ar-SA', {
-                                  dateStyle: 'short', timeStyle: 'short'
-                                })}
-                              </span>
+                      <div key={r.id} className={`p-4 space-y-3 transition-all ${approved === r.id ? 'bg-green-50' : 'bg-amber-50/50'}`}>
+
+                        {/* Approved state */}
+                        {approved === r.id ? (
+                          <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center shrink-0">
+                              <CheckCircle className="w-4 h-4 text-green-600" />
+                            </div>
+                            <div>
+                              <p className="text-sm font-semibold text-green-800">تمت الموافقة ✓</p>
+                              <p className="text-xs text-green-600">سيختفي هذا الإشعار تلقائياً</p>
                             </div>
                           </div>
-                        </div>
+                        ) : (
+                          <>
+                            {/* Icon + text */}
+                            <div className="flex items-start gap-3">
+                              <div className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center shrink-0">
+                                <ShieldCheck className="w-4 h-4 text-amber-600" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-semibold text-slate-800">طلب وصول من فريق الدعم</p>
+                                <p className="text-xs text-slate-500 mt-0.5 truncate">{r.requested_by}</p>
+                                <div className="flex items-center gap-1 mt-0.5 text-slate-400">
+                                  <Clock className="w-3 h-3" />
+                                  <span className="text-xs">
+                                    {new Date(r.requested_at).toLocaleString('ar-SA', {
+                                      dateStyle: 'short', timeStyle: 'short'
+                                    })}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
 
-                        {/* TTL selector */}
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-xs text-slate-500 shrink-0">مدة الوصول:</span>
-                          {[1, 2, 4].map(h => (
-                            <button
-                              key={h}
-                              onClick={() => setTtl(r.id, h)}
-                              className={`px-2 py-0.5 text-xs rounded-md border transition-colors ${
-                                getTtl(r.id) === h
-                                  ? 'bg-amber-500 text-white border-amber-500'
-                                  : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                              }`}
-                            >
-                              {h === 1 ? 'ساعة' : h === 2 ? 'ساعتان' : '4 ساعات'}
-                            </button>
-                          ))}
-                        </div>
+                            {/* TTL selector */}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs text-slate-500 shrink-0">مدة الوصول:</span>
+                              {[1, 2, 4].map(h => (
+                                <button
+                                  key={h}
+                                  onClick={() => setTtl(r.id, h)}
+                                  className={`px-2 py-0.5 text-xs rounded-md border transition-colors ${
+                                    getTtl(r.id) === h
+                                      ? 'bg-amber-500 text-white border-amber-500'
+                                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  {h === 1 ? 'ساعة' : h === 2 ? 'ساعتان' : '4 ساعات'}
+                                </button>
+                              ))}
+                            </div>
 
-                        {/* Actions */}
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => respond(r.id, true, getTtl(r.id))}
-                            disabled={responding === r.id}
-                            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-green-500 hover:bg-green-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
-                          >
-                            {responding === r.id
-                              ? <span className="w-3.5 h-3.5 border border-white border-t-transparent rounded-full animate-spin" />
-                              : <CheckCircle className="w-3.5 h-3.5" />}
-                            موافقة
-                          </button>
-                          <button
-                            onClick={() => respond(r.id, false)}
-                            disabled={responding === r.id}
-                            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-white hover:bg-red-50 text-red-600 border border-red-200 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
-                          >
-                            <XCircle className="w-3.5 h-3.5" />
-                            رفض
-                          </button>
-                        </div>
+                            {/* Actions */}
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => respond(r.id, true, getTtl(r.id))}
+                                disabled={responding === r.id}
+                                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-green-500 hover:bg-green-600 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                              >
+                                {responding === r.id
+                                  ? <span className="w-3.5 h-3.5 border border-white border-t-transparent rounded-full animate-spin" />
+                                  : <CheckCircle className="w-3.5 h-3.5" />}
+                                موافقة
+                              </button>
+                              <button
+                                onClick={() => respond(r.id, false)}
+                                disabled={responding === r.id}
+                                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-white hover:bg-red-50 text-red-600 border border-red-200 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                              >
+                                <XCircle className="w-3.5 h-3.5" />
+                                رفض
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
                     ))}
                   </div>

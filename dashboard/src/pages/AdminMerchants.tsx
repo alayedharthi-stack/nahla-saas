@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { API_BASE } from '../api/client'
 import { getToken, startImpersonation } from '../auth'
-import { Users, Search, LogIn, ToggleLeft, ToggleRight, Send, Clock, CheckCircle } from 'lucide-react'
+import { Users, Search, LogIn, ToggleLeft, ToggleRight, Send, Clock, CheckCircle, Bell } from 'lucide-react'
 
 interface Merchant {
   id: number
@@ -38,6 +38,8 @@ export default function AdminMerchants() {
   const [search, setSearch]               = useState('')
   const [accessState, setAccessState]     = useState<Record<number, AccessState>>({})
   const [toggling, setToggling]           = useState<number | null>(null)
+  const [approvedAlerts, setApprovedAlerts] = useState<{id: number; name: string}[]>([])
+  const pollingRef                        = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     fetch(`${API_BASE}/admin/stats`, { headers: { Authorization: `Bearer ${getToken()}` } })
@@ -46,6 +48,38 @@ export default function AdminMerchants() {
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [])
+
+  // Poll every 15s for merchants in "requested" state to detect approval
+  const checkApprovals = useCallback(async () => {
+    const requested = Object.entries(accessState)
+      .filter(([, s]) => s === 'requested')
+      .map(([id]) => parseInt(id))
+    if (requested.length === 0) return
+
+    for (const userId of requested) {
+      const m = merchants.find(x => x.id === userId)
+      if (!m?.tenant_id) continue
+      try {
+        const res = await fetch(`${API_BASE}/admin/impersonate/${m.tenant_id}`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${getToken()}` },
+        })
+        if (res.ok) {
+          setAccessState(prev => ({ ...prev, [userId]: 'has_access' }))
+          setApprovedAlerts(prev => [...prev, { id: userId, name: m.store_name || m.email }])
+          setTimeout(() => {
+            setApprovedAlerts(prev => prev.filter(a => a.id !== userId))
+          }, 8000)
+        }
+      } catch { /* ignore */ }
+    }
+  }, [accessState, merchants])
+
+  useEffect(() => {
+    if (pollingRef.current) clearInterval(pollingRef.current)
+    pollingRef.current = setInterval(checkApprovals, 15_000)
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
+  }, [checkApprovals])
 
   const filtered = merchants.filter(m =>
     !search ||
@@ -219,6 +253,16 @@ export default function AdminMerchants() {
           />
         </div>
       </div>
+
+      {/* Approval notifications */}
+      {approvedAlerts.map(a => (
+        <div key={a.id} className="flex items-center gap-3 bg-green-50 border border-green-200 rounded-xl px-4 py-3 animate-pulse">
+          <Bell className="w-4 h-4 text-green-600 shrink-0" />
+          <p className="text-sm text-green-800 font-medium">
+            ✓ وافق <strong>{a.name}</strong> على طلب الوصول — يمكنك الدخول الآن
+          </p>
+        </div>
+      ))}
 
       {/* Info banner */}
       <div className="flex items-start gap-3 bg-blue-50 border border-blue-100 rounded-xl px-4 py-3">
