@@ -955,46 +955,85 @@ async def serve_salla_auto_snippet():
   var API = '{_API_BASE}';
 
   function _getStoreId() {{
-    // 1. Salla Twilight SDK globals (most reliable)
+    // 1. Salla Twilight SDK — lowercase (standard)
     var s = window.salla;
     if (s) {{
       var id = (s.store && (s.store.id || s.store.merchant_id))
             || (s.env   && (s.env.storeId || s.env.store_id || s.env.merchantId))
-            || (s.config && s.config.store_id)
+            || (s.config && (typeof s.config.get === 'function' ? s.config.get('store.id') : s.config.store_id))
             || (s.settings && s.settings.store_id)
             || (s.data && s.data.store && s.data.store.id);
       if (id) return String(id).trim();
     }}
 
-    // 2. salla_config global
-    var sc = window.salla_config;
-    if (sc) {{
-      var id2 = (sc.store && sc.store.id) || sc.store_id || sc.merchant_id;
+    // 2. Salla Twilight SDK — uppercase (some versions)
+    var S2 = window.Salla;
+    if (S2) {{
+      var id2 = (S2.store && (S2.store.id || S2.store.merchant_id))
+             || (S2.config && typeof S2.config.get === 'function' && S2.config.get('store.id'))
+             || (S2.env && (S2.env.storeId || S2.env.store_id));
       if (id2) return String(id2).trim();
     }}
 
-    // 3. Meta tags injected by Salla theme
-    var meta = document.querySelector(
-      'meta[name="salla:store_id"],meta[name="store-id"],'  +
-      'meta[property="salla:store_id"],meta[name="merchant_id"]'
-    );
-    if (meta) return meta.getAttribute('content');
+    // 3. salla_config global
+    var sc = window.salla_config;
+    if (sc) {{
+      var id3 = (sc.store && sc.store.id) || sc.store_id || sc.merchant_id;
+      if (id3) return String(id3).trim();
+    }}
 
-    // 4. Data attributes on <body> or <html>
+    // 4. window.app or window.store (some Salla themes)
+    var app = window.app || window.storeApp;
+    if (app && app.store) {{
+      var id4 = app.store.id || app.store.merchant_id;
+      if (id4) return String(id4).trim();
+    }}
+
+    // 5. Meta tags injected by Salla theme
+    var meta = document.querySelector(
+      'meta[name="salla:store_id"],meta[name="store-id"],' +
+      'meta[property="salla:store_id"],meta[name="merchant_id"],' +
+      'meta[name="store_id"],meta[name="salla-store-id"]'
+    );
+    if (meta) {{ var mv = meta.getAttribute('content'); if (mv) return mv; }}
+
+    // 6. Data attributes on <body> or <html>
     var body = document.body || document.documentElement;
     if (body) {{
       var d = body.dataset;
-      var id3 = d.storeId || d.sallaStoreId || d.merchantId || d.store;
-      if (id3) return id3;
+      var id5 = d.storeId || d.sallaStoreId || d.merchantId || d.store || d.salla;
+      if (id5) return id5;
     }}
 
-    // 5. Salla app_component or rocket-loader embedded JSON
-    var appEl = document.querySelector('[data-salla-app],[data-store-id],[data-merchant-id]');
+    // 7. Any element with data-salla-app, data-store-id or data-merchant-id
+    var appEl = document.querySelector(
+      '[data-salla-app],[data-store-id],[data-merchant-id],[data-store],[data-salla]'
+    );
     if (appEl) {{
-      return appEl.getAttribute('data-store-id') ||
-             appEl.getAttribute('data-merchant-id') ||
-             appEl.getAttribute('data-salla-app');
+      var idA = appEl.getAttribute('data-store-id') ||
+                appEl.getAttribute('data-merchant-id') ||
+                appEl.getAttribute('data-salla-app') ||
+                appEl.getAttribute('data-salla');
+      if (idA) return idA;
     }}
+
+    // 8. JSON-LD / application/json script tags with store info
+    var jsonTags = document.querySelectorAll('script[type="application/json"],script[type="application/ld+json"]');
+    for (var i = 0; i < jsonTags.length; i++) {{
+      try {{
+        var obj = JSON.parse(jsonTags[i].textContent);
+        var idJ = (obj.store && obj.store.id) || obj.store_id || obj.merchant_id ||
+                  (obj.data && obj.data.store && obj.data.store.id);
+        if (idJ) return String(idJ).trim();
+      }} catch(e) {{}}
+    }}
+
+    // 9. URL params (some Salla previews pass store_id in the URL)
+    try {{
+      var params = new URLSearchParams(window.location.search);
+      var idU = params.get('store_id') || params.get('merchant_id') || params.get('store');
+      if (idU) return idU;
+    }} catch(e) {{}}
 
     return null;
   }}
