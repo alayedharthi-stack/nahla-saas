@@ -336,10 +336,21 @@ async def select_phone(
     logger.info("[EmbeddedSignup] select-phone OTP request: %s", otp_data)
 
     if "error" in otp_data:
-        err = otp_data["error"]
+        err     = otp_data["error"]
+        code    = err.get("code")
+        subcode = err.get("error_subcode")
+        # Rate limit: too many OTP requests for this number
+        if code == 136024 or subcode in (2388091, 2388095):
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "تم تجاوز الحد المسموح به لطلبات التحقق لهذا الرقم. "
+                    "يرجى الانتظار بضع ساعات والمحاولة مرة واحدة فقط."
+                ),
+            )
         raise HTTPException(
             status_code=400,
-            detail=f"فشل إرسال رمز التحقق: {err.get('message','')} (code={err.get('code')})",
+            detail=f"فشل إرسال رمز التحقق: {err.get('message','')} (code={code})",
         )
 
     logger.info(
