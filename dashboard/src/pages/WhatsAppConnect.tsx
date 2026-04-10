@@ -973,13 +973,13 @@ export default function WhatsAppConnect() {
             </select>
           </Field>
 
-          <Field label="وصف النشاط التجاري" hint="ما يظهر في قسم 'نبذة' على واتساب للأعمال — حد أقصى 256 حرف">
+          <Field label="وصف النشاط التجاري" hint="ما يظهر في قسم 'نبذة' على واتساب للأعمال — حد أقصى 512 حرف">
             <textarea
-              value={about} onChange={e=>setAbout(e.target.value.slice(0,256))}
+              value={about} onChange={e=>setAbout(e.target.value.slice(0,512))}
               placeholder="مثال: نوفر أفضل منتجات الإلكترونيات بأسعار منافسة مع توصيل سريع"
               rows={3} className={`${inputCls} resize-none`}
             />
-            <p className="text-xs text-slate-400 text-left">{about.length}/256</p>
+            <p className="text-xs text-slate-400 text-left">{about.length}/512</p>
           </Field>
 
           <Field label="عنوان النشاط التجاري" hint="العنوان الذي سيظهر في الملف التجاري">
