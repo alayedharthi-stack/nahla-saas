@@ -161,10 +161,18 @@ async def _dispatch_message(
 
     # ── Resolve tenant + verified phone_number_id from DB ────────────────────
     # Look up by the phone_number_id that RECEIVED the message.
-    # This guarantees replies go back from the correct number.
+    # Prefer merchant tenants (tenant_id > 1) over the platform admin tenant,
+    # and prefer status='connected' over pending states.
+    from sqlalchemy import case as _case  # noqa: PLC0415
     wa_conn = (
         db.query(WhatsAppConnection)
         .filter(WhatsAppConnection.phone_number_id == phone_number_id)
+        .order_by(
+            # connected status first
+            _case((WhatsAppConnection.status == "connected", 0), else_=1),
+            # merchant tenants before admin (tenant_id=1)
+            _case((WhatsAppConnection.tenant_id == 1, 1), else_=0),
+        )
         .first()
     )
 
