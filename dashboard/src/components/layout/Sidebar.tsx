@@ -209,8 +209,8 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                         <span className="relative shrink-0">
                           <Icon className="w-4 h-4" />
                           {isAI && (
-                            <span className="absolute -bottom-1.5 -end-1.5 flex items-center justify-center w-3.5 h-3.5 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.7)]">
-                              <span className="text-[6px] font-black text-slate-900 leading-none tracking-tight">AI</span>
+                            <span className="absolute -bottom-1.5 -end-1.5 inline-flex items-center px-1 py-px rounded bg-amber-500/15 border border-amber-500/50 shadow-[0_0_6px_rgba(245,158,11,0.4)]">
+                              <span className="text-[6px] font-black text-amber-400 leading-none tracking-wide">AI</span>
                             </span>
                           )}
                         </span>
