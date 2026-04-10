@@ -56,6 +56,14 @@ SALLA_REDIRECT_URI   = os.environ.get(
 )
 SALLA_WEBHOOK_SECRET = os.environ.get("SALLA_WEBHOOK_SECRET", "")
 
+# ── Salla TEST app (separate credentials — does not affect production app) ──
+SALLA_TEST_CLIENT_ID     = os.environ.get("SALLA_TEST_CLIENT_ID", "")
+SALLA_TEST_CLIENT_SECRET = os.environ.get("SALLA_TEST_CLIENT_SECRET", "")
+SALLA_TEST_REDIRECT_URI  = os.environ.get(
+    "SALLA_TEST_REDIRECT_URI",
+    "https://api.nahlah.ai/oauth/salla/test/callback",
+)
+
 # Where to redirect after Salla OAuth completes (the embedded app landing page).
 # Set SALLA_EMBEDDED_URL in Railway env to override.
 # For Salla embedded apps this is typically the partner app iframe URL.

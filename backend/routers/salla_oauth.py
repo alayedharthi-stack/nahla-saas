@@ -48,6 +48,9 @@ from core.config import (
     SALLA_CLIENT_SECRET,
     SALLA_EMBEDDED_URL,
     SALLA_REDIRECT_URI,
+    SALLA_TEST_CLIENT_ID,
+    SALLA_TEST_CLIENT_SECRET,
+    SALLA_TEST_REDIRECT_URI,
 )
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
@@ -1242,6 +1245,165 @@ def _redirect_html(dest: str, title: str, subtitle: str) -> str:
   <script>setTimeout(() => location.href = "{dest}", 1500);</script>
 </body>
 </html>"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SALLA TEST APP — separate routes using SALLA_TEST_* credentials
+# Does NOT modify or affect the production OAuth flow above.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/api/salla/test/authorize")
+async def salla_test_authorize(request: Request):
+    """
+    Returns the Salla OAuth authorization URL for the TEST app.
+    Use this to start the OAuth flow with the test/private Salla app.
+    """
+    tenant_id = resolve_tenant_id(request)
+    if not SALLA_TEST_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="SALLA_TEST_CLIENT_ID not configured")
+
+    params = urllib.parse.urlencode({
+        "client_id":     SALLA_TEST_CLIENT_ID,
+        "redirect_uri":  SALLA_TEST_REDIRECT_URI,
+        "response_type": "code",
+        "scope":         "offline_access",
+        "state":         str(tenant_id),
+    })
+    auth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
+    logger.info(
+        "[SallaTest] authorize URL generated | tenant=%s redirect_uri=%s",
+        tenant_id, SALLA_TEST_REDIRECT_URI,
+    )
+    return {"url": auth_url, "redirect_uri": SALLA_TEST_REDIRECT_URI}
+
+
+@router.get("/oauth/salla/test/callback")
+async def salla_test_oauth_callback(
+    request: Request,
+    code:    Optional[str] = None,
+    state:   Optional[str] = None,
+    error:   Optional[str] = None,
+    db:      Session = Depends(get_db),
+):
+    """
+    Salla TEST app OAuth callback — uses SALLA_TEST_* credentials.
+    Identical logic to /oauth/salla/callback but uses the test app's keys.
+    The production /oauth/salla/callback is NOT affected.
+    """
+    logger.info(
+        "[SallaTest] Callback received | code=%s state=%s error=%s",
+        bool(code), state, error,
+    )
+
+    is_new_merchant = (state or "").startswith(_NEW_MERCHANT_PREFIX)
+    try:
+        tenant_id = int(state) if (state and not is_new_merchant) else 0
+    except (ValueError, TypeError):
+        tenant_id = 0
+
+    if error:
+        return RedirectResponse(url=_error_url(error), status_code=302)
+
+    if not code:
+        return RedirectResponse(url=_error_url("missing_code"), status_code=302)
+
+    if not SALLA_TEST_CLIENT_ID or not SALLA_TEST_CLIENT_SECRET:
+        logger.error("[SallaTest] TEST credentials not configured")
+        return RedirectResponse(url=_error_url("app_not_configured"), status_code=302)
+
+    # Token exchange using TEST app credentials
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            token_resp = await client.post(
+                "https://accounts.salla.sa/oauth2/token",
+                data={
+                    "grant_type":    "authorization_code",
+                    "client_id":     SALLA_TEST_CLIENT_ID,
+                    "client_secret": SALLA_TEST_CLIENT_SECRET,
+                    "code":          code,
+                    "redirect_uri":  SALLA_TEST_REDIRECT_URI,
+                },
+                headers={
+                    "Accept":       "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            logger.info("[SallaTest] Token response: status=%s", token_resp.status_code)
+
+            if token_resp.status_code != 200:
+                try:
+                    err_json  = token_resp.json()
+                    salla_err = err_json.get("error", "token_exchange_failed")
+                    salla_msg = err_json.get("error_description", token_resp.text[:200])
+                except Exception:
+                    salla_err, salla_msg = "token_exchange_failed", token_resp.text[:200]
+                logger.error("[SallaTest] Token exchange FAILED: %s %s", salla_err, salla_msg)
+                return RedirectResponse(url=_error_url("token_exchange_failed", salla_err), status_code=302)
+
+            token_data    = token_resp.json()
+            access_token  = token_data.get("access_token", "")
+            refresh_token = token_data.get("refresh_token", "")
+            expires_in    = int(token_data.get("expires_in", 0))
+
+            # Fetch store info
+            salla_store_id = ""
+            store_name     = ""
+            merchant_id    = ""
+            store_resp = await client.get(
+                "https://api.salla.dev/admin/v2/store/info",
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            )
+            if store_resp.status_code == 200:
+                store_data     = store_resp.json().get("data", {})
+                salla_store_id = str(store_data.get("id", ""))
+                store_name     = store_data.get("name", "")
+                merchant_id    = str(store_data.get("merchant", {}).get("id", "")) if isinstance(
+                    store_data.get("merchant"), dict
+                ) else str(store_data.get("merchant", ""))
+                logger.info("[SallaTest] Store: id=%s name=%s", salla_store_id, store_name)
+
+    except Exception as exc:
+        logger.exception("[SallaTest] Unexpected error: %s", exc)
+        return RedirectResponse(url=_error_url("network_error"), status_code=302)
+
+    # Save / update integration in DB
+    try:
+        from datetime import datetime, timezone  # noqa: PLC0415
+        if tenant_id:
+            get_or_create_tenant(db, tenant_id)
+        integration = db.query(Integration).filter(
+            Integration.tenant_id == (tenant_id or 0),
+            Integration.provider  == "salla",
+        ).first()
+        cfg = {
+            "store_id":      salla_store_id,
+            "store_name":    store_name,
+            "merchant_id":   merchant_id,
+            "access_token":  access_token,
+            "refresh_token": refresh_token,
+            "expires_in":    expires_in,
+            "connected_at":  datetime.now(timezone.utc).isoformat(),
+            "app_type":      "test",
+        }
+        if integration:
+            integration.config  = cfg
+            integration.enabled = True
+        else:
+            integration = Integration(
+                tenant_id=tenant_id or 0,
+                provider="salla",
+                config=cfg,
+                enabled=True,
+            )
+            db.add(integration)
+        db.commit()
+        logger.info("[SallaTest] Integration saved | tenant=%s store=%s", tenant_id, salla_store_id)
+    except Exception as exc:
+        logger.error("[SallaTest] DB save failed: %s", exc)
+        return RedirectResponse(url=_error_url("db_save_failed"), status_code=302)
+
+    success_url = f"{_SALLA_APP}?salla_connected=true&name={urllib.parse.quote(store_name)}"
+    return RedirectResponse(url=success_url, status_code=302)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
