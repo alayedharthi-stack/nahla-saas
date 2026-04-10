@@ -1258,10 +1258,18 @@ async def salla_test_authorize(request: Request):
     PUBLIC — no JWT required.
     Redirects directly to Salla OAuth authorization using the TEST app credentials.
     """
+    # ── Diagnostic logs — confirms exactly which credentials are used ──────────
+    logger.info("[SallaTest][DIAG] ▶ /api/salla/test/authorize called")
+    logger.info("[SallaTest][DIAG] SALLA_TEST_CLIENT_ID  = %s",
+                (SALLA_TEST_CLIENT_ID[:8] + "***") if SALLA_TEST_CLIENT_ID else "NOT SET")
+    logger.info("[SallaTest][DIAG] SALLA_TEST_REDIRECT_URI = %s", SALLA_TEST_REDIRECT_URI)
+    logger.info("[SallaTest][DIAG] SALLA_CLIENT_ID (prod) = %s",
+                (SALLA_CLIENT_ID[:8] + "***") if SALLA_CLIENT_ID else "NOT SET")
+
     if not SALLA_TEST_CLIENT_ID:
+        logger.error("[SallaTest][DIAG] ✗ SALLA_TEST_CLIENT_ID is empty — cannot redirect")
         raise HTTPException(status_code=503, detail="SALLA_TEST_CLIENT_ID not configured")
 
-    # Use state=0 for new-merchant flow (no existing Nahla account required)
     params = urllib.parse.urlencode({
         "client_id":     SALLA_TEST_CLIENT_ID,
         "redirect_uri":  SALLA_TEST_REDIRECT_URI,
@@ -1270,7 +1278,7 @@ async def salla_test_authorize(request: Request):
         "state":         _NEW_MERCHANT_PREFIX + "test",
     })
     auth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
-    logger.info("[SallaTest] Redirecting to Salla auth | redirect_uri=%s", SALLA_TEST_REDIRECT_URI)
+    logger.info("[SallaTest][DIAG] ✓ Final authorize URL = %s", auth_url)
     return RedirectResponse(url=auth_url, status_code=302)
 
 
