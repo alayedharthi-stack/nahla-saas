@@ -119,12 +119,18 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
     try {
-      await apiCall('/whatsapp/embedded/select-phone', {
+      const res = await apiCall<{ status: string; phone_number_id?: string }>('/whatsapp/embedded/select-phone', {
         method: 'POST',
         body: JSON.stringify({ phone_number_id: phoneId }),
       })
-      setStage('done')
-      setTimeout(onConnected, 1500)
+      if (res.status === 'otp_required') {
+        // Phone not yet verified — show OTP stage
+        setNewPhoneId(res.phone_number_id || phoneId)
+        setStage('verify-phone')
+      } else {
+        setStage('done')
+        setTimeout(onConnected, 1500)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تعذر اختيار الرقم')
     } finally { setBusy(false) }

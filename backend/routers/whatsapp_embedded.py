@@ -316,28 +316,55 @@ async def select_phone(
             detail=f"تعذر جلب بيانات الرقم: {phone_data['error'].get('message','')}",
         )
 
-    conn.phone_number_id          = body.phone_number_id
-    conn.phone_number             = phone_data.get("display_phone_number", "")
-    conn.business_display_name    = phone_data.get("verified_name", "")
-    conn.status                   = "connected"
-    conn.sending_enabled          = True
-    conn.connected_at             = datetime.now(timezone.utc)
-    conn.last_verified_at         = datetime.now(timezone.utc)
-    conn.connection_type          = "embedded"
+    is_verified = phone_data.get("code_verification_status") == "VERIFIED"
+
+    conn.phone_number_id       = body.phone_number_id
+    conn.phone_number          = phone_data.get("display_phone_number", "")
+    conn.business_display_name = phone_data.get("verified_name", "")
+    conn.connection_type       = "embedded"
+
+    if is_verified:
+        conn.status           = "connected"
+        conn.sending_enabled  = True
+        conn.connected_at     = datetime.now(timezone.utc)
+        conn.last_verified_at = datetime.now(timezone.utc)
+    else:
+        # Phone exists in WABA but not yet verified — request OTP now
+        conn.status          = "otp_pending"
+        conn.sending_enabled = False
+        async with httpx.AsyncClient(timeout=15) as client:
+            otp_resp = await client.post(
+                f"{GRAPH}/{body.phone_number_id}/request_code",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"code_method": "SMS", "language": "ar"},
+            )
+            otp_data = otp_resp.json()
+        logger.info("[EmbeddedSignup] select-phone OTP request: %s", otp_data)
+
     db.commit()
 
     logger.info(
-        "[EmbeddedSignup] select-phone OK tenant=%s phone_id=%s number=%s",
-        tenant_id, body.phone_number_id, conn.phone_number,
+        "[EmbeddedSignup] select-phone OK tenant=%s phone_id=%s number=%s verified=%s",
+        tenant_id, body.phone_number_id, conn.phone_number, is_verified,
     )
 
-    return {
-        "status":       "connected",
-        "phone_number": conn.phone_number,
-        "display_name": conn.business_display_name,
-        "verified":     phone_data.get("code_verification_status") == "VERIFIED",
-        "message":      "تم ربط رقم الواتساب بنجاح!",
-    }
+    if is_verified:
+        return {
+            "status":       "connected",
+            "phone_number": conn.phone_number,
+            "display_name": conn.business_display_name,
+            "verified":     True,
+            "message":      "تم ربط رقم الواتساب بنجاح!",
+        }
+    else:
+        return {
+            "status":          "otp_required",
+            "phone_number_id": body.phone_number_id,
+            "phone_number":    conn.phone_number,
+            "display_name":    conn.business_display_name,
+            "verified":        False,
+            "message":         "تم إرسال رمز التحقق عبر SMS — أدخله لإكمال الربط.",
+        }
 
 
 @router.get("/status")
