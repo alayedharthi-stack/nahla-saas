@@ -241,9 +241,17 @@ async def on_startup() -> None:
                         pass
                 conn.commit()
 
-        # Run in thread pool to avoid blocking the event loop
-        await asyncio.get_event_loop().run_in_executor(None, _run_migrations)
-        logger.info("Database tables ready.")
+        # Fire-and-forget: run migrations in background so startup doesn't block healthcheck
+        async def _migrate_background():
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _run_migrations)
+                logger.info("Database tables ready.")
+            except Exception as exc:
+                logger.warning("DB migration skipped (non-fatal): %s", exc)
+
+        asyncio.create_task(_migrate_background())
+        logger.info("Database migration task started in background.")
     except Exception as exc:
         logger.warning("DB migration skipped (non-fatal): %s", exc)
 
