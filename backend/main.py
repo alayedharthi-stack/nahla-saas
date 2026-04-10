@@ -235,7 +235,21 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("DB migration skipped (non-fatal): %s", exc)
 
-    # 2. Background scheduler
+    # 2. Subscribe platform WABA to app (ensures webhooks are delivered)
+    try:
+        import httpx as _httpx  # noqa: PLC0415
+        from core.config import WA_TOKEN, WA_BUSINESS_ACCOUNT_ID, META_GRAPH_API_VERSION  # noqa: PLC0415
+        if WA_TOKEN and WA_BUSINESS_ACCOUNT_ID:
+            async def _subscribe_platform_waba():
+                url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{WA_BUSINESS_ACCOUNT_ID}/subscribed_apps"
+                async with _httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(url, headers={"Authorization": f"Bearer {WA_TOKEN}"})
+                logger.info("[Startup] platform WABA subscribed_apps: %s %s", resp.status_code, resp.text[:200])
+            asyncio.create_task(_subscribe_platform_waba())
+    except Exception as exc:
+        logger.warning("[Startup] WABA subscription skipped: %s", exc)
+
+    # 3. Background scheduler
     try:
         from core.scheduler import run_scheduler  # noqa: PLC0415
         asyncio.create_task(run_scheduler())
