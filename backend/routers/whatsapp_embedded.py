@@ -316,6 +316,13 @@ async def select_phone(
             detail=f"تعذر جلب بيانات الرقم: {phone_data['error'].get('message','')}",
         )
 
+    # Remove any stale connection for this phone_number_id from OTHER tenants
+    # so we never have duplicate phone_number_id records across tenants.
+    db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.phone_number_id == body.phone_number_id,
+        WhatsAppConnection.tenant_id != tenant_id,
+    ).update({"phone_number_id": None, "status": "disconnected", "sending_enabled": False})
+
     conn.phone_number_id       = body.phone_number_id
     conn.phone_number          = phone_data.get("display_phone_number", "")
     conn.business_display_name = phone_data.get("verified_name", "")
@@ -447,7 +454,12 @@ async def add_phone(
             detail=f"فشل إرسال رمز التحقق: {err.get('message', '')} (code={err.get('code')}, subcode={err.get('error_subcode')})",
         )
 
-    # Save phone_number_id temporarily for verification step
+    # Remove stale connections for this phone from other tenants
+    db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.phone_number_id == phone_number_id,
+        WhatsAppConnection.tenant_id != tenant_id,
+    ).update({"phone_number_id": None, "status": "disconnected", "sending_enabled": False})
+
     conn.phone_number_id = phone_number_id
     conn.status          = "otp_pending"
     db.commit()

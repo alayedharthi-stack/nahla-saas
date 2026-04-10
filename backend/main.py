@@ -220,6 +220,18 @@ async def on_startup() -> None:
                 "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_merchant_widget_tenant_key') THEN ALTER TABLE merchant_widgets ADD CONSTRAINT uq_merchant_widget_tenant_key UNIQUE (tenant_id, widget_key); END IF; END $$",
                 # ── whatsapp_connections (migration 0016) ─────────────────────
                 "ALTER TABLE whatsapp_connections ADD COLUMN IF NOT EXISTS connection_type VARCHAR DEFAULT 'direct'",
+                # Ensure phone_number_id is unique per non-null value (one phone = one tenant)
+                """DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_indexes
+                        WHERE tablename='whatsapp_connections'
+                        AND indexname='uq_wa_conn_phone_number_id'
+                    ) THEN
+                        CREATE UNIQUE INDEX uq_wa_conn_phone_number_id
+                        ON whatsapp_connections (phone_number_id)
+                        WHERE phone_number_id IS NOT NULL;
+                    END IF;
+                END $$""",
             ]
             with engine.connect() as conn:
                 for stmt in safe_alters:
