@@ -216,6 +216,15 @@ async def _dispatch_message(
     if not text:
         return
 
+    # ── Merchant bypass: tenant_id > 1 uses store AI, not platform sales bot ──
+    PLATFORM_TENANT_ID = 1
+    if resolved_tenant_id != PLATFORM_TENANT_ID:
+        await _handle_merchant_message(
+            phone_id=used_pid, to=sender, text=text,
+            tenant_id=resolved_tenant_id, db=db,
+        )
+        return
+
     turn_log: Optional[TurnLog] = None
     effective_tenant_id = resolved_tenant_id
 
@@ -378,6 +387,86 @@ async def _dispatch_message(
             db.close()
         except Exception:
             pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MERCHANT AI HANDLER — bypasses platform sales logic entirely
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _handle_merchant_message(
+    phone_id: str,
+    to: str,
+    text: str,
+    tenant_id: int,
+    db,
+) -> None:
+    """
+    For merchant tenants (tenant_id > 1): reply using the store's own AI context.
+    Bypasses the platform sales engine (intent/stage/decision) entirely.
+    """
+    logger.info("[Merchant] tenant=%s from=%s text_snippet=%s", tenant_id, to, text[:60])
+
+    if not ANTHROPIC_API_KEY:
+        logger.error("[Merchant] No ANTHROPIC_API_KEY — cannot generate reply")
+        return
+
+    try:
+        from core.store_knowledge import build_ai_context  # noqa: PLC0415
+
+        # Load store context for this merchant
+        store_context = build_ai_context(db, tenant_id, customer_phone=to, product_query=text)
+
+        # Load recent conversation history for continuity
+        history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
+        messages: list = []
+        for turn in history[-15:]:
+            role = "user" if turn.get("direction") == "inbound" else "assistant"
+            body = (turn.get("body") or "").strip()
+            if not body:
+                continue
+            if messages and messages[-1]["role"] == role:
+                messages[-1]["content"] += f"\n{body}"
+            else:
+                messages.append({"role": role, "content": body})
+        # Ensure last turn is current user message
+        if not messages or messages[-1]["role"] != "user":
+            messages.append({"role": "user", "content": text})
+        elif messages[-1]["content"] != text:
+            messages.append({"role": "user", "content": text})
+
+        system_prompt = f"""أنت مساعد ذكي لمتجر إلكتروني. مهمتك الرد على استفسارات العملاء بأسلوب ودي واحترافي باللغة العربية.
+
+استخدم المعلومات التالية للإجابة بدقة — لا تخترع معلومات خارجها:
+
+{store_context}
+
+تعليمات:
+- أجب باختصار وبوضوح
+- لا تذكر منصة نحلة أو أي منصة SaaS أخرى
+- إذا لم تجد إجابة في البيانات المتاحة، قل للعميل أنك ستتحقق وتعود إليه
+- تحدث كموظف خدمة العملاء للمتجر مباشرةً"""
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=500,
+            system=system_prompt,
+            messages=messages,
+        )
+        reply = response.content[0].text if response.content else "كيف أقدر أساعدك؟"
+
+        # Save messages to history
+        StateManager.save_message(db, to, text,  "inbound",  tenant_id=tenant_id)
+        StateManager.save_message(db, to, reply, "outbound", tenant_id=tenant_id)
+
+        await _send_whatsapp_message(
+            phone_id=phone_id, to=to, text=reply,
+            _tenant_id=tenant_id, _db=db,
+        )
+        logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
+
+    except Exception as exc:
+        logger.error("[Merchant] Error generating reply for tenant=%s: %s", tenant_id, exc)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
