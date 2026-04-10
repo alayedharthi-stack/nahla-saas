@@ -258,30 +258,48 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 owner_email, tenant_id, role,
             )
         else:
-            # ── First-time merchant: create isolated Tenant + User ────────────
-            new_tenant = Tenant(name=store_name or "متجر سلة")
-            db.add(new_tenant)
-            db.flush()     # generate new_tenant.id immediately
-            tenant_id = new_tenant.id
-            role      = "merchant"
-            is_new    = True
+            # ── Check by store_id first to avoid duplicate tenant creation ────
+            existing_integration = db.query(Integration).filter(
+                Integration.provider == "salla",
+                Integration.config["store_id"].astext == str(merchant_id_str),
+            ).first() if merchant_id_str else None
 
-            new_user = User(
-                username      = owner_email.split("@")[0],
-                email         = owner_email,
-                password_hash = hash_password(_secrets.token_urlsafe(16)),
-                role          = role,
-                tenant_id     = tenant_id,
-                is_active     = True,
-            )
-            db.add(new_user)
-            db.flush()
+            if existing_integration:
+                tenant_id = existing_integration.tenant_id
+                role      = "merchant"
+                is_new    = False
+                logger.info(
+                    "[SallaLogin] ✅ STEP 4 — TENANT FOUND (by store_id) | "
+                    "store_id=%s tenant_id=%s",
+                    merchant_id_str, tenant_id,
+                )
+            else:
+                # ── First-time merchant: create isolated Tenant + User ────────
+                # Use store_id suffix to ensure name uniqueness
+                unique_name = f"{store_name or 'متجر سلة'}-{merchant_id_str}" if merchant_id_str else (store_name or "متجر سلة")
+                new_tenant = Tenant(name=unique_name)
+                db.add(new_tenant)
+                db.flush()     # generate new_tenant.id immediately
+                tenant_id = new_tenant.id
+                role      = "merchant"
+                is_new    = True
 
-            logger.info(
-                "[SallaLogin] ✅ STEP 4 — TENANT CREATED (new merchant) | "
-                "email=%s tenant_id=%s store=%r",
-                owner_email, tenant_id, store_name,
-            )
+                new_user = User(
+                    username      = owner_email.split("@")[0],
+                    email         = owner_email,
+                    password_hash = hash_password(_secrets.token_urlsafe(16)),
+                    role          = role,
+                    tenant_id     = tenant_id,
+                    is_active     = True,
+                )
+                db.add(new_user)
+                db.flush()
+
+                logger.info(
+                    "[SallaLogin] ✅ STEP 4 — TENANT CREATED (new merchant) | "
+                    "email=%s tenant_id=%s store=%r",
+                    owner_email, tenant_id, store_name,
+                )
 
         # ── Save / update Salla integration record ────────────────────────────
         if merchant_id_str:
@@ -1076,11 +1094,30 @@ async def salla_oauth_callback(
                     user_id=existing_user.id,
                 )
             else:
-                # Create new Tenant + User
-                new_tenant = Tenant(name=store_name or "متجر سلة")
-                db.add(new_tenant)
-                db.flush()   # get new_tenant.id
-                tenant_id = new_tenant.id
+                # Check by store_id to avoid duplicate tenant name error
+                existing_integ = db.query(Integration).filter(
+                    Integration.provider == "salla",
+                    Integration.config["store_id"].astext == str(salla_store_id),
+                ).first() if salla_store_id else None
+
+                if existing_integ:
+                    tenant_id = existing_integ.tenant_id
+                    logger.info("[Salla OAuth] Found existing tenant by store_id=%s → tenant=%s", salla_store_id, tenant_id)
+                    existing_user2 = db.query(User).filter(User.tenant_id == tenant_id).first()
+                    if existing_user2:
+                        auto_jwt = create_token(
+                            email=existing_user2.email,
+                            role=existing_user2.role or "merchant",
+                            tenant_id=tenant_id,
+                            user_id=existing_user2.id,
+                        )
+                else:
+                    # Create new Tenant + User with unique name
+                    unique_name = f"{store_name or 'متجر سلة'}-{salla_store_id}" if salla_store_id else (store_name or "متجر سلة")
+                    new_tenant = Tenant(name=unique_name)
+                    db.add(new_tenant)
+                    db.flush()   # get new_tenant.id
+                    tenant_id = new_tenant.id
 
                 temp_password = _secrets.token_urlsafe(16)
                 new_user = User(
