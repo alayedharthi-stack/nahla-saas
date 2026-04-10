@@ -38,6 +38,9 @@ JWT_PUBLIC_PREFIXES = (
     "/merchant/addons/widget/",         # legacy widget embed.js
     "/merchant/widgets/salla-auto.js",  # universal Salla snippet
     "/merchant/widgets/salla/",         # by-salla-store widgets
+    "/merchant/widgets/",               # all widget JS/JSON endpoints
+    "/salla-auto.js",                   # short alias (configured in Salla Partner Portal)
+    "/static/salla-auto.js",            # legacy path (configured in Salla Partner Portal)
 )
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
 

@@ -1032,3 +1032,26 @@ async def serve_widgets_js_by_salla(salla_store_id: str, db: Session = Depends(g
 
     logger.info("[widgets/by-salla] store=%s tenant=%s", salla_store_id, tenant_id)
     return Response(content=_build_nahla_widgets_js(widgets, tenant_id), headers=_JS_HEADERS)
+
+
+# ── Public aliases for salla-auto.js (configured in Salla Partner Portal) ────
+# Salla Partner Portal → App Script URL must point to one of:
+#   https://api.nahlah.ai/salla-auto.js          ← preferred (short)
+#   https://api.nahlah.ai/static/salla-auto.js   ← legacy alias
+
+async def _salla_auto_snippet_content() -> str:
+    """Return the salla-auto.js bundle (delegates to main handler)."""
+    resp = await serve_salla_auto_snippet()
+    return resp.body.decode() if hasattr(resp, "body") else resp.body
+
+
+@router.get("/salla-auto.js", include_in_schema=False)
+async def salla_auto_js_root():
+    """Public root-level alias — https://api.nahlah.ai/salla-auto.js"""
+    return await serve_salla_auto_snippet()
+
+
+@router.get("/static/salla-auto.js", include_in_schema=False)
+async def salla_auto_js_static():
+    """Public /static alias — https://api.nahlah.ai/static/salla-auto.js"""
+    return await serve_salla_auto_snippet()
