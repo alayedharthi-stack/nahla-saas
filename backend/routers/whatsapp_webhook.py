@@ -419,7 +419,20 @@ async def _post_wa(
     _store_name: str = "unknown",
     _db=None,
 ) -> None:
-    if not WA_TOKEN:
+    # Resolve the correct token: prefer the tenant's own token (Embedded Signup)
+    # over the global platform token (Direct mode).
+    send_token = WA_TOKEN  # default: platform token
+    if _tenant_id and _db:
+        try:
+            from database.models import WhatsAppConnection  # noqa: PLC0415
+            wa_conn = _db.query(WhatsAppConnection).filter_by(tenant_id=_tenant_id).first()
+            if wa_conn and wa_conn.access_token:
+                send_token = wa_conn.access_token
+        except Exception:
+            pass
+
+    if not send_token:
+        logger.warning("[WA] No token available for tenant=%s — skipping send", _tenant_id)
         return
 
     # Fetch store name from DB if not provided
@@ -431,7 +444,7 @@ async def _post_wa(
         except Exception:
             pass
 
-    token_tail = WA_TOKEN[-6:] if WA_TOKEN and len(WA_TOKEN) >= 6 else WA_TOKEN or "EMPTY"
+    token_tail = send_token[-6:] if send_token and len(send_token) >= 6 else "EMPTY"
 
     logger.info(
         "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_tail=%s to=%s",
@@ -439,7 +452,7 @@ async def _post_wa(
     )
 
     url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
-    headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {send_token}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=15) as client:
         try:
             resp = await client.post(url, json=payload, headers=headers)
