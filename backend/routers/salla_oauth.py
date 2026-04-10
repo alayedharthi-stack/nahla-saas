@@ -243,50 +243,44 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
 
     # ══════════════════════════════════════════════════════════════
     # STEP 4 — Find or create isolated Tenant + User
+    # Priority: store_id FIRST (each store = isolated tenant)
     # ══════════════════════════════════════════════════════════════
     try:
-        existing_user = db.query(User).filter(User.email == owner_email).first()
+        # ── 1) Try to find an existing integration for THIS specific store ────
+        existing_integration = db.query(Integration).filter(
+            Integration.provider == "salla",
+            Integration.config["store_id"].astext == str(merchant_id_str),
+        ).first() if merchant_id_str else None
 
-        if existing_user:
-            # ── Returning merchant ────────────────────────────────────────────
-            tenant_id = existing_user.tenant_id
-            role      = existing_user.role or "merchant"
+        if existing_integration:
+            # Known store → reuse its own isolated tenant
+            tenant_id = existing_integration.tenant_id
+            role      = "merchant"
             is_new    = False
             logger.info(
-                "[SallaLogin] ✅ STEP 4 — TENANT FOUND (returning merchant) | "
-                "email=%s tenant_id=%s role=%s",
-                owner_email, tenant_id, role,
+                "[SallaLogin] ✅ STEP 4 — TENANT FOUND (by store_id) | "
+                "store_id=%s tenant_id=%s",
+                merchant_id_str, tenant_id,
             )
         else:
-            # ── Check by store_id first to avoid duplicate tenant creation ────
-            existing_integration = db.query(Integration).filter(
-                Integration.provider == "salla",
-                Integration.config["store_id"].astext == str(merchant_id_str),
-            ).first() if merchant_id_str else None
+            # ── 2) New store — create a brand-new isolated Tenant + User ─────
+            # NOTE: intentionally NOT reusing an existing email/tenant.
+            # Each Salla store_id must have its own tenant for full data isolation.
+            unique_name = f"{store_name or 'متجر سلة'}-{merchant_id_str}" if merchant_id_str else (store_name or "متجر سلة")
+            new_tenant = Tenant(name=unique_name)
+            db.add(new_tenant)
+            db.flush()     # generate new_tenant.id immediately
+            tenant_id = new_tenant.id
+            role      = "merchant"
+            is_new    = True
 
-            if existing_integration:
-                tenant_id = existing_integration.tenant_id
-                role      = "merchant"
-                is_new    = False
-                logger.info(
-                    "[SallaLogin] ✅ STEP 4 — TENANT FOUND (by store_id) | "
-                    "store_id=%s tenant_id=%s",
-                    merchant_id_str, tenant_id,
-                )
-            else:
-                # ── First-time merchant: create isolated Tenant + User ────────
-                # Use store_id suffix to ensure name uniqueness
-                unique_name = f"{store_name or 'متجر سلة'}-{merchant_id_str}" if merchant_id_str else (store_name or "متجر سلة")
-                new_tenant = Tenant(name=unique_name)
-                db.add(new_tenant)
-                db.flush()     # generate new_tenant.id immediately
-                tenant_id = new_tenant.id
-                role      = "merchant"
-                is_new    = True
-
+            # Create a unique email per store to avoid conflicts (same person may own multiple stores)
+            store_email = f"{owner_email.split('@')[0]}-{merchant_id_str}@salla.store" if merchant_id_str else owner_email
+            existing_user_for_email = db.query(User).filter(User.email == store_email).first()
+            if not existing_user_for_email:
                 new_user = User(
-                    username      = owner_email.split("@")[0],
-                    email         = owner_email,
+                    username      = f"{owner_email.split('@')[0]}-{merchant_id_str}" if merchant_id_str else owner_email.split("@")[0],
+                    email         = store_email,
                     password_hash = hash_password(_secrets.token_urlsafe(16)),
                     role          = role,
                     tenant_id     = tenant_id,
@@ -295,11 +289,11 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 db.add(new_user)
                 db.flush()
 
-                logger.info(
-                    "[SallaLogin] ✅ STEP 4 — TENANT CREATED (new merchant) | "
-                    "email=%s tenant_id=%s store=%r",
-                    owner_email, tenant_id, store_name,
-                )
+            logger.info(
+                "[SallaLogin] ✅ STEP 4 — TENANT CREATED (new store) | "
+                "email=%s store_email=%s tenant_id=%s store=%r store_id=%s",
+                owner_email, store_email, tenant_id, store_name, merchant_id_str,
+            )
 
         # ── Save / update Salla integration record ────────────────────────────
         if merchant_id_str:
@@ -353,10 +347,12 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # ══════════════════════════════════════════════════════════════
     # STEP 5 — Issue Nahla JWT (must carry user_id for tenant isolation)
     # ══════════════════════════════════════════════════════════════
-    db_user   = db.query(User).filter(User.email == owner_email).first()
+    # Look up by tenant_id since email may be store-specific (e.g. user-123@salla.store)
+    db_user    = db.query(User).filter(User.tenant_id == tenant_id).first()
     db_user_id = db_user.id if db_user else None
-    nahla_jwt = create_token(
-        email=owner_email, role=role, tenant_id=tenant_id, user_id=db_user_id
+    jwt_email  = db_user.email if db_user else owner_email
+    nahla_jwt  = create_token(
+        email=jwt_email, role=role, tenant_id=tenant_id, user_id=db_user_id
     )
 
     # Check WhatsApp connection status for smart redirect
