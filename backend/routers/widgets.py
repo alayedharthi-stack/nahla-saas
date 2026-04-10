@@ -532,11 +532,34 @@ function initDiscountPopup(c,fromSlide){{
   var cta=document.getElementById('nahla-popup-cta');
   if(cta)cta.addEventListener('click',function(){{
     ls(SEEN_KEY,1);
-    var code=N.popupCfg&&N.popupCfg.coupon_code?N.popupCfg.coupon_code:'';
-    if(!code){{hide();return;}}
     cta.textContent='⏳ جاري…';cta.disabled=true;
-    try{{navigator.clipboard.writeText(code);}}catch(e){{}}
-    _applyCode(code,cta);
+
+    // 1. Use pre-configured static code if available
+    var staticCode=N.popupCfg&&N.popupCfg.coupon_code?N.popupCfg.coupon_code:'';
+    if(staticCode){{
+      try{{navigator.clipboard.writeText(staticCode);}}catch(e){{}}
+      _applyCode(staticCode,cta);
+      return;
+    }}
+
+    // 2. Request a dynamic coupon from the backend
+    var apiBase='{_API_BASE}';
+    fetch(apiBase+'/merchant/widgets/'+TENANT_ID+'/create-coupon',{{method:'POST'}})
+      .then(function(r){{return r.json();}})
+      .then(function(d){{
+        if(d.success&&d.code){{
+          try{{navigator.clipboard.writeText(d.code);}}catch(e){{}}
+          _applyCode(d.code,cta);
+        }}else{{
+          // No coupon available — still redirect to cart
+          cta.textContent='احصل على الخصم';cta.disabled=false;
+          _applyCode('',cta);
+        }}
+      }})
+      .catch(function(){{
+        cta.textContent='احصل على الخصم';cta.disabled=false;
+        hide();
+      }});
   }});
 
   // Redirect to cart with coupon in URL — Salla applies it natively
@@ -544,8 +567,9 @@ function initDiscountPopup(c,fromSlide){{
     btn.textContent='⏳ جاري تطبيق الخصم…';
     btn.disabled=true;
     var lm=window.location.pathname.match(/^\/([a-z]{{2}})\//);
-    var base=(lm?'/'+lm[1]:'')+'/cart?coupon='+encodeURIComponent(code);
-    setTimeout(function(){{window.location.href=base;}},900);
+    var cartPath=(lm?'/'+lm[1]:'')+'/cart';
+    var dest=code?cartPath+'?coupon='+encodeURIComponent(code):cartPath;
+    setTimeout(function(){{window.location.href=dest;}},900);
   }}
 
   return {{show:show,hide:hide}};
@@ -827,9 +851,12 @@ async def create_unique_coupon(tenant_id: int, db: Session = Depends(get_db)):
         .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
         .first()
     )
-    salla_token = (integration.config or {}).get("token") if integration else None
+    cfg = integration.config or {} if integration else {}
+    # Token stored as "api_key" (OAuth flow) or legacy "token" key
+    salla_token = cfg.get("api_key") or cfg.get("token") or cfg.get("access_token") or ""
 
     if not salla_token:
+        logger.warning("[widgets/create-coupon] No Salla token for tenant=%s — cfg_keys=%s", tenant_id, list(cfg.keys()))
         # No Salla token → return static code if set
         if static_code:
             return {"success": True, "code": static_code, "method": "static"}
