@@ -948,17 +948,47 @@ async def serve_widgets_config(tenant_id: int, db: Session = Depends(get_db)):
 @router.get("/merchant/widgets/salla-auto.js", include_in_schema=False)
 async def serve_salla_auto_snippet():
     """
-    Universal Salla snippet — auto-detects store, resolves tenant, loads bundle.
+    Universal Salla snippet — auto-detects store ID from multiple sources, loads bundle.
     """
-    js = f"""/* Nahla Universal Salla Snippet — {_API_BASE} */
+    js = f"""/* Nahla Universal Salla Snippet v2 — {_API_BASE} */
 (function(){{
-  var id=(window.salla&&window.salla.store&&window.salla.store.id)
-       ||(window.salla_config&&window.salla_config.store&&window.salla_config.store.id);
-  if(!id)return;
-  var s=document.createElement('script');
-  s.src='{_API_BASE}/merchant/widgets/salla/'+id+'/nahla-widgets.js';
-  s.defer=true;
+  // Try every known location where Salla exposes the store ID
+  var id = (
+    (window.salla && window.salla.store && (window.salla.store.id || window.salla.store.merchant_id)) ||
+    (window.salla_config && window.salla_config.store && window.salla_config.store.id) ||
+    (window.salla_config && window.salla_config.store_id) ||
+    (window.salla_config && window.salla_config.merchant_id) ||
+    (window.salla && window.salla.env && window.salla.env.storeId) ||
+    (window.salla && window.salla.settings && window.salla.settings.store_id)
+  );
+
+  // Fallback: read from meta tag <meta name="salla:store_id" content="...">
+  if (!id) {{
+    var m = document.querySelector('meta[name="salla:store_id"],meta[name="store-id"],meta[property="salla:store_id"]');
+    if (m) id = m.getAttribute('content');
+  }}
+
+  // Fallback: read from data attribute on body or html
+  if (!id) {{
+    id = document.body && (document.body.dataset.storeId || document.body.dataset.sallaStoreId);
+  }}
+
+  console.log('[Nahla] salla-auto.js store_id detected:', id || 'NOT FOUND');
+
+  if (!id) {{
+    console.warn('[Nahla] Could not detect Salla store ID. Add <script src="{_API_BASE}/merchant/widgets/TENANT_ID/nahla-widgets.js"></script> manually.');
+    return;
+  }}
+
+  id = String(id).trim();
+  var s = document.createElement('script');
+  s.src = '{_API_BASE}/merchant/widgets/salla/' + id + '/nahla-widgets.js';
+  s.defer = true;
+  s.onerror = function() {{
+    console.warn('[Nahla] Widget bundle failed to load for store_id=' + id);
+  }};
   document.head.appendChild(s);
+  console.log('[Nahla] Loading widget bundle for store_id=' + id);
 }})();"""
     return Response(content=js, headers=_JS_HEADERS)
 

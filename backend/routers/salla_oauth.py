@@ -1024,20 +1024,35 @@ async def salla_oauth_callback(
             if store_resp.status_code == 200:
                 store_json     = store_resp.json()
                 store_data     = store_json.get("data", {})
-                salla_store_id = str(store_data.get("id", ""))
-                store_name     = store_data.get("name", "")
+                salla_store_id = str(store_data.get("id", "") or store_data.get("store_id", ""))
+                store_name     = store_data.get("name", "") or store_data.get("store_name", "")
                 merchant_id    = str(store_data.get("merchant", {}).get("id", "")) if isinstance(
                     store_data.get("merchant"), dict
                 ) else str(store_data.get("merchant", ""))
                 logger.info(
-                    "[Salla OAuth] Store info: id=%s name=%s merchant_id=%s",
-                    salla_store_id, store_name, merchant_id,
+                    "[Salla OAuth] ✅ Store info: id=%s name=%r merchant_id=%s full_keys=%s",
+                    salla_store_id, store_name, merchant_id, list(store_data.keys()),
                 )
             else:
                 logger.warning(
-                    "[Salla OAuth] Store info fetch failed: %s %.200s",
+                    "[Salla OAuth] ⚠️ Store info fetch failed: %s %.300s",
                     store_resp.status_code, store_resp.text,
                 )
+                # Attempt fallback: try merchant/info endpoint
+                try:
+                    fallback_resp = await client.get(
+                        "https://api.salla.dev/admin/v2/merchant/info",
+                        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                    )
+                    if fallback_resp.status_code == 200:
+                        fb_data = fallback_resp.json().get("data", {})
+                        salla_store_id = str(fb_data.get("id", "") or fb_data.get("store_id", ""))
+                        store_name = fb_data.get("name", "") or fb_data.get("store_name", "")
+                        logger.info("[Salla OAuth] ✅ Fallback store info: id=%s name=%r", salla_store_id, store_name)
+                    else:
+                        logger.warning("[Salla OAuth] ⚠️ Fallback also failed: %s", fallback_resp.status_code)
+                except Exception as fb_exc:
+                    logger.warning("[Salla OAuth] ⚠️ Fallback request error: %s", fb_exc)
 
     except httpx.TimeoutException as exc:
         logger.error("[Salla OAuth] Token exchange timed out: %s", exc)
@@ -1157,7 +1172,16 @@ async def salla_oauth_callback(
         get_or_create_tenant(db, tenant_id)
 
     # ── Step 4b: Save Salla integration to DB ──────────────────────────────────
-    logger.info("[Salla OAuth] Saving integration to DB | tenant=%s", tenant_id)
+    logger.info(
+        "[Salla OAuth] ▶ Saving integration | tenant=%s store_id=%r store_name=%r",
+        tenant_id, salla_store_id, store_name,
+    )
+    if not salla_store_id:
+        logger.error(
+            "[Salla OAuth] ❌ store_id is EMPTY — widget auto-load will NOT work. "
+            "Check store info API response above."
+        )
+
     try:
         integration = db.query(Integration).filter(
             Integration.tenant_id == tenant_id,
@@ -1179,21 +1203,26 @@ async def salla_oauth_callback(
         if integration:
             integration.config  = new_config
             integration.enabled = True
+            logger.info("[Salla OAuth] ✅ Updated existing Integration id=%s", integration.id)
         else:
-            db.add(Integration(
+            new_integ = Integration(
                 tenant_id=tenant_id,
                 provider="salla",
                 config=new_config,
                 enabled=True,
-            ))
+            )
+            db.add(new_integ)
+            db.flush()
+            logger.info("[Salla OAuth] ✅ Created new Integration id=%s", new_integ.id)
 
         db.commit()
         logger.info(
-            "[Salla OAuth] DB save SUCCESS | tenant=%s store_id=%s",
-            tenant_id, salla_store_id,
+            "[Salla OAuth] ✅ DB commit SUCCESS | tenant=%s store_id=%s | "
+            "Widget URL: /merchant/widgets/salla/%s/nahla-widgets.js",
+            tenant_id, salla_store_id, salla_store_id,
         )
     except Exception as exc:
-        logger.exception("[Salla OAuth] DB save FAILED: %s", exc)
+        logger.exception("[Salla OAuth] ❌ DB save FAILED: %s", exc)
         try:
             db.rollback()
         except Exception:
