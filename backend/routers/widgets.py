@@ -950,45 +950,89 @@ async def serve_salla_auto_snippet():
     """
     Universal Salla snippet — auto-detects store ID from multiple sources, loads bundle.
     """
-    js = f"""/* Nahla Universal Salla Snippet v2 — {_API_BASE} */
+    js = f"""/* Nahla Universal Salla Snippet v3 — {_API_BASE} */
 (function(){{
-  // Try every known location where Salla exposes the store ID
-  var id = (
-    (window.salla && window.salla.store && (window.salla.store.id || window.salla.store.merchant_id)) ||
-    (window.salla_config && window.salla_config.store && window.salla_config.store.id) ||
-    (window.salla_config && window.salla_config.store_id) ||
-    (window.salla_config && window.salla_config.merchant_id) ||
-    (window.salla && window.salla.env && window.salla.env.storeId) ||
-    (window.salla && window.salla.settings && window.salla.settings.store_id)
-  );
+  var API = '{_API_BASE}';
 
-  // Fallback: read from meta tag <meta name="salla:store_id" content="...">
-  if (!id) {{
-    var m = document.querySelector('meta[name="salla:store_id"],meta[name="store-id"],meta[property="salla:store_id"]');
-    if (m) id = m.getAttribute('content');
+  function _getStoreId() {{
+    // 1. Salla Twilight SDK globals (most reliable)
+    var s = window.salla;
+    if (s) {{
+      var id = (s.store && (s.store.id || s.store.merchant_id))
+            || (s.env   && (s.env.storeId || s.env.store_id || s.env.merchantId))
+            || (s.config && s.config.store_id)
+            || (s.settings && s.settings.store_id)
+            || (s.data && s.data.store && s.data.store.id);
+      if (id) return String(id).trim();
+    }}
+
+    // 2. salla_config global
+    var sc = window.salla_config;
+    if (sc) {{
+      var id2 = (sc.store && sc.store.id) || sc.store_id || sc.merchant_id;
+      if (id2) return String(id2).trim();
+    }}
+
+    // 3. Meta tags injected by Salla theme
+    var meta = document.querySelector(
+      'meta[name="salla:store_id"],meta[name="store-id"],'  +
+      'meta[property="salla:store_id"],meta[name="merchant_id"]'
+    );
+    if (meta) return meta.getAttribute('content');
+
+    // 4. Data attributes on <body> or <html>
+    var body = document.body || document.documentElement;
+    if (body) {{
+      var d = body.dataset;
+      var id3 = d.storeId || d.sallaStoreId || d.merchantId || d.store;
+      if (id3) return id3;
+    }}
+
+    // 5. Salla app_component or rocket-loader embedded JSON
+    var appEl = document.querySelector('[data-salla-app],[data-store-id],[data-merchant-id]');
+    if (appEl) {{
+      return appEl.getAttribute('data-store-id') ||
+             appEl.getAttribute('data-merchant-id') ||
+             appEl.getAttribute('data-salla-app');
+    }}
+
+    return null;
   }}
 
-  // Fallback: read from data attribute on body or html
-  if (!id) {{
-    id = document.body && (document.body.dataset.storeId || document.body.dataset.sallaStoreId);
+  function _load(id) {{
+    id = String(id).trim();
+    if (!id || id === 'null' || id === 'undefined') return;
+    console.log('[Nahla] Loading widget bundle for store_id=' + id);
+    var s = document.createElement('script');
+    s.src  = API + '/merchant/widgets/salla/' + id + '/nahla-widgets.js';
+    s.defer = true;
+    s.onerror = function() {{
+      console.warn('[Nahla] Widget bundle not found for store_id=' + id);
+    }};
+    document.head.appendChild(s);
   }}
 
-  console.log('[Nahla] salla-auto.js store_id detected:', id || 'NOT FOUND');
-
-  if (!id) {{
-    console.warn('[Nahla] Could not detect Salla store ID. Add <script src="{_API_BASE}/merchant/widgets/TENANT_ID/nahla-widgets.js"></script> manually.');
-    return;
+  function _detect() {{
+    var id = _getStoreId();
+    console.log('[Nahla] salla-auto.js store_id detected:', id || 'NOT FOUND');
+    if (id) {{ _load(id); return true; }}
+    return false;
   }}
 
-  id = String(id).trim();
-  var s = document.createElement('script');
-  s.src = '{_API_BASE}/merchant/widgets/salla/' + id + '/nahla-widgets.js';
-  s.defer = true;
-  s.onerror = function() {{
-    console.warn('[Nahla] Widget bundle failed to load for store_id=' + id);
-  }};
-  document.head.appendChild(s);
-  console.log('[Nahla] Loading widget bundle for store_id=' + id);
+  // Try immediately (works if SDK already loaded)
+  if (_detect()) return;
+
+  // Retry on DOMContentLoaded
+  document.addEventListener('DOMContentLoaded', function() {{
+    if (_detect()) return;
+
+    // Retry up to 10 times with 300ms intervals waiting for Salla SDK
+    var tries = 0;
+    var t = setInterval(function() {{
+      tries++;
+      if (_detect() || tries >= 10) clearInterval(t);
+    }}, 300);
+  }});
 }})();"""
     return Response(content=js, headers=_JS_HEADERS)
 
