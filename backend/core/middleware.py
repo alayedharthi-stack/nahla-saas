@@ -29,6 +29,7 @@ JWT_PUBLIC_PREFIXES = (
     "/oauth",                           # Salla/WhatsApp OAuth callbacks
     "/integrations/salla/",             # Salla success/error landing HTML pages (public)
     "/salla",                           # /salla/start (new merchant install entry point)
+    "/api/salla/test/authorize",        # Salla TEST app OAuth start — public redirect
     "/zid",                             # /zid/app, /zid/redirect, /zid/token-login
     "/settings/validate",               # Salla Partner Portal validation probe
     "/snippet.js",

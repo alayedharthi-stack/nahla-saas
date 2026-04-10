@@ -1252,29 +1252,26 @@ def _redirect_html(dest: str, title: str, subtitle: str) -> str:
 # Does NOT modify or affect the production OAuth flow above.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/api/salla/test/authorize")
+@router.get("/api/salla/test/authorize", include_in_schema=True)
 async def salla_test_authorize(request: Request):
     """
-    Returns the Salla OAuth authorization URL for the TEST app.
-    Use this to start the OAuth flow with the test/private Salla app.
+    PUBLIC — no JWT required.
+    Redirects directly to Salla OAuth authorization using the TEST app credentials.
     """
-    tenant_id = resolve_tenant_id(request)
     if not SALLA_TEST_CLIENT_ID:
         raise HTTPException(status_code=503, detail="SALLA_TEST_CLIENT_ID not configured")
 
+    # Use state=0 for new-merchant flow (no existing Nahla account required)
     params = urllib.parse.urlencode({
         "client_id":     SALLA_TEST_CLIENT_ID,
         "redirect_uri":  SALLA_TEST_REDIRECT_URI,
         "response_type": "code",
         "scope":         "offline_access",
-        "state":         str(tenant_id),
+        "state":         _NEW_MERCHANT_PREFIX + "test",
     })
     auth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
-    logger.info(
-        "[SallaTest] authorize URL generated | tenant=%s redirect_uri=%s",
-        tenant_id, SALLA_TEST_REDIRECT_URI,
-    )
-    return {"url": auth_url, "redirect_uri": SALLA_TEST_REDIRECT_URI}
+    logger.info("[SallaTest] Redirecting to Salla auth | redirect_uri=%s", SALLA_TEST_REDIRECT_URI)
+    return RedirectResponse(url=auth_url, status_code=302)
 
 
 @router.get("/oauth/salla/test/callback")
