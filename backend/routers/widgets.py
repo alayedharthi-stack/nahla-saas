@@ -980,7 +980,8 @@ async def serve_widgets_js_by_salla(salla_store_id: str, db: Session = Depends(g
             break
 
     if tenant_id is None:
-        return Response(content="/* Nahla: store not registered */", headers=_JS_HEADERS)
+        logger.warning("[widgets/by-salla] store_id=%s NOT registered — use POST /admin/link-salla-store to link it", salla_store_id)
+        return Response(content="/* Nahla: store not registered — store_id=" + str(salla_store_id) + " */", headers=_JS_HEADERS)
 
     rows = (
         db.query(MerchantWidget)

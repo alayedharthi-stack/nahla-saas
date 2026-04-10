@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from models import Tenant, User  # noqa: E402
+from models import Integration, Tenant, User  # noqa: E402
 
 from core.audit import audit
 from core.auth import (
@@ -417,3 +417,53 @@ async def get_tenant(
         "domain":    tenant.domain,
         "is_active": tenant.is_active,
     }
+
+
+# ── Manual Salla store linking ────────────────────────────────────────────────
+
+class LinkSallaStoreRequest(BaseModel):
+    tenant_id: int
+    salla_store_id: str
+
+
+@router.post("/admin/link-salla-store")
+async def link_salla_store(
+    body: LinkSallaStoreRequest,
+    db: Session = Depends(get_db),
+    _admin: dict = Depends(require_admin),
+):
+    """
+    Manually link a Salla store_id to an existing tenant.
+    Used when OAuth could not complete (e.g. private app restrictions).
+    Idempotent: re-running updates the existing Integration record.
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == body.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    existing = (
+        db.query(Integration)
+        .filter(
+            Integration.tenant_id == body.tenant_id,
+            Integration.provider == "salla",
+        )
+        .first()
+    )
+
+    if existing:
+        cfg = dict(existing.config or {})
+        cfg["store_id"] = body.salla_store_id
+        existing.config = cfg
+        existing.enabled = True
+        db.commit()
+        return {"status": "updated", "tenant_id": body.tenant_id, "salla_store_id": body.salla_store_id}
+
+    new_integ = Integration(
+        provider="salla",
+        tenant_id=body.tenant_id,
+        enabled=True,
+        config={"store_id": body.salla_store_id},
+    )
+    db.add(new_integ)
+    db.commit()
+    return {"status": "created", "tenant_id": body.tenant_id, "salla_store_id": body.salla_store_id}
