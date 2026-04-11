@@ -879,12 +879,13 @@ async def salla_authorize(request: Request):
     if not SALLA_CLIENT_ID:
         raise HTTPException(status_code=503, detail="SALLA_CLIENT_ID not configured")
 
+    state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}"
     params = urllib.parse.urlencode({
         "client_id":     SALLA_CLIENT_ID,
         "redirect_uri":  SALLA_REDIRECT_URI,
         "response_type": "code",
         "scope":         "offline_access",
-        "state":         str(tenant_id),
+        "state":         state,
     })
     auth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
     logger.info(
@@ -927,11 +928,18 @@ async def salla_oauth_callback(
     )
 
     # ── Resolve tenant from state param ────────────────────────────────────────
-    # state = integer  → existing merchant linking their Salla store
-    # state = "salla_new_*" → brand-new merchant installing from Salla (no Nahla account yet)
+    # state = "t<id>_<rand>"  → existing merchant (new format, >=8 chars for Salla)
+    # state = integer         → existing merchant (legacy, may be short)
+    # state = "salla_new_*"   → brand-new merchant installing from Salla
     is_new_merchant = (state or "").startswith(_NEW_MERCHANT_PREFIX)
     try:
-        tenant_id = int(state) if (state and not is_new_merchant) else 0
+        raw = state or ""
+        if raw.startswith("t") and "_" in raw:
+            tenant_id = int(raw.split("_")[0][1:])
+        elif not is_new_merchant:
+            tenant_id = int(raw) if raw else 0
+        else:
+            tenant_id = 0
     except (ValueError, TypeError):
         tenant_id = 0
     logger.info(
