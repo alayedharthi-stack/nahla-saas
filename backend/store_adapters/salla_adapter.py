@@ -219,6 +219,14 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_order", exc)
             raise
 
+    async def get_orders(self, limit: int = 50) -> List[NormalizedOrder]:
+        try:
+            data = await self._get("/orders", {"per_page": min(limit, 50)})
+            return [self._normalize_order(o, None) for o in data.get("data", [])]
+        except Exception as exc:
+            self._log_error("get_orders", exc)
+            return []
+
     async def get_customer_orders(self, customer_phone: str) -> List[NormalizedOrder]:
         try:
             data = await self._get("/orders", {"mobile": customer_phone, "per_page": 10})
