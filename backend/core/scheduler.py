@@ -18,18 +18,81 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger("nahla-scheduler")
 
-_CHECK_INTERVAL_HOURS = 12   # run every 12 hours
+_CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
+_SYNC_INTERVAL_SECONDS = 3600  # store sync every 1 hour
 
 
 async def run_scheduler() -> None:
     """Main scheduler loop — runs forever in background."""
-    logger.info("[Scheduler] Started — checking every %sh", _CHECK_INTERVAL_HOURS)
+    logger.info("[Scheduler] Started — billing checks every %sh, store sync every %ss",
+                _CHECK_INTERVAL_HOURS, _SYNC_INTERVAL_SECONDS)
     while True:
         try:
             await _run_checks()
         except Exception as exc:
             logger.error("[Scheduler] Error in check cycle: %s", exc, exc_info=True)
         await asyncio.sleep(_CHECK_INTERVAL_HOURS * 3600)
+
+
+async def run_store_sync_scheduler() -> None:
+    """Hourly full sync for all connected stores — runs as a separate background task."""
+    await asyncio.sleep(120)  # let the app fully start before first sync
+    logger.info("[StoreSync Scheduler] Started — syncing every %ss", _SYNC_INTERVAL_SECONDS)
+    while True:
+        try:
+            await _sync_all_stores()
+        except Exception as exc:
+            logger.error("[StoreSync Scheduler] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_SYNC_INTERVAL_SECONDS)
+
+
+async def _sync_all_stores() -> None:
+    """Run full_sync for every tenant that has an enabled Salla integration."""
+    import sys as _sys, os as _os  # noqa: PLC0415
+    _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    from core.database import SessionLocal  # noqa: PLC0415
+    from models import Integration  # noqa: PLC0415
+
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        logger.error("[StoreSync Scheduler] Cannot open DB: %s", exc)
+        return
+
+    try:
+        integrations = db.query(Integration).filter(
+            Integration.provider == "salla",
+            Integration.enabled == True,  # noqa: E712
+        ).all()
+
+        if not integrations:
+            logger.info("[StoreSync Scheduler] No active Salla integrations — skipping")
+            return
+
+        logger.info("[StoreSync Scheduler] Syncing %d store(s)...", len(integrations))
+
+        for intg in integrations:
+            tenant_id = intg.tenant_id
+            api_key = (intg.config or {}).get("api_key", "")
+            if not api_key:
+                logger.warning("[StoreSync Scheduler] tenant=%s has empty api_key — skipping", tenant_id)
+                continue
+            try:
+                from services.store_sync import StoreSyncService  # noqa: PLC0415
+                svc = StoreSyncService(db, tenant_id)
+                result = await svc.full_sync(triggered_by="scheduler")
+                logger.info(
+                    "[StoreSync Scheduler] tenant=%s sync %s | products=%s orders=%s",
+                    tenant_id, result.get("status"),
+                    result.get("products_synced", 0), result.get("orders_synced", 0),
+                )
+            except Exception as exc:
+                logger.error("[StoreSync Scheduler] tenant=%s sync failed: %s", tenant_id, exc)
+
+        logger.info("[StoreSync Scheduler] Cycle complete.")
+    finally:
+        db.close()
 
 
 async def _run_checks() -> None:

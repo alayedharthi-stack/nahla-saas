@@ -288,13 +288,21 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("[Startup] WABA subscription skipped: %s", exc)
 
-    # 3. Background scheduler
+    # 3. Background scheduler (billing/subscription checks)
     try:
         from core.scheduler import run_scheduler  # noqa: PLC0415
         asyncio.create_task(run_scheduler())
         logger.info("Background scheduler started.")
     except Exception as exc:
         logger.warning("Scheduler could not start: %s", exc)
+
+    # 4. Hourly store sync scheduler
+    try:
+        from core.scheduler import run_store_sync_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_store_sync_scheduler())
+        logger.info("Store sync scheduler started (hourly).")
+    except Exception as exc:
+        logger.warning("Store sync scheduler could not start: %s", exc)
 
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.

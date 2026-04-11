@@ -483,6 +483,134 @@ class StoreSyncService:
             snap.updated_at                = datetime.now(timezone.utc)
             self.db.commit()
 
+    # ── Incremental order update (called by webhook) ────────────────────────
+
+    async def handle_order_webhook(self, payload: Dict) -> None:
+        """Process a single order create/update from a platform webhook."""
+        normalised = _normalise_order(payload)
+        ext_id     = normalised["external_id"]
+        if not ext_id:
+            return
+
+        existing = (
+            self.db.query(Order)
+            .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+            .first()
+        )
+        if existing:
+            existing.status        = normalised["status"]
+            existing.total         = normalised["total"]
+            existing.customer_info = normalised["customer_info"]
+            existing.line_items    = normalised["line_items"]
+            existing.is_abandoned  = normalised["is_abandoned"]
+        else:
+            self.db.add(Order(
+                tenant_id     = self.tenant_id,
+                external_id   = ext_id,
+                status        = normalised["status"],
+                total         = normalised["total"],
+                customer_info = normalised["customer_info"],
+                line_items    = normalised["line_items"],
+                checkout_url  = normalised["checkout_url"],
+                is_abandoned  = normalised["is_abandoned"],
+            ))
+        self.db.commit()
+
+        snap = (
+            self.db.query(StoreKnowledgeSnapshot)
+            .filter_by(tenant_id=self.tenant_id)
+            .first()
+        )
+        if snap:
+            snap.order_count              = (
+                self.db.query(Order).filter_by(tenant_id=self.tenant_id).count()
+            )
+            snap.last_incremental_sync_at = datetime.now(timezone.utc)
+            snap.updated_at               = datetime.now(timezone.utc)
+            self.db.commit()
+
+    # ── Incremental customer update (called by webhook) ───────────────────
+
+    async def handle_customer_webhook(self, payload: Dict) -> None:
+        """Process a single customer create/update from a platform webhook."""
+        ext_id = str(payload.get("id", ""))
+        name   = (payload.get("first_name", "") + " " + payload.get("last_name", "")).strip()
+        if not name:
+            name = payload.get("name", "")
+        email  = payload.get("email", "")
+        phone  = payload.get("mobile", payload.get("phone", ""))
+
+        if not ext_id:
+            return
+
+        existing = (
+            self.db.query(Customer)
+            .filter(
+                Customer.tenant_id == self.tenant_id,
+                Customer.extra_metadata["salla_id"].astext == ext_id,
+            )
+            .first()
+        )
+        meta = {"salla_id": ext_id, **(payload.get("metadata", {}) or {})}
+
+        if existing:
+            if name:
+                existing.name  = name
+            if email:
+                existing.email = email
+            if phone:
+                existing.phone = phone
+            existing.extra_metadata = {**(existing.extra_metadata or {}), **meta}
+        else:
+            self.db.add(Customer(
+                tenant_id      = self.tenant_id,
+                name           = name or None,
+                email          = email or None,
+                phone          = phone or None,
+                extra_metadata = meta,
+            ))
+        self.db.commit()
+
+        snap = (
+            self.db.query(StoreKnowledgeSnapshot)
+            .filter_by(tenant_id=self.tenant_id)
+            .first()
+        )
+        if snap:
+            snap.customer_count           = (
+                self.db.query(Customer).filter_by(tenant_id=self.tenant_id).count()
+            )
+            snap.last_incremental_sync_at = datetime.now(timezone.utc)
+            snap.updated_at               = datetime.now(timezone.utc)
+            self.db.commit()
+
+    # ── Product deletion (called by webhook) ──────────────────────────────
+
+    async def handle_product_deleted(self, external_id: str) -> None:
+        """Remove a product that was deleted in the store."""
+        if not external_id:
+            return
+        deleted = (
+            self.db.query(Product)
+            .filter_by(tenant_id=self.tenant_id, external_id=external_id)
+            .delete()
+        )
+        if deleted:
+            self.db.commit()
+            snap = (
+                self.db.query(StoreKnowledgeSnapshot)
+                .filter_by(tenant_id=self.tenant_id)
+                .first()
+            )
+            if snap:
+                snap.product_count            = (
+                    self.db.query(Product).filter_by(tenant_id=self.tenant_id).count()
+                )
+                snap.last_incremental_sync_at = datetime.now(timezone.utc)
+                snap.updated_at               = datetime.now(timezone.utc)
+                self.db.commit()
+            logger.info("tenant=%s product deleted | external_id=%s", self.tenant_id, external_id)
+
     # ── Status ─────────────────────────────────────────────────────────────────
 
     def get_status(self) -> Dict:

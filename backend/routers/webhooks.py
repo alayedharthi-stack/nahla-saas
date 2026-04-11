@@ -81,26 +81,50 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
     data = payload.get("data", {})
 
     if event in ("app.store.authorize", "app.store.token"):
-        # Salla sends full token data when merchant installs/authorizes the app
         await _handle_salla_authorize(db, store_id, data, payload)
 
-    elif event == "order.created":
-        logger.info("Salla order.created | order_id=%s store=%s", data.get("id"), store_id)
-    elif event == "order.updated":
-        logger.info(
-            "Salla order.updated | order_id=%s status=%s store=%s",
-            data.get("id"), data.get("status", {}), store_id,
-        )
+    elif event in ("order.created", "order.updated"):
+        logger.info("Salla %s | order_id=%s store=%s", event, data.get("id"), store_id)
+        tenant_id = _resolve_tenant_from_store(db, store_id)
+        if tenant_id:
+            from services.store_sync import StoreSyncService  # noqa: PLC0415
+            await StoreSyncService(db, tenant_id).handle_order_webhook(data)
+            logger.info("Salla %s processed | tenant=%s order=%s", event, tenant_id, data.get("id"))
+
+    elif event in ("product.created", "product.updated"):
+        logger.info("Salla %s | product_id=%s store=%s", event, data.get("id"), store_id)
+        tenant_id = _resolve_tenant_from_store(db, store_id)
+        if tenant_id:
+            from services.store_sync import StoreSyncService  # noqa: PLC0415
+            await StoreSyncService(db, tenant_id).handle_product_webhook(data)
+            logger.info("Salla %s processed | tenant=%s product=%s", event, tenant_id, data.get("id"))
+
+    elif event == "product.deleted":
+        logger.info("Salla product.deleted | product_id=%s store=%s", data.get("id"), store_id)
+        tenant_id = _resolve_tenant_from_store(db, store_id)
+        if tenant_id:
+            from services.store_sync import StoreSyncService  # noqa: PLC0415
+            await StoreSyncService(db, tenant_id).handle_product_deleted(str(data.get("id", "")))
+
+    elif event in ("customer.created", "customer.updated"):
+        logger.info("Salla %s | email=%s store=%s", event, data.get("email"), store_id)
+        tenant_id = _resolve_tenant_from_store(db, store_id)
+        if tenant_id:
+            from services.store_sync import StoreSyncService  # noqa: PLC0415
+            await StoreSyncService(db, tenant_id).handle_customer_webhook(data)
+            logger.info("Salla %s processed | tenant=%s", event, tenant_id)
+
     elif event == "shipment.created":
         logger.info("Salla shipment.created | shipment_id=%s store=%s", data.get("id"), store_id)
-    elif event == "customer.created":
-        logger.info("Salla customer.created | email=%s store=%s", data.get("email"), store_id)
+
     elif event == "app.installed":
         logger.info("Salla app.installed | store=%s", store_id)
         await _handle_salla_authorize(db, store_id, data, payload)
+
     elif event == "app.uninstalled":
         logger.info("Salla app.uninstalled | store=%s", store_id)
         _disable_salla_integration(db, str(store_id))
+
     else:
         logger.info(
             "Salla webhook unhandled event=%s store=%s | data=%s",
@@ -108,6 +132,21 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         )
 
     return {"status": "ok", "event": event}
+
+
+def _resolve_tenant_from_store(db, store_id) -> int | None:
+    """Look up the Nahla tenant_id that owns a given Salla store_id."""
+    from models import Integration  # noqa: PLC0415
+    sid = str(store_id)
+    integrations = db.query(Integration).filter(
+        Integration.provider == "salla",
+        Integration.enabled == True,  # noqa: E712
+    ).all()
+    for intg in integrations:
+        if str((intg.config or {}).get("store_id", "")) == sid:
+            return intg.tenant_id
+    logger.warning("Salla webhook: no tenant found for store_id=%s", sid)
+    return None
 
 
 async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> None:
