@@ -76,7 +76,7 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         "Salla webhook received | event=%s store_id=%s created_at=%s ip=%s",
         event, store_id, created_at, client_ip,
     )
-    audit("salla_webhook", event=event, store_id=store_id, ip=client_ip)
+    audit("salla_webhook", salla_event=event, store_id=store_id, ip=client_ip)
 
     data = payload.get("data", {})
 
