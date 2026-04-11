@@ -1175,8 +1175,24 @@ async def salla_oauth_callback(
 
     else:
         # Existing merchant — tenant_id came from state
+        if tenant_id == 0 and salla_store_id:
+            # State was not in our format (Salla may replace it).
+            # Try to find the tenant that already owns this store_id.
+            existing = db.query(Integration).filter(
+                Integration.provider == "salla",
+                Integration.enabled == True,  # noqa: E712
+            ).all()
+            for intg in existing:
+                if str((intg.config or {}).get("store_id", "")) == salla_store_id:
+                    tenant_id = intg.tenant_id
+                    logger.info(
+                        "[Salla OAuth] Resolved tenant from store_id | store=%s → tenant=%s",
+                        salla_store_id, tenant_id,
+                    )
+                    break
         if tenant_id == 0:
-            tenant_id = 1  # last resort fallback (should not happen)
+            tenant_id = 1  # last resort fallback
+            logger.warning("[Salla OAuth] Could not resolve tenant, falling back to tenant=1")
         get_or_create_tenant(db, tenant_id)
 
     # ── Step 4b: Save Salla integration to DB ──────────────────────────────────

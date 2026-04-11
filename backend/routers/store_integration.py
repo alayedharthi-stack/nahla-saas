@@ -123,3 +123,43 @@ async def test_store_integration(request: Request):
         }
     except Exception as exc:
         return {"status": "error", "platform": adapter.platform, "error": str(exc)}
+
+
+@router.post("/copy-from-tenant")
+async def copy_integration_from_tenant(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Copy Salla integration (tokens) from another tenant to the current one."""
+    tenant_id = resolve_tenant_id(request)
+    body = await request.json()
+    source_tenant = int(body.get("source_tenant", 1))
+
+    source = db.query(Integration).filter(
+        Integration.tenant_id == source_tenant,
+        Integration.provider == "salla",
+    ).first()
+    if not source or not source.config:
+        return {"status": "error", "message": f"No salla integration found for tenant {source_tenant}"}
+
+    get_or_create_tenant(db, tenant_id)
+    target = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+        Integration.provider == "salla",
+    ).first()
+
+    if target:
+        target.config = dict(source.config)
+        target.enabled = True
+    else:
+        target = Integration(
+            tenant_id=tenant_id,
+            provider="salla",
+            config=dict(source.config),
+            enabled=True,
+        )
+        db.add(target)
+
+    db.commit()
+    logger.info("Copied salla integration from tenant=%s to tenant=%s", source_tenant, tenant_id)
+    return {"status": "ok", "copied_from": source_tenant, "to_tenant": tenant_id}
