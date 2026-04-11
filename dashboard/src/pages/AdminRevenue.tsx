@@ -1,12 +1,6 @@
 import { useEffect, useState } from 'react'
-import { API_BASE } from '../api/client'
-import { getToken } from '../auth'
+import { adminApi, type AdminPayment } from '../api/admin'
 import { DollarSign, TrendingUp, AlertCircle, Calendar } from 'lucide-react'
-
-interface Payment {
-  id: number; tenant_id: number; amount: number
-  currency: string; status: string; gateway: string; created_at: string
-}
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; cls: string }> = {
@@ -19,12 +13,32 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function AdminRevenue() {
-  const [data, setData]     = useState<any>(null)
+  const [data, setData]     = useState<{
+    revenue: { total_sar: number; today_sar: number; mrr_sar: number }
+    recent_payments: Array<{ id: number; tenant_id: number; amount: number; currency: string; status: string; gateway: string; created_at: string | null }>
+  } | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch(`${API_BASE}/admin/stats`, { headers: { Authorization: `Bearer ${getToken()}` } })
-      .then(r => r.json()).then(setData).catch(() => {}).finally(() => setLoading(false))
+    Promise.all([adminApi.revenueSummary(), adminApi.billingPayments()])
+      .then(([summary, payments]) => setData({
+        revenue: {
+          total_sar: summary.total_sar,
+          today_sar: summary.today_sar,
+          mrr_sar: summary.mrr_sar,
+        },
+        recent_payments: payments.payments.slice(0, 20).map((payment: AdminPayment) => ({
+          id: payment.id,
+          tenant_id: payment.tenant_id,
+          amount: payment.amount_sar,
+          currency: payment.currency,
+          status: payment.status,
+          gateway: payment.gateway,
+          created_at: payment.created_at,
+        })),
+      }))
+      .catch(() => {})
+      .finally(() => setLoading(false))
   }, [])
 
   if (loading) return (
@@ -34,7 +48,7 @@ export default function AdminRevenue() {
   )
 
   const rev = data?.revenue ?? { total_sar: 0, today_sar: 0, mrr_sar: 0 }
-  const payments: Payment[] = data?.recent_payments ?? []
+  const payments = data?.recent_payments ?? []
   const failed = payments.filter(p => p.status === 'failed')
 
   const summary = [

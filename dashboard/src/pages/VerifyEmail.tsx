@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle, XCircle, Loader2, Mail } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { API_BASE } from '../api/client'
 
 type Status = 'loading' | 'success' | 'invalid' | 'not_found' | 'pending'
 
@@ -18,7 +19,7 @@ export default function VerifyEmail() {
 
     // If there's a token in URL, redirect to backend to process
     if (token) {
-      window.location.href = `/api/auth/verify-email?token=${token}`
+      window.location.href = `${API_BASE}/auth/verify-email?token=${encodeURIComponent(token)}`
       return
     }
 

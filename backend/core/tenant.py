@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from sqlalchemy.orm import Session
 
 from models import Tenant, TenantSettings  # noqa: E402
@@ -94,16 +94,17 @@ def resolve_tenant_id(request: Request) -> int:
     """
     Resolve tenant_id for the current request.
 
-    Priority (authoritative → fallback)
+    Priority (authoritative → restricted fallback)
     ------------------------------------
     1. JWT payload claim   — set by jwt_enforcement_middleware; always present on
                              authenticated routes after the middleware fix.
     2. request.state       — set by multi_tenant_middleware from X-Tenant-ID header
                              (dev/testing only).
-    3. Hard fallback = 1   — NEVER acceptable in production; logged as CRITICAL.
+    3. Explicit failure     — no tenant scope means request must be rejected.
 
-    The hard fallback exists only to prevent a 500 crash in edge cases.
-    Every call that hits the fallback indicates a middleware or auth bug.
+    Silent fallback to tenant 1 is forbidden because it compromises tenant
+    isolation. Every call that reaches the final failure path indicates an
+    auth or middleware bug and must fail closed.
     """
     # Path 1 — JWT claim (expected path for all authenticated requests)
     jwt_payload = getattr(request.state, "jwt_payload", None)
@@ -113,10 +114,13 @@ def resolve_tenant_id(request: Request) -> int:
             return int(tid)
         # JWT present but missing tenant_id — should have been caught by middleware
         _tenant_logger.critical(
-            "[tenant] JWT has no tenant_id! path=%s sub=%s role=%s — using 1 (DATA ISOLATION AT RISK)",
+            "[tenant] JWT has no tenant_id! path=%s sub=%s role=%s — rejecting request",
             request.url.path, jwt_payload.get("sub"), jwt_payload.get("role"),
         )
-        return 1
+        raise HTTPException(
+            status_code=401,
+            detail="Token missing tenant scope — please log in again",
+        )
 
     # Path 2 — header/state (dev testing only)
     try:
@@ -131,28 +135,49 @@ def resolve_tenant_id(request: Request) -> int:
     except (ValueError, AttributeError):
         pass
 
-    # Path 3 — hard fallback (SHOULD NEVER REACH HERE)
+    # Path 3 — explicit failure (SHOULD NEVER REACH HERE)
     _tenant_logger.critical(
-        "[tenant] resolve_tenant_id fell back to 1! path=%s — THIS IS A BUG. "
-        "Data isolation is compromised. Check JWT middleware.",
+        "[tenant] resolve_tenant_id has no tenant scope! path=%s — rejecting request. "
+        "Check JWT middleware / impersonation / header propagation.",
         request.url.path,
     )
-    return 1
+    raise HTTPException(
+        status_code=401,
+        detail="Tenant scope required for this request",
+    )
 
 
 def get_or_create_tenant(db: Session, tenant_id: int) -> Tenant:
-    """Fetch existing tenant or create a default placeholder (dev only)."""
+    """
+    Fetch an existing tenant.
+
+    Placeholder auto-creation is disabled by default because it can hide
+    tenant-resolution bugs and silently route data into unintended tenants.
+    It may be re-enabled only in tightly controlled development setups by
+    setting `NAHLA_ALLOW_RUNTIME_TENANT_AUTO_CREATE=1`.
+    """
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
-        tenant = Tenant(
-            id=tenant_id,
-            name=f"متجر رقم {tenant_id}",
-            domain=f"store-{tenant_id}.nahla.sa",
-            is_active=True,
-            created_at=datetime.now(timezone.utc),
-        )
-        db.add(tenant)
-        db.flush()
+        if os.getenv("NAHLA_ALLOW_RUNTIME_TENANT_AUTO_CREATE", "").strip() == "1":
+            _tenant_logger.warning(
+                "[tenant] Runtime auto-create enabled for tenant_id=%s — development only",
+                tenant_id,
+            )
+            tenant = Tenant(
+                id=tenant_id,
+                name=f"متجر رقم {tenant_id}",
+                domain=f"store-{tenant_id}.nahla.sa",
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(tenant)
+            db.flush()
+        else:
+            _tenant_logger.error(
+                "[tenant] Tenant %s not found — refusing implicit creation",
+                tenant_id,
+            )
+            raise HTTPException(status_code=404, detail="Tenant not found")
     return tenant
 
 

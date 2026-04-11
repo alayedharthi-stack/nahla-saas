@@ -1,27 +1,24 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Bot, Link2, Search, Filter, Download } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { ShoppingCart, DollarSign, Clock, CheckCircle } from 'lucide-react'
+import { featureRealityApi, type DashboardOrder, type OrdersDashboard } from '../api/featureReality'
 
 type OrderStatus = 'paid' | 'pending' | 'failed' | 'cancelled'
 type OrderSource = 'AI' | 'manual'
 
-interface Order {
-  id: string
-  customer: string
-  phone: string
-  items: string
-  amount: string
-  status: OrderStatus
-  source: OrderSource
-  paymentLink?: string
-  createdAt: string
+const emptyData: OrdersDashboard = {
+  summary: {
+    total_orders: 0,
+    today_revenue_sar: 0,
+    pending_orders: 0,
+    completed_today: 0,
+  },
+  orders: [],
 }
-
-const orders: Order[] = []
 
 const TABS = [
   { key: 'all',        label: 'الكل' },
@@ -44,9 +41,16 @@ const TABLE_HEADERS = ['الطلب', 'العميل', 'المنتجات', 'الم
 export default function Orders() {
   const [tab, setTab] = useState<TabKey>('all')
   const [search, setSearch] = useState('')
+  const [data, setData] = useState<OrdersDashboard>(emptyData)
   const { t } = useLanguage()
 
-  const filtered = orders.filter((o) => {
+  useEffect(() => {
+    featureRealityApi.orders()
+      .then(setData)
+      .catch(() => setData(emptyData))
+  }, [])
+
+  const filtered = data.orders.filter((o: DashboardOrder) => {
     if (tab === 'ai'        && o.source !== 'AI')     return false
     if (tab === 'pending'   && o.status !== 'pending') return false
     if (tab === 'completed' && o.status !== 'paid')    return false
@@ -69,10 +73,10 @@ export default function Orders() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="إجمالي الطلبات"    value="0"        icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
-        <StatCard label="الإيرادات اليوم"   value="0 ر.س"   icon={DollarSign}   iconColor="text-emerald-600" iconBg="bg-emerald-50" />
-        <StatCard label="بانتظار الدفع"     value="0"        icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
-        <StatCard label="مكتملة اليوم"      value="0"        icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
+        <StatCard label="إجمالي الطلبات"    value={String(data.summary.total_orders)}        icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
+        <StatCard label="الإيرادات اليوم"   value={`${data.summary.today_revenue_sar.toLocaleString('ar-SA')} ر.س`}   icon={DollarSign}   iconColor="text-emerald-600" iconBg="bg-emerald-50" />
+        <StatCard label="بانتظار الدفع"     value={String(data.summary.pending_orders)}        icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+        <StatCard label="مكتملة اليوم"      value={String(data.summary.completed_today)}        icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
       </div>
 
       {/* Table card */}
@@ -171,7 +175,7 @@ export default function Orders() {
 
         {/* Pagination */}
         <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100">
-          <p className="text-xs text-slate-400">عرض {filtered.length} من {orders.length} طلب</p>
+          <p className="text-xs text-slate-400">عرض {filtered.length} من {data.orders.length} طلب</p>
           <div className="flex items-center gap-1">
             <button className="btn-ghost text-xs py-1.5 px-2">السابق</button>
             <button className="px-3 py-1.5 rounded-lg bg-brand-500 text-white text-xs font-medium">1</button>

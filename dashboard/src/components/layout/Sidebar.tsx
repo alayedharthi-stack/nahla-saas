@@ -22,6 +22,7 @@ import {
   Crown,
   TrendingUp,
   Layers,
+  Flag,
   X,
   Puzzle,
 } from 'lucide-react'
@@ -49,10 +50,14 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
     groupLabel: 'المنصة',
     items: [
       { to: '/admin',          icon: Crown,         label: _tr => 'Dashboard'        },
-      { to: '/admin/merchants',icon: Users,         label: _tr => 'Merchants'        },
+      { to: '/admin/tenants',  icon: Store,         label: _tr => 'Tenants'          },
+      { to: '/admin/merchants',icon: Users,         label: _tr => 'Merchant Access'  },
       { to: '/admin/revenue',  icon: TrendingUp,    label: _tr => 'Revenue'          },
+      { to: '/admin/ai-usage', icon: BrainCircuit,  label: _tr => 'AI Usage'         },
+      { to: '/admin/features', icon: Flag,          label: _tr => 'Feature Flags'    },
+      { to: '/admin/troubleshooting', icon: Puzzle, label: _tr => 'Troubleshooting'  },
       { to: '/admin/team',     icon: Layers,        label: _tr => 'Team'             },
-      { to: '/system-status',  icon: Activity,      label: _tr => 'System Status'    },
+      { to: '/admin/system',   icon: Activity,      label: _tr => 'System Status'    },
     ],
   },
   {

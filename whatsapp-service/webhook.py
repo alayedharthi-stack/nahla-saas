@@ -2,10 +2,9 @@ from fastapi import APIRouter, Request, Query, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
 
 import logging
-from ai_client import get_ai_response
-from whatsapp_client import send_whatsapp_message
-from branding import apply_branding, get_tenant_branding_config, is_welcome_input
-import asyncio
+import os
+
+import httpx
 
 router = APIRouter()
 
@@ -13,55 +12,53 @@ router = APIRouter()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger("whatsapp-webhook")
 
-VERIFY_TOKEN = "nahla_verify_token"  # Set this securely in production
+_BACKEND_BASE = os.getenv("BACKEND_URL", "http://localhost:8000")
+_BACKEND_WA_WEBHOOK = f"{_BACKEND_BASE}/webhook/whatsapp"
 
 @router.get("/webhook")
-def verify_webhook(
+async def verify_webhook(
     hub_mode: str = Query(None, alias="hub.mode"),
     hub_challenge: str = Query(None, alias="hub.challenge"),
     hub_verify_token: str = Query(None, alias="hub.verify_token")
 ):
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        logger.info("Webhook verified successfully.")
-        return PlainTextResponse(hub_challenge or "", status_code=200)
-    logger.warning("Webhook verification failed.")
-    raise HTTPException(status_code=403, detail="Verification failed")
+    """
+    Deprecated compatibility endpoint.
+
+    Forward verification requests to the canonical webhook owner:
+      backend/routers/whatsapp_webhook.py  →  GET /webhook/whatsapp
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                _BACKEND_WA_WEBHOOK,
+                params={
+                    "hub.mode": hub_mode,
+                    "hub.challenge": hub_challenge,
+                    "hub.verify_token": hub_verify_token,
+                },
+            )
+        logger.warning(
+            "[whatsapp-service] deprecated webhook verify path used — forwarded to backend"
+        )
+        return PlainTextResponse(resp.text, status_code=resp.status_code)
+    except httpx.HTTPError as exc:
+        logger.error("[whatsapp-service] backend webhook verify unavailable: %s", exc)
+        raise HTTPException(status_code=502, detail="Canonical WhatsApp webhook unavailable")
 
 
 @router.post("/webhook")
 async def receive_message(request: Request):
-    data = await request.json()
-    logger.info(f"Received webhook payload: {data}")
     try:
-        entry = data.get("entry", [])[0]
-        changes = entry.get("changes", [])[0]
-        value = changes.get("value", {})
-        messages = value.get("messages", [])
-        phone_number_id = value.get("metadata", {}).get("phone_number_id")
-        if messages:
-            msg = messages[0]
-            phone_number = msg.get("from")
-            text = msg.get("text", {}).get("body")
-            tenant = value.get("metadata", {}).get("display_phone_number", "unknown_tenant")
-            logger.info(f"Incoming WhatsApp message | Tenant: {tenant} | From: {phone_number} | Text: {text}")
-
-            # Call AI engine for response
-            ai_response = await get_ai_response(tenant, phone_number, text)
-            branding_config = get_tenant_branding_config(tenant)
-            if is_welcome_input(text):
-                ai_response = apply_branding(ai_response, branding_config, force_footer=True)
-            else:
-                ai_response = apply_branding(ai_response, branding_config)
-            logger.info(f"AI response: {ai_response}")
-
-            # Send response back via WhatsApp Cloud API
-            if phone_number_id:
-                await send_whatsapp_message(phone_number_id, phone_number, ai_response)
-                logger.info(f"Sent response to WhatsApp user {phone_number}")
-            else:
-                logger.warning("No phone_number_id found in webhook payload; cannot send WhatsApp message.")
-        else:
-            logger.info("No messages found in webhook payload.")
+        data = await request.json()
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(_BACKEND_WA_WEBHOOK, json=data)
+        logger.warning(
+            "[whatsapp-service] deprecated webhook POST path used — forwarded to backend"
+        )
+        return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except httpx.HTTPError as exc:
+        logger.error("[whatsapp-service] backend webhook unavailable: %s", exc)
+        return JSONResponse(content={"status": "error", "detail": "Canonical WhatsApp webhook unavailable"}, status_code=502)
     except Exception as e:
-        logger.error(f"Error processing WhatsApp message: {e}")
-    return JSONResponse(content={"status": "received"}, status_code=200)
+        logger.error(f"Error forwarding WhatsApp message: {e}")
+        return JSONResponse(content={"status": "error"}, status_code=500)

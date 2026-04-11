@@ -22,7 +22,8 @@ import sys
 
 _ORCH_ROOT = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT  = os.path.abspath(os.path.join(_ORCH_ROOT, "..", ".."))
-for _p in (_ORCH_ROOT, _REPO_ROOT):
+_BACKEND_DIR = os.path.abspath(os.path.join(_REPO_ROOT, "backend"))
+for _p in (_ORCH_ROOT, _REPO_ROOT, _BACKEND_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

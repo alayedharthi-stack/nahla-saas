@@ -150,8 +150,11 @@ class Order(Base):
 
 class Coupon(Base):
     __tablename__ = 'coupons'
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'code', name='uq_coupons_tenant_code'),
+    )
     id = Column(Integer, primary_key=True)
-    code = Column(String, unique=True, nullable=False)
+    code = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     discount_type = Column(String, nullable=True)
     discount_value = Column(String, nullable=True)

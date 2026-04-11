@@ -1,18 +1,9 @@
 import { useEffect, useState } from 'react'
-import { API_BASE } from '../api/client'
-import { getToken } from '../auth'
+import { adminApi, type AdminPlatformStats } from '../api/admin'
 import {
   Users, TrendingUp, DollarSign, Activity,
   Package, Clock, CheckCircle, AlertCircle,
 } from 'lucide-react'
-
-interface PlatformStats {
-  merchants:     { total: number; active: number; trial: number }
-  subscriptions: { active: number; trial: number; total: number; by_plan: Record<string, { name_ar: string; count: number; price: number }> }
-  revenue:       { total_sar: number; today_sar: number; mrr_sar: number }
-  recent_payments:  any[]
-  recent_merchants: any[]
-}
 
 function KPICard({
   label, value, sub, icon: Icon, color, prefix = '', suffix = '',
@@ -55,17 +46,12 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function AdminDashboard() {
-  const [stats, setStats]     = useState<PlatformStats | null>(null)
+  const [stats, setStats]     = useState<AdminPlatformStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState('')
 
   useEffect(() => {
-    const token = getToken()
-    fetch(`${API_BASE}/admin/stats`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(async r => {
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `خطأ ${r.status}`)
-        return r.json()
-      })
+    adminApi.stats()
       .then(setStats)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : 'خطأ غير معروف'))
       .finally(() => setLoading(false))
@@ -117,7 +103,7 @@ export default function AdminDashboard() {
             <h2 className="font-bold text-slate-700 text-sm flex items-center gap-2">
               <Users className="w-4 h-4 text-slate-400" /> آخر التجار
             </h2>
-            <a href="/admin/merchants" className="text-xs text-amber-600 hover:text-amber-700 font-medium">عرض الكل ←</a>
+            <a href="/admin/tenants" className="text-xs text-amber-600 hover:text-amber-700 font-medium">عرض الكل ←</a>
           </div>
           <div className="divide-y divide-slate-50">
             {stats.recent_merchants.length === 0 ? (

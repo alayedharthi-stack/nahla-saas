@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time as _time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -41,8 +41,8 @@ from core.tenant import (
     resolve_tenant_id,
 )
 from core.billing import get_moyasar_settings
-from core.config import ORCHESTRATOR_URL
 from core.middleware import rate_limit
+from modules.ai.orchestrator.adapter import generate_orchestrate_response
 
 logger = logging.getLogger("nahla-backend")
 
@@ -223,18 +223,16 @@ def _detect_intent(message: str, settings: Dict[str, Any]) -> Tuple[str, float, 
 
 
 async def _call_orchestrator(tenant_id: int, customer_phone: str, message: str) -> Optional[Dict[str, Any]]:
-    """Route message through AI Orchestrator. Returns None if unavailable."""
+    """Route message through the canonical in-process orchestrator adapter."""
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{ORCHESTRATOR_URL}/orchestrate",
-                json={"tenant_id": tenant_id, "customer_phone": customer_phone, "message": message},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        return await generate_orchestrate_response(
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            message=message,
+        )
     except Exception as exc:
         logger.warning(
-            "[Orchestrator] Call failed for tenant=%s: %s — falling back to keyword engine",
+            "[Orchestrator] In-process call failed for tenant=%s: %s — falling back to keyword engine",
             tenant_id, exc,
         )
         return None
@@ -636,13 +634,21 @@ async def ai_sales_process_message(
         "product_info", "price_info", "recommendation", "start_order_flow", "cod_flow"
     )
 
+    threshold = settings.get("confidence_threshold", 0.55)
+
     # 5. Resolve payment link
     payment_link = None
     if response_type == "payment_link" and settings.get("allow_payment_link_sending", True):
         payment_link = await store_payment_link(tenant_id, str(tenant_id), 0.0)
 
-    # 6. Route through AI Orchestrator (falls back to keyword engine)
-    orch_result = await _call_orchestrator(tenant_id, cust_phone, message)
+    # 6. Rules first, orchestrator only as a guarded fallback.
+    should_use_orchestrator = (
+        intent == "general"
+        or confidence < threshold
+    )
+    orch_result = None
+    if should_use_orchestrator:
+        orch_result = await _call_orchestrator(tenant_id, cust_phone, message)
 
     if orch_result and orch_result.get("reply"):
         response_text = orch_result["reply"]
@@ -658,7 +664,6 @@ async def ai_sales_process_message(
             orch_result.get("fact_guard", {}).get("was_modified", False),
         )
     else:
-        threshold = settings.get("confidence_threshold", 0.55)
         if confidence < threshold and intent not in ("general",):
             response_text = (
                 f"مرحباً {cust_name}! 😊 لم أفهم طلبك تماماً.\n"
@@ -682,6 +687,7 @@ async def ai_sales_process_message(
     _orch_used = bool(orch_result and orch_result.get("reply"))
     _fg = orch_result.get("fact_guard", {}) if orch_result else {}
 
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     from observability.event_logger import log_event, write_trace  # noqa: PLC0415
     write_trace(
         db, tenant_id, cust_phone,

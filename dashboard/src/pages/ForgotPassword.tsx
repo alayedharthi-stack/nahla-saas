@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Sparkles, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
+import { API_BASE } from '../api/client'
 
 export default function ForgotPassword() {
   const [email,   setEmail]   = useState('')
@@ -13,7 +14,7 @@ export default function ForgotPassword() {
     setError('')
     setLoading(true)
     try {
-      await fetch('/api/auth/forgot-password', {
+      await fetch(`${API_BASE}/auth/forgot-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim().toLowerCase() }),

@@ -24,6 +24,16 @@ from core.audit import audit
 
 _support_audit = logging.getLogger("nahla.support_audit")
 
+# Platform staff roles are allowed to access owner/admin APIs.
+# Keep legacy names for backward compatibility with existing tokens/frontend code.
+PLATFORM_ADMIN_ROLES = frozenset({
+    "admin",
+    "owner",
+    "super_admin",
+    "platform_admin",
+    "platform_owner",
+})
+
 # ── JWT availability ───────────────────────────────────────────────────────────
 try:
     from jose import JWTError, jwt as _jwt
@@ -198,16 +208,21 @@ def get_current_user(
     return payload
 
 
+def is_platform_admin_role(role: Any) -> bool:
+    """Return True when the role is allowed to access owner/admin surfaces."""
+    return str(role or "").strip() in PLATFORM_ADMIN_ROLES
+
+
 def require_admin(
     request: Request,
     creds: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
 ) -> Dict[str, Any]:
-    """Dependency — requires a valid JWT with role=admin. Logs every access."""
+    """Dependency — requires a valid JWT with a platform-staff role. Logs every access."""
     client_ip = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
     user = get_current_user(creds)
-    if user.get("role") != "admin":
+    if not is_platform_admin_role(user.get("role")):
         audit(
             "admin_access_denied",
             path=str(request.url.path),

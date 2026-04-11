@@ -10,7 +10,7 @@ import {
 } from 'lucide-react'
 import { useLanguage } from '../i18n/context'
 import { settingsApi, type AllSettings, type WhatsAppSettings, type AISettings, type StoreSettings, type NotificationSettings } from '../api/settings'
-import { apiCall } from '../api/client'
+import { apiCall, API_BASE } from '../api/client'
 import { whatsappConnectApi, type WaConnection } from '../api/whatsappConnect'
 import {
   autopilotApi,
@@ -1412,7 +1412,7 @@ function SupportAccessTab() {
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const res = await fetch('/api/merchant/support-access', {
+      const res = await fetch(`${API_BASE}/merchant/support-access`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
       })
       if (res.ok) setStatus(await res.json())
@@ -1439,8 +1439,8 @@ function SupportAccessTab() {
     setErrorMsg(null)
     try {
       const endpoint = enable
-        ? '/api/merchant/support-access/enable'
-        : '/api/merchant/support-access/disable'
+        ? `${API_BASE}/merchant/support-access/enable`
+        : `${API_BASE}/merchant/support-access/disable`
       const body = enable ? JSON.stringify({ ttl_hours: ttlHours }) : undefined
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -1658,7 +1658,7 @@ function AccessRequestsPanel({ onApproved }: { onApproved?: () => void }) {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/merchant/access-requests', {
+      const res = await fetch(`${API_BASE}/merchant/access-requests`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
       })
       if (res.ok) {
@@ -1674,7 +1674,7 @@ function AccessRequestsPanel({ onApproved }: { onApproved?: () => void }) {
   const respond = async (reqId: string, approve: boolean) => {
     setResponding(reqId)
     try {
-      const res = await fetch(`/api/merchant/access-requests/${reqId}/respond`, {
+      const res = await fetch(`${API_BASE}/merchant/access-requests/${reqId}/respond`, {
         method:  'POST',
         headers: {
           'Content-Type': 'application/json',

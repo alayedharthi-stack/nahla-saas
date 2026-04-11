@@ -49,17 +49,17 @@ JWT_PUBLIC_PREFIXES = (
 
 async def multi_tenant_middleware(request: Request, call_next):
     """Read X-Tenant-ID header and attach to request.state (dev routing only)."""
-    raw = request.headers.get("X-Tenant-ID", "1")
+    raw = request.headers.get("X-Tenant-ID")
     try:
-        tenant_id = str(int(raw))
+        tenant_id = str(int(raw)) if raw is not None else None
     except (ValueError, TypeError):
-        tenant_id = "1"
+        tenant_id = None
     request.state.tenant_id = tenant_id
     return await call_next(request)
 
 
 async def api_key_middleware(request: Request, call_next):
-    """Reject requests without X-Nahla-Key header when API_SECRET_KEY is configured."""
+    """Reject unauthenticated service calls without X-Nahla-Key when configured."""
     if API_SECRET_KEY:
         path = request.url.path
         if not (
@@ -67,7 +67,9 @@ async def api_key_middleware(request: Request, call_next):
             or path.startswith("/webhook")
             or path.startswith("/auth")
         ):
-            if request.headers.get("X-Nahla-Key", "") != API_SECRET_KEY:
+            auth_header = request.headers.get("Authorization", "")
+            has_bearer_token = auth_header.startswith("Bearer ")
+            if not has_bearer_token and request.headers.get("X-Nahla-Key", "") != API_SECRET_KEY:
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     return await call_next(request)
 

@@ -1,54 +1,100 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Plus, Tag, Copy, Crown, Zap, Trash2, ToggleLeft, ToggleRight } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
+import { featureRealityApi, type CouponsDashboard, type DashboardCoupon } from '../api/featureReality'
 
-interface Coupon {
-  id: string
-  code: string
-  type: 'percentage' | 'fixed'
-  value: number
-  usages: number
-  limit: number
-  expires: string
-  category: 'standard' | 'vip' | 'auto'
-  active: boolean
+const emptyData: CouponsDashboard = {
+  rules: [],
+  vip_tiers: [],
+  coupons: [],
 }
 
-const coupons: Coupon[] = []
-
-const rules = [
-  { id: 'r1', label: 'إرسال كوبون تلقائي بعد ترك العربة (أكثر من 30 دقيقة)',    enabled: true },
-  { id: 'r2', label: 'كوبون VIP للعملاء الذين لديهم أكثر من 5 طلبات',            enabled: true },
-  { id: 'r3', label: 'خصم عيد الميلاد (10% في يوم ميلاد العميل)',               enabled: false },
-  { id: 'r4', label: 'خصم التجميع — اشتر 3 واحصل على خصم 10%',                  enabled: true },
-  { id: 'r5', label: 'خصم أول شراء — 15% على أول طلب',                           enabled: false },
-]
-
-const categoryIcon = (cat: Coupon['category']) => {
+const categoryIcon = (cat: DashboardCoupon['category']) => {
   if (cat === 'vip')  return <Crown className="w-3.5 h-3.5 text-amber-500" />
   if (cat === 'auto') return <Zap    className="w-3.5 h-3.5 text-purple-500" />
   return                      <Tag    className="w-3.5 h-3.5 text-slate-400" />
 }
 
-const categoryBadge = (cat: Coupon['category']) =>
+const categoryBadge = (cat: DashboardCoupon['category']) =>
   cat === 'vip'  ? <Badge label="VIP"      variant="amber"  /> :
   cat === 'auto' ? <Badge label="تلقائي"   variant="purple" /> :
                    <Badge label="عادي"      variant="slate"  />
 
-const typeLabel = (t: Coupon['type']) =>
+const typeLabel = (t: DashboardCoupon['type']) =>
   t === 'percentage' ? 'نسبة مئوية' : 'مبلغ ثابت'
 
 const TABLE_HEADERS = ['الكود', 'النوع', 'الخصم', 'الاستخدامات', 'الانتهاء', 'الفئة', 'الحالة', '']
 
 export default function Coupons() {
-  const [rulesState, setRulesState] = useState(rules)
+  const [data, setData] = useState<CouponsDashboard>(emptyData)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const { t } = useLanguage()
 
-  const toggleRule = (id: string) =>
-    setRulesState(rs => rs.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r))
+  const load = () => {
+    featureRealityApi.coupons()
+      .then(setData)
+      .catch(() => setData(emptyData))
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  const toggleRule = async (id: string) => {
+    const nextRules = data.rules.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r)
+    setData(rs => ({ ...rs, rules: nextRules }))
+    try {
+      const saved = await featureRealityApi.saveCouponSettings({
+        rules: nextRules,
+        vip_tiers: data.vip_tiers,
+      })
+      setData(rs => ({ ...rs, rules: saved.rules, vip_tiers: saved.vip_tiers }))
+    } catch {
+      load()
+      alert('تعذّر حفظ إعدادات القواعد')
+    }
+  }
+
+  const handleCreateCoupon = async () => {
+    const code = window.prompt('أدخل كود الكوبون')
+    if (!code) return
+    const type = (window.prompt('نوع الخصم: percentage أو fixed', 'percentage') || 'percentage') as 'percentage' | 'fixed'
+    const value = window.prompt('قيمة الخصم')
+    if (!value) return
+    try {
+      await featureRealityApi.createCoupon({
+        code,
+        type,
+        value,
+        category: 'standard',
+        active: true,
+      })
+      load()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر إنشاء الكوبون')
+    }
+  }
+
+  const handleToggleCoupon = async (coupon: DashboardCoupon) => {
+    try {
+      await featureRealityApi.updateCoupon(coupon.id, { active: !coupon.active })
+      load()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر تحديث الكوبون')
+    }
+  }
+
+  const handleDeleteCoupon = async (coupon: DashboardCoupon) => {
+    if (!window.confirm(`حذف الكوبون ${coupon.code}؟`)) return
+    try {
+      await featureRealityApi.deleteCoupon(coupon.id)
+      load()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر حذف الكوبون')
+    }
+  }
 
   const copyCode = (code: string, id: string) => {
     navigator.clipboard.writeText(code)
@@ -62,7 +108,7 @@ export default function Coupons() {
         title={t(tr => tr.pages.coupons.title)}
         subtitle={t(tr => tr.pages.coupons.subtitle)}
         action={
-          <button className="btn-primary text-sm">
+          <button className="btn-primary text-sm" onClick={handleCreateCoupon}>
             <Plus className="w-4 h-4" /> {t(tr => tr.actions.newCoupon)}
           </button>
         }
@@ -77,7 +123,7 @@ export default function Coupons() {
           </div>
         </div>
         <ul className="divide-y divide-slate-100">
-          {rulesState.map((rule) => (
+          {data.rules.map((rule) => (
             <li key={rule.id} className="flex items-center justify-between px-5 py-3.5">
               <p className="text-sm text-slate-700">{rule.label}</p>
               <button onClick={() => toggleRule(rule.id)} className="shrink-0 ms-4">
@@ -98,17 +144,16 @@ export default function Coupons() {
           </h2>
         </div>
         <div className="grid sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-100">
-          {[
-            { tier: 'فضي',    threshold: '+3 طلبات',  discount: '10%', color: 'text-slate-500 bg-slate-50' },
-            { tier: 'ذهبي',   threshold: '+7 طلبات',  discount: '20%', color: 'text-amber-600 bg-amber-50' },
-            { tier: 'بلاتيني',threshold: '+15 طلب',   discount: '30%', color: 'text-purple-600 bg-purple-50' },
-          ].map(({ tier, threshold, discount, color }) => (
-            <div key={tier} className={`flex flex-col items-center py-6 ${color.split(' ')[1]}`}>
-              <span className={`text-xs font-bold uppercase tracking-widest ${color.split(' ')[0]}`}>{tier}</span>
-              <p className={`text-3xl font-bold mt-2 ${color.split(' ')[0]}`}>{discount}</p>
-              <p className="text-xs text-slate-500 mt-1">{threshold}</p>
-            </div>
-          ))}
+          {data.vip_tiers.map(({ tier, threshold, discount }, idx) => {
+            const color = idx === 0 ? 'text-slate-500 bg-slate-50' : idx === 1 ? 'text-amber-600 bg-amber-50' : 'text-purple-600 bg-purple-50'
+            return (
+              <div key={tier} className={`flex flex-col items-center py-6 ${color.split(' ')[1]}`}>
+                <span className={`text-xs font-bold uppercase tracking-widest ${color.split(' ')[0]}`}>{tier}</span>
+                <p className={`text-3xl font-bold mt-2 ${color.split(' ')[0]}`}>{discount}</p>
+                <p className="text-xs text-slate-500 mt-1">{threshold}</p>
+              </div>
+            )
+          })}
         </div>
       </div>
 
@@ -130,7 +175,7 @@ export default function Coupons() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {coupons.map((c) => (
+              {data.coupons.map((c) => (
                 <tr key={c.id} className="hover:bg-slate-50 transition-colors">
                   <td className="px-5 py-3.5">
                     <div className="flex items-center gap-2">
@@ -163,10 +208,12 @@ export default function Coupons() {
                   <td className="px-5 py-3.5 text-xs text-slate-500" dir="ltr">{c.expires}</td>
                   <td className="px-5 py-3.5">{categoryBadge(c.category)}</td>
                   <td className="px-5 py-3.5">
-                    <Badge label={c.active ? 'نشط' : 'غير نشط'} variant={c.active ? 'green' : 'slate'} dot />
+                    <button onClick={() => handleToggleCoupon(c)}>
+                      <Badge label={c.active ? 'نشط' : 'غير نشط'} variant={c.active ? 'green' : 'slate'} dot />
+                    </button>
                   </td>
                   <td className="px-5 py-3.5">
-                    <button className="text-slate-300 hover:text-red-500 transition-colors">
+                    <button className="text-slate-300 hover:text-red-500 transition-colors" onClick={() => handleDeleteCoupon(c)}>
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </td>

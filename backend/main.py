@@ -27,10 +27,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("nahla-backend")
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-# Allow backend/ sub-packages to import from database/ and from each other.
-_BACKEND_DIR  = os.path.dirname(os.path.abspath(__file__))
-_DATABASE_DIR = os.path.abspath(os.path.join(_BACKEND_DIR, "..", "database"))
-for _p in (_BACKEND_DIR, _DATABASE_DIR):
+# Allow backend/ sub-packages to import from the repo root, database/ and each other.
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_BACKEND_DIR, ".."))
+_DATABASE_DIR = os.path.join(_REPO_ROOT, "database")
+for _p in (_REPO_ROOT, _BACKEND_DIR, _DATABASE_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -99,6 +100,10 @@ from routers.settings     import router as _settings_router      # noqa: E402
 from routers.templates    import router as _templates_router     # noqa: E402
 from routers.campaigns    import router as _campaigns_router     # noqa: E402
 from routers.automations  import router as _automations_router   # noqa: E402
+from routers.analytics    import router as _analytics_router     # noqa: E402
+from routers.conversations import router as _conversations_router # noqa: E402
+from routers.coupons      import router as _coupons_router       # noqa: E402
+from routers.orders       import router as _orders_router        # noqa: E402
 from routers.intelligence import router as _intelligence_router  # noqa: E402
 
 # Newly extracted routers
@@ -128,6 +133,10 @@ app.include_router(_settings_router)
 app.include_router(_templates_router)
 app.include_router(_campaigns_router)
 app.include_router(_automations_router)
+app.include_router(_analytics_router)
+app.include_router(_conversations_router)
+app.include_router(_coupons_router)
+app.include_router(_orders_router)
 app.include_router(_intelligence_router)
 app.include_router(_ai_sales_router)
 app.include_router(_billing_router)
@@ -232,14 +241,24 @@ async def on_startup() -> None:
                         WHERE phone_number_id IS NOT NULL;
                     END IF;
                 END $$""",
+                "ALTER TABLE coupons DROP CONSTRAINT IF EXISTS coupons_code_key",
+                """DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname='uq_coupons_tenant_code'
+                    ) THEN
+                        ALTER TABLE coupons
+                        ADD CONSTRAINT uq_coupons_tenant_code UNIQUE (tenant_id, code);
+                    END IF;
+                END $$""",
+                "SELECT setval('tenants_id_seq', COALESCE((SELECT MAX(id) FROM tenants), 1), EXISTS (SELECT 1 FROM tenants))",
+                "SELECT setval('users_id_seq', COALESCE((SELECT MAX(id) FROM users), 1), EXISTS (SELECT 1 FROM users))",
             ]
-            with engine.connect() as conn:
-                for stmt in safe_alters:
-                    try:
+            for stmt in safe_alters:
+                try:
+                    with engine.begin() as conn:
                         conn.execute(text(stmt))
-                    except Exception:
-                        pass
-                conn.commit()
+                except Exception as exc:
+                    logger.warning("Startup migration skipped statement: %s | error=%s", stmt[:120], exc)
 
         # Fire-and-forget: run migrations in background so startup doesn't block healthcheck
         async def _migrate_background():

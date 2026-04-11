@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
 import { register } from '../auth'
+import { API_BASE } from '../api/client'
 import { useLanguage } from '../i18n/context'
 
 export default function Register() {
@@ -23,7 +24,7 @@ export default function Register() {
     const token = params.get('invite') ?? ''
     setInviteToken(token)
     if (token) {
-      fetch(`/api/auth/invite/${token}`)
+      fetch(`${API_BASE}/auth/invite/${encodeURIComponent(token)}`)
         .then(r => r.json())
         .then(data => {
           setInviteValid(!!data.valid)

@@ -9,6 +9,12 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Vite reads VITE_* variables at build time, not at nginx runtime.
+ARG VITE_API_BASE=http://localhost:8000
+ARG VITE_API_URL=http://localhost:8000
+ENV VITE_API_BASE=$VITE_API_BASE
+ENV VITE_API_URL=$VITE_API_URL
+
 # Install dependencies (separate layer for caching)
 COPY package.json ./
 RUN npm install

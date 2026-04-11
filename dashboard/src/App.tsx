@@ -28,6 +28,11 @@ import AdminDashboard from './pages/AdminDashboard'
 import AdminMerchants from './pages/AdminMerchants'
 import AdminRevenue from './pages/AdminRevenue'
 import AdminTeam from './pages/AdminTeam'
+import AdminTenants from './pages/AdminTenants'
+import AdminAiUsage from './pages/AdminAiUsage'
+import AdminFeatures from './pages/AdminFeatures'
+import AdminTroubleshooting from './pages/AdminTroubleshooting'
+import AdminSystemStatus from './pages/AdminSystemStatus'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
@@ -96,9 +101,14 @@ export default function App() {
             <Route path="system-status"      element={<SystemStatus />} />
             <Route path="merchants"          element={<Merchants />} />
             <Route path="admin"              element={<AdminDashboard />} />
+            <Route path="admin/tenants"      element={<AdminTenants />} />
             <Route path="admin/merchants"    element={<AdminMerchants />} />
             <Route path="admin/revenue"      element={<AdminRevenue />} />
+            <Route path="admin/ai-usage"     element={<AdminAiUsage />} />
+            <Route path="admin/features"     element={<AdminFeatures />} />
+            <Route path="admin/troubleshooting" element={<AdminTroubleshooting />} />
             <Route path="admin/team"         element={<AdminTeam />} />
+            <Route path="admin/system"       element={<AdminSystemStatus />} />
             <Route path="billing"            element={<Billing />} />
             <Route path="widgets"            element={<MerchantWidgets />} />
           </Route>

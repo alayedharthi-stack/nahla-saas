@@ -1,28 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Bot, User, Send, Phone, Search, MoreVertical, UserCheck, RefreshCw } from 'lucide-react'
 import Badge from '../components/ui/Badge'
+import { featureRealityApi, type DashboardConversation, type DashboardMessage } from '../api/featureReality'
 
-interface Message {
-  id: string
-  direction: 'in' | 'out'
-  body: string
-  time: string
-  isAI?: boolean
+interface Conversation extends DashboardConversation {
+  messages: DashboardMessage[]
 }
-
-interface Conversation {
-  id: string
-  customer: string
-  phone: string
-  lastMsg: string
-  time: string
-  isAI: boolean
-  status: 'active' | 'human' | 'closed'
-  unread: number
-  messages: Message[]
-}
-
-const conversations: Conversation[] = []
 
 const filterLabels: Record<string, string> = {
   all:    'الكل',
@@ -35,6 +18,67 @@ export default function Conversations() {
   const [selected, setSelected] = useState<Conversation | null>(null)
   const [filter, setFilter] = useState<'all' | 'active' | 'human' | 'closed'>('all')
   const [reply, setReply] = useState('')
+  const [conversations, setConversations] = useState<Conversation[]>([])
+
+  const load = () => {
+    featureRealityApi.conversations()
+      .then(async ({ conversations }) => {
+        const withMessages = await Promise.all(
+          conversations.map(async (c) => {
+            const msgRes = await featureRealityApi.conversationMessages(c.phone)
+            return { ...c, messages: msgRes.messages }
+          }),
+        )
+        setConversations(withMessages)
+        setSelected((prev) => withMessages.find(c => c.phone === prev?.phone) ?? prev)
+      })
+      .catch(() => setConversations([]))
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  const handleReply = async () => {
+    if (!selected || !reply.trim()) return
+    try {
+      await featureRealityApi.replyToConversation({
+        customer_phone: selected.phone,
+        message: reply.trim(),
+      })
+      setReply('')
+      await load()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر إرسال الرد')
+    }
+  }
+
+  const handleHandoff = async () => {
+    if (!selected) return
+    try {
+      await featureRealityApi.handoffConversation({
+        customer_phone: selected.phone,
+        customer_name: selected.customer,
+        last_message: selected.lastMsg,
+      })
+      await load()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر تحويل المحادثة')
+    }
+  }
+
+  const handleClose = async () => {
+    if (!selected) return
+    if (!window.confirm('إغلاق هذه المحادثة؟')) return
+    try {
+      await featureRealityApi.closeConversation({
+        customer_phone: selected.phone,
+      })
+      await load()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر إغلاق المحادثة')
+    }
+  }
 
   const filtered = conversations.filter(c => filter === 'all' || c.status === filter)
 
@@ -141,16 +185,16 @@ export default function Conversations() {
               </div>
               <div className="flex items-center gap-2">
                 {selected.status !== 'human' && (
-                  <button className="btn-secondary text-xs py-1.5">
+                  <button className="btn-secondary text-xs py-1.5" onClick={handleHandoff}>
                     <UserCheck className="w-3.5 h-3.5" /> تولّ المحادثة
                   </button>
                 )}
                 {selected.status === 'human' && (
-                  <button className="btn-secondary text-xs py-1.5">
-                    <RefreshCw className="w-3.5 h-3.5" /> أعد لنحلة
+                  <button className="btn-secondary text-xs py-1.5" onClick={handleClose}>
+                    <RefreshCw className="w-3.5 h-3.5" /> إغلاق المحادثة
                   </button>
                 )}
-                <button className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400">
+                <button className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 text-slate-400" onClick={handleClose}>
                   <MoreVertical className="w-4 h-4" />
                 </button>
               </div>
@@ -191,7 +235,7 @@ export default function Conversations() {
                   placeholder="اكتب رسالة…"
                   className="input flex-1 resize-none text-sm"
                 />
-                <button className="btn-primary py-2 px-3 shrink-0">
+                <button className="btn-primary py-2 px-3 shrink-0" onClick={handleReply}>
                   <Send className="w-4 h-4" />
                 </button>
               </div>

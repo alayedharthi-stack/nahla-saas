@@ -17,14 +17,33 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Any, Dict
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
-from models import Integration, Tenant, User  # noqa: E402
+from models import (  # noqa: E402
+    AIActionLog,
+    BillingInvoice,
+    BillingPayment,
+    BillingPlan,
+    BillingSubscription,
+    ConversationLog,
+    ConversationTrace,
+    Integration,
+    Order,
+    StoreSyncJob,
+    SystemEvent,
+    Tenant,
+    TenantSettings,
+    User,
+    WhatsAppConnection,
+    WhatsAppUsage,
+)
 
 from core.audit import audit
 from core.auth import (
@@ -37,9 +56,23 @@ from core.auth import (
 )
 from core.config import INVITE_EXPIRE_H
 from core.database import get_db
+from core.tenant import get_or_create_settings
+from modules.ai.orchestrator.costing import estimate_call_cost
 
 logger = logging.getLogger("nahla.admin")
 router = APIRouter()
+
+_PLATFORM_FEATURES_KEY = "platform_features"
+_TENANT_FEATURES_KEY = "tenant_features"
+_DEFAULT_PLATFORM_FEATURE_FLAGS = {
+    "owner_dashboard": True,
+    "tenant_suspend_controls": True,
+    "billing_overview": True,
+    "ai_usage_insights": True,
+    "system_health": True,
+    "merchant_troubleshooting": True,
+    "support_impersonation": True,
+}
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
@@ -55,6 +88,14 @@ class InviteIn(BaseModel):
     email: str  # pre-fill for a specific email, or "" for an open invitation
 
 
+class UpdateTenantStatusIn(BaseModel):
+    is_active: bool
+
+
+class FeatureFlagUpdateIn(BaseModel):
+    enabled: bool = Field(...)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _merchant_row(user: User) -> Dict[str, Any]:
@@ -66,6 +107,140 @@ def _merchant_row(user: User) -> Dict[str, Any]:
         "tenant_id":  user.tenant_id,
         "store_name": user.tenant.name if user.tenant else "",
         "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
+
+
+def _payment_amount_value(payment: BillingPayment) -> float:
+    raw = getattr(payment, "amount_sar", None)
+    if raw is None:
+        raw = getattr(payment, "amount", 0)
+    return float(raw or 0)
+
+
+def _payment_amount_column():
+    return getattr(BillingPayment, "amount_sar", None) or getattr(BillingPayment, "amount")
+
+
+def _provider_from_model(model_name: str) -> str:
+    model = str(model_name or "").lower()
+    if model.startswith("claude"):
+        return "anthropic"
+    if model.startswith("gemini"):
+        return "gemini"
+    if model.startswith("gpt") or model.startswith("o1") or model.startswith("o3"):
+        return "openai_compatible"
+    return "unknown"
+
+
+def _estimate_trace_cost(trace: ConversationTrace) -> Dict[str, Any]:
+    # ConversationTrace does not persist full prompt size, so use a conservative
+    # proxy based on customer message + reply text lengths for owner-level insight.
+    message_chars = len(trace.message or "")
+    reply_chars = len(trace.response_text or "")
+    prompt_proxy_chars = max(message_chars * 6, message_chars + reply_chars)
+    provider = _provider_from_model(trace.model_used or "")
+    cost = estimate_call_cost(
+        provider=provider,
+        model=trace.model_used or "unknown",
+        prompt_chars=prompt_proxy_chars,
+        reply_chars=reply_chars,
+    )
+    cost["source"] = "conversation_trace_proxy"
+    return cost
+
+
+def _tenant_feature_flags(settings: Optional[TenantSettings]) -> Dict[str, bool]:
+    meta = dict(settings.extra_metadata or {}) if settings else {}
+    flags = dict(meta.get(_TENANT_FEATURES_KEY) or {})
+    return flags
+
+
+def _platform_feature_flags(settings: Optional[TenantSettings]) -> Dict[str, bool]:
+    meta = dict(settings.extra_metadata or {}) if settings else {}
+    flags = dict(_DEFAULT_PLATFORM_FEATURE_FLAGS)
+    flags.update(meta.get(_PLATFORM_FEATURES_KEY) or {})
+    return flags
+
+
+def _set_settings_flags(settings: TenantSettings, key: str, values: Dict[str, Any]) -> None:
+    meta = dict(settings.extra_metadata or {})
+    meta[key] = values
+    settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
+
+
+def _latest_subscription_for_tenant(db: Session, tenant_id: int) -> Optional[BillingSubscription]:
+    return (
+        db.query(BillingSubscription)
+        .filter(BillingSubscription.tenant_id == tenant_id)
+        .order_by(BillingSubscription.started_at.desc(), BillingSubscription.id.desc())
+        .first()
+    )
+
+
+def _plan_name(db: Session, plan_id: Optional[int]) -> str:
+    if not plan_id:
+        return "—"
+    plan = db.query(BillingPlan).filter(BillingPlan.id == plan_id).first()
+    return plan.name_ar or plan.name if plan else "—"
+
+
+def _merchant_detail(db: Session, user: User) -> Dict[str, Any]:
+    sub = _latest_subscription_for_tenant(db, user.tenant_id)
+    wa = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == user.tenant_id
+    ).first()
+    return {
+        "id":           user.id,
+        "tenant_id":    user.tenant_id,
+        "email":        user.email,
+        "store_name":   user.tenant.name if user.tenant else user.username,
+        "phone":        getattr(user, "phone", ""),
+        "is_active":    user.is_active,
+        "plan":         _plan_name(db, sub.plan_id if sub else None),
+        "sub_status":   sub.status if sub else "none",
+        "wa_status":    wa.status if wa else "not_connected",
+        "created_at":   user.created_at.isoformat() if user.created_at else None,
+    }
+
+
+def _tenant_summary_payload(db: Session, tenant: Tenant) -> Dict[str, Any]:
+    subscription = _latest_subscription_for_tenant(db, tenant.id)
+    wa_conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant.id
+    ).first()
+    order_count = db.query(func.count(Order.id)).filter(Order.tenant_id == tenant.id).scalar() or 0
+    conversation_count = db.query(func.count(ConversationLog.id)).filter(
+        ConversationLog.tenant_id == tenant.id
+    ).scalar() or 0
+    revenue_sar = db.query(func.sum(_payment_amount_column())).filter(
+        BillingPayment.tenant_id == tenant.id,
+        BillingPayment.status == "paid",
+    ).scalar() or 0
+    return {
+        "id": tenant.id,
+        "name": tenant.name,
+        "domain": tenant.domain,
+        "is_active": tenant.is_active,
+        "created_at": tenant.created_at.isoformat() if tenant.created_at else None,
+        "subscription": {
+            "status": subscription.status if subscription else "none",
+            "plan": _plan_name(db, subscription.plan_id if subscription else None),
+            "trial_ends_at": subscription.trial_ends_at.isoformat() if subscription and subscription.trial_ends_at else None,
+            "ends_at": subscription.ends_at.isoformat() if subscription and subscription.ends_at else None,
+        },
+        "whatsapp": {
+            "status": wa_conn.status if wa_conn else "not_connected",
+            "phone_number": wa_conn.phone_number if wa_conn else None,
+            "business_display_name": wa_conn.business_display_name if wa_conn else None,
+            "sending_enabled": bool(wa_conn.sending_enabled) if wa_conn else False,
+            "webhook_verified": bool(wa_conn.webhook_verified) if wa_conn else False,
+        },
+        "stats": {
+            "orders": int(order_count),
+            "conversations": int(conversation_count),
+            "revenue_sar": float(revenue_sar),
+        },
     }
 
 
@@ -226,10 +401,6 @@ async def get_platform_stats(
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
     """Platform-wide statistics for the owner dashboard."""
-    from sqlalchemy import func
-    from datetime import date, timezone
-    from models import BillingSubscription, BillingPayment, BillingPlan, WhatsAppConnection  # noqa: E402
-
     total_merchants  = db.query(func.count(User.id)).filter(User.role == "merchant").scalar() or 0
     active_merchants = db.query(func.count(User.id)).filter(User.role == "merchant", User.is_active == True).scalar() or 0  # noqa: E712
     total_tenants    = db.query(func.count(Tenant.id)).scalar() or 0
@@ -262,10 +433,10 @@ async def get_platform_stats(
     # Revenue
     try:
         today = date.today()
-        total_revenue = db.query(func.sum(BillingPayment.amount)).filter(
+        total_revenue = db.query(func.sum(_payment_amount_column())).filter(
             BillingPayment.status == "paid"
         ).scalar() or 0
-        today_revenue = db.query(func.sum(BillingPayment.amount)).filter(
+        today_revenue = db.query(func.sum(_payment_amount_column())).filter(
             BillingPayment.status == "paid",
             func.date(BillingPayment.created_at) == today,
         ).scalar() or 0
@@ -289,7 +460,7 @@ async def get_platform_stats(
             {
                 "id":         p.id,
                 "tenant_id":  p.tenant_id,
-                "amount":     float(p.amount),
+                "amount":     _payment_amount_value(p),
                 "currency":   p.currency,
                 "status":     p.status,
                 "gateway":    p.gateway,
@@ -307,42 +478,6 @@ async def get_platform_stats(
     all_merchants = db.query(User).filter(User.role == "merchant").order_by(
         User.created_at.desc()
     ).limit(100).all()
-
-    def _merchant_detail(u: User) -> dict:
-        sub = None
-        plan_name = "—"
-        sub_status = "none"
-        try:
-            sub = db.query(BillingSubscription).filter(
-                BillingSubscription.tenant_id == u.tenant_id
-            ).order_by(BillingSubscription.created_at.desc()).first()
-            if sub:
-                plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
-                plan_name  = plan.name_ar or plan.name if plan else "—"
-                sub_status = sub.status
-        except Exception:
-            pass
-        wa_status = "not_connected"
-        try:
-            wa = db.query(WhatsAppConnection).filter(
-                WhatsAppConnection.tenant_id == u.tenant_id
-            ).first()
-            if wa:
-                wa_status = wa.status
-        except Exception:
-            pass
-        return {
-            "id":           u.id,
-            "tenant_id":    u.tenant_id,
-            "email":        u.email,
-            "store_name":   u.username,
-            "phone":        getattr(u, "phone", ""),
-            "is_active":    u.is_active,
-            "plan":         plan_name,
-            "sub_status":   sub_status,
-            "wa_status":    wa_status,
-            "created_at":   u.created_at.isoformat() if u.created_at else None,
-        }
 
     return {
         "merchants": {
@@ -365,8 +500,8 @@ async def get_platform_stats(
             "mrr_sar":   mrr,
         },
         "recent_payments":  payments_list,
-        "recent_merchants": [_merchant_detail(u) for u in all_merchants[:5]],
-        "all_merchants":    [_merchant_detail(u) for u in all_merchants],
+        "recent_merchants": [_merchant_detail(db, u) for u in all_merchants[:5]],
+        "all_merchants":    [_merchant_detail(db, u) for u in all_merchants],
     }
 
 
@@ -397,6 +532,7 @@ async def impersonate_merchant(
     )
 
 
+@router.get("/admin/tenants/{tenant_id}")
 @router.get("/tenants/{tenant_id}")
 async def get_tenant(
     tenant_id: int,
@@ -407,16 +543,10 @@ async def get_tenant(
     """Retrieve a single tenant by its numeric ID. Admin-only."""
     tenant = db.query(Tenant).filter(
         Tenant.id == tenant_id,
-        Tenant.is_active == True,  # noqa: E712
     ).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    return {
-        "id":        tenant.id,
-        "name":      tenant.name,
-        "domain":    tenant.domain,
-        "is_active": tenant.is_active,
-    }
+    return _tenant_summary_payload(db, tenant)
 
 
 # ── Manual Salla store linking ────────────────────────────────────────────────
@@ -467,3 +597,755 @@ async def link_salla_store(
     db.add(new_integ)
     db.commit()
     return {"status": "created", "tenant_id": body.tenant_id, "salla_store_id": body.salla_store_id}
+
+
+@router.get("/admin/tenants")
+async def list_tenants(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+    search: str = "",
+    status: str = Query("", pattern="^(|active|inactive)$"),
+    limit: int = 50,
+    offset: int = 0,
+):
+    query = db.query(Tenant)
+    if search:
+        like = f"%{search.strip()}%"
+        query = query.filter((Tenant.name.ilike(like)) | (Tenant.domain.ilike(like)))
+    if status == "active":
+        query = query.filter(Tenant.is_active == True)  # noqa: E712
+    elif status == "inactive":
+        query = query.filter(Tenant.is_active == False)  # noqa: E712
+
+    total = query.count()
+    rows = (
+        query.order_by(Tenant.created_at.desc(), Tenant.id.desc())
+        .offset(offset)
+        .limit(min(limit, 200))
+        .all()
+    )
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "tenants": [_tenant_summary_payload(db, tenant) for tenant in rows],
+    }
+
+
+@router.patch("/admin/tenants/{tenant_id}/status")
+async def update_tenant_status(
+    tenant_id: int,
+    body: UpdateTenantStatusIn,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    tenant.is_active = body.is_active
+    users = db.query(User).filter(User.tenant_id == tenant_id).all()
+    for user in users:
+        if user.role == "merchant":
+            user.is_active = body.is_active
+    db.commit()
+    audit(
+        "tenant_status_updated",
+        admin=admin.get("sub"),
+        tenant_id=tenant_id,
+        is_active=body.is_active,
+    )
+    return _tenant_summary_payload(db, tenant)
+
+
+@router.get("/admin/tenants/{tenant_id}/summary")
+async def get_tenant_summary(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return _tenant_summary_payload(db, tenant)
+
+
+@router.get("/admin/tenants/{tenant_id}/users")
+async def get_tenant_users(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    users = (
+        db.query(User)
+        .filter(User.tenant_id == tenant_id)
+        .order_by(User.created_at.desc(), User.id.desc())
+        .all()
+    )
+    return {
+        "tenant_id": tenant_id,
+        "users": [
+            {
+                "id": user.id,
+                "email": user.email,
+                "role": user.role,
+                "is_active": user.is_active,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+            }
+            for user in users
+        ],
+    }
+
+
+@router.get("/admin/billing/overview")
+async def admin_billing_overview(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    today = date.today()
+    total_subscriptions = db.query(func.count(BillingSubscription.id)).scalar() or 0
+    active_subscriptions = db.query(func.count(BillingSubscription.id)).filter(
+        BillingSubscription.status.in_(["active", "trialing"])
+    ).scalar() or 0
+    total_revenue = db.query(func.sum(_payment_amount_column())).filter(
+        BillingPayment.status == "paid"
+    ).scalar() or 0
+    today_revenue = db.query(func.sum(_payment_amount_column())).filter(
+        BillingPayment.status == "paid",
+        func.date(BillingPayment.created_at) == today,
+    ).scalar() or 0
+    invoices_due = db.query(func.count(BillingInvoice.id)).filter(
+        BillingInvoice.status.in_(["open", "overdue", "pending"])
+    ).scalar() or 0
+
+    by_plan: Dict[str, Dict[str, Any]] = {}
+    for plan in db.query(BillingPlan).order_by(BillingPlan.price_sar.asc()).all():
+        by_plan[plan.slug] = {
+            "name": plan.name,
+            "name_ar": plan.name_ar or plan.name,
+            "price_sar": float(plan.price_sar),
+            "active_count": db.query(func.count(BillingSubscription.id)).filter(
+                BillingSubscription.plan_id == plan.id,
+                BillingSubscription.status.in_(["active", "trialing"]),
+            ).scalar() or 0,
+        }
+
+    return {
+        "subscriptions": {
+            "total": int(total_subscriptions),
+            "active": int(active_subscriptions),
+        },
+        "revenue": {
+            "total_sar": float(total_revenue),
+            "today_sar": float(today_revenue),
+        },
+        "invoices_due": int(invoices_due),
+        "by_plan": by_plan,
+    }
+
+
+@router.get("/admin/billing/subscriptions")
+async def admin_billing_subscriptions(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+    limit: int = 100,
+):
+    rows = (
+        db.query(BillingSubscription)
+        .order_by(BillingSubscription.started_at.desc(), BillingSubscription.id.desc())
+        .limit(min(limit, 200))
+        .all()
+    )
+    return {
+        "subscriptions": [
+            {
+                "id": row.id,
+                "tenant_id": row.tenant_id,
+                "tenant_name": row.tenant.name if row.tenant else "—",
+                "plan": _plan_name(db, row.plan_id),
+                "status": row.status,
+                "started_at": row.started_at.isoformat() if row.started_at else None,
+                "trial_ends_at": row.trial_ends_at.isoformat() if row.trial_ends_at else None,
+                "ends_at": row.ends_at.isoformat() if row.ends_at else None,
+                "auto_renew": bool(row.auto_renew),
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/admin/billing/payments")
+async def admin_billing_payments(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+    status: str = "",
+    limit: int = 100,
+):
+    query = db.query(BillingPayment)
+    if status:
+        query = query.filter(BillingPayment.status == status)
+    rows = (
+        query.order_by(BillingPayment.created_at.desc(), BillingPayment.id.desc())
+        .limit(min(limit, 200))
+        .all()
+    )
+    return {
+        "payments": [
+            {
+                "id": row.id,
+                "tenant_id": row.tenant_id,
+                "tenant_name": row.tenant.name if row.tenant else "—",
+                "amount_sar": _payment_amount_value(row),
+                "currency": row.currency,
+                "gateway": row.gateway,
+                "status": row.status,
+                "paid_at": row.paid_at.isoformat() if row.paid_at else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/admin/revenue/summary")
+async def admin_revenue_summary(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    today = date.today()
+    paid_query = db.query(BillingPayment).filter(BillingPayment.status == "paid")
+    payments = paid_query.all()
+    total_sar = sum(_payment_amount_value(payment) for payment in payments)
+    today_sar = sum(
+        _payment_amount_value(payment)
+        for payment in payments
+        if payment.created_at and payment.created_at.date() == today
+    )
+    active_subs = (
+        db.query(BillingSubscription)
+        .filter(BillingSubscription.status.in_(["active", "trialing"]))
+        .all()
+    )
+    mrr_sar = 0.0
+    for subscription in active_subs:
+        plan = db.query(BillingPlan).filter(BillingPlan.id == subscription.plan_id).first()
+        if plan:
+            mrr_sar += float(plan.price_sar)
+
+    failed_count = db.query(func.count(BillingPayment.id)).filter(BillingPayment.status == "failed").scalar() or 0
+    paid_count = len(payments)
+    avg_payment = (total_sar / paid_count) if paid_count else 0.0
+    return {
+        "total_sar": round(total_sar, 2),
+        "today_sar": round(today_sar, 2),
+        "mrr_sar": round(mrr_sar, 2),
+        "paid_count": int(paid_count),
+        "failed_count": int(failed_count),
+        "avg_payment_sar": round(avg_payment, 2),
+    }
+
+
+@router.get("/admin/revenue/timeseries")
+async def admin_revenue_timeseries(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+    days: int = Query(30, ge=7, le=180),
+):
+    start_date = date.today() - timedelta(days=days - 1)
+    rows = (
+        db.query(BillingPayment)
+        .filter(
+            BillingPayment.status == "paid",
+            func.date(BillingPayment.created_at) >= start_date,
+        )
+        .order_by(BillingPayment.created_at.asc(), BillingPayment.id.asc())
+        .all()
+    )
+    totals: Dict[str, float] = {}
+    for idx in range(days):
+        day = start_date + timedelta(days=idx)
+        totals[day.isoformat()] = 0.0
+    for row in rows:
+        if not row.created_at:
+            continue
+        key = row.created_at.date().isoformat()
+        if key in totals:
+            totals[key] += _payment_amount_value(row)
+    return {
+        "days": days,
+        "points": [
+            {"date": key, "revenue_sar": round(value, 2)}
+            for key, value in totals.items()
+        ],
+    }
+
+
+def _tenant_ai_usage_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
+    turns = (
+        db.query(ConversationTrace)
+        .filter(ConversationTrace.tenant_id == tenant_id)
+        .order_by(ConversationTrace.created_at.desc(), ConversationTrace.id.desc())
+        .all()
+    )
+    action_count = db.query(func.count(AIActionLog.id)).filter(AIActionLog.tenant_id == tenant_id).scalar() or 0
+    models: Dict[str, int] = {}
+    providers: Dict[str, int] = {}
+    est_cost_usd = 0.0
+    est_tokens = 0
+    latency_values: List[int] = []
+
+    orchestrated_turns = 0
+    for turn in turns:
+        if turn.orchestrator_used:
+            orchestrated_turns += 1
+        model = turn.model_used or "unknown"
+        models[model] = models.get(model, 0) + 1
+        provider = _provider_from_model(model)
+        providers[provider] = providers.get(provider, 0) + 1
+        if turn.latency_ms is not None:
+            latency_values.append(int(turn.latency_ms))
+        cost = _estimate_trace_cost(turn)
+        est_cost_usd += float(cost.get("est_cost_usd", 0.0))
+        est_tokens += int(cost.get("est_total_tokens", 0))
+
+    avg_latency = round(sum(latency_values) / len(latency_values), 1) if latency_values else 0.0
+    return {
+        "tenant_id": tenant_id,
+        "turns_total": len(turns),
+        "turns_orchestrated": orchestrated_turns,
+        "ai_actions_logged": int(action_count),
+        "avg_latency_ms": avg_latency,
+        "estimated_total_tokens": int(est_tokens),
+        "estimated_total_cost_usd": round(est_cost_usd, 6),
+        "models": [{"model": model, "count": count} for model, count in sorted(models.items(), key=lambda item: item[1], reverse=True)],
+        "providers": [{"provider": provider, "count": count} for provider, count in sorted(providers.items(), key=lambda item: item[1], reverse=True)],
+    }
+
+
+@router.get("/admin/ai/usage")
+async def admin_ai_usage(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+    limit: int = 100,
+):
+    tenants = db.query(Tenant).order_by(Tenant.created_at.desc(), Tenant.id.desc()).limit(min(limit, 200)).all()
+    rows = []
+    for tenant in tenants:
+        payload = _tenant_ai_usage_payload(db, tenant.id)
+        payload["tenant_name"] = tenant.name
+        rows.append(payload)
+    return {"tenants": rows}
+
+
+@router.get("/admin/ai/usage/{tenant_id}")
+async def admin_ai_usage_tenant(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    payload = _tenant_ai_usage_payload(db, tenant_id)
+    payload["tenant_name"] = tenant.name
+    return payload
+
+
+@router.get("/admin/ai/costs")
+async def admin_ai_costs(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    tenants = db.query(Tenant).all()
+    per_tenant = []
+    total_cost = 0.0
+    total_tokens = 0
+    for tenant in tenants:
+        usage = _tenant_ai_usage_payload(db, tenant.id)
+        total_cost += usage["estimated_total_cost_usd"]
+        total_tokens += usage["estimated_total_tokens"]
+        per_tenant.append({
+            "tenant_id": tenant.id,
+            "tenant_name": tenant.name,
+            "estimated_total_cost_usd": usage["estimated_total_cost_usd"],
+            "estimated_total_tokens": usage["estimated_total_tokens"],
+        })
+    per_tenant.sort(key=lambda item: item["estimated_total_cost_usd"], reverse=True)
+    return {
+        "estimated_total_cost_usd": round(total_cost, 6),
+        "estimated_total_tokens": int(total_tokens),
+        "tenants": per_tenant[:100],
+    }
+
+
+@router.get("/admin/ai/providers")
+async def admin_ai_providers(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    rows = db.query(ConversationTrace).all()
+    provider_counts: Dict[str, int] = {}
+    model_counts: Dict[str, int] = {}
+    for row in rows:
+        provider = _provider_from_model(row.model_used or "")
+        provider_counts[provider] = provider_counts.get(provider, 0) + 1
+        model = row.model_used or "unknown"
+        model_counts[model] = model_counts.get(model, 0) + 1
+    return {
+        "providers": [{"provider": key, "count": value} for key, value in sorted(provider_counts.items(), key=lambda item: item[1], reverse=True)],
+        "models": [{"model": key, "count": value} for key, value in sorted(model_counts.items(), key=lambda item: item[1], reverse=True)],
+    }
+
+
+@router.get("/admin/system/health")
+async def admin_system_health(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    from observability.health import (  # noqa: PLC0415
+        check_database,
+        check_orchestrator,
+        overall_status,
+    )
+    components = {
+        "database": await check_database(db),
+        "orchestrator": await check_orchestrator(os.environ.get("ORCHESTRATOR_URL", "http://localhost:8016")),
+        "whatsapp_connections": {
+            "status": "ok",
+            "connected": db.query(func.count(WhatsAppConnection.id)).filter(
+                WhatsAppConnection.status == "connected"
+            ).scalar() or 0,
+        },
+        "support_access": {
+            "status": "ok",
+            "active_grants": db.query(TenantSettings).count(),
+        },
+    }
+    return {
+        "status": overall_status(components),
+        "components": components,
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+    }
+
+
+@router.get("/admin/system/dependencies")
+async def admin_system_dependencies(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    return {
+        "database": {"configured": True},
+        "orchestrator_url": os.environ.get("ORCHESTRATOR_URL", "http://localhost:8016"),
+        "connected_whatsapp_tenants": db.query(func.count(WhatsAppConnection.id)).filter(
+            WhatsAppConnection.status == "connected"
+        ).scalar() or 0,
+        "salla_integrations_enabled": db.query(func.count(Integration.id)).filter(
+            Integration.provider == "salla",
+            Integration.enabled == True,  # noqa: E712
+        ).scalar() or 0,
+        "zid_integrations_enabled": db.query(func.count(Integration.id)).filter(
+            Integration.provider == "zid",
+            Integration.enabled == True,  # noqa: E712
+        ).scalar() or 0,
+    }
+
+
+@router.get("/admin/system/tenant-isolation")
+async def admin_tenant_isolation(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    issues: List[str] = []
+    merchant_users_missing_tenant = db.query(func.count(User.id)).filter(
+        User.role == "merchant",
+        User.tenant_id == None,  # noqa: E711
+    ).scalar() or 0
+    if merchant_users_missing_tenant:
+        issues.append(f"{merchant_users_missing_tenant} merchant users are missing tenant_id")
+
+    orphan_whatsapp = db.query(func.count(WhatsAppConnection.id)).filter(
+        WhatsAppConnection.tenant_id == None,  # noqa: E711
+    ).scalar() or 0
+    if orphan_whatsapp:
+        issues.append(f"{orphan_whatsapp} WhatsApp connections are missing tenant_id")
+
+    missing_settings = (
+        db.query(func.count(Tenant.id))
+        .outerjoin(TenantSettings, TenantSettings.tenant_id == Tenant.id)
+        .filter(TenantSettings.id == None)  # noqa: E711
+        .scalar() or 0
+    )
+    if missing_settings:
+        issues.append(f"{missing_settings} tenants do not yet have tenant_settings")
+
+    return {
+        "all_checks_passed": len(issues) == 0,
+        "issues": issues,
+        "checked_at": datetime.now(timezone.utc).isoformat() + "Z",
+    }
+
+
+@router.get("/admin/system/events")
+async def admin_system_events(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+    category: str = "",
+    severity: str = "",
+    tenant_id: Optional[int] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    query = db.query(SystemEvent)
+    if category:
+        query = query.filter(SystemEvent.category == category)
+    if severity:
+        query = query.filter(SystemEvent.severity == severity)
+    if tenant_id is not None:
+        query = query.filter(SystemEvent.tenant_id == tenant_id)
+    total = query.count()
+    rows = (
+        query.order_by(SystemEvent.created_at.desc(), SystemEvent.id.desc())
+        .offset(offset)
+        .limit(min(limit, 200))
+        .all()
+    )
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "events": [
+            {
+                "id": row.id,
+                "tenant_id": row.tenant_id,
+                "tenant_name": row.tenant.name if row.tenant else "—",
+                "category": row.category,
+                "event_type": row.event_type,
+                "severity": row.severity,
+                "summary": row.summary,
+                "payload": row.payload,
+                "reference_id": row.reference_id,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/admin/features")
+async def admin_get_global_features(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    settings = get_or_create_settings(db, 1)
+    db.commit()
+    return {"features": _platform_feature_flags(settings)}
+
+
+@router.put("/admin/features/{feature_key}")
+async def admin_update_global_feature(
+    feature_key: str,
+    body: FeatureFlagUpdateIn,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    settings = get_or_create_settings(db, 1)
+    flags = _platform_feature_flags(settings)
+    flags[feature_key] = bool(body.enabled)
+    _set_settings_flags(settings, _PLATFORM_FEATURES_KEY, flags)
+    db.add(settings)
+    db.commit()
+    audit(
+        "platform_feature_updated",
+        admin=admin.get("sub"),
+        feature_key=feature_key,
+        enabled=body.enabled,
+    )
+    return {"feature_key": feature_key, "enabled": body.enabled, "features": flags}
+
+
+@router.get("/admin/tenants/{tenant_id}/features")
+async def admin_get_tenant_features(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    settings = get_or_create_settings(db, tenant_id)
+    db.commit()
+    return {
+        "tenant_id": tenant_id,
+        "features": _tenant_feature_flags(settings),
+        "global_defaults": _platform_feature_flags(get_or_create_settings(db, 1)),
+    }
+
+
+@router.put("/admin/tenants/{tenant_id}/features/{feature_key}")
+async def admin_update_tenant_feature(
+    tenant_id: int,
+    feature_key: str,
+    body: FeatureFlagUpdateIn,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    settings = get_or_create_settings(db, tenant_id)
+    flags = _tenant_feature_flags(settings)
+    flags[feature_key] = bool(body.enabled)
+    _set_settings_flags(settings, _TENANT_FEATURES_KEY, flags)
+    db.add(settings)
+    db.commit()
+    audit(
+        "tenant_feature_updated",
+        admin=admin.get("sub"),
+        tenant_id=tenant_id,
+        feature_key=feature_key,
+        enabled=body.enabled,
+    )
+    return {"tenant_id": tenant_id, "feature_key": feature_key, "enabled": body.enabled, "features": flags}
+
+
+@router.get("/admin/troubleshooting/tenants/{tenant_id}")
+async def admin_troubleshoot_tenant(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    summary = _tenant_summary_payload(db, tenant)
+    latest_sync = (
+        db.query(StoreSyncJob)
+        .filter(StoreSyncJob.tenant_id == tenant_id)
+        .order_by(StoreSyncJob.created_at.desc(), StoreSyncJob.id.desc())
+        .first()
+    )
+    settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).first()
+    support_access = dict((settings.extra_metadata or {}).get("support_access") or {}) if settings else {}
+    recent_events = (
+        db.query(SystemEvent)
+        .filter(SystemEvent.tenant_id == tenant_id)
+        .order_by(SystemEvent.created_at.desc(), SystemEvent.id.desc())
+        .limit(10)
+        .all()
+    )
+    return {
+        "tenant": summary,
+        "support_access": {
+            "enabled": bool(support_access.get("enabled")),
+            "expires_at": support_access.get("expires_at"),
+        },
+        "latest_sync": {
+            "status": latest_sync.status if latest_sync else "none",
+            "sync_type": latest_sync.sync_type if latest_sync else None,
+            "created_at": latest_sync.created_at.isoformat() if latest_sync and latest_sync.created_at else None,
+            "error_message": latest_sync.error_message if latest_sync else None,
+        },
+        "recent_events": [
+            {
+                "id": row.id,
+                "category": row.category,
+                "event_type": row.event_type,
+                "severity": row.severity,
+                "summary": row.summary,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in recent_events
+        ],
+    }
+
+
+@router.get("/admin/troubleshooting/tenants/{tenant_id}/whatsapp")
+async def admin_troubleshoot_whatsapp(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    wa_conn = db.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id == tenant_id).first()
+    usage_rows = (
+        db.query(WhatsAppUsage)
+        .filter(WhatsAppUsage.tenant_id == tenant_id)
+        .order_by(WhatsAppUsage.year.desc(), WhatsAppUsage.month.desc(), WhatsAppUsage.id.desc())
+        .limit(6)
+        .all()
+    )
+    return {
+        "tenant_id": tenant_id,
+        "tenant_name": tenant.name,
+        "connection": {
+            "status": wa_conn.status if wa_conn else "not_connected",
+            "phone_number": wa_conn.phone_number if wa_conn else None,
+            "business_display_name": wa_conn.business_display_name if wa_conn else None,
+            "connection_type": wa_conn.connection_type if wa_conn else None,
+            "webhook_verified": bool(wa_conn.webhook_verified) if wa_conn else False,
+            "sending_enabled": bool(wa_conn.sending_enabled) if wa_conn else False,
+            "last_error": wa_conn.last_error if wa_conn else None,
+            "updated_at": wa_conn.updated_at.isoformat() if wa_conn and wa_conn.updated_at else None,
+        },
+        "usage": [
+            {
+                "year": row.year,
+                "month": row.month,
+                "service_conversations_used": row.service_conversations_used,
+                "marketing_conversations_used": row.marketing_conversations_used,
+                "conversations_limit": row.conversations_limit,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+            for row in usage_rows
+        ],
+    }
+
+
+@router.get("/admin/troubleshooting/tenants/{tenant_id}/integrations")
+async def admin_troubleshoot_integrations(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    integrations = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == tenant_id)
+        .order_by(Integration.provider.asc(), Integration.id.desc())
+        .all()
+    )
+    sync_jobs = (
+        db.query(StoreSyncJob)
+        .filter(StoreSyncJob.tenant_id == tenant_id)
+        .order_by(StoreSyncJob.created_at.desc(), StoreSyncJob.id.desc())
+        .limit(10)
+        .all()
+    )
+    return {
+        "tenant_id": tenant_id,
+        "tenant_name": tenant.name,
+        "integrations": [
+            {
+                "id": row.id,
+                "provider": row.provider,
+                "enabled": bool(row.enabled),
+                "config": row.config,
+            }
+            for row in integrations
+        ],
+        "sync_jobs": [
+            {
+                "id": row.id,
+                "status": row.status,
+                "sync_type": row.sync_type,
+                "triggered_by": row.triggered_by,
+                "products_synced": row.products_synced,
+                "orders_synced": row.orders_synced,
+                "coupons_synced": row.coupons_synced,
+                "error_message": row.error_message,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in sync_jobs
+        ],
+    }

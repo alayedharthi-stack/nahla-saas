@@ -85,6 +85,10 @@ export function getRole(): string {
   return localStorage.getItem(ROLE_KEY) ?? 'merchant'
 }
 
+export function isPlatformStaffRole(role: string): boolean {
+  return ['admin', 'owner', 'super_admin', 'platform_admin', 'platform_owner'].includes(role)
+}
+
 /** Returns the email (sub) of the logged-in user. */
 export function getEmail(): string {
   return localStorage.getItem(EMAIL_KEY) ?? ''
@@ -122,13 +126,11 @@ export function getUserId(): number | null {
 // merchant_admin / merchant_user / merchant → Merchant Dashboard
 
 export function isAdmin(): boolean {
-  const r = getRole()
-  return r === 'admin' || r === 'owner' || r === 'super_admin'
+  return isPlatformStaffRole(getRole())
 }
 
 export function isPlatformOwner(): boolean {
-  const r = getRole()
-  return r === 'owner' || r === 'super_admin' || r === 'admin'
+  return isPlatformStaffRole(getRole())
 }
 
 export function isStaff(): boolean {

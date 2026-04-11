@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
+import { adminApi } from '../api/admin'
 import { API_BASE } from '../api/client'
 import { getToken, startImpersonation } from '../auth'
 import { Users, Search, LogIn, ToggleLeft, ToggleRight, Send, Clock, CheckCircle, Bell } from 'lucide-react'
@@ -13,7 +14,7 @@ interface Merchant {
   plan: string
   sub_status: string
   wa_status: string
-  created_at: string
+  created_at: string | null
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -42,8 +43,7 @@ export default function AdminMerchants() {
   const pollingRef                        = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
-    fetch(`${API_BASE}/admin/stats`, { headers: { Authorization: `Bearer ${getToken()}` } })
-      .then(r => r.json())
+    adminApi.stats()
       .then(d => setMerchants(d.all_merchants ?? d.recent_merchants ?? []))
       .catch(() => {})
       .finally(() => setLoading(false))
@@ -169,10 +169,9 @@ export default function AdminMerchants() {
 
   const handleToggle = async (m: Merchant) => {
     setToggling(m.id)
-    const action = m.is_active ? 'suspend' : 'activate'
     try {
-      const res = await fetch(`${API_BASE}/admin/merchants/${m.id}/${action}`, {
-        method: 'POST',
+      const res = await fetch(`${API_BASE}/admin/merchants/${m.id}/toggle`, {
+        method: 'PUT',
         headers: { Authorization: `Bearer ${getToken()}` },
       })
       if (!res.ok) throw new Error('فشل التحديث')

@@ -1,26 +1,18 @@
 """
 Orchestrator API routes
 ────────────────────────
-POST /orchestrate           — main intelligence + safety pipeline
-GET  /health                — liveness check
-GET  /customer/{tenant}/{phone} — inspect stored customer memory (debug)
-GET  /permissions/{tenant_id}   — inspect tenant commerce permissions (debug)
+Compatibility HTTP shell for the legacy `/orchestrate` contract.
 
-Pipeline (9 stages):
-  1  Load customer memory
-  2  Load commerce permissions
-  3  Build Claude system prompt (grounding instructions included)
-  4  Call Claude (reply text + tool-use actions)
-  5  FactGuard          — vet reply TEXT for 11 ungrounded claim types
-  6  PolicyGuard        — validate ACTION PARAMS (discounts, categories, count)
-  7  CommercePermissionGuard — filter by tenant-level action type flags
-  8  ActionExecutionGuard    — final synthesis: executable + blocked_reason
-  9  Async memory update + return OrchestrateResponse
+Canonical runtime owner:
+  backend/modules/ai/orchestrator/adapter.py
+
+This file preserves the existing request/response shape so external callers
+can continue using `POST /orchestrate`, but it no longer owns provider
+execution directly. All AI execution now flows through the canonical adapter.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import sys
@@ -33,23 +25,20 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+_BACKEND_DIR = os.path.join(_REPO_ROOT, "backend")
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 _ORCH_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _ORCH_ROOT not in sys.path:
     sys.path.insert(0, _ORCH_ROOT)
 
-from memory.loader import load_customer_memory
-from memory.updater import update_customer_memory
-from policy.guard import validate_actions
-from prompt.builder import build_system_prompt
-from engine.claude_client import call_claude
-from fact_guard.data_fetcher import fetch_grounding_data
-from fact_guard.checker import vet_reply, extract_coupon_codes_from_text
-from commerce.permission_guard import gate as permission_gate, load_permissions
-from commerce.permissions import CommercePermissionSet
-from execution.action_execution_guard import decide as execution_decide
-
 logger = logging.getLogger("ai-orchestrator.routes")
 router = APIRouter()
+
+from memory.loader import load_customer_memory  # noqa: E402
+from commerce.permission_guard import load_permissions  # noqa: E402
+from modules.ai.orchestrator.adapter import generate_orchestrate_response
 
 
 # ── Request / Response schemas ────────────────────────────────────────────────
@@ -102,165 +91,31 @@ async def orchestrate(req: OrchestrateRequest):
         f"msg={req.message[:80]}"
     )
 
-    # ── Stage 1: Load customer memory ─────────────────────────────────────────
-    try:
-        ctx = load_customer_memory(req.tenant_id, req.customer_phone)
-    except Exception as exc:
-        logger.warning(f"Memory load failed: {exc} — proceeding with empty context")
-        ctx = {}
-
-    customer_segment = ctx.get("segment", "new")
-    is_returning     = ctx.get("is_returning", False)
-    customer_id      = ctx.get("customer_id")
-
-    # ── Stage 2: Load commerce permissions ────────────────────────────────────
-    try:
-        permissions: CommercePermissionSet = load_permissions(req.tenant_id)
-    except Exception as exc:
-        logger.warning(f"Permissions load failed: {exc} — using safe defaults")
-        permissions = CommercePermissionSet(tenant_id=req.tenant_id)
-
-    # ── Stage 3: Build system prompt ──────────────────────────────────────────
-    system_prompt = build_system_prompt(ctx)
-
-    # ── Stage 4: Call Claude ──────────────────────────────────────────────────
-    try:
-        engine_result = await call_claude(system_prompt, req.message)
-    except Exception as exc:
-        logger.error(f"Claude call failed: {exc}")
-        raise HTTPException(status_code=502, detail="AI engine unavailable")
-
-    raw_reply   = engine_result.get("reply", "")
-    raw_actions = engine_result.get("actions", [])
-    model_used  = engine_result.get("model", "unknown")
-
-    # ── Stage 5: Fact Guard ───────────────────────────────────────────────────
-    # Fetch grounding data (DB reads, once per request)
-    try:
-        grounding = fetch_grounding_data(req.tenant_id, req.customer_phone)
-    except Exception as exc:
-        logger.warning(f"Grounding data fetch failed: {exc} — fact guard will reject all claims")
-        from fact_guard.data_fetcher import GroundingData
-        grounding = GroundingData()
-
-    # Extract coupon codes mentioned in the AI reply so the checker can verify them
-    mentioned_coupons = extract_coupon_codes_from_text(raw_reply)
-
-    vetted = vet_reply(raw_reply, grounding, mentioned_coupon_codes=mentioned_coupons)
-    vetted_reply = vetted.vetted_text
-
-    fact_guard_result = FactGuardResult(
-        was_modified=vetted.was_modified,
-        claims_detected=[c.claim_type for c in vetted.claims if c.detected],
+    result = await generate_orchestrate_response(
+        tenant_id=req.tenant_id,
+        customer_phone=req.customer_phone,
+        message=req.message,
+        conversation_id=req.conversation_id,
     )
 
-    if vetted.was_modified:
-        logger.info(
-            f"FactGuard modified reply | tenant={req.tenant_id} | "
-            f"claims={fact_guard_result.claims_detected}"
-        )
-
-    # ── Stage 6: Policy Guard ─────────────────────────────────────────────────
-    policy_gated = validate_actions(raw_actions, ctx)
-
-    # ── Stage 7: Commerce Permission Guard ────────────────────────────────────
-    permission_gated = permission_gate(policy_gated, permissions)
-
-    # ── Stage 8: Action Execution Guard ───────────────────────────────────────
-    fully_gated = execution_decide(permission_gated, req.tenant_id)
-
-    # ── Stage 5b: Append branding footer ──────────────────────────────────────
-    branding = ctx.get("branding", "")
-    if branding and vetted_reply:
-        final_reply = f"{vetted_reply}\n\n_{branding}_"
-    else:
-        final_reply = vetted_reply
-
-    # ── Stage 9a: Collect executable product IDs for memory update ───────────
-    approved_product_ids: List[int] = []
-    for action in fully_gated:
-        if action.get("executable") and action.get("final_payload"):
-            fp = action["final_payload"]
-            if action["type"] == "suggest_product":
-                pid = fp.get("product_id")
-                if pid:
-                    approved_product_ids.append(pid)
-            elif action["type"] in ("suggest_bundle", "propose_order", "create_draft_order"):
-                approved_product_ids.extend(fp.get("product_ids", []))
-
-    # ── Stage 9b: Fire-and-forget memory update ───────────────────────────────
-    turn_data = {
-        "intent":                _infer_intent(req.message),
-        "sentiment":             _infer_sentiment(req.message),
-        "suggested_product_ids": approved_product_ids,
-        "inferred_preferences":  _infer_preferences(req.message),
-        "approved_actions": [
-            {
-                "type":              a["type"],
-                "proposed_payload":  a.get("proposed_payload"),
-                "policy_result":     a["policy_result"],
-                "policy_notes":      a.get("policy_notes", ""),
-                "permission_result": a.get("permission_result", "n/a"),
-                "permission_notes":  a.get("permission_notes", ""),
-                "final_payload":     a.get("final_payload"),
-            }
-            for a in fully_gated
-        ],
-        "summary_snippet": f"Customer: {req.message[:200]}",
-    }
-
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(
-        None,
-        update_customer_memory,
-        req.tenant_id,
-        customer_id,
-        req.customer_phone,
-        turn_data,
-    )
-
-    # ── Return ────────────────────────────────────────────────────────────────
-    return OrchestrateResponse(
-        reply=final_reply or _default_reply(),
-        fact_guard=fact_guard_result,
-        actions=[
-            GatedAction(
-                type=a["type"],
-                policy_result=a["policy_result"],
-                policy_notes=a.get("policy_notes", ""),
-                permission_result=a.get("permission_result", "n/a"),
-                permission_notes=a.get("permission_notes", ""),
-                executable=a.get("executable", False),
-                blocked_reason=a.get("blocked_reason"),
-                final_payload=a.get("final_payload"),
-            )
-            for a in fully_gated
-        ],
-        customer_segment=customer_segment,
-        is_returning=is_returning,
-        model_used=model_used,
-    )
+    return OrchestrateResponse(**result)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @router.get("/health")
 async def health():
-    from engine.claude_client import CLAUDE_API_KEY, CLAUDE_MODEL
     return {
         "service":          "ai-orchestrator",
         "status":           "ok",
-        "claude_configured": bool(CLAUDE_API_KEY),
-        "model":            CLAUDE_MODEL,
+        "canonical_owner":  "backend/modules/ai/orchestrator",
+        "mode":             "compatibility_shell",
         "pipeline_stages": [
-            "customer_memory",
-            "commerce_permissions",
-            "claude_generate",
-            "fact_guard",
-            "policy_guard",
-            "commerce_permission_guard",
-            "action_execution_guard",
-            "memory_update",
+            "compat_request_mapping",
+            "canonical_adapter",
+            "canonical_pipeline",
+            "canonical_engine",
+            "compat_response_mapping",
         ],
     }
 
@@ -334,3 +189,5 @@ def _infer_preferences(message: str) -> Dict[str, Any]:
 
 def _default_reply() -> str:
     return "شكراً لتواصلك معنا! 😊 كيف أقدر أساعدك؟\n\nThanks for reaching out! 😊 How can I assist you?"
+
+

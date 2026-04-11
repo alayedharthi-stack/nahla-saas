@@ -57,6 +57,7 @@ from core.conversation_engine import (
 )
 from core.database import get_db
 from core.nahla_knowledge import build_nahla_system_prompt
+from modules.ai.orchestrator.adapter import generate_ai_reply
 
 logger = logging.getLogger("nahla-backend")
 router = APIRouter(tags=["WhatsApp Webhook"])
@@ -446,14 +447,25 @@ async def _handle_merchant_message(
 - إذا لم تجد إجابة في البيانات المتاحة، قل للعميل أنك ستتحقق وتعود إليه
 - تحدث كموظف خدمة العملاء للمتجر مباشرةً"""
 
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=500,
-            system=system_prompt,
-            messages=messages,
+        history_transcript = "\n".join(
+            f"{m['role']}: {m['content']}" for m in messages[:-1]
+        ).strip()
+        full_prompt = system_prompt
+        if history_transcript:
+            full_prompt += f"\n\nسجل المحادثة الأخيرة:\n{history_transcript}"
+
+        payload = generate_ai_reply(
+            tenant_id=tenant_id,
+            customer_phone=to,
+            message=text,
+            store_name=store_context.get("store_name", ""),
+            channel="whatsapp",
+            locale="ar",
+            context_metadata=store_context,
+            prompt_overrides={"__full_system_prompt": full_prompt},
+            provider_hint="anthropic",
         )
-        reply = response.content[0].text if response.content else "كيف أقدر أساعدك؟"
+        reply = payload.reply_text.strip() or "كيف أقدر أساعدك؟"
 
         # Save messages to history
         StateManager.save_message(db, to, text,  "inbound",  tenant_id=tenant_id)
@@ -492,14 +504,25 @@ async def _call_claude_with_context(
         fact_block   = FactGuard.build_fact_block()
         system_prompt = fact_block + state_injection + base_system
 
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=600,
-            system=system_prompt,
-            messages=messages,
+        history_transcript = "\n".join(
+            f"{m['role']}: {m['content']}" for m in messages[:-1]
+        ).strip()
+        full_prompt = system_prompt
+        if history_transcript:
+            full_prompt += f"\n\nRecent conversation history:\n{history_transcript}"
+
+        payload = generate_ai_reply(
+            tenant_id=None,
+            customer_phone="",
+            message=(messages[-1].get("content", "") if messages else ""),
+            store_name="Nahla",
+            channel="whatsapp",
+            locale="ar",
+            context_metadata={},
+            prompt_overrides={"__full_system_prompt": full_prompt},
+            provider_hint="anthropic",
         )
-        return response.content[0].text if response.content else "كيف أقدر أساعدك؟"
+        return payload.reply_text.strip() or "كيف أقدر أساعدك؟"
     except Exception as exc:
         logger.error("[Claude] Call failed: %s", exc)
         return "عذراً، حدث خطأ مؤقت. يرجى المحاولة مرة أخرى."
@@ -547,6 +570,25 @@ async def _post_wa(
         "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_tail=%s to=%s",
         _tenant_id, _store_name, phone_id, token_tail, payload.get("to", "?"),
     )
+
+    # Lightweight in-process throttling to avoid accidental burst sends to the
+    # same recipient. This is not a queue, but it protects against runaway
+    # loops/retries within a single process.
+    from observability.rate_limiter import check_rate_limit  # noqa: PLC0415
+    recipient = str(payload.get("to") or "")
+    rate_key = f"wa-send:{_tenant_id or 'platform'}:{recipient}"
+    if not check_rate_limit(rate_key, max_count=6, window_seconds=10):
+        logger.warning(
+            "[WA] throttled burst send | tenant_id=%s to=%s phone_number_id=%s",
+            _tenant_id, recipient, phone_id,
+        )
+        return
+    if not check_rate_limit(rate_key, max_count=20, window_seconds=60):
+        logger.warning(
+            "[WA] throttled minute send | tenant_id=%s to=%s phone_number_id=%s",
+            _tenant_id, recipient, phone_id,
+        )
+        return
 
     url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {send_token}", "Content-Type": "application/json"}

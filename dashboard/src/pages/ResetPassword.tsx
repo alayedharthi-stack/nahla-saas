@@ -1,6 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Sparkles, Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
+import { API_BASE } from '../api/client'
 
 export default function ResetPassword() {
   const navigate = useNavigate()
@@ -27,7 +28,7 @@ export default function ResetPassword() {
 
     setLoading(true)
     try {
-      const res = await fetch('/api/auth/reset-password', {
+      const res = await fetch(`${API_BASE}/auth/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token, password }),

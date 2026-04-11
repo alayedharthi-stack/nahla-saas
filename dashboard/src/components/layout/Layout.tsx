@@ -20,6 +20,15 @@ const PAGE_META: Record<string, MetaSelector> = {
   '/settings':           tr => tr.pages.settings,
   '/smart-automations':  _tr => ({ title: 'الطيار الآلي', subtitle: 'إدارة الأتمتة الذكية' }),
   '/billing':            _tr => ({ title: 'الاشتراك والفوترة', subtitle: 'إدارة خطة نحلة' }),
+  '/admin':              _tr => ({ title: 'لوحة المنصة', subtitle: 'نظرة عامة على أداء المنصة' }),
+  '/admin/tenants':      _tr => ({ title: 'المتاجر', subtitle: 'إدارة الـ tenants وحالتها' }),
+  '/admin/merchants':    _tr => ({ title: 'وصول التجار', subtitle: 'إدارة الوصول والدعم والتمثيل' }),
+  '/admin/revenue':      _tr => ({ title: 'الإيرادات', subtitle: 'ملخص مالي على مستوى المنصة' }),
+  '/admin/ai-usage':     _tr => ({ title: 'استخدام AI', subtitle: 'تكلفة ومزودات الاستخدام التقديرية' }),
+  '/admin/features':     _tr => ({ title: 'Feature Flags', subtitle: 'تحكم مركزي في خصائص المنصة' }),
+  '/admin/troubleshooting': _tr => ({ title: 'Troubleshooting', subtitle: 'فحص سريع لمشكلات المتاجر' }),
+  '/admin/team':         _tr => ({ title: 'الفريق', subtitle: 'سياسة الأدوار التشغيلية للمنصة' }),
+  '/admin/system':       _tr => ({ title: 'حالة النظام', subtitle: 'الصحة العامة والتبعيات والأحداث' }),
 }
 
 export default function Layout() {

@@ -7,6 +7,19 @@ The engine works in three stages:
   2. Build a prompt       – combines context with the customer message.
   3. Generate a reply     – calls the configured LLM provider (OpenAI-compatible).
      Falls back to a rule-based responder when no API key is set (dev mode).
+
+Migration note:
+  The internal reply-generation step now routes through the canonical
+  AI orchestrator adapter at:
+    backend/modules/ai/orchestrator/adapter.py
+
+  If the adapter is unavailable or returns empty reply_text, this engine
+  automatically falls back to the legacy _build_system_prompt + _call_llm path,
+  preserving the external API contract.
+
+  External API surface is unchanged:
+    POST /ai/respond  →  AIResponse(response, tenant, model)
+    GET  /health
 """
 
 import logging
@@ -23,11 +36,24 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+# Make backend/ importable so the canonical AI orchestrator adapter can be used
+_BACKEND_DIR = os.path.abspath(os.path.join(_REPO_ROOT, "backend"))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 from database.models import Coupon, Integration, KnowledgePolicy, Product, Tenant, TenantSettings
 from database.session import SessionLocal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("ai-engine")
+
+# ── Orchestrator adapter (shared loader, safe fallback) ──────────────────────
+# Loaded via the shared helper in backend/modules/ai/orchestrator/loader.py.
+# A None return means the legacy reply path runs exclusively.
+from modules.ai.orchestrator.invoker import invoke_adapter
+from modules.ai.orchestrator.loader import load_orchestrator_adapter
+from modules.ai.orchestrator.request_mapper import build_adapter_kwargs
+_adapter: Any = load_orchestrator_adapter("ai-engine")
 
 # ── LLM Configuration ────────────────────────────────────────────────────────
 OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
@@ -281,23 +307,69 @@ async def ai_respond(request: AIRequest):
 
     logger.info(f"AI request | tenant={request.tenant} | phone={request.phone} | msg={request.message[:80]}")
 
+    # Stage 1: load tenant context from DB (unchanged from legacy path)
     try:
         context = _load_tenant_context(request.tenant, request.tenant_id)
     except Exception as exc:
         logger.warning(f"Could not load tenant context: {exc} — using empty context")
         context = {"store_name": "our store", "products": [], "coupons": [], "policy": {}, "branding": {}}
 
-    system_prompt = _build_system_prompt(context)
+    # ── NEW: Try canonical orchestrator adapter ────────────────────────────────
+    # Route through backend/modules/ai/orchestrator/adapter.generate_ai_reply.
+    # The loaded tenant context is forwarded as context_metadata so the new
+    # prompt builder can access store_name, products, coupons, and policy.
+    #
+    # Fallback conditions (adapter is bypassed when either):
+    #   a) adapter module failed to import at startup (_adapter is None)
+    #   b) adapter call raises any exception
+    #   c) adapter returns an empty reply_text
+    #
+    # In all fallback cases the legacy _build_system_prompt + _call_llm path
+    # runs and external API behavior is identical to the pre-migration state.
+    reply: str        = ""
+    model_used: str   = "rule-based"
+    _adapter_used     = False
 
-    try:
-        reply = await _call_llm(system_prompt, request.message)
-    except httpx.HTTPError as exc:
-        logger.error(f"LLM call failed: {exc} — falling back to rule-based")
-        reply = _rule_based_response(request.message)
+    _ai_payload = invoke_adapter(
+        _adapter,
+        build_adapter_kwargs(
+            tenant_id=request.tenant_id,
+            customer_phone=request.phone,
+            message=request.message,
+            store_name=context.get("store_name", ""),
+            context_metadata=context,
+            provider_hint="openai_compatible",
+        ),
+        caller_tag="ai-engine",
+    )
+    if _ai_payload is not None and _ai_payload.reply_text:
+        reply         = _ai_payload.reply_text
+        model_used    = str(_ai_payload.provider_used or "orchestrator")
+        _adapter_used = True
+        logger.info(
+            "[ai-engine] Adapter path | tenant=%s model=%s reply=%s",
+            request.tenant, model_used, reply[:80],
+        )
+    elif _ai_payload is not None:
+        logger.debug(
+            "[ai-engine] Adapter returned empty reply (scaffold mode) — "
+            "falling back to legacy path"
+        )
 
-    model_used = OPENAI_MODEL if OPENAI_API_KEY else "rule-based"
+    # ── LEGACY: runs when adapter is unavailable or returned empty reply ───────
+    # Preserved exactly from the original implementation; no changes.
+    if not _adapter_used:
+        system_prompt = _build_system_prompt(context)
+        try:
+            reply = await _call_llm(system_prompt, request.message)
+        except httpx.HTTPError as exc:
+            logger.error(f"LLM call failed: {exc} — falling back to rule-based")
+            reply = _rule_based_response(request.message)
+        model_used = OPENAI_MODEL if OPENAI_API_KEY else "rule-based"
+
     logger.info(f"AI response | tenant={request.tenant} | model={model_used} | reply={reply[:80]}")
 
+    # Response schema unchanged: AIResponse(response, tenant, model)
     return AIResponse(response=reply, tenant=request.tenant, model=model_used)
 
 

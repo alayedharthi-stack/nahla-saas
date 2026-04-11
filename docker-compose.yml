@@ -20,6 +20,22 @@ x-python-service: &python-service
     dockerfile: Dockerfile
   env_file:
     - .env
+  environment:
+    DATABASE_URL: postgresql://${POSTGRES_USER:-nahla}:${POSTGRES_PASSWORD:-nahla_password}@postgres:5432/${POSTGRES_DB:-nahla_saas}
+    AI_ORCHESTRATOR_URL: http://ai-orchestrator:8016/orchestrate
+    AI_ENGINE_URL: http://ai-engine:8002/ai/respond
+    ORCHESTRATOR_URL: http://ai-orchestrator:8016
+    ORDER_SERVICE_URL: http://order-service:8004
+    COUPON_SERVICE_URL: http://coupon-service:8005
+    CAMPAIGN_SERVICE_URL: http://campaign-service:8006
+    CONVERSATION_SERVICE_URL: http://conversation-service:8008
+    AUTOMATION_SERVICE_URL: http://automation-service:8009
+    ANALYTICS_SERVICE_URL: http://analytics-service:8010
+    BILLING_SERVICE_URL: http://billing-service:8011
+    LOCATION_SERVICE_URL: http://location-service:8012
+    MARKETPLACE_SERVICE_URL: http://marketplace-service:8013
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
   depends_on:
     postgres:
       condition: service_healthy
@@ -50,6 +66,15 @@ services:
     networks:
       - nahla-net
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - nahla-net
+
   # Run Alembic migrations before any service starts
   migrate:
     <<: *python-service
@@ -74,6 +99,7 @@ services:
 
   whatsapp-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/whatsapp-service && uvicorn main:app --host 0.0.0.0 --port 8001 --reload"
     ports:
@@ -94,6 +120,7 @@ services:
 
   catalog-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/catalog-service && uvicorn main:app --host 0.0.0.0 --port 8003 --reload"
     ports:
@@ -104,6 +131,7 @@ services:
 
   order-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/order-service && uvicorn main:app --host 0.0.0.0 --port 8004 --reload"
     ports:
@@ -114,6 +142,7 @@ services:
 
   coupon-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/coupon-service && uvicorn main:app --host 0.0.0.0 --port 8005 --reload"
     ports:
@@ -124,6 +153,7 @@ services:
 
   campaign-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/campaign-service && uvicorn main:app --host 0.0.0.0 --port 8006 --reload"
     ports:
@@ -144,6 +174,7 @@ services:
 
   conversation-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/conversation-service && uvicorn main:app --host 0.0.0.0 --port 8008 --reload"
     ports:
@@ -154,6 +185,7 @@ services:
 
   automation-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/automation-service && uvicorn main:app --host 0.0.0.0 --port 8009 --reload"
     ports:
@@ -164,6 +196,7 @@ services:
 
   analytics-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/analytics-service && uvicorn main:app --host 0.0.0.0 --port 8010 --reload"
     ports:
@@ -174,6 +207,7 @@ services:
 
   billing-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/billing-service && uvicorn main:app --host 0.0.0.0 --port 8011 --reload"
     ports:
@@ -184,6 +218,7 @@ services:
 
   location-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/location-service && uvicorn main:app --host 0.0.0.0 --port 8012 --reload"
     ports:
@@ -194,6 +229,7 @@ services:
 
   marketplace-service:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/marketplace-service && uvicorn main:app --host 0.0.0.0 --port 8013 --reload"
     ports:
@@ -218,6 +254,7 @@ services:
 
   salla-integration:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/integrations/salla && uvicorn main:app --host 0.0.0.0 --port 8014 --reload"
     ports:
@@ -228,6 +265,7 @@ services:
 
   zid-integration:
     <<: *python-service
+    profiles: ["legacy-services"]
     command: >
       sh -c "cd /app/integrations/zid && uvicorn main:app --host 0.0.0.0 --port 8015 --reload"
     ports:
@@ -242,9 +280,13 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile.dashboard
+      args:
+        VITE_API_BASE: http://localhost:8000
+        VITE_API_URL: http://localhost:8000
     ports:
       - "3000:3000"
     environment:
+      - VITE_API_BASE=http://localhost:8000
       - VITE_API_URL=http://localhost:8000
     networks:
       - nahla-net
