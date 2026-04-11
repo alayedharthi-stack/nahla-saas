@@ -26,8 +26,8 @@ export default defineConfig({
     },
   },
   preview: {
-    // Production preview server (used by Railway to serve the built SPA)
     host: true,
+    allowedHosts: true,
     headers: SALLA_IFRAME_HEADERS,
   },
 })
