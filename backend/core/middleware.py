@@ -34,7 +34,6 @@ JWT_PUBLIC_PREFIXES = (
     "/settings/validate",               # Salla Partner Portal validation probe
     "/snippet.js",
     "/track",
-    "/store-integration/copy-from-tenant",  # temp admin endpoint — remove after use
     # ── Public store scripts (loaded by external stores — no JWT) ──────────────
     "/merchant/addons/widget/",         # legacy widget embed.js
     "/merchant/widgets/salla-auto.js",  # universal Salla snippet
