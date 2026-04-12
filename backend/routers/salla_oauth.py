@@ -333,10 +333,10 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                         "salla_token_login": True,
                         "connected_at":      now_iso,
                     },
-                    enabled = True,
+                    enabled = False,
                 ))
                 logger.info(
-                    "[SallaLogin]    Integration CREATED | tenant=%s store_id=%s",
+                    "[SallaLogin]    Integration CREATED (disabled until OAuth) | tenant=%s store_id=%s",
                     tenant_id, merchant_id_str,
                 )
 
@@ -1266,6 +1266,29 @@ async def salla_oauth_callback(
     except Exception as _exc:
         logger.warning("[Salla OAuth] WA notification error: %s", _exc)
 
+    # ── Trigger initial sync (fire-and-forget) ────────────────────────────────
+    try:
+        import asyncio as _asyncio2  # noqa: PLC0415
+
+        async def _initial_sync(tid: int):
+            await _asyncio2.sleep(3)
+            from core.database import get_db as _gdb  # noqa: PLC0415
+            from services.store_sync import StoreSyncService  # noqa: PLC0415
+            _db = next(_gdb())
+            try:
+                svc = StoreSyncService(_db, tid)
+                result = await svc.full_sync(triggered_by="oauth_connect")
+                logger.info("[Salla OAuth] Initial sync done | tenant=%s result=%s", tid, result.get("status"))
+            except Exception as exc:
+                logger.error("[Salla OAuth] Initial sync failed | tenant=%s: %s", tid, exc)
+            finally:
+                _db.close()
+
+        _asyncio2.ensure_future(_initial_sync(tenant_id))
+        logger.info("[Salla OAuth] Initial sync task queued | tenant=%s", tenant_id)
+    except Exception as _exc:
+        logger.warning("[Salla OAuth] Could not queue initial sync: %s", _exc)
+
     # ── Step 5: Redirect ────────────────────────────────────────────────────────
     if auto_jwt:
         # New merchant: redirect to /salla-callback with the JWT so they land logged-in
@@ -1471,11 +1494,11 @@ async def salla_test_oauth_callback(
             Integration.provider  == "salla",
         ).first()
         cfg = {
+            "api_key":       access_token,
+            "refresh_token": refresh_token,
             "store_id":      salla_store_id,
             "store_name":    store_name,
             "merchant_id":   merchant_id,
-            "access_token":  access_token,
-            "refresh_token": refresh_token,
             "expires_in":    expires_in,
             "connected_at":  datetime.now(timezone.utc).isoformat(),
             "app_type":      "test",
@@ -1496,6 +1519,29 @@ async def salla_test_oauth_callback(
     except Exception as exc:
         logger.error("[SallaTest] DB save failed: %s", exc)
         return RedirectResponse(url=_error_url("db_save_failed"), status_code=302)
+
+    # Trigger initial sync for the test store
+    if tenant_id:
+        try:
+            import asyncio as _asyncio3  # noqa: PLC0415
+
+            async def _test_initial_sync(tid: int):
+                await _asyncio3.sleep(3)
+                from core.database import get_db as _gdb  # noqa: PLC0415
+                from services.store_sync import StoreSyncService  # noqa: PLC0415
+                _db = next(_gdb())
+                try:
+                    svc = StoreSyncService(_db, tid)
+                    result = await svc.full_sync(triggered_by="oauth_test_connect")
+                    logger.info("[SallaTest] Initial sync done | tenant=%s result=%s", tid, result.get("status"))
+                except Exception as e:
+                    logger.error("[SallaTest] Initial sync failed | tenant=%s: %s", tid, e)
+                finally:
+                    _db.close()
+
+            _asyncio3.ensure_future(_test_initial_sync(tenant_id))
+        except Exception as _e:
+            logger.warning("[SallaTest] Could not queue initial sync: %s", _e)
 
     success_url = f"{_SALLA_APP}?salla_connected=true&name={urllib.parse.quote(store_name)}"
     return RedirectResponse(url=success_url, status_code=302)

@@ -102,14 +102,16 @@ def _normalise_order(raw: Any) -> Dict:
 def _normalise_coupon(raw: Any) -> Dict:
     if hasattr(raw, "dict"):
         raw = raw.dict()
+    discount_val = raw.get("amount", raw.get("percent", raw.get("value", "")))
+    status = raw.get("status", "active")
     return {
         "code":           raw.get("code", ""),
         "description":    raw.get("description", raw.get("name", "")),
         "discount_type":  raw.get("type", raw.get("discount_type", "percentage")),
-        "discount_value": str(raw.get("value", raw.get("discount_value", ""))),
-        "expires_at":     raw.get("expires_at", raw.get("expire_date", None)),
-        "active":         raw.get("active", raw.get("enabled", True)),
-        "minimum_order":  raw.get("minimum_order", None),
+        "discount_value": str(discount_val) if discount_val else "",
+        "expires_at":     raw.get("expire_date", raw.get("expiry_date", raw.get("expires_at", None))),
+        "active":         status == "active" if isinstance(status, str) else raw.get("active", True),
+        "minimum_order":  raw.get("minimum_amount", raw.get("minimum_order", None)),
         "maximum_uses":   raw.get("maximum_uses", None),
     }
 

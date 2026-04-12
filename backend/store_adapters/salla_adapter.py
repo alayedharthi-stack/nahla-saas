@@ -133,6 +133,12 @@ class SallaAdapter(BaseStoreAdapter):
                 headers=self._headers(),
                 json=body,
             )
+            if resp.status_code == 401 and await self._refresh_access_token():
+                resp = await client.post(
+                    f"{SALLA_API_BASE}{path}",
+                    headers=self._headers(),
+                    json=body,
+                )
             resp.raise_for_status()
             return resp.json()
 
@@ -141,10 +147,23 @@ class SallaAdapter(BaseStoreAdapter):
 
     # ── Products ───────────────────────────────────────────────────────────────
 
+    async def _get_all_pages(self, path: str, per_page: int = 50, max_pages: int = 10) -> List[Dict[str, Any]]:
+        """Fetch all pages from a paginated Salla endpoint."""
+        all_items: List[Dict[str, Any]] = []
+        for page in range(1, max_pages + 1):
+            data = await self._get(path, {"per_page": per_page, "page": page})
+            items = data.get("data") or []
+            all_items.extend(items)
+            pagination = data.get("pagination") or data.get("meta") or {}
+            total_pages = pagination.get("totalPages", pagination.get("last_page", 1))
+            if page >= total_pages or not items:
+                break
+        return all_items
+
     async def get_products(self) -> List[NormalizedProduct]:
         try:
-            data = await self._get("/products", {"per_page": 50})
-            return [self._normalize_product(p) for p in data.get("data", [])]
+            raw_list = await self._get_all_pages("/products")
+            return [self._normalize_product(p) for p in raw_list]
         except httpx.HTTPStatusError as exc:
             self._log_error("get_products", exc)
             logger.error(f"Salla get_products HTTP error {exc.response.status_code}: {exc.response.text[:200]}")
@@ -286,10 +305,11 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_order", exc)
             raise
 
-    async def get_orders(self, limit: int = 50) -> List[NormalizedOrder]:
+    async def get_orders(self, limit: int = 500) -> List[NormalizedOrder]:
         try:
-            data = await self._get("/orders", {"per_page": min(limit, 50)})
-            return [self._normalize_order(o, None) for o in data.get("data", [])]
+            max_pages = max(1, limit // 50)
+            raw_list = await self._get_all_pages("/orders", per_page=50, max_pages=max_pages)
+            return [self._normalize_order(o, None) for o in raw_list]
         except Exception as exc:
             self._log_error("get_orders", exc)
             return []
@@ -380,11 +400,11 @@ class SallaAdapter(BaseStoreAdapter):
 
     # ── Customers ──────────────────────────────────────────────────────────────
 
-    async def get_customers(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Fetch customers from Salla and return raw dicts."""
+    async def get_customers(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Fetch all customers from Salla across all pages."""
         try:
-            data = await self._get("/customers", {"per_page": min(limit, 50)})
-            return data.get("data") or []
+            max_pages = max(1, limit // 50)
+            return await self._get_all_pages("/customers", per_page=50, max_pages=max_pages)
         except Exception as exc:
             self._log_error("get_customers", exc)
             return []
@@ -392,10 +412,9 @@ class SallaAdapter(BaseStoreAdapter):
     # ── Offers / Coupons ──────────────────────────────────────────────────────
 
     async def get_coupons(self) -> List[Dict[str, Any]]:
-        """Return raw coupon dicts from Salla (used by sync_coupons)."""
+        """Return raw coupon dicts from Salla across all pages."""
         try:
-            data = await self._get("/coupons", {"per_page": 50})
-            return data.get("data") or []
+            return await self._get_all_pages("/coupons", per_page=50, max_pages=5)
         except Exception as exc:
             self._log_error("get_coupons", exc)
             return []
@@ -409,20 +428,28 @@ class SallaAdapter(BaseStoreAdapter):
     ) -> Optional[Dict[str, Any]]:
         """Create a coupon in Salla. Returns the created coupon data or None."""
         from datetime import timedelta
+        start = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         expiry = (datetime.now(timezone.utc) + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
-        salla_type = "PERCENT" if discount_type == "percentage" else "FIXED"
         payload = {
             "code": code,
-            "type": salla_type,
-            "percent_off": discount_value if salla_type == "PERCENT" else 0,
-            "amount_off": discount_value if salla_type == "FIXED" else 0,
-            "status": "active",
+            "type": discount_type,
+            "amount": discount_value,
+            "free_shipping": False,
+            "start_date": start,
             "expiry_date": expiry,
+            "exclude_sale_products": False,
         }
         try:
             data = await self._post("/coupons", payload)
             logger.info("Salla coupon created: %s | tenant=%s", code, self._tenant_id)
             return data.get("data", data)
+        except httpx.HTTPStatusError as exc:
+            self._log_error("create_coupon", exc)
+            logger.error(
+                "Salla create_coupon HTTP %s: %s",
+                exc.response.status_code, exc.response.text[:300],
+            )
+            return None
         except Exception as exc:
             self._log_error("create_coupon", exc)
             return None
