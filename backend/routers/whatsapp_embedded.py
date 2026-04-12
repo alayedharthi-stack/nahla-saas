@@ -79,7 +79,12 @@ def _resolve_register_pin(conn: "WhatsAppConnection") -> str:
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def resolve_tenant_id(request: Request) -> int:
-    tid = request.headers.get("X-Tenant-ID") or request.state.__dict__.get("tenant_id")
+    """Extract tenant_id from the authenticated session (JWT middleware).
+
+    Priority: request.state (set by auth middleware) > X-Tenant-ID header.
+    Never reads from query params, cookies, or callback data.
+    """
+    tid = request.state.__dict__.get("tenant_id") or request.headers.get("X-Tenant-ID")
     if not tid:
         raise HTTPException(status_code=401, detail="tenant_id مفقود")
     return int(tid)
@@ -803,7 +808,7 @@ async def exchange_code(
     # 4 — List phone numbers
     phones = await _get_phone_numbers(waba_id, user_token)
 
-    # 5 — Upsert WhatsAppConnection
+    # 5 — Upsert WhatsAppConnection (keyed by phone_number_id when possible)
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn:
         conn = WhatsAppConnection(tenant_id=tenant_id)
@@ -813,13 +818,7 @@ async def exchange_code(
     conn.access_token                 = user_token
     conn.token_type                   = long_data.get("token_type") or token_data.get("token_type", "user")
     conn.connection_type              = "embedded"
-    conn.status                       = "pending"   # waiting for phone selection
-    conn.phone_number_id              = None
-    conn.phone_number                 = None
-    conn.business_display_name        = None
     conn.sending_enabled              = False
-    conn.connected_at                 = None
-    conn.last_verified_at             = None
     conn.last_error                   = None
     conn.extra_metadata               = {}
 
@@ -838,6 +837,35 @@ async def exchange_code(
         expires_at=expires_at,
     )
 
+    # ── Auto-select when exactly one phone exists ─────────────────────────
+    if len(phones) == 1:
+        auto_phone = phones[0]
+        auto_pid = auto_phone["id"]
+
+        db.query(WhatsAppConnection).filter(
+            WhatsAppConnection.phone_number_id == auto_pid,
+            WhatsAppConnection.tenant_id != tenant_id,
+        ).update({"phone_number_id": None, "status": "disconnected", "sending_enabled": False})
+
+        conn.phone_number_id       = auto_pid
+        conn.phone_number          = auto_phone.get("display_phone_number", "")
+        conn.business_display_name = auto_phone.get("verified_name", "")
+        conn.status                = "pending"
+        db.commit()
+
+        logger.info(
+            "[EmbeddedSignup] exchange OK — auto-select tenant=%s waba=%s phone_id=%s",
+            tenant_id, waba_id, auto_pid,
+        )
+        return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+
+    # ── Multiple phones or none → return list for manual selection ─────────
+    conn.status           = "pending"
+    conn.phone_number_id  = None
+    conn.phone_number     = None
+    conn.business_display_name = None
+    conn.connected_at     = None
+    conn.last_verified_at = None
     db.commit()
 
     logger.info(

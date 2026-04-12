@@ -982,30 +982,18 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
     Falls back to tenant settings for backward compatibility.
     """
     from models import WhatsAppConnection  # noqa: PLC0415
-    from core.config import WA_BUSINESS_ACCOUNT_ID  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
 
-    # ── Prefer WhatsAppConnection row (most reliable source) ──────────────────
+    # ── Source of truth: WhatsAppConnection row for this tenant ───────────────
     wa_conn = (
         db.query(WhatsAppConnection)
-        .filter(
-            WhatsAppConnection.tenant_id == tenant_id,
-            WhatsAppConnection.status == "connected",
-        )
+        .filter_by(tenant_id=tenant_id)
         .first()
     )
 
     sync_conn = wa_conn
-    if wa_conn and wa_conn.whatsapp_business_account_id:
-        waba_id = wa_conn.whatsapp_business_account_id
-    else:
-        # Fallback to tenant settings
-        settings = get_or_create_settings(db, tenant_id)
-        db.commit()
-        wa    = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-        waba_id = wa.get("waba_id", "") or WA_BUSINESS_ACCOUNT_ID
-        sync_conn = wa_conn
+    waba_id = (wa_conn.whatsapp_business_account_id if wa_conn else None) or ""
 
     if not waba_id:
         return {

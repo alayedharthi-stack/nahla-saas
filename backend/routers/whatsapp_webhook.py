@@ -28,7 +28,7 @@ from fastapi.responses import PlainTextResponse
 
 from models import WhatsAppConnection
 
-from core.config import ANTHROPIC_API_KEY, CLAUDE_MODEL, ORCHESTRATOR_URL, WA_PHONE_ID, WA_VERIFY_TOKEN
+from core.config import ANTHROPIC_API_KEY, CLAUDE_MODEL, ORCHESTRATOR_URL, WA_VERIFY_TOKEN
 from core.conversation_engine import (
     # Actions
     DETERMINISTIC_ACTIONS,
@@ -145,8 +145,6 @@ async def _dispatch_message(
         phone_number_id, sender, msg_id, msg_type,
     )
 
-    # NEVER fall back to WA_PHONE_ID — that would route the message to the wrong tenant.
-    # If phone_number_id is missing from the webhook metadata, drop the message.
     if not phone_number_id:
         logger.error(
             "[Webhook] DROPPED — phone_number_id missing from metadata. "
@@ -161,45 +159,26 @@ async def _dispatch_message(
         logger.error("[Engine] Cannot open DB session for phone=%s", sender)
         return
 
-    # ── Resolve tenant + verified phone_number_id from DB ────────────────────
-    # Look up by the phone_number_id that RECEIVED the message.
-    # Prefer merchant tenants (tenant_id > 1) over the platform admin tenant,
-    # and prefer status='connected' over pending states.
-    from sqlalchemy import case as _case  # noqa: PLC0415
+    # ── Resolve tenant from phone_number_id (unique global key) ──────────────
     wa_conn = (
         db.query(WhatsAppConnection)
-        .filter(WhatsAppConnection.phone_number_id == phone_number_id)
-        .order_by(
-            # connected status first
-            _case((WhatsAppConnection.status == "connected", 0), else_=1),
-            # merchant tenants before admin (tenant_id=1)
-            _case((WhatsAppConnection.tenant_id == 1, 1), else_=0),
-        )
+        .filter_by(phone_number_id=phone_number_id)
         .first()
     )
 
-    if wa_conn:
-        # Use the DB-stored phone_number_id (verified) — not the raw webhook value
-        used_pid            = wa_conn.phone_number_id
-        resolved_tenant_id  = wa_conn.tenant_id
-        logger.info(
-            "[TRACE][2/6] TENANT_RESOLVED | webhook_phone_id=%s db_phone_id=%s tenant_id=%s",
-            phone_number_id, used_pid, resolved_tenant_id,
-        )
-        # Guard: mismatch between webhook phone_id and DB phone_id
-        if phone_number_id != used_pid:
-            logger.critical(
-                "[TRACE] MISMATCH DETECTED | webhook_phone_id=%s != db_phone_id=%s — DROPPING",
-                phone_number_id, used_pid,
-            )
-            return
-    else:
-        # No connected tenant found for this phone_number_id — drop message
+    if not wa_conn:
         logger.warning(
             "[Webhook] DROPPED — no WhatsAppConnection for phone_number_id=%s from=%s",
             phone_number_id, sender,
         )
         return
+
+    used_pid           = wa_conn.phone_number_id
+    resolved_tenant_id = wa_conn.tenant_id
+    logger.info(
+        "[TRACE][2/6] TENANT_RESOLVED | phone_number_id=%s tenant_id=%s status=%s",
+        used_pid, resolved_tenant_id, wa_conn.status,
+    )
 
     # ── Handle interactive button replies ──────────────────────────────────────
     if msg_type == "interactive":

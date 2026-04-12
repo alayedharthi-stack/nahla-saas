@@ -41,11 +41,16 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlah.ai>")
 DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlah.ai")
 
-# WhatsApp Business (Meta Cloud API — platform-level, not per-tenant)
+# WhatsApp Business (Meta Cloud API)
+# WA_TOKEN: platform-level token used as fallback by token_manager and for
+#   platform notifications (wa_notify.py).  NOT used for per-tenant operations.
 WA_TOKEN           = os.environ.get("WHATSAPP_TOKEN", "")
-WA_PHONE_ID        = os.environ.get("PHONE_NUMBER_ID", "100253985293107")
+# WA_PHONE_ID: Nahla's own phone — only for platform-to-merchant notifications.
+WA_PHONE_ID        = os.environ.get("PHONE_NUMBER_ID", "")
 WA_VERIFY_TOKEN    = os.environ.get("WHATSAPP_VERIFY_TOKEN", "nahla2025")
-WA_BUSINESS_ACCOUNT_ID = os.environ.get("WA_BUSINESS_ACCOUNT_ID", "1650794559682412")
+# WA_BUSINESS_ACCOUNT_ID: kept for the legacy "direct" connection flow only.
+# Embedded Signup tenants use their own WABA stored in whatsapp_connections.
+WA_BUSINESS_ACCOUNT_ID = os.environ.get("WA_BUSINESS_ACCOUNT_ID", "")
 
 # ── Salla OAuth ────────────────────────────────────────────────────────────────
 SALLA_CLIENT_ID      = os.environ.get("SALLA_CLIENT_ID", "")
