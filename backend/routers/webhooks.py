@@ -189,7 +189,8 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         logger.warning("[Salla Webhook] Integration lookup error: %s", _e)
 
     if existing_integration:
-        # Update tokens for existing integration
+        from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
+
         tenant_id = existing_integration.tenant_id
         new_cfg = dict(existing_integration.config or {})
         new_cfg.update({
@@ -199,10 +200,11 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
             "store_name":    store_name,
             "connected_at":  datetime.now(timezone.utc).isoformat(),
         })
-        existing_integration.config  = new_cfg
-        existing_integration.enabled = True
+        claim_store_for_tenant(
+            db, store_id=salla_store_id, tenant_id=tenant_id, new_config=new_cfg,
+        )
         db.commit()
-        logger.info("[Salla Webhook] Updated existing integration | tenant=%s", tenant_id)
+        logger.info("[Salla Webhook] Updated existing integration via guard | tenant=%s", tenant_id)
         return
 
     # ── No existing integration: auto-create a new Nahla merchant account ─────
@@ -262,17 +264,30 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
 
 def _disable_salla_integration(db, store_id: str) -> None:
     """Disable integration when app is uninstalled."""
-    from models import Integration, Tenant
-    tenant = db.query(Tenant).filter(Tenant.salla_store_id == store_id).first()
-    if tenant:
-        integration = db.query(Integration).filter(
-            Integration.tenant_id == tenant.id,
-            Integration.provider  == "salla",
-        ).first()
-        if integration:
-            integration.enabled = False
-            db.commit()
-            logger.info("Salla integration disabled | store=%s", store_id)
+    from models import Integration  # noqa: PLC0415
+
+    sid = str(store_id)
+    integrations = db.query(Integration).filter(
+        Integration.provider == "salla",
+        Integration.config["store_id"].astext == sid,
+    ).all()
+
+    for intg in integrations:
+        intg.enabled = False
+        cfg = dict(intg.config or {})
+        cfg.pop("api_key", None)
+        cfg.pop("refresh_token", None)
+        cfg["uninstalled_at"] = datetime.now(timezone.utc).isoformat()
+        intg.config = cfg
+        logger.info(
+            "[Salla Webhook] Integration DISABLED (app.uninstalled) | tenant=%s store_id=%s",
+            intg.tenant_id, sid,
+        )
+
+    if integrations:
+        db.commit()
+    else:
+        logger.warning("[Salla Webhook] app.uninstalled — no integration found for store_id=%s", sid)
 
 
 # ── Moyasar payment webhook ───────────────────────────────────────────────────
