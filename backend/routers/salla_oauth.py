@@ -308,6 +308,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 Integration.provider  == "salla",
             ).first()
 
+            from services.salla_guard import has_valid_tokens as _has_tokens  # noqa: PLC0415
+
             now_iso = datetime.now(timezone.utc).isoformat()
             if integration:
                 cfg = dict(integration.config or {})
@@ -317,12 +319,10 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     "last_seen":  now_iso,
                 })
                 integration.config = cfg
-                has_tokens = bool(cfg.get("api_key") and cfg.get("refresh_token"))
-                if has_tokens:
-                    integration.enabled = True
+                integration.enabled = _has_tokens(integration)
                 logger.info(
-                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s has_tokens=%s",
-                    tenant_id, merchant_id_str, has_tokens,
+                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s enabled=%s (has_tokens=%s)",
+                    tenant_id, merchant_id_str, integration.enabled, _has_tokens(integration),
                 )
             else:
                 db.add(Integration(
@@ -337,7 +337,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     enabled = False,
                 ))
                 logger.info(
-                    "[SallaLogin]    Integration CREATED (disabled until OAuth) | tenant=%s store_id=%s",
+                    "[SallaLogin]    Integration CREATED (disabled — awaiting OAuth) | tenant=%s store_id=%s",
                     tenant_id, merchant_id_str,
                 )
 
@@ -1208,6 +1208,8 @@ async def salla_oauth_callback(
         )
 
     try:
+        from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
+
         new_config = {
             "api_key":       access_token,
             "refresh_token": refresh_token,
@@ -1220,49 +1222,26 @@ async def salla_oauth_callback(
             "connected_at":  datetime.now(timezone.utc).isoformat(),
         }
 
-        # Revoke stale integrations: same store on OTHER tenants lose their
-        # tokens because Salla invalidates old tokens on re-auth.
         if salla_store_id:
-            stale = (
-                db.query(Integration)
-                .filter(
-                    Integration.provider == "salla",
-                    Integration.tenant_id != tenant_id,
-                    Integration.config["store_id"].astext == str(salla_store_id),
-                )
-                .all()
-            )
-            for s in stale:
-                s.enabled = False
-                stale_cfg = dict(s.config or {})
-                stale_cfg.pop("api_key", None)
-                stale_cfg.pop("refresh_token", None)
-                stale_cfg["revoked_reason"] = f"re-authed under tenant {tenant_id}"
-                s.config = stale_cfg
-                logger.warning(
-                    "[Salla OAuth] ⚠️ Disabled stale integration id=%s tenant=%s (same store_id=%s)",
-                    s.id, s.tenant_id, salla_store_id,
-                )
-
-        integration = db.query(Integration).filter(
-            Integration.tenant_id == tenant_id,
-            Integration.provider  == "salla",
-        ).first()
-
-        if integration:
-            integration.config  = new_config
-            integration.enabled = True
-            logger.info("[Salla OAuth] ✅ Updated existing Integration id=%s", integration.id)
-        else:
-            new_integ = Integration(
+            claim_store_for_tenant(
+                db,
+                store_id=salla_store_id,
                 tenant_id=tenant_id,
-                provider="salla",
-                config=new_config,
-                enabled=True,
+                new_config=new_config,
             )
-            db.add(new_integ)
-            db.flush()
-            logger.info("[Salla OAuth] ✅ Created new Integration id=%s", new_integ.id)
+        else:
+            integration = db.query(Integration).filter(
+                Integration.tenant_id == tenant_id,
+                Integration.provider  == "salla",
+            ).first()
+            if integration:
+                integration.config  = new_config
+                integration.enabled = True
+            else:
+                db.add(Integration(
+                    tenant_id=tenant_id, provider="salla",
+                    config=new_config, enabled=True,
+                ))
 
         db.commit()
         logger.info(
@@ -1509,15 +1488,14 @@ async def salla_test_oauth_callback(
         logger.exception("[SallaTest] Unexpected error: %s", exc)
         return RedirectResponse(url=_error_url("network_error"), status_code=302)
 
-    # Save / update integration in DB
+    # Save / update integration in DB — same guard as production callback
     try:
         from datetime import datetime, timezone  # noqa: PLC0415
+        from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
+
         if tenant_id:
             get_or_create_tenant(db, tenant_id)
-        integration = db.query(Integration).filter(
-            Integration.tenant_id == (tenant_id or 0),
-            Integration.provider  == "salla",
-        ).first()
+
         cfg = {
             "api_key":       access_token,
             "refresh_token": refresh_token,
@@ -1528,17 +1506,29 @@ async def salla_test_oauth_callback(
             "connected_at":  datetime.now(timezone.utc).isoformat(),
             "app_type":      "test",
         }
-        if integration:
-            integration.config  = cfg
-            integration.enabled = True
-        else:
-            integration = Integration(
-                tenant_id=tenant_id or 0,
-                provider="salla",
-                config=cfg,
-                enabled=True,
+
+        effective_tenant = tenant_id or 0
+        if salla_store_id and effective_tenant:
+            claim_store_for_tenant(
+                db,
+                store_id=salla_store_id,
+                tenant_id=effective_tenant,
+                new_config=cfg,
             )
-            db.add(integration)
+        else:
+            integration = db.query(Integration).filter(
+                Integration.tenant_id == effective_tenant,
+                Integration.provider  == "salla",
+            ).first()
+            if integration:
+                integration.config  = cfg
+                integration.enabled = True
+            else:
+                db.add(Integration(
+                    tenant_id=effective_tenant, provider="salla",
+                    config=cfg, enabled=True,
+                ))
+
         db.commit()
         logger.info("[SallaTest] Integration saved | tenant=%s store=%s", tenant_id, salla_store_id)
     except Exception as exc:

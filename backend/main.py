@@ -255,6 +255,19 @@ async def on_startup() -> None:
                 END $$""",
                 "SELECT setval('tenants_id_seq', COALESCE((SELECT MAX(id) FROM tenants), 1), EXISTS (SELECT 1 FROM tenants))",
                 "SELECT setval('users_id_seq', COALESCE((SELECT MAX(id) FROM users), 1), EXISTS (SELECT 1 FROM users))",
+                # ── Salla: one active binding per store_id (migration 0020) ────
+                """DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_indexes
+                        WHERE indexname = 'uq_salla_active_store'
+                    ) THEN
+                        CREATE UNIQUE INDEX uq_salla_active_store
+                        ON integrations ((config->>'store_id'))
+                        WHERE provider = 'salla'
+                          AND enabled = true
+                          AND config->>'store_id' IS NOT NULL;
+                    END IF;
+                END $$""",
             ]
             for stmt in safe_alters:
                 try:

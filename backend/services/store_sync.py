@@ -675,6 +675,19 @@ class StoreSyncService:
             incremental: if True, only fetch items updated since last full sync.
                          First sync is always full regardless of this flag.
         """
+        # ── Pre-sync guard: refuse if binding is invalid ──────────────────
+        try:
+            from services.salla_guard import validate_before_sync  # noqa: PLC0415
+            ok, reason = validate_before_sync(self.db, self.tenant_id)
+            if not ok:
+                logger.warning(
+                    "tenant=%s ⛔ SYNC_BLOCKED — %s (triggered_by=%s)",
+                    self.tenant_id, reason, triggered_by,
+                )
+                return {"status": "blocked", "message": reason}
+        except Exception as guard_exc:
+            logger.warning("tenant=%s salla_guard check failed (non-fatal): %s", self.tenant_id, guard_exc)
+
         has_previous = self._last_sync_timestamp() is not None
         is_incremental = incremental and has_previous
 
