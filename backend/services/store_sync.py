@@ -390,18 +390,19 @@ class StoreSyncService:
             return 0
 
         updated_since = None
-        if incremental:
+        has_local_orders = self.db.query(Order).filter(Order.tenant_id == self.tenant_id).first() is not None
+        if incremental and has_local_orders:
             updated_since = self._last_sync_timestamp()
 
         try:
             raw_list = await adapter.get_orders(updated_since=updated_since)
         except Exception as exc:
             logger.warning("tenant=%s orders sync failed: %s", self.tenant_id, exc)
-            return 0
+            raise
 
         logger.info(
             "tenant=%s syncing %d orders (incremental=%s, since=%s)",
-            self.tenant_id, len(raw_list), incremental, updated_since or "beginning",
+            self.tenant_id, len(raw_list), incremental and has_local_orders, updated_since or "beginning",
         )
 
         created = 0

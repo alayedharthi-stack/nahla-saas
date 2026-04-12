@@ -15,6 +15,7 @@ import {
   AutomationType,
   AUTOMATION_META,
 } from '../api/automations'
+import { autopilotApi } from '../api/autopilot'
 
 // ── Template variable map panel ───────────────────────────────────────────────
 
@@ -448,11 +449,19 @@ export default function SmartAutomations() {
     setLoading(true)
     setError(null)
     try {
-      const data = await automationsApi.list()
+      const [data, autopilotStatus] = await Promise.all([
+        automationsApi.list(),
+        autopilotApi.status(),
+      ])
       setAutomations(data.automations)
-      setAutopilot(data.autopilot_enabled)
-    } catch {
-      setError('تعذّر تحميل بيانات الأتمتة. يرجى المحاولة مرة أخرى.')
+      setAutopilot(Boolean(autopilotStatus.settings.enabled))
+    } catch (e) {
+      const message = e instanceof Error ? e.message : ''
+      if (message.includes('402') || message.includes('خطة نحلة') || message.includes('التجربة')) {
+        setError(message)
+      } else {
+        setError('تعذّر تحميل بيانات الأتمتة. يرجى المحاولة مرة أخرى.')
+      }
     } finally {
       setLoading(false)
     }
@@ -464,10 +473,13 @@ export default function SmartAutomations() {
     setAutopilot(next)
     setAutopilotLoading(true)
     try {
-      const res = await automationsApi.setAutopilot(next)
-      setAutopilot(res.autopilot_enabled)
-    } catch {
+      const res = await autopilotApi.save({ enabled: next })
+      setAutopilot(Boolean(res.settings.enabled))
+      setError(null)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'تعذّر تحديث حالة الطيار الآلي.'
       setAutopilot(!next)
+      setError(message)
     } finally {
       setAutopilotLoading(false)
     }

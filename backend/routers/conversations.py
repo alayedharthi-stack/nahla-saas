@@ -82,14 +82,18 @@ def _get_or_create_conversation(
     else:
         meta = dict(convo.extra_metadata or {})
         meta["customer_phone"] = customer_phone
+        meta["phone"] = customer_phone
         convo.extra_metadata = meta
+    if not convo.extra_metadata:
+        convo.extra_metadata = {"customer_phone": customer_phone, "phone": customer_phone}
     return convo
 
 
 def _resolve_customer_phone(convo: Conversation) -> str:
     if convo.customer and convo.customer.phone:
         return str(convo.customer.phone)
-    return str((convo.extra_metadata or {}).get("customer_phone") or "")
+    meta = convo.extra_metadata or {}
+    return str(meta.get("customer_phone") or meta.get("phone") or "")
 
 
 @router.get("")

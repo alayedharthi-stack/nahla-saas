@@ -35,7 +35,7 @@ from models import (  # noqa: E402
     TenantSettings,
 )
 
-from core.billing import require_subscription
+from core.billing import require_billing_access
 from core.database import get_db
 from core.tenant import (
     DEFAULT_AI,
@@ -244,17 +244,18 @@ def _auto_to_dict(a: SmartAutomation) -> Dict[str, Any]:
 
 
 def _get_autopilot_enabled(db: Session, tenant_id: int) -> bool:
-    settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).first()
-    if not settings:
-        return False
-    ai = merge_defaults(settings.ai_settings, DEFAULT_AI)
-    return bool(ai.get("autopilot_enabled", False))
+    return bool(_get_autopilot_settings(db, tenant_id).get("enabled", False))
 
 
 def _get_autopilot_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
     """Read autopilot config from TenantSettings.extra_metadata."""
     settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).first()
     stored: Dict[str, Any] = {}
+    legacy_enabled: Optional[bool] = None
+    if settings and settings.ai_settings:
+        legacy_ai = merge_defaults(settings.ai_settings, DEFAULT_AI)
+        if "autopilot_enabled" in legacy_ai:
+            legacy_enabled = bool(legacy_ai.get("autopilot_enabled"))
     if settings and settings.extra_metadata:
         stored = settings.extra_metadata.get("autopilot", {})
     merged = dict(DEFAULT_AUTOPILOT)
@@ -265,15 +266,22 @@ def _get_autopilot_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
                 base = dict(DEFAULT_AUTOPILOT[sub])
                 base.update(stored[sub])
                 merged[sub] = base
+    elif legacy_enabled is not None:
+        merged["enabled"] = legacy_enabled
+    if legacy_enabled is not None and "enabled" not in stored:
+        merged["enabled"] = legacy_enabled
     return merged
 
 
 def _save_autopilot_settings(db: Session, tenant_id: int, autopilot: Dict[str, Any]) -> None:
-    """Persist autopilot config to TenantSettings.extra_metadata."""
+    """Persist autopilot config and keep legacy ai_settings in sync."""
     settings = get_or_create_settings(db, tenant_id)
     extra: Dict[str, Any] = dict(settings.extra_metadata or {})
     extra["autopilot"] = autopilot
     settings.extra_metadata = extra
+    ai = merge_defaults(settings.ai_settings, DEFAULT_AI)
+    ai["autopilot_enabled"] = bool(autopilot.get("enabled", False))
+    settings.ai_settings = ai
     settings.updated_at = datetime.now(timezone.utc)
 
 
@@ -583,13 +591,13 @@ async def set_autopilot(
 ):
     """Enable/disable the Marketing Autopilot master switch."""
     tenant_id = resolve_tenant_id(request)
-    settings = get_or_create_settings(db, tenant_id)
-    current = merge_defaults(settings.ai_settings, DEFAULT_AI)
-    current["autopilot_enabled"] = body.enabled
-    settings.ai_settings = current
-    settings.updated_at = datetime.now(timezone.utc)
+    if body.enabled:
+        require_billing_access(db, int(tenant_id))
+    current = _get_autopilot_settings(db, tenant_id)
+    current["enabled"] = body.enabled
+    _save_autopilot_settings(db, tenant_id, current)
     db.commit()
-    return {"autopilot_enabled": body.enabled}
+    return {"autopilot_enabled": bool(current["enabled"])}
 
 
 @router.post("/automations/events")
@@ -650,7 +658,7 @@ async def update_autopilot_settings(
     get_or_create_tenant(db, tenant_id)
 
     if body.enabled:
-        require_subscription(db, int(tenant_id))
+        require_billing_access(db, int(tenant_id))
 
     current = _get_autopilot_settings(db, tenant_id)
 

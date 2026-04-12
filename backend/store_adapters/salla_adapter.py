@@ -364,15 +364,24 @@ class SallaAdapter(BaseStoreAdapter):
             raise
 
     async def get_orders(self, updated_since: Optional[str] = None) -> List[NormalizedOrder]:
+        extra: Optional[Dict[str, Any]] = None
+        if updated_since:
+            date_only = str(updated_since).split("T", 1)[0]
+            extra = {"from_date": date_only}
         try:
-            extra: Optional[Dict[str, Any]] = None
-            if updated_since:
-                extra = {"updated_at_min": updated_since}
             raw_list = await self._get_all_pages("/orders", label="orders", extra_params=extra)
             return [self._normalize_order(o, None) for o in raw_list]
+        except httpx.HTTPStatusError as exc:
+            self._log_error("get_orders", exc)
+            logger.error(
+                "Salla get_orders HTTP error %s: %s",
+                exc.response.status_code,
+                exc.response.text[:300],
+            )
+            raise
         except Exception as exc:
             self._log_error("get_orders", exc)
-            return []
+            raise
 
     async def get_customer_orders(self, customer_phone: str) -> List[NormalizedOrder]:
         try:

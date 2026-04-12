@@ -407,15 +407,30 @@ async def _handle_merchant_message(
     """
     logger.info("[Merchant] tenant=%s from=%s text_snippet=%s", tenant_id, to, text[:60])
 
-    if not ANTHROPIC_API_KEY:
-        logger.error("[Merchant] No ANTHROPIC_API_KEY — cannot generate reply")
-        return
-
     try:
         from core.store_knowledge import build_ai_context  # noqa: PLC0415
+        from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
 
-        # Load store context for this merchant
-        store_context = build_ai_context(db, tenant_id, customer_phone=to, product_query=text)
+        # Create/update the visible dashboard conversation first so inbound
+        # messages appear even if AI generation or sending fails later.
+        convo = _get_or_create_conversation(db, tenant_id, to)
+        convo.status = "active"
+        convo.is_human_handoff = False
+        convo.paused_by_human = False
+        db.add(convo)
+        db.flush()
+
+        # Persist inbound immediately for inbox visibility and history continuity.
+        StateManager.save_message(db, to, text, "inbound", conversation_id=convo.id, tenant_id=tenant_id)
+
+        # Keep a lightweight state row in sync with the same phone key used by history.
+        state = StateManager.load(db, phone=to, tenant_id=tenant_id)
+        state.turn += 1
+        state.stage = "active"
+        StateManager.save(db, state, tenant_id=tenant_id)
+
+        # Load store context for this merchant.
+        store_context_text = build_ai_context(db, tenant_id, customer_phone=to, product_query=text)
 
         # Load recent conversation history for continuity
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
@@ -439,7 +454,7 @@ async def _handle_merchant_message(
 
 استخدم المعلومات التالية للإجابة بدقة — لا تخترع معلومات خارجها:
 
-{store_context}
+{store_context_text}
 
 تعليمات:
 - أجب باختصار وبوضوح
@@ -454,22 +469,46 @@ async def _handle_merchant_message(
         if history_transcript:
             full_prompt += f"\n\nسجل المحادثة الأخيرة:\n{history_transcript}"
 
-        payload = generate_ai_reply(
-            tenant_id=tenant_id,
-            customer_phone=to,
-            message=text,
-            store_name=store_context.get("store_name", ""),
-            channel="whatsapp",
-            locale="ar",
-            context_metadata=store_context,
-            prompt_overrides={"__full_system_prompt": full_prompt},
-            provider_hint="anthropic",
-        )
-        reply = payload.reply_text.strip() or "كيف أقدر أساعدك؟"
+        if not ANTHROPIC_API_KEY:
+            logger.error("[Merchant] No ANTHROPIC_API_KEY — using fallback reply")
+            reply = "وصلت رسالتك بنجاح. فريق المتجر أو المساعد الذكي سيراجع طلبك ويعود إليك قريبًا."
+        else:
+            payload = generate_ai_reply(
+                tenant_id=tenant_id,
+                customer_phone=to,
+                message=text,
+                store_name="",
+                channel="whatsapp",
+                locale="ar",
+                context_metadata={"store_context": store_context_text},
+                prompt_overrides={"__full_system_prompt": full_prompt},
+                provider_hint="anthropic",
+            )
+            reply = payload.reply_text.strip() or "كيف أقدر أساعدك؟"
 
-        # Save messages to history
-        StateManager.save_message(db, to, text,  "inbound",  tenant_id=tenant_id)
-        StateManager.save_message(db, to, reply, "outbound", tenant_id=tenant_id)
+        # Save outbound reply after generation.
+        StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)
+
+        latency_ms = 0
+        try:
+            ObservabilityLogger.log(db, TurnLog(
+                phone=to,
+                turn=max(int(getattr(state, "turn", 1) or 1), 1),
+                raw_message=text,
+                detected_intent="merchant_store_ai",
+                confidence=1.0,
+                extracted_slots=[],
+                stage_before="merchant",
+                stage_after="merchant",
+                stage_transition=None,
+                decision="GENERATE_AI_REPLY",
+                decision_reason="merchant_whatsapp_inbound",
+                ai_called=True,
+                response_text=reply,
+                latency_ms=latency_ms,
+            ), tenant_id=tenant_id)
+        except Exception:
+            pass
 
         await _send_whatsapp_message(
             phone_id=phone_id, to=to, text=reply,
