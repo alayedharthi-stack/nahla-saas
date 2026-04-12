@@ -32,10 +32,17 @@ from core.config import (
     META_APP_SECRET,
     META_GRAPH_API_VERSION,
     META_WA_CONFIG_ID,
-    WA_TOKEN,
 )
 from core.database import get_db
 from database.models import WhatsAppConnection
+from services.whatsapp_platform.service import graph_get_with_context, graph_post_with_context
+from services.whatsapp_platform.token_manager import (
+    get_oauth_session_state as _shared_get_oauth_session_state,
+    get_token_candidates,
+    get_token_for_operation,
+    persist_token_context,
+    update_token_state as _shared_update_token_state,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/whatsapp/embedded", tags=["whatsapp-embedded"])
@@ -160,63 +167,27 @@ def _update_oauth_state(
     debug_info: Optional[Dict[str, Any]] = None,
     expires_at: Optional[datetime] = None,
 ) -> None:
-    """Persist OAuth session health separately from phone connection state."""
-    meta = dict(conn.extra_metadata or {})
-    meta["oauth_session_status"] = status
-    meta["oauth_session_needs_reauth"] = status in {"expired", "invalid", "missing"}
-    meta["last_token_check_at"] = datetime.now(timezone.utc).isoformat()
-    if token_source is not None:
-        meta["active_graph_token_source"] = token_source
-    if message:
-        meta["oauth_session_message"] = message
-        meta["last_token_error"] = message
-    else:
-        meta.pop("oauth_session_message", None)
-        meta.pop("last_token_error", None)
-    if debug_info:
-        meta["oauth_debug"] = {
-            "is_valid": debug_info.get("is_valid"),
-            "expires_at": debug_info.get("expires_at"),
-            "scopes": debug_info.get("scopes"),
-            "granular_scopes": debug_info.get("granular_scopes"),
-        }
-    if expires_at is not None:
-        conn.token_expires_at = expires_at
-    conn.extra_metadata = meta
+    _shared_update_token_state(
+        conn,
+        token_source=token_source,
+        token_status="healthy" if token_source == "platform" else None,
+        token_expires_at=expires_at,
+        oauth_session_status=status,
+        oauth_session_message=message,
+        debug_info=debug_info,
+    )
 
 
 def _get_oauth_session_state(conn: Optional["WhatsAppConnection"]) -> tuple[str, Optional[str]]:
-    if not conn:
-        return "missing", None
-    meta = dict(conn.extra_metadata or {})
-    if conn.access_token and conn.token_expires_at and datetime.now(timezone.utc) > conn.token_expires_at:
-        return (
-            "expired",
-            "انتهت جلسة Meta الإدارية. الربط الحالي ما زال محفوظًا، لكن قد تحتاج إعادة التفويض لإدارة أصول Meta من داخل نحلة.",
-        )
-    status = str(meta.get("oauth_session_status") or ("healthy" if conn.access_token else "missing"))
-    return status, meta.get("oauth_session_message")
+    return _shared_get_oauth_session_state(conn)
 
 
 def _candidate_graph_tokens(
     conn: "WhatsAppConnection",
     *,
     prefer_platform: bool,
-) -> List[tuple[str, str]]:
-    candidates: List[tuple[str, str]] = []
-    if prefer_platform and WA_TOKEN:
-        candidates.append(("platform", WA_TOKEN))
-    if conn.access_token:
-        candidates.append(("merchant_oauth", conn.access_token))
-    if not prefer_platform and WA_TOKEN:
-        candidates.append(("platform", WA_TOKEN))
-    deduped: List[tuple[str, str]] = []
-    seen: set[str] = set()
-    for source, token in candidates:
-        if token and token not in seen:
-            deduped.append((source, token))
-            seen.add(token)
-    return deduped
+):
+    return get_token_candidates(conn, prefer_platform=prefer_platform)
 
 
 async def _get_waba_id_from_token(token: str) -> str:
@@ -365,48 +336,70 @@ async def _register_phone(phone_number_id: str, token: str, pin: str) -> Dict[st
 
 async def _get_phone_details_with_fallback(
     conn: "WhatsAppConnection",
+    db: Session,
+    phone_number_id: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Optional[str]]:
     """Fetch live phone state using OAuth token first, then platform token if needed."""
     last_data: Dict[str, Any] = {}
     last_source: Optional[str] = None
-    for source, token in _candidate_graph_tokens(conn, prefer_platform=False):
-        last_source = source
-        data = await _get_phone_details(conn.phone_number_id or "", token)
+    tenant_id = getattr(conn, "tenant_id", None)
+    resolved_phone_id = phone_number_id or conn.phone_number_id or ""
+    for ctx in _candidate_graph_tokens(conn, prefer_platform=False):
+        last_source = ctx.source
+        persist_token_context(db, conn, tenant_id=tenant_id, operation="embedded.status_sync", ctx=ctx)
+        data = await graph_get_with_context(
+            ctx,
+            tenant_id=tenant_id,
+            operation="embedded.status_sync",
+            path=resolved_phone_id,
+            params={"fields": PHONE_FIELDS},
+            timeout=15,
+        )
         if "error" not in data:
-            _update_oauth_state(conn, status="healthy", token_source=source)
-            return data, source
+            _update_oauth_state(conn, status="healthy", token_source=ctx.source)
+            return data, ctx.source
         last_data = data
         err = data.get("error") or {}
-        if source == "merchant_oauth" and int(err.get("code") or 0) == 190:
+        if ctx.source == "merchant_oauth" and int(err.get("code") or 0) == 190:
             _update_oauth_state(
                 conn,
                 status="expired",
                 message=_meta_embedded_error_message(err, "انتهت صلاحية جلسة Meta."),
-                token_source=source,
+                token_source=ctx.source,
             )
     return last_data, last_source
 
 
 async def _register_phone_with_fallback(
     conn: "WhatsAppConnection",
+    db: Session,
     pin: str,
 ) -> tuple[Dict[str, Any], Optional[str]]:
     """Register the phone with the most stable token available."""
     last_data: Dict[str, Any] = {}
     last_source: Optional[str] = None
-    for source, token in _candidate_graph_tokens(conn, prefer_platform=True):
-        last_source = source
-        data = await _register_phone(conn.phone_number_id or "", token, pin)
+    tenant_id = getattr(conn, "tenant_id", None)
+    for ctx in _candidate_graph_tokens(conn, prefer_platform=True):
+        last_source = ctx.source
+        persist_token_context(db, conn, tenant_id=tenant_id, operation="embedded.phone_register", ctx=ctx)
+        data = await graph_post_with_context(
+            ctx,
+            tenant_id=tenant_id,
+            operation="embedded.phone_register",
+            path=f"{conn.phone_number_id or ''}/register",
+            json={"messaging_product": "whatsapp", "pin": pin},
+            timeout=20,
+        )
         if "error" not in data:
-            return data, source
+            return data, ctx.source
         last_data = data
         err = data.get("error") or {}
-        if source == "merchant_oauth" and int(err.get("code") or 0) == 190:
+        if ctx.source == "merchant_oauth" and int(err.get("code") or 0) == 190:
             _update_oauth_state(
                 conn,
                 status="expired",
                 message=_meta_embedded_error_message(err, "انتهت صلاحية جلسة Meta."),
-                token_source=source,
+                token_source=ctx.source,
             )
     return last_data, last_source
 
@@ -607,6 +600,8 @@ def _build_embedded_status_payload(
         "oauth_session_message": oauth_message,
         "oauth_session_needs_reauth": oauth_status in {"expired", "invalid", "missing"},
         "active_graph_token_source": meta.get("active_graph_token_source"),
+        "token_status": meta.get("token_status", "healthy" if meta.get("active_graph_token_source") == "platform" else None),
+        "token_health": meta.get("token_health", meta.get("token_status")),
     }
     if phones is not None:
         payload["phones"] = phones
@@ -626,7 +621,7 @@ async def sync_embedded_connection_from_meta(
     if not conn.phone_number_id:
         return _build_embedded_status_payload(conn)
 
-    phone_data, token_source = await _get_phone_details_with_fallback(conn)
+    phone_data, token_source = await _get_phone_details_with_fallback(conn, db)
     if "error" in phone_data:
         err = phone_data["error"]
         meta = dict(conn.extra_metadata or {})
@@ -686,7 +681,7 @@ async def sync_embedded_connection_from_meta(
     )
     if should_register:
         pin = _resolve_register_pin(conn)
-        register_data, _ = await _register_phone_with_fallback(conn, pin)
+        register_data, _ = await _register_phone_with_fallback(conn, db, pin)
         reg_error = register_data.get("error")
         if reg_error and reg_error.get("code") != 80007:
             reg_msg = reg_error.get("message", "تعذر إكمال التفعيل")
@@ -714,7 +709,7 @@ async def sync_embedded_connection_from_meta(
             db.commit()
             return _build_embedded_status_payload(conn)
 
-        refreshed, _ = await _get_phone_details_with_fallback(conn)
+        refreshed, _ = await _get_phone_details_with_fallback(conn, db)
         if "error" not in refreshed:
             phone_data = refreshed
             sync_state = _build_phone_sync_state(phone_data)
@@ -871,12 +866,10 @@ async def select_phone(
     tenant_id = resolve_tenant_id(request)
 
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    if not conn or not conn.access_token:
+    if not conn:
         raise HTTPException(status_code=400, detail="أكمل خطوة ربط حساب واتساب أولاً.")
 
-    token = conn.access_token
-
-    phone_data = await _get_phone_details(body.phone_number_id, token)
+    phone_data, _ = await _get_phone_details_with_fallback(conn, db, body.phone_number_id)
 
     if "error" in phone_data:
         raise HTTPException(
@@ -907,13 +900,21 @@ async def select_phone(
         return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
 
     # Always request OTP on first selection to confirm ownership
-    async with httpx.AsyncClient(timeout=15) as client:
-        otp_resp = await client.post(
-            f"{GRAPH}/{body.phone_number_id}/request_code",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"code_method": "SMS", "language": "ar"},
-        )
-        otp_data = otp_resp.json()
+    otp_ctx = await get_token_for_operation(
+        db,
+        conn,
+        tenant_id=tenant_id,
+        operation="embedded.request_code",
+        prefer_platform=False,
+    )
+    otp_data = await graph_post_with_context(
+        otp_ctx,
+        tenant_id=tenant_id,
+        operation="embedded.request_code",
+        path=f"{body.phone_number_id}/request_code",
+        json={"code_method": "SMS", "language": "ar"},
+        timeout=15,
+    )
 
     logger.info("[EmbeddedSignup] select-phone OTP request: %s", otp_data)
 
@@ -973,15 +974,22 @@ async def get_status(request: Request, db: Session = Depends(get_db)):
         return {"connected": False, "status": "not_connected", "phones": []}
 
     phones: List[dict] = []
-    if conn.whatsapp_business_account_id and conn.access_token and not conn.phone_number_id:
+    if conn.whatsapp_business_account_id and not conn.phone_number_id:
         try:
+            list_ctx = await get_token_for_operation(
+                db,
+                conn,
+                tenant_id=tenant_id,
+                operation="embedded.list_phones",
+                prefer_platform=False,
+            )
             phones = _serialize_phones(
-                await _get_phone_numbers(conn.whatsapp_business_account_id, conn.access_token),
+                await _get_phone_numbers(conn.whatsapp_business_account_id, list_ctx.token),
             )
         except Exception as exc:
             logger.warning("[EmbeddedSignup] status phone list fetch failed: %s", exc)
 
-    if conn.phone_number_id and conn.access_token:
+    if conn.phone_number_id:
         try:
             return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
         except Exception as exc:
@@ -1015,13 +1023,19 @@ async def add_phone(
         raise HTTPException(status_code=400, detail="لا يوجد WABA مرتبط. أكمل خطوة الربط أولاً.")
 
     waba_id = conn.whatsapp_business_account_id
-    token   = conn.access_token
+    token_ctx = await get_token_for_operation(
+        db,
+        conn,
+        tenant_id=tenant_id,
+        operation="embedded.add_phone",
+        prefer_platform=False,
+    )
 
     # Step 1 — Register the phone number with the WABA
     async with httpx.AsyncClient(timeout=20) as client:
         reg_resp = await client.post(
             f"{GRAPH}/{waba_id}/phone_numbers",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token_ctx.token}"},
             json={
                 "cc":            body.country_code,
                 "phone_number":  body.phone_number,
@@ -1051,7 +1065,7 @@ async def add_phone(
     async with httpx.AsyncClient(timeout=15) as client:
         otp_resp = await client.post(
             f"{GRAPH}/{phone_number_id}/request_code",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token_ctx.token}"},
             json={"code_method": body.code_method, "language": "ar"},
         )
         otp_data = otp_resp.json()
@@ -1102,15 +1116,20 @@ async def verify_phone(
         body.phone_number_id,
     )
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    if not conn or not conn.access_token:
+    if not conn:
         raise HTTPException(status_code=400, detail="لا يوجد اتصال نشط")
-
-    token = conn.access_token
+    token_ctx = await get_token_for_operation(
+        db,
+        conn,
+        tenant_id=tenant_id,
+        operation="embedded.verify_phone",
+        prefer_platform=False,
+    )
 
     async with httpx.AsyncClient(timeout=15) as client:
         verify_resp = await client.post(
             f"{GRAPH}/{body.phone_number_id}/verify_code",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token_ctx.token}"},
             json={"code": body.code},
         )
         verify_data = verify_resp.json()

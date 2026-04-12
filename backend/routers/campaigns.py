@@ -29,6 +29,7 @@ from core.tenant import (
     merge_defaults,
     resolve_tenant_id,
 )
+from services.whatsapp_platform.token_manager import get_token_context
 
 router = APIRouter()
 
@@ -175,14 +176,22 @@ async def update_campaign_status(
 @router.post("/campaigns/test-send")
 async def test_send(body: TestSendIn, request: Request, db: Session = Depends(get_db)):
     """Simulate sending a test message to a phone number."""
+    from models import WhatsAppConnection  # noqa: PLC0415
     tenant_id = resolve_tenant_id(request)
     settings = get_or_create_settings(db, tenant_id)
     db.commit()
     wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    if not wa.get("phone_number_id") or not wa.get("access_token"):
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    token_ctx = get_token_context(conn)
+    if not ((conn.phone_number_id if conn else None) or wa.get("phone_number_id")) or not token_ctx.token:
         return {
             "success": True,
             "simulated": True,
             "message": f"تمت المحاكاة — أرسلنا القالب '{body.template_name}' إلى {body.phone} (وضع تجريبي)",
         }
-    return {"success": True, "simulated": False, "message": f"تم إرسال رسالة اختبار إلى {body.phone}"}
+    return {
+        "success": True,
+        "simulated": False,
+        "message": f"تم إرسال رسالة اختبار إلى {body.phone}",
+        "token_status": token_ctx.token_status,
+    }

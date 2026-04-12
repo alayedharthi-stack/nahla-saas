@@ -42,6 +42,7 @@ from core.tenant import (
     merge_defaults,
     resolve_tenant_id,
 )
+from services.whatsapp_platform.token_manager import get_token_for_operation
 
 router = APIRouter()
 
@@ -556,23 +557,39 @@ def _compute_template_compatibility(
     }
 
 
-def _submit_template_to_meta(waba_id: str, token: str, body: "CreateTemplateIn") -> Optional[str]:
-    """Submit a new template to Meta Graph API. Returns the Meta template ID or None."""
+async def _submit_template_to_meta(
+    *,
+    db: Session,
+    conn: Any,
+    tenant_id: int,
+    waba_id: str,
+    name: str,
+    language: str,
+    category: str,
+    components: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Submit a new template to Meta Graph API using the operational token manager."""
     try:
         import json as _json
-        import urllib.parse
         import urllib.request
+        token_ctx = await get_token_for_operation(
+            db,
+            conn,
+            tenant_id=tenant_id,
+            operation="template_submit",
+            prefer_platform=bool(conn and getattr(conn, "connection_type", None) == "direct"),
+        )
         url = f"https://graph.facebook.com/v20.0/{waba_id}/message_templates"
         payload = _json.dumps({
-            "name": body.name,
-            "language": body.language,
-            "category": body.category,
-            "components": [c.model_dump(exclude_none=True) for c in body.components],
+            "name": name,
+            "language": language,
+            "category": category,
+            "components": components,
         }).encode()
         req = urllib.request.Request(
             url,
             data=payload,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token_ctx.token}"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -643,11 +660,18 @@ async def create_template(body: CreateTemplateIn, request: Request, db: Session 
         (wa_conn.whatsapp_business_account_id if wa_conn else None)
         or wa.get("whatsapp_business_account_id", "")
     )
-    token = WA_TOKEN or wa.get("access_token", "")
-
     meta_id = None
-    if waba_id and token:
-        meta_id = _submit_template_to_meta(waba_id, token, body)
+    if waba_id:
+        meta_id = await _submit_template_to_meta(
+            db=db,
+            conn=wa_conn,
+            tenant_id=tenant_id,
+            waba_id=waba_id,
+            name=body.name,
+            language=body.language,
+            category=body.category,
+            components=[c.model_dump(exclude_none=True) for c in body.components],
+        )
 
     tpl = WhatsAppTemplate(
         tenant_id=tenant_id,
@@ -775,9 +799,19 @@ async def generate_template(body: GenerateTemplateIn, request: Request, db: Sess
     meta_id = None
     if submission_mode == "auto_submit":
         waba_id = wa.get("whatsapp_business_account_id", "")
-        token = wa.get("access_token", "")
-        if waba_id and token:
-            meta_id = await _submit_template_to_meta(tpl.name, tpl.language, tpl.category, tpl.components or [], waba_id, token)
+        from models import WhatsAppConnection  # noqa: PLC0415
+        wa_conn = db.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id == tenant_id).first()
+        if waba_id:
+            meta_id = await _submit_template_to_meta(
+                db=db,
+                conn=wa_conn,
+                tenant_id=tenant_id,
+                waba_id=waba_id,
+                name=tpl.name,
+                language=tpl.language,
+                category=tpl.category,
+                components=tpl.components or [],
+            )
             if meta_id:
                 tpl.meta_template_id = meta_id
                 tpl.status = "PENDING"
@@ -818,15 +852,24 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
     settings = get_or_create_settings(db, tenant_id)
     wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
     waba_id = wa.get("whatsapp_business_account_id", "")
-    token = wa.get("access_token", "")
-
-    if not waba_id or not token:
+    if not waba_id:
         raise HTTPException(
             status_code=422,
-            detail="بيانات WhatsApp Business غير مُعدَّة. أضف WABA ID و Access Token في الإعدادات.",
+            detail="بيانات WhatsApp Business غير مُعدَّة. أضف WABA ID أو أكمل ربط واتساب أولاً.",
         )
 
-    meta_id = await _submit_template_to_meta(tpl.name, tpl.language, tpl.category, tpl.components or [], waba_id, token)
+    from models import WhatsAppConnection  # noqa: PLC0415
+    wa_conn = db.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id == tenant_id).first()
+    meta_id = await _submit_template_to_meta(
+        db=db,
+        conn=wa_conn,
+        tenant_id=tenant_id,
+        waba_id=waba_id,
+        name=tpl.name,
+        language=tpl.language,
+        category=tpl.category,
+        components=tpl.components or [],
+    )
     if not meta_id:
         raise HTTPException(status_code=502, detail="فشل إرسال القالب إلى Meta. تحقق من بيانات الاعتماد وحاول مرة أخرى.")
 
@@ -939,7 +982,7 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
     Falls back to tenant settings for backward compatibility.
     """
     from models import WhatsAppConnection  # noqa: PLC0415
-    from core.config import WA_TOKEN, WA_BUSINESS_ACCOUNT_ID  # noqa: PLC0415
+    from core.config import WA_BUSINESS_ACCOUNT_ID  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
 
@@ -953,24 +996,38 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
         .first()
     )
 
+    sync_conn = wa_conn
     if wa_conn and wa_conn.whatsapp_business_account_id:
         waba_id = wa_conn.whatsapp_business_account_id
-        token   = WA_TOKEN  # platform-level system-user token
     else:
         # Fallback to tenant settings
         settings = get_or_create_settings(db, tenant_id)
         db.commit()
         wa    = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
         waba_id = wa.get("waba_id", "") or WA_BUSINESS_ACCOUNT_ID
-        token   = wa.get("access_token", "") or WA_TOKEN
+        sync_conn = wa_conn
 
-    if not waba_id or not token:
+    if not waba_id:
         return {
             "synced":  0,
-            "message": "لم يتم العثور على WABA ID أو Access Token. تأكد من ربط واتساب أولاً.",
+            "message": "لم يتم العثور على WABA ID. تأكد من ربط واتساب أولاً.",
         }
 
-    live = _fetch_meta_templates(waba_id, token)
+    try:
+        token_ctx = await get_token_for_operation(
+            db,
+            sync_conn,
+            tenant_id=tenant_id,
+            operation="template_sync",
+            prefer_platform=bool(sync_conn and getattr(sync_conn, "connection_type", None) == "direct"),
+        )
+    except Exception:
+        return {
+            "synced": 0,
+            "message": "لم يتم العثور على توكن تشغيل صالح لمزامنة القوالب. أعد ربط واتساب أو تحقّق من إعدادات المنصة.",
+        }
+
+    live = _fetch_meta_templates(waba_id, token_ctx.token)
     if live is None:
         return {"synced": 0, "message": "تعذّر الاتصال بـ Meta. تأكد من صحة بيانات الاعتماد."}
 

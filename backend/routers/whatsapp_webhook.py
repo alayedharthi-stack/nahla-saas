@@ -28,7 +28,7 @@ from fastapi.responses import PlainTextResponse
 
 from models import WhatsAppConnection
 
-from core.config import ANTHROPIC_API_KEY, CLAUDE_MODEL, ORCHESTRATOR_URL, WA_PHONE_ID, WA_TOKEN, WA_VERIFY_TOKEN
+from core.config import ANTHROPIC_API_KEY, CLAUDE_MODEL, ORCHESTRATOR_URL, WA_PHONE_ID, WA_VERIFY_TOKEN
 from core.conversation_engine import (
     # Actions
     DETERMINISTIC_ACTIONS,
@@ -55,6 +55,7 @@ from core.conversation_engine import (
     TurnLog,
     recommend_plan,
 )
+from services.whatsapp_platform.token_manager import build_token_context, get_token_for_operation
 from core.database import get_db
 from core.nahla_knowledge import build_nahla_system_prompt
 from modules.ai.orchestrator.adapter import generate_ai_reply
@@ -578,18 +579,22 @@ async def _post_wa(
     _store_name: str = "unknown",
     _db=None,
 ) -> None:
-    # Default to the stable platform token; only prefer tenant OAuth when it is
-    # still healthy. This prevents false outages when the merchant's Meta OAuth
-    # session expires while the phone remains connected.
-    send_token = WA_TOKEN  # default: platform token
+    platform_ctx = build_token_context(None, source="platform")
+    send_token = platform_ctx.token
+    token_source = platform_ctx.source
     if _tenant_id and _db:
         try:
             from database.models import WhatsAppConnection  # noqa: PLC0415
             wa_conn = _db.query(WhatsAppConnection).filter_by(tenant_id=_tenant_id).first()
-            meta = dict((wa_conn.extra_metadata or {}) if wa_conn else {})
-            oauth_ok = meta.get("oauth_session_status") not in {"expired", "invalid"}
-            if wa_conn and wa_conn.access_token and wa_conn.sending_enabled and oauth_ok:
-                send_token = wa_conn.access_token
+            token_ctx = await get_token_for_operation(
+                _db,
+                wa_conn,
+                tenant_id=_tenant_id,
+                operation="send_message",
+                prefer_platform=bool(wa_conn and getattr(wa_conn, "connection_type", None) == "direct"),
+            )
+            send_token = token_ctx.token
+            token_source = token_ctx.source
         except Exception:
             pass
 
@@ -609,8 +614,8 @@ async def _post_wa(
     token_tail = send_token[-6:] if send_token and len(send_token) >= 6 else "EMPTY"
 
     logger.info(
-        "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_tail=%s to=%s",
-        _tenant_id, _store_name, phone_id, token_tail, payload.get("to", "?"),
+        "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_source=%s token_tail=%s to=%s",
+        _tenant_id, _store_name, phone_id, token_source, token_tail, payload.get("to", "?"),
     )
 
     # Lightweight in-process throttling to avoid accidental burst sends to the

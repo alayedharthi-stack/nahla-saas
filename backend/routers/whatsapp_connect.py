@@ -35,6 +35,12 @@ from models import WhatsAppConnection  # noqa: E402
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION, META_WA_CONFIG_ID
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
+from services.whatsapp_platform.token_manager import (
+    get_oauth_session_state,
+    get_token_context,
+    get_token_for_operation,
+    update_token_state,
+)
 
 logger = logging.getLogger("nahla-backend")
 
@@ -85,6 +91,7 @@ def _get_or_create_connection(db: Session, tenant_id: int) -> WhatsAppConnection
 def _safe_view(conn: WhatsAppConnection) -> dict:
     """Return a connection dict safe for the frontend (no access_token)."""
     meta = dict(conn.extra_metadata or {})
+    token_ctx = get_token_context(conn)
     return {
         "status":                       conn.status,
         "connection_status":            conn.status,
@@ -100,10 +107,12 @@ def _safe_view(conn: WhatsAppConnection) -> dict:
         "webhook_verified":             bool(conn.webhook_verified),
         "sending_enabled":              bool(conn.sending_enabled),
         "token_expires_at":             conn.token_expires_at.isoformat() if conn.token_expires_at else None,
-        "oauth_session_status":         meta.get("oauth_session_status", "healthy" if conn.access_token else "missing"),
-        "oauth_session_message":        meta.get("oauth_session_message"),
-        "oauth_session_needs_reauth":   bool(meta.get("oauth_session_needs_reauth", False)),
-        "active_graph_token_source":    meta.get("active_graph_token_source"),
+        "oauth_session_status":         token_ctx.oauth_session_status,
+        "oauth_session_message":        token_ctx.oauth_session_message,
+        "oauth_session_needs_reauth":   token_ctx.oauth_session_status in {"expired", "invalid", "missing"},
+        "active_graph_token_source":    meta.get("active_graph_token_source", token_ctx.source),
+        "token_status":                 meta.get("token_status", token_ctx.token_status),
+        "token_health":                 meta.get("token_health", token_ctx.token_status),
     }
 
 
@@ -199,12 +208,6 @@ async def get_connection_status(request: Request, db: Session = Depends(get_db))
     get_or_create_tenant(db, tenant_id)
     conn = _get_or_create_connection(db, tenant_id)
     db.commit()
-
-    # Surface needs_reauth if token has expired
-    if conn.status == "connected" and conn.token_expires_at:
-        if datetime.now(timezone.utc) > conn.token_expires_at:
-            conn.status = "needs_reauth"
-            db.commit()
 
     return _safe_view(conn)
 
@@ -337,7 +340,7 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if conn and conn.connection_type == "embedded":
-        if not conn.phone_number_id or not conn.access_token:
+        if not conn.phone_number_id:
             return {"verified": False, "reason": "no_connection"}
         try:
             from routers.whatsapp_embedded import sync_embedded_connection_from_meta  # noqa: PLC0415
@@ -353,11 +356,18 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
             db.commit()
             return {"verified": False, "reason": str(exc)}
 
-    if not conn or conn.status not in ("connected", "needs_reauth"):
+    if not conn or conn.status not in ("connected", "pending", "activation_pending", "review_pending"):
         return {"verified": False, "reason": "no_connection"}
 
-    if not conn.access_token:
-        conn.status = "needs_reauth"
+    token_ctx = get_token_context(conn)
+    update_token_state(
+        conn,
+        token_source=token_ctx.source,
+        token_status=token_ctx.token_status,
+        oauth_session_status=token_ctx.oauth_session_status,
+        oauth_session_message=token_ctx.oauth_session_message,
+    )
+    if not token_ctx.token:
         db.commit()
         return {"verified": False, "reason": "missing_token"}
 
@@ -368,12 +378,18 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
                 f"{GRAPH_BASE}/{conn.phone_number_id or 'me'}",
                 params={
                     "fields":       "id,display_phone_number,code_verification_status",
-                    "access_token": conn.access_token,
+                    "access_token": token_ctx.token,
                 },
             )
 
         if resp.status_code == 401:
-            conn.status     = "needs_reauth"
+            update_token_state(
+                conn,
+                token_source=token_ctx.source,
+                token_status="expired",
+                oauth_session_status=token_ctx.oauth_session_status,
+                oauth_session_message=token_ctx.oauth_session_message,
+            )
             conn.last_error = "Token expired or revoked"
             db.commit()
             return {"verified": False, "reason": "token_expired"}
@@ -505,14 +521,12 @@ async def connection_health(request: Request, db: Session = Depends(get_db)):
             },
         }
 
-    token_present = bool(conn.access_token)
-    token_valid   = (
-        token_present
-        and (not conn.token_expires_at or datetime.now(timezone.utc) < conn.token_expires_at)
-    )
+    token_ctx = get_token_context(conn)
+    token_present = bool(token_ctx.token)
+    token_valid = token_ctx.token_status in {"healthy", "expiring_soon"}
 
     checks = {
-        "has_connection":   conn.status in ("connected", "pending"),
+        "has_connection":   conn.status in ("connected", "pending", "activation_pending", "review_pending"),
         "token_present":    token_present,
         "token_valid":      token_valid,
         "webhook_verified": bool(conn.webhook_verified),
@@ -523,6 +537,9 @@ async def connection_health(request: Request, db: Session = Depends(get_db)):
     return {
         "healthy":       healthy,
         "status":        conn.status,
+        "connection_status": conn.status,
+        "token_status":  token_ctx.token_status,
+        "oauth_session_status": token_ctx.oauth_session_status,
         "phone_number":  conn.phone_number,
         "checks":        checks,
         "last_verified": conn.last_verified_at.isoformat() if conn.last_verified_at else None,
@@ -630,11 +647,22 @@ async def direct_request_otp(
     Step 1 — Register the merchant's phone number under Nahla's WABA and
     send an OTP to that number via SMS or voice call.
     """
-    from core.config import WA_BUSINESS_ACCOUNT_ID, WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+    from core.config import WA_BUSINESS_ACCOUNT_ID, META_GRAPH_API_VERSION  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
+    existing_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    try:
+        token_ctx = await get_token_for_operation(
+            db,
+            existing_conn,
+            tenant_id=tenant_id,
+            operation="phone_register",
+            prefer_platform=True,
+        )
+    except Exception:
+        token_ctx = None
 
-    if not WA_TOKEN or not WA_BUSINESS_ACCOUNT_ID:
+    if not token_ctx or not token_ctx.token or not WA_BUSINESS_ACCOUNT_ID:
         raise HTTPException(
             status_code=503,
             detail="خدمة واتساب غير مُهيَّأة. تواصل مع الدعم.",
@@ -664,7 +692,7 @@ async def direct_request_otp(
 
     graph        = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
     headers      = {
-        "Authorization": f"Bearer {WA_TOKEN}",
+        "Authorization": f"Bearer {token_ctx.token}",
         "Content-Type":  "application/json",
     }
 
@@ -674,7 +702,6 @@ async def direct_request_otp(
     )
 
     # ── Check DB: if already pending for same number, validate ID then skip add ──
-    existing_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     full_phone    = f"+{cc}{national}"
     if (
         existing_conn
@@ -924,13 +951,20 @@ async def direct_resend_otp(
     db: Session = Depends(get_db),
 ):
     """Resend OTP to an already-registered phone number (uses saved phone_number_id)."""
-    from core.config import WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
     tenant_id = resolve_tenant_id(request)
     graph   = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-    headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
 
     # Prefer phone_number_id from DB to avoid spoofing
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    token_ctx = await get_token_for_operation(
+        db,
+        conn,
+        tenant_id=tenant_id,
+        operation="request_code",
+        prefer_platform=True,
+    )
+    headers = {"Authorization": f"Bearer {token_ctx.token}", "Content-Type": "application/json"}
     phone_number_id = (conn.phone_number_id if conn else None) or body.phone_number_id
 
     if not phone_number_id:
@@ -1053,14 +1087,22 @@ async def direct_verify_otp(
       C) GET status   — fetch real Meta verification status
       D) Save to DB   — mark as connected only after Meta confirms
     """
-    from core.config import WA_TOKEN, WA_BUSINESS_ACCOUNT_ID, META_GRAPH_API_VERSION  # noqa: PLC0415
+    from core.config import WA_BUSINESS_ACCOUNT_ID, META_GRAPH_API_VERSION  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
     graph     = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
     phone_id  = body.phone_number_id.strip()
-    token_tail = WA_TOKEN[-8:] if WA_TOKEN else "EMPTY"
+    conn_for_token = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    token_ctx = await get_token_for_operation(
+        db,
+        conn_for_token,
+        tenant_id=tenant_id,
+        operation="phone_verify",
+        prefer_platform=True,
+    )
+    token_tail = token_ctx.token[-8:] if token_ctx.token else "EMPTY"
     headers   = {
-        "Authorization": f"Bearer {WA_TOKEN}",
+        "Authorization": f"Bearer {token_ctx.token}",
         "Content-Type":  "application/json",
     }
 
@@ -1282,7 +1324,10 @@ async def direct_verify_otp(
     conn.phone_number                 = phone_number
     conn.business_display_name        = display_name
     conn.whatsapp_business_account_id = WA_BUSINESS_ACCOUNT_ID
-    conn.access_token                 = WA_TOKEN
+    conn.connection_type              = "direct"
+    conn.access_token                 = None
+    conn.token_type                   = None
+    conn.token_expires_at             = None
     conn.webhook_verified             = bool(sync_state.get("connected"))
     conn.sending_enabled              = bool(sync_state.get("sending_enabled"))
     conn.connected_at                 = datetime.now(timezone.utc) if sync_state.get("connected") else None
@@ -1297,6 +1342,13 @@ async def direct_verify_otp(
         "embedded_status_message": sync_state.get("message"),
         "meta_register_response": register_data,
     }
+    update_token_state(
+        conn,
+        token_source=token_ctx.source,
+        token_status=token_ctx.token_status,
+        oauth_session_status="not_applicable",
+        oauth_session_message=None,
+    )
 
     db.commit()
 
@@ -1331,9 +1383,13 @@ def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
             "oauth_session_status": "missing",
             "oauth_session_message": None,
             "oauth_session_needs_reauth": False,
+            "token_status": "missing",
+            "token_health": "missing",
         }
 
     meta = dict(conn.extra_metadata or {})
+    oauth_status, oauth_message = get_oauth_session_state(conn)
+    token_ctx = get_token_context(conn)
     resp: dict = {
         "connected":              bool(conn.status == "connected" and conn.sending_enabled),
         "status":                 conn.status,
@@ -1355,10 +1411,12 @@ def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
         "webhook_verified":       bool(conn.webhook_verified),
         "token_expires_at":       conn.token_expires_at.isoformat() if conn.token_expires_at else None,
         "meta_business_account_id": conn.meta_business_account_id,
-        "oauth_session_status":   meta.get("oauth_session_status", "healthy" if conn.access_token else "missing"),
-        "oauth_session_message":  meta.get("oauth_session_message"),
-        "oauth_session_needs_reauth": bool(meta.get("oauth_session_needs_reauth", False)),
-        "active_graph_token_source": meta.get("active_graph_token_source"),
+        "oauth_session_status":   oauth_status,
+        "oauth_session_message":  oauth_message,
+        "oauth_session_needs_reauth": oauth_status in {"expired", "invalid", "missing"},
+        "active_graph_token_source": meta.get("active_graph_token_source", token_ctx.source),
+        "token_status":           meta.get("token_status", token_ctx.token_status),
+        "token_health":           meta.get("token_health", token_ctx.token_status),
     }
     if meta.get("meta_name_status") is not None:
         resp["name_status"] = meta.get("meta_name_status")
@@ -1422,11 +1480,18 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
     if conn.status == "connected":
         return {"updated": False, "already_connected": True, **_build_wa_status(conn)}
 
-    from core.config import WA_TOKEN as _WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
     graph   = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
     phone_id = conn.phone_number_id
+    token_ctx = await get_token_for_operation(
+        db,
+        conn,
+        tenant_id=tenant_id,
+        operation="status_sync",
+        prefer_platform=True,
+    )
     headers = {
-        "Authorization": f"Bearer {_WA_TOKEN}",
+        "Authorization": f"Bearer {token_ctx.token}",
         "Content-Type": "application/json",
     }
 
@@ -1568,12 +1633,20 @@ async def direct_save_profile(
     Step 3 — Update the WhatsApp Business Profile for the registered number.
     Calls POST /{phone_number_id}/whatsapp_business_profile
     """
-    from core.config import WA_TOKEN, META_GRAPH_API_VERSION  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
     graph     = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    token_ctx = await get_token_for_operation(
+        db,
+        conn,
+        tenant_id=tenant_id,
+        operation="save_profile",
+        prefer_platform=True,
+    )
     headers   = {
-        "Authorization": f"Bearer {WA_TOKEN}",
+        "Authorization": f"Bearer {token_ctx.token}",
         "Content-Type":  "application/json",
     }
 

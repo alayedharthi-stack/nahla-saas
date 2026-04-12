@@ -31,6 +31,7 @@ from core.tenant import (
     merge_defaults,
     resolve_tenant_id,
 )
+from services.whatsapp_platform.token_manager import get_token_context
 
 _iso_logger = logging.getLogger("nahla.tenant_isolation")
 router = APIRouter()
@@ -91,17 +92,21 @@ async def health_db(db: Session = Depends(get_db)):
 @router.get("/health/whatsapp")
 async def health_whatsapp(request: Request, db: Session = Depends(get_db)):
     """WhatsApp integration readiness — reports configured/not_configured without exposing secrets."""
+    from models import WhatsAppConnection  # noqa: PLC0415
     tenant_id = resolve_tenant_id(request)
     settings  = get_or_create_settings(db, tenant_id)
     db.commit()
     wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    configured = bool(wa.get("phone_number_id") and wa.get("access_token"))
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    token_ctx = get_token_context(conn)
+    configured = bool((conn and conn.phone_number_id) or wa.get("phone_number_id")) and bool(token_ctx.token)
     return {
         "status":              "configured" if configured else "not_configured",
         "service":             "nahla-saas",
-        "phone_number_set":    bool(wa.get("phone_number")),
-        "phone_number_id_set": bool(wa.get("phone_number_id")),
-        "access_token_set":    bool(wa.get("access_token")),
+        "phone_number_set":    bool((conn.phone_number if conn else None) or wa.get("phone_number")),
+        "phone_number_id_set": bool((conn.phone_number_id if conn else None) or wa.get("phone_number_id")),
+        "access_token_set":    bool(token_ctx.token),
+        "token_status":        token_ctx.token_status,
         "verify_token_set":    bool(wa.get("verify_token")),
         "auto_reply_enabled":  wa.get("auto_reply_enabled", False),
     }
@@ -257,13 +262,16 @@ async def health_detailed(request: Request, db: Session = Depends(get_db)):
     db_result = await check_database(db)
     db_ok     = db_result.get("status") == "ok"
 
+    from models import WhatsAppConnection  # noqa: PLC0415
     tenant_id = resolve_tenant_id(request)
     wa = merge_defaults(
         get_or_create_settings(db, tenant_id).whatsapp_settings,
         DEFAULT_WHATSAPP,
     )
     db.commit()
-    wa_configured = bool(wa.get("phone_number_id") and wa.get("access_token"))
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    token_ctx = get_token_context(conn)
+    wa_configured = bool((conn.phone_number_id if conn else None) or wa.get("phone_number_id")) and bool(token_ctx.token)
 
     return JSONResponse(
         status_code=200 if db_ok else 503,
@@ -272,6 +280,7 @@ async def health_detailed(request: Request, db: Session = Depends(get_db)):
             "service":              "nahla-saas",
             "database":             db_ok,
             "whatsapp_configured":  wa_configured,
+            "whatsapp_token_status": token_ctx.token_status,
             "uptime_seconds":       round(_time.monotonic() - _START_TIME),
             "timestamp":            datetime.now(timezone.utc).isoformat() + "Z",
         },

@@ -31,6 +31,8 @@ export interface WaConnection {
   webhook_verified: boolean
   sending_enabled: boolean
   token_expires_at: string | null
+  token_status?: string | null
+  token_health?: string | null
   oauth_session_status?: string | null
   oauth_session_message?: string | null
   oauth_session_needs_reauth?: boolean
