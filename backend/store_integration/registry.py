@@ -59,6 +59,8 @@ def get_adapter(tenant_id: int):
         return adapter_cls(
             api_key=cfg.get("api_key", ""),
             store_id=cfg.get("store_id", ""),
+            refresh_token=cfg.get("refresh_token", ""),
+            tenant_id=tenant_id,
         )
     except Exception as exc:
         logger.error(f"AdapterRegistry error for tenant {tenant_id}: {exc}")

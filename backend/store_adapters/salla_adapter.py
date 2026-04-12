@@ -38,9 +38,11 @@ REQUEST_TIMEOUT = 20.0
 class SallaAdapter(BaseStoreAdapter):
     platform = "salla"
 
-    def __init__(self, api_key: str, store_id: str = ""):
+    def __init__(self, api_key: str, store_id: str = "", refresh_token: str = "", tenant_id: int = 0):
         self.api_key = api_key
         self.store_id = store_id
+        self._refresh_token = refresh_token
+        self._tenant_id = tenant_id
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -49,6 +51,65 @@ class SallaAdapter(BaseStoreAdapter):
             "Content-Type": "application/json",
         }
 
+    async def _refresh_access_token(self) -> bool:
+        """Use refresh_token to get a new access_token from Salla."""
+        if not self._refresh_token or not self._tenant_id:
+            return False
+        client_id = os.environ.get("SALLA_CLIENT_ID", "")
+        client_secret = os.environ.get("SALLA_CLIENT_SECRET", "")
+        if not client_id or not client_secret:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    "https://accounts.salla.sa/oauth2/token",
+                    data={
+                        "grant_type": "refresh_token",
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": self._refresh_token,
+                    },
+                    headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
+                )
+                if resp.status_code != 200:
+                    logger.error("Salla token refresh failed: %s %s", resp.status_code, resp.text[:200])
+                    return False
+                data = resp.json()
+                new_access = data.get("access_token", "")
+                new_refresh = data.get("refresh_token", self._refresh_token)
+                if not new_access:
+                    return False
+                self.api_key = new_access
+                self._refresh_token = new_refresh
+                self._persist_refreshed_tokens(new_access, new_refresh)
+                logger.info("Salla token refreshed | tenant=%s", self._tenant_id)
+                return True
+        except Exception as exc:
+            logger.error("Salla token refresh error: %s", exc)
+            return False
+
+    def _persist_refreshed_tokens(self, access_token: str, refresh_token: str) -> None:
+        """Save refreshed tokens back to the Integration row."""
+        try:
+            from database.session import SessionLocal
+            from database.models import Integration
+            db = SessionLocal()
+            try:
+                intg = db.query(Integration).filter(
+                    Integration.tenant_id == self._tenant_id,
+                    Integration.provider == "salla",
+                ).first()
+                if intg:
+                    cfg = dict(intg.config or {})
+                    cfg["api_key"] = access_token
+                    cfg["refresh_token"] = refresh_token
+                    intg.config = cfg
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("Failed to persist refreshed tokens: %s", exc)
+
     async def _get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             resp = await client.get(
@@ -56,6 +117,12 @@ class SallaAdapter(BaseStoreAdapter):
                 headers=self._headers(),
                 params=params or {},
             )
+            if resp.status_code == 401 and await self._refresh_access_token():
+                resp = await client.get(
+                    f"{SALLA_API_BASE}{path}",
+                    headers=self._headers(),
+                    params=params or {},
+                )
             resp.raise_for_status()
             return resp.json()
 
