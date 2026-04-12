@@ -56,6 +56,9 @@ function explainWhatsAppError(msg: unknown): string {
   const m = raw.toLowerCase()
 
   if (!raw) return 'حدث خطأ غير متوقع أثناء ربط واتساب.'
+  if (m.includes('131000') || m.includes('something went wrong')) {
+    return 'حدث خلل مؤقت من Meta أثناء جلب حالة الرقم. إذا كان رمز التحقق قد وصل أو تم قبوله، انتظر قليلًا ثم اضغط تحديث الآن.'
+  }
   if (m.includes('cors') || m.includes('failed to fetch') || m.includes('تعذر الوصول إلى الخادم')) {
     return 'تعذر الاتصال بـ API. السبب المرجّح: CORS أو انقطاع الشبكة أو خطأ مؤقت في الخادم.'
   }
@@ -76,7 +79,7 @@ function EmbeddedSignupFlow({
 }: {
   onConnected: (payload?: { phone_number?: string; display_name?: string; connected_at?: string }) => void
 }) {
-  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'verify-phone'|'syncing-phone'|'done'>('init')
+  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'requesting-code'|'verify-phone'|'syncing-phone'|'done'>('init')
   const [error, setError]       = useState('')
   const [phones, setPhones]     = useState<EmbeddedPhone[]>([])
   const [wabaId, setWabaId]     = useState('')
@@ -244,6 +247,8 @@ function EmbeddedSignupFlow({
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
+    setStatusHint('جارٍ تجهيز خطوة التحقق... قد تصلك رسالة الكود قبل أن تظهر شاشة إدخاله. انتظر قليلًا.')
+    setStage('requesting-code')
     try {
       const res = await apiCall<EmbeddedStatusPayload>('/whatsapp/embedded/select-phone', {
         method: 'POST',
@@ -253,6 +258,7 @@ function EmbeddedSignupFlow({
       applyEmbeddedStatus(res)
     } catch (e) {
       setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر اختيار الرقم'))
+      setStage('select-phone')
     } finally { setBusy(false) }
   }, [applyEmbeddedStatus])
 
@@ -291,7 +297,8 @@ function EmbeddedSignupFlow({
             </div>
             <button
               onClick={() => { setError(''); setStage('add-phone') }}
-              className="shrink-0 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 transition-colors flex items-center justify-center gap-2"
+              disabled={busy}
+              className="shrink-0 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
             >
               <Phone className="w-4 h-4" />
               إضافة رقم
@@ -340,6 +347,8 @@ function EmbeddedSignupFlow({
         const cleanCC    = countryCode.replace(/\D/g, '')
         if (!cleanPhone) { setError('أدخل رقم الهاتف بشكل صحيح'); setBusy(false); return }
         if (!displayName.trim()) { setError('الاسم التجاري مطلوب'); setBusy(false); return }
+        setStatusHint('جارٍ إرسال رمز التحقق... قد تصلك رسالة الكود قبل أن تظهر شاشة إدخاله. لا تغادر هذه الخطوة.')
+        setStage('requesting-code')
         const res = await apiCall<{ phone_number_id: string; message?: string }>('/whatsapp/embedded/add-phone', {
           method: 'POST',
           body: JSON.stringify({
@@ -354,6 +363,7 @@ function EmbeddedSignupFlow({
         setStage('verify-phone')
       } catch (e) {
         setError(explainWhatsAppError(e instanceof Error ? e.message : 'فشل إضافة الرقم'))
+        setStage('add-phone')
       } finally { setBusy(false) }
     }
     return (
@@ -418,6 +428,30 @@ function EmbeddedSignupFlow({
             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}
             إرسال رمز التحقق
           </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (stage === 'requesting-code') {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center">
+            <Loader2 className="w-5 h-5 text-violet-600 animate-spin" />
+          </div>
+          <div>
+            <p className="font-semibold text-slate-800">جارٍ تجهيز رمز التحقق</p>
+            <p className="text-xs text-slate-500">قد تصلك الرسالة النصية أولًا ثم تظهر شاشة إدخال الكود بعد لحظات</p>
+          </div>
+        </div>
+
+        <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 text-sm text-violet-800">
+          {statusHint || 'يتم الآن طلب رمز التحقق من Meta. لا تنتقل إلى خطوة أخرى حتى تظهر شاشة إدخال الكود.'}
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+          إذا وصلتك الرسالة الآن فهذا طبيعي. انتظر قليلًا وسيتم فتح نافذة إدخال الكود تلقائيًا.
         </div>
       </div>
     )

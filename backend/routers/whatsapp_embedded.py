@@ -199,6 +199,25 @@ def _meta_has_token(value: str, *tokens: str) -> bool:
     return any(token in value for token in tokens)
 
 
+def _meta_embedded_error_message(error: Dict[str, Any], fallback: str) -> str:
+    """Map raw Meta embedded-signup errors to merchant-friendly Arabic text."""
+    code = int(error.get("code") or 0)
+    subcode = int(error.get("error_subcode") or 0)
+    message = str(error.get("message") or "")
+    raw = f"{code}:{subcode}:{message}".lower()
+
+    if code == 131000 or "something went wrong" in raw:
+        return (
+            "Meta واجهت خللًا مؤقتًا أثناء مزامنة حالة الرقم. "
+            "إذا وصلك رمز التحقق أو تم التحقق منه بنجاح، انتظر قليلًا ثم اضغط تحديث الآن."
+        )
+    if code == 190:
+        return "انتهت صلاحية جلسة Meta. أعد ربط واتساب عبر Meta ثم جرّب مرة أخرى."
+    if "permission" in raw or code in (10, 200):
+        return "تعذر إكمال العملية بسبب صلاحيات Meta. تأكد من ربط الحساب الصحيح ثم أعد المحاولة."
+    return fallback
+
+
 def _serialize_phones(phones: List[dict]) -> List[dict]:
     return [
         {
@@ -254,6 +273,7 @@ def _build_phone_sync_state(phone_data: Dict[str, Any]) -> Dict[str, Any]:
     is_phone_pending = _meta_has_token(
         phone_status, "PENDING", "MIGRAT", "OFFLINE", "IN_PROGRESS",
     )
+    is_phone_connected = _meta_has_token(phone_status, "CONNECTED", "ONLINE", "ACTIVE")
     is_verified = code_status == "VERIFIED"
 
     if is_name_rejected:
@@ -293,6 +313,25 @@ def _build_phone_sync_state(phone_data: Dict[str, Any]) -> Dict[str, Any]:
             "meta_phone_status": phone_status or None,
             "quality_rating": quality_rating,
             "message": "يلزم إدخال رمز التحقق الذي أرسلته Meta لإكمال ربط الرقم.",
+        }
+
+    # If Meta already says the phone is connected and the OTP is verified,
+    # treat it as ready even if the display name is still under review.
+    if is_phone_connected:
+        return {
+            "connected": True,
+            "sending_enabled": True,
+            "db_status": "connected",
+            "verification_status": code_status or None,
+            "name_status": name_status or None,
+            "meta_phone_status": phone_status or None,
+            "quality_rating": quality_rating,
+            "message": (
+                "الرقم مفعّل وجاهز للإرسال. اسم العرض ما زال تحت مراجعة Meta، "
+                "لكن ذلك لا يمنع تفعيل الرقم."
+                if is_name_pending else
+                "الرقم مفعّل ومتزامن مع Meta وجاهز للإرسال."
+            ),
         }
 
     if is_name_pending:
@@ -429,11 +468,29 @@ async def sync_embedded_connection_from_meta(
     phone_data = await _get_phone_details(conn.phone_number_id, conn.access_token)
     if "error" in phone_data:
         err = phone_data["error"]
-        conn.status = "error"
-        conn.sending_enabled = False
-        conn.last_error = f"تعذر مزامنة حالة الرقم مع Meta: {err.get('message', '')}"
         meta = dict(conn.extra_metadata or {})
-        meta["embedded_status_message"] = conn.last_error
+        prev_name_status = _meta_flag(meta.get("meta_name_status"))
+        was_verified = bool(conn.last_verified_at or meta.get("meta_code_verification_status") == "VERIFIED")
+        transient_msg = _meta_embedded_error_message(
+            err,
+            f"تعذر مزامنة حالة الرقم مع Meta: {err.get('message', '')}",
+        )
+
+        if was_verified and int(err.get("code") or 0) == 131000:
+            conn.status = "review_pending" if _meta_has_token(prev_name_status, "PENDING", "REVIEW") else (
+                conn.status if conn.status in ("activation_pending", "review_pending") else "activation_pending"
+            )
+            conn.sending_enabled = False
+            conn.last_error = None
+            meta["embedded_status_message"] = transient_msg
+            meta["last_meta_sync_error"] = err
+        else:
+            conn.status = "error"
+            conn.sending_enabled = False
+            conn.last_error = transient_msg
+            meta["embedded_status_message"] = transient_msg
+            meta["last_meta_sync_error"] = err
+
         meta["last_meta_sync_at"] = datetime.now(timezone.utc).isoformat()
         conn.extra_metadata = meta
         db.commit()
@@ -630,7 +687,10 @@ async def select_phone(
     if "error" in phone_data:
         raise HTTPException(
             status_code=400,
-            detail=f"تعذر جلب بيانات الرقم: {phone_data['error'].get('message','')}",
+            detail=_meta_embedded_error_message(
+                phone_data["error"],
+                f"تعذر جلب بيانات الرقم: {phone_data['error'].get('message','')}",
+            ),
         )
 
     # Remove any stale connection for this phone_number_id from OTHER tenants
@@ -678,7 +738,10 @@ async def select_phone(
             )
         raise HTTPException(
             status_code=400,
-            detail=f"فشل إرسال رمز التحقق: {err.get('message','')} (code={code})",
+            detail=_meta_embedded_error_message(
+                err,
+                f"فشل إرسال رمز التحقق: {err.get('message','')} (code={code})",
+            ),
         )
 
     logger.info(
@@ -780,7 +843,10 @@ async def add_phone(
         err = reg_data["error"]
         raise HTTPException(
             status_code=400,
-            detail=f"فشل إضافة الرقم: {err.get('message', '')} (code={err.get('code')}, subcode={err.get('error_subcode')})",
+            detail=_meta_embedded_error_message(
+                err,
+                f"فشل إضافة الرقم: {err.get('message', '')} (code={err.get('code')}, subcode={err.get('error_subcode')})",
+            ),
         )
 
     phone_number_id = reg_data.get("id")
@@ -802,7 +868,10 @@ async def add_phone(
         err = otp_data["error"]
         raise HTTPException(
             status_code=400,
-            detail=f"فشل إرسال رمز التحقق: {err.get('message', '')} (code={err.get('code')}, subcode={err.get('error_subcode')})",
+            detail=_meta_embedded_error_message(
+                err,
+                f"فشل إرسال رمز التحقق: {err.get('message', '')} (code={err.get('code')}, subcode={err.get('error_subcode')})",
+            ),
         )
 
     # Remove stale connections for this phone from other tenants
