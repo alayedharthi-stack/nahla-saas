@@ -79,14 +79,15 @@ app.middleware("http")(salla_iframe_middleware)
 # CORS must be outermost so it adds Access-Control-* headers to ALL responses,
 # including 401 / 429 error responses returned by inner middleware.
 # add_middleware() wraps everything above it → CORS becomes the outermost layer.
-from core.config import CORS_ORIGINS  # noqa: E402
+from core.config import CORS_ORIGINS, CORS_ORIGIN_REGEX  # noqa: E402
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Nahla-Error-Code"],
+    expose_headers=["X-Nahla-Error-Code", "X-Nahla-Error-Type"],
 )
 
 

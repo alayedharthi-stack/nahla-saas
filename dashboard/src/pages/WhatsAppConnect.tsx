@@ -51,6 +51,26 @@ interface EmbeddedStatusPayload {
   phones?: EmbeddedPhone[]
 }
 
+function explainWhatsAppError(msg: unknown): string {
+  const raw = typeof msg === 'string' ? msg.trim() : ''
+  const m = raw.toLowerCase()
+
+  if (!raw) return 'حدث خطأ غير متوقع أثناء ربط واتساب.'
+  if (m.includes('cors') || m.includes('failed to fetch') || m.includes('تعذر الوصول إلى الخادم')) {
+    return 'تعذر الاتصال بـ API. السبب المرجّح: CORS أو انقطاع الشبكة أو خطأ مؤقت في الخادم.'
+  }
+  if (m.includes('انتهت صلاحية الجلسة') || m.includes('token') || m.includes('authentication required') || m.includes('missing_token')) {
+    return 'الجلسة غير صالحة أو منتهية. سجّل الدخول مرة أخرى ثم أعد المحاولة.'
+  }
+  if (m.includes('review') || m.includes('مراجعة') || m.includes('name') || m.includes('اسم العرض')) {
+    return raw
+  }
+  if (m.includes('pending') || m.includes('تفعيل') || m.includes('cloud api')) {
+    return raw
+  }
+  return raw
+}
+
 function EmbeddedSignupFlow({
   onConnected,
 }: {
@@ -101,7 +121,7 @@ function EmbeddedSignupFlow({
           if (window.FB) { sdkLoaded.current = true; setStage('ready') }
         }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'تعذر تحميل إعدادات Meta')
+        if (!cancelled) setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر تحميل إعدادات Meta'))
       }
     }
     loadSdk()
@@ -168,7 +188,7 @@ function EmbeddedSignupFlow({
         }
       } catch (e) {
         if (!cancelled) {
-          setError(e instanceof Error ? e.message : 'تعذر مزامنة حالة الرقم مع Meta')
+          setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر مزامنة حالة الرقم مع Meta'))
         }
       }
 
@@ -202,7 +222,7 @@ function EmbeddedSignupFlow({
       setPhones(result.phones)
       setStage('select-phone')
     }).catch(e => {
-      setError(e instanceof Error ? e.message : 'حدث خطأ أثناء الربط')
+      setError(explainWhatsAppError(e instanceof Error ? e.message : 'حدث خطأ أثناء الربط'))
       setStage('ready')
     }).finally(() => setBusy(false))
   }, [])
@@ -232,7 +252,7 @@ function EmbeddedSignupFlow({
       setNewPhoneId(res.phone_number_id || phoneId)
       applyEmbeddedStatus(res)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'تعذر اختيار الرقم')
+      setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر اختيار الرقم'))
     } finally { setBusy(false) }
   }, [applyEmbeddedStatus])
 
@@ -333,7 +353,7 @@ function EmbeddedSignupFlow({
         setStatusHint(res.message || '')
         setStage('verify-phone')
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'فشل إضافة الرقم')
+        setError(explainWhatsAppError(e instanceof Error ? e.message : 'فشل إضافة الرقم'))
       } finally { setBusy(false) }
     }
     return (
@@ -415,7 +435,7 @@ function EmbeddedSignupFlow({
         })
         applyEmbeddedStatus(res)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'رمز التحقق غير صحيح')
+        setError(explainWhatsAppError(e instanceof Error ? e.message : 'رمز التحقق غير صحيح'))
       } finally { setBusy(false) }
     }
     return (
@@ -480,7 +500,7 @@ function EmbeddedSignupFlow({
 
         <div className="flex gap-2">
           <button
-            onClick={() => refreshEmbeddedStatus().catch(e => setError(e instanceof Error ? e.message : 'تعذر تحديث الحالة'))}
+            onClick={() => refreshEmbeddedStatus().catch(e => setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر تحديث الحالة')))}
             className="flex-1 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
           >
             <RefreshCw className="w-4 h-4" />
@@ -835,11 +855,15 @@ export default function WhatsAppConnect() {
     if (otp.trim().length < 6) { setError('أدخل الرمز كاملاً (6 أرقام)'); return }
     setBusy(true); setError('')
     try {
-      const r = await verifyOtp(phoneNumberId, otp.trim())
+      const r = await verifyOtp(phoneNumberId, otp.trim()) as VerifyResponse & { sending_enabled?: boolean; status?: string }
       setConnPhone(r.phone_number)
       setConnName(r.display_name)
+      if (r.sending_enabled === false || (r.status && r.status !== 'connected')) {
+        setError(explainWhatsAppError(r.message || 'تم التحقق من الرمز، لكن الرقم ما زال بانتظار تفعيل Meta.'))
+        return
+      }
       setStep(3)
-    } catch (e) { setError(sanitizeMessage(e instanceof Error ? e.message : '')) }
+    } catch (e) { setError(explainWhatsAppError(sanitizeMessage(e instanceof Error ? e.message : ''))) }
     finally { setBusy(false) }
   }, [otp, phoneNumberId])
 

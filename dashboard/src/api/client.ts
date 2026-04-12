@@ -18,21 +18,36 @@ const SESSION_EXPIRED_CODES = new Set([
   'no_tenant_claim',
 ])
 
+function classifyNetworkError(error: unknown): string {
+  const msg = error instanceof Error ? error.message : String(error ?? '')
+  const lowered = msg.toLowerCase()
+
+  if (lowered.includes('failed to fetch') || lowered.includes('load failed') || lowered.includes('networkerror')) {
+    return 'تعذر الوصول إلى الخادم. قد يكون السبب CORS أو انقطاع الشبكة أو خطأ مؤقت في API.'
+  }
+  return msg || 'حدث خطأ غير متوقع أثناء الاتصال بالخادم.'
+}
+
 export async function apiCall<T>(path: string, options?: RequestInit): Promise<T> {
   const token    = getToken()
   const tenantId = getTenantId()
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-      // Send the real tenant_id from the JWT-backed localStorage — never a hardcoded '1'
-      ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options?.headers ?? {}),
-    },
-    ...options,
-  })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      cache: 'no-store',
+      mode: 'cors',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options?.headers ?? {}),
+      },
+      ...options,
+    })
+  } catch (error) {
+    throw new Error(classifyNetworkError(error))
+  }
 
   // 401 — only logout when the backend signals the session/token itself is invalid.
   // A 401 for other reasons (e.g. permission checks) should surface as a normal error.

@@ -710,6 +710,7 @@ async def select_phone(
 async def get_status(request: Request, db: Session = Depends(get_db)):
     """Return current embedded signup connection status for this tenant."""
     tenant_id = resolve_tenant_id(request)
+    logger.info("[EmbeddedSignup] status START tenant=%s origin=%s", tenant_id, request.headers.get("origin", ""))
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn or conn.connection_type != "embedded":
         return {"connected": False, "status": "not_connected", "phones": []}
@@ -745,6 +746,13 @@ async def add_phone(
     Called when the merchant's WABA has no phone numbers yet.
     """
     tenant_id = resolve_tenant_id(request)
+    logger.info(
+        "[EmbeddedSignup] add-phone START tenant=%s origin=%s cc=%s phone=%s",
+        tenant_id,
+        request.headers.get("origin", ""),
+        body.country_code,
+        body.phone_number,
+    )
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn or not conn.whatsapp_business_account_id:
         raise HTTPException(status_code=400, detail="لا يوجد WABA مرتبط. أكمل خطوة الربط أولاً.")
@@ -824,6 +832,12 @@ async def verify_phone(
 ):
     """Verify OTP for a newly added phone number."""
     tenant_id = resolve_tenant_id(request)
+    logger.info(
+        "[EmbeddedSignup] verify-phone START tenant=%s origin=%s phone_id=%s",
+        tenant_id,
+        request.headers.get("origin", ""),
+        body.phone_number_id,
+    )
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn or not conn.access_token:
         raise HTTPException(status_code=400, detail="لا يوجد اتصال نشط")

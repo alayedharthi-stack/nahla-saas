@@ -374,10 +374,20 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
 
         if resp.status_code == 200:
             data = resp.json()
-            conn.sending_enabled  = data.get("code_verification_status") == "VERIFIED"
-            conn.status           = "connected" if conn.sending_enabled else "activation_pending"
+            from routers.whatsapp_embedded import _build_phone_sync_state  # noqa: PLC0415
+            sync_state = _build_phone_sync_state(data if isinstance(data, dict) else {})
+            conn.sending_enabled  = bool(sync_state.get("sending_enabled"))
+            conn.status           = sync_state.get("db_status") or "activation_pending"
             conn.last_verified_at = datetime.now(timezone.utc)
-            conn.last_error       = None
+            conn.last_error       = None if conn.sending_enabled else sync_state.get("message")
+            conn.extra_metadata   = {
+                **(conn.extra_metadata or {}),
+                "meta_code_verification_status": sync_state.get("verification_status"),
+                "meta_name_status": sync_state.get("name_status"),
+                "meta_phone_status": sync_state.get("meta_phone_status"),
+                "meta_quality_rating": sync_state.get("quality_rating"),
+                "embedded_status_message": sync_state.get("message"),
+            }
             db.commit()
             return {
                 "verified": bool(conn.sending_enabled),
@@ -1249,39 +1259,58 @@ async def direct_verify_otp(
     except Exception as exc:
         logger.error("[WA Direct] fetch_phone_status error: %s", exc)
 
-    # ── Step D: persist to DB ────────────────────────────────────────────────
-    # Mark as connected regardless of meta_status field — verify_code + register
-    # succeeded, so the number is active; meta_status field may lag briefly.
+    # ── Step D: persist to DB using live Meta state ──────────────────────────
+    # IMPORTANT:
+    #   Never mark connected immediately after verify_code/register.
+    #   The number is only "connected" when Meta confirms it is actually ready.
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if conn is None:
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
 
-    conn.status                       = "connected"
+    from routers.whatsapp_embedded import _build_phone_sync_state  # noqa: PLC0415
+    sync_state = _build_phone_sync_state(info if isinstance(info, dict) else {})
+
+    conn.status                       = sync_state.get("db_status") or "activation_pending"
     conn.phone_number_id              = phone_id
     conn.phone_number                 = phone_number
     conn.business_display_name        = display_name
     conn.whatsapp_business_account_id = WA_BUSINESS_ACCOUNT_ID
     conn.access_token                 = WA_TOKEN
-    conn.webhook_verified             = True
-    conn.sending_enabled              = True
-    conn.connected_at                 = datetime.now(timezone.utc)
-    conn.last_error                   = None
+    conn.webhook_verified             = bool(sync_state.get("connected"))
+    conn.sending_enabled              = bool(sync_state.get("sending_enabled"))
+    conn.connected_at                 = datetime.now(timezone.utc) if sync_state.get("connected") else None
+    conn.last_verified_at             = datetime.now(timezone.utc) if meta_status == "VERIFIED" else conn.last_verified_at
+    conn.last_error                   = None if conn.sending_enabled else sync_state.get("message")
+    conn.extra_metadata               = {
+        **(conn.extra_metadata or {}),
+        "meta_code_verification_status": sync_state.get("verification_status"),
+        "meta_name_status": sync_state.get("name_status"),
+        "meta_phone_status": sync_state.get("meta_phone_status"),
+        "meta_quality_rating": sync_state.get("quality_rating"),
+        "embedded_status_message": sync_state.get("message"),
+        "meta_register_response": register_data,
+    }
 
     db.commit()
 
     logger.info(
-        "[WA Direct] ✅ Connected | tenant=%s phone=%s name=%s meta_verification=%s",
-        tenant_id, phone_number, display_name, meta_status,
+        "[WA Direct] ✅ Finalized | tenant=%s phone=%s name=%s meta_verification=%s db_status=%s sending_enabled=%s",
+        tenant_id, phone_number, display_name, meta_status, conn.status, conn.sending_enabled,
     )
 
     return {
-        "status":              "connected",
+        "status":              conn.status,
         "phone_number":        phone_number,
         "display_name":        display_name,
         "meta_status":         meta_status,
         "register_response":   register_data,
-        "message":             "تم ربط واتساب بنجاح! 🎉",
+        "sending_enabled":     bool(conn.sending_enabled),
+        "message":             (
+            "تم ربط واتساب بنجاح! 🎉"
+            if conn.sending_enabled
+            else (sync_state.get("message") or "تم التحقق من الرقم، لكن Meta ما زالت تُكمل التفعيل.")
+        ),
     }
 
 
@@ -1393,7 +1422,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
             resp = await client.get(
                 f"{graph}/{phone_id}",
                 headers=headers,
-                params={"fields": "id,display_phone_number,verified_name,code_verification_status,quality_rating"},
+                params={"fields": "id,display_phone_number,verified_name,code_verification_status,name_status,status,quality_rating"},
             )
             resp_status = resp.status_code
             data = resp.json()
@@ -1448,13 +1477,25 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
             logger.error("[WA refresh] re-register error: %s", exc)
             reg_data = {}
 
-    if verification_status == "VERIFIED":
+    from routers.whatsapp_embedded import _build_phone_sync_state as _bps  # noqa: PLC0415
+    sync_state = _bps(data if isinstance(data, dict) else {})
+
+    if sync_state.get("connected"):
         from datetime import datetime, timezone as _tz  # noqa: PLC0415
         conn.status                = "connected"
         conn.sending_enabled       = True
         conn.phone_number          = display_phone
         conn.business_display_name = verified_name or conn.business_display_name
         conn.connected_at          = datetime.now(_tz.utc)
+        conn.last_error            = None
+        conn.extra_metadata        = {
+            **(conn.extra_metadata or {}),
+            "meta_code_verification_status": sync_state.get("verification_status"),
+            "meta_name_status": sync_state.get("name_status"),
+            "meta_phone_status": sync_state.get("meta_phone_status"),
+            "meta_quality_rating": sync_state.get("quality_rating"),
+            "embedded_status_message": sync_state.get("message"),
+        }
         db.commit()
         logger.info("[WA refresh] CONNECTED tenant=%s", tenant_id)
         return {
@@ -1465,13 +1506,27 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         }
 
     # Not verified yet — return full Meta response for diagnosis
+    conn.status          = sync_state.get("db_status") or "activation_pending"
+    conn.sending_enabled = bool(sync_state.get("sending_enabled"))
+    conn.last_error      = sync_state.get("message")
+    conn.extra_metadata  = {
+        **(conn.extra_metadata or {}),
+        "meta_code_verification_status": sync_state.get("verification_status"),
+        "meta_name_status": sync_state.get("name_status"),
+        "meta_phone_status": sync_state.get("meta_phone_status"),
+        "meta_quality_rating": sync_state.get("quality_rating"),
+        "embedded_status_message": sync_state.get("message"),
+    }
+    db.commit()
+
     return {
         "updated":      False,
         "meta_status":  verification_status,
         "meta_response": data,
-        "message": (
-            f"الرقم لم يُفعَّل بعد في Meta. حالته: {verification_status or 'غير معروف'}. "
-            "إذا أدخلت OTP بنجاح، جرّب مرة أخرى أو تواصل مع الدعم."
+        "status": conn.status,
+        "sending_enabled": conn.sending_enabled,
+        "message": sync_state.get("message") or (
+            f"الرقم لم يُفعَّل بعد في Meta. حالته: {verification_status or 'غير معروف'}."
         ),
     }
 

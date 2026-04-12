@@ -118,8 +118,10 @@ ANTHROPIC_API_KEY = (
 CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
-# Canonical list — no duplicates. Override via CORS_ORIGINS env-var (comma-separated).
-_default_origins = ",".join([
+# IMPORTANT:
+#   Never allow an environment override to DROP the canonical Nahla origins.
+#   We always merge required origins with any custom env origins.
+_required_cors_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
     "https://nahlah.ai",
@@ -133,9 +135,23 @@ _default_origins = ",".join([
     "https://zid.sa",
     "https://web.zid.sa",
     "https://partner.zid.sa",
-])
-CORS_ORIGINS: list[str] = [
+]
+_env_cors_origins = [
     o.strip()
-    for o in os.environ.get("CORS_ORIGINS", _default_origins).split(",")
+    for o in os.environ.get("CORS_ORIGINS", "").split(",")
     if o.strip()
 ]
+
+CORS_ORIGINS: list[str] = []
+_seen_cors: set[str] = set()
+for _origin in [*_required_cors_origins, *_env_cors_origins]:
+    if _origin not in _seen_cors:
+        CORS_ORIGINS.append(_origin)
+        _seen_cors.add(_origin)
+
+# Optional regex for additional first-party subdomains / preview hosts.
+# Safe with credentials because FastAPI reflects the matched Origin instead of "*".
+CORS_ORIGIN_REGEX = os.environ.get(
+    "CORS_ORIGIN_REGEX",
+    r"https://([a-z0-9-]+\.)?nahlah\.ai",
+)

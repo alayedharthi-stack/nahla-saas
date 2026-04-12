@@ -141,13 +141,21 @@ def _cors_error_headers(request: Request) -> dict:
     This helper adds the minimum required headers so browsers don't mask the
     real error with a misleading CORS failure message.
     """
-    from core.config import CORS_ORIGINS as _origins  # noqa: PLC0415 (local import avoids circular)
+    from core.config import CORS_ORIGINS as _origins, CORS_ORIGIN_REGEX as _origin_regex  # noqa: PLC0415
+    import re as _re  # noqa: PLC0415
     origin = request.headers.get("origin", "")
-    if origin and (origin in _origins or "*" in _origins):
+    if origin and (
+        origin in _origins
+        or "*" in _origins
+        or (_origin_regex and _re.fullmatch(_origin_regex, origin))
+    ):
         return {
             "Access-Control-Allow-Origin":      origin,
             "Access-Control-Allow-Credentials": "true",
+            "X-Nahla-Error-Type":              "cors-compatible-error",
         }
+    if origin:
+        logger.warning("[CORS] Origin not allowed for error response | origin=%s path=%s", origin, request.url.path)
     return {}
 
 
