@@ -11,9 +11,9 @@ Responsibilities
 
 Usage
   svc = StoreSyncService(db, tenant_id)
-  await svc.full_sync()          # triggered by merchant "Sync Now" or after store connect
-  await svc.sync_products()      # triggered by product webhook
-  await svc.sync_orders(limit=50)
+  await svc.full_sync()                    # full historical sync (first time)
+  await svc.full_sync(incremental=True)    # incremental sync (subsequent times)
+  await svc.sync_products()                # triggered by product webhook
   status = svc.get_status()
 """
 from __future__ import annotations
@@ -307,21 +307,48 @@ class StoreSyncService:
         snap.updated_at        = datetime.now(timezone.utc)
         self.db.commit()
 
+    # ── Incremental timestamp helper ─────────────────────────────────────────
+
+    def _last_sync_timestamp(self) -> Optional[str]:
+        """Return ISO timestamp of the last successful full sync, or None if never synced."""
+        snap = (
+            self.db.query(StoreKnowledgeSnapshot)
+            .filter_by(tenant_id=self.tenant_id)
+            .first()
+        )
+        if snap and snap.last_full_sync_at:
+            return snap.last_full_sync_at.isoformat()
+        return None
+
     # ── Products sync ──────────────────────────────────────────────────────────
 
-    async def sync_products(self) -> int:
-        """Fetch all products from the store adapter and upsert into DB."""
+    async def sync_products(self, incremental: bool = False) -> int:
+        """Fetch products from the store adapter and upsert into DB.
+
+        If incremental=True and a previous full sync exists, only fetch
+        products updated since that timestamp.
+        """
         adapter = self._get_adapter()
         if not adapter:
             return 0
 
+        updated_since = None
+        if incremental:
+            updated_since = self._last_sync_timestamp()
+
         try:
-            raw_list = await adapter.get_products()
+            raw_list = await adapter.get_products(updated_since=updated_since)
         except Exception as exc:
             logger.warning("tenant=%s product sync failed: %s", self.tenant_id, exc)
             return 0
 
-        count = 0
+        logger.info(
+            "tenant=%s syncing %d products (incremental=%s, since=%s)",
+            self.tenant_id, len(raw_list), incremental, updated_since or "beginning",
+        )
+
+        created = 0
+        updated = 0
         for raw in raw_list:
             normalised = _normalise_product(raw)
             ext_id = normalised["external_id"]
@@ -336,6 +363,7 @@ class StoreSyncService:
                 existing.price       = normalised["price"]
                 existing.sku         = normalised["sku"]
                 existing.extra_metadata = normalised
+                updated += 1
             else:
                 self.db.add(Product(
                     tenant_id    = self.tenant_id,
@@ -346,24 +374,38 @@ class StoreSyncService:
                     sku          = normalised["sku"],
                     extra_metadata = normalised,
                 ))
-            count += 1
+                created += 1
         self.db.flush()
-        return count
+        logger.info(
+            "tenant=%s products sync done — created=%d updated=%d total_upserted=%d",
+            self.tenant_id, created, updated, created + updated,
+        )
+        return created + updated
 
     # ── Orders sync ────────────────────────────────────────────────────────────
 
-    async def sync_orders(self, limit: int = 200) -> int:
+    async def sync_orders(self, incremental: bool = False) -> int:
         adapter = self._get_adapter()
         if not adapter:
             return 0
 
+        updated_since = None
+        if incremental:
+            updated_since = self._last_sync_timestamp()
+
         try:
-            raw_list = await adapter.get_orders(limit=limit)
+            raw_list = await adapter.get_orders(updated_since=updated_since)
         except Exception as exc:
             logger.warning("tenant=%s orders sync failed: %s", self.tenant_id, exc)
             return 0
 
-        count = 0
+        logger.info(
+            "tenant=%s syncing %d orders (incremental=%s, since=%s)",
+            self.tenant_id, len(raw_list), incremental, updated_since or "beginning",
+        )
+
+        created = 0
+        updated = 0
         for raw in raw_list:
             normalised = _normalise_order(raw)
             ext_id = normalised["external_id"]
@@ -382,6 +424,7 @@ class StoreSyncService:
                     **(existing.extra_metadata or {}),
                     "created_at": normalised.get("created_at"),
                 }
+                updated += 1
             else:
                 self.db.add(Order(
                     tenant_id    = self.tenant_id,
@@ -394,9 +437,13 @@ class StoreSyncService:
                     is_abandoned = normalised["is_abandoned"],
                     extra_metadata = {"created_at": normalised.get("created_at")},
                 ))
-            count += 1
+                created += 1
+        logger.info(
+            "tenant=%s orders sync done — created=%d updated=%d total_upserted=%d",
+            self.tenant_id, created, updated, created + updated,
+        )
         self.db.flush()
-        return count
+        return created + updated
 
     # ── Coupons sync ───────────────────────────────────────────────────────────
 
@@ -411,7 +458,10 @@ class StoreSyncService:
             logger.warning("tenant=%s coupons sync failed: %s", self.tenant_id, exc)
             return 0
 
-        count = 0
+        logger.info("tenant=%s syncing %d coupons", self.tenant_id, len(raw_list))
+
+        created = 0
+        updated = 0
         for raw in raw_list:
             normalised = _normalise_coupon(raw)
             code = normalised["code"]
@@ -434,6 +484,7 @@ class StoreSyncService:
                 existing.discount_type  = normalised["discount_type"]
                 existing.discount_value = normalised["discount_value"]
                 existing.expires_at     = exp
+                updated += 1
             else:
                 self.db.add(Coupon(
                     tenant_id      = self.tenant_id,
@@ -444,24 +495,38 @@ class StoreSyncService:
                     expires_at     = exp,
                     extra_metadata = normalised,
                 ))
-            count += 1
+                created += 1
         self.db.flush()
-        return count
+        logger.info(
+            "tenant=%s coupons sync done — created=%d updated=%d",
+            self.tenant_id, created, updated,
+        )
+        return created + updated
 
     # ── Customers sync ─────────────────────────────────────────────────────────
 
-    async def sync_customers(self) -> int:
+    async def sync_customers(self, incremental: bool = False) -> int:
         adapter = self._get_adapter()
         if not adapter or not hasattr(adapter, "get_customers"):
             return 0
 
+        updated_since = None
+        if incremental:
+            updated_since = self._last_sync_timestamp()
+
         try:
-            raw_list = await adapter.get_customers()
+            raw_list = await adapter.get_customers(updated_since=updated_since)
         except Exception as exc:
             logger.warning("tenant=%s customers sync failed: %s", self.tenant_id, exc)
             return 0
 
-        count = 0
+        logger.info(
+            "tenant=%s syncing %d customers (incremental=%s, since=%s)",
+            self.tenant_id, len(raw_list), incremental, updated_since or "beginning",
+        )
+
+        created = 0
+        updated = 0
         for raw in raw_list:
             ext_id = str(raw.get("id", ""))
             if not ext_id:
@@ -491,6 +556,7 @@ class StoreSyncService:
                 if phone:
                     existing.phone = phone
                 existing.extra_metadata = {**(existing.extra_metadata or {}), **meta}
+                updated += 1
             else:
                 self.db.add(Customer(
                     tenant_id=self.tenant_id,
@@ -499,9 +565,13 @@ class StoreSyncService:
                     phone=phone or None,
                     extra_metadata=meta,
                 ))
-            count += 1
+                created += 1
         self.db.flush()
-        return count
+        logger.info(
+            "tenant=%s customers sync done — created=%d updated=%d",
+            self.tenant_id, created, updated,
+        )
+        return created + updated
 
     # ── Customer profile builder ─────────────────────────────────────────────
 
@@ -596,17 +666,29 @@ class StoreSyncService:
 
     # ── Full sync ──────────────────────────────────────────────────────────────
 
-    async def full_sync(self, triggered_by: str = "merchant") -> Dict:
+    async def full_sync(self, triggered_by: str = "merchant", incremental: bool = False) -> Dict:
+        """Sync store data into the local DB.
+
+        Args:
+            triggered_by: who initiated the sync (merchant / scheduler / oauth_connect).
+            incremental: if True, only fetch items updated since last full sync.
+                         First sync is always full regardless of this flag.
         """
-        Run a complete initial sync:
-          products -> orders -> coupons -> customers -> profiles -> snapshot
-        """
-        job = self._start_job("full", triggered_by)
+        has_previous = self._last_sync_timestamp() is not None
+        is_incremental = incremental and has_previous
+
+        sync_type = "incremental" if is_incremental else "full"
+        job = self._start_job(sync_type, triggered_by)
+        logger.info(
+            "tenant=%s ▶ %s sync started (triggered_by=%s, has_previous=%s)",
+            self.tenant_id, sync_type.upper(), triggered_by, has_previous,
+        )
+
         try:
-            products_n  = await self.sync_products()
-            orders_n    = await self.sync_orders()
+            products_n  = await self.sync_products(incremental=is_incremental)
+            orders_n    = await self.sync_orders(incremental=is_incremental)
             coupons_n   = await self.sync_coupons()
-            customers_n = await self.sync_customers()
+            customers_n = await self.sync_customers(incremental=is_incremental)
             profiles_n  = self._build_customer_profiles()
 
             self._rebuild_snapshot(products_n, orders_n, coupons_n)
@@ -618,11 +700,12 @@ class StoreSyncService:
                 customers_synced  = customers_n,
             )
             logger.info(
-                "tenant=%s full sync done — products=%d orders=%d coupons=%d customers=%d profiles=%d",
-                self.tenant_id, products_n, orders_n, coupons_n, customers_n, profiles_n,
+                "tenant=%s ✅ %s sync completed — products=%d orders=%d coupons=%d customers=%d profiles=%d",
+                self.tenant_id, sync_type.upper(), products_n, orders_n, coupons_n, customers_n, profiles_n,
             )
             return {
                 "status":           "completed",
+                "sync_type":        sync_type,
                 "products_synced":  products_n,
                 "orders_synced":    orders_n,
                 "coupons_synced":   coupons_n,
@@ -632,7 +715,7 @@ class StoreSyncService:
             }
         except Exception as exc:
             self._fail_job(job, str(exc))
-            logger.error("tenant=%s full sync error: %s", self.tenant_id, exc)
+            logger.error("tenant=%s ❌ %s sync error: %s", self.tenant_id, sync_type.upper(), exc)
             return {"status": "failed", "error": str(exc), "job_id": job.id}
 
     # ── Incremental product update (called by webhook) ─────────────────────────

@@ -145,24 +145,82 @@ class SallaAdapter(BaseStoreAdapter):
     def _log_error(self, method: str, exc: Exception) -> None:
         logger.error(f"SallaAdapter.{method} failed: {exc}", exc_info=True)
 
-    # ── Products ───────────────────────────────────────────────────────────────
+    # ── Pagination helper ────────────────────────────────────────────────────
 
-    async def _get_all_pages(self, path: str, per_page: int = 50, max_pages: int = 10) -> List[Dict[str, Any]]:
-        """Fetch all pages from a paginated Salla endpoint."""
+    async def _get_all_pages(
+        self,
+        path: str,
+        per_page: int = 50,
+        extra_params: Optional[Dict[str, Any]] = None,
+        label: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Fetch ALL pages from a paginated Salla endpoint until data is exhausted.
+
+        No hard page limit — continues until:
+          1. API returns an empty page, OR
+          2. Current page >= total pages reported by API, OR
+          3. A single page returns fewer items than per_page (last page).
+        """
+        tag = label or path.strip("/")
         all_items: List[Dict[str, Any]] = []
-        for page in range(1, max_pages + 1):
-            data = await self._get(path, {"per_page": per_page, "page": page})
+        page = 1
+        total_pages_hint = None
+
+        while True:
+            params: Dict[str, Any] = {"per_page": per_page, "page": page}
+            if extra_params:
+                params.update(extra_params)
+
+            try:
+                data = await self._get(path, params)
+            except Exception as exc:
+                logger.error(
+                    "[Salla:%s] tenant=%s page %d FAILED — stopping pagination: %s",
+                    tag, self._tenant_id, page, exc,
+                )
+                break
+
             items = data.get("data") or []
             all_items.extend(items)
+
             pagination = data.get("pagination") or data.get("meta") or {}
-            total_pages = pagination.get("totalPages", pagination.get("last_page", 1))
-            if page >= total_pages or not items:
+            total_pages_hint = pagination.get(
+                "totalPages",
+                pagination.get("last_page", pagination.get("total_pages", None)),
+            )
+            total_items_hint = pagination.get(
+                "total", pagination.get("count", None),
+            )
+
+            logger.info(
+                "[Salla:%s] tenant=%s page %d → %d items (cumulative=%d%s)",
+                tag, self._tenant_id, page, len(items), len(all_items),
+                f", total_pages={total_pages_hint}" if total_pages_hint else "",
+            )
+
+            if not items:
                 break
+            if total_pages_hint and page >= total_pages_hint:
+                break
+            if len(items) < per_page:
+                break
+
+            page += 1
+
+        logger.info(
+            "[Salla:%s] tenant=%s pagination complete — %d total items across %d pages",
+            tag, self._tenant_id, len(all_items), page,
+        )
         return all_items
 
-    async def get_products(self) -> List[NormalizedProduct]:
+    # ── Products ───────────────────────────────────────────────────────────────
+
+    async def get_products(self, updated_since: Optional[str] = None) -> List[NormalizedProduct]:
         try:
-            raw_list = await self._get_all_pages("/products")
+            extra: Optional[Dict[str, Any]] = None
+            if updated_since:
+                extra = {"updated_at_min": updated_since}
+            raw_list = await self._get_all_pages("/products", label="products", extra_params=extra)
             return [self._normalize_product(p) for p in raw_list]
         except httpx.HTTPStatusError as exc:
             self._log_error("get_products", exc)
@@ -305,10 +363,12 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_order", exc)
             raise
 
-    async def get_orders(self, limit: int = 500) -> List[NormalizedOrder]:
+    async def get_orders(self, updated_since: Optional[str] = None) -> List[NormalizedOrder]:
         try:
-            max_pages = max(1, limit // 50)
-            raw_list = await self._get_all_pages("/orders", per_page=50, max_pages=max_pages)
+            extra: Optional[Dict[str, Any]] = None
+            if updated_since:
+                extra = {"updated_at_min": updated_since}
+            raw_list = await self._get_all_pages("/orders", label="orders", extra_params=extra)
             return [self._normalize_order(o, None) for o in raw_list]
         except Exception as exc:
             self._log_error("get_orders", exc)
@@ -400,11 +460,13 @@ class SallaAdapter(BaseStoreAdapter):
 
     # ── Customers ──────────────────────────────────────────────────────────────
 
-    async def get_customers(self, limit: int = 500) -> List[Dict[str, Any]]:
-        """Fetch all customers from Salla across all pages."""
+    async def get_customers(self, updated_since: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch all customers from Salla across all pages until exhaustion."""
         try:
-            max_pages = max(1, limit // 50)
-            return await self._get_all_pages("/customers", per_page=50, max_pages=max_pages)
+            extra: Optional[Dict[str, Any]] = None
+            if updated_since:
+                extra = {"updated_at_min": updated_since}
+            return await self._get_all_pages("/customers", label="customers", extra_params=extra)
         except Exception as exc:
             self._log_error("get_customers", exc)
             return []
@@ -412,9 +474,9 @@ class SallaAdapter(BaseStoreAdapter):
     # ── Offers / Coupons ──────────────────────────────────────────────────────
 
     async def get_coupons(self) -> List[Dict[str, Any]]:
-        """Return raw coupon dicts from Salla across all pages."""
+        """Return raw coupon dicts from Salla across all pages until exhaustion."""
         try:
-            return await self._get_all_pages("/coupons", per_page=50, max_pages=5)
+            return await self._get_all_pages("/coupons", label="coupons")
         except Exception as exc:
             self._log_error("get_coupons", exc)
             return []

@@ -102,7 +102,12 @@ async def _generate_coupons_all_tenants() -> None:
 
 
 async def _sync_all_stores() -> None:
-    """Run full_sync for every tenant that has an enabled Salla integration."""
+    """Sync all connected stores.
+
+    Strategy:
+      - First sync for a tenant → full historical sync (all pages, all data)
+      - Subsequent syncs → incremental (only items updated since last sync)
+    """
     import sys as _sys, os as _os  # noqa: PLC0415
     _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
 
@@ -136,11 +141,12 @@ async def _sync_all_stores() -> None:
             try:
                 from services.store_sync import StoreSyncService  # noqa: PLC0415
                 svc = StoreSyncService(db, tenant_id)
-                result = await svc.full_sync(triggered_by="scheduler")
+                result = await svc.full_sync(triggered_by="scheduler", incremental=True)
                 logger.info(
-                    "[StoreSync Scheduler] tenant=%s sync %s | products=%s orders=%s",
-                    tenant_id, result.get("status"),
+                    "[StoreSync Scheduler] tenant=%s sync %s (%s) | products=%s orders=%s customers=%s",
+                    tenant_id, result.get("status"), result.get("sync_type", "?"),
                     result.get("products_synced", 0), result.get("orders_synced", 0),
+                    result.get("customers_synced", 0),
                 )
             except Exception as exc:
                 logger.error("[StoreSync Scheduler] tenant=%s sync failed: %s", tenant_id, exc)
