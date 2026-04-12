@@ -1,9 +1,8 @@
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export interface CodConfirmationConfig {
+export interface OrderStatusUpdateConfig {
   enabled: boolean
-  reminder_hours: number
-  auto_cancel_hours: number
+  notify_statuses: string[]
   template_name: string
 }
 
@@ -32,7 +31,7 @@ export interface InactiveRecoveryConfig {
 
 export interface AutopilotSettings {
   enabled: boolean
-  cod_confirmation: CodConfirmationConfig
+  order_status_update: OrderStatusUpdateConfig
   predictive_reorder: PredictiveReorderConfig
   abandoned_cart: AbandonedCartConfig
   inactive_recovery: InactiveRecoveryConfig
@@ -60,6 +59,47 @@ export interface AutopilotRunResult {
   message: string
 }
 
+// ── Queue item types ──────────────────────────────────────────────────────────
+
+export interface AbandonedCartItem {
+  order_id: number
+  external_id: string | null
+  customer_name: string
+  customer_phone: string
+  checkout_url: string
+  total: number
+  status: string
+  created_at: string
+}
+
+export interface PredictiveReorderItem {
+  estimate_id: number
+  customer_name: string
+  customer_phone: string
+  product_name: string
+  predicted_date: string | null
+  days_remaining: number
+  notified: boolean
+}
+
+export interface OrderStatusUpdateItem {
+  order_id: number
+  external_id: string | null
+  customer_name: string
+  customer_phone: string
+  status: string
+  status_label: string
+  previous_status: string | null
+  previous_status_label: string | null
+  created_at: string
+}
+
+export interface AutopilotQueues {
+  abandoned_carts: AbandonedCartItem[]
+  predictive_reorder: PredictiveReorderItem[]
+  order_status_updates: OrderStatusUpdateItem[]
+}
+
 // ── API client ────────────────────────────────────────────────────────────────
 
 import { apiCall } from './client'
@@ -79,6 +119,52 @@ export const autopilotApi = {
   /** Manually trigger all enabled autopilot jobs (for testing). */
   runNow: () =>
     apiCall<AutopilotRunResult>('/autopilot/run', { method: 'POST' }),
+
+  /** Get operational queues: abandoned carts, predictive reorder, order status updates. */
+  queues: () =>
+    apiCall<AutopilotQueues>('/autopilot/queues'),
+}
+
+// ── Order status labels (Arabic) ──────────────────────────────────────────────
+
+export const ORDER_STATUS_LABELS: Record<string, string> = {
+  pending:           'قيد الانتظار',
+  under_review:      'قيد المراجعة',
+  in_progress:       'قيد المعالجة',
+  processing:        'قيد المعالجة',
+  shipped:           'تم الشحن',
+  out_for_delivery:  'خرج للتوصيل',
+  delivered:         'تم التوصيل',
+  completed:         'مكتمل',
+  cancelled:         'ملغي',
+  refunded:          'مسترجع',
+  payment_pending:   'في انتظار الدفع',
+  ready_for_pickup:  'جاهز للاستلام',
+  on_hold:           'في الانتظار',
+  failed:            'فشل',
+  draft:             'مسودة',
+  cod:               'الدفع عند الاستلام',
+  abandoned:         'سلة متروكة',
+}
+
+export const ORDER_STATUS_COLORS: Record<string, string> = {
+  pending:          'amber',
+  under_review:     'amber',
+  in_progress:      'blue',
+  processing:       'blue',
+  shipped:          'purple',
+  out_for_delivery: 'purple',
+  delivered:        'green',
+  completed:        'green',
+  cancelled:        'red',
+  refunded:         'orange',
+  payment_pending:  'amber',
+  ready_for_pickup: 'teal',
+  on_hold:          'slate',
+  failed:           'red',
+  draft:            'slate',
+  cod:              'amber',
+  abandoned:        'orange',
 }
 
 // ── Display metadata ──────────────────────────────────────────────────────────
@@ -87,12 +173,12 @@ export const AUTOPILOT_SUB_META: Record<
   keyof Omit<AutopilotSettings, 'enabled'>,
   { label: string; desc: string; template: string; icon: string; triggerLabel: string }
 > = {
-  cod_confirmation: {
-    label: 'تأكيد الطلب النقدي (COD)',
-    desc:  'يُرسل رسالة تأكيد لكل طلب بالدفع عند الاستلام ويتابع الرد تلقائياً.',
-    template: 'cod_order_confirmation_ar',
-    icon: '🍯',
-    triggerLabel: 'order_created (COD)',
+  order_status_update: {
+    label: 'إشعارات تحديثات الطلبات',
+    desc:  'يُرسل إشعار واتساب فور تغيُّر حالة الطلب (قيد الانتظار، الشحن، التوصيل، الإلغاء...).',
+    template: 'order_status_update_ar',
+    icon: '📦',
+    triggerLabel: 'order_status_changed',
   },
   predictive_reorder: {
     label: 'تذكير إعادة الطلب التنبؤي',

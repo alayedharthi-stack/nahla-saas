@@ -3,7 +3,8 @@ import {
   Zap, Send, CheckCircle, TrendingUp, Sparkles,
   ChevronDown, ChevronUp, AlertCircle, RefreshCw,
   Settings2, ArrowRight, ShoppingCart, Gift, UserX,
-  Tag, Megaphone, MessageSquare,
+  Tag, Megaphone, MessageSquare, Package, RotateCcw,
+  Clock, Phone, ExternalLink,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -15,7 +16,15 @@ import {
   AutomationType,
   AUTOMATION_META,
 } from '../api/automations'
-import { autopilotApi } from '../api/autopilot'
+import {
+  autopilotApi,
+  type AutopilotQueues,
+  type AbandonedCartItem,
+  type PredictiveReorderItem,
+  type OrderStatusUpdateItem,
+  ORDER_STATUS_LABELS,
+  ORDER_STATUS_COLORS,
+} from '../api/autopilot'
 
 // ── Template variable map panel ───────────────────────────────────────────────
 
@@ -193,6 +202,272 @@ function ConfigObject({ obj, depth = 0 }: { obj: Record<string, unknown>; depth?
           <span className="text-start">{renderConfigValue(val, depth)}</span>
         </div>
       ))}
+    </div>
+  )
+}
+
+// ── Operational Queues ────────────────────────────────────────────────────────
+
+type QueueTab = 'order_status' | 'abandoned_carts' | 'predictive_reorder'
+
+const STATUS_COLOR_MAP: Record<string, string> = {
+  amber:  'bg-amber-100 text-amber-700 border-amber-200',
+  blue:   'bg-blue-100 text-blue-700 border-blue-200',
+  purple: 'bg-purple-100 text-purple-700 border-purple-200',
+  green:  'bg-emerald-100 text-emerald-700 border-emerald-200',
+  red:    'bg-red-100 text-red-700 border-red-200',
+  orange: 'bg-orange-100 text-orange-700 border-orange-200',
+  teal:   'bg-teal-100 text-teal-700 border-teal-200',
+  slate:  'bg-slate-100 text-slate-600 border-slate-200',
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const label = ORDER_STATUS_LABELS[status] ?? status
+  const color = ORDER_STATUS_COLORS[status] ?? 'slate'
+  const cls = STATUS_COLOR_MAP[color] ?? STATUS_COLOR_MAP.slate
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border ${cls}`}>
+      {label}
+    </span>
+  )
+}
+
+function OrderStatusQueue({ items }: { items: OrderStatusUpdateItem[] }) {
+  if (items.length === 0) {
+    return (
+      <div className="text-center py-8 text-slate-400">
+        <Package className="w-8 h-8 mx-auto mb-2 opacity-40" />
+        <p className="text-sm">لا توجد طلبات بانتظار الإشعار</p>
+      </div>
+    )
+  }
+  return (
+    <div className="divide-y divide-slate-100">
+      {items.map((item) => (
+        <div key={item.order_id} className="flex items-center justify-between gap-3 py-3 px-1">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+              {item.external_id && (
+                <span className="text-xs text-slate-400">#{item.external_id}</span>
+              )}
+              {item.customer_phone && (
+                <span className="flex items-center gap-1 text-xs text-slate-400">
+                  <Phone className="w-3 h-3" />{item.customer_phone}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="shrink-0 flex items-center gap-2">
+            {item.previous_status && (
+              <>
+                <StatusBadge status={item.previous_status} />
+                <ArrowRight className="w-3 h-3 text-slate-300" />
+              </>
+            )}
+            <StatusBadge status={item.status} />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function AbandonedCartsQueue({ items }: { items: AbandonedCartItem[] }) {
+  if (items.length === 0) {
+    return (
+      <div className="text-center py-8 text-slate-400">
+        <ShoppingCart className="w-8 h-8 mx-auto mb-2 opacity-40" />
+        <p className="text-sm">لا توجد سلات متروكة</p>
+      </div>
+    )
+  }
+  return (
+    <div className="divide-y divide-slate-100">
+      {items.map((item) => (
+        <div key={item.order_id} className="flex items-center justify-between gap-3 py-3 px-1">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+              {item.customer_phone && (
+                <span className="flex items-center gap-1 text-xs text-slate-400">
+                  <Phone className="w-3 h-3" />{item.customer_phone}
+                </span>
+              )}
+              {item.total > 0 && (
+                <span className="text-xs font-medium text-slate-600">
+                  {item.total.toLocaleString('ar-SA')} ر.س
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="shrink-0 flex items-center gap-2">
+            <StatusBadge status="abandoned" />
+            {item.checkout_url && (
+              <a
+                href={item.checkout_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-brand-500 hover:text-brand-700"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function PredictiveReorderQueue({ items }: { items: PredictiveReorderItem[] }) {
+  if (items.length === 0) {
+    return (
+      <div className="text-center py-8 text-slate-400">
+        <RotateCcw className="w-8 h-8 mx-auto mb-2 opacity-40" />
+        <p className="text-sm">لا توجد تقديرات إعادة طلب مستحقة هذا الأسبوع</p>
+      </div>
+    )
+  }
+  return (
+    <div className="divide-y divide-slate-100">
+      {items.map((item) => (
+        <div key={item.estimate_id} className="flex items-center justify-between gap-3 py-3 px-1">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
+            <p className="text-xs text-slate-500 mt-0.5 truncate">{item.product_name}</p>
+          </div>
+          <div className="shrink-0 flex items-center gap-2">
+            <span className={`flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full border ${
+              item.days_remaining <= 1
+                ? 'bg-red-50 text-red-600 border-red-200'
+                : item.days_remaining <= 3
+                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                : 'bg-blue-50 text-blue-700 border-blue-200'
+            }`}>
+              <Clock className="w-3 h-3" />
+              {item.days_remaining === 0 ? 'اليوم' : `${item.days_remaining} أيام`}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+interface OperationalQueuesProps {
+  queues: AutopilotQueues | null
+  loading: boolean
+  onRefresh: () => void
+}
+
+function OperationalQueues({ queues, loading, onRefresh }: OperationalQueuesProps) {
+  const [activeTab, setActiveTab] = useState<QueueTab>('order_status')
+
+  const tabs: { id: QueueTab; label: string; icon: React.ReactNode; count: number }[] = [
+    {
+      id: 'order_status',
+      label: 'تحديثات الطلبات',
+      icon: <Package className="w-3.5 h-3.5" />,
+      count: queues?.order_status_updates.length ?? 0,
+    },
+    {
+      id: 'abandoned_carts',
+      label: 'السلات المتروكة',
+      icon: <ShoppingCart className="w-3.5 h-3.5" />,
+      count: queues?.abandoned_carts.length ?? 0,
+    },
+    {
+      id: 'predictive_reorder',
+      label: 'إعادة الطلب التنبؤي',
+      icon: <RotateCcw className="w-3.5 h-3.5" />,
+      count: queues?.predictive_reorder.length ?? 0,
+    },
+  ]
+
+  return (
+    <div className="card overflow-hidden">
+      {/* Header */}
+      <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-900">قوائم الانتظار التشغيلية</h3>
+          <p className="text-xs text-slate-400 mt-0.5">البنود المنتظرة لإرسال إشعار واتساب</p>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-brand-600 px-2.5 py-1.5 rounded-lg hover:bg-brand-50 transition-colors"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+          تحديث
+        </button>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex border-b border-slate-100 bg-slate-50/60">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveTab(tab.id)}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors ${
+              activeTab === tab.id
+                ? 'text-brand-700 border-b-2 border-brand-500 bg-white'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            {tab.icon}
+            <span>{tab.label}</span>
+            {tab.count > 0 && (
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
+                activeTab === tab.id
+                  ? 'bg-brand-100 text-brand-700'
+                  : 'bg-slate-200 text-slate-600'
+              }`}>
+                {tab.count}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div className="px-5 py-2 max-h-80 overflow-y-auto">
+        {loading ? (
+          <div className="space-y-3 py-4">
+            {[1, 2, 3].map(i => (
+              <div key={i} className="animate-pulse flex items-center justify-between gap-3">
+                <div className="space-y-1.5 flex-1">
+                  <div className="h-3 bg-slate-100 rounded w-32" />
+                  <div className="h-2.5 bg-slate-100 rounded w-24" />
+                </div>
+                <div className="h-5 bg-slate-100 rounded-full w-20" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <>
+            {activeTab === 'order_status' && (
+              <OrderStatusQueue items={queues?.order_status_updates ?? []} />
+            )}
+            {activeTab === 'abandoned_carts' && (
+              <AbandonedCartsQueue items={queues?.abandoned_carts ?? []} />
+            )}
+            {activeTab === 'predictive_reorder' && (
+              <PredictiveReorderQueue items={queues?.predictive_reorder ?? []} />
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Footer note */}
+      <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/60">
+        <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
+          <AlertCircle className="w-3 h-3 shrink-0" />
+          يُرسل الطيار الآلي إشعارات واتساب لهذه البنود تلقائياً عند تفعيله.
+        </p>
+      </div>
     </div>
   )
 }
@@ -444,6 +719,20 @@ export default function SmartAutomations() {
   const [autopilotLoading, setAutopilotLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [queues, setQueues] = useState<AutopilotQueues | null>(null)
+  const [queuesLoading, setQueuesLoading] = useState(false)
+
+  const loadQueues = useCallback(async () => {
+    setQueuesLoading(true)
+    try {
+      const q = await autopilotApi.queues()
+      setQueues(q)
+    } catch {
+      // non-critical — queues panel just shows empty
+    } finally {
+      setQueuesLoading(false)
+    }
+  }, [])
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -467,7 +756,10 @@ export default function SmartAutomations() {
     }
   }, [])
 
-  useEffect(() => { loadData() }, [loadData])
+  useEffect(() => {
+    loadData()
+    loadQueues()
+  }, [loadData, loadQueues])
 
   const handleAutopilot = async (next: boolean) => {
     setAutopilot(next)
@@ -564,6 +856,13 @@ export default function SmartAutomations() {
           iconBg="bg-brand-50"
         />
       </div>
+
+      {/* ── Operational queues ── */}
+      <OperationalQueues
+        queues={queues}
+        loading={queuesLoading}
+        onRefresh={loadQueues}
+      />
 
       {/* ── Compliance notice ── */}
       <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">

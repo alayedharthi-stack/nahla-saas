@@ -4,7 +4,7 @@ import {
   Save, Bot, Store, Users, Bell, MessageSquare,
   CheckCircle, AlertCircle, Loader2, Copy, ExternalLink,
   Eye, EyeOff, RefreshCw, UserPlus, Shield, ShieldOff, ToggleLeft, ToggleRight,
-  Sparkles, Play, Zap, ShoppingCart, RotateCcw, Heart,
+  Sparkles, Play, Zap, ShoppingCart, RotateCcw, Heart, Package,
   ChevronDown, ChevronUp, Clock, BrainCircuit, ShieldCheck, ExternalLink as LinkOut,
   Wifi, WifiOff, BadgeCheck, RefreshCw as ReconnectIcon, Code2,
 } from 'lucide-react'
@@ -827,10 +827,10 @@ function NotificationsTab({
 // ── Autopilot Tab ────────────────────────────────────────────────────────────
 
 const SUB_ICONS: Record<string, React.ReactNode> = {
-  cod_confirmation:  <ShoppingCart className="w-4 h-4 text-amber-500" />,
-  predictive_reorder: <RotateCcw  className="w-4 h-4 text-brand-500" />,
-  abandoned_cart:    <ShoppingCart className="w-4 h-4 text-red-500"  />,
-  inactive_recovery: <Heart        className="w-4 h-4 text-blue-500"  />,
+  order_status_update: <Package     className="w-4 h-4 text-brand-500" />,
+  predictive_reorder:  <RotateCcw   className="w-4 h-4 text-brand-500" />,
+  abandoned_cart:      <ShoppingCart className="w-4 h-4 text-red-500"  />,
+  inactive_recovery:   <Heart        className="w-4 h-4 text-blue-500"  />,
 }
 
 function SubAutomationCard({
@@ -889,10 +889,12 @@ function SubAutomationCard({
       {/* Expanded detail */}
       {open && (
         <div className="border-t border-slate-100 bg-slate-50 px-4 py-3 space-y-2">
-          {subKey === 'cod_confirmation' && (
+          {subKey === 'order_status_update' && (
             <>
-              <p className="text-xs text-slate-600"><span className="font-medium">التدفق:</span> إرسال تأكيد فوري → تذكير بعد {(config as AutopilotSettings['cod_confirmation']).reminder_hours} ساعة إذا لم يرد → إلغاء تلقائي بعد {(config as AutopilotSettings['cod_confirmation']).auto_cancel_hours} ساعة</p>
-              <p className="text-xs text-slate-500">الهدف: تقليل طلبات COD الوهمية.</p>
+              <p className="text-xs text-slate-600">
+                <span className="font-medium">التدفق:</span> فور تغيُّر حالة الطلب يُرسل إشعار واتساب للعميل (انتظار، شحن، توصيل، إلغاء...).
+              </p>
+              <p className="text-xs text-slate-500">يُتابع جميع الطلبات تلقائياً دون تكرار.</p>
             </>
           )}
           {subKey === 'predictive_reorder' && (
@@ -1072,10 +1074,10 @@ function AutopilotTab() {
 
   const ap = status?.settings ?? {
     enabled: false,
-    cod_confirmation:   { enabled: true,  reminder_hours: 2, auto_cancel_hours: 24, template_name: 'cod_order_confirmation_ar' },
-    predictive_reorder: { enabled: true,  days_before: 3, consumption_days_default: 45, template_name: 'predictive_reorder_reminder_ar' },
-    abandoned_cart:     { enabled: true,  reminder_30min: true, reminder_24h: true, coupon_48h: false, coupon_code: '', template_name: 'abandoned_cart_reminder' },
-    inactive_recovery:  { enabled: true,  inactive_days: 60, discount_pct: 15, template_name: 'win_back' },
+    order_status_update: { enabled: true, notify_statuses: ['pending', 'shipped', 'delivered', 'cancelled'], template_name: 'order_status_update_ar' },
+    predictive_reorder:  { enabled: true, days_before: 3, consumption_days_default: 45, template_name: 'predictive_reorder_reminder_ar' },
+    abandoned_cart:      { enabled: true, reminder_30min: true, reminder_24h: true, coupon_48h: false, coupon_code: '', template_name: 'abandoned_cart_reminder' },
+    inactive_recovery:   { enabled: true, inactive_days: 60, discount_pct: 15, template_name: 'win_back' },
   }
 
   return (

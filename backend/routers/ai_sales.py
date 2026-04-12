@@ -859,8 +859,8 @@ async def ai_sales_create_order(
             _log_autopilot_event as _log_ap,
         )
         ap = _get_ap(db, tenant_id)
-        if ap.get("enabled") and ap.get("cod_confirmation", {}).get("enabled"):
-            _log_ap(db, tenant_id, "cod_confirmation", customer.id,
+        if ap.get("enabled") and ap.get("order_status_update", ap.get("cod_confirmation", {})).get("enabled"):
+            _log_ap(db, tenant_id, "order_status_update", customer.id,
                     {"order_id": order.id, "source": "ai_sales_agent"})
 
     _log_ai_sales_event(

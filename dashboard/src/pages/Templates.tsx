@@ -25,10 +25,16 @@ const DEFAULT_TEMPLATE_META: Record<string, {
   automationType: string
   varLabels: Record<string, string>
 }> = {
+  order_status_update_ar: {
+    purposeLabel: 'إشعار تحديث حالة الطلب',
+    automationLabel: 'إشعارات الطلبات',
+    automationType: 'order_status_update',
+    varLabels: { '{{1}}': 'اسم العميل', '{{2}}': 'رقم الطلب', '{{3}}': 'حالة الطلب' },
+  },
   cod_order_confirmation_ar: {
     purposeLabel: 'تأكيد الطلب النقدي',
     automationLabel: 'الطلبات بالدفع عند الاستلام',
-    automationType: 'cod_confirmation',
+    automationType: 'order_status_update',
     varLabels: { '{{1}}': 'اسم العميل', '{{2}}': 'اسم المنتج', '{{3}}': 'مبلغ الطلب' },
   },
   predictive_reorder_reminder_ar: {
