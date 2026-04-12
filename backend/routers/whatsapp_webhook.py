@@ -546,7 +546,7 @@ async def _post_wa(
         try:
             from database.models import WhatsAppConnection  # noqa: PLC0415
             wa_conn = _db.query(WhatsAppConnection).filter_by(tenant_id=_tenant_id).first()
-            if wa_conn and wa_conn.access_token:
+            if wa_conn and wa_conn.access_token and wa_conn.sending_enabled:
                 send_token = wa_conn.access_token
         except Exception:
             pass

@@ -245,7 +245,7 @@ async def auth_me_full(
             "name": tenant.name if tenant else None,
         },
         "whatsapp": {
-            "connected": bool(wa_conn and wa_conn.status == "connected"),
+            "connected": bool(wa_conn and wa_conn.status == "connected" and wa_conn.sending_enabled),
             "status":    wa_conn.status       if wa_conn else "none",
             "phone":     wa_conn.phone_number if wa_conn else None,
         },

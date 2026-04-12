@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -40,6 +40,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/whatsapp/embedded", tags=["whatsapp-embedded"])
 
 GRAPH = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+PHONE_FIELDS = (
+    "id,display_phone_number,verified_name,code_verification_status,"
+    "name_status,status,quality_rating"
+)
+_DEFAULT_PIN = "000000"
+
+
+def _resolve_register_pin(conn: "WhatsAppConnection") -> str:
+    """Return the tenant's two-step verification PIN for Cloud API register.
+
+    Priority:
+      1. PIN already stored in extra_metadata (set during previous register).
+      2. Generate a random 6-digit PIN, store it, and return it.
+
+    The PIN is persisted so re-register after display-name changes uses the
+    same value (Meta requires consistency until the tenant resets it).
+    """
+    import secrets  # noqa: PLC0415
+    meta = dict(conn.extra_metadata or {})
+    existing = meta.get("wa_register_pin")
+    if existing and len(str(existing)) == 6 and str(existing).isdigit():
+        return str(existing)
+    pin = f"{secrets.randbelow(1_000_000):06d}"
+    meta["wa_register_pin"] = pin
+    conn.extra_metadata = meta
+    return pin
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -164,6 +190,303 @@ async def _get_phone_numbers(waba_id: str, token: str) -> List[dict]:
     return data.get("data", [])
 
 
+def _meta_flag(value: Any) -> str:
+    """Normalize Meta enum-like values for resilient comparisons."""
+    return str(value or "").strip().upper().replace(" ", "_").replace("-", "_")
+
+
+def _meta_has_token(value: str, *tokens: str) -> bool:
+    return any(token in value for token in tokens)
+
+
+def _serialize_phones(phones: List[dict]) -> List[dict]:
+    return [
+        {
+            "id": p["id"],
+            "number": p.get("display_phone_number", ""),
+            "name": p.get("verified_name", ""),
+            "verified": _meta_flag(p.get("code_verification_status")) == "VERIFIED",
+        }
+        for p in phones
+    ]
+
+
+async def _get_phone_details(phone_number_id: str, token: str) -> Dict[str, Any]:
+    """Fetch live phone state from Meta for a single phone number."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{GRAPH}/{phone_number_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"fields": PHONE_FIELDS},
+        )
+        data = resp.json()
+    logger.info("[EmbeddedSignup] phone_details phone_id=%s result=%s", phone_number_id, data)
+    return data
+
+
+async def _register_phone(phone_number_id: str, token: str, pin: str) -> Dict[str, Any]:
+    """Activate the phone on WhatsApp Cloud API after OTP verification."""
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            f"{GRAPH}/{phone_number_id}/register",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"messaging_product": "whatsapp", "pin": pin},
+        )
+        data = resp.json()
+    logger.info("[EmbeddedSignup] register phone_id=%s result=%s", phone_number_id, data)
+    return data
+
+
+def _build_phone_sync_state(phone_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Map raw Meta phone state to Nahla's connection state machine."""
+    code_status = _meta_flag(phone_data.get("code_verification_status"))
+    name_status = _meta_flag(phone_data.get("name_status"))
+    phone_status = _meta_flag(phone_data.get("status"))
+    quality_rating = phone_data.get("quality_rating")
+
+    is_name_rejected = _meta_has_token(
+        name_status, "REJECT", "DECLIN", "DISAPPROV", "DENY", "BLOCK",
+    )
+    is_name_pending = _meta_has_token(name_status, "PENDING", "REVIEW")
+    is_phone_rejected = _meta_has_token(
+        phone_status, "RESTRICT", "DISABLE", "BLOCK", "DELETE", "FLAG",
+    )
+    is_phone_pending = _meta_has_token(
+        phone_status, "PENDING", "MIGRAT", "OFFLINE", "IN_PROGRESS",
+    )
+    is_verified = code_status == "VERIFIED"
+
+    if is_name_rejected:
+        return {
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "error",
+            "verification_status": code_status or None,
+            "name_status": name_status or None,
+            "meta_phone_status": phone_status or None,
+            "quality_rating": quality_rating,
+            "message": (
+                "تم التحقق من الرقم لكن Meta رفضت اسم العرض. "
+                "عدّل الاسم التجاري ليطابق نشاط التاجر ثم أعد المحاولة."
+            ),
+        }
+
+    if is_phone_rejected:
+        return {
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "error",
+            "verification_status": code_status or None,
+            "name_status": name_status or None,
+            "meta_phone_status": phone_status or None,
+            "quality_rating": quality_rating,
+            "message": "Meta أوقفت هذا الرقم أو قيّدته، لذلك لا يمكن تفعيله حاليًا.",
+        }
+
+    if not is_verified:
+        return {
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "otp_pending",
+            "verification_status": code_status or None,
+            "name_status": name_status or None,
+            "meta_phone_status": phone_status or None,
+            "quality_rating": quality_rating,
+            "message": "يلزم إدخال رمز التحقق الذي أرسلته Meta لإكمال ربط الرقم.",
+        }
+
+    if is_name_pending:
+        return {
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "review_pending",
+            "verification_status": code_status or None,
+            "name_status": name_status or None,
+            "meta_phone_status": phone_status or None,
+            "quality_rating": quality_rating,
+            "message": (
+                "تم التحقق من الرقم، لكن اسم العرض ما زال تحت مراجعة Meta. "
+                "سيظهر الرقم كـمعلّق إلى أن تنتهي المراجعة."
+            ),
+        }
+
+    if is_phone_pending:
+        return {
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "activation_pending",
+            "verification_status": code_status or None,
+            "name_status": name_status or None,
+            "meta_phone_status": phone_status or None,
+            "quality_rating": quality_rating,
+            "message": (
+                "تم التحقق من الرقم، لكن Meta ما زالت تُكمل تفعيله على Cloud API. "
+                "سننتظر حتى تصبح الحالة جاهزة فعليًا."
+            ),
+        }
+
+    return {
+        "connected": True,
+        "sending_enabled": True,
+        "db_status": "connected",
+        "verification_status": code_status or None,
+        "name_status": name_status or None,
+        "meta_phone_status": phone_status or None,
+        "quality_rating": quality_rating,
+        "message": "الرقم مفعّل ومتزامن مع Meta وجاهز للإرسال.",
+    }
+
+
+def _apply_embedded_state(
+    conn: WhatsAppConnection,
+    phone_data: Dict[str, Any],
+    sync_state: Dict[str, Any],
+    register_data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Persist the normalized Meta state into the WhatsAppConnection row."""
+    now = datetime.now(timezone.utc)
+    meta = dict(conn.extra_metadata or {})
+    meta.update({
+        "meta_code_verification_status": sync_state.get("verification_status"),
+        "meta_name_status": sync_state.get("name_status"),
+        "meta_phone_status": sync_state.get("meta_phone_status"),
+        "meta_quality_rating": sync_state.get("quality_rating"),
+        "embedded_status_message": sync_state.get("message"),
+        "last_meta_sync_at": now.isoformat(),
+    })
+    if register_data is not None:
+        meta["meta_register_response"] = register_data
+
+    conn.extra_metadata = meta
+    conn.connection_type = "embedded"
+    conn.phone_number = phone_data.get("display_phone_number") or conn.phone_number
+    conn.business_display_name = phone_data.get("verified_name") or conn.business_display_name
+    conn.status = sync_state["db_status"]
+    conn.sending_enabled = bool(sync_state["sending_enabled"])
+
+    if sync_state.get("verification_status") == "VERIFIED":
+        conn.last_verified_at = now
+
+    if sync_state["connected"]:
+        conn.connected_at = conn.connected_at or now
+        conn.last_error = None
+    elif conn.status == "error":
+        conn.last_error = sync_state["message"]
+    else:
+        conn.last_error = None
+
+
+def _build_embedded_status_payload(
+    conn: Optional[WhatsAppConnection],
+    phones: Optional[List[dict]] = None,
+) -> Dict[str, Any]:
+    if not conn or conn.connection_type != "embedded":
+        return {"connected": False, "status": "not_connected", "phones": phones or []}
+
+    meta = dict(conn.extra_metadata or {})
+    payload: Dict[str, Any] = {
+        "connected": bool(conn.status == "connected" and conn.sending_enabled),
+        "status": conn.status,
+        "connection_type": conn.connection_type,
+        "meta_business_account_id": conn.meta_business_account_id,
+        "phone_number_id": conn.phone_number_id,
+        "phone_number": conn.phone_number,
+        "display_phone_number": conn.phone_number,
+        "waba_id": conn.whatsapp_business_account_id,
+        "business_display_name": conn.business_display_name,
+        "display_name": conn.business_display_name,
+        "sending_enabled": bool(conn.sending_enabled),
+        "verification_status": meta.get("meta_code_verification_status"),
+        "name_status": meta.get("meta_name_status"),
+        "meta_phone_status": meta.get("meta_phone_status"),
+        "quality_rating": meta.get("meta_quality_rating"),
+        "message": meta.get("embedded_status_message"),
+        "connected_at": conn.connected_at.isoformat() if conn.connected_at else None,
+        "last_verified_at": conn.last_verified_at.isoformat() if conn.last_verified_at else None,
+        "last_attempt_at": conn.last_attempt_at.isoformat() if conn.last_attempt_at else None,
+        "webhook_verified": bool(conn.webhook_verified),
+        "token_expires_at": conn.token_expires_at.isoformat() if conn.token_expires_at else None,
+        "last_error": conn.last_error,
+    }
+    if phones is not None:
+        payload["phones"] = phones
+    return payload
+
+
+async def sync_embedded_connection_from_meta(
+    conn: WhatsAppConnection,
+    db: Session,
+    *,
+    attempt_register: bool = True,
+) -> Dict[str, Any]:
+    """
+    Pull the live phone state from Meta and persist it.
+    When the OTP is already verified, also attempts the final Cloud API register step.
+    """
+    if not conn.access_token or not conn.phone_number_id:
+        return _build_embedded_status_payload(conn)
+
+    phone_data = await _get_phone_details(conn.phone_number_id, conn.access_token)
+    if "error" in phone_data:
+        err = phone_data["error"]
+        conn.status = "error"
+        conn.sending_enabled = False
+        conn.last_error = f"تعذر مزامنة حالة الرقم مع Meta: {err.get('message', '')}"
+        meta = dict(conn.extra_metadata or {})
+        meta["embedded_status_message"] = conn.last_error
+        meta["last_meta_sync_at"] = datetime.now(timezone.utc).isoformat()
+        conn.extra_metadata = meta
+        db.commit()
+        return _build_embedded_status_payload(conn)
+
+    sync_state = _build_phone_sync_state(phone_data)
+    register_data: Optional[Dict[str, Any]] = None
+
+    should_register = (
+        attempt_register
+        and sync_state.get("verification_status") == "VERIFIED"
+        and not sync_state["connected"]
+    )
+    if should_register:
+        pin = _resolve_register_pin(conn)
+        register_data = await _register_phone(conn.phone_number_id, conn.access_token, pin)
+        reg_error = register_data.get("error")
+        if reg_error and reg_error.get("code") != 80007:
+            reg_msg = reg_error.get("message", "تعذر إكمال التفعيل")
+            reg_flag = _meta_flag(reg_msg)
+            if _meta_has_token(reg_flag, "PENDING", "REVIEW"):
+                sync_state = {
+                    **sync_state,
+                    "connected": False,
+                    "sending_enabled": False,
+                    "db_status": "review_pending",
+                    "message": (
+                        "تم التحقق من الرقم، لكن Meta ما زالت تراجع الاسم التجاري "
+                        "أو بيانات الحساب قبل تفعيل الإرسال."
+                    ),
+                }
+            else:
+                sync_state = {
+                    **sync_state,
+                    "connected": False,
+                    "sending_enabled": False,
+                    "db_status": "error",
+                    "message": f"فشل تفعيل الرقم في Meta: {reg_msg}",
+                }
+            _apply_embedded_state(conn, phone_data, sync_state, register_data)
+            db.commit()
+            return _build_embedded_status_payload(conn)
+
+        refreshed = await _get_phone_details(conn.phone_number_id, conn.access_token)
+        if "error" not in refreshed:
+            phone_data = refreshed
+            sync_state = _build_phone_sync_state(phone_data)
+
+    _apply_embedded_state(conn, phone_data, sync_state, register_data)
+    db.commit()
+    return _build_embedded_status_payload(conn)
+
+
 # ── schemas ───────────────────────────────────────────────────────────────────
 
 class ExchangeRequest(BaseModel):
@@ -255,6 +578,14 @@ async def exchange_code(
     conn.token_type                   = token_data.get("token_type", "user")
     conn.connection_type              = "embedded"
     conn.status                       = "pending"   # waiting for phone selection
+    conn.phone_number_id              = None
+    conn.phone_number                 = None
+    conn.business_display_name        = None
+    conn.sending_enabled              = False
+    conn.connected_at                 = None
+    conn.last_verified_at             = None
+    conn.last_error                   = None
+    conn.extra_metadata               = {}
 
     # Token expiry (Meta user tokens expire in ~60 days)
     expires_in = token_data.get("expires_in")
@@ -271,15 +602,7 @@ async def exchange_code(
     return {
         "status":   "waba_connected",
         "waba_id":  waba_id,
-        "phones":   [
-            {
-                "id":     p["id"],
-                "number": p.get("display_phone_number", ""),
-                "name":   p.get("verified_name", ""),
-                "verified": p.get("code_verification_status", "") == "VERIFIED",
-            }
-            for p in phones
-        ],
+        "phones":   _serialize_phones(phones),
         "message":  "تم ربط حساب واتساب للأعمال بنجاح. اختر رقم الهاتف.",
     }
 
@@ -302,13 +625,7 @@ async def select_phone(
 
     token = conn.access_token
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(
-            f"{GRAPH}/{body.phone_number_id}",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"fields": "id,display_phone_number,verified_name,code_verification_status,quality_rating"},
-        )
-        phone_data = resp.json()
+    phone_data = await _get_phone_details(body.phone_number_id, token)
 
     if "error" in phone_data:
         raise HTTPException(
@@ -327,9 +644,13 @@ async def select_phone(
     conn.phone_number          = phone_data.get("display_phone_number", "")
     conn.business_display_name = phone_data.get("verified_name", "")
     conn.connection_type       = "embedded"
-    conn.status                = "otp_pending"
+    conn.status                = "pending"
     conn.sending_enabled       = False
     db.commit()
+
+    initial_state = _build_phone_sync_state(phone_data)
+    if initial_state.get("verification_status") == "VERIFIED":
+        return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
 
     # Always request OTP on first selection to confirm ownership
     async with httpx.AsyncClient(timeout=15) as client:
@@ -365,6 +686,16 @@ async def select_phone(
         tenant_id, body.phone_number_id, conn.phone_number,
     )
 
+    conn.last_attempt_at = datetime.now(timezone.utc)
+    _apply_embedded_state(conn, phone_data, {
+        **initial_state,
+        "db_status": "otp_pending",
+        "connected": False,
+        "sending_enabled": False,
+        "message": "تم إرسال رمز التحقق عبر SMS. أدخله لإكمال الربط مع Meta.",
+    })
+    db.commit()
+
     return {
         "status":          "otp_required",
         "phone_number_id": body.phone_number_id,
@@ -381,14 +712,26 @@ async def get_status(request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn or conn.connection_type != "embedded":
-        return {"connected": False}
-    return {
-        "connected":    conn.status == "connected",
-        "status":       conn.status,
-        "phone_number": conn.phone_number,
-        "waba_id":      conn.whatsapp_business_account_id,
-        "display_name": conn.business_display_name,
-    }
+        return {"connected": False, "status": "not_connected", "phones": []}
+
+    phones: List[dict] = []
+    if conn.whatsapp_business_account_id and conn.access_token and not conn.phone_number_id:
+        try:
+            phones = _serialize_phones(
+                await _get_phone_numbers(conn.whatsapp_business_account_id, conn.access_token),
+            )
+        except Exception as exc:
+            logger.warning("[EmbeddedSignup] status phone list fetch failed: %s", exc)
+
+    if conn.phone_number_id and conn.access_token:
+        try:
+            return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+        except Exception as exc:
+            logger.warning("[EmbeddedSignup] status sync failed tenant=%s: %s", tenant_id, exc)
+            conn.last_error = str(exc)[:500]
+            db.commit()
+
+    return _build_embedded_status_payload(conn, phones)
 
 
 @router.post("/add-phone")
@@ -462,6 +805,8 @@ async def add_phone(
 
     conn.phone_number_id = phone_number_id
     conn.status          = "otp_pending"
+    conn.connection_type = "embedded"
+    conn.last_attempt_at = datetime.now(timezone.utc)
     db.commit()
 
     return {
@@ -501,27 +846,9 @@ async def verify_phone(
             detail=f"رمز التحقق غير صحيح: {verify_data['error'].get('message', '')}",
         )
 
-    # Fetch phone details to update the connection
-    async with httpx.AsyncClient(timeout=15) as client:
-        ph_resp = await client.get(
-            f"{GRAPH}/{body.phone_number_id}",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"fields": "id,display_phone_number,verified_name,code_verification_status"},
-        )
-        ph_data = ph_resp.json()
-
-    conn.phone_number_id          = body.phone_number_id
-    conn.phone_number             = ph_data.get("display_phone_number", "")
-    conn.business_display_name    = ph_data.get("verified_name", "")
-    conn.status                   = "connected"
-    conn.sending_enabled          = True
-    conn.connected_at             = datetime.now(timezone.utc)
-    conn.last_verified_at         = datetime.now(timezone.utc)
+    conn.phone_number_id = body.phone_number_id
+    conn.connection_type = "embedded"
     db.commit()
 
-    return {
-        "status":       "connected",
-        "phone_number": conn.phone_number,
-        "display_name": conn.business_display_name,
-        "message":      "تم التحقق وربط الرقم بنجاح!",
-    }
+    synced = await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+    return synced

@@ -34,13 +34,35 @@ declare global {
 
 interface EmbeddedPhone { id: string; number: string; name: string; verified: boolean }
 
-function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
-  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'verify-phone'|'done'>('init')
+interface EmbeddedStatusPayload {
+  connected: boolean
+  status: string
+  phone_number?: string
+  display_name?: string
+  connected_at?: string
+  phone_number_id?: string
+  waba_id?: string
+  sending_enabled?: boolean
+  verification_status?: string | null
+  name_status?: string | null
+  meta_phone_status?: string | null
+  message?: string | null
+  last_error?: string | null
+  phones?: EmbeddedPhone[]
+}
+
+function EmbeddedSignupFlow({
+  onConnected,
+}: {
+  onConnected: (payload?: { phone_number?: string; display_name?: string; connected_at?: string }) => void
+}) {
+  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'verify-phone'|'syncing-phone'|'done'>('init')
   const [error, setError]       = useState('')
   const [phones, setPhones]     = useState<EmbeddedPhone[]>([])
   const [wabaId, setWabaId]     = useState('')
   const [busy, setBusy]         = useState(false)
   const sdkLoaded               = useRef(false)
+  const embeddedStatusChecked   = useRef(false)
 
   const [configId, setConfigId] = useState('')
 
@@ -50,6 +72,7 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
   const [displayName, setDisplayName]   = useState('')
   const [otpCode, setOtpCode]           = useState('')
   const [newPhoneId, setNewPhoneId]     = useState('')
+  const [statusHint, setStatusHint]     = useState('')
 
   // Load Meta config + FB SDK on mount
   useEffect(() => {
@@ -85,6 +108,88 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
     return () => { cancelled = true }
   }, [])
 
+  const applyEmbeddedStatus = useCallback((res: EmbeddedStatusPayload) => {
+    if (res.waba_id) setWabaId(res.waba_id)
+    if (res.phone_number_id) setNewPhoneId(res.phone_number_id)
+    if (Array.isArray(res.phones)) setPhones(res.phones)
+
+    const message = res.message || res.last_error || ''
+    setStatusHint(message)
+    if (res.status !== 'error') setError('')
+
+    if (res.connected && res.sending_enabled) {
+      setStage('done')
+      setTimeout(() => onConnected({
+        phone_number: res.phone_number,
+        display_name: res.display_name,
+        connected_at: res.connected_at,
+      }), 1200)
+      return
+    }
+
+    if (res.status === 'otp_pending') {
+      setStage('verify-phone')
+      return
+    }
+
+    if (res.status === 'review_pending' || res.status === 'activation_pending') {
+      setStage('syncing-phone')
+      return
+    }
+
+    if (res.status === 'error') {
+      setError(message || 'تعذر إكمال تفعيل الرقم في Meta')
+      setStage('select-phone')
+      return
+    }
+
+    if (res.status === 'pending') {
+      setStage('select-phone')
+    }
+  }, [onConnected])
+
+  const refreshEmbeddedStatus = useCallback(async () => {
+    const res = await apiCall<EmbeddedStatusPayload>('/whatsapp/embedded/status')
+    applyEmbeddedStatus(res)
+    return res
+  }, [applyEmbeddedStatus])
+
+  useEffect(() => {
+    if (stage !== 'syncing-phone') return
+    let cancelled = false
+    let timer: number | undefined
+
+    const poll = async () => {
+      try {
+        const res = await refreshEmbeddedStatus()
+        if (cancelled) return
+        if (res.connected || !['review_pending', 'activation_pending', 'syncing-phone'].includes(res.status)) {
+          return
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'تعذر مزامنة حالة الرقم مع Meta')
+        }
+      }
+
+      if (!cancelled) {
+        timer = window.setTimeout(poll, 5000)
+      }
+    }
+
+    timer = window.setTimeout(poll, 3000)
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [stage, refreshEmbeddedStatus])
+
+  useEffect(() => {
+    if (stage !== 'ready' || embeddedStatusChecked.current) return
+    embeddedStatusChecked.current = true
+    refreshEmbeddedStatus().catch(() => {})
+  }, [stage, refreshEmbeddedStatus])
+
   const handleToken = useCallback((accessToken: string) => {
     setBusy(true); setStage('exchanging')
     // Send the access_token directly — avoids redirect_uri mismatch from code exchange
@@ -92,6 +197,7 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
       '/whatsapp/embedded/exchange',
       { method: 'POST', body: JSON.stringify({ access_token: accessToken }) }
     ).then(result => {
+      setStatusHint(result.message || '')
       setWabaId(result.waba_id)
       setPhones(result.phones)
       setStage('select-phone')
@@ -119,22 +225,16 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
     try {
-      const res = await apiCall<{ status: string; phone_number_id?: string }>('/whatsapp/embedded/select-phone', {
+      const res = await apiCall<EmbeddedStatusPayload>('/whatsapp/embedded/select-phone', {
         method: 'POST',
         body: JSON.stringify({ phone_number_id: phoneId }),
       })
-      if (res.status === 'otp_required') {
-        // Phone not yet verified — show OTP stage
-        setNewPhoneId(res.phone_number_id || phoneId)
-        setStage('verify-phone')
-      } else {
-        setStage('done')
-        setTimeout(onConnected, 1500)
-      }
+      setNewPhoneId(res.phone_number_id || phoneId)
+      applyEmbeddedStatus(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تعذر اختيار الرقم')
     } finally { setBusy(false) }
-  }, [onConnected])
+  }, [applyEmbeddedStatus])
 
   // ── Render ────────────────────────────────────────────────────────────────
   if (stage === 'done') {
@@ -220,7 +320,7 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
         const cleanCC    = countryCode.replace(/\D/g, '')
         if (!cleanPhone) { setError('أدخل رقم الهاتف بشكل صحيح'); setBusy(false); return }
         if (!displayName.trim()) { setError('الاسم التجاري مطلوب'); setBusy(false); return }
-        const res = await apiCall<{ phone_number_id: string }>('/whatsapp/embedded/add-phone', {
+        const res = await apiCall<{ phone_number_id: string; message?: string }>('/whatsapp/embedded/add-phone', {
           method: 'POST',
           body: JSON.stringify({
             country_code:  cleanCC,
@@ -230,6 +330,7 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
           }),
         })
         setNewPhoneId(res.phone_number_id)
+        setStatusHint(res.message || '')
         setStage('verify-phone')
       } catch (e) {
         setError(e instanceof Error ? e.message : 'فشل إضافة الرقم')
@@ -308,12 +409,11 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
       if (!otpCode) { setError('أدخل رمز التحقق'); return }
       setBusy(true); setError('')
       try {
-        await apiCall('/whatsapp/embedded/verify-phone', {
+        const res = await apiCall<EmbeddedStatusPayload>('/whatsapp/embedded/verify-phone', {
           method: 'POST',
           body: JSON.stringify({ phone_number_id: newPhoneId, code: otpCode }),
         })
-        setStage('done')
-        setTimeout(onConnected, 1500)
+        applyEmbeddedStatus(res)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'رمز التحقق غير صحيح')
       } finally { setBusy(false) }
@@ -329,6 +429,7 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
             <p className="text-xs text-slate-500">أدخل الرمز المرسل عبر SMS</p>
           </div>
         </div>
+        {statusHint && !error && <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-sm text-blue-700">{statusHint}</div>}
         {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
         <input
           value={otpCode}
@@ -352,6 +453,44 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
           >
             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <BadgeCheck className="w-4 h-4" />}
             تأكيد
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (stage === 'syncing-phone') {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
+            <Loader2 className="w-5 h-5 text-amber-600 animate-spin" />
+          </div>
+          <div>
+            <p className="font-semibold text-slate-800">جارٍ مزامنة الرقم مع Meta</p>
+            <p className="text-xs text-slate-500">لن يظهر كمرتبط إلا بعد أن يصبح جاهزًا فعليًا للإرسال</p>
+          </div>
+        </div>
+
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+          {statusHint || 'Meta ما زالت تُراجع أو تُفعّل الرقم. يتم التحديث تلقائيًا كل بضع ثوانٍ.'}
+        </div>
+
+        {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
+
+        <div className="flex gap-2">
+          <button
+            onClick={() => refreshEmbeddedStatus().catch(e => setError(e instanceof Error ? e.message : 'تعذر تحديث الحالة'))}
+            className="flex-1 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
+          >
+            <RefreshCw className="w-4 h-4" />
+            تحديث الآن
+          </button>
+          <button
+            onClick={() => setStage('select-phone')}
+            className="flex-1 py-3 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            العودة للأرقام
           </button>
         </div>
       </div>
@@ -422,6 +561,12 @@ interface StatusResponse {
   connected: boolean; status: string
   phone_number?: string; display_name?: string; connected_at?: string
   phone_number_id?: string; last_attempt_at?: string
+  sending_enabled?: boolean
+  verification_status?: string | null
+  name_status?: string | null
+  meta_phone_status?: string | null
+  message?: string | null
+  last_error?: string | null
 }
 
 // ── Meta business verticals ───────────────────────────────────────────────────
@@ -603,12 +748,12 @@ export default function WhatsAppConnect() {
   useEffect(() => {
     getStatus()
       .then(s => {
-        if (s.connected) {
+        if (s.connected && s.sending_enabled !== false) {
           setConnPhone(s.phone_number ?? '')
           setConnName(s.display_name ?? '')
           setConnAt(s.connected_at ?? '')
           setStep(4)
-        } else if (s.status === 'pending' && s.phone_number_id) {
+        } else if ((s.status === 'pending' || s.status === 'otp_pending') && s.phone_number_id) {
           // Resume from Step 2 — OTP was already sent, pending verification
           setPhoneNumberId(s.phone_number_id)
           setSentMsg('تم إرسال رمز التحقق مسبقاً — أدخل الرمز الذي وصلك.')
@@ -619,6 +764,8 @@ export default function WhatsAppConnect() {
             const remaining = Math.max(0, 60 - elapsed)
             if (remaining > 0) setResendCooldown(remaining)
           }
+        } else if (s.status === 'activation_pending' || s.status === 'review_pending') {
+          setMode('embedded')
         }
       })
       .catch(()=>{})
@@ -772,7 +919,12 @@ export default function WhatsAppConnect() {
       {/* ── Embedded Signup mode ─────────────────────────────────────────── */}
       {mode === 'embedded' && step < 4 && !loading && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-          <EmbeddedSignupFlow onConnected={() => { setStep(4); setConnAt(new Date().toISOString()) }} />
+          <EmbeddedSignupFlow onConnected={(payload) => {
+            setConnPhone(payload?.phone_number ?? '')
+            setConnName(payload?.display_name ?? '')
+            setConnAt(payload?.connected_at ?? new Date().toISOString())
+            setStep(4)
+          }} />
         </div>
       )}
 

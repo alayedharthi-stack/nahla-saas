@@ -361,7 +361,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
 
     # Check WhatsApp connection status for smart redirect
     wa_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    wa_connected = bool(wa_conn and wa_conn.status == "connected")
+    wa_connected = bool(wa_conn and wa_conn.status == "connected" and wa_conn.sending_enabled)
 
     if is_new:
         redirect_target = "/onboarding"

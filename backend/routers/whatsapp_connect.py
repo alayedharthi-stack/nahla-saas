@@ -330,6 +330,23 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
     """
     tenant_id = resolve_tenant_id(request)
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if conn and conn.connection_type == "embedded":
+        if not conn.phone_number_id or not conn.access_token:
+            return {"verified": False, "reason": "no_connection"}
+        try:
+            from routers.whatsapp_embedded import sync_embedded_connection_from_meta  # noqa: PLC0415
+            payload = await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+            return {
+                "verified": bool(payload.get("connected")),
+                "sending_enabled": bool(payload.get("sending_enabled")),
+                "status": payload.get("status"),
+                "reason": payload.get("message") or payload.get("last_error"),
+            }
+        except Exception as exc:
+            conn.last_error = str(exc)[:500]
+            db.commit()
+            return {"verified": False, "reason": str(exc)}
+
     if not conn or conn.status not in ("connected", "needs_reauth"):
         return {"verified": False, "reason": "no_connection"}
 
@@ -357,12 +374,16 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
 
         if resp.status_code == 200:
             data = resp.json()
-            conn.status           = "connected"
-            conn.last_verified_at = datetime.now(timezone.utc)
             conn.sending_enabled  = data.get("code_verification_status") == "VERIFIED"
+            conn.status           = "connected" if conn.sending_enabled else "activation_pending"
+            conn.last_verified_at = datetime.now(timezone.utc)
             conn.last_error       = None
             db.commit()
-            return {"verified": True, "sending_enabled": conn.sending_enabled}
+            return {
+                "verified": bool(conn.sending_enabled),
+                "sending_enabled": conn.sending_enabled,
+                "status": conn.status,
+            }
 
         conn.last_error = f"Meta returned {resp.status_code}"
         db.commit()
@@ -1153,6 +1174,12 @@ async def direct_verify_otp(
 
     # ── Step B: register — activates the phone on WhatsApp Cloud API ─────────
     # Without this call the phone stays "Pending/معلق" in Meta Business Manager.
+    from routers.whatsapp_embedded import _resolve_register_pin  # noqa: PLC0415
+    _conn_for_pin = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    _reg_pin = _resolve_register_pin(_conn_for_pin) if _conn_for_pin else "000000"
+    if _conn_for_pin:
+        db.commit()
+
     logger.info(
         "[WA Direct] ▶ register | endpoint=POST %s/%s/register",
         graph, phone_id,
@@ -1163,7 +1190,7 @@ async def direct_verify_otp(
             reg_resp  = await client.post(
                 f"{graph}/{phone_id}/register",
                 headers=headers,
-                json={"messaging_product": "whatsapp", "pin": "000000"},
+                json={"messaging_product": "whatsapp", "pin": _reg_pin},
             )
             reg_status = reg_resp.status_code
             register_data = reg_resp.json()
@@ -1265,7 +1292,7 @@ def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
         return {"connected": False, "status": "not_connected"}
 
     resp: dict = {
-        "connected":              conn.status == "connected",
+        "connected":              bool(conn.status == "connected" and conn.sending_enabled),
         "status":                 conn.status,
         "phone_number":           conn.phone_number,
         "display_phone_number":   conn.phone_number,
@@ -1273,10 +1300,29 @@ def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
         "display_name":           conn.business_display_name,
         "phone_number_id":        conn.phone_number_id,
         "waba_id":                conn.whatsapp_business_account_id,
-        "verification_status":    "verified" if conn.status == "connected" else conn.status,
+        "verification_status":    (
+            ((conn.extra_metadata or {}).get("meta_code_verification_status"))
+            or ("verified" if conn.status == "connected" else conn.status)
+        ),
         "connected_at":           conn.connected_at.isoformat() if conn.connected_at else None,
+        "last_verified_at":       conn.last_verified_at.isoformat() if conn.last_verified_at else None,
+        "last_error":             conn.last_error,
+        "sending_enabled":        bool(conn.sending_enabled),
+        "webhook_verified":       bool(conn.webhook_verified),
+        "token_expires_at":       conn.token_expires_at.isoformat() if conn.token_expires_at else None,
+        "meta_business_account_id": conn.meta_business_account_id,
     }
-    if conn.status == "pending" and conn.phone_number_id:
+    meta = dict(conn.extra_metadata or {})
+    if meta.get("meta_name_status") is not None:
+        resp["name_status"] = meta.get("meta_name_status")
+    if meta.get("meta_phone_status") is not None:
+        resp["meta_phone_status"] = meta.get("meta_phone_status")
+    if meta.get("embedded_status_message") is not None:
+        resp["message"] = meta.get("embedded_status_message")
+    if meta.get("meta_quality_rating") is not None:
+        resp["quality_rating"] = meta.get("meta_quality_rating")
+
+    if conn.status in ("pending", "otp_pending", "activation_pending", "review_pending") and conn.phone_number_id:
         resp["last_attempt_at"] = (
             conn.last_attempt_at.isoformat() if conn.last_attempt_at else None
         )
@@ -1293,6 +1339,12 @@ async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
     """
     tenant_id = resolve_tenant_id(request)
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if conn and conn.connection_type == "embedded" and conn.phone_number_id and conn.access_token:
+        try:
+            from routers.whatsapp_embedded import sync_embedded_connection_from_meta  # noqa: PLC0415
+            return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+        except Exception as exc:
+            logger.warning("[whatsapp/status] embedded sync failed tenant=%s: %s", tenant_id, exc)
     return _build_wa_status(conn)
 
 
@@ -1374,6 +1426,11 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
 
     # If NOT_VERIFIED: attempt register to re-activate
     if verification_status != "VERIFIED":
+        from routers.whatsapp_embedded import _resolve_register_pin as _rrp  # noqa: PLC0415
+        _refresh_pin = _rrp(conn) if conn else "000000"
+        if conn:
+            db.commit()
+
         logger.info(
             "[WA refresh] ▶ re-register | endpoint=POST %s/%s/register",
             graph, phone_id,
@@ -1383,7 +1440,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
                 reg = await client.post(
                     f"{graph}/{phone_id}/register",
                     headers=headers,
-                    json={"messaging_product": "whatsapp", "pin": "000000"},
+                    json={"messaging_product": "whatsapp", "pin": _refresh_pin},
                 )
                 reg_data = reg.json()
             logger.info("[WA refresh] re-register response | status=%s body=%s", reg.status_code, reg_data)

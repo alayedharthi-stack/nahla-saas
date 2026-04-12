@@ -1016,7 +1016,8 @@ async def admin_system_health(
         "whatsapp_connections": {
             "status": "ok",
             "connected": db.query(func.count(WhatsAppConnection.id)).filter(
-                WhatsAppConnection.status == "connected"
+                WhatsAppConnection.status == "connected",
+                WhatsAppConnection.sending_enabled == True,  # noqa: E712
             ).scalar() or 0,
         },
         "support_access": {
@@ -1040,7 +1041,8 @@ async def admin_system_dependencies(
         "database": {"configured": True},
         "orchestrator_url": os.environ.get("ORCHESTRATOR_URL", "http://localhost:8016"),
         "connected_whatsapp_tenants": db.query(func.count(WhatsAppConnection.id)).filter(
-            WhatsAppConnection.status == "connected"
+            WhatsAppConnection.status == "connected",
+            WhatsAppConnection.sending_enabled == True,  # noqa: E712
         ).scalar() or 0,
         "salla_integrations_enabled": db.query(func.count(Integration.id)).filter(
             Integration.provider == "salla",

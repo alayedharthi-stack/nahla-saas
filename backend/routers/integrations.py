@@ -30,15 +30,23 @@ def _wa_status_payload(conn: WhatsAppConnection | None) -> dict:
     """Return the unified WhatsApp status dict (mirrors /whatsapp/status)."""
     if not conn or conn.status == "not_connected":
         return {"connected": False, "status": "not_connected"}
+    meta = dict(conn.extra_metadata or {})
     return {
-        "connected":             conn.status == "connected",
+        "connected":             bool(conn.status == "connected" and conn.sending_enabled),
         "status":                conn.status,
         "phone_number":          conn.phone_number,
         "display_phone_number":  conn.phone_number,
         "business_display_name": conn.business_display_name,
         "phone_number_id":       conn.phone_number_id,
         "waba_id":               conn.whatsapp_business_account_id,
-        "verification_status":   "verified" if conn.status == "connected" else conn.status,
+        "verification_status":   (
+            meta.get("meta_code_verification_status")
+            or ("verified" if conn.status == "connected" else conn.status)
+        ),
+        "name_status":           meta.get("meta_name_status"),
+        "meta_phone_status":     meta.get("meta_phone_status"),
+        "message":               meta.get("embedded_status_message"),
+        "sending_enabled":       bool(conn.sending_enabled),
         "connected_at":          conn.connected_at.isoformat() if conn.connected_at else None,
     }
 

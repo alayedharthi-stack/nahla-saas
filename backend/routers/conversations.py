@@ -240,6 +240,7 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
     wa_conn = db.query(WhatsAppConnection).filter(
         WhatsAppConnection.tenant_id == tenant_id,
         WhatsAppConnection.status == "connected",
+        WhatsAppConnection.sending_enabled == True,  # noqa: E712
     ).first()
     if not wa_conn or not wa_conn.phone_number_id:
         raise HTTPException(status_code=409, detail="WhatsApp is not connected for this tenant")

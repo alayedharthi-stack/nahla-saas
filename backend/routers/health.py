@@ -187,7 +187,7 @@ async def tenant_isolation_check(
     # ── WhatsApp connection ─────────────────────────────────────────────────────
     wa = db.query(WhatsAppConnection).filter_by(tenant_id=resolved_tid).first() if resolved_tid else None
     details["whatsapp"] = {
-        "connected":    bool(wa and wa.status == "connected"),
+        "connected":    bool(wa and wa.status == "connected" and wa.sending_enabled),
         "status":       wa.status if wa else "none",
         "phone_number": wa.phone_number if wa else None,
         "tenant_id":    wa.tenant_id if wa else None,
