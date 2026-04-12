@@ -310,18 +310,19 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
 
             now_iso = datetime.now(timezone.utc).isoformat()
             if integration:
-                # Update store_id / name in case they changed
                 cfg = dict(integration.config or {})
                 cfg.update({
                     "store_id":   merchant_id_str,
                     "store_name": store_name,
                     "last_seen":  now_iso,
                 })
-                integration.config  = cfg
-                integration.enabled = True
+                integration.config = cfg
+                has_tokens = bool(cfg.get("api_key") and cfg.get("refresh_token"))
+                if has_tokens:
+                    integration.enabled = True
                 logger.info(
-                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s",
-                    tenant_id, merchant_id_str,
+                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s has_tokens=%s",
+                    tenant_id, merchant_id_str, has_tokens,
                 )
             else:
                 db.add(Integration(
@@ -1207,11 +1208,6 @@ async def salla_oauth_callback(
         )
 
     try:
-        integration = db.query(Integration).filter(
-            Integration.tenant_id == tenant_id,
-            Integration.provider  == "salla",
-        ).first()
-
         new_config = {
             "api_key":       access_token,
             "refresh_token": refresh_token,
@@ -1223,6 +1219,35 @@ async def salla_oauth_callback(
             "redirect_uri":  SALLA_REDIRECT_URI,
             "connected_at":  datetime.now(timezone.utc).isoformat(),
         }
+
+        # Revoke stale integrations: same store on OTHER tenants lose their
+        # tokens because Salla invalidates old tokens on re-auth.
+        if salla_store_id:
+            stale = (
+                db.query(Integration)
+                .filter(
+                    Integration.provider == "salla",
+                    Integration.tenant_id != tenant_id,
+                    Integration.config["store_id"].astext == str(salla_store_id),
+                )
+                .all()
+            )
+            for s in stale:
+                s.enabled = False
+                stale_cfg = dict(s.config or {})
+                stale_cfg.pop("api_key", None)
+                stale_cfg.pop("refresh_token", None)
+                stale_cfg["revoked_reason"] = f"re-authed under tenant {tenant_id}"
+                s.config = stale_cfg
+                logger.warning(
+                    "[Salla OAuth] ⚠️ Disabled stale integration id=%s tenant=%s (same store_id=%s)",
+                    s.id, s.tenant_id, salla_store_id,
+                )
+
+        integration = db.query(Integration).filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider  == "salla",
+        ).first()
 
         if integration:
             integration.config  = new_config
