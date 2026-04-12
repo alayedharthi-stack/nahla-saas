@@ -328,6 +328,14 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("Coupon generator scheduler could not start: %s", exc)
 
+    # 6. WhatsApp token auto-refresh (every 12h)
+    try:
+        from core.scheduler import run_wa_token_refresh_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_wa_token_refresh_scheduler())
+        logger.info("WA token refresh scheduler started (12h).")
+    except Exception as exc:
+        logger.warning("WA token refresh scheduler could not start: %s", exc)
+
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.
 _REQUIRED_PROD_VARS = ("JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD")

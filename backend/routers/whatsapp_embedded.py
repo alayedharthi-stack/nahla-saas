@@ -1051,27 +1051,33 @@ async def add_phone(
         raise HTTPException(status_code=400, detail="لا يوجد WABA مرتبط. أكمل خطوة الربط أولاً.")
 
     waba_id = conn.whatsapp_business_account_id
-    token_ctx = await get_token_for_operation(
-        db,
-        conn,
-        tenant_id=tenant_id,
-        operation="embedded.add_phone",
-        prefer_platform=False,
-    )
 
-    # Step 1 — Register the phone number with the WABA
-    async with httpx.AsyncClient(timeout=20) as client:
-        reg_resp = await client.post(
-            f"{GRAPH}/{waba_id}/phone_numbers",
-            headers={"Authorization": f"Bearer {token_ctx.token}"},
+    reg_data: dict = {}
+    for ctx in _candidate_graph_tokens(conn, prefer_platform=False):
+        persist_token_context(db, conn, tenant_id=tenant_id, operation="embedded.add_phone", ctx=ctx)
+        reg_data = await graph_post_with_context(
+            ctx,
+            tenant_id=tenant_id,
+            operation="embedded.add_phone",
+            path=f"{waba_id}/phone_numbers",
             json={
                 "cc":            body.country_code,
                 "phone_number":  body.phone_number,
                 "migrate_phone_number": False,
                 "verified_name": body.verified_name,
             },
+            timeout=20,
         )
-        reg_data = reg_resp.json()
+        if "error" not in reg_data:
+            break
+        err = reg_data.get("error") or {}
+        if ctx.source == "merchant_oauth" and int(err.get("code") or 0) == 190:
+            _update_oauth_state(conn, status="expired",
+                message="انتهت صلاحية جلسة Meta — جارٍ المحاولة بالتوكن البديل.",
+                token_source=ctx.source)
+            logger.warning("[EmbeddedSignup] add-phone 190 on merchant token — retrying with next candidate")
+            continue
+        break
 
     logger.info("[EmbeddedSignup] add-phone register: %s", reg_data)
 
@@ -1089,14 +1095,24 @@ async def add_phone(
     if not phone_number_id:
         raise HTTPException(status_code=500, detail="لم يُعاد phone_number_id من Meta")
 
-    # Step 2 — Request OTP
-    async with httpx.AsyncClient(timeout=15) as client:
-        otp_resp = await client.post(
-            f"{GRAPH}/{phone_number_id}/request_code",
-            headers={"Authorization": f"Bearer {token_ctx.token}"},
+    # Step 2 — Request OTP (with same fallback pattern)
+    otp_data: dict = {}
+    for ctx in _candidate_graph_tokens(conn, prefer_platform=False):
+        otp_data = await graph_post_with_context(
+            ctx,
+            tenant_id=tenant_id,
+            operation="embedded.add_phone.otp",
+            path=f"{phone_number_id}/request_code",
             json={"code_method": body.code_method, "language": "ar"},
+            timeout=15,
         )
-        otp_data = otp_resp.json()
+        if "error" not in otp_data:
+            break
+        otp_err = otp_data.get("error") or {}
+        if ctx.source == "merchant_oauth" and int(otp_err.get("code") or 0) == 190:
+            logger.warning("[EmbeddedSignup] add-phone OTP 190 — retrying with next candidate")
+            continue
+        break
 
     logger.info("[EmbeddedSignup] add-phone request_code: %s", otp_data)
 

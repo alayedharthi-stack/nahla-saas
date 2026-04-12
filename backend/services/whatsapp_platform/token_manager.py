@@ -39,8 +39,10 @@ def _merchant_token_health(conn: Any) -> Tuple[str, Optional[datetime]]:
     expires_at = getattr(conn, "token_expires_at", None)
     if expires_at and _now_utc() > expires_at:
         return "expired", expires_at
-    if expires_at and expires_at - _now_utc() <= timedelta(days=3):
+    if expires_at and expires_at - _now_utc() <= timedelta(days=7):
         return "expiring_soon", expires_at
+    if not expires_at:
+        return "expiring_soon", None
     return "healthy", expires_at
 
 
@@ -191,8 +193,13 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
     if not META_APP_ID or not META_APP_SECRET:
         return None
     health, expires_at = _merchant_token_health(conn)
-    if health == "healthy" and (not expires_at or expires_at - _now_utc() > timedelta(days=3)):
+    if health == "healthy" and expires_at and expires_at - _now_utc() > timedelta(days=7):
         return None
+    logger.info(
+        "[WA token] attempting refresh — health=%s expires_at=%s tenant=%s",
+        health, expires_at.isoformat() if expires_at else "unknown",
+        getattr(conn, "tenant_id", "?"),
+    )
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(
@@ -209,7 +216,15 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
         logger.warning("[WA token] refresh failed with network error: %s", exc)
         return None
     if "error" in data:
-        logger.warning("[WA token] refresh rejected by Meta: %s", data)
+        err_code = int(data.get("error", {}).get("code") or 0)
+        if err_code == 190:
+            conn.token_expires_at = _now_utc() - timedelta(seconds=1)
+            logger.warning(
+                "[WA token] token truly expired (190) — marked expired in DB | tenant=%s",
+                getattr(conn, "tenant_id", "?"),
+            )
+        else:
+            logger.warning("[WA token] refresh rejected by Meta: %s", data)
         return None
     new_token = data.get("access_token")
     if not new_token:
@@ -219,8 +234,8 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
     new_expires_at = _now_utc() + timedelta(seconds=int(data.get("expires_in") or 5183944))
     conn.token_expires_at = new_expires_at
     logger.info(
-        "[WA token] refreshed merchant long-lived token exp=%s",
-        new_expires_at.isoformat(),
+        "[WA token] refreshed merchant long-lived token — new_exp=%s tenant=%s",
+        new_expires_at.isoformat(), getattr(conn, "tenant_id", "?"),
     )
     return build_token_context(conn, source="merchant_oauth")
 

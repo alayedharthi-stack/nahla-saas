@@ -21,6 +21,7 @@ logger = logging.getLogger("nahla-scheduler")
 _CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
 _SYNC_INTERVAL_SECONDS = 3600  # store sync every 1 hour
 _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
+_TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
 
 
 async def run_scheduler() -> None:
@@ -57,6 +58,93 @@ async def run_coupon_generator_scheduler() -> None:
         except Exception as exc:
             logger.error("[Coupon Scheduler] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_COUPON_GEN_INTERVAL_SECONDS)
+
+
+async def run_wa_token_refresh_scheduler() -> None:
+    """Proactively refresh WhatsApp merchant tokens before they expire."""
+    await asyncio.sleep(300)
+    logger.info("[WA Token Refresh] Started — checking every %ss", _TOKEN_REFRESH_INTERVAL_SECONDS)
+    while True:
+        try:
+            await _refresh_all_wa_tokens()
+        except Exception as exc:
+            logger.error("[WA Token Refresh] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_TOKEN_REFRESH_INTERVAL_SECONDS)
+
+
+async def _refresh_all_wa_tokens() -> None:
+    """Find all WhatsApp connections with tokens nearing expiry and refresh them."""
+    import sys as _sys, os as _os
+    _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    from core.database import SessionLocal
+    from database.models import WhatsAppConnection
+
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        logger.error("[WA Token Refresh] Cannot open DB: %s", exc)
+        return
+
+    refreshed = 0
+    failed = 0
+    skipped = 0
+    try:
+        connections = (
+            db.query(WhatsAppConnection)
+            .filter(
+                WhatsAppConnection.access_token.isnot(None),
+                WhatsAppConnection.access_token != "",
+                WhatsAppConnection.connection_type == "embedded",
+            )
+            .all()
+        )
+        logger.info("[WA Token Refresh] Found %d embedded connections to check", len(connections))
+
+        now = datetime.now(timezone.utc)
+        threshold = now + timedelta(days=14)
+
+        for conn in connections:
+            try:
+                needs_refresh = False
+                if not conn.token_expires_at:
+                    needs_refresh = True
+                elif conn.token_expires_at <= threshold:
+                    needs_refresh = True
+
+                if not needs_refresh:
+                    skipped += 1
+                    continue
+
+                from services.whatsapp_platform.token_manager import (
+                    _refresh_merchant_long_lived_token,
+                )
+                result = await _refresh_merchant_long_lived_token(conn)
+                if result and result.token_status in ("healthy", "expiring_soon"):
+                    db.commit()
+                    refreshed += 1
+                    logger.info(
+                        "[WA Token Refresh] tenant=%s — refreshed OK, new_exp=%s",
+                        conn.tenant_id, conn.token_expires_at,
+                    )
+                else:
+                    db.rollback()
+                    failed += 1
+                    logger.warning(
+                        "[WA Token Refresh] tenant=%s — refresh failed (token may be expired)",
+                        conn.tenant_id,
+                    )
+            except Exception as exc:
+                db.rollback()
+                failed += 1
+                logger.warning("[WA Token Refresh] tenant=%s error: %s", conn.tenant_id, exc)
+
+        logger.info(
+            "[WA Token Refresh] Done — refreshed=%d failed=%d skipped=%d total=%d",
+            refreshed, failed, skipped, len(connections),
+        )
+    finally:
+        db.close()
 
 
 async def _generate_coupons_all_tenants() -> None:
