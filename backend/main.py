@@ -105,6 +105,7 @@ from routers.conversations import router as _conversations_router # noqa: E402
 from routers.coupons      import router as _coupons_router       # noqa: E402
 from routers.orders       import router as _orders_router        # noqa: E402
 from routers.intelligence import router as _intelligence_router  # noqa: E402
+from routers.customers    import router as _customers_router     # noqa: E402
 
 # Newly extracted routers
 from routers.ai_sales          import router as _ai_sales_router         # noqa: E402
@@ -138,6 +139,7 @@ app.include_router(_conversations_router)
 app.include_router(_coupons_router)
 app.include_router(_orders_router)
 app.include_router(_intelligence_router)
+app.include_router(_customers_router)
 app.include_router(_ai_sales_router)
 app.include_router(_billing_router)
 app.include_router(_webhooks_router)
@@ -303,6 +305,14 @@ async def on_startup() -> None:
         logger.info("Store sync scheduler started (hourly).")
     except Exception as exc:
         logger.warning("Store sync scheduler could not start: %s", exc)
+
+    # 5. Coupon pool generator scheduler (every 6h)
+    try:
+        from core.scheduler import run_coupon_generator_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_coupon_generator_scheduler())
+        logger.info("Coupon generator scheduler started (6h).")
+    except Exception as exc:
+        logger.warning("Coupon generator scheduler could not start: %s", exc)
 
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.

@@ -378,7 +378,54 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_shipping_options", exc)
             return []
 
-    # ── Offers ─────────────────────────────────────────────────────────────────
+    # ── Customers ──────────────────────────────────────────────────────────────
+
+    async def get_customers(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Fetch customers from Salla and return raw dicts."""
+        try:
+            data = await self._get("/customers", {"per_page": min(limit, 50)})
+            return data.get("data") or []
+        except Exception as exc:
+            self._log_error("get_customers", exc)
+            return []
+
+    # ── Offers / Coupons ──────────────────────────────────────────────────────
+
+    async def get_coupons(self) -> List[Dict[str, Any]]:
+        """Return raw coupon dicts from Salla (used by sync_coupons)."""
+        try:
+            data = await self._get("/coupons", {"per_page": 50})
+            return data.get("data") or []
+        except Exception as exc:
+            self._log_error("get_coupons", exc)
+            return []
+
+    async def create_coupon(
+        self,
+        code: str,
+        discount_type: str = "percentage",
+        discount_value: int = 10,
+        expiry_days: int = 3,
+    ) -> Optional[Dict[str, Any]]:
+        """Create a coupon in Salla. Returns the created coupon data or None."""
+        from datetime import timedelta
+        expiry = (datetime.now(timezone.utc) + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+        salla_type = "PERCENT" if discount_type == "percentage" else "FIXED"
+        payload = {
+            "code": code,
+            "type": salla_type,
+            "percent_off": discount_value if salla_type == "PERCENT" else 0,
+            "amount_off": discount_value if salla_type == "FIXED" else 0,
+            "status": "active",
+            "expiry_date": expiry,
+        }
+        try:
+            data = await self._post("/coupons", payload)
+            logger.info("Salla coupon created: %s | tenant=%s", code, self._tenant_id)
+            return data.get("data", data)
+        except Exception as exc:
+            self._log_error("create_coupon", exc)
+            return None
 
     async def get_active_offers(self) -> List[NormalizedOffer]:
         try:

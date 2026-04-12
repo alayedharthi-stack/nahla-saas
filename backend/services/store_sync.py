@@ -39,6 +39,7 @@ for _p in (_THIS, _DB):
 from models import (  # noqa: E402
     Coupon,
     Customer,
+    CustomerProfile,
     Order,
     Product,
     StoreSyncJob,
@@ -77,14 +78,24 @@ def _normalise_product(raw: Any) -> Dict:
 def _normalise_order(raw: Any) -> Dict:
     if hasattr(raw, "dict"):
         raw = raw.dict()
+    customer_info = raw.get("customer") or raw.get("customer_info") or {}
+    if not customer_info:
+        customer_name = raw.get("customer_name", "")
+        customer_phone = raw.get("customer_phone", "")
+        if customer_name or customer_phone:
+            customer_info = {
+                "name": customer_name,
+                "mobile": customer_phone,
+            }
     return {
         "external_id":   str(raw.get("id", raw.get("external_id", ""))),
         "status":        raw.get("status", "unknown"),
         "total":         str(raw.get("total", raw.get("sub_total", ""))),
-        "customer_info": raw.get("customer", raw.get("customer_info", {})),
+        "customer_info": customer_info,
         "line_items":    raw.get("items", raw.get("line_items", [])),
         "checkout_url":  raw.get("checkout_url", ""),
         "is_abandoned":  raw.get("is_abandoned", raw.get("abandoned", False)),
+        "created_at":    raw.get("created_at"),
     }
 
 
@@ -101,6 +112,34 @@ def _normalise_coupon(raw: Any) -> Dict:
         "minimum_order":  raw.get("minimum_order", None),
         "maximum_uses":   raw.get("maximum_uses", None),
     }
+
+
+def _compute_segment(total_orders: int, total_spend: float, days_inactive: int):
+    """Classify a customer into a segment and compute churn risk."""
+    if days_inactive <= 14:
+        churn_risk = max(0.02, days_inactive * 0.005)
+    elif days_inactive <= 30:
+        churn_risk = 0.10 + (days_inactive - 14) * 0.008
+    elif days_inactive <= 60:
+        churn_risk = 0.23 + (days_inactive - 30) * 0.01
+    elif days_inactive <= 90:
+        churn_risk = 0.53 + (days_inactive - 60) * 0.008
+    else:
+        churn_risk = 0.77 + min((days_inactive - 90) * 0.002, 0.23)
+    churn_risk = round(min(churn_risk, 1.0), 3)
+
+    if days_inactive > 90:
+        segment = "churned"
+    elif days_inactive > 60:
+        segment = "at_risk"
+    elif total_orders <= 1:
+        segment = "new"
+    elif (total_spend >= 2000 and total_orders >= 5) or total_spend >= 3000:
+        segment = "vip"
+    else:
+        segment = "active"
+
+    return segment, churn_risk
 
 
 # ── Sync service ──────────────────────────────────────────────────────────────
@@ -259,6 +298,7 @@ class StoreSyncService:
         snap.product_count  = products_count
         snap.order_count    = orders_count
         snap.coupon_count   = len(coupon_list)
+        snap.customer_count = self.db.query(Customer).filter_by(tenant_id=self.tenant_id).count()
         snap.category_count = len(categories)
         snap.sync_version   = (snap.sync_version or 0) + 1
         snap.last_full_sync_at = datetime.now(timezone.utc)
@@ -336,6 +376,10 @@ class StoreSyncService:
                 existing.customer_info = normalised["customer_info"]
                 existing.line_items    = normalised["line_items"]
                 existing.is_abandoned  = normalised["is_abandoned"]
+                existing.extra_metadata = {
+                    **(existing.extra_metadata or {}),
+                    "created_at": normalised.get("created_at"),
+                }
             else:
                 self.db.add(Order(
                     tenant_id    = self.tenant_id,
@@ -346,6 +390,7 @@ class StoreSyncService:
                     line_items   = normalised["line_items"],
                     checkout_url = normalised["checkout_url"],
                     is_abandoned = normalised["is_abandoned"],
+                    extra_metadata = {"created_at": normalised.get("created_at")},
                 ))
             count += 1
         self.db.flush()
@@ -401,20 +446,166 @@ class StoreSyncService:
         self.db.flush()
         return count
 
+    # ── Customers sync ─────────────────────────────────────────────────────────
+
+    async def sync_customers(self) -> int:
+        adapter = self._get_adapter()
+        if not adapter or not hasattr(adapter, "get_customers"):
+            return 0
+
+        try:
+            raw_list = await adapter.get_customers()
+        except Exception as exc:
+            logger.warning("tenant=%s customers sync failed: %s", self.tenant_id, exc)
+            return 0
+
+        count = 0
+        for raw in raw_list:
+            ext_id = str(raw.get("id", ""))
+            if not ext_id:
+                continue
+            name = (raw.get("first_name", "") + " " + raw.get("last_name", "")).strip()
+            if not name:
+                name = raw.get("name", "")
+            email = raw.get("email", "")
+            phone = raw.get("mobile", raw.get("phone", ""))
+
+            existing = (
+                self.db.query(Customer)
+                .filter(
+                    Customer.tenant_id == self.tenant_id,
+                    Customer.extra_metadata["salla_id"].astext == ext_id,
+                )
+                .first()
+            )
+            meta = {"salla_id": ext_id, "source": "salla",
+                    "city": raw.get("city", ""), "country": raw.get("country", "SA")}
+
+            if existing:
+                if name:
+                    existing.name = name
+                if email:
+                    existing.email = email
+                if phone:
+                    existing.phone = phone
+                existing.extra_metadata = {**(existing.extra_metadata or {}), **meta}
+            else:
+                self.db.add(Customer(
+                    tenant_id=self.tenant_id,
+                    name=name or None,
+                    email=email or None,
+                    phone=phone or None,
+                    extra_metadata=meta,
+                ))
+            count += 1
+        self.db.flush()
+        return count
+
+    # ── Customer profile builder ─────────────────────────────────────────────
+
+    def _build_customer_profiles(self) -> int:
+        """Create/update CustomerProfile for every customer using order data."""
+        customers = (
+            self.db.query(Customer)
+            .filter(Customer.tenant_id == self.tenant_id)
+            .all()
+        )
+        updated = 0
+        now = datetime.now(timezone.utc)
+        for cust in customers:
+            profile = (
+                self.db.query(CustomerProfile)
+                .filter_by(customer_id=cust.id, tenant_id=self.tenant_id)
+                .first()
+            )
+            if not profile:
+                profile = CustomerProfile(
+                    customer_id=cust.id,
+                    tenant_id=self.tenant_id,
+                    segment="new",
+                )
+                self.db.add(profile)
+                self.db.flush()
+
+            orders = (
+                self.db.query(Order)
+                .filter(
+                    Order.tenant_id == self.tenant_id,
+                    Order.customer_info["mobile"].astext == (cust.phone or ""),
+                )
+                .all()
+            ) if cust.phone else []
+
+            if not orders and cust.name:
+                orders = (
+                    self.db.query(Order)
+                    .filter(
+                        Order.tenant_id == self.tenant_id,
+                        Order.customer_info["name"].astext == cust.name,
+                    )
+                    .all()
+                )
+
+            total_orders = len(orders)
+            total_spend = 0.0
+            last_order_at = None
+            first_seen_at = None
+            for o in orders:
+                try:
+                    total_spend += float(o.total or 0)
+                except (ValueError, TypeError):
+                    pass
+                o_date = None
+                raw_created_at = (
+                    (o.extra_metadata or {}).get("created_at")
+                    if getattr(o, "extra_metadata", None) else None
+                )
+                if raw_created_at:
+                    try:
+                        o_date = datetime.fromisoformat(str(raw_created_at).replace("Z", "+00:00"))
+                    except Exception:
+                        o_date = None
+                if o_date is None:
+                    o_date = getattr(o, "created_at", None)
+                if o_date:
+                    if o_date.tzinfo is None:
+                        o_date = o_date.replace(tzinfo=timezone.utc)
+                    if last_order_at is None or o_date > last_order_at:
+                        last_order_at = o_date
+                    if first_seen_at is None or o_date < first_seen_at:
+                        first_seen_at = o_date
+
+            profile.total_orders = total_orders
+            profile.total_spend_sar = round(total_spend, 2)
+            profile.average_order_value_sar = round(total_spend / total_orders, 2) if total_orders else 0
+            profile.last_order_at = last_order_at
+            profile.first_seen_at = first_seen_at or now
+            profile.is_returning = total_orders > 1
+
+            days_inactive = (now - (last_order_at or now)).days if last_order_at else 999
+            segment, churn_risk = _compute_segment(total_orders, total_spend, days_inactive)
+            profile.segment = segment
+            profile.churn_risk_score = churn_risk
+            profile.updated_at = now
+            updated += 1
+
+        self.db.commit()
+        return updated
+
     # ── Full sync ──────────────────────────────────────────────────────────────
 
     async def full_sync(self, triggered_by: str = "merchant") -> Dict:
         """
         Run a complete initial sync:
-          products → orders → coupons → rebuild snapshot
-
-        Returns a summary dict.
+          products -> orders -> coupons -> customers -> profiles -> snapshot
         """
         job = self._start_job("full", triggered_by)
         try:
             products_n  = await self.sync_products()
             orders_n    = await self.sync_orders()
             coupons_n   = await self.sync_coupons()
+            customers_n = await self.sync_customers()
+            profiles_n  = self._build_customer_profiles()
 
             self._rebuild_snapshot(products_n, orders_n, coupons_n)
             self._finish_job(
@@ -422,16 +613,19 @@ class StoreSyncService:
                 products_synced   = products_n,
                 orders_synced     = orders_n,
                 coupons_synced    = coupons_n,
+                customers_synced  = customers_n,
             )
             logger.info(
-                "tenant=%s full sync done — products=%d orders=%d coupons=%d",
-                self.tenant_id, products_n, orders_n, coupons_n,
+                "tenant=%s full sync done — products=%d orders=%d coupons=%d customers=%d profiles=%d",
+                self.tenant_id, products_n, orders_n, coupons_n, customers_n, profiles_n,
             )
             return {
                 "status":           "completed",
                 "products_synced":  products_n,
                 "orders_synced":    orders_n,
                 "coupons_synced":   coupons_n,
+                "customers_synced": customers_n,
+                "profiles_updated": profiles_n,
                 "job_id":           job.id,
             }
         except Exception as exc:
@@ -503,6 +697,10 @@ class StoreSyncService:
             existing.customer_info = normalised["customer_info"]
             existing.line_items    = normalised["line_items"]
             existing.is_abandoned  = normalised["is_abandoned"]
+            existing.extra_metadata = {
+                **(existing.extra_metadata or {}),
+                "created_at": normalised.get("created_at"),
+            }
         else:
             self.db.add(Order(
                 tenant_id     = self.tenant_id,
@@ -513,8 +711,12 @@ class StoreSyncService:
                 line_items    = normalised["line_items"],
                 checkout_url  = normalised["checkout_url"],
                 is_abandoned  = normalised["is_abandoned"],
+                extra_metadata = {"created_at": normalised.get("created_at")},
             ))
         self.db.commit()
+
+        if not existing:
+            self._update_customer_profile_from_order(normalised)
 
         snap = (
             self.db.query(StoreKnowledgeSnapshot)
@@ -528,6 +730,69 @@ class StoreSyncService:
             snap.last_incremental_sync_at = datetime.now(timezone.utc)
             snap.updated_at               = datetime.now(timezone.utc)
             self.db.commit()
+
+    def _update_customer_profile_from_order(self, normalised: Dict) -> None:
+        """Update CustomerProfile when a new order arrives."""
+        cust_info = normalised.get("customer_info") or {}
+        phone = cust_info.get("mobile", cust_info.get("phone", ""))
+        name = cust_info.get("name", "")
+        if not phone and not name:
+            return
+
+        cust = None
+        if phone:
+            cust = self.db.query(Customer).filter(
+                Customer.tenant_id == self.tenant_id, Customer.phone == phone,
+            ).first()
+        if not cust and name:
+            cust = self.db.query(Customer).filter(
+                Customer.tenant_id == self.tenant_id, Customer.name == name,
+            ).first()
+        if not cust:
+            return
+
+        profile = self.db.query(CustomerProfile).filter_by(
+            customer_id=cust.id, tenant_id=self.tenant_id,
+        ).first()
+        if not profile:
+            profile = CustomerProfile(customer_id=cust.id, tenant_id=self.tenant_id, segment="new")
+            self.db.add(profile)
+            self.db.flush()
+
+        now = datetime.now(timezone.utc)
+        order_total = 0.0
+        try:
+            order_total = float(normalised.get("total", 0))
+        except (ValueError, TypeError):
+            pass
+
+        profile.total_orders = (profile.total_orders or 0) + 1
+        profile.total_spend_sar = round((profile.total_spend_sar or 0) + order_total, 2)
+        profile.average_order_value_sar = round(
+            profile.total_spend_sar / profile.total_orders, 2
+        ) if profile.total_orders else 0
+        order_created_at = normalised.get("created_at")
+        order_dt = now
+        if order_created_at:
+            try:
+                order_dt = datetime.fromisoformat(str(order_created_at).replace("Z", "+00:00"))
+                if order_dt.tzinfo is None:
+                    order_dt = order_dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                order_dt = now
+        profile.last_order_at = order_dt
+        if not profile.first_seen_at or order_dt < profile.first_seen_at:
+            profile.first_seen_at = order_dt
+        profile.is_returning = profile.total_orders > 1
+
+        days_inactive = 0
+        segment, churn_risk = _compute_segment(
+            profile.total_orders, profile.total_spend_sar, days_inactive,
+        )
+        profile.segment = segment
+        profile.churn_risk_score = churn_risk
+        profile.updated_at = now
+        self.db.commit()
 
     # ── Incremental customer update (called by webhook) ───────────────────
 
@@ -562,13 +827,29 @@ class StoreSyncService:
                 existing.phone = phone
             existing.extra_metadata = {**(existing.extra_metadata or {}), **meta}
         else:
-            self.db.add(Customer(
+            new_cust = Customer(
                 tenant_id      = self.tenant_id,
                 name           = name or None,
                 email          = email or None,
                 phone          = phone or None,
                 extra_metadata = meta,
-            ))
+            )
+            self.db.add(new_cust)
+            self.db.flush()
+            existing = new_cust
+
+        if existing and existing.id:
+            prof = self.db.query(CustomerProfile).filter_by(
+                customer_id=existing.id, tenant_id=self.tenant_id,
+            ).first()
+            if not prof:
+                self.db.add(CustomerProfile(
+                    customer_id=existing.id,
+                    tenant_id=self.tenant_id,
+                    segment="new",
+                    first_seen_at=datetime.now(timezone.utc),
+                ))
+
         self.db.commit()
 
         snap = (

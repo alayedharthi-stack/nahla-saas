@@ -162,18 +162,24 @@ function EmbeddedSignupFlow({ onConnected }: { onConnected: () => void }) {
         </div>
         {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
         <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <div className="text-right">
+              <p className="text-sm font-medium text-slate-800">إضافة رقم جديد</p>
+              <p className="text-xs text-slate-500">
+                إذا ظهر لك رقم قديم أو تجريبي، أضف رقم نشاطك الجديد من هنا
+              </p>
+            </div>
+            <button
+              onClick={() => { setError(''); setStage('add-phone') }}
+              className="shrink-0 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 transition-colors flex items-center justify-center gap-2"
+            >
+              <Phone className="w-4 h-4" />
+              إضافة رقم
+            </button>
+          </div>
           {phones.length === 0 && (
-            <div className="space-y-3">
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-700">
-                لا توجد أرقام هاتف في حساب واتساب للأعمال.
-              </div>
-              <button
-                onClick={() => { setError(''); setStage('add-phone') }}
-                className="w-full py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
-              >
-                <Phone className="w-4 h-4" />
-                إضافة رقم هاتف جديد
-              </button>
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-700">
+              لا توجد أرقام هاتف في حساب واتساب للأعمال.
             </div>
           )}
           {phones.map(p => (

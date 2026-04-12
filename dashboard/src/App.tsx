@@ -45,6 +45,7 @@ import VerifyEmail from './pages/VerifyEmail'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
 import MerchantWidgets from './pages/MerchantWidgets'
+import Customers from './pages/Customers'
 
 export default function App() {
   return (
@@ -84,6 +85,7 @@ export default function App() {
             <Route path="overview"           element={<Overview />} />
             <Route path="conversations"      element={<Conversations />} />
             <Route path="orders"             element={<Orders />} />
+            <Route path="customers"          element={<Customers />} />
             <Route path="coupons"            element={<Coupons />} />
             <Route path="campaigns"          element={<Campaigns />} />
             <Route path="templates"          element={<Templates />} />

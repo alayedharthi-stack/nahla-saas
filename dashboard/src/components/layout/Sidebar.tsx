@@ -83,6 +83,7 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/overview',          icon: LayoutDashboard, label: tr  => tr.nav.items.overview      },
       { to: '/conversations',     icon: MessageSquare,   label: tr  => tr.nav.items.conversations },
       { to: '/orders',            icon: ShoppingCart,    label: tr  => tr.nav.items.orders        },
+      { to: '/customers',        icon: Users,           label: _tr => 'العملاء'                  },
       { to: '/smart-automations', icon: Bot,             label: _tr => 'الطيار الآلي',  isAI: true },
       { to: '/coupons',           icon: Tag,             label: tr  => tr.nav.items.coupons       },
       { to: '/campaigns',         icon: Megaphone,       label: tr  => tr.nav.items.campaigns     },

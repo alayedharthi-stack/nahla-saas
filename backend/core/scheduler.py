@@ -20,6 +20,7 @@ logger = logging.getLogger("nahla-scheduler")
 
 _CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
 _SYNC_INTERVAL_SECONDS = 3600  # store sync every 1 hour
+_COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 
 
 async def run_scheduler() -> None:
@@ -44,6 +45,60 @@ async def run_store_sync_scheduler() -> None:
         except Exception as exc:
             logger.error("[StoreSync Scheduler] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_SYNC_INTERVAL_SECONDS)
+
+
+async def run_coupon_generator_scheduler() -> None:
+    """Refresh coupon pools for all tenants every 6 hours."""
+    await asyncio.sleep(180)
+    logger.info("[Coupon Scheduler] Started — refreshing every %ss", _COUPON_GEN_INTERVAL_SECONDS)
+    while True:
+        try:
+            await _generate_coupons_all_tenants()
+        except Exception as exc:
+            logger.error("[Coupon Scheduler] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_COUPON_GEN_INTERVAL_SECONDS)
+
+
+async def _generate_coupons_all_tenants() -> None:
+    """Top up coupon pools for every tenant with an active Salla integration."""
+    import sys as _sys, os as _os
+    _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    from core.database import SessionLocal
+    from models import Integration
+
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        logger.error("[Coupon Scheduler] Cannot open DB: %s", exc)
+        return
+
+    try:
+        integrations = db.query(Integration).filter(
+            Integration.provider == "salla",
+            Integration.enabled == True,  # noqa: E712
+        ).all()
+
+        if not integrations:
+            return
+
+        logger.info("[Coupon Scheduler] Processing %d tenant(s)...", len(integrations))
+
+        for intg in integrations:
+            tenant_id = intg.tenant_id
+            try:
+                from services.coupon_generator import CouponGeneratorService
+                svc = CouponGeneratorService(db, tenant_id)
+                created = await svc.ensure_coupon_pool()
+                total = sum(created.values())
+                if total:
+                    logger.info("[Coupon Scheduler] tenant=%s created %d coupons", tenant_id, total)
+            except Exception as exc:
+                logger.error("[Coupon Scheduler] tenant=%s failed: %s", tenant_id, exc)
+
+        logger.info("[Coupon Scheduler] Cycle complete.")
+    finally:
+        db.close()
 
 
 async def _sync_all_stores() -> None:

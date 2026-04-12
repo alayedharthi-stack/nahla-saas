@@ -13,6 +13,7 @@ const PAGE_META: Record<string, MetaSelector> = {
   '/overview':           tr => tr.pages.overview,
   '/conversations':      tr => tr.pages.conversations,
   '/orders':             tr => tr.pages.orders,
+  '/customers':          _tr => ({ title: 'العملاء', subtitle: 'إدارة وتصنيف العملاء' }),
   '/coupons':            tr => tr.pages.coupons,
   '/campaigns':          tr => tr.pages.campaigns,
   '/integrations':       tr => tr.pages.integrations,
