@@ -37,6 +37,7 @@ interface EmbeddedPhone { id: string; number: string; name: string; verified: bo
 interface EmbeddedStatusPayload {
   connected: boolean
   status: string
+  connection_status?: string
   phone_number?: string
   display_name?: string
   connected_at?: string
@@ -48,6 +49,9 @@ interface EmbeddedStatusPayload {
   meta_phone_status?: string | null
   message?: string | null
   last_error?: string | null
+  oauth_session_status?: string | null
+  oauth_session_message?: string | null
+  oauth_session_needs_reauth?: boolean
   phones?: EmbeddedPhone[]
 }
 
@@ -62,8 +66,8 @@ function explainWhatsAppError(msg: unknown): string {
   if (m.includes('cors') || m.includes('failed to fetch') || m.includes('تعذر الوصول إلى الخادم')) {
     return 'تعذر الاتصال بـ API. السبب المرجّح: CORS أو انقطاع الشبكة أو خطأ مؤقت في الخادم.'
   }
-  if (m.includes('انتهت صلاحية الجلسة') || m.includes('token') || m.includes('authentication required') || m.includes('missing_token')) {
-    return 'الجلسة غير صالحة أو منتهية. سجّل الدخول مرة أخرى ثم أعد المحاولة.'
+  if (m.includes('انتهت جلسة meta') || m.includes('انتهت صلاحية الجلسة') || m.includes('token') || m.includes('authentication required') || m.includes('missing_token')) {
+    return 'انتهت جلسة Meta الإدارية في نحلة. إذا كان الرقم ما زال ظاهرًا في Meta فالربط نفسه غالبًا مستمر، وقد تحتاج فقط إلى إعادة التفويض.'
   }
   if (m.includes('review') || m.includes('مراجعة') || m.includes('name') || m.includes('اسم العرض')) {
     return raw
@@ -136,7 +140,7 @@ function EmbeddedSignupFlow({
     if (res.phone_number_id) setNewPhoneId(res.phone_number_id)
     if (Array.isArray(res.phones)) setPhones(res.phones)
 
-    const message = res.message || res.last_error || ''
+    const message = res.message || res.oauth_session_message || res.last_error || ''
     setStatusHint(message)
     if (res.status !== 'error') setError('')
 
@@ -147,6 +151,11 @@ function EmbeddedSignupFlow({
         display_name: res.display_name,
         connected_at: res.connected_at,
       }), 1200)
+      return
+    }
+
+    if (res.oauth_session_needs_reauth && res.connection_status === 'connected') {
+      setStage('done')
       return
     }
 

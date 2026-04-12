@@ -29,6 +29,11 @@ import {
 // ── Template variable map panel ───────────────────────────────────────────────
 
 const STATIC_VAR_MAPS: Record<string, Record<string, string>> = {
+  order_status_update_ar: {
+    '{{1}}': 'اسم العميل',
+    '{{2}}': 'رقم الطلب',
+    '{{3}}': 'حالة الطلب',
+  },
   predictive_reorder_reminder_ar: {
     '{{1}}': 'اسم العميل',
     '{{2}}': 'اسم المنتج',

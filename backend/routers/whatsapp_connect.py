@@ -84,8 +84,10 @@ def _get_or_create_connection(db: Session, tenant_id: int) -> WhatsAppConnection
 
 def _safe_view(conn: WhatsAppConnection) -> dict:
     """Return a connection dict safe for the frontend (no access_token)."""
+    meta = dict(conn.extra_metadata or {})
     return {
         "status":                       conn.status,
+        "connection_status":            conn.status,
         "phone_number":                 conn.phone_number,
         "business_display_name":        conn.business_display_name,
         "whatsapp_business_account_id": conn.whatsapp_business_account_id,
@@ -98,6 +100,10 @@ def _safe_view(conn: WhatsAppConnection) -> dict:
         "webhook_verified":             bool(conn.webhook_verified),
         "sending_enabled":              bool(conn.sending_enabled),
         "token_expires_at":             conn.token_expires_at.isoformat() if conn.token_expires_at else None,
+        "oauth_session_status":         meta.get("oauth_session_status", "healthy" if conn.access_token else "missing"),
+        "oauth_session_message":        meta.get("oauth_session_message"),
+        "oauth_session_needs_reauth":   bool(meta.get("oauth_session_needs_reauth", False)),
+        "active_graph_token_source":    meta.get("active_graph_token_source"),
     }
 
 
@@ -1318,11 +1324,20 @@ async def direct_verify_otp(
 def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
     """Build the unified WhatsApp status response from a DB record (or None)."""
     if not conn or conn.status == "not_connected":
-        return {"connected": False, "status": "not_connected"}
+        return {
+            "connected": False,
+            "status": "not_connected",
+            "connection_status": "not_connected",
+            "oauth_session_status": "missing",
+            "oauth_session_message": None,
+            "oauth_session_needs_reauth": False,
+        }
 
+    meta = dict(conn.extra_metadata or {})
     resp: dict = {
         "connected":              bool(conn.status == "connected" and conn.sending_enabled),
         "status":                 conn.status,
+        "connection_status":      conn.status,
         "phone_number":           conn.phone_number,
         "display_phone_number":   conn.phone_number,
         "business_display_name":  conn.business_display_name,
@@ -1340,8 +1355,11 @@ def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
         "webhook_verified":       bool(conn.webhook_verified),
         "token_expires_at":       conn.token_expires_at.isoformat() if conn.token_expires_at else None,
         "meta_business_account_id": conn.meta_business_account_id,
+        "oauth_session_status":   meta.get("oauth_session_status", "healthy" if conn.access_token else "missing"),
+        "oauth_session_message":  meta.get("oauth_session_message"),
+        "oauth_session_needs_reauth": bool(meta.get("oauth_session_needs_reauth", False)),
+        "active_graph_token_source": meta.get("active_graph_token_source"),
     }
-    meta = dict(conn.extra_metadata or {})
     if meta.get("meta_name_status") is not None:
         resp["name_status"] = meta.get("meta_name_status")
     if meta.get("meta_phone_status") is not None:
@@ -1368,7 +1386,7 @@ async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
     """
     tenant_id = resolve_tenant_id(request)
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    if conn and conn.connection_type == "embedded" and conn.phone_number_id and conn.access_token:
+    if conn and conn.connection_type == "embedded" and conn.phone_number_id:
         try:
             from routers.whatsapp_embedded import sync_embedded_connection_from_meta  # noqa: PLC0415
             return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)

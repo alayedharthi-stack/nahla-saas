@@ -14,6 +14,7 @@ export interface WaConnection {
   /** Unified flag — true only when status === 'connected' */
   connected: boolean
   status: WaConnectionStatus
+  connection_status?: string | null
   phone_number: string | null
   display_phone_number: string | null
   business_display_name: string | null
@@ -30,6 +31,10 @@ export interface WaConnection {
   webhook_verified: boolean
   sending_enabled: boolean
   token_expires_at: string | null
+  oauth_session_status?: string | null
+  oauth_session_message?: string | null
+  oauth_session_needs_reauth?: boolean
+  active_graph_token_source?: string | null
 }
 
 export interface WaStartResult {

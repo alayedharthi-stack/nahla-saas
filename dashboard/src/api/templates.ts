@@ -1,7 +1,15 @@
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type TemplateStatus = 'APPROVED' | 'PENDING' | 'REJECTED' | 'DISABLED'
-export type TemplateCategory = 'MARKETING' | 'UTILITY' | 'AUTHENTICATION'
+export type TemplateStatus =
+  | 'APPROVED'
+  | 'PENDING'
+  | 'REJECTED'
+  | 'DISABLED'
+  | 'PAUSED'
+  | 'ARCHIVED'
+  | 'LIMIT_EXCEEDED'
+  | string
+export type TemplateCategory = 'MARKETING' | 'UTILITY' | 'AUTHENTICATION' | string
 
 export interface TemplateButton {
   type: 'URL' | 'PHONE_NUMBER' | 'COPY_CODE' | 'QUICK_REPLY'
@@ -25,11 +33,13 @@ export interface WhatsAppTemplateRecord {
   language: string
   category: TemplateCategory
   status: TemplateStatus
+  status_raw?: string | null
   rejection_reason: string | null
   components: TemplateComponent[]
   created_at: string | null
   updated_at: string | null
   synced_at: string | null
+  compatibility?: TemplateCompatibility
 }
 
 export interface CreateTemplatePayload {
@@ -55,6 +65,7 @@ export interface TemplateVarMapRecord {
   var_map: Record<string, string>            // {"{{1}}": "customer_name", ...}
   var_map_annotated: Record<string, VarMapAnnotated>
   is_default: boolean
+  compatibility?: TemplateCompatibility
 }
 
 export interface ResolvedTemplate {
@@ -62,6 +73,20 @@ export interface ResolvedTemplate {
   resolved_components: TemplateComponent[]
   rendered_body: string
   wa_parameters: { type: 'text'; text: string }[]
+  compatibility?: TemplateCompatibility
+}
+
+export interface TemplateCompatibility {
+  compatibility: 'compatible' | 'review_needed' | 'pending_meta' | string
+  placeholder_count: number
+  placeholders: string[]
+  var_map: Record<string, string>
+  supported_features: string[]
+  issues: string[]
+  has_body_text: boolean
+  language_normalized: string
+  category_normalized: string
+  status_normalized: string
 }
 
 export const templatesApi = {
@@ -132,18 +157,24 @@ export function countVars(tpl: WhatsAppTemplateRecord): number {
   return extractVars(body).length
 }
 
-export const STATUS_COLORS: Record<TemplateStatus, string> = {
+export const STATUS_COLORS: Record<string, string> = {
   APPROVED: 'green',
   PENDING:  'amber',
   REJECTED: 'red',
   DISABLED: 'slate',
+  PAUSED: 'purple',
+  ARCHIVED: 'slate',
+  LIMIT_EXCEEDED: 'red',
 }
 
-export const STATUS_LABELS: Record<TemplateStatus, string> = {
+export const STATUS_LABELS: Record<string, string> = {
   APPROVED: 'معتمد',
   PENDING:  'قيد المراجعة',
   REJECTED: 'مرفوض',
   DISABLED: 'معطّل',
+  PAUSED: 'موقوف مؤقتًا',
+  ARCHIVED: 'مؤرشف',
+  LIMIT_EXCEEDED: 'تجاوز الحد',
 }
 
 export const CATEGORY_LABELS: Record<TemplateCategory, string> = {

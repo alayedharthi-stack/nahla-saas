@@ -83,9 +83,10 @@ function TemplateRow({
   tpl, onPreview, onDelete,
 }: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void }) {
   const vars = countVars(tpl)
-  const sm = STATUS_COLORS[tpl.status] as 'green' | 'amber' | 'red' | 'slate'
+  const sm = (STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'
   const isDefault = isDefaultTemplate(tpl.name)
   const meta = DEFAULT_TEMPLATE_META[tpl.name]
+  const compatibility = tpl.compatibility
 
   return (
     <tr className={`hover:bg-slate-50 transition-colors ${isDefault ? 'bg-brand-50/30' : ''}`}>
@@ -117,19 +118,39 @@ function TemplateRow({
         />
       </td>
       <td className="px-5 py-3.5">
-        <Badge label={STATUS_LABELS[tpl.status]} variant={sm} dot />
+        <Badge label={STATUS_LABELS[tpl.status] ?? tpl.status} variant={sm} dot />
         {tpl.status === 'REJECTED' && tpl.rejection_reason && (
           <p className="text-[10px] text-red-500 mt-0.5 max-w-xs truncate">{tpl.rejection_reason}</p>
         )}
+        {compatibility?.issues?.[0] && tpl.status !== 'REJECTED' && (
+          <p className="text-[10px] text-slate-500 mt-0.5 max-w-xs truncate">{compatibility.issues[0]}</p>
+        )}
       </td>
       <td className="px-5 py-3.5">
-        {vars > 0 ? (
-          <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
-            {vars} متغير
-          </span>
-        ) : (
-          <span className="text-xs text-slate-300">—</span>
-        )}
+        <div className="flex flex-col items-start gap-1">
+          {vars > 0 ? (
+            <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
+              {vars} متغير
+            </span>
+          ) : (
+            <span className="text-xs text-slate-300">—</span>
+          )}
+          {compatibility && (
+            <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full ${
+              compatibility.compatibility === 'compatible'
+                ? 'bg-emerald-50 text-emerald-700'
+                : compatibility.compatibility === 'pending_meta'
+                ? 'bg-amber-50 text-amber-700'
+                : 'bg-slate-100 text-slate-600'
+            }`}>
+              {compatibility.compatibility === 'compatible'
+                ? 'متوافق'
+                : compatibility.compatibility === 'pending_meta'
+                ? 'بانتظار اعتماد Meta'
+                : 'يحتاج مراجعة'}
+            </span>
+          )}
+        </div>
       </td>
       <td className="px-5 py-3.5 text-xs text-slate-400 whitespace-nowrap" dir="ltr">
         {tpl.updated_at ? new Date(tpl.updated_at).toLocaleDateString('ar-SA') : '—'}
@@ -216,9 +237,49 @@ function PreviewModal({ tpl, onClose }: { tpl: WhatsAppTemplateRecord; onClose: 
             </div>
             <div className="bg-slate-50 rounded-lg p-2.5">
               <p className="text-slate-400 mb-0.5">الحالة</p>
-              <Badge label={STATUS_LABELS[tpl.status]} variant={STATUS_COLORS[tpl.status] as 'green' | 'amber' | 'red' | 'slate'} dot />
+              <Badge label={STATUS_LABELS[tpl.status] ?? tpl.status} variant={(STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'} dot />
             </div>
           </div>
+
+          {tpl.compatibility && (
+            <div className="bg-slate-50 rounded-xl p-3 space-y-2">
+              <p className="text-xs font-semibold text-slate-700">توافق القالب مع نحلة</p>
+              <div className="flex flex-wrap gap-2">
+                <Badge
+                  label={
+                    tpl.compatibility.compatibility === 'compatible'
+                      ? 'متوافق'
+                      : tpl.compatibility.compatibility === 'pending_meta'
+                      ? 'بانتظار اعتماد Meta'
+                      : 'يحتاج مراجعة'
+                  }
+                  variant={
+                    tpl.compatibility.compatibility === 'compatible'
+                      ? 'green'
+                      : tpl.compatibility.compatibility === 'pending_meta'
+                      ? 'amber'
+                      : 'slate'
+                  }
+                />
+                <Badge
+                  label={`${tpl.compatibility.placeholder_count} متغير`}
+                  variant="blue"
+                />
+              </div>
+              {!!tpl.compatibility.supported_features?.length && (
+                <p className="text-[11px] text-slate-600">
+                  الميزات المدعومة: {tpl.compatibility.supported_features.join('، ')}
+                </p>
+              )}
+              {!!tpl.compatibility.issues?.length && (
+                <div className="space-y-1">
+                  {tpl.compatibility.issues.map((issue, idx) => (
+                    <p key={idx} className="text-[11px] text-slate-500">{issue}</p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Default template — variable mapping panel */}
           {isDefault && defaultMeta && (
@@ -627,6 +688,7 @@ const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
   { key: 'PENDING',  label: 'قيد المراجعة' },
   { key: 'REJECTED', label: 'مرفوضة' },
   { key: 'DISABLED', label: 'معطّلة' },
+  { key: 'PAUSED',   label: 'موقوفة مؤقتًا' },
 ]
 
 const TABLE_HEADERS = ['اسم القالب', 'اللغة', 'الفئة', 'الحالة', 'المتغيرات', 'آخر تحديث', '']

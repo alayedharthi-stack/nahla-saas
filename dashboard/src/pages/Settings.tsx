@@ -174,7 +174,8 @@ function WhatsAppConnectionCard({ onConnected }: { onConnected?: (v: boolean) =>
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const isConnected = conn?.connected === true
-  const needsReauth = conn?.status === 'needs_reauth' || conn?.status === 'error'
+  const needsReauth = conn?.oauth_session_needs_reauth === true
+  const connectionPreserved = (conn?.connected === true) || (conn?.connection_status === 'connected' && conn?.phone_number)
 
   if (loading) {
     return (
@@ -187,7 +188,7 @@ function WhatsAppConnectionCard({ onConnected }: { onConnected?: (v: boolean) =>
 
   return (
     <div className={`rounded-xl border p-4 ${
-      isConnected
+      connectionPreserved
         ? 'bg-emerald-50 border-emerald-200'
         : needsReauth
           ? 'bg-amber-50 border-amber-200'
@@ -196,27 +197,27 @@ function WhatsAppConnectionCard({ onConnected }: { onConnected?: (v: boolean) =>
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3">
           <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-            isConnected ? 'bg-emerald-100' : 'bg-white/70'
+            connectionPreserved ? 'bg-emerald-100' : 'bg-white/70'
           }`}>
-            {isConnected
+            {connectionPreserved
               ? <BadgeCheck className="w-5 h-5 text-emerald-600" />
               : <WifiOff className="w-5 h-5 text-slate-400" />
             }
           </div>
           <div>
             <p className={`text-sm font-bold ${
-              isConnected ? 'text-emerald-800'
+              connectionPreserved ? 'text-emerald-800'
               : needsReauth ? 'text-amber-800'
               : 'text-slate-600'
             }`}>
-              {isConnected
+              {connectionPreserved
                 ? 'متصل بواتساب ✅'
                 : needsReauth
-                  ? 'انتهت صلاحية الاتصال ⚠️'
+                  ? 'الربط مستمر لكن جلسة Meta الإدارية تحتاج إعادة تفويض ⚠️'
                   : 'غير متصل بواتساب'
               }
             </p>
-            {isConnected && conn?.phone_number && (
+            {connectionPreserved && conn?.phone_number && (
               <p className="text-xs font-mono text-emerald-700 mt-0.5 dir-ltr">
                 {conn.business_display_name
                   ? `${conn.business_display_name} · ${conn.phone_number}`
@@ -224,9 +225,14 @@ function WhatsAppConnectionCard({ onConnected }: { onConnected?: (v: boolean) =>
                 }
               </p>
             )}
-            {!isConnected && (
+            {!connectionPreserved && (
               <p className="text-xs text-slate-500 mt-0.5">
                 اربط رقم واتساب للأعمال لتفعيل الردود التلقائية
+              </p>
+            )}
+            {needsReauth && conn?.oauth_session_message && (
+              <p className="text-xs text-amber-700 mt-1 max-w-xl">
+                {conn.oauth_session_message}
               </p>
             )}
           </div>
@@ -235,21 +241,21 @@ function WhatsAppConnectionCard({ onConnected }: { onConnected?: (v: boolean) =>
         <Link
           to="/whatsapp-connect"
           className={`flex items-center gap-2 text-sm font-bold px-4 py-2 rounded-xl transition-all ${
-            isConnected
+            connectionPreserved
               ? 'bg-white border border-emerald-300 text-emerald-700 hover:bg-emerald-50'
               : needsReauth
                 ? 'bg-amber-500 text-white hover:bg-amber-400'
                 : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-600/20'
           }`}
         >
-          {isConnected
+          {connectionPreserved
             ? <><ReconnectIcon className="w-4 h-4" /> إعادة ربط واتساب</>
             : <><MessageSquare className="w-4 h-4" /> ربط واتساب</>
           }
         </Link>
       </div>
 
-      {isConnected && conn?.connected_at && (
+      {connectionPreserved && conn?.connected_at && (
         <p className="text-xs text-emerald-600/70 mt-3 border-t border-emerald-200 pt-2">
           تم الربط في {new Date(conn.connected_at).toLocaleDateString('ar-SA')}
           {conn.whatsapp_business_account_id && (

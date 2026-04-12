@@ -45,6 +45,20 @@ from core.tenant import (
 
 router = APIRouter()
 
+SUPPORTED_TEMPLATE_FIELDS: Dict[int, List[str]] = {
+    1: ["customer_name"],
+    2: ["product_name", "order_id", "cart_url", "store_name"],
+    3: ["reorder_url", "order_amount", "discount_pct", "status_label", "coupon_code"],
+    4: ["order_tracking_url"],
+}
+
+SUPPORTED_FEATURE_RULES: Dict[str, Dict[str, Any]] = {
+    "order_status_update": {"category": {"UTILITY"}, "min_vars": 2, "max_vars": 3},
+    "predictive_reorder": {"category": {"MARKETING", "UTILITY"}, "min_vars": 2, "max_vars": 3},
+    "abandoned_cart": {"category": {"MARKETING", "UTILITY"}, "min_vars": 2, "max_vars": 2},
+    "inactive_recovery": {"category": {"MARKETING"}, "min_vars": 2, "max_vars": 3},
+}
+
 
 # ── Seed data ─────────────────────────────────────────────────────────────────
 
@@ -344,25 +358,38 @@ def _seed_templates_if_empty(db: Session, tenant_id: int) -> None:
 
 
 def _fetch_meta_templates(waba_id: str, access_token: str) -> Optional[List[Dict[str, Any]]]:
-    """Try to fetch ALL templates from Meta Graph API. Returns None on failure."""
+    """Fetch ALL templates from Meta Graph API with pagination."""
     try:
         import json as _json
+        import urllib.parse
         import urllib.request
-        # Fetch all statuses (APPROVED, PENDING, REJECTED, PAUSED) — no status filter
+        fields = "id,name,language,category,status,components,quality_score,rejected_reason"
         url = (
             f"https://graph.facebook.com/v20.0/{waba_id}/message_templates"
-            f"?access_token={access_token}&limit=100"
-            f"&fields=id,name,language,category,status,components,quality_score,rejected_reason"
+            f"?access_token={urllib.parse.quote(access_token)}&limit=100&fields={fields}"
         )
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = _json.loads(resp.read())
-            return data.get("data", [])
+        results: List[Dict[str, Any]] = []
+        while url:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = _json.loads(resp.read())
+            results.extend(data.get("data", []))
+            paging = data.get("paging") or {}
+            url = paging.get("next")
+        return results
     except Exception as exc:
         logger.warning("[templates] _fetch_meta_templates failed waba=%s: %s", waba_id, exc)
         return None
 
 
 def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
+    meta = dict(getattr(t, "ai_generation_metadata", None) or {})
+    compatibility = meta.get("meta_compatibility") or _compute_template_compatibility(
+        t.components or [],
+        category=t.category,
+        language=t.language,
+        status=t.status,
+        template_name=t.name,
+    )
     return {
         "id": t.id,
         "meta_template_id": t.meta_template_id,
@@ -370,6 +397,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "language": t.language,
         "category": t.category,
         "status": t.status,
+        "status_raw": meta.get("meta_status_raw", t.status),
         "rejection_reason": t.rejection_reason,
         "components": t.components or [],
         "created_at": t.created_at.isoformat() if t.created_at else None,
@@ -383,6 +411,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "recommendation_state": getattr(t, "recommendation_state", "none") or "none",
         "recommendation_note": getattr(t, "recommendation_note", None),
         "ai_generation_metadata": getattr(t, "ai_generation_metadata", None),
+        "compatibility": compatibility,
     }
 
 
@@ -395,6 +424,136 @@ def _tpl_bump_usage(db: Session, template_id: int, tenant_id: int | None = None)
     if tpl:
         tpl.usage_count = (getattr(tpl, "usage_count", 0) or 0) + 1
         tpl.last_used_at = datetime.now(timezone.utc)
+
+
+def _normalize_template_status(raw_status: Any) -> str:
+    raw = str(raw_status or "PENDING").strip().upper()
+    status_map = {
+        "APPROVED": "APPROVED",
+        "ACTIVE": "APPROVED",
+        "PENDING": "PENDING",
+        "IN_REVIEW": "PENDING",
+        "PENDING_REVIEW": "PENDING",
+        "REJECTED": "REJECTED",
+        "DISABLED": "DISABLED",
+        "PAUSED": "PAUSED",
+        "ARCHIVED": "ARCHIVED",
+        "DELETED": "ARCHIVED",
+        "LIMIT_EXCEEDED": "LIMIT_EXCEEDED",
+    }
+    return status_map.get(raw, raw or "PENDING")
+
+
+def _normalize_template_language(raw_language: Any) -> str:
+    lang = str(raw_language or "ar").strip()
+    return lang.replace("-", "_")
+
+
+def _normalize_template_category(raw_category: Any) -> str:
+    category = str(raw_category or "MARKETING").strip().upper()
+    return category if category in {"MARKETING", "UTILITY", "AUTHENTICATION"} else "MARKETING"
+
+
+def _extract_placeholders_from_text(text: str) -> List[str]:
+    import re
+    return sorted(set(re.findall(r"\{\{\d+\}\}", text or "")), key=lambda item: int(item.strip("{}")))
+
+
+def _extract_template_placeholders(components: List[Dict[str, Any]]) -> List[str]:
+    placeholders: set[str] = set()
+    for comp in components or []:
+        text = str(comp.get("text") or "")
+        placeholders.update(_extract_placeholders_from_text(text))
+        for btn in comp.get("buttons") or []:
+            placeholders.update(_extract_placeholders_from_text(str(btn.get("text") or "")))
+            placeholders.update(_extract_placeholders_from_text(str(btn.get("url") or "")))
+    return sorted(placeholders, key=lambda item: int(item.strip("{}")))
+
+
+def _guess_field_candidates(placeholder: str, *, category: str, template_name: str) -> List[str]:
+    try:
+        idx = int(placeholder.strip("{}"))
+    except Exception:
+        idx = 0
+    candidates = list(SUPPORTED_TEMPLATE_FIELDS.get(idx, []))
+    lower_name = (template_name or "").lower()
+    if "order" in lower_name and "order_id" not in candidates:
+        candidates.insert(0, "order_id")
+    if "status" in lower_name and "status_label" not in candidates:
+        candidates.insert(0, "status_label")
+    if "cart" in lower_name and "cart_url" not in candidates:
+        candidates.insert(0, "cart_url")
+    if category == "UTILITY" and "status_label" not in candidates and idx == 3:
+        candidates.insert(0, "status_label")
+    # preserve order and uniqueness
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
+
+
+def _infer_var_map(
+    components: List[Dict[str, Any]],
+    *,
+    category: str,
+    template_name: str,
+) -> Dict[str, str]:
+    name_map = TEMPLATE_VAR_MAP.get(template_name, {})
+    placeholders = _extract_template_placeholders(components)
+    inferred: Dict[str, str] = {}
+    for placeholder in placeholders:
+        if placeholder in name_map:
+            inferred[placeholder] = name_map[placeholder]
+            continue
+        candidates = _guess_field_candidates(placeholder, category=category, template_name=template_name)
+        if candidates:
+            inferred[placeholder] = candidates[0]
+    return inferred
+
+
+def _compute_template_compatibility(
+    components: List[Dict[str, Any]],
+    *,
+    category: str,
+    language: str,
+    status: str,
+    template_name: str,
+) -> Dict[str, Any]:
+    placeholders = _extract_template_placeholders(components)
+    has_body_text = any(comp.get("type") == "BODY" and comp.get("text") for comp in (components or []))
+    var_map = _infer_var_map(components, category=category, template_name=template_name)
+    status_norm = _normalize_template_status(status)
+    issues: List[str] = []
+    if not has_body_text:
+        issues.append("القالب لا يحتوي على BODY نصي")
+    if status_norm != "APPROVED":
+        issues.append(f"حالة Meta الحالية: {status_norm}")
+    supported_features: List[str] = []
+    for feature, rule in SUPPORTED_FEATURE_RULES.items():
+        if category not in rule["category"]:
+            continue
+        count = len(placeholders)
+        if count < rule["min_vars"] or count > rule["max_vars"]:
+            continue
+        supported_features.append(feature)
+    compatibility = "compatible" if has_body_text and bool(supported_features) else "review_needed"
+    if status_norm != "APPROVED":
+        compatibility = "pending_meta"
+    return {
+        "compatibility": compatibility,
+        "placeholder_count": len(placeholders),
+        "placeholders": placeholders,
+        "var_map": var_map,
+        "supported_features": supported_features,
+        "issues": issues,
+        "has_body_text": has_body_text,
+        "language_normalized": _normalize_template_language(language),
+        "category_normalized": _normalize_template_category(category),
+        "status_normalized": status_norm,
+    }
 
 
 def _submit_template_to_meta(waba_id: str, token: str, body: "CreateTemplateIn") -> Optional[str]:
@@ -470,13 +629,21 @@ async def list_templates(
 @router.post("/templates")
 async def create_template(body: CreateTemplateIn, request: Request, db: Session = Depends(get_db)):
     """Create a new template locally and submit it to Meta for approval."""
+    from models import WhatsAppConnection  # noqa: PLC0415
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
     settings = get_or_create_settings(db, tenant_id)
     wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    waba_id = wa.get("whatsapp_business_account_id", "")
-    token = wa.get("access_token", "")
+    wa_conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id,
+        WhatsAppConnection.status.in_(["connected", "pending", "review_pending", "activation_pending"]),
+    ).first()
+    waba_id = (
+        (wa_conn.whatsapp_business_account_id if wa_conn else None)
+        or wa.get("whatsapp_business_account_id", "")
+    )
+    token = WA_TOKEN or wa.get("access_token", "")
 
     meta_id = None
     if waba_id and token:
@@ -830,15 +997,36 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
             WhatsAppTemplate.meta_template_id == meta_id,
         ).first()
         now = datetime.now(timezone.utc)
-        raw_status = (item.get("status") or "PENDING").upper()
-        rejection  = item.get("rejected_reason") or None
+        raw_status = str(item.get("status") or "PENDING").upper()
+        normalized_status = _normalize_template_status(raw_status)
+        normalized_language = _normalize_template_language(item.get("language", "ar"))
+        normalized_category = _normalize_template_category(item.get("category", "MARKETING"))
+        rejection = item.get("rejected_reason") or None
+        compatibility = _compute_template_compatibility(
+            item.get("components", []),
+            category=normalized_category,
+            language=normalized_language,
+            status=normalized_status,
+            template_name=item.get("name", ""),
+        )
+        sync_metadata = {
+            "meta_status_raw": raw_status,
+            "meta_language_raw": item.get("language", "ar"),
+            "meta_category_raw": item.get("category", "MARKETING"),
+            "meta_quality_score": item.get("quality_score"),
+            "meta_compatibility": compatibility,
+        }
         if existing:
             existing.name             = item.get("name", existing.name)
-            existing.language         = item.get("language", existing.language)
-            existing.category         = item.get("category", existing.category)
-            existing.status           = raw_status
+            existing.language         = normalized_language
+            existing.category         = normalized_category
+            existing.status           = normalized_status
             existing.components       = item.get("components", existing.components)
             existing.rejection_reason = rejection
+            existing.ai_generation_metadata = {
+                **(existing.ai_generation_metadata or {}),
+                **sync_metadata,
+            }
             existing.synced_at        = now
             existing.updated_at       = now
         else:
@@ -846,11 +1034,12 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
                 tenant_id=tenant_id,
                 meta_template_id=meta_id,
                 name=item.get("name", ""),
-                language=item.get("language", "ar"),
-                category=item.get("category", "MARKETING"),
-                status=raw_status,
+                language=normalized_language,
+                category=normalized_category,
+                status=normalized_status,
                 components=item.get("components", []),
                 rejection_reason=rejection,
+                ai_generation_metadata=sync_metadata,
                 created_at=now,
                 updated_at=now,
                 synced_at=now,
@@ -883,7 +1072,14 @@ async def get_template_var_map(
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    raw_map = TEMPLATE_VAR_MAP.get(tpl.name, {})
+    compatibility = _compute_template_compatibility(
+        tpl.components or [],
+        category=tpl.category,
+        language=tpl.language,
+        status=tpl.status,
+        template_name=tpl.name,
+    )
+    raw_map = compatibility["var_map"]
     annotated = {
         var: {"field": field, "label": VAR_FIELD_LABELS.get(field, field)}
         for var, field in raw_map.items()
@@ -894,7 +1090,8 @@ async def get_template_var_map(
         "category": tpl.category,
         "var_map": raw_map,
         "var_map_annotated": annotated,
-        "is_default": tpl.name in ("cod_order_confirmation_ar", "predictive_reorder_reminder_ar"),
+        "is_default": tpl.name in TEMPLATE_VAR_MAP,
+        "compatibility": compatibility,
     }
 
 
@@ -931,7 +1128,14 @@ async def resolve_template_vars(
         **extra,
     }
 
-    var_map = TEMPLATE_VAR_MAP.get(tpl.name, {})
+    compatibility = _compute_template_compatibility(
+        tpl.components or [],
+        category=tpl.category,
+        language=tpl.language,
+        status=tpl.status,
+        template_name=tpl.name,
+    )
+    var_map = compatibility["var_map"]
     components = tpl.components or []
     resolved_components: List[Dict[str, Any]] = []
 
@@ -945,7 +1149,7 @@ async def resolve_template_vars(
         resolved_components.append(comp_copy)
 
     wa_params = []
-    for var_placeholder, field in sorted(var_map.items()):
+    for var_placeholder, field in sorted(var_map.items(), key=lambda item: int(item[0].strip("{}"))):
         wa_params.append({
             "type": "text",
             "text": field_values.get(field, var_placeholder),
@@ -963,6 +1167,7 @@ async def resolve_template_vars(
         "resolved_components": resolved_components,
         "rendered_body": body_text,
         "wa_parameters": wa_params,
+        "compatibility": compatibility,
     }
 
 

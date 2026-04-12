@@ -578,14 +578,17 @@ async def _post_wa(
     _store_name: str = "unknown",
     _db=None,
 ) -> None:
-    # Resolve the correct token: prefer the tenant's own token (Embedded Signup)
-    # over the global platform token (Direct mode).
+    # Default to the stable platform token; only prefer tenant OAuth when it is
+    # still healthy. This prevents false outages when the merchant's Meta OAuth
+    # session expires while the phone remains connected.
     send_token = WA_TOKEN  # default: platform token
     if _tenant_id and _db:
         try:
             from database.models import WhatsAppConnection  # noqa: PLC0415
             wa_conn = _db.query(WhatsAppConnection).filter_by(tenant_id=_tenant_id).first()
-            if wa_conn and wa_conn.access_token and wa_conn.sending_enabled:
+            meta = dict((wa_conn.extra_metadata or {}) if wa_conn else {})
+            oauth_ok = meta.get("oauth_session_status") not in {"expired", "invalid"}
+            if wa_conn and wa_conn.access_token and wa_conn.sending_enabled and oauth_ok:
                 send_token = wa_conn.access_token
         except Exception:
             pass
