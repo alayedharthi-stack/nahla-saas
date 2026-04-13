@@ -27,7 +27,7 @@ for _p in (_THIS, _DB):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from models import Coupon, Tenant  # noqa: E402
+from models import Coupon, Tenant, TenantSettings  # noqa: E402
 
 logger = logging.getLogger("nahla-backend")
 
@@ -48,16 +48,34 @@ def _random_code(segment: str) -> str:
     return f"NAHLA-{seg_tag}-{suffix}"
 
 
+_DEFAULT_MAX_DISCOUNT = 10
+
 def _get_merchant_limits(db: Session, tenant_id: int) -> Dict[str, int]:
-    """Read merchant coupon_policy for min/max discount limits."""
+    """Read max discount from TenantSettings.ai_settings (dashboard source of truth),
+    falling back to Tenant.coupon_policy, then to _DEFAULT_MAX_DISCOUNT."""
+    # Primary source: ai_settings.allowed_discount_levels (set from dashboard)
+    ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+    if ts:
+        ai = ts.ai_settings or {}
+        try:
+            max_disc = int(ai.get("allowed_discount_levels", 0))
+            if max_disc > 0:
+                return {"min_discount": 0, "max_discount": max_disc}
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback: Tenant.coupon_policy
     tenant = db.query(Tenant).filter_by(id=tenant_id).first()
-    if not tenant:
-        return {"min_discount": 0, "max_discount": 50}
-    policy = tenant.coupon_policy or {}
-    return {
-        "min_discount": int(policy.get("min_discount", 0)),
-        "max_discount": int(policy.get("max_discount", 50)),
-    }
+    if tenant:
+        policy = tenant.coupon_policy or {}
+        max_val = policy.get("max_discount")
+        if max_val is not None:
+            return {
+                "min_discount": int(policy.get("min_discount", 0)),
+                "max_discount": int(max_val),
+            }
+
+    return {"min_discount": 0, "max_discount": _DEFAULT_MAX_DISCOUNT}
 
 
 def _clamp(value: int, low: int, high: int) -> int:
