@@ -57,8 +57,8 @@ function ActivateForm({
     setForm(f => ({ ...f, [k]: v }))
 
   const submit = async () => {
-    if (!form.phone_number_id || !form.phone_number || !form.api_key) {
-      setError('phone_number_id و phone_number و api_key مطلوبة.')
+    if (!form.phone_number || !form.api_key) {
+      setError('رقم واتساب ومفتاح API مطلوبان.')
       return
     }
     setBusy(true)
@@ -85,92 +85,120 @@ function ActivateForm({
   }
 
   return (
-    <div className="mt-4 border border-violet-200 rounded-xl bg-violet-50 p-4 space-y-3" dir="rtl">
-      <p className="font-bold text-violet-800 text-sm flex items-center gap-2">
-        <Zap className="w-4 h-4" /> تفعيل خدمة 360dialog
-      </p>
+    <div className="mt-4 border border-violet-200 rounded-xl bg-violet-50 p-4 space-y-4" dir="rtl">
+      <div className="flex items-center gap-2">
+        <Zap className="w-4 h-4 text-violet-700" />
+        <p className="font-bold text-violet-800 text-sm">تفعيل عبر 360dialog</p>
+      </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {/* Step guide */}
+      <div className="rounded-lg bg-white border border-violet-100 p-3 text-xs text-slate-600 space-y-1.5">
+        <p className="font-bold text-slate-700 mb-2">الخطوات:</p>
+        <p>① ادخل <a href="https://app.360dialog.io" target="_blank" rel="noreferrer" className="text-violet-600 underline font-semibold">app.360dialog.io</a> → الحساب المرتبط بـ Nahlah AI</p>
+        <p>② اضغط <strong>Add Number</strong> → أدخل رقم واتساب التاجر → أكمل التحقق عبر OTP</p>
+        <p>③ بعد إضافة الرقم → افتح الرقم → اضغط <strong>Generate API Key</strong> → انسخ المفتاح</p>
+        <p>④ الصق المفتاح في الحقل أدناه ← الحقل الوحيد المطلوب مع رقم الهاتف</p>
+      </div>
+
+      {/* Required fields */}
+      <div className="space-y-3">
         <div>
-          <label className="block text-xs font-semibold text-slate-600 mb-1">Phone Number *</label>
+          <label className="block text-xs font-bold text-slate-700 mb-1">رقم واتساب التاجر <span className="text-red-500">*</span></label>
           <input
             value={form.phone_number ?? ''}
             onChange={e => set('phone_number', e.target.value)}
             placeholder="+9665XXXXXXXX"
-            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"
             dir="ltr"
           />
         </div>
         <div>
-          <label className="block text-xs font-semibold text-slate-600 mb-1">Phone Number ID * (من 360dialog)</label>
-          <input
-            value={form.phone_number_id ?? ''}
-            onChange={e => set('phone_number_id', e.target.value)}
-            placeholder="360dialog phone_number_id"
-            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-            dir="ltr"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-slate-600 mb-1">API Key * (D360-API-KEY)</label>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            مفتاح API من 360dialog <span className="text-red-500">*</span>
+          </label>
           <input
             value={form.api_key ?? ''}
             onChange={e => set('api_key', e.target.value)}
-            placeholder="D360-XXXXXXXXXXXXXXXX"
-            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-mono"
+            placeholder="D360-XXXXXXXXXXXXXXXXXXXXXXXX"
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-mono"
             dir="ltr"
           />
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-slate-600 mb-1">WABA ID (اختياري)</label>
-          <input
-            value={form.waba_id ?? ''}
-            onChange={e => set('waba_id', e.target.value)}
-            placeholder="WABA ID"
-            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-            dir="ltr"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-slate-600 mb-1">Channel ID (اختياري)</label>
-          <input
-            value={form.channel_id ?? ''}
-            onChange={e => set('channel_id', e.target.value)}
-            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-            dir="ltr"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-semibold text-slate-600 mb-1">Display Name (اختياري)</label>
-          <input
-            value={form.display_name ?? ''}
-            onChange={e => set('display_name', e.target.value)}
-            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-          />
+          <p className="text-xs text-slate-400 mt-1">من صفحة الرقم في 360dialog → Generate API Key</p>
         </div>
       </div>
 
-      <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+      {/* Optional fields (collapsible) */}
+      <details className="group">
+        <summary className="cursor-pointer text-xs font-semibold text-slate-500 hover:text-slate-700 list-none flex items-center gap-1">
+          <span className="group-open:hidden">▸</span>
+          <span className="hidden group-open:inline">▾</span>
+          حقول اختيارية (WABA ID، Channel ID، Display Name)
+        </summary>
+        <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">Phone Number ID (اختياري)</label>
+            <input
+              value={form.phone_number_id ?? ''}
+              onChange={e => set('phone_number_id', e.target.value)}
+              placeholder="من صفحة الرقم في 360dialog"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              dir="ltr"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">WABA ID (اختياري)</label>
+            <input
+              value={form.waba_id ?? ''}
+              onChange={e => set('waba_id', e.target.value)}
+              placeholder="WhatsApp Business Account ID"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              dir="ltr"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">Channel ID (اختياري)</label>
+            <input
+              value={form.channel_id ?? ''}
+              onChange={e => set('channel_id', e.target.value)}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              dir="ltr"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">اسم النشاط (اختياري)</label>
+            <input
+              value={form.display_name ?? ''}
+              onChange={e => set('display_name', e.target.value)}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+            />
+          </div>
+        </div>
+      </details>
+
+      <label className="flex items-center gap-2.5 text-sm text-slate-700 cursor-pointer bg-white border border-violet-100 rounded-lg px-3 py-2.5">
         <input
           type="checkbox"
           checked={!!form.configure_webhook}
           onChange={e => set('configure_webhook', e.target.checked)}
-          className="rounded"
+          className="rounded accent-violet-600 w-4 h-4"
         />
-        إعداد Webhook تلقائيًا لدى 360dialog
+        <span>
+          <span className="font-semibold">إعداد Webhook تلقائيًا</span>
+          <span className="text-xs text-slate-400 block">نحلة ستُسجّل نفسها تلقائيًا لدى 360dialog لاستقبال الرسائل</span>
+        </span>
       </label>
 
       {error && (
         <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-red-700 text-xs">{error}</div>
       )}
 
-      <div className="flex gap-3">
+      <div className="flex gap-3 pt-1">
         <button
           onClick={submit}
           disabled={busy}
           className="flex-1 rounded-xl bg-violet-600 py-2.5 text-sm font-bold text-white hover:bg-violet-500 disabled:opacity-60 transition"
         >
-          {busy ? 'جارٍ التفعيل...' : 'تفعيل الآن'}
+          {busy ? 'جارٍ التفعيل...' : '⚡ تفعيل الآن'}
         </button>
         <button
           onClick={onCancel}
