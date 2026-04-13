@@ -425,8 +425,8 @@ class SallaAdapter(BaseStoreAdapter):
             ))
 
         customer = raw.get("customer") or {}
-        cname = customer.get("name") or (order_input.customer_name if order_input else "")
-        cphone = customer.get("mobile") or (order_input.customer_phone if order_input else "")
+        cname = str(customer.get("name") or (order_input.customer_name if order_input else "") or "")
+        cphone = str(customer.get("mobile") or (order_input.customer_phone if order_input else "") or "")
 
         return NormalizedOrder(
             id=str(raw.get("id") or raw.get("reference_id", "")),
