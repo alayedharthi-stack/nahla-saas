@@ -1178,19 +1178,17 @@ async def salla_oauth_callback(
         # Existing merchant — tenant_id came from state
         if tenant_id == 0 and salla_store_id:
             # State was not in our format (Salla may replace it).
-            # Try to find the tenant that already owns this store_id.
-            existing = db.query(Integration).filter(
+            # Search ALL integrations (enabled+disabled) to find the tenant.
+            existing_integ = db.query(Integration).filter(
                 Integration.provider == "salla",
-                Integration.enabled == True,  # noqa: E712
-            ).all()
-            for intg in existing:
-                if str((intg.config or {}).get("store_id", "")) == salla_store_id:
-                    tenant_id = intg.tenant_id
-                    logger.info(
-                        "[Salla OAuth] Resolved tenant from store_id | store=%s → tenant=%s",
-                        salla_store_id, tenant_id,
-                    )
-                    break
+                Integration.config["store_id"].astext == str(salla_store_id),
+            ).first()
+            if existing_integ:
+                tenant_id = existing_integ.tenant_id
+                logger.info(
+                    "[Salla OAuth] Resolved tenant from store_id | store=%s → tenant=%s enabled=%s",
+                    salla_store_id, tenant_id, existing_integ.enabled,
+                )
         if tenant_id == 0:
             tenant_id = 1  # last resort fallback
             logger.warning("[Salla OAuth] Could not resolve tenant, falling back to tenant=1")

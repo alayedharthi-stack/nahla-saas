@@ -238,24 +238,21 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
     )
 
     # ── Find existing integration by salla store_id in config ─────────────────
-    # (Tenant model has no salla_store_id column — search via Integration.config)
+    # Search ALL integrations (enabled AND disabled) so we re-activate existing
+    # tenants instead of creating duplicates — critical for Easy-mode reinstalls.
     existing_integration = None
     try:
-        all_salla = db.query(Integration).filter(
+        existing_integration = db.query(Integration).filter(
             Integration.provider == "salla",
-            Integration.enabled  == True,  # noqa: E712
-        ).all()
-        for intg in all_salla:
-            cfg = intg.config or {}
-            if str(cfg.get("store_id", "")) == salla_store_id:
-                existing_integration = intg
-                break
+            Integration.config["store_id"].astext == salla_store_id,
+        ).first()
     except Exception as _e:
         logger.warning("[Salla Webhook] Integration lookup error: %s", _e)
 
     if existing_integration:
         from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
 
+        was_disabled = not existing_integration.enabled
         tenant_id = existing_integration.tenant_id
         new_cfg = dict(existing_integration.config or {})
         new_cfg.update({
@@ -264,12 +261,22 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
             "expires_in":    expires_in,
             "store_name":    store_name,
             "connected_at":  datetime.now(timezone.utc).isoformat(),
+            "app_type":      "easy",
         })
         claim_store_for_tenant(
             db, store_id=salla_store_id, tenant_id=tenant_id, new_config=new_cfg,
         )
         db.commit()
-        logger.info("[Salla Webhook] Updated existing integration via guard | tenant=%s", tenant_id)
+        if was_disabled:
+            logger.info(
+                "[Salla Webhook] RE-ACTIVATED disabled integration via Easy webhook | "
+                "tenant=%s store=%s", tenant_id, salla_store_id,
+            )
+        else:
+            logger.info(
+                "[Salla Webhook] REFRESHED tokens for active integration | "
+                "tenant=%s store=%s", tenant_id, salla_store_id,
+            )
         return
 
     # ── No existing integration: auto-create a new Nahla merchant account ─────
@@ -310,6 +317,7 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
                 "store_name":    store_name,
                 "expires_in":    expires_in,
                 "connected_at":  datetime.now(timezone.utc).isoformat(),
+                "app_type":      "easy",
             },
             enabled=True,
         )
