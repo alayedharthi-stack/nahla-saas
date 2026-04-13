@@ -111,34 +111,41 @@ class SallaAdapter(BaseStoreAdapter):
             logger.warning("Failed to persist refreshed tokens: %s", exc)
 
     async def _get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        url = f"{SALLA_API_BASE}{path}"
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(
-                f"{SALLA_API_BASE}{path}",
-                headers=self._headers(),
-                params=params or {},
+            resp = await client.get(url, headers=self._headers(), params=params or {})
+            logger.info(
+                "[Salla API] GET %s → %d | tenant=%s store=%s",
+                path, resp.status_code, self._tenant_id, self.store_id,
             )
-            if resp.status_code == 401 and await self._refresh_access_token():
-                resp = await client.get(
-                    f"{SALLA_API_BASE}{path}",
-                    headers=self._headers(),
-                    params=params or {},
+            if resp.status_code == 401:
+                logger.warning(
+                    "[Salla API] 401 on %s | tenant=%s — attempting token refresh | response=%s",
+                    path, self._tenant_id, resp.text[:200],
+                )
+                if await self._refresh_access_token():
+                    resp = await client.get(url, headers=self._headers(), params=params or {})
+                    logger.info("[Salla API] RETRY GET %s → %d | tenant=%s", path, resp.status_code, self._tenant_id)
+            if resp.status_code >= 400:
+                logger.error(
+                    "[Salla API] ERROR GET %s → %d | tenant=%s body=%s",
+                    path, resp.status_code, self._tenant_id, resp.text[:300],
                 )
             resp.raise_for_status()
             return resp.json()
 
     async def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        url = f"{SALLA_API_BASE}{path}"
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.post(
-                f"{SALLA_API_BASE}{path}",
-                headers=self._headers(),
-                json=body,
-            )
-            if resp.status_code == 401 and await self._refresh_access_token():
-                resp = await client.post(
-                    f"{SALLA_API_BASE}{path}",
-                    headers=self._headers(),
-                    json=body,
-                )
+            resp = await client.post(url, headers=self._headers(), json=body)
+            logger.info("[Salla API] POST %s → %d | tenant=%s", path, resp.status_code, self._tenant_id)
+            if resp.status_code == 401:
+                logger.warning("[Salla API] 401 on POST %s — attempting refresh", path)
+                if await self._refresh_access_token():
+                    resp = await client.post(url, headers=self._headers(), json=body)
+                    logger.info("[Salla API] RETRY POST %s → %d", path, resp.status_code)
+            if resp.status_code >= 400:
+                logger.error("[Salla API] ERROR POST %s → %d | body=%s", path, resp.status_code, resp.text[:300])
             resp.raise_for_status()
             return resp.json()
 

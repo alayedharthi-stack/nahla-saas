@@ -125,6 +125,98 @@ async def test_store_integration(request: Request):
         return {"status": "error", "platform": adapter.platform, "error": str(exc)}
 
 
+@router.get("/debug")
+async def debug_salla_integration(request: Request, db: Session = Depends(get_db)):
+    """Owner-only diagnostic: shows integration health for current tenant."""
+    tenant_id = resolve_tenant_id(request)
+
+    integration = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+        Integration.provider == "salla",
+    ).first()
+
+    if not integration:
+        return {
+            "tenant_id": tenant_id,
+            "integration_found": False,
+            "message": "لا يوجد ربط سلة لهذا التاجر.",
+        }
+
+    cfg = integration.config or {}
+    has_token = bool(cfg.get("api_key"))
+    has_refresh = bool(cfg.get("refresh_token"))
+    store_id = cfg.get("store_id", "")
+
+    from models import Product, Order, Coupon  # noqa: PLC0415
+    local_products = db.query(Product).filter_by(tenant_id=tenant_id).count()
+    local_orders = db.query(Order).filter_by(tenant_id=tenant_id).count()
+
+    from models import StoreSyncJob  # noqa: PLC0415
+    last_job = (
+        db.query(StoreSyncJob)
+        .filter_by(tenant_id=tenant_id)
+        .order_by(StoreSyncJob.id.desc())
+        .first()
+    )
+
+    salla_products_count = None
+    salla_orders_count = None
+    salla_api_error = None
+    if has_token:
+        try:
+            import httpx  # noqa: PLC0415
+            async with httpx.AsyncClient(timeout=10) as client:
+                headers = {"Authorization": f"Bearer {cfg['api_key']}", "Accept": "application/json"}
+                p_resp = await client.get(
+                    "https://api.salla.dev/admin/v2/products",
+                    headers=headers, params={"per_page": 1},
+                )
+                if p_resp.status_code == 200:
+                    p_data = p_resp.json()
+                    salla_products_count = (p_data.get("pagination") or p_data.get("meta") or {}).get("total", len(p_data.get("data", [])))
+                else:
+                    salla_api_error = f"products → {p_resp.status_code}: {p_resp.text[:200]}"
+
+                o_resp = await client.get(
+                    "https://api.salla.dev/admin/v2/orders",
+                    headers=headers, params={"per_page": 1},
+                )
+                if o_resp.status_code == 200:
+                    o_data = o_resp.json()
+                    salla_orders_count = (o_data.get("pagination") or o_data.get("meta") or {}).get("total", len(o_data.get("data", [])))
+                elif not salla_api_error:
+                    salla_api_error = f"orders → {o_resp.status_code}: {o_resp.text[:200]}"
+        except Exception as exc:
+            salla_api_error = str(exc)
+
+    return {
+        "tenant_id":            tenant_id,
+        "integration_found":    True,
+        "integration_id":       integration.id,
+        "enabled":              integration.enabled,
+        "store_id":             store_id,
+        "has_access_token":     has_token,
+        "has_refresh_token":    has_refresh,
+        "token_hint":           (cfg["api_key"][:8] + "...") if has_token else None,
+        "connected_at":         cfg.get("connected_at"),
+        "app_type":             cfg.get("app_type", "production"),
+        "last_sync_job":        {
+            "id": last_job.id,
+            "status": last_job.status,
+            "sync_type": last_job.sync_type,
+            "started_at": last_job.started_at.isoformat() if last_job.started_at else None,
+            "finished_at": last_job.finished_at.isoformat() if last_job.finished_at else None,
+            "products_synced": last_job.products_synced,
+            "orders_synced": last_job.orders_synced,
+        } if last_job else None,
+        "local_products_count": local_products,
+        "local_orders_count":   local_orders,
+        "salla_api_products":   salla_products_count,
+        "salla_api_orders":     salla_orders_count,
+        "salla_api_error":      salla_api_error,
+    }
+
+
 @router.post("/copy-from-tenant")
 async def copy_integration_from_tenant(
     request: Request,

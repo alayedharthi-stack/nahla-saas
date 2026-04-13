@@ -30,7 +30,6 @@ def get_adapter(tenant_id: int):
     Returns a BaseStoreAdapter instance for the tenant, or None if no
     store integration is configured.
     """
-    # Ensure salla adapter is registered
     try:
         import store_adapters.salla_adapter  # noqa: F401
     except ImportError:
@@ -42,20 +41,49 @@ def get_adapter(tenant_id: int):
             db.query(Integration)
             .filter(
                 Integration.tenant_id == tenant_id,
-                Integration.enabled == True,
+                Integration.enabled == True,  # noqa: E712
                 Integration.provider.in_(list(_ADAPTER_REGISTRY.keys())),
             )
             .first()
         )
         if not integration:
+            all_for_tenant = (
+                db.query(Integration)
+                .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+                .first()
+            )
+            if all_for_tenant:
+                cfg = all_for_tenant.config or {}
+                logger.warning(
+                    "[Registry] tenant=%s has salla integration BUT enabled=%s | "
+                    "store_id=%s has_token=%s has_refresh=%s",
+                    tenant_id, all_for_tenant.enabled,
+                    cfg.get("store_id", ""),
+                    bool(cfg.get("api_key")),
+                    bool(cfg.get("refresh_token")),
+                )
+            else:
+                logger.info("[Registry] tenant=%s — no integration found at all", tenant_id)
             return None
 
         adapter_cls = _ADAPTER_REGISTRY.get(integration.provider)
         if not adapter_cls:
-            logger.warning(f"No adapter registered for platform: {integration.provider}")
+            logger.warning("[Registry] No adapter class for provider=%s", integration.provider)
             return None
 
         cfg = integration.config or {}
+        has_token = bool(cfg.get("api_key"))
+        has_refresh = bool(cfg.get("refresh_token"))
+        logger.info(
+            "[Registry] tenant=%s → adapter=%s store_id=%s has_token=%s has_refresh=%s",
+            tenant_id, integration.provider, cfg.get("store_id", ""), has_token, has_refresh,
+        )
+        if not has_token:
+            logger.error(
+                "[Registry] tenant=%s — integration enabled but api_key is EMPTY — sync will fail",
+                tenant_id,
+            )
+
         return adapter_cls(
             api_key=cfg.get("api_key", ""),
             store_id=cfg.get("store_id", ""),
@@ -63,7 +91,7 @@ def get_adapter(tenant_id: int):
             tenant_id=tenant_id,
         )
     except Exception as exc:
-        logger.error(f"AdapterRegistry error for tenant {tenant_id}: {exc}")
+        logger.error("[Registry] tenant=%s error: %s", tenant_id, exc)
         return None
     finally:
         db.close()

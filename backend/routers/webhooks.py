@@ -60,12 +60,29 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         request.client.host if request.client else "unknown"
     )
 
-    # TODO: re-enable signature verification before production launch
-    logger.info("Salla webhook received | ip=%s (signature check disabled for testing)", client_ip)
+    logger.info(
+        "[Salla WH] ══════ HIT ══════ method=%s ip=%s content-type=%s user-agent=%s body_len=%d",
+        request.method, client_ip,
+        request.headers.get("content-type", ""),
+        request.headers.get("user-agent", "")[:80],
+        len(raw_body),
+    )
+
+    sig_header = request.headers.get("x-salla-signature", "")
+    if SALLA_WEBHOOK_SECRET and sig_header:
+        expected = hmac.new(
+            SALLA_WEBHOOK_SECRET.encode(), raw_body, "sha256"
+        ).hexdigest()
+        sig_ok = hmac.compare_digest(expected, sig_header)
+        logger.info("[Salla WH] signature check: %s", "PASS" if sig_ok else "FAIL")
+    else:
+        logger.info("[Salla WH] signature check SKIPPED (secret=%s sig=%s)",
+                     bool(SALLA_WEBHOOK_SECRET), bool(sig_header))
 
     try:
         payload = await request.json()
     except Exception:
+        logger.warning("[Salla WH] body is not valid JSON — raw[:200]=%s", raw_body[:200])
         payload = {}
 
     event      = payload.get("event", "unknown")
@@ -73,8 +90,9 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
     created_at = payload.get("created_at", "")
 
     logger.info(
-        "Salla webhook received | event=%s store_id=%s created_at=%s ip=%s",
+        "[Salla WH] event=%s store_id=%s created_at=%s ip=%s data_keys=%s",
         event, store_id, created_at, client_ip,
+        list(payload.get("data", {}).keys())[:10] if isinstance(payload.get("data"), dict) else "N/A",
     )
     audit("salla_webhook", salla_event=event, store_id=store_id, ip=client_ip)
 
@@ -138,14 +156,27 @@ def _resolve_tenant_from_store(db, store_id) -> int | None:
     """Look up the Nahla tenant_id that owns a given Salla store_id."""
     from models import Integration  # noqa: PLC0415
     sid = str(store_id)
-    integrations = db.query(Integration).filter(
+
+    active = db.query(Integration).filter(
         Integration.provider == "salla",
         Integration.enabled == True,  # noqa: E712
-    ).all()
-    for intg in integrations:
-        if str((intg.config or {}).get("store_id", "")) == sid:
-            return intg.tenant_id
-    logger.warning("Salla webhook: no tenant found for store_id=%s", sid)
+        Integration.config["store_id"].astext == sid,
+    ).first()
+    if active:
+        logger.info("[Salla WH] resolved store_id=%s → tenant=%s (integration id=%s)", sid, active.tenant_id, active.id)
+        return active.tenant_id
+
+    disabled = db.query(Integration).filter(
+        Integration.provider == "salla",
+        Integration.config["store_id"].astext == sid,
+    ).first()
+    if disabled:
+        logger.warning(
+            "[Salla WH] store_id=%s found BUT disabled | tenant=%s enabled=%s — webhook ignored",
+            sid, disabled.tenant_id, disabled.enabled,
+        )
+    else:
+        logger.warning("[Salla WH] store_id=%s NOT FOUND in any integration — webhook dropped", sid)
     return None
 
 
@@ -168,8 +199,9 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
     ) or f"متجر سلة {salla_store_id}"
 
     logger.info(
-        "[Salla Webhook] _handle_salla_authorize | store_id=%s has_token=%s store_name=%s",
-        salla_store_id, bool(access_token), store_name,
+        "[Salla WH] _handle_salla_authorize | store_id=%s has_access_token=%s "
+        "has_refresh_token=%s store_name=%s",
+        salla_store_id, bool(access_token), bool(refresh_token), store_name,
     )
 
     # ── Find existing integration by salla store_id in config ─────────────────

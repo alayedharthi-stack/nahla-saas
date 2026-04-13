@@ -713,11 +713,20 @@ class StoreSyncService:
                 coupons_synced    = coupons_n,
                 customers_synced  = customers_n,
             )
-            logger.info(
-                "tenant=%s ✅ %s sync completed — products=%d orders=%d coupons=%d customers=%d profiles=%d",
-                self.tenant_id, sync_type.upper(), products_n, orders_n, coupons_n, customers_n, profiles_n,
-            )
-            return {
+            total_items = products_n + orders_n + coupons_n + customers_n
+            if total_items == 0:
+                logger.warning(
+                    "tenant=%s ⚠️ %s sync completed but ALL counts are ZERO — "
+                    "store may be empty or token may lack permissions",
+                    self.tenant_id, sync_type.upper(),
+                )
+            else:
+                logger.info(
+                    "tenant=%s ✅ %s sync completed — products=%d orders=%d coupons=%d customers=%d profiles=%d",
+                    self.tenant_id, sync_type.upper(), products_n, orders_n, coupons_n, customers_n, profiles_n,
+                )
+
+            result = {
                 "status":           "completed",
                 "sync_type":        sync_type,
                 "products_synced":  products_n,
@@ -727,6 +736,12 @@ class StoreSyncService:
                 "profiles_updated": profiles_n,
                 "job_id":           job.id,
             }
+            if total_items == 0:
+                result["message"] = (
+                    "تم الربط بنجاح لكن المتجر لا يحتوي على بيانات قابلة للمزامنة حالياً. "
+                    "أضف منتجات في سلة ثم أعد المزامنة."
+                )
+            return result
         except Exception as exc:
             self._fail_job(job, str(exc))
             logger.error("tenant=%s ❌ %s sync error: %s", self.tenant_id, sync_type.upper(), exc)
