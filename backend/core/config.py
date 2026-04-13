@@ -60,6 +60,11 @@ SALLA_REDIRECT_URI   = os.environ.get(
     "https://api.nahlah.ai/oauth/salla/callback",
 )
 SALLA_WEBHOOK_SECRET = os.environ.get("SALLA_WEBHOOK_SECRET", "")
+# ── Salla webhook signature enforcement ───────────────────────────────────
+# Production launch: set SALLA_WEBHOOK_ENFORCE_SIGNATURE=true
+#                    and SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE=false
+SALLA_WEBHOOK_ENFORCE_SIGNATURE      = os.environ.get("SALLA_WEBHOOK_ENFORCE_SIGNATURE", "false").lower() == "true"
+SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE = os.environ.get("SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE", "true").lower() == "true"
 
 # ── Salla TEST app (separate credentials — does not affect production app) ──
 SALLA_TEST_CLIENT_ID     = os.environ.get("SALLA_TEST_CLIENT_ID", "")

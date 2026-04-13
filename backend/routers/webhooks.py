@@ -36,6 +36,8 @@ from core.billing import get_moyasar_settings
 from core.config import (
     HYPERPAY_WEBHOOK_SECRET,
     SALLA_WEBHOOK_SECRET,
+    SALLA_WEBHOOK_ENFORCE_SIGNATURE,
+    SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE,
 )
 from core.database import get_db
 
@@ -45,6 +47,42 @@ router = APIRouter(tags=["Webhooks"])
 
 _MOYASAR_FAIL_STATUSES = frozenset({"failed", "expired", "canceled", "voided", "refunded"})
 _BILLING_ACTIVATABLE   = frozenset({"pending_payment"})
+
+
+def _verify_salla_signature(raw_body: bytes, request_headers) -> tuple[bool, str]:
+    """Verify Salla webhook HMAC-SHA256 signature.
+
+    Returns ``(should_accept, log_reason)``.
+
+    Behaviour matrix (controlled by env vars):
+      ENFORCE=false  → always accept, log only
+      ENFORCE=true + valid sig   → accept
+      ENFORCE=true + missing sig → accept/reject per ALLOW_MISSING_SIGNATURE
+      ENFORCE=true + invalid sig → reject
+    """
+    sig_header = request_headers.get("x-salla-signature", "")
+    has_secret = bool(SALLA_WEBHOOK_SECRET)
+
+    if not has_secret:
+        return True, "SIG_SKIP: no SALLA_WEBHOOK_SECRET configured"
+
+    if not sig_header:
+        if not SALLA_WEBHOOK_ENFORCE_SIGNATURE:
+            return True, "SIG_SKIP: signature missing, enforcement OFF"
+        if SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE:
+            return True, "SIG_WARN: signature missing, allowed by ALLOW_MISSING_SIGNATURE"
+        return False, "SIG_REJECT: signature missing, enforcement ON + ALLOW_MISSING=false"
+
+    expected = hmac.new(SALLA_WEBHOOK_SECRET.encode(), raw_body, "sha256").hexdigest()
+    sig_ok = hmac.compare_digest(expected, sig_header)
+
+    if sig_ok:
+        return True, "SIG_PASS: valid signature"
+
+    if not SALLA_WEBHOOK_ENFORCE_SIGNATURE:
+        return True, "SIG_WARN: invalid signature, enforcement OFF — accepted anyway"
+
+    return False, "SIG_REJECT: invalid signature"
 
 
 # ── Salla ─────────────────────────────────────────────────────────────────────
@@ -68,16 +106,11 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         len(raw_body),
     )
 
-    sig_header = request.headers.get("x-salla-signature", "")
-    if SALLA_WEBHOOK_SECRET and sig_header:
-        expected = hmac.new(
-            SALLA_WEBHOOK_SECRET.encode(), raw_body, "sha256"
-        ).hexdigest()
-        sig_ok = hmac.compare_digest(expected, sig_header)
-        logger.info("[Salla WH] signature check: %s", "PASS" if sig_ok else "FAIL")
-    else:
-        logger.info("[Salla WH] signature check SKIPPED (secret=%s sig=%s)",
-                     bool(SALLA_WEBHOOK_SECRET), bool(sig_header))
+    sig_accepted, sig_reason = _verify_salla_signature(raw_body, request.headers)
+    logger.info("[Salla WH] %s (enforce=%s)", sig_reason, SALLA_WEBHOOK_ENFORCE_SIGNATURE)
+    if not sig_accepted:
+        logger.warning("[Salla WH] REJECTED — %s | ip=%s", sig_reason, client_ip)
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     try:
         payload = await request.json()
