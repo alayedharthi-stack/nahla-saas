@@ -1732,23 +1732,33 @@ async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
     Unified WhatsApp connection status — used by ALL pages.
     Single source of truth for connected state, phone number, etc.
     """
-    tenant_id = resolve_tenant_id(request)
-    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    if conn and _wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
-        payload = _coexistence_status_payload(conn)
-        payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
-        return payload
-    if conn and conn.connection_type == "embedded" and conn.phone_number_id:
-        try:
-            from routers.whatsapp_embedded import sync_embedded_connection_from_meta  # noqa: PLC0415
-            payload = await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+    try:
+        tenant_id = resolve_tenant_id(request)
+        conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+        if conn and _wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
+            payload = _coexistence_status_payload(conn)
             payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
             return payload
-        except Exception as exc:
-            logger.warning("[whatsapp/status] embedded sync failed tenant=%s: %s", tenant_id, exc)
-    payload = _build_wa_status(conn)
-    payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
-    return payload
+        if conn and conn.connection_type == "embedded" and conn.phone_number_id:
+            try:
+                from routers.whatsapp_embedded import sync_embedded_connection_from_meta  # noqa: PLC0415
+                payload = await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+                payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
+                return payload
+            except Exception as exc:
+                logger.warning("[whatsapp/status] embedded sync failed tenant=%s: %s", tenant_id, exc)
+        payload = _build_wa_status(conn)
+        payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
+        return payload
+    except Exception as exc:
+        import traceback
+        logger.error("[whatsapp/status] unhandled error tenant=%s: %s\n%s",
+                     getattr(request.state, "tenant_id", "?"), exc, traceback.format_exc())
+        from fastapi.responses import JSONResponse as _JSONResponse
+        return _JSONResponse(
+            status_code=500,
+            content={"detail": "خطأ داخلي في خدمة واتساب", "error": str(exc), "type": type(exc).__name__},
+        )
 
 
 @router.get("/direct/status")
