@@ -5,8 +5,9 @@ Verifies that:
   1. claim_store_for_tenant revokes stale bindings and creates/updates the winner
   2. Only one enabled integration per store_id can exist
   3. token-login never enables without tokens
-  4. validate_before_sync blocks when tokens are missing or duplicate exists
-  5. has_valid_tokens / is_active_binding classify correctly
+  4. validate_before_sync blocks when api_key is missing or duplicate exists
+  5. has_valid_tokens / can_call_api / is_active_binding classify correctly
+  6. Easy-mode (api_key only, no refresh_token) passes sync and active checks
 """
 import sys
 from pathlib import Path
@@ -89,12 +90,42 @@ class TestHasValidTokens:
         assert has_valid_tokens(None) is False
 
 
+# ── can_call_api ──────────────────────────────────────────────────────────────
+
+class TestCanCallApi:
+    def test_api_key_only(self, db):
+        """Easy-mode: api_key present, no refresh_token → can call API."""
+        from services.salla_guard import can_call_api
+        i = _integration(db, 1, "S1", refresh_token="")
+        assert can_call_api(i) is True
+
+    def test_both_tokens(self, db):
+        from services.salla_guard import can_call_api
+        i = _integration(db, 1, "S1")
+        assert can_call_api(i) is True
+
+    def test_no_api_key(self, db):
+        from services.salla_guard import can_call_api
+        i = _integration(db, 1, "S1", api_key="")
+        assert can_call_api(i) is False
+
+    def test_none_integration(self):
+        from services.salla_guard import can_call_api
+        assert can_call_api(None) is False
+
+
 # ── is_active_binding ─────────────────────────────────────────────────────────
 
 class TestIsActiveBinding:
-    def test_enabled_with_tokens(self, db):
+    def test_enabled_with_both_tokens(self, db):
         from services.salla_guard import is_active_binding
         i = _integration(db, 1, "S1")
+        assert is_active_binding(i) is True
+
+    def test_enabled_api_key_only_easy_mode(self, db):
+        """Easy-mode: enabled + api_key (no refresh_token) → active."""
+        from services.salla_guard import is_active_binding
+        i = _integration(db, 1, "S1", refresh_token="")
         assert is_active_binding(i) is True
 
     def test_disabled(self, db):
@@ -102,7 +133,7 @@ class TestIsActiveBinding:
         i = _integration(db, 1, "S1", enabled=False)
         assert is_active_binding(i) is False
 
-    def test_enabled_no_tokens(self, db):
+    def test_enabled_no_tokens_at_all(self, db):
         from services.salla_guard import is_active_binding
         i = _integration(db, 1, "S1", api_key="", refresh_token="")
         assert is_active_binding(i) is False
@@ -173,16 +204,24 @@ class TestValidateBeforeSync:
         assert ok is False
         assert "معطّل" in msg
 
-    def test_missing_tokens(self, db):
+    def test_missing_api_key(self, db):
         from services.salla_guard import validate_before_sync
         _integration(db, 30, "S500", api_key="", refresh_token="")
         ok, msg = validate_before_sync(db, 30)
         assert ok is False
         assert "توكن" in msg
 
-    def test_valid_integration_passes(self, db):
+    def test_valid_oauth_integration_passes(self, db):
         from services.salla_guard import validate_before_sync
         _integration(db, 40, "S600")
         ok, msg = validate_before_sync(db, 40)
+        assert ok is True
+        assert msg == "OK"
+
+    def test_easy_mode_api_key_only_passes(self, db):
+        """Easy-mode: api_key present, no refresh_token → sync allowed."""
+        from services.salla_guard import validate_before_sync
+        _integration(db, 41, "S601", refresh_token="")
+        ok, msg = validate_before_sync(db, 41)
         assert ok is True
         assert msg == "OK"

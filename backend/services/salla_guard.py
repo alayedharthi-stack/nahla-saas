@@ -28,8 +28,26 @@ logger = logging.getLogger("nahla.salla_guard")
 
 # ── Integration health definitions ────────────────────────────────────────────
 
+def can_call_api(integration: Optional[Integration]) -> bool:
+    """True when the integration has an access token and can make API calls.
+
+    This is the *minimum* requirement for sync and data retrieval.
+    Works for both Easy mode (api_key only) and OAuth (api_key + refresh_token).
+    """
+    if not integration:
+        return False
+    cfg = integration.config or {}
+    return bool(cfg.get("api_key"))
+
+
 def has_valid_tokens(integration: Optional[Integration]) -> bool:
-    """True only when both access-token and refresh-token are present."""
+    """True only when both access-token and refresh-token are present.
+
+    This is the *strict* check — satisfied only by a full OAuth exchange.
+    Easy-mode integrations typically have api_key but NO refresh_token,
+    so this will return False for them.  Use ``can_call_api()`` when you
+    just need to know whether API calls are possible.
+    """
     if not integration:
         return False
     cfg = integration.config or {}
@@ -45,10 +63,14 @@ def is_oauth_completed(integration: Optional[Integration]) -> bool:
 
 
 def is_active_binding(integration: Optional[Integration]) -> bool:
-    """An integration is truly *active* only when enabled AND has valid tokens."""
+    """An integration is truly *active* when enabled AND can make API calls.
+
+    Does NOT require refresh_token — Easy-mode integrations (api_key only)
+    are considered active.
+    """
     if not integration:
         return False
-    return bool(integration.enabled) and has_valid_tokens(integration)
+    return bool(integration.enabled) and can_call_api(integration)
 
 
 # ── Ownership claim ──────────────────────────────────────────────────────────
@@ -143,12 +165,12 @@ def validate_before_sync(db: Session, tenant_id: int) -> tuple[bool, str]:
     if not integration.enabled:
         return False, "ربط سلة معطّل. أعد الربط عبر OAuth."
 
-    if not has_valid_tokens(integration):
+    if not can_call_api(integration):
         logger.warning(
-            "[SallaGuard] SYNC_BLOCKED | tenant=%s — integration exists but tokens are missing/empty",
+            "[SallaGuard] SYNC_BLOCKED | tenant=%s — integration enabled but api_key is missing",
             tenant_id,
         )
-        return False, "توكن سلة مفقود أو غير مكتمل. أعد ربط المتجر عبر OAuth."
+        return False, "توكن سلة مفقود. أعد تثبيت التطبيق من متجر سلة أو أعد الربط عبر OAuth."
 
     store_id = (integration.config or {}).get("store_id", "")
     if store_id:
