@@ -49,11 +49,11 @@ export default function AdminSystemStatus() {
             <span className="text-slate-500 text-xs font-medium">الحالة العامة</span>
             <Server className="w-4 h-4 text-slate-500" />
           </div>
-          <p className="text-2xl font-black text-slate-800">{health?.status || 'unknown'}</p>
+          <p className="text-2xl font-black text-slate-800">{health?.status === 'ok' ? 'سليم' : health?.status === 'degraded' ? 'متأثر' : health?.status === 'error' ? 'خطأ' : 'غير معروف'}</p>
         </div>
         <div className="bg-white rounded-2xl border border-slate-100 p-5 shadow-sm">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-slate-500 text-xs font-medium">Tenant Isolation</span>
+            <span className="text-slate-500 text-xs font-medium">عزل المتاجر</span>
             {isolation?.all_checks_passed ? <CheckCircle2 className="w-4 h-4 text-green-500" /> : <AlertTriangle className="w-4 h-4 text-amber-500" />}
           </div>
           <p className="text-sm font-bold text-slate-800">{isolation?.all_checks_passed ? 'سليم' : 'يحتاج مراجعة'}</p>

@@ -401,108 +401,99 @@ async def get_platform_stats(
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
     """Platform-wide statistics for the owner dashboard."""
-    total_merchants  = db.query(func.count(User.id)).filter(User.role == "merchant").scalar() or 0
-    active_merchants = db.query(func.count(User.id)).filter(User.role == "merchant", User.is_active == True).scalar() or 0  # noqa: E712
-    total_tenants    = db.query(func.count(Tenant.id)).scalar() or 0
-
-    # Subscriptions by plan
+    import traceback as _tb  # noqa: PLC0415
     try:
-        active_subs = db.query(func.count(BillingSubscription.id)).filter(
-            BillingSubscription.status.in_(["active", "trialing"])
-        ).scalar() or 0
-        trial_subs = db.query(func.count(BillingSubscription.id)).filter(
-            BillingSubscription.status == "trialing"
-        ).scalar() or 0
-        total_subs = db.query(func.count(BillingSubscription.id)).scalar() or 0
+        total_merchants  = db.query(func.count(User.id)).filter(User.role == "merchant").scalar() or 0
+        active_merchants = db.query(func.count(User.id)).filter(User.role == "merchant", User.is_active == True).scalar() or 0  # noqa: E712
+        total_tenants    = db.query(func.count(Tenant.id)).scalar() or 0
 
-        # Per-plan counts
-        plans = db.query(BillingPlan).all()
-        plan_counts = {}
-        for plan in plans:
-            cnt = db.query(func.count(BillingSubscription.id)).filter(
-                BillingSubscription.plan_id == plan.id,
-                BillingSubscription.status.in_(["active", "trialing"]),
-            ).scalar() or 0
-            plan_counts[plan.slug] = {"name_ar": plan.name_ar or plan.name, "count": cnt, "price": float(plan.price_sar)}
-    except Exception:
-        active_subs  = 0
-        trial_subs   = 0
-        total_subs   = 0
-        plan_counts  = {}
-
-    # Revenue
-    try:
-        today = date.today()
-        total_revenue = db.query(func.sum(_payment_amount_column())).filter(
-            BillingPayment.status == "paid"
-        ).scalar() or 0
-        today_revenue = db.query(func.sum(_payment_amount_column())).filter(
-            BillingPayment.status == "paid",
-            func.date(BillingPayment.created_at) == today,
-        ).scalar() or 0
-        # MRR: sum of active subscription plan prices
-        mrr = 0.0
+        # Subscriptions by plan
         try:
-            active_sub_list = db.query(BillingSubscription).filter(
+            active_subs = db.query(func.count(BillingSubscription.id)).filter(
                 BillingSubscription.status.in_(["active", "trialing"])
-            ).all()
-            for sub in active_sub_list:
-                plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
-                if plan:
-                    mrr += float(plan.price_sar)
+            ).scalar() or 0
+            trial_subs = db.query(func.count(BillingSubscription.id)).filter(
+                BillingSubscription.status == "trialing"
+            ).scalar() or 0
+            total_subs = db.query(func.count(BillingSubscription.id)).scalar() or 0
+            plans = db.query(BillingPlan).all()
+            plan_counts = {}
+            for plan in plans:
+                cnt = db.query(func.count(BillingSubscription.id)).filter(
+                    BillingSubscription.plan_id == plan.id,
+                    BillingSubscription.status.in_(["active", "trialing"]),
+                ).scalar() or 0
+                plan_counts[plan.slug] = {"name_ar": plan.name_ar or plan.name, "count": cnt, "price": float(plan.price_sar)}
         except Exception:
+            active_subs = trial_subs = total_subs = 0
+            plan_counts = {}
+
+        # Revenue
+        try:
+            today = date.today()
+            total_revenue = db.query(func.sum(_payment_amount_column())).filter(
+                BillingPayment.status == "paid"
+            ).scalar() or 0
+            today_revenue = db.query(func.sum(_payment_amount_column())).filter(
+                BillingPayment.status == "paid",
+                func.date(BillingPayment.created_at) == today,
+            ).scalar() or 0
             mrr = 0.0
+            try:
+                for sub in db.query(BillingSubscription).filter(
+                    BillingSubscription.status.in_(["active", "trialing"])
+                ).all():
+                    plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+                    if plan:
+                        mrr += float(plan.price_sar)
+            except Exception:
+                mrr = 0.0
+            recent_payments = db.query(BillingPayment).order_by(
+                BillingPayment.created_at.desc()
+            ).limit(10).all()
+            payments_list = [
+                {
+                    "id": p.id, "tenant_id": p.tenant_id,
+                    "amount": _payment_amount_value(p), "currency": p.currency,
+                    "status": p.status, "gateway": p.gateway,
+                    "created_at": p.created_at.isoformat() if p.created_at else None,
+                }
+                for p in recent_payments
+            ]
+        except Exception:
+            total_revenue = today_revenue = mrr = 0.0
+            payments_list = []
 
-        recent_payments = db.query(BillingPayment).order_by(
-            BillingPayment.created_at.desc()
-        ).limit(10).all()
-        payments_list = [
-            {
-                "id":         p.id,
-                "tenant_id":  p.tenant_id,
-                "amount":     _payment_amount_value(p),
-                "currency":   p.currency,
-                "status":     p.status,
-                "gateway":    p.gateway,
-                "created_at": p.created_at.isoformat() if p.created_at else None,
-            }
-            for p in recent_payments
-        ]
-    except Exception:
-        total_revenue   = 0
-        today_revenue   = 0
-        mrr             = 0.0
-        payments_list   = []
+        # All merchants — use safe builder to avoid lazy-load crashes
+        all_merchants = db.query(User).filter(User.role == "merchant").order_by(
+            User.created_at.desc()
+        ).limit(100).all()
 
-    # All merchants with details
-    all_merchants = db.query(User).filter(User.role == "merchant").order_by(
-        User.created_at.desc()
-    ).limit(100).all()
+        def _safe_merchant(u: User) -> Dict[str, Any]:
+            try:
+                return _merchant_detail(db, u)
+            except Exception:
+                return {
+                    "id": u.id, "tenant_id": u.tenant_id, "email": u.email,
+                    "store_name": u.username or u.email, "phone": "",
+                    "is_active": bool(u.is_active), "plan": "—",
+                    "sub_status": "none", "wa_status": "not_connected",
+                    "created_at": u.created_at.isoformat() if u.created_at else None,
+                }
 
-    return {
-        "merchants": {
-            "total":  total_merchants,
-            "active": active_merchants,
-            "trial":  trial_subs,
-        },
-        "tenants": {
-            "total": total_tenants,
-        },
-        "subscriptions": {
-            "active":  active_subs,
-            "trial":   trial_subs,
-            "total":   total_subs,
-            "by_plan": plan_counts,
-        },
-        "revenue": {
-            "total_sar": float(total_revenue),
-            "today_sar": float(today_revenue),
-            "mrr_sar":   mrr,
-        },
-        "recent_payments":  payments_list,
-        "recent_merchants": [_merchant_detail(db, u) for u in all_merchants[:5]],
-        "all_merchants":    [_merchant_detail(db, u) for u in all_merchants],
-    }
+        return {
+            "merchants":       {"total": total_merchants, "active": active_merchants, "trial": trial_subs},
+            "tenants":         {"total": total_tenants},
+            "subscriptions":   {"active": active_subs, "trial": trial_subs, "total": total_subs, "by_plan": plan_counts},
+            "revenue":         {"total_sar": float(total_revenue), "today_sar": float(today_revenue), "mrr_sar": mrr},
+            "recent_payments": payments_list,
+            "recent_merchants": [_safe_merchant(u) for u in all_merchants[:5]],
+            "all_merchants":    [_safe_merchant(u) for u in all_merchants],
+        }
+    except Exception as exc:
+        logger.error("[admin/stats] unhandled error: %s\n%s", exc, _tb.format_exc())
+        from fastapi.responses import JSONResponse as _J  # noqa: PLC0415
+        return _J(status_code=500, content={"detail": "خطأ في تحميل إحصائيات المنصة", "error": str(exc)})
 
 
 @router.post("/admin/merchants/{user_id}/impersonate")

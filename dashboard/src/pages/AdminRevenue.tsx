@@ -53,7 +53,7 @@ export default function AdminRevenue() {
 
   const summary = [
     { label: 'إيرادات اليوم',    value: rev.today_sar, icon: Calendar,   color: 'bg-blue-500'    },
-    { label: 'MRR (هذا الشهر)', value: rev.mrr_sar,   icon: TrendingUp,  color: 'bg-emerald-500' },
+    { label: 'الإيرادات الشهرية (MRR)', value: rev.mrr_sar,   icon: TrendingUp,  color: 'bg-emerald-500' },
     { label: 'إجمالي الإيرادات', value: rev.total_sar, icon: DollarSign,  color: 'bg-amber-500'  },
     { label: 'مدفوعات فاشلة',   value: failed.length, icon: AlertCircle, color: 'bg-red-500'     },
   ]

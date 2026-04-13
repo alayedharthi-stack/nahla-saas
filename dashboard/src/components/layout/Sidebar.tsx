@@ -50,29 +50,29 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
   {
     groupLabel: 'المنصة',
     items: [
-      { to: '/admin',          icon: Crown,         label: _tr => 'Dashboard'        },
-      { to: '/admin/tenants',  icon: Store,         label: _tr => 'Tenants'          },
-      { to: '/admin/merchants',icon: Users,         label: _tr => 'Merchant Access'  },
-      { to: '/admin/revenue',  icon: TrendingUp,    label: _tr => 'Revenue'          },
-      { to: '/admin/ai-usage', icon: BrainCircuit,  label: _tr => 'AI Usage'         },
-      { to: '/admin/features', icon: Flag,          label: _tr => 'Feature Flags'    },
-      { to: '/admin/troubleshooting', icon: Puzzle, label: _tr => 'Troubleshooting'  },
-      { to: '/admin/coexistence', icon: Smartphone, label: _tr => 'طلبات الجوال + AI' },
-      { to: '/admin/team',     icon: Layers,        label: _tr => 'Team'             },
-      { to: '/admin/system',   icon: Activity,      label: _tr => 'System Status'    },
+      { to: '/admin',                 icon: Crown,         label: _tr => 'لوحة التحكم'          },
+      { to: '/admin/tenants',         icon: Store,         label: _tr => 'المتاجر'              },
+      { to: '/admin/merchants',       icon: Users,         label: _tr => 'التجار'               },
+      { to: '/admin/revenue',         icon: TrendingUp,    label: _tr => 'الإيرادات'            },
+      { to: '/admin/ai-usage',        icon: BrainCircuit,  label: _tr => 'استخدام الذكاء'       },
+      { to: '/admin/features',        icon: Flag,          label: _tr => 'الميزات التجريبية'    },
+      { to: '/admin/troubleshooting', icon: Puzzle,        label: _tr => 'تشخيص المشاكل'       },
+      { to: '/admin/coexistence',     icon: Smartphone,    label: _tr => 'طلبات الجوال + AI'   },
+      { to: '/admin/team',            icon: Layers,        label: _tr => 'الفريق'               },
+      { to: '/admin/system',          icon: Activity,      label: _tr => 'حالة النظام'          },
     ],
   },
   {
     groupLabel: 'نحلة AI',
     items: [
-      { to: '/whatsapp-connect', icon: MessageCircle, label: _tr => 'بوت نحلة' },
+      { to: '/whatsapp-connect', icon: MessageCircle, label: _tr => 'بوت نحلة'       },
       { to: '/templates',        icon: FileText,       label: _tr => 'قوالب الرسائل' },
     ],
   },
   {
     groupLabel: 'الإعدادات',
     items: [
-      { to: '/settings', icon: Settings, label: _tr => 'Settings' },
+      { to: '/settings', icon: Settings, label: _tr => 'الإعدادات' },
     ],
   },
 ]

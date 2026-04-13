@@ -2,6 +2,16 @@ import { useEffect, useMemo, useState } from 'react'
 import { Search, Store, ToggleLeft, ToggleRight } from 'lucide-react'
 import { adminApi, type AdminTenantSummary } from '../api/admin'
 
+const SUB_STATUS_AR: Record<string, string> = {
+  active: 'نشط', trialing: 'تجربة', canceled: 'ملغى',
+  past_due: 'متأخر', none: 'بلا باقة', incomplete: 'غير مكتمل',
+}
+const WA_STATUS_AR: Record<string, string> = {
+  connected: 'مربوط', not_connected: 'غير مربوط', pending: 'معلق',
+  request_submitted: 'طلب إرسال', pending_activation: 'ينتظر التفعيل',
+  action_required: 'يحتاج إجراء', disconnected: 'مقطوع',
+}
+
 function StatusBadge({ active }: { active: boolean }) {
   return (
     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
@@ -46,7 +56,7 @@ export default function AdminTenants() {
           </div>
           <div>
             <h1 className="text-lg font-black text-slate-800">المتاجر</h1>
-            <p className="text-slate-400 text-xs">إدارة الـ tenants وحالتها التشغيلية</p>
+            <p className="text-slate-400 text-xs">إدارة المتاجر والحسابات وحالتها التشغيلية</p>
           </div>
         </div>
 
@@ -98,9 +108,9 @@ export default function AdminTenants() {
                     </td>
                     <td className="px-4 py-3">
                       <p className="text-slate-700">{tenant.subscription.plan || '—'}</p>
-                      <p className="text-xs text-slate-400">{tenant.subscription.status}</p>
+                      <p className="text-xs text-slate-400">{SUB_STATUS_AR[tenant.subscription.status] ?? tenant.subscription.status}</p>
                     </td>
-                    <td className="px-4 py-3 text-slate-600">{tenant.whatsapp.status}</td>
+                    <td className="px-4 py-3 text-slate-600">{WA_STATUS_AR[tenant.whatsapp.status] ?? tenant.whatsapp.status}</td>
                     <td className="px-4 py-3 text-slate-600">{tenant.stats.orders.toLocaleString('ar-SA')}</td>
                     <td className="px-4 py-3 text-slate-600">{tenant.stats.conversations.toLocaleString('ar-SA')}</td>
                     <td className="px-4 py-3 text-slate-600">{tenant.stats.revenue_sar.toLocaleString('ar-SA')} ر.س</td>

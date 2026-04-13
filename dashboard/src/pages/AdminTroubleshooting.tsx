@@ -27,7 +27,7 @@ export default function AdminTroubleshooting() {
           <LifeBuoy className="w-5 h-5 text-white" />
         </div>
         <div>
-          <h1 className="text-lg font-black text-slate-800">Troubleshooting</h1>
+          <h1 className="text-lg font-black text-slate-800">تشخيص المشاكل</h1>
           <p className="text-slate-400 text-xs">تشخيص حالة التاجر والدعم والوضع التشغيلي بسرعة</p>
         </div>
       </div>
@@ -53,7 +53,7 @@ export default function AdminTroubleshooting() {
                 className={`w-full text-right px-4 py-3 hover:bg-slate-50 transition ${selectedTenantId === tenant.id ? 'bg-sky-50' : ''}`}
               >
                 <p className="font-semibold text-slate-700">{tenant.name}</p>
-                <p className="text-xs text-slate-400">{tenant.domain || `Tenant #${tenant.id}`}</p>
+                <p className="text-xs text-slate-400">{tenant.domain || `متجر #${tenant.id}`}</p>
               </button>
             ))}
           </div>

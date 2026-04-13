@@ -44,7 +44,7 @@ export default function AdminFeatures() {
           <Flag className="w-5 h-5 text-white" />
         </div>
         <div>
-          <h1 className="text-lg font-black text-slate-800">Feature Flags</h1>
+          <h1 className="text-lg font-black text-slate-800">الميزات التجريبية</h1>
           <p className="text-slate-400 text-xs">تحكم مركزي في تفعيل القدرات على مستوى المنصة</p>
         </div>
       </div>
@@ -52,10 +52,10 @@ export default function AdminFeatures() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div className="bg-white rounded-2xl border border-slate-100 shadow-sm divide-y divide-slate-50">
           <div className="px-5 py-4">
-            <h2 className="font-bold text-slate-700 text-sm">Global Flags</h2>
+            <h2 className="font-bold text-slate-700 text-sm">الإعدادات العامة</h2>
           </div>
           {entries.length === 0 ? (
-            <div className="p-8 text-center text-slate-400">لا توجد flags حالياً</div>
+            <div className="p-8 text-center text-slate-400">لا توجد ميزات حالياً</div>
           ) : entries.map(([key, enabled]) => (
             <div key={key} className="px-5 py-4 flex items-center justify-between gap-3">
               <div>
@@ -75,7 +75,7 @@ export default function AdminFeatures() {
 
         <div className="bg-white rounded-2xl border border-slate-100 shadow-sm divide-y divide-slate-50">
           <div className="px-5 py-4 flex items-center justify-between gap-3">
-            <h2 className="font-bold text-slate-700 text-sm">Tenant Overrides</h2>
+            <h2 className="font-bold text-slate-700 text-sm">إعدادات المتاجر</h2>
             <select
               value={selectedTenantId ?? ''}
               onChange={e => setSelectedTenantId(Number(e.target.value))}
@@ -87,7 +87,7 @@ export default function AdminFeatures() {
             </select>
           </div>
           {tenantEntries.length === 0 ? (
-            <div className="p-8 text-center text-slate-400">لا توجد overrides لهذا المتجر</div>
+            <div className="p-8 text-center text-slate-400">لا توجد تخصيصات لهذا المتجر</div>
           ) : tenantEntries.map(([key, enabled]) => (
             <div key={key} className="px-5 py-4 flex items-center justify-between gap-3">
               <div>

@@ -25,7 +25,7 @@ export default function AdminTeam() {
         <UserCheck className="w-12 h-12 text-slate-200 mx-auto mb-3" />
         <p className="text-slate-500 font-medium">إدارة الفريق</p>
         <p className="text-slate-400 text-sm mt-1">المرحلة الحالية توحد سياسة الأدوار قبل إدارة الحسابات فعلياً</p>
-        <p className="text-xs text-slate-400 mt-2">Platform staff roles observed: {staffCount}</p>
+        <p className="text-xs text-slate-400 mt-2">إجمالي موظفي المنصة المرصودين: {staffCount}</p>
       </div>
 
       <div className="bg-slate-50 rounded-2xl border border-slate-100 p-5">

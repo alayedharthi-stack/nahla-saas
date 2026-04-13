@@ -70,7 +70,7 @@ export default function AdminAiUsage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-100">
-                {['المتجر', 'المحادثات', 'مُنسّقة', 'الأفعال', 'متوسط الزمن', 'توكنات ~', 'تكلفة ~', 'المزوّدات'].map(h => (
+                {['المتجر', 'المحادثات', 'مُنسّقة', 'الأفعال', 'متوسط الزمن (ث)', 'التوكنات (تقديري)', 'التكلفة (تقديري)', 'المزوّدات'].map(h => (
                   <th key={h} className="text-right px-4 py-3 text-xs font-semibold text-slate-500">{h}</th>
                 ))}
               </tr>
@@ -78,11 +78,11 @@ export default function AdminAiUsage() {
             <tbody className="divide-y divide-slate-50">
               {rows.map(row => (
                 <tr key={row.tenant_id} className="hover:bg-slate-50/50">
-                  <td className="px-4 py-3 font-semibold text-slate-700">{row.tenant_name ?? `Tenant #${row.tenant_id}`}</td>
+                  <td className="px-4 py-3 font-semibold text-slate-700">{row.tenant_name ?? `متجر #${row.tenant_id}`}</td>
                   <td className="px-4 py-3 text-slate-600">{row.turns_total.toLocaleString('ar-SA')}</td>
                   <td className="px-4 py-3 text-slate-600">{row.turns_orchestrated.toLocaleString('ar-SA')}</td>
                   <td className="px-4 py-3 text-slate-600">{row.ai_actions_logged.toLocaleString('ar-SA')}</td>
-                  <td className="px-4 py-3 text-slate-600">{row.avg_latency_ms.toLocaleString('ar-SA')} ms</td>
+                  <td className="px-4 py-3 text-slate-600">{row.avg_latency_ms.toLocaleString('ar-SA')} مللي ث</td>
                   <td className="px-4 py-3 text-slate-600">{row.estimated_total_tokens.toLocaleString('ar-SA')}</td>
                   <td className="px-4 py-3 text-slate-600">${row.estimated_total_cost_usd.toFixed(4)}</td>
                   <td className="px-4 py-3 text-slate-500 text-xs">
