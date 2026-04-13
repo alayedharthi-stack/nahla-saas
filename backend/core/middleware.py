@@ -70,7 +70,11 @@ async def api_key_middleware(request: Request, call_next):
             auth_header = request.headers.get("Authorization", "")
             has_bearer_token = auth_header.startswith("Bearer ")
             if not has_bearer_token and request.headers.get("X-Nahla-Key", "") != API_SECRET_KEY:
-                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Unauthorized"},
+                    headers=_cors_error_headers(request),
+                )
     return await call_next(request)
 
 
@@ -88,7 +92,11 @@ async def global_rate_limit_middleware(request: Request, call_next):
             request.client.host if request.client else "unknown"
         )
         if not _check(f"global:{client_ip}", max_count=300, window_seconds=60):
-            return JSONResponse(status_code=429, content={"detail": "Too many requests"})
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests"},
+                headers=_cors_error_headers(request),
+            )
     return await call_next(request)
 
 
@@ -217,6 +225,7 @@ async def jwt_enforcement_middleware(request: Request, call_next):
                 "detail": "Auth service unavailable — server misconfiguration.",
                 "code": "jwt_library_missing",
             },
+            headers=_cors_error_headers(request),
         )
 
     auth_header = request.headers.get("Authorization", "")

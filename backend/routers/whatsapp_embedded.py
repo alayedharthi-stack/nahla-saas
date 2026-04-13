@@ -199,7 +199,8 @@ async def _get_waba_id_from_token(token: str) -> str:
     """
     Extract the WhatsApp Business Account ID from the token using multiple strategies:
     1. debug_token granular_scopes (works when config_id triggers full WA signup)
-    2. GET /me/businesses → list WABAs per business (fallback without config_id)
+    2. GET /me/businesses → list WABAs per business
+    3. GET /me/whatsapp_business_accounts (direct query)
     """
     # Strategy 1: debug_token granular_scopes
     info = await _debug_token(token)
@@ -237,11 +238,28 @@ async def _get_waba_id_from_token(token: str) -> str:
     except Exception as e:
         logger.warning("[EmbeddedSignup] Business lookup failed: %s", e)
 
+    # Strategy 3: direct query (some token types expose this edge)
+    logger.info("[EmbeddedSignup] Trying /me/whatsapp_business_accounts direct query")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            direct_resp = await client.get(
+                f"{GRAPH}/me/whatsapp_business_accounts",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"fields": "id,name"},
+            )
+            direct_data = direct_resp.json()
+        logger.info("[EmbeddedSignup] /me/whatsapp_business_accounts: %s", direct_data)
+        for waba in direct_data.get("data", []):
+            logger.info("[EmbeddedSignup] WABA found via direct query: %s", waba["id"])
+            return str(waba["id"])
+    except Exception as e:
+        logger.warning("[EmbeddedSignup] Direct WABA query failed: %s", e)
+
     raise HTTPException(
         status_code=400,
         detail=(
-            "لم يُعثر على حساب واتساب للأعمال مرتبط بهذا الحساب. "
-            "تأكد من أن لديك حساب واتساب للأعمال في Meta Business Manager."
+            "تعذّر العثور على حساب واتساب للأعمال. "
+            "أعد المحاولة واختر «إنشاء حساب واتساب جديد» في نافذة Meta أثناء الربط."
         ),
     )
 

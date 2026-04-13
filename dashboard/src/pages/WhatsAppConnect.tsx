@@ -222,12 +222,14 @@ function EmbeddedSignupFlow({
     refreshEmbeddedStatus().catch(() => {})
   }, [stage, refreshEmbeddedStatus])
 
-  const handleToken = useCallback((accessToken: string) => {
+  const handleExchange = useCallback((code?: string, accessToken?: string) => {
     setBusy(true); setStage('exchanging')
-    // Send the access_token directly — avoids redirect_uri mismatch from code exchange
+    const payload: Record<string, string> = {}
+    if (code) payload.code = code
+    if (accessToken) payload.access_token = accessToken
     apiCall<{ waba_id: string; phones: EmbeddedPhone[]; message: string }>(
       '/whatsapp/embedded/exchange',
-      { method: 'POST', body: JSON.stringify({ access_token: accessToken }) }
+      { method: 'POST', body: JSON.stringify(payload) }
     ).then(result => {
       setStatusHint(result.message || '')
       setWabaId(result.waba_id)
@@ -242,17 +244,20 @@ function EmbeddedSignupFlow({
   const launchSignup = useCallback(() => {
     if (!window.FB || !sdkLoaded.current) { setError('SDK غير جاهز، انتظر لحظة'); return }
     setError('')
-    const loginOptions: any = {
-      scope: 'whatsapp_business_management,whatsapp_business_messaging,business_management',
-      extras: { setup: {}, featureType: '', sessionInfoVersion: '3' },
-    }
-    // Use config_id if available — triggers full WhatsApp Business onboarding
-    if (configId) loginOptions.config_id = configId
     window.FB.login((response: any) => {
       if (!response?.authResponse) { setError('تم إلغاء عملية الربط'); return }
-      handleToken(response.authResponse.accessToken)
-    }, loginOptions)
-  }, [handleToken, configId])
+      handleExchange(response.authResponse.code, response.authResponse.accessToken)
+    }, {
+      config_id: configId,
+      response_type: 'code',
+      override_default_response_type: true,
+      extras: {
+        setup: {},
+        feature: 'whatsapp_embedded_signup',
+        sessionInfoVersion: '3',
+      },
+    })
+  }, [handleExchange, configId])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
@@ -578,14 +583,19 @@ function EmbeddedSignupFlow({
         {[
           { n: 1, text: 'اضغط "ربط مع Meta" أدناه' },
           { n: 2, text: 'سجّل دخولك بحساب Facebook' },
-          { n: 3, text: 'اختر أو أنشئ حساب واتساب للأعمال' },
-          { n: 4, text: 'اختر رقم هاتف نشاطك التجاري' },
+          { n: 3, text: 'ستنشئ Meta حساب واتساب للأعمال تلقائيًا إذا لم يكن لديك' },
+          { n: 4, text: 'اختر أو أضف رقم هاتف نشاطك التجاري' },
         ].map(s => (
           <div key={s.n} className="flex items-center gap-3">
             <div className="w-6 h-6 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-xs font-bold shrink-0">{s.n}</div>
             <p className="text-sm text-slate-600">{s.text}</p>
           </div>
         ))}
+      </div>
+
+      {/* Informational hint — not blocking */}
+      <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-xs text-blue-700">
+        إذا لم يكن لديك حساب واتساب للأعمال بعد، ستقوم Meta بإنشائه تلقائيًا أثناء الربط — لا تحتاج إعداد أي شيء مسبقًا.
       </div>
 
       {error && (
@@ -610,7 +620,7 @@ function EmbeddedSignupFlow({
       </button>
 
       <p className="text-center text-xs text-slate-400">
-        ستُفتح نافذة Meta الرسمية — كل بياناتك آمنة ومشفّرة
+        ستُفتح نافذة Meta الرسمية — كل بياناتك آمنة ومشفّرة. ستتكفل Meta بجميع الإعدادات التقنية نيابةً عنك.
       </p>
     </div>
   )
