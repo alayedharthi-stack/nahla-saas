@@ -1359,46 +1359,55 @@ async def admin_list_coexistence_requests(
     By default returns requests with status='request_submitted'.
     Pass ?status_filter=all to get every dialog360 connection.
     """
-    query = db.query(WhatsAppConnection).filter(
-        WhatsAppConnection.provider == "dialog360"
-    )
-    if status_filter != "all":
-        query = query.filter(WhatsAppConnection.status == status_filter)
-    connections = query.order_by(WhatsAppConnection.last_attempt_at.desc()).all()
-
-    rows = []
-    for conn in connections:
-        tenant = db.query(Tenant).filter(Tenant.id == conn.tenant_id).first()
-        user = (
-            db.query(User)
-            .filter(User.tenant_id == conn.tenant_id)
-            .order_by(User.id.asc())
-            .first()
+    import traceback as _tb  # noqa: PLC0415
+    try:
+        # Match both provider values to handle any legacy data
+        query = db.query(WhatsAppConnection).filter(
+            WhatsAppConnection.connection_type == "coexistence"
         )
-        coex_meta = dict((conn.extra_metadata or {}).get("coexistence") or {})
-        request_data = dict(coex_meta.get("request") or {})
-        rows.append({
-            "tenant_id":          conn.tenant_id,
-            "tenant_name":        tenant.name if tenant else None,
-            "merchant_email":     user.email if user else None,
-            "merchant_phone":     user.phone if user else None,
-            "wa_status":          conn.status,
-            "connection_type":    conn.connection_type,
-            "provider":           conn.provider,
-            # From the merchant's original request form
-            "requested_phone":    request_data.get("phone_number") or conn.phone_number,
-            "display_name":       request_data.get("display_name") or conn.business_display_name,
-            "notes":              request_data.get("notes"),
-            "submitted_at":       request_data.get("submitted_at"),
-            "has_whatsapp_business_app": request_data.get("has_whatsapp_business_app"),
-            # Current DB values (post-activation)
-            "phone_number_id":    conn.phone_number_id,
-            "waba_id":            conn.whatsapp_business_account_id,
-            "last_attempt_at":    conn.last_attempt_at.isoformat() if conn.last_attempt_at else None,
-            "last_error":         conn.last_error,
-            "sending_enabled":    bool(conn.sending_enabled),
-            "webhook_verified":   bool(conn.webhook_verified),
-            "connected_at":       conn.connected_at.isoformat() if conn.connected_at else None,
-        })
+        if status_filter != "all":
+            query = query.filter(WhatsAppConnection.status == status_filter)
+        connections = query.order_by(WhatsAppConnection.last_attempt_at.desc().nullslast()).all()
 
-    return {"requests": rows, "total": len(rows)}
+        rows = []
+        for conn in connections:
+            try:
+                tenant = db.query(Tenant).filter(Tenant.id == conn.tenant_id).first()
+                user = (
+                    db.query(User)
+                    .filter(User.tenant_id == conn.tenant_id)
+                    .order_by(User.id.asc())
+                    .first()
+                )
+                coex_meta = dict((conn.extra_metadata or {}).get("coexistence") or {})
+                request_data = dict(coex_meta.get("request") or {})
+                rows.append({
+                    "tenant_id":          conn.tenant_id,
+                    "tenant_name":        tenant.name if tenant else None,
+                    "merchant_email":     user.email if user else None,
+                    "merchant_phone":     getattr(user, "phone", None) if user else None,
+                    "wa_status":          conn.status,
+                    "connection_type":    conn.connection_type,
+                    "provider":           conn.provider,
+                    "requested_phone":    request_data.get("phone_number") or conn.phone_number,
+                    "display_name":       request_data.get("display_name") or conn.business_display_name,
+                    "notes":              request_data.get("notes"),
+                    "submitted_at":       request_data.get("submitted_at"),
+                    "has_whatsapp_business_app": request_data.get("has_whatsapp_business_app"),
+                    "phone_number_id":    conn.phone_number_id,
+                    "waba_id":            conn.whatsapp_business_account_id,
+                    "last_attempt_at":    conn.last_attempt_at.isoformat() if conn.last_attempt_at else None,
+                    "last_error":         conn.last_error,
+                    "sending_enabled":    bool(conn.sending_enabled),
+                    "webhook_verified":   bool(conn.webhook_verified),
+                    "connected_at":       conn.connected_at.isoformat() if conn.connected_at else None,
+                })
+            except Exception as row_exc:
+                logger.warning("[admin/coexistence] row error tenant=%s: %s", getattr(conn, "tenant_id", "?"), row_exc)
+                continue
+
+        return {"requests": rows, "total": len(rows)}
+    except Exception as exc:
+        logger.error("[admin/coexistence/requests] unhandled error: %s\n%s", exc, _tb.format_exc())
+        from fastapi.responses import JSONResponse as _J  # noqa: PLC0415
+        return _J(status_code=500, content={"detail": "خطأ في تحميل طلبات الربط", "error": str(exc)})

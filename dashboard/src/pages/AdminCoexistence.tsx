@@ -309,13 +309,18 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
 export default function AdminCoexistence() {
   const [requests, setRequests] = useState<CoexistenceRequest[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [statusFilter, setStatusFilter] = useState('request_submitted')
 
   const load = () => {
     setLoading(true)
+    setLoadError('')
     adminApi.coexistenceRequests(statusFilter)
       .then(data => setRequests(data.requests))
-      .catch(() => setRequests([]))
+      .catch((e: unknown) => {
+        setRequests([])
+        setLoadError(e instanceof Error ? e.message : 'فشل تحميل الطلبات')
+      })
       .finally(() => setLoading(false))
   }
 
@@ -386,6 +391,17 @@ export default function AdminCoexistence() {
       {/* List */}
       {loading ? (
         <div className="text-center py-16 text-slate-400 text-sm">جارٍ التحميل...</div>
+      ) : loadError ? (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-center">
+          <p className="text-red-700 font-semibold text-sm">فشل تحميل الطلبات</p>
+          <p className="text-red-500 text-xs mt-1 font-mono">{loadError}</p>
+          <button
+            onClick={load}
+            className="mt-3 px-4 py-2 rounded-xl bg-red-600 text-white text-xs font-bold hover:bg-red-500 transition"
+          >
+            إعادة المحاولة
+          </button>
+        </div>
       ) : requests.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
           <Smartphone className="w-12 h-12 mx-auto mb-3 opacity-20" />

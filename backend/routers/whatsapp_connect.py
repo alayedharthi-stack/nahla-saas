@@ -30,6 +30,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from models import WhatsAppConnection  # noqa: E402
 
@@ -175,6 +176,7 @@ def _set_coexistence_state(
         coex["action_required_message"] = action_required_message
     meta["coexistence"] = coex
     conn.extra_metadata = meta
+    flag_modified(conn, "extra_metadata")
 
 
 def _coexistence_status_payload(conn: Optional[WhatsAppConnection]) -> dict:
