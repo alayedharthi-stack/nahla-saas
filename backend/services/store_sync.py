@@ -52,6 +52,28 @@ logger = logging.getLogger("nahla-backend")
 
 # ── Data normalisation helpers ────────────────────────────────────────────────
 
+import re as _re
+
+def _normalize_phone(raw_phone) -> str:
+    """Normalize a Saudi phone number to 9-digit local format (5xxxxxxxx).
+
+    Handles: +966..., 00966..., 966..., 05..., 5..., int values.
+    Returns empty string for non-Saudi or invalid numbers.
+    """
+    s = _re.sub(r"[^\d]", "", str(raw_phone or ""))
+    if not s:
+        return ""
+    if s.startswith("00966"):
+        s = s[5:]
+    elif s.startswith("966") and len(s) >= 12:
+        s = s[3:]
+    if s.startswith("0") and len(s) == 10:
+        s = s[1:]
+    if len(s) == 9 and s[0] == "5":
+        return s
+    return str(raw_phone or "")
+
+
 def _normalise_product(raw: Any) -> Dict:
     """Convert a store-adapter product object/dict to a normalised internal dict."""
     if hasattr(raw, "dict"):
@@ -85,8 +107,12 @@ def _normalise_order(raw: Any) -> Dict:
         if customer_name or customer_phone:
             customer_info = {
                 "name": customer_name,
-                "mobile": customer_phone,
+                "mobile": _normalize_phone(customer_phone),
             }
+    else:
+        if "mobile" in customer_info:
+            customer_info = dict(customer_info)
+            customer_info["mobile"] = _normalize_phone(customer_info["mobile"])
     return {
         "external_id":   str(raw.get("id", raw.get("external_id", ""))),
         "status":        raw.get("status", "unknown"),
@@ -536,8 +562,9 @@ class StoreSyncService:
             if not name:
                 name = raw.get("name", "")
             email = raw.get("email", "")
-            phone = raw.get("mobile", raw.get("phone", ""))
+            phone = _normalize_phone(raw.get("mobile", raw.get("phone", "")))
 
+            # 1. Try by salla_id first
             existing = (
                 self.db.query(Customer)
                 .filter(
@@ -546,6 +573,18 @@ class StoreSyncService:
                 )
                 .first()
             )
+
+            # 2. If not found by salla_id, try by normalized phone to avoid duplicates
+            if not existing and phone:
+                existing = (
+                    self.db.query(Customer)
+                    .filter(
+                        Customer.tenant_id == self.tenant_id,
+                        Customer.phone == phone,
+                    )
+                    .first()
+                )
+
             meta = {"salla_id": ext_id, "source": "salla",
                     "city": raw.get("city", ""), "country": raw.get("country", "SA")}
 
@@ -600,14 +639,17 @@ class StoreSyncService:
                 self.db.add(profile)
                 self.db.flush()
 
-            orders = (
-                self.db.query(Order)
-                .filter(
-                    Order.tenant_id == self.tenant_id,
-                    Order.customer_info["mobile"].astext == (cust.phone or ""),
+            norm_phone = _normalize_phone(cust.phone) if cust.phone else ""
+            orders = []
+            if norm_phone:
+                orders = (
+                    self.db.query(Order)
+                    .filter(
+                        Order.tenant_id == self.tenant_id,
+                        Order.customer_info["mobile"].astext == norm_phone,
+                    )
+                    .all()
                 )
-                .all()
-            ) if cust.phone else []
 
             if not orders and cust.name:
                 orders = (
@@ -848,7 +890,7 @@ class StoreSyncService:
     def _update_customer_profile_from_order(self, normalised: Dict) -> None:
         """Update CustomerProfile when a new order arrives."""
         cust_info = normalised.get("customer_info") or {}
-        phone = cust_info.get("mobile", cust_info.get("phone", ""))
+        phone = _normalize_phone(cust_info.get("mobile", cust_info.get("phone", "")))
         name = cust_info.get("name", "")
         if not phone and not name:
             return
@@ -917,7 +959,7 @@ class StoreSyncService:
         if not name:
             name = payload.get("name", "")
         email  = payload.get("email", "")
-        phone  = payload.get("mobile", payload.get("phone", ""))
+        phone  = _normalize_phone(payload.get("mobile", payload.get("phone", "")))
 
         if not ext_id:
             return
