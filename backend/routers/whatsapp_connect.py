@@ -50,6 +50,7 @@ from services.whatsapp_platform.provider_utils import (
     WHATSAPP_CONNECTION_TYPE_COEXISTENCE,
     WHATSAPP_CONNECTION_TYPE_DIRECT,
     WHATSAPP_CONNECTION_TYPE_EMBEDDED,
+    WHATSAPP_PROVIDER_360DIALOG,
     WHATSAPP_PROVIDER_META,
     merchant_channel_label as _merchant_channel_label,
     provider_label as _provider_label,
