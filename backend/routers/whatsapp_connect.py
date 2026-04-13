@@ -38,6 +38,8 @@ from core.config import (
     BACKEND_URL,
     D360_COHOST_ALLOW_SELF_REQUEST,
     D360_COHOST_ENABLED,
+    D360_PARTNER_HUB_BASE,
+    D360_PARTNER_ID,
     D360_WEBHOOK_INTERNAL_SECRET,
     META_APP_ID,
     META_APP_SECRET,
@@ -62,7 +64,11 @@ from services.whatsapp_platform.token_manager import (
     get_token_for_operation,
     update_token_state,
 )
-from services.whatsapp_platform.service import dialog360_configure_webhook
+from services.whatsapp_platform.service import (
+    dialog360_configure_webhook,
+    dialog360_generate_api_key,
+    dialog360_get_channel_info,
+)
 
 logger = logging.getLogger("nahla-backend")
 
@@ -654,6 +660,190 @@ async def coexistence_status(request: Request, db: Session = Depends(get_db)):
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     _ensure_coexistence_allowed(db, tenant_id)
     return _coexistence_status_payload(conn)
+
+
+# ── Partner Embedded Signup (self-service) ────────────────────────────────────
+
+@router.get("/coexistence/signup-url")
+async def coexistence_signup_url(request: Request, db: Session = Depends(get_db)):
+    """
+    Return the 360dialog Partner Integrated Onboarding URL for this tenant.
+    The merchant opens this URL (as a popup) to complete self-service setup.
+    """
+    _ensure_coexistence_allowed(db, resolve_tenant_id(request))
+    if not D360_PARTNER_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="D360_PARTNER_ID is not configured. Contact Nahla support.",
+        )
+    tenant_id = resolve_tenant_id(request)
+    import base64 as _b64  # noqa: PLC0415
+    state = _b64.urlsafe_b64encode(f"tid={tenant_id}".encode()).decode()
+    redirect_url = f"{BACKEND_URL.rstrip('/')}/whatsapp/coexistence/partner-redirect"
+    hub_base = D360_PARTNER_HUB_BASE.rstrip("/")
+    import urllib.parse as _up  # noqa: PLC0415
+    signup_url = (
+        f"{hub_base}/dashboard/app/{D360_PARTNER_ID}/permissions"
+        f"?state={_up.quote(state)}"
+        f"&redirect_url={_up.quote(redirect_url)}"
+    )
+    return {"signup_url": signup_url, "partner_id": D360_PARTNER_ID}
+
+
+class PartnerConnectIn(BaseModel):
+    """Payload sent by frontend after 360dialog popup returns client_id + channels."""
+    client_id: str
+    channels: list  # list of channel IDs (strings) from 360dialog
+
+
+@router.post("/coexistence/partner-connect")
+async def coexistence_partner_connect(
+    body: PartnerConnectIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Called by the frontend immediately after the 360dialog popup closes
+    and posts back client_id + channels[].
+
+    1. Fetches channel info from 360dialog Partner API
+    2. Generates API key for the channel
+    3. Saves connection with provider=dialog360 + api_key
+    4. Configures webhook
+    5. Returns connection status
+    """
+    tenant_id = resolve_tenant_id(request)
+    _ensure_coexistence_allowed(db, tenant_id)
+
+    if not D360_PARTNER_ID:
+        raise HTTPException(status_code=503, detail="D360_PARTNER_ID is not configured.")
+    if not body.channels:
+        raise HTTPException(status_code=400, detail="No channels returned from 360dialog.")
+
+    channel_id = body.channels[0] if isinstance(body.channels[0], str) else body.channels[0].get("id", "")
+    if not channel_id:
+        raise HTTPException(status_code=400, detail="Could not extract channel_id from 360dialog response.")
+
+    # Fetch channel details from Partner API
+    channel_info = await dialog360_get_channel_info(
+        partner_id=D360_PARTNER_ID,
+        channel_id=channel_id,
+    )
+    logger.info("[coexistence/partner-connect] tenant=%s client=%s channel=%s info=%s",
+                tenant_id, body.client_id, channel_id, channel_info)
+
+    # Attempt to generate an API key
+    api_key_resp = await dialog360_generate_api_key(
+        partner_id=D360_PARTNER_ID,
+        channel_id=channel_id,
+    )
+    api_key = (
+        api_key_resp.get("api_key")
+        or api_key_resp.get("key")
+        or api_key_resp.get("token")
+    )
+    channel_status = channel_info.get("status", "unknown")
+
+    conn = _get_or_create_connection(db, tenant_id)
+    internal_secret = D360_WEBHOOK_INTERNAL_SECRET or secrets.token_urlsafe(24)
+
+    conn.provider = WHATSAPP_PROVIDER_360DIALOG
+    conn.connection_type = WHATSAPP_CONNECTION_TYPE_COEXISTENCE
+    conn.phone_number = channel_info.get("phone_number") or conn.phone_number
+    conn.business_display_name = channel_info.get("name") or conn.business_display_name
+    conn.whatsapp_business_account_id = channel_info.get("waba_id")
+    conn.phone_number_id = channel_id
+    conn.token_type = "dialog360_api_key"
+    conn.token_expires_at = None
+    conn.last_attempt_at = datetime.now(timezone.utc)
+    conn.last_error = None
+
+    meta = dict(conn.extra_metadata or {})
+    meta["provider_details"] = {
+        "channel_id": channel_id,
+        "client_id": body.client_id,
+        "webhook_url": _coexistence_webhook_url(),
+        "internal_header_name": "X-Nahla-Coexistence-Secret",
+        "channel_status_at_connect": channel_status,
+    }
+    meta["coexistence_internal_secret"] = internal_secret
+
+    if api_key:
+        conn.access_token = api_key
+        conn.status = "pending_activation"
+        conn.sending_enabled = False
+        conn.webhook_verified = False
+        _set_coexistence_state(conn, status="pending_activation")
+        # Configure webhook immediately if we have the API key
+        webhook_result = await dialog360_configure_webhook(
+            api_key=api_key,
+            url=_coexistence_webhook_url(),
+            headers={"X-Nahla-Coexistence-Secret": internal_secret},
+        )
+        if "error" not in (webhook_result or {}):
+            conn.webhook_verified = True
+            if channel_status == "ready":
+                conn.status = "connected"
+                conn.sending_enabled = True
+                conn.connected_at = datetime.now(timezone.utc)
+                _set_coexistence_state(conn, status="connected")
+        meta["last_webhook_setup"] = webhook_result
+    else:
+        # Channel not ready yet — store pending state, webhook from 360dialog will follow
+        conn.access_token = None
+        conn.status = "pending_activation"
+        conn.sending_enabled = False
+        conn.webhook_verified = False
+        _set_coexistence_state(
+            conn,
+            status="pending_activation",
+            action_required_message=(
+                "تم تسجيل القناة لدى 360dialog. "
+                "ننتظر تفعيلها (يستغرق دقائق). ستحصل على إشعار عند الجاهزية."
+            ),
+        )
+
+    conn.extra_metadata = meta
+    db.commit()
+
+    return {
+        "status": conn.status,
+        "channel_id": channel_id,
+        "client_id": body.client_id,
+        "api_key_obtained": bool(api_key),
+        "channel_status": channel_status,
+        **_coexistence_status_payload(conn),
+    }
+
+
+@router.get("/coexistence/partner-redirect")
+async def coexistence_partner_redirect():
+    """
+    Landing page that 360dialog redirects to after Integrated Onboarding.
+    This page is opened in a popup — it posts its query params to the opener
+    window (the Nahla dashboard) and closes itself.
+    """
+    from fastapi.responses import HTMLResponse  # noqa: PLC0415
+    html = """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>نحلة — جارٍ الربط...</title></head>
+<body>
+<script>
+function processParams() {
+  var params = window.location.search;
+  if (window.opener) {
+    window.opener.postMessage(params, '*');
+    window.close();
+  } else {
+    document.body.innerText = 'تم الربط. يمكنك إغلاق هذه النافذة.';
+  }
+}
+window.onload = processParams;
+</script>
+<p style="font-family:sans-serif;text-align:center;margin-top:80px">جارٍ إتمام الربط...</p>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 @router.post("/admin/coexistence/activate")

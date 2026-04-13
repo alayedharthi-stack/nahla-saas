@@ -120,7 +120,11 @@ META_WA_CONFIG_ID        = os.environ.get("META_WA_CONFIG_ID", "")
 # to merchants in the dashboard.
 BACKEND_URL = os.environ.get("BACKEND_URL", "https://api.nahlah.ai")
 D360_API_BASE_URL = os.environ.get("D360_API_BASE_URL", "https://waba-v2.360dialog.io")
+D360_PARTNER_HUB_BASE = os.environ.get("D360_PARTNER_HUB_BASE", "https://hub.360dialog.com")
+# Partner API key — used to generate channel API keys on behalf of merchants.
 D360_PARTNER_API_KEY = os.environ.get("D360_PARTNER_API_KEY", "")
+# Partner ID visible in the hub URL: hub.360dialog.com/dashboard/app/{PARTNER_ID}
+D360_PARTNER_ID = os.environ.get("D360_PARTNER_ID", "")
 # Internal shared secret sent by 360dialog via custom webhook header configured
 # by Nahla during channel activation.
 D360_WEBHOOK_INTERNAL_SECRET = os.environ.get("D360_WEBHOOK_INTERNAL_SECRET", "")

@@ -1,5 +1,40 @@
 import { apiCall } from './client'
 
+export interface CoexistenceRequest {
+  tenant_id: number
+  tenant_name: string | null
+  merchant_email: string | null
+  merchant_phone: string | null
+  wa_status: string
+  connection_type: string | null
+  provider: string | null
+  requested_phone: string | null
+  display_name: string | null
+  notes: string | null
+  submitted_at: string | null
+  has_whatsapp_business_app: boolean | null
+  phone_number_id: string | null
+  waba_id: string | null
+  last_attempt_at: string | null
+  last_error: string | null
+  sending_enabled: boolean
+  webhook_verified: boolean
+  connected_at: string | null
+}
+
+export interface CoexistenceActivatePayload {
+  tenant_id: number
+  phone_number_id: string
+  phone_number: string
+  display_name?: string
+  waba_id?: string
+  api_key: string
+  channel_id?: string
+  client_id?: string
+  configure_webhook?: boolean
+  action_required_message?: string
+}
+
 export interface AdminPlatformStats {
   merchants: { total: number; active: number; trial: number }
   tenants: { total: number }
@@ -277,4 +312,15 @@ export const adminApi = {
       integrations: Array<Record<string, unknown>>
       sync_jobs: Array<Record<string, unknown>>
     }>(`/admin/troubleshooting/tenants/${tenantId}/integrations`),
+
+  coexistenceRequests: (statusFilter = 'request_submitted') =>
+    apiCall<{ requests: CoexistenceRequest[]; total: number }>(
+      `/admin/coexistence/requests?status_filter=${statusFilter}`,
+    ),
+
+  activateCoexistence: (payload: CoexistenceActivatePayload) =>
+    apiCall<Record<string, unknown>>('/whatsapp/admin/coexistence/activate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 }

@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import httpx
 from sqlalchemy.orm import Session
 
-from core.config import D360_API_BASE_URL, META_GRAPH_API_VERSION
+from core.config import D360_API_BASE_URL, D360_PARTNER_API_KEY, D360_PARTNER_HUB_BASE, META_GRAPH_API_VERSION
 from .provider_utils import (
     WHATSAPP_PROVIDER_360DIALOG,
     wa_provider,
@@ -318,3 +318,68 @@ async def dialog360_configure_webhook(
         data = resp.json()
     logger.info("[WA dialog360 webhook] status=%s body=%s", resp.status_code, data)
     return data
+
+
+# ── 360dialog Partner API helpers ─────────────────────────────────────────────
+
+_D360_PARTNER_HUB = D360_PARTNER_HUB_BASE.rstrip("/")
+
+
+async def dialog360_generate_api_key(
+    *,
+    partner_id: str,
+    channel_id: str,
+    timeout: float = 20,
+) -> Dict[str, Any]:
+    """
+    Generate (or retrieve) the D360-API-KEY for a channel the merchant connected
+    during Integrated Onboarding.
+
+    POST https://hub.360dialog.com/api/v2/partners/{partner_id}/channels/{channel_id}/api-keys
+    Authorization: Bearer {D360_PARTNER_API_KEY}
+    """
+    if not D360_PARTNER_API_KEY:
+        return {"error": "D360_PARTNER_API_KEY not configured"}
+    url = f"{_D360_PARTNER_HUB}/api/v2/partners/{partner_id}/channels/{channel_id}/api-keys"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {D360_PARTNER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+        )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text}
+    logger.info(
+        "[D360 partner] generate_api_key partner=%s channel=%s status=%s",
+        partner_id, channel_id, resp.status_code,
+    )
+    return data
+
+
+async def dialog360_get_channel_info(
+    *,
+    partner_id: str,
+    channel_id: str,
+    timeout: float = 20,
+) -> Dict[str, Any]:
+    """
+    Retrieve channel details (status, phone_number, waba_id, etc.) from Partner API.
+
+    GET https://hub.360dialog.com/api/v2/partners/{partner_id}/channels/{channel_id}
+    """
+    if not D360_PARTNER_API_KEY:
+        return {"error": "D360_PARTNER_API_KEY not configured"}
+    url = f"{_D360_PARTNER_HUB}/api/v2/partners/{partner_id}/channels/{channel_id}"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {D360_PARTNER_API_KEY}"},
+        )
+    try:
+        return resp.json()
+    except Exception:
+        return {"raw": resp.text}

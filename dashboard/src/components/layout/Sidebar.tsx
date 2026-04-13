@@ -25,6 +25,7 @@ import {
   Flag,
   X,
   Puzzle,
+  Smartphone,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -56,6 +57,7 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
       { to: '/admin/ai-usage', icon: BrainCircuit,  label: _tr => 'AI Usage'         },
       { to: '/admin/features', icon: Flag,          label: _tr => 'Feature Flags'    },
       { to: '/admin/troubleshooting', icon: Puzzle, label: _tr => 'Troubleshooting'  },
+      { to: '/admin/coexistence', icon: Smartphone, label: _tr => 'طلبات الجوال + AI' },
       { to: '/admin/team',     icon: Layers,        label: _tr => 'Team'             },
       { to: '/admin/system',   icon: Activity,      label: _tr => 'System Status'    },
     ],

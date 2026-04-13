@@ -32,6 +32,7 @@ import AdminTenants from './pages/AdminTenants'
 import AdminAiUsage from './pages/AdminAiUsage'
 import AdminFeatures from './pages/AdminFeatures'
 import AdminTroubleshooting from './pages/AdminTroubleshooting'
+import AdminCoexistence from './pages/AdminCoexistence'
 import AdminSystemStatus from './pages/AdminSystemStatus'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
@@ -109,6 +110,7 @@ export default function App() {
             <Route path="admin/ai-usage"     element={<AdminAiUsage />} />
             <Route path="admin/features"     element={<AdminFeatures />} />
             <Route path="admin/troubleshooting" element={<AdminTroubleshooting />} />
+            <Route path="admin/coexistence"  element={<AdminCoexistence />} />
             <Route path="admin/team"         element={<AdminTeam />} />
             <Route path="admin/system"       element={<AdminSystemStatus />} />
             <Route path="billing"            element={<Billing />} />

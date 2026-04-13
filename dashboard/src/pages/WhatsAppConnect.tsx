@@ -71,17 +71,14 @@ function CoexistenceFlow({
   status: WaConnection | null
   onConnected: (payload?: { phone_number?: string; display_name?: string; connected_at?: string }) => void
 }) {
-  const [phone, setPhone] = useState(status?.phone_number ?? '')
-  const [displayName, setDisplayName] = useState(status?.display_name ?? '')
-  const [notes, setNotes] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [localStatus, setLocalStatus] = useState<WaConnection | null>(status)
+  const [connecting, setConnecting] = useState(false)
 
-  useEffect(() => {
-    setLocalStatus(status)
-  }, [status])
+  useEffect(() => { setLocalStatus(status) }, [status])
 
+  // Auto-notify parent when connected
   useEffect(() => {
     if (localStatus?.status === 'connected') {
       onConnected({
@@ -92,13 +89,11 @@ function CoexistenceFlow({
     }
   }, [localStatus, onConnected])
 
+  // Poll while waiting for channel activation
   useEffect(() => {
-    if (!localStatus || !['request_submitted', 'pending_activation', 'action_required'].includes(localStatus.status)) {
-      return
-    }
+    if (!localStatus || !['pending_activation', 'action_required'].includes(localStatus.status)) return
     let cancelled = false
     let timer: number | undefined
-
     const poll = async () => {
       try {
         const next = await whatsappConnectApi.getCoexistenceStatus()
@@ -106,42 +101,72 @@ function CoexistenceFlow({
           setLocalStatus(next)
           if (next.status === 'connected') return
         }
-      } catch {
-        // Keep silent here — the last known state is still useful to the merchant.
-      }
-      if (!cancelled) {
-        timer = window.setTimeout(poll, 8000)
-      }
+      } catch { /* keep last known state */ }
+      if (!cancelled) timer = window.setTimeout(poll, 8000)
     }
-
-    timer = window.setTimeout(poll, 4000)
-    return () => {
-      cancelled = true
-      if (timer) window.clearTimeout(timer)
-    }
+    timer = window.setTimeout(poll, 5000)
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer) }
   }, [localStatus?.status])
 
-  const submitRequest = async () => {
-    if (!phone.trim()) { setError('أدخل رقم واتساب المرتبط على الجوال'); return }
+  // ── Partner Embedded Signup popup ─────────────────────────────────────────
+  const openPopup = async () => {
     setBusy(true); setError('')
     try {
-      const result = await whatsappConnectApi.requestCoexistence({
-        phone_number: phone.trim(),
-        display_name: displayName.trim() || undefined,
-        has_whatsapp_business_app: true,
-        understands_keep_app_installed: true,
-        understands_open_every_13_days: true,
-        notes: notes.trim() || undefined,
-      })
-      setLocalStatus(result)
+      const { signup_url } = await apiCall<{ signup_url: string }>('/whatsapp/coexistence/signup-url')
+      const w = 600; const h = 900
+      const left = (window.screen.width - w) / 2
+      const top = Math.max(0, (window.screen.height - h) / 2)
+      const popup = window.open(
+        signup_url,
+        'nahla360dialogConnect',
+        `toolbar=no,menubar=no,width=${w},height=${h},top=${top},left=${left}`,
+      )
+      if (!popup) {
+        setError('يرجى السماح بالنوافذ المنبثقة (popup) في متصفحك ثم المحاولة مجددًا.')
+        setBusy(false); return
+      }
+      setConnecting(true)
+      // Listen for postMessage from the redirect page
+      const handler = async (event: MessageEvent) => {
+        if (typeof event.data !== 'string' || !event.data.includes('client=')) return
+        window.removeEventListener('message', handler)
+        try {
+          const params = new URLSearchParams(event.data.startsWith('?') ? event.data.slice(1) : event.data)
+          const clientId = params.get('client') ?? ''
+          const channelsRaw = params.get('channels') ?? '[]'
+          const channels: string[] = JSON.parse(channelsRaw.replace(/\[([^\]]+)\]/, '["$1"]').replace(/,/g, '","'))
+          if (!clientId || channels.length === 0) {
+            setError('لم يتم استلام بيانات القناة. أعد المحاولة.'); setConnecting(false); setBusy(false); return
+          }
+          const result = await apiCall<WaConnection>('/whatsapp/coexistence/partner-connect', {
+            method: 'POST',
+            body: JSON.stringify({ client_id: clientId, channels }),
+          })
+          setLocalStatus(result)
+        } catch (e) {
+          setError(e instanceof Error ? e.message : 'تعذر إتمام الربط. تواصل مع فريق نحلة.')
+        } finally {
+          setConnecting(false); setBusy(false)
+        }
+      }
+      window.addEventListener('message', handler, false)
+      // Clean up if popup closed without completing
+      const check = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(check)
+          window.removeEventListener('message', handler)
+          if (connecting) { setConnecting(false); setBusy(false) }
+        }
+      }, 500)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'تعذر إرسال طلب التفعيل')
-    } finally {
+      setError(e instanceof Error ? e.message : 'تعذر فتح نافذة الربط.')
       setBusy(false)
     }
   }
 
   const current = localStatus
+
+  // ── Connected state ──────────────────────────────────────────────────────
   if (current?.status === 'connected') {
     return (
       <div className="space-y-4">
@@ -152,91 +177,79 @@ function CoexistenceFlow({
           </p>
           {current.phone_number && <p className="mt-3 text-sm font-mono text-emerald-800">{current.phone_number}</p>}
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
-          <p>سيبقى هذا النوع من الربط تحت متابعة فريق نحلة حفاظًا على استقرار القناة.</p>
+        <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 space-y-2">
+          <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> استمر في استخدام تطبيق واتساب للأعمال على الجوال</div>
+          <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> لا تحذف التطبيق ولا تفصل الرقم</div>
+          <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> افتح التطبيق دوريًا للحفاظ على الجاهزية</div>
         </div>
       </div>
     )
   }
 
-  if (current?.status === 'request_submitted' || current?.status === 'pending_activation' || current?.status === 'action_required') {
+  // ── Pending / processing state ───────────────────────────────────────────
+  if (current?.status === 'pending_activation' || current?.status === 'action_required' || connecting) {
     return (
       <div className="space-y-4">
-        <div className={`rounded-2xl border p-5 ${
-          current.status === 'action_required' ? 'border-amber-200 bg-amber-50' : 'border-blue-200 bg-blue-50'
-        }`}>
-          <p className="text-lg font-bold text-slate-800">
-            {current.status === 'request_submitted' && 'تم استلام طلبك'}
-            {current.status === 'pending_activation' && 'جاري التفعيل من فريق نحلة'}
-            {current.status === 'action_required' && 'مطلوب إجراء منك لإكمال الربط'}
-          </p>
-          <p className="mt-2 text-sm text-slate-700">
-            {current.action_required_message
-              || current.last_error
-              || 'سنكمل معك ربط واتساب الجوال + الذكاء الاصطناعي بدون أي إعدادات تقنية منك داخل المزود.'}
-          </p>
-          {current.request_submitted_at && (
-            <p className="mt-3 text-xs text-slate-500">
-              وقت الطلب: {new Date(current.request_submitted_at).toLocaleString('ar-SA')}
+        <div className={`rounded-2xl border p-5 ${current?.status === 'action_required' ? 'border-amber-200 bg-amber-50' : 'border-blue-200 bg-blue-50'}`}>
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-5 h-5 animate-spin text-blue-500 flex-shrink-0" />
+            <p className="font-bold text-slate-800">
+              {connecting ? 'جارٍ ربط القناة...' : current?.status === 'action_required' ? 'مطلوب إجراء' : 'جارٍ تفعيل القناة'}
             </p>
-          )}
+          </div>
+          <p className="mt-2 text-sm text-slate-700 mr-8">
+            {current?.action_required_message
+              || 'ننتظر تجهيز القناة من 360dialog — عادةً يستغرق دقائق. لا حاجة لأي إجراء منك.'}
+          </p>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 space-y-2">
           <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> استمر في استخدام تطبيق واتساب للأعمال على الجوال</div>
-          <div className="mt-2 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> لا تحذف التطبيق ولا تفصل الرقم</div>
-          <div className="mt-2 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> افتح التطبيق دوريًا للحفاظ على الجاهزية</div>
+          <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> لا تحذف التطبيق ولا تفصل الرقم</div>
+          <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> افتح التطبيق دوريًا للحفاظ على الجاهزية</div>
         </div>
       </div>
     )
   }
 
+  // ── Initial / connect button state ───────────────────────────────────────
   return (
     <div className="space-y-5">
       <div className="text-center">
         <p className="text-lg font-bold text-slate-800">واتساب الجوال + الذكاء الاصطناعي</p>
         <p className="mt-1 text-sm text-slate-500">
-          احتفظ برقم واتساب الأعمال الموجود على جوالك، واستمر في استخدام التطبيق، وفي نفس الوقت دع نحلة ترد وتنفّذ الأتمتة.
+          احتفظ برقم واتساب الأعمال الموجود على جوالك، واستمر في استخدام التطبيق، ودع نحلة ترد وتنفّذ الأتمتة.
         </p>
       </div>
 
-      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-        <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> نفس الرقم الموجود على جوالك</div>
-        <div className="mt-2 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> تواصل نحلة مع العملاء بالذكاء الاصطناعي</div>
-        <div className="mt-2 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> تفعيل مبدئي بإشراف فريق نحلة</div>
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 space-y-2">
+        <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> نفس الرقم الموجود على جوالك — بدون أي تغيير</div>
+        <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> نحلة ترد على العملاء بالذكاء الاصطناعي تلقائيًا</div>
+        <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600" /> الربط يكتمل خلال دقائق بدون أي مساعدة تقنية</div>
       </div>
 
-      <div className="space-y-3">
-        <input
-          value={phone}
-          onChange={e => setPhone(e.target.value)}
-          placeholder="رقم واتساب الأعمال على الجوال"
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm"
-          dir="ltr"
-        />
-        <input
-          value={displayName}
-          onChange={e => setDisplayName(e.target.value)}
-          placeholder="اسم النشاط التجاري"
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm"
-        />
-        <textarea
-          value={notes}
-          onChange={e => setNotes(e.target.value)}
-          placeholder="ملاحظات لفريق نحلة (اختياري)"
-          rows={3}
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm"
-        />
+      <div className="rounded-xl border border-violet-100 bg-violet-50 p-4 text-xs text-violet-700 space-y-1">
+        <p className="font-bold">كيف يعمل الربط:</p>
+        <p>① اضغط الزر أدناه → تفتح نافذة إعداد واتساب</p>
+        <p>② سجّل دخول بحساب Meta وأكمل ربط الرقم</p>
+        <p>③ امسح رمز QR بتطبيق واتساب للأعمال على جوالك</p>
+        <p>④ يُغلق تلقائيًا ويكتمل الربط في نحلة ✅</p>
       </div>
 
       {error && <ErrorBox msg={error} />}
 
       <button
-        onClick={submitRequest}
+        onClick={openPopup}
         disabled={busy}
-        className="w-full rounded-xl bg-violet-600 py-3.5 text-sm font-bold text-white transition-all hover:bg-violet-500 disabled:opacity-60"
+        className="w-full rounded-xl bg-violet-600 py-4 text-sm font-bold text-white transition-all hover:bg-violet-500 disabled:opacity-60 flex items-center justify-center gap-2"
       >
-        {busy ? 'جارٍ إرسال الطلب...' : 'طلب التفعيل'}
+        {busy
+          ? <><Loader2 className="w-4 h-4 animate-spin" />جارٍ فتح نافذة الربط...</>
+          : '🔗 ابدأ ربط واتساب الجوال الآن'}
       </button>
+
+      <p className="text-center text-xs text-slate-400">
+        ستفتح نافذة من 360dialog — شريكنا التقني الموثوق لربط واتساب
+      </p>
     </div>
   )
 }
