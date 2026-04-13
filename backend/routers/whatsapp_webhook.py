@@ -26,7 +26,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from models import WhatsAppConnection
+from models import MessageEvent, WhatsAppConnection
 
 from core.config import ANTHROPIC_API_KEY, CLAUDE_MODEL, ORCHESTRATOR_URL, WA_VERIFY_TOKEN
 from core.conversation_engine import (
@@ -55,7 +55,8 @@ from core.conversation_engine import (
     TurnLog,
     recommend_plan,
 )
-from services.whatsapp_platform.token_manager import build_token_context, get_token_for_operation
+from services.whatsapp_platform.service import provider_send_message
+from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
 from core.database import get_db
 from core.nahla_knowledge import build_nahla_system_prompt
 from modules.ai.orchestrator.adapter import generate_ai_reply
@@ -116,6 +117,19 @@ async def whatsapp_incoming(request: Request):
     return {"status": "ok"}
 
 
+@router.post("/webhook/whatsapp/360dialog")
+async def whatsapp_incoming_360dialog(request: Request):
+    try:
+        body: Dict[str, Any] = await request.json()
+    except Exception:
+        return {"status": "ok"}
+    try:
+        await _handle_360dialog_body(body, request)
+    except Exception as exc:
+        logger.error("[Webhook360] Unhandled error: %s", exc, exc_info=True)
+    return {"status": "ok"}
+
+
 async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
     for entry in body.get("entry", []):
         for change in entry.get("changes", []):
@@ -123,6 +137,88 @@ async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
             phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
             for msg in value.get("messages", []):
                 await _dispatch_message(phone_number_id, msg, value)
+
+
+async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None:
+    db = next(get_db(), None)
+    if not db:
+        logger.error("[Webhook360] Cannot open DB session")
+        return
+    try:
+        for entry in body.get("entry", []):
+            for change in entry.get("changes", []):
+                value = change.get("value", {}) or {}
+                field = str(change.get("field") or "")
+                phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+                if not phone_number_id:
+                    logger.warning("[Webhook360] Missing phone_number_id field=%s", field)
+                    continue
+                wa_conn = db.query(WhatsAppConnection).filter_by(phone_number_id=phone_number_id).first()
+                if not wa_conn:
+                    logger.warning("[Webhook360] Unknown phone_number_id=%s field=%s", phone_number_id, field)
+                    continue
+                if wa_provider(wa_conn) != WHATSAPP_PROVIDER_360DIALOG:
+                    logger.warning("[Webhook360] phone_number_id=%s is not dialog360 provider", phone_number_id)
+                    continue
+                expected_secret = str((wa_conn.extra_metadata or {}).get("coexistence_internal_secret") or "")
+                provided_secret = request.headers.get("X-Nahla-Coexistence-Secret", "")
+                if expected_secret and provided_secret != expected_secret:
+                    logger.warning("[Webhook360] Invalid internal secret tenant=%s", wa_conn.tenant_id)
+                    return
+
+                if field == "messages":
+                    for msg in value.get("messages", []):
+                        await _dispatch_message(phone_number_id, msg, value)
+                    continue
+
+                if field == "smb_message_echoes":
+                    await _ingest_smb_message_echoes(db, wa_conn, value)
+                    continue
+
+                logger.info("[Webhook360] Ignored field=%s tenant=%s phone_number_id=%s", field, wa_conn.tenant_id, phone_number_id)
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dict[str, Any]) -> None:
+    from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+
+    phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+    for echo in value.get("message_echoes", []) or []:
+        to_phone = str(echo.get("to") or "")
+        msg_type = str(echo.get("type") or "")
+        body_text = ""
+        if msg_type == "text":
+            body_text = str(((echo.get("text") or {}).get("body")) or "")
+        else:
+            body_text = f"[merchant_{msg_type}]"
+
+        if not to_phone:
+            continue
+
+        convo = _get_or_create_conversation(db, wa_conn.tenant_id, to_phone)
+        db.add(MessageEvent(
+            conversation_id=convo.id,
+            tenant_id=wa_conn.tenant_id,
+            direction="outbound",
+            body=body_text,
+            event_type="smb_message_echo",
+            extra_metadata={
+                "customer_phone": to_phone,
+                "phone": to_phone,
+                "provider": WHATSAPP_PROVIDER_360DIALOG,
+                "phone_number_id": phone_number_id,
+                "message_id": echo.get("id"),
+                "source": "merchant_mobile_app",
+                "echo_type": msg_type,
+            },
+        ))
+        convo.status = "active"
+        db.add(convo)
+    db.commit()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -558,28 +654,13 @@ async def _post_wa(
     _store_name: str = "unknown",
     _db=None,
 ) -> None:
-    platform_ctx = build_token_context(None, source="platform")
-    send_token = platform_ctx.token
-    token_source = platform_ctx.source
+    wa_conn = None
     if _tenant_id and _db:
         try:
             from database.models import WhatsAppConnection  # noqa: PLC0415
             wa_conn = _db.query(WhatsAppConnection).filter_by(tenant_id=_tenant_id).first()
-            token_ctx = await get_token_for_operation(
-                _db,
-                wa_conn,
-                tenant_id=_tenant_id,
-                operation="send_message",
-                prefer_platform=bool(wa_conn and getattr(wa_conn, "connection_type", None) == "direct"),
-            )
-            send_token = token_ctx.token
-            token_source = token_ctx.source
         except Exception:
             pass
-
-    if not send_token:
-        logger.warning("[WA] No token available for tenant=%s — skipping send", _tenant_id)
-        return
 
     # Fetch store name from DB if not provided
     if _store_name == "unknown" and _tenant_id and _db:
@@ -589,13 +670,6 @@ async def _post_wa(
             _store_name = getattr(t, "store_name", None) or getattr(t, "name", None) or f"tenant_{_tenant_id}"
         except Exception:
             pass
-
-    token_tail = send_token[-6:] if send_token and len(send_token) >= 6 else "EMPTY"
-
-    logger.info(
-        "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_source=%s token_tail=%s to=%s",
-        _tenant_id, _store_name, phone_id, token_source, token_tail, payload.get("to", "?"),
-    )
 
     # Lightweight in-process throttling to avoid accidental burst sends to the
     # same recipient. This is not a queue, but it protects against runaway
@@ -615,20 +689,30 @@ async def _post_wa(
             _tenant_id, recipient, phone_id,
         )
         return
-
-    url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
-    headers = {"Authorization": f"Bearer {send_token}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=15) as client:
-        try:
-            resp = await client.post(url, json=payload, headers=headers)
-            logger.info(
-                "[SEND_DEBUG] Meta response | status=%s phone_number_id=%s",
-                resp.status_code, phone_id,
-            )
-            if resp.status_code not in (200, 201):
-                logger.warning("[WA] post failed: %s %.200s", resp.status_code, resp.text)
-        except Exception as exc:
-            logger.error("[WA] post error: %s", exc)
+    try:
+        resp_data, ctx = await provider_send_message(
+            _db,
+            wa_conn,
+            tenant_id=_tenant_id,
+            operation="send_message",
+            phone_id=phone_id,
+            payload=payload,
+            prefer_platform=bool(wa_conn and getattr(wa_conn, "connection_type", None) == "direct"),
+            timeout=15,
+        )
+        token_tail = ctx.token[-6:] if ctx.token and len(ctx.token) >= 6 else "EMPTY"
+        logger.info(
+            "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_source=%s token_tail=%s to=%s",
+            _tenant_id, _store_name, phone_id, ctx.source, token_tail, payload.get("to", "?"),
+        )
+        logger.info(
+            "[SEND_DEBUG] provider response | tenant=%s phone_number_id=%s provider_payload=%s",
+            _tenant_id, phone_id, resp_data,
+        )
+        if "error" in (resp_data or {}):
+            logger.warning("[WA] provider send failed: %.200s", str(resp_data))
+    except Exception as exc:
+        logger.error("[WA] post error: %s", exc)
 
 
 async def _send_whatsapp_message(

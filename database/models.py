@@ -820,8 +820,12 @@ class WhatsAppConnection(Base):
     business_display_name        = Column(String, nullable=True)
     business_manager_id          = Column(String, nullable=True)
 
-    # Connection type ─────────────────────────────────────────────────────────
-    # 'direct' (platform adds number to shared WABA) | 'embedded' (merchant's own WABA)
+    # Provider / connection type ──────────────────────────────────────────────
+    # provider: 'meta' | 'dialog360'
+    provider          = Column(String, nullable=False, default='meta')
+    # connection_type: 'direct' (platform adds number to shared WABA)
+    #                | 'embedded' (merchant's own WABA)
+    #                | 'coexistence' (merchant keeps WA Business App + API via 360dialog)
     connection_type   = Column(String, nullable=True, default='direct')
 
     # Token — backend-only, NEVER send to frontend ────────────────────────────

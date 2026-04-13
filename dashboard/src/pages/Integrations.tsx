@@ -18,6 +18,7 @@ interface WaStatus {
   phone_number?: string
   display_name?: string
   connected_at?: string
+  merchant_channel_label?: string
 }
 
 interface ZidStatus {
@@ -175,6 +176,7 @@ export default function Integrations() {
         phone_number: d?.phone_number,
         display_name: d?.display_name,
         connected_at: d?.connected_at,
+        merchant_channel_label: d?.merchant_channel_label,
       }))
       .catch(() => setWaStatus({ connected: false }))
       .finally(() => setWaLoading(false))
@@ -222,6 +224,9 @@ export default function Integrations() {
             <p className="text-sm font-bold text-slate-900">
               {waLoading ? '...' : waStatus.connected ? 'مرتبط ✓' : 'غير مرتبط'}
             </p>
+            {!waLoading && waStatus.merchant_channel_label && (
+              <p className="text-xs text-slate-500 mt-0.5">{waStatus.merchant_channel_label}</p>
+            )}
           </div>
         </div>
         <div className="card px-5 py-4 flex items-center gap-3">

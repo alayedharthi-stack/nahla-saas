@@ -43,6 +43,12 @@ from services.whatsapp_platform.token_manager import (
     persist_token_context,
     update_token_state as _shared_update_token_state,
 )
+from routers.whatsapp_connect import (
+    WHATSAPP_PROVIDER_META,
+    _merchant_channel_label,
+    _provider_label,
+    _wa_provider,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/whatsapp/embedded", tags=["whatsapp-embedded"])
@@ -569,6 +575,7 @@ def _apply_embedded_state(
 
     conn.extra_metadata = meta
     conn.connection_type = "embedded"
+    conn.provider = WHATSAPP_PROVIDER_META
     conn.phone_number = phone_data.get("display_phone_number") or conn.phone_number
     conn.business_display_name = phone_data.get("verified_name") or conn.business_display_name
     conn.status = sync_state["db_status"]
@@ -600,6 +607,9 @@ def _build_embedded_status_payload(
         "status": conn.status,
         "connection_status": conn.status,
         "connection_type": conn.connection_type,
+        "provider": _wa_provider(conn),
+        "provider_label": _provider_label(conn),
+        "merchant_channel_label": _merchant_channel_label(conn),
         "meta_business_account_id": conn.meta_business_account_id,
         "phone_number_id": conn.phone_number_id,
         "phone_number": conn.phone_number,
@@ -836,6 +846,7 @@ async def exchange_code(
     conn.access_token                 = user_token
     conn.token_type                   = long_data.get("token_type") or token_data.get("token_type", "user")
     conn.connection_type              = "embedded"
+    conn.provider                     = WHATSAPP_PROVIDER_META
     conn.sending_enabled              = False
     conn.last_error                   = None
     conn.extra_metadata               = {}
@@ -937,6 +948,7 @@ async def select_phone(
     conn.phone_number          = phone_data.get("display_phone_number", "")
     conn.business_display_name = phone_data.get("verified_name", "")
     conn.connection_type       = "embedded"
+    conn.provider              = WHATSAPP_PROVIDER_META
     conn.status                = "pending"
     conn.sending_enabled       = False
     db.commit()
@@ -1153,6 +1165,7 @@ async def add_phone(
     conn.phone_number_id = phone_number_id
     conn.status          = "otp_pending"
     conn.connection_type = "embedded"
+    conn.provider        = WHATSAPP_PROVIDER_META
     conn.last_attempt_at = datetime.now(timezone.utc)
     db.commit()
 
@@ -1206,6 +1219,7 @@ async def verify_phone(
 
     conn.phone_number_id = body.phone_number_id
     conn.connection_type = "embedded"
+    conn.provider = WHATSAPP_PROVIDER_META
     db.commit()
 
     synced = await sync_embedded_connection_from_meta(conn, db, attempt_register=True)

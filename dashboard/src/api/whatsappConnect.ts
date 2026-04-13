@@ -9,6 +9,9 @@ export type WaConnectionStatus =
   | 'error'
   | 'disconnected'
   | 'needs_reauth'
+  | 'request_submitted'
+  | 'pending_activation'
+  | 'action_required'
 
 export interface WaConnection {
   /** Unified flag — true only when status === 'connected' */
@@ -37,6 +40,14 @@ export interface WaConnection {
   oauth_session_message?: string | null
   oauth_session_needs_reauth?: boolean
   active_graph_token_source?: string | null
+  provider?: string | null
+  provider_label?: string | null
+  merchant_channel_label?: string | null
+  connection_type?: string | null
+  coexistence_status?: string | null
+  action_required_message?: string | null
+  request_submitted_at?: string | null
+  coexistence_available?: boolean
 }
 
 export interface WaStartResult {
@@ -61,6 +72,16 @@ export interface WaHealthResult {
   }
   last_verified: string | null
   last_error: string | null
+  provider?: string | null
+}
+
+export interface CoexistenceRequestPayload {
+  phone_number: string
+  display_name?: string
+  has_whatsapp_business_app?: boolean
+  understands_keep_app_installed?: boolean
+  understands_open_every_13_days?: boolean
+  notes?: string
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -96,4 +117,13 @@ export const whatsappConnectApi = {
 
   health: () =>
     apiCall<WaHealthResult>('/whatsapp/connection/health'),
+
+  requestCoexistence: (data: CoexistenceRequestPayload) =>
+    apiCall<WaConnection & { status: string; message?: string }>('/whatsapp/coexistence/request', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getCoexistenceStatus: () =>
+    apiCall<WaConnection>('/whatsapp/coexistence/status'),
 }

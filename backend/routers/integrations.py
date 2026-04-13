@@ -19,6 +19,7 @@ from core.auth import get_current_user
 from core.database import get_db
 from core.tenant import resolve_tenant_id
 from models import Integration, Tenant, User, WhatsAppConnection
+from routers.whatsapp_connect import _merchant_channel_label, _provider_label, _wa_provider
 
 logger = logging.getLogger("nahla.integrations")
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
@@ -29,7 +30,14 @@ router = APIRouter(prefix="/integrations", tags=["Integrations"])
 def _wa_status_payload(conn: WhatsAppConnection | None) -> dict:
     """Return the unified WhatsApp status dict (mirrors /whatsapp/status)."""
     if not conn or conn.status == "not_connected":
-        return {"connected": False, "status": "not_connected"}
+        return {
+            "connected": False,
+            "status": "not_connected",
+            "provider": "meta",
+            "provider_label": "meta",
+            "merchant_channel_label": None,
+            "connection_type": None,
+        }
     meta = dict(conn.extra_metadata or {})
     return {
         "connected":             bool(conn.status == "connected" and conn.sending_enabled),
@@ -48,6 +56,10 @@ def _wa_status_payload(conn: WhatsAppConnection | None) -> dict:
         "message":               meta.get("embedded_status_message"),
         "sending_enabled":       bool(conn.sending_enabled),
         "connected_at":          conn.connected_at.isoformat() if conn.connected_at else None,
+        "provider":              _wa_provider(conn),
+        "provider_label":        _provider_label(conn),
+        "merchant_channel_label": _merchant_channel_label(conn),
+        "connection_type":       conn.connection_type,
     }
 
 

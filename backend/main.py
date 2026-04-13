@@ -230,8 +230,10 @@ async def on_startup() -> None:
                 )""",
                 "CREATE INDEX IF NOT EXISTS ix_merchant_widgets_tenant_id ON merchant_widgets (tenant_id)",
                 "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_merchant_widget_tenant_key') THEN ALTER TABLE merchant_widgets ADD CONSTRAINT uq_merchant_widget_tenant_key UNIQUE (tenant_id, widget_key); END IF; END $$",
-                # ── whatsapp_connections (migration 0016) ─────────────────────
+                # ── whatsapp_connections (migration 0016+) ────────────────────
                 "ALTER TABLE whatsapp_connections ADD COLUMN IF NOT EXISTS connection_type VARCHAR DEFAULT 'direct'",
+                "ALTER TABLE whatsapp_connections ADD COLUMN IF NOT EXISTS provider VARCHAR DEFAULT 'meta'",
+                "UPDATE whatsapp_connections SET provider='meta' WHERE provider IS NULL OR provider=''",
                 # Ensure phone_number_id is unique per non-null value (one phone = one tenant)
                 """DO $$ BEGIN
                     IF NOT EXISTS (

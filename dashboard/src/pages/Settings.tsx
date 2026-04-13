@@ -225,6 +225,11 @@ function WhatsAppConnectionCard({ onConnected }: { onConnected?: (v: boolean) =>
                 }
               </p>
             )}
+            {connectionPreserved && conn?.merchant_channel_label && (
+              <p className="text-xs text-emerald-700 mt-1">
+                {conn.merchant_channel_label}
+              </p>
+            )}
             {!connectionPreserved && (
               <p className="text-xs text-slate-500 mt-0.5">
                 اربط رقم واتساب للأعمال لتفعيل الردود التلقائية

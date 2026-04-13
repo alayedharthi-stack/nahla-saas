@@ -1283,9 +1283,11 @@ async def admin_troubleshoot_whatsapp(
             "phone_number": wa_conn.phone_number if wa_conn else None,
             "business_display_name": wa_conn.business_display_name if wa_conn else None,
             "connection_type": wa_conn.connection_type if wa_conn else None,
+            "provider": wa_conn.provider if wa_conn else None,
             "webhook_verified": bool(wa_conn.webhook_verified) if wa_conn else False,
             "sending_enabled": bool(wa_conn.sending_enabled) if wa_conn else False,
             "last_error": wa_conn.last_error if wa_conn else None,
+            "extra_metadata": wa_conn.extra_metadata if wa_conn else None,
             "updated_at": wa_conn.updated_at.isoformat() if wa_conn and wa_conn.updated_at else None,
         },
         "usage": [

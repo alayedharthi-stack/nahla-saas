@@ -115,6 +115,19 @@ META_GRAPH_API_VERSION   = os.environ.get("META_GRAPH_API_VERSION", "v20.0")
 # (Optional but recommended — ensures correct permissions/features are requested)
 META_WA_CONFIG_ID        = os.environ.get("META_WA_CONFIG_ID", "")
 
+# ── 360dialog / WhatsApp Coexistence ───────────────────────────────────────────
+# Internal / platform-managed provider configuration. Never expose these values
+# to merchants in the dashboard.
+BACKEND_URL = os.environ.get("BACKEND_URL", "https://api.nahlah.ai")
+D360_API_BASE_URL = os.environ.get("D360_API_BASE_URL", "https://waba-v2.360dialog.io")
+D360_PARTNER_API_KEY = os.environ.get("D360_PARTNER_API_KEY", "")
+# Internal shared secret sent by 360dialog via custom webhook header configured
+# by Nahla during channel activation.
+D360_WEBHOOK_INTERNAL_SECRET = os.environ.get("D360_WEBHOOK_INTERNAL_SECRET", "")
+# Beta rollout flags
+D360_COHOST_ENABLED = os.environ.get("D360_COHOST_ENABLED", "false").lower() == "true"
+D360_COHOST_ALLOW_SELF_REQUEST = os.environ.get("D360_COHOST_ALLOW_SELF_REQUEST", "true").lower() == "true"
+
 # ── Store Sync ─────────────────────────────────────────────────────────────────
 STORE_SYNC_MAX_PRODUCTS  = int(os.environ.get("STORE_SYNC_MAX_PRODUCTS", "500"))
 STORE_SYNC_MAX_ORDERS    = int(os.environ.get("STORE_SYNC_MAX_ORDERS", "200"))

@@ -42,7 +42,12 @@ from core.tenant import (
     merge_defaults,
     resolve_tenant_id,
 )
-from services.whatsapp_platform.token_manager import get_token_for_operation
+from services.whatsapp_platform.provider_utils import (
+    WHATSAPP_CONNECTION_TYPE_DIRECT,
+    WHATSAPP_PROVIDER_360DIALOG,
+    wa_provider,
+)
+from services.whatsapp_platform.service import provider_list_templates, provider_submit_template
 
 router = APIRouter()
 
@@ -382,6 +387,12 @@ def _fetch_meta_templates(waba_id: str, access_token: str) -> Optional[List[Dict
         return None
 
 
+def _normalize_provider_template_list(conn: Any, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
+        return list(payload.get("waba_templates") or [])
+    return list(payload.get("data") or [])
+
+
 def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
     meta = dict(getattr(t, "ai_generation_metadata", None) or {})
     compatibility = meta.get("meta_compatibility") or _compute_template_compatibility(
@@ -568,33 +579,23 @@ async def _submit_template_to_meta(
     category: str,
     components: List[Dict[str, Any]],
 ) -> Optional[str]:
-    """Submit a new template to Meta Graph API using the operational token manager."""
+    """Submit a new template using the active WhatsApp provider."""
     try:
-        import json as _json
-        import urllib.request
-        token_ctx = await get_token_for_operation(
-            db,
-            conn,
-            tenant_id=tenant_id,
-            operation="template_submit",
-            prefer_platform=bool(conn and getattr(conn, "connection_type", None) == "direct"),
-        )
-        url = f"https://graph.facebook.com/v20.0/{waba_id}/message_templates"
-        payload = _json.dumps({
+        payload = {
             "name": name,
             "language": language,
             "category": category,
             "components": components,
-        }).encode()
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token_ctx.token}"},
-            method="POST",
+        }
+        result, _token_ctx = await provider_submit_template(
+            db,
+            conn,
+            tenant_id=tenant_id,
+            waba_id=waba_id,
+            payload=payload,
+            prefer_platform=bool(conn and getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT),
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = _json.loads(resp.read())
-            return str(data.get("id", ""))
+        return str(result.get("id") or result.get("external_id") or "")
     except Exception:
         return None
 
@@ -1002,12 +1003,12 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
         }
 
     try:
-        token_ctx = await get_token_for_operation(
+        live_payload, _token_ctx = await provider_list_templates(
             db,
             sync_conn,
             tenant_id=tenant_id,
-            operation="template_sync",
-            prefer_platform=bool(sync_conn and getattr(sync_conn, "connection_type", None) == "direct"),
+            waba_id=waba_id,
+            prefer_platform=bool(sync_conn and getattr(sync_conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT),
         )
     except Exception:
         return {
@@ -1015,7 +1016,7 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
             "message": "لم يتم العثور على توكن تشغيل صالح لمزامنة القوالب. أعد ربط واتساب أو تحقّق من إعدادات المنصة.",
         }
 
-    live = _fetch_meta_templates(waba_id, token_ctx.token)
+    live = _normalize_provider_template_list(sync_conn, live_payload or {})
     if live is None:
         return {"synced": 0, "message": "تعذّر الاتصال بـ Meta. تأكد من صحة بيانات الاعتماد."}
 
