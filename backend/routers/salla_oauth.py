@@ -308,8 +308,6 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 Integration.provider  == "salla",
             ).first()
 
-            from services.salla_guard import has_valid_tokens as _has_tokens  # noqa: PLC0415
-
             now_iso = datetime.now(timezone.utc).isoformat()
             if integration:
                 cfg = dict(integration.config or {})
@@ -319,10 +317,17 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     "last_seen":  now_iso,
                 })
                 integration.config = cfg
-                integration.enabled = _has_tokens(integration)
+                # token-login: enable if api_key exists (refresh_token
+                # arrives separately via app.store.authorize webhook).
+                # OAuth callback uses the stricter has_valid_tokens() check.
+                has_api_key = bool(cfg.get("api_key"))
+                if has_api_key:
+                    integration.enabled = True
+                # If no api_key, preserve current enabled state — don't
+                # force-disable an integration that may receive tokens soon.
                 logger.info(
-                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s enabled=%s (has_tokens=%s)",
-                    tenant_id, merchant_id_str, integration.enabled, _has_tokens(integration),
+                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s enabled=%s has_api_key=%s",
+                    tenant_id, merchant_id_str, integration.enabled, has_api_key,
                 )
             else:
                 db.add(Integration(
