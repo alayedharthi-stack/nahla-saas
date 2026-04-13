@@ -74,6 +74,38 @@ def _normalize_phone(raw_phone) -> str:
     return str(raw_phone or "")
 
 
+def _extract_order_datetime(raw: Any) -> Optional[datetime]:
+    """Extract a reliable order datetime from adapter payloads / stored metadata."""
+    candidates: List[Any] = []
+    if isinstance(raw, dict):
+        candidates.extend([
+            raw.get("created_at"),
+            raw.get("date"),
+            (raw.get("date") or {}).get("date") if isinstance(raw.get("date"), dict) else None,
+            raw.get("updated_at"),
+        ])
+
+    for value in candidates:
+        if not value:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        for candidate in (
+            text.replace("Z", "+00:00"),
+            text.replace(" ", "T", 1),
+            text.split(".", 1)[0].replace(" ", "T", 1),
+        ):
+            try:
+                dt = datetime.fromisoformat(candidate)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            except Exception:
+                continue
+    return None
+
+
 def _normalise_product(raw: Any) -> Dict:
     """Convert a store-adapter product object/dict to a normalised internal dict."""
     if hasattr(raw, "dict"):
@@ -108,11 +140,15 @@ def _normalise_order(raw: Any) -> Dict:
             customer_info = {
                 "name": customer_name,
                 "mobile": _normalize_phone(customer_phone),
+                "phone": _normalize_phone(customer_phone),
             }
     else:
-        if "mobile" in customer_info:
-            customer_info = dict(customer_info)
-            customer_info["mobile"] = _normalize_phone(customer_info["mobile"])
+        customer_info = dict(customer_info)
+        normalized_phone = _normalize_phone(customer_info.get("mobile", customer_info.get("phone", "")))
+        if normalized_phone:
+            customer_info["mobile"] = normalized_phone
+            customer_info["phone"] = normalized_phone
+    order_dt = _extract_order_datetime(raw)
     return {
         "external_id":   str(raw.get("id", raw.get("external_id", ""))),
         "status":        raw.get("status", "unknown"),
@@ -121,7 +157,7 @@ def _normalise_order(raw: Any) -> Dict:
         "line_items":    raw.get("items", raw.get("line_items", [])),
         "checkout_url":  raw.get("checkout_url", ""),
         "is_abandoned":  raw.get("is_abandoned", raw.get("abandoned", False)),
-        "created_at":    raw.get("created_at"),
+        "created_at":    order_dt.isoformat() if order_dt else raw.get("created_at"),
     }
 
 
@@ -642,14 +678,17 @@ class StoreSyncService:
             norm_phone = _normalize_phone(cust.phone) if cust.phone else ""
             orders = []
             if norm_phone:
-                orders = (
+                matched = {}
+                for order in (
                     self.db.query(Order)
-                    .filter(
-                        Order.tenant_id == self.tenant_id,
-                        Order.customer_info["mobile"].astext == norm_phone,
-                    )
+                    .filter(Order.tenant_id == self.tenant_id)
                     .all()
-                )
+                ):
+                    info = order.customer_info or {}
+                    order_phone = _normalize_phone(info.get("mobile", info.get("phone", "")))
+                    if order_phone == norm_phone:
+                        matched[order.id] = order
+                orders = list(matched.values())
 
             if not orders and cust.name:
                 orders = (
@@ -682,6 +721,8 @@ class StoreSyncService:
                         o_date = None
                 if o_date is None:
                     o_date = getattr(o, "created_at", None)
+                if o_date is None and isinstance(getattr(o, "customer_info", None), dict):
+                    o_date = _extract_order_datetime(o.customer_info)
                 if o_date:
                     if o_date.tzinfo is None:
                         o_date = o_date.replace(tzinfo=timezone.utc)

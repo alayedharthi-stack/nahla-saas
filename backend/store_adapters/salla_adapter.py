@@ -505,9 +505,10 @@ class SallaAdapter(BaseStoreAdapter):
         expiry_days: int = 3,
     ) -> Optional[Dict[str, Any]]:
         """Create a coupon in Salla. Returns the created coupon data or None."""
-        from datetime import timedelta
-        start = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        expiry = (datetime.now(timezone.utc) + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+        start_dt = datetime.now(timezone.utc)
+        expiry_dt = start_dt + timedelta(days=expiry_days)
+        start = start_dt.strftime("%Y-%m-%d")
+        expiry = expiry_dt.strftime("%Y-%m-%d")
         payload = {
             "code": code,
             "type": discount_type,
@@ -519,6 +520,10 @@ class SallaAdapter(BaseStoreAdapter):
         }
         try:
             data = await self._post("/coupons", payload)
+            if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                data["data"].setdefault("expires_at", expiry_dt.isoformat())
+            elif isinstance(data, dict):
+                data.setdefault("expires_at", expiry_dt.isoformat())
             logger.info("Salla coupon created: %s | tenant=%s", code, self._tenant_id)
             return data.get("data", data)
         except httpx.HTTPStatusError as exc:

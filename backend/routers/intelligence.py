@@ -270,11 +270,18 @@ async def reorder_predictions(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/intelligence/analyze-customers")
 async def analyze_customers(request: Request, db: Session = Depends(get_db)):
-    """Re-compute segment + churn_risk_score for every CustomerProfile in this tenant."""
+    """Rebuild profiles from orders, then re-compute segment + churn_risk_score."""
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
     _cleanup_demo_customers(db, tenant_id)
     db.commit()
+
+    try:
+        from services.store_sync import StoreSyncService  # noqa: PLC0415
+        svc = StoreSyncService(db, tenant_id)
+        rebuilt = svc._build_customer_profiles()
+    except Exception:
+        rebuilt = 0
 
     profiles = db.query(CustomerProfile).filter(CustomerProfile.tenant_id == tenant_id).all()
     updated = 0
@@ -296,7 +303,11 @@ async def analyze_customers(request: Request, db: Session = Depends(get_db)):
         updated += 1
 
     db.commit()
-    return {"analyzed": updated, "message": f"تم تحليل {updated} عميل وتحديث شرائحهم"}
+    return {
+        "analyzed": updated,
+        "profiles_rebuilt": rebuilt,
+        "message": f"تم تحليل {updated} عميل وتحديث شرائحهم",
+    }
 
 
 @router.get("/intelligence/segments/live")

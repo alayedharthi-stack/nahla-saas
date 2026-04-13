@@ -219,6 +219,7 @@ async def generate_orchestrate_response(
 
     approved_product_ids: List[int] = []
     coupon_code_to_inject: Optional[str] = None
+    coupon_expiry_text_to_inject: Optional[str] = None
     for action in fully_gated:
         if action.get("executable") and action.get("final_payload"):
             fp = action["final_payload"]
@@ -229,14 +230,22 @@ async def generate_orchestrate_response(
             elif action["type"] in ("suggest_bundle", "propose_order", "create_draft_order"):
                 approved_product_ids.extend(fp.get("product_ids", []))
             elif action["type"] == "suggest_coupon":
-                coupon_code_to_inject = await _execute_suggest_coupon(
+                coupon_payload = await _execute_suggest_coupon(
                     tenant_id, customer_segment, fp,
                 )
-                if coupon_code_to_inject:
+                if coupon_payload:
+                    coupon_code_to_inject = coupon_payload.get("code")
+                    coupon_expiry_text_to_inject = coupon_payload.get("expires_text")
                     fp["coupon_code"] = coupon_code_to_inject
+                    if coupon_payload.get("expires_at"):
+                        fp["coupon_expires_at"] = coupon_payload["expires_at"]
+                    if coupon_expiry_text_to_inject:
+                        fp["coupon_expires_text"] = coupon_expiry_text_to_inject
 
     if coupon_code_to_inject and coupon_code_to_inject not in (vetted_reply or ""):
         vetted_reply = (vetted_reply or "") + f"\n\nكود الخصم الخاص بك: {coupon_code_to_inject}"
+    if coupon_expiry_text_to_inject and coupon_expiry_text_to_inject not in (vetted_reply or ""):
+        vetted_reply = (vetted_reply or "") + f"\nينتهي الكوبون بتاريخ: {coupon_expiry_text_to_inject}"
 
     branding = ctx.get("branding", "")
     final_reply = f"{vetted_reply}\n\n_{branding}_" if branding and vetted_reply else vetted_reply
@@ -443,15 +452,15 @@ async def _execute_suggest_coupon(
     tenant_id: int,
     customer_segment: str,
     payload: Dict[str, Any],
-) -> Optional[str]:
-    """Pick or create a real coupon for the customer segment. Returns the code or None."""
+) -> Optional[Dict[str, str]]:
+    """Pick or create a real coupon for the customer segment."""
     try:
         db_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         if db_root not in sys.path:
             sys.path.insert(0, db_root)
 
         from core.database import SessionLocal
-        from services.coupon_generator import CouponGeneratorService
+        from services.coupon_generator import CouponGeneratorService, build_coupon_send_payload
 
         db = SessionLocal()
         try:
@@ -462,7 +471,7 @@ async def _execute_suggest_coupon(
                     "suggest_coupon: picked pool coupon %s for tenant=%s segment=%s",
                     coupon.code, tenant_id, customer_segment,
                 )
-                return coupon.code
+                return build_coupon_send_payload(coupon)
 
             requested_discount = payload.get("discount_pct")
             coupon = await svc.create_on_demand(
@@ -474,7 +483,7 @@ async def _execute_suggest_coupon(
                     "suggest_coupon: created on-demand coupon %s for tenant=%s segment=%s",
                     coupon.code, tenant_id, customer_segment,
                 )
-                return coupon.code
+                return build_coupon_send_payload(coupon)
         finally:
             db.close()
     except Exception as exc:

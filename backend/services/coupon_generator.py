@@ -6,7 +6,7 @@ Automatic coupon pool management.
 Maintains a pool of pre-generated coupons per customer segment so the AI
 agent can immediately hand out a real coupon during a conversation.
 
-Pool size: 3 coupons per segment (5 segments = 15 coupons max per tenant).
+Pool size: 15 coupons per segment (5 segments = 75 coupons max per tenant).
 Coupons are created both in Salla and stored locally.
 """
 from __future__ import annotations
@@ -14,12 +14,13 @@ from __future__ import annotations
 import logging
 import os
 import random
-import string
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _DB = os.path.abspath(os.path.join(_THIS, "../../database"))
@@ -31,7 +32,11 @@ from models import Coupon, Tenant, TenantSettings  # noqa: E402
 
 logger = logging.getLogger("nahla-backend")
 
-POOL_SIZE_PER_SEGMENT = 3
+POOL_SIZE_PER_SEGMENT = 15
+SHORT_CODE_PREFIX = "NHL"
+SHORT_CODE_DIGITS = 3
+SHORT_CODE_LENGTH = len(SHORT_CODE_PREFIX) + SHORT_CODE_DIGITS
+KSA_TZ = timezone(timedelta(hours=3))
 
 SEGMENT_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "new":     {"discount_pct": 15, "expiry_days": 1, "label": "عميل جديد"},
@@ -42,10 +47,70 @@ SEGMENT_DEFAULTS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _random_code(segment: str) -> str:
-    suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    seg_tag = segment.upper()[:3]
-    return f"NAHLA-{seg_tag}-{suffix}"
+def _is_short_coupon_code(code: Optional[str]) -> bool:
+    value = str(code or "").strip().upper()
+    return value.startswith(SHORT_CODE_PREFIX) and len(value) == SHORT_CODE_LENGTH and value[3:].isdigit()
+
+
+def _next_short_code(reserved_codes: set[str]) -> str:
+    available = [
+        f"{SHORT_CODE_PREFIX}{index:03d}"
+        for index in range(10 ** SHORT_CODE_DIGITS)
+        if f"{SHORT_CODE_PREFIX}{index:03d}" not in reserved_codes
+    ]
+    if not available:
+        raise RuntimeError("No short coupon codes left in NHL000-NHL999 range for this tenant.")
+    code = random.choice(available)
+    reserved_codes.add(code)
+    return code
+
+
+def _parse_provider_expiry(raw_value: Any) -> Optional[datetime]:
+    if raw_value in (None, ""):
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(f"{text}T00:00:00")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _resolve_coupon_expiry(provider_result: Optional[Dict[str, Any]], fallback_days: int) -> datetime:
+    raw_expiry = None
+    if isinstance(provider_result, dict):
+        raw_expiry = (
+            provider_result.get("expire_date")
+            or provider_result.get("expiry_date")
+            or provider_result.get("expires_at")
+        )
+    parsed = _parse_provider_expiry(raw_expiry)
+    if parsed:
+        return parsed
+    return datetime.now(timezone.utc) + timedelta(days=fallback_days)
+
+
+def build_coupon_send_payload(coupon: Coupon) -> Dict[str, Optional[str]]:
+    expires_at = getattr(coupon, "expires_at", None)
+    if expires_at and getattr(expires_at, "tzinfo", None) is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    expires_iso = expires_at.astimezone(timezone.utc).isoformat() if expires_at else None
+    expires_text = None
+    if expires_at:
+        local_expiry = expires_at.astimezone(KSA_TZ)
+        expires_text = f"{local_expiry:%Y-%m-%d} الساعة {local_expiry:%H:%M} بتوقيت السعودية"
+    return {
+        "code": str(getattr(coupon, "code", "") or ""),
+        "expires_at": expires_iso,
+        "expires_text": expires_text,
+    }
 
 
 _DEFAULT_MAX_DISCOUNT = 10
@@ -87,6 +152,36 @@ class CouponGeneratorService:
         self.db = db
         self.tenant_id = tenant_id
 
+    def _reserved_codes(self) -> set[str]:
+        rows = (
+            self.db.query(Coupon.code)
+            .filter(Coupon.tenant_id == self.tenant_id)
+            .all()
+        )
+        return {str(code or "").strip().upper() for (code,) in rows if code}
+
+    def _mark_coupon_sent(
+        self,
+        coupon: Coupon,
+        *,
+        sent_at: Optional[datetime] = None,
+        commit: bool = True,
+    ) -> None:
+        sent_at = sent_at or datetime.now(timezone.utc)
+        meta = dict(coupon.extra_metadata or {})
+        meta["used"] = "true"
+        meta["used_at"] = sent_at.isoformat()
+        meta["sent_at"] = sent_at.isoformat()
+        send_payload = build_coupon_send_payload(coupon)
+        if send_payload.get("expires_at"):
+            meta["sent_expiry_at"] = send_payload["expires_at"]
+        if send_payload.get("expires_text"):
+            meta["sent_expiry_text"] = send_payload["expires_text"]
+        coupon.extra_metadata = meta
+        flag_modified(coupon, "extra_metadata")
+        if commit:
+            self.db.commit()
+
     def _count_pool(self, segment: str) -> int:
         """Count unused auto-coupons for a segment that haven't expired."""
         now = datetime.now(timezone.utc)
@@ -94,6 +189,8 @@ class CouponGeneratorService:
             self.db.query(Coupon)
             .filter(
                 Coupon.tenant_id == self.tenant_id,
+                Coupon.code.like(f"{SHORT_CODE_PREFIX}___"),
+                func.length(Coupon.code) == SHORT_CODE_LENGTH,
                 Coupon.extra_metadata["source"].astext == "auto",
                 Coupon.extra_metadata["target_segment"].astext == segment,
                 Coupon.extra_metadata["used"].astext != "true",
@@ -108,6 +205,7 @@ class CouponGeneratorService:
         limits = _get_merchant_limits(self.db, self.tenant_id)
         adapter = self._get_adapter()
         created: Dict[str, int] = {}
+        reserved_codes = self._reserved_codes()
 
         for segment, defaults in SEGMENT_DEFAULTS.items():
             current = self._count_pool(segment)
@@ -124,8 +222,13 @@ class CouponGeneratorService:
             expiry_days = defaults["expiry_days"]
             count = 0
             for _ in range(needed):
-                code = _random_code(segment)
+                try:
+                    code = _next_short_code(reserved_codes)
+                except RuntimeError as exc:
+                    logger.error("tenant=%s coupon pool exhausted: %s", self.tenant_id, exc)
+                    break
                 salla_ok = False
+                result = None
                 if adapter:
                     try:
                         result = await adapter.create_coupon(
@@ -145,8 +248,7 @@ class CouponGeneratorService:
                     )
                     continue
 
-                from datetime import timedelta
-                exp_dt = datetime.now(timezone.utc) + timedelta(days=expiry_days)
+                exp_dt = _resolve_coupon_expiry(result if isinstance(result, dict) else None, expiry_days)
 
                 self.db.add(Coupon(
                     tenant_id=self.tenant_id,
@@ -185,6 +287,8 @@ class CouponGeneratorService:
             self.db.query(Coupon)
             .filter(
                 Coupon.tenant_id == self.tenant_id,
+                Coupon.code.like(f"{SHORT_CODE_PREFIX}___"),
+                func.length(Coupon.code) == SHORT_CODE_LENGTH,
                 Coupon.extra_metadata["source"].astext == "auto",
                 Coupon.extra_metadata["target_segment"].astext == segment,
                 Coupon.extra_metadata["used"].astext != "true",
@@ -194,13 +298,7 @@ class CouponGeneratorService:
             .first()
         )
         if coupon:
-            meta = dict(coupon.extra_metadata or {})
-            meta["used"] = "true"
-            meta["used_at"] = now.isoformat()
-            coupon.extra_metadata = meta
-            from sqlalchemy.orm.attributes import flag_modified
-            flag_modified(coupon, "extra_metadata")
-            self.db.commit()
+            self._mark_coupon_sent(coupon, sent_at=now, commit=True)
         return coupon
 
     async def create_on_demand(
@@ -216,10 +314,16 @@ class CouponGeneratorService:
             base_discount = requested_discount_pct
         discount = _clamp(base_discount, limits["min_discount"], limits["max_discount"])
         expiry_days = defaults["expiry_days"]
-        code = _random_code(segment)
+        reserved_codes = self._reserved_codes()
+        try:
+            code = _next_short_code(reserved_codes)
+        except RuntimeError as exc:
+            logger.error("tenant=%s cannot create on-demand coupon: %s", self.tenant_id, exc)
+            return None
 
         adapter = self._get_adapter()
         salla_ok = False
+        result = None
         if adapter:
             try:
                 result = await adapter.create_coupon(
@@ -237,8 +341,8 @@ class CouponGeneratorService:
             )
             return None
 
-        from datetime import timedelta
-        exp_dt = datetime.now(timezone.utc) + timedelta(days=expiry_days)
+        exp_dt = _resolve_coupon_expiry(result if isinstance(result, dict) else None, expiry_days)
+        now = datetime.now(timezone.utc)
 
         coupon = Coupon(
             tenant_id=self.tenant_id,
@@ -252,7 +356,7 @@ class CouponGeneratorService:
                 "target_segment": segment,
                 "discount_pct": discount,
                 "used": "true",
-                "used_at": datetime.now(timezone.utc).isoformat(),
+                "used_at": now.isoformat(),
                 "salla_synced": salla_ok,
                 "on_demand": True,
                 "category": "auto",
@@ -260,6 +364,8 @@ class CouponGeneratorService:
             },
         )
         self.db.add(coupon)
+        self.db.flush()
+        self._mark_coupon_sent(coupon, sent_at=now, commit=False)
         self.db.commit()
         return coupon
 
