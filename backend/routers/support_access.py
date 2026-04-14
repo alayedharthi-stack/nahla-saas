@@ -54,6 +54,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from core.auth import (
     create_support_token,
@@ -83,10 +84,15 @@ def _get_requests(settings) -> List[dict]:
 
 
 def _put_requests(db: Session, settings, requests: List[dict]) -> None:
-    """Write access requests back to extra_metadata."""
+    """Write access requests back to extra_metadata.
+
+    Uses flag_modified so SQLAlchemy always detects the JSONB mutation —
+    nested dict changes are not tracked automatically by the ORM.
+    """
     meta = dict(settings.extra_metadata or {})
-    meta["access_requests"] = requests
+    meta["access_requests"] = list(requests)   # ensure new list object
     settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
     db.commit()
 
 
@@ -103,10 +109,14 @@ def _get_sa(settings) -> dict:
 
 
 def _put_sa(db: Session, settings, data: dict) -> None:
-    """Write the support_access block back to extra_metadata atomically."""
+    """Write the support_access block back to extra_metadata atomically.
+
+    Uses flag_modified so SQLAlchemy always detects the JSONB mutation.
+    """
     meta = dict(settings.extra_metadata or {})
-    meta["support_access"] = data
+    meta["support_access"] = dict(data)   # ensure new dict object
     settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
     db.commit()
 
 
@@ -510,23 +520,28 @@ async def merchant_respond_access_request(
         raise HTTPException(status_code=404, detail="الطلب غير موجود أو تمت معالجته مسبقاً")
 
     now = datetime.now(timezone.utc)
-    target["status"]      = "approved" if body.approve else "rejected"
+    target["status"]       = "approved" if body.approve else "rejected"
     target["responded_at"] = now.isoformat()
     target["responded_by"] = user.get("sub")
-    _put_requests(db, settings, requests)
 
     if body.approve:
         if body.ttl_hours not in _VALID_TTL_HOURS:
             body.ttl_hours = 4
-        sa = _get_sa(settings)
         expires = now + timedelta(hours=body.ttl_hours)
+        sa = _get_sa(settings)
         sa.update({
             "enabled":    True,
             "granted_at": now.isoformat(),
             "expires_at": expires.isoformat(),
             "granted_by": user.get("sub"),
         })
-        _put_sa(db, settings, sa)
+        # Write both requests list and support_access in a single atomic commit
+        meta = dict(settings.extra_metadata or {})
+        meta["access_requests"] = list(requests)
+        meta["support_access"]  = dict(sa)
+        settings.extra_metadata = meta
+        flag_modified(settings, "extra_metadata")
+        db.commit()
         _audit.info(
             "ACCESS_APPROVED req=%s tenant=%d by=%s ttl=%dh",
             req_id, tenant_id, user.get("sub"), body.ttl_hours,
@@ -537,6 +552,12 @@ async def merchant_respond_access_request(
             "message":  f"تم منح الوصول لمدة {body.ttl_hours} ساعة. سيُلغى تلقائياً بعد انتهاء المدة.",
         }
     else:
+        # Persist rejection in a single atomic commit
+        meta = dict(settings.extra_metadata or {})
+        meta["access_requests"] = list(requests)
+        settings.extra_metadata = meta
+        flag_modified(settings, "extra_metadata")
+        db.commit()
         _audit.info(
             "ACCESS_REJECTED req=%s tenant=%d by=%s",
             req_id, tenant_id, user.get("sub"),

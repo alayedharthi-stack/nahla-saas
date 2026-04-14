@@ -50,6 +50,8 @@ function useAccessRequests(role: string) {
   const [requests, setRequests]     = useState<AccessRequest[]>([])
   const [responding, setResponding] = useState<string | null>(null)
   const [approved, setApproved]     = useState<string | null>(null)
+  // Track IDs already handled so polling never re-shows them
+  const handledIds = useRef<Set<string>>(new Set())
 
   const load = useCallback(async () => {
     if (role === 'admin' || role === 'super_admin') return
@@ -59,7 +61,12 @@ function useAccessRequests(role: string) {
       })
       if (res.ok) {
         const d = await res.json()
-        setRequests(d.requests ?? [])
+        // Filter out any IDs we've already handled locally — prevents
+        // the brief window between local removal and DB confirmation
+        const incoming: AccessRequest[] = (d.requests ?? []).filter(
+          (r: AccessRequest) => !handledIds.current.has(r.id)
+        )
+        setRequests(incoming)
       }
     } catch { /* ignore */ }
   }, [role])
@@ -71,7 +78,18 @@ function useAccessRequests(role: string) {
   }, [load])
 
   const respond = async (reqId: string, approve: boolean, ttlHours = 4) => {
+    if (responding) return
     setResponding(reqId)
+
+    // Optimistic: remove immediately from view and mark handled
+    handledIds.current.add(reqId)
+
+    if (approve) {
+      setApproved(reqId)
+    } else {
+      setRequests(prev => prev.filter(r => r.id !== reqId))
+    }
+
     try {
       const res = await fetch(`${API_BASE}/merchant/access-requests/${reqId}/respond`, {
         method:  'POST',
@@ -81,22 +99,33 @@ function useAccessRequests(role: string) {
         },
         body: JSON.stringify({ approve, ttl_hours: ttlHours }),
       })
+
       if (res.ok) {
         if (approve) {
-          setApproved(reqId)
           // Notify Settings page to refresh support-access status
           window.dispatchEvent(new Event('nahla:support-access-changed'))
-          // Remove from list after 3 seconds
+          // Brief success feedback, then remove
           setTimeout(() => {
             setApproved(null)
             setRequests(prev => prev.filter(r => r.id !== reqId))
-          }, 3000)
-        } else {
-          setRequests(prev => prev.filter(r => r.id !== reqId))
+          }, 2000)
         }
+        // Reload from server after a short delay to sync state
+        setTimeout(load, 1500)
+      } else {
+        // Server rejected — undo optimistic removal
+        handledIds.current.delete(reqId)
+        setApproved(null)
+        await load()
       }
-    } catch { /* ignore */ }
-    finally { setResponding(null) }
+    } catch {
+      // Network error — undo optimistic removal
+      handledIds.current.delete(reqId)
+      setApproved(null)
+      await load()
+    } finally {
+      setResponding(null)
+    }
   }
 
   return { requests, responding, respond, reload: load, approved }

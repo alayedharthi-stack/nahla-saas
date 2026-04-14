@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
+import { isPlatformOwner } from '../auth'
 import {
   Save, Bot, Store, Users, Bell, MessageSquare,
   CheckCircle, AlertCircle, Loader2, Copy, ExternalLink,
@@ -2058,11 +2059,16 @@ export default function Settings() {
   const [savedTab, setSavedTab] = useState<TabId | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  const TABS = TAB_IDS.map(id => ({
-    id,
-    label: t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]),
-    icon: TAB_ICONS[id],
-  }))
+  // Platform owner (admin) doesn't need the Security/Support-Access tab —
+  // no one else can access their panel, so the feature is irrelevant for them.
+  const _isOwner = isPlatformOwner()
+  const TABS = TAB_IDS
+    .filter(id => !(id === 'security' && _isOwner))
+    .map(id => ({
+      id,
+      label: t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]),
+      icon: TAB_ICONS[id],
+    }))
 
   useEffect(() => {
     settingsApi.getAll()
@@ -2194,7 +2200,7 @@ export default function Settings() {
           saveError={activeTab === 'notifications' ? saveError : null}
         />
       )}
-      {activeTab === 'security' && <SupportAccessTab />}
+      {activeTab === 'security' && !_isOwner && <SupportAccessTab />}
       {activeTab === 'widget'   && <WidgetTab />}
     </div>
   )
