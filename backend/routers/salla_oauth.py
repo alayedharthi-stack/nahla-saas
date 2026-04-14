@@ -426,8 +426,11 @@ async def salla_whoami(request: Request, db: Session = Depends(get_db)):
         Integration.tenant_id == tenant_id,
         Integration.provider  == "salla",
     ).first()
-    salla_store_id   = (salla_int.config or {}).get("store_id", "?") if salla_int else "not_connected"
-    salla_store_name = (salla_int.config or {}).get("store_name", "?") if salla_int else "not_connected"
+    salla_cfg = (salla_int.config or {}) if salla_int else {}
+    salla_store_id   = salla_cfg.get("store_id", "?") if salla_int else "not_connected"
+    salla_store_name = salla_cfg.get("store_name", "?") if salla_int else "not_connected"
+    salla_enabled    = bool(salla_int.enabled) if salla_int else False
+    salla_has_api    = bool(salla_cfg.get("api_key")) if salla_int else False
 
     return {
         "isolation_check": "OK — you see ONLY your tenant data",
@@ -443,6 +446,9 @@ async def salla_whoami(request: Request, db: Session = Depends(get_db)):
         "salla_integration": {
             "store_id":   salla_store_id,
             "store_name": salla_store_name,
+            "enabled":    salla_enabled,
+            "has_api_key": salla_has_api,
+            "connected":  salla_enabled and salla_has_api and salla_store_id not in ("?", "not_connected", ""),
         },
         "security_note": (
             "tenant_id comes from the JWT claims only — "

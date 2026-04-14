@@ -71,15 +71,21 @@ async def put_store_integration_settings(
         Integration.tenant_id == tenant_id,
         Integration.provider == body.platform,
     ).first()
-    new_config = {
-        "api_key":       body.api_key,
-        "store_id":      body.store_id,
-        "webhook_secret": body.webhook_secret,
-    }
     if integration:
-        integration.config  = new_config
+        merged_config = dict(integration.config or {})
+        merged_config.update({
+            "api_key":       body.api_key,
+            "store_id":      body.store_id,
+            "webhook_secret": body.webhook_secret,
+        })
+        integration.config  = merged_config
         integration.enabled = body.enabled
     else:
+        new_config = {
+            "api_key":       body.api_key,
+            "store_id":      body.store_id,
+            "webhook_secret": body.webhook_secret,
+        }
         integration = Integration(
             tenant_id=tenant_id,
             provider=body.platform,

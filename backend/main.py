@@ -338,6 +338,13 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("WA token refresh scheduler could not start: %s", exc)
 
+    try:
+        from core.scheduler import run_salla_token_refresh_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_salla_token_refresh_scheduler())
+        logger.info("Salla token refresh scheduler started (6h).")
+    except Exception as exc:
+        logger.warning("Salla token refresh scheduler could not start: %s", exc)
+
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.
 _REQUIRED_PROD_VARS = ("JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD")

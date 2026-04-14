@@ -263,6 +263,8 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
             "connected_at":  datetime.now(timezone.utc).isoformat(),
             "app_type":      "easy",
         })
+        new_cfg.pop("soft_disabled", None)
+        new_cfg.pop("uninstalled_at", None)
         claim_store_for_tenant(
             db, store_id=salla_store_id, tenant_id=tenant_id, new_config=new_cfg,
         )
@@ -336,7 +338,14 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
 
 
 def _disable_salla_integration(db, store_id: str) -> None:
-    """Disable integration when app is uninstalled."""
+    """Soft-disable integration on app.uninstalled.
+
+    We keep api_key and refresh_token intact so the integration can
+    automatically re-activate when Salla sends app.installed or
+    app.store.authorize again (common with Easy-mode reinstalls).
+    Tokens are preserved behind a ``soft_disabled`` flag — the
+    _handle_salla_authorize path checks for this and re-enables.
+    """
     from models import Integration  # noqa: PLC0415
 
     sid = str(store_id)
@@ -348,12 +357,12 @@ def _disable_salla_integration(db, store_id: str) -> None:
     for intg in integrations:
         intg.enabled = False
         cfg = dict(intg.config or {})
-        cfg.pop("api_key", None)
-        cfg.pop("refresh_token", None)
+        cfg["soft_disabled"] = True
         cfg["uninstalled_at"] = datetime.now(timezone.utc).isoformat()
         intg.config = cfg
-        logger.info(
-            "[Salla Webhook] Integration DISABLED (app.uninstalled) | tenant=%s store_id=%s",
+        logger.warning(
+            "[Salla Webhook] Integration SOFT-DISABLED (app.uninstalled) | "
+            "tenant=%s store_id=%s — tokens preserved for auto-reactivation",
             intg.tenant_id, sid,
         )
 

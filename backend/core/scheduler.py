@@ -22,6 +22,7 @@ _CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
 _SYNC_INTERVAL_SECONDS = 3600  # store sync every 1 hour
 _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
+_SALLA_TOKEN_REFRESH_SECONDS = 6 * 3600  # Salla token refresh every 6 hours
 
 
 async def run_scheduler() -> None:
@@ -70,6 +71,18 @@ async def run_wa_token_refresh_scheduler() -> None:
         except Exception as exc:
             logger.error("[WA Token Refresh] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_TOKEN_REFRESH_INTERVAL_SECONDS)
+
+
+async def run_salla_token_refresh_scheduler() -> None:
+    """Proactively refresh Salla OAuth tokens and re-enable soft-disabled integrations."""
+    await asyncio.sleep(240)
+    logger.info("[Salla Token Refresh] Started — checking every %ss", _SALLA_TOKEN_REFRESH_SECONDS)
+    while True:
+        try:
+            await _refresh_all_salla_tokens()
+        except Exception as exc:
+            logger.error("[Salla Token Refresh] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_SALLA_TOKEN_REFRESH_SECONDS)
 
 
 async def _refresh_all_wa_tokens() -> None:
@@ -142,6 +155,117 @@ async def _refresh_all_wa_tokens() -> None:
         logger.info(
             "[WA Token Refresh] Done — refreshed=%d failed=%d skipped=%d total=%d",
             refreshed, failed, skipped, len(connections),
+        )
+    finally:
+        db.close()
+
+
+async def _refresh_all_salla_tokens() -> None:
+    """Proactively refresh Salla OAuth tokens for all integrations that have a refresh_token.
+
+    Also re-enables integrations that were soft-disabled by app.uninstalled
+    if they still have valid credentials (api_key present).
+    """
+    import sys as _sys, os as _os  # noqa: PLC0415
+    _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    from core.database import SessionLocal  # noqa: PLC0415
+    from models import Integration  # noqa: PLC0415
+
+    client_id = _os.environ.get("SALLA_CLIENT_ID", "")
+    client_secret = _os.environ.get("SALLA_CLIENT_SECRET", "")
+
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        logger.error("[Salla Token Refresh] Cannot open DB: %s", exc)
+        return
+
+    refreshed = 0
+    reactivated = 0
+    failed = 0
+    skipped = 0
+    try:
+        integrations = db.query(Integration).filter(
+            Integration.provider == "salla",
+        ).all()
+
+        logger.info("[Salla Token Refresh] Found %d Salla integrations to check", len(integrations))
+
+        for intg in integrations:
+            cfg = dict(intg.config or {})
+            api_key = cfg.get("api_key", "")
+            refresh_token = cfg.get("refresh_token", "")
+
+            # Re-enable soft-disabled integrations that still have an api_key
+            if not intg.enabled and cfg.get("soft_disabled") and api_key:
+                intg.enabled = True
+                cfg.pop("soft_disabled", None)
+                cfg["reactivated_at"] = datetime.now(timezone.utc).isoformat()
+                intg.config = cfg
+                db.commit()
+                reactivated += 1
+                logger.info(
+                    "[Salla Token Refresh] RE-ACTIVATED soft-disabled integration | tenant=%s store=%s",
+                    intg.tenant_id, cfg.get("store_id", "?"),
+                )
+                continue
+
+            if not intg.enabled or not api_key:
+                skipped += 1
+                continue
+
+            # Try to refresh the token if we have refresh_token + client credentials
+            if refresh_token and client_id and client_secret:
+                try:
+                    import httpx  # noqa: PLC0415
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        resp = await client.post(
+                            "https://accounts.salla.sa/oauth2/token",
+                            data={
+                                "grant_type": "refresh_token",
+                                "client_id": client_id,
+                                "client_secret": client_secret,
+                                "refresh_token": refresh_token,
+                            },
+                            headers={
+                                "Accept": "application/json",
+                                "Content-Type": "application/x-www-form-urlencoded",
+                            },
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            new_access = data.get("access_token", "")
+                            new_refresh = data.get("refresh_token", refresh_token)
+                            if new_access:
+                                cfg["api_key"] = new_access
+                                cfg["refresh_token"] = new_refresh
+                                cfg["last_token_refresh"] = datetime.now(timezone.utc).isoformat()
+                                intg.config = cfg
+                                db.commit()
+                                refreshed += 1
+                                logger.info(
+                                    "[Salla Token Refresh] tenant=%s — refreshed OK",
+                                    intg.tenant_id,
+                                )
+                            else:
+                                skipped += 1
+                        else:
+                            failed += 1
+                            logger.warning(
+                                "[Salla Token Refresh] tenant=%s — refresh failed %d: %s",
+                                intg.tenant_id, resp.status_code, resp.text[:200],
+                            )
+                except Exception as exc:
+                    db.rollback()
+                    failed += 1
+                    logger.warning("[Salla Token Refresh] tenant=%s error: %s", intg.tenant_id, exc)
+            else:
+                skipped += 1
+
+        logger.info(
+            "[Salla Token Refresh] Done — refreshed=%d reactivated=%d failed=%d skipped=%d total=%d",
+            refreshed, reactivated, failed, skipped, len(integrations),
         )
     finally:
         db.close()

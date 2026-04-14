@@ -161,7 +161,7 @@ export default function Integrations() {
       .then(d => {
         const si = d?.salla_integration ?? {}
         setSallaStatus({
-          connected: si.store_id && si.store_id !== 'not_connected' && si.store_id !== '?',
+          connected: si.connected === true || (si.enabled && si.has_api_key && si.store_id && si.store_id !== 'not_connected' && si.store_id !== '?'),
           store_id:   si.store_id,
           store_name: si.store_name,
         })
