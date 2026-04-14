@@ -1439,6 +1439,68 @@ async def admin_troubleshoot_integrations(
     }
 
 
+# ── Admin: force-connect WhatsApp with raw Meta credentials ─────────────────
+
+class AdminWhatsAppForceConnectIn(BaseModel):
+    tenant_id:        int
+    phone_number_id:  str
+    access_token:     str
+    waba_id:          str
+    phone_number:     Optional[str] = None
+    display_name:     Optional[str] = None
+
+
+@router.post("/admin/whatsapp/force-connect")
+async def admin_force_connect_whatsapp(
+    body: AdminWhatsAppForceConnectIn,
+    db:     Session         = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Directly connect a WhatsApp number for any tenant by writing raw Meta
+    credentials (Phone Number ID, Access Token, WABA ID) — no OTP flow needed.
+    Intended for platform admins adding test numbers or manually onboarding merchants.
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == body.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == body.tenant_id
+    ).first()
+    if not conn:
+        conn = WhatsAppConnection(tenant_id=body.tenant_id)
+        db.add(conn)
+
+    conn.phone_number_id              = body.phone_number_id.strip()
+    conn.whatsapp_business_account_id = body.waba_id.strip()
+    conn.access_token                 = body.access_token.strip()
+    conn.phone_number                 = (body.phone_number or '').strip() or None
+    conn.business_display_name        = (body.display_name or '').strip() or None
+    conn.status                       = "connected"
+    conn.sending_enabled              = True
+    conn.connection_type              = "cloud_api"
+    conn.provider                     = "meta"
+    conn.webhook_verified             = False
+    conn.last_error                   = None
+    conn.connected_at                 = datetime.now(timezone.utc)
+    conn.updated_at                   = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(conn)
+
+    return {
+        "ok": True,
+        "tenant_id":       body.tenant_id,
+        "phone_number_id": conn.phone_number_id,
+        "waba_id":         conn.whatsapp_business_account_id,
+        "phone_number":    conn.phone_number,
+        "display_name":    conn.business_display_name,
+        "status":          conn.status,
+        "sending_enabled": conn.sending_enabled,
+    }
+
+
 # ── Coexistence (360dialog) request management ──────────────────────────────
 
 @router.get("/admin/coexistence/requests")
