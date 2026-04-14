@@ -36,7 +36,7 @@ export interface CoexistenceActivatePayload {
 }
 
 export interface AdminPlatformStats {
-  merchants: { total: number; active: number; trial: number }
+  merchants: { total: number; active: number; trial: number; paid: number; suspended: number }
   tenants: { total: number }
   subscriptions: {
     active: number
@@ -56,6 +56,20 @@ export interface AdminPlatformStats {
   }>
   recent_merchants: AdminMerchantSummary[]
   all_merchants: AdminMerchantSummary[]
+  // SaaS owner fields
+  new_this_week: number
+  wa_connected:  number
+  onboarding: {
+    registered_only: number
+    salla_only:      number
+    whatsapp_only:   number
+    both_connected:  number
+  }
+  at_risk: {
+    trials_expiring_7d: number
+    salla_needs_reauth: number
+    suspended:          number
+  }
 }
 
 export interface AdminMerchantSummary {

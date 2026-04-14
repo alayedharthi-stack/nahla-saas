@@ -481,14 +481,107 @@ async def get_platform_stats(
                     "created_at": u.created_at.isoformat() if u.created_at else None,
                 }
 
+        # ── SaaS owner metrics ─────────────────────────────────────────────────
+        # Paid (non-trial) merchants
+        try:
+            paid_merchants = db.query(func.count(BillingSubscription.id)).filter(
+                BillingSubscription.status == "active"
+            ).scalar() or 0
+        except Exception:
+            paid_merchants = 0
+
+        # Suspended merchants
+        try:
+            suspended_merchants = db.query(func.count(User.id)).filter(
+                User.role == "merchant", User.is_active == False  # noqa: E712
+            ).scalar() or 0
+        except Exception:
+            suspended_merchants = 0
+
+        # New signups this week
+        try:
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+            new_this_week = db.query(func.count(Tenant.id)).filter(
+                Tenant.created_at >= week_ago
+            ).scalar() or 0
+        except Exception:
+            new_this_week = 0
+
+        # Onboarding funnel — based on all merchant tenants
+        try:
+            all_tenant_ids = [
+                row[0] for row in db.query(User.tenant_id).filter(
+                    User.role == "merchant", User.tenant_id.isnot(None)
+                ).all()
+            ]
+            # Tenants with active Salla integration
+            salla_tenants = set(
+                row[0] for row in db.query(Integration.tenant_id).filter(
+                    Integration.provider == "salla",
+                    Integration.enabled == True,  # noqa: E712
+                ).all()
+            )
+            # Tenants with connected WhatsApp
+            wa_tenants = set(
+                row[0] for row in db.query(WhatsAppConnection.tenant_id).filter(
+                    WhatsAppConnection.status == "connected"
+                ).all()
+            )
+            both_connected   = len(salla_tenants & wa_tenants)
+            salla_only       = len(salla_tenants - wa_tenants)
+            whatsapp_only    = len(wa_tenants - salla_tenants)
+            registered_only  = max(0, len(all_tenant_ids) - len(salla_tenants | wa_tenants))
+            wa_connected_count = len(wa_tenants)
+        except Exception:
+            both_connected = salla_only = whatsapp_only = registered_only = wa_connected_count = 0
+
+        # At-risk: Salla needs_reauth
+        try:
+            salla_integrations_all = db.query(Integration).filter(
+                Integration.provider == "salla"
+            ).all()
+            salla_needs_reauth = sum(
+                1 for intg in salla_integrations_all
+                if (intg.config or {}).get("needs_reauth")
+            )
+        except Exception:
+            salla_needs_reauth = 0
+
+        # At-risk: trials expiring within 7 days
+        try:
+            now_utc   = datetime.now(timezone.utc)
+            in_7_days = now_utc + timedelta(days=7)
+            trials_expiring_7d = db.query(func.count(BillingSubscription.id)).filter(
+                BillingSubscription.status == "trialing",
+                BillingSubscription.ends_at <= in_7_days,
+                BillingSubscription.ends_at >= now_utc,
+            ).scalar() or 0
+        except Exception:
+            trials_expiring_7d = 0
+
         return {
-            "merchants":       {"total": total_merchants, "active": active_merchants, "trial": trial_subs},
+            "merchants":       {"total": total_merchants, "active": active_merchants, "trial": trial_subs,
+                                "paid": paid_merchants, "suspended": suspended_merchants},
             "tenants":         {"total": total_tenants},
             "subscriptions":   {"active": active_subs, "trial": trial_subs, "total": total_subs, "by_plan": plan_counts},
             "revenue":         {"total_sar": float(total_revenue), "today_sar": float(today_revenue), "mrr_sar": mrr},
             "recent_payments": payments_list,
-            "recent_merchants": [_safe_merchant(u) for u in all_merchants[:5]],
+            "recent_merchants": [_safe_merchant(u) for u in all_merchants[:8]],
             "all_merchants":    [_safe_merchant(u) for u in all_merchants],
+            # ── SaaS owner fields ──────────────────────────────────────────────
+            "new_this_week":   new_this_week,
+            "wa_connected":    wa_connected_count,
+            "onboarding": {
+                "registered_only": registered_only,
+                "salla_only":      salla_only,
+                "whatsapp_only":   whatsapp_only,
+                "both_connected":  both_connected,
+            },
+            "at_risk": {
+                "trials_expiring_7d": trials_expiring_7d,
+                "salla_needs_reauth": salla_needs_reauth,
+                "suspended":          suspended_merchants,
+            },
         }
     except Exception as exc:
         logger.error("[admin/stats] unhandled error: %s\n%s", exc, _tb.format_exc())

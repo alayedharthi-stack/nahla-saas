@@ -63,13 +63,6 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    groupLabel: 'نحلة AI',
-    items: [
-      { to: '/whatsapp-connect', icon: MessageCircle, label: _tr => 'بوت نحلة'       },
-      { to: '/templates',        icon: FileText,       label: _tr => 'قوالب الرسائل' },
-    ],
-  },
-  {
     groupLabel: 'الإعدادات',
     items: [
       { to: '/settings', icon: Settings, label: _tr => 'الإعدادات' },
