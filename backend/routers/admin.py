@@ -708,11 +708,25 @@ async def list_tenants(
         .limit(min(limit, 200))
         .all()
     )
+    def _safe_summary(t: Tenant) -> Optional[Dict[str, Any]]:
+        try:
+            return _tenant_summary_payload(db, t)
+        except Exception as _e:
+            logger.warning("[admin/tenants] summary failed for tenant %s: %s", t.id, _e)
+            return {
+                "id": t.id, "name": t.name or f"tenant-{t.id}", "domain": t.domain,
+                "is_active": bool(t.is_active),
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+                "subscription": {"status": "none", "plan": "—", "trial_ends_at": None, "ends_at": None},
+                "whatsapp":     {"status": "not_connected", "phone_number": None, "business_display_name": None, "sending_enabled": False, "webhook_verified": False},
+                "stats":        {"orders": 0, "conversations": 0, "revenue_sar": 0.0},
+            }
+
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
-        "tenants": [_tenant_summary_payload(db, tenant) for tenant in rows],
+        "tenants": [s for t in rows if (s := _safe_summary(t)) is not None],
     }
 
 
