@@ -265,6 +265,9 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         })
         new_cfg.pop("soft_disabled", None)
         new_cfg.pop("uninstalled_at", None)
+        new_cfg.pop("needs_reauth", None)
+        new_cfg.pop("needs_reauth_at", None)
+        new_cfg.pop("needs_reauth_reason", None)
         claim_store_for_tenant(
             db, store_id=salla_store_id, tenant_id=tenant_id, new_config=new_cfg,
         )

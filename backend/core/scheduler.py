@@ -197,6 +197,16 @@ async def _refresh_all_salla_tokens() -> None:
             api_key = cfg.get("api_key", "")
             refresh_token = cfg.get("refresh_token", "")
 
+            # Skip permanently failed integrations — needs manual re-auth by merchant
+            if cfg.get("needs_reauth"):
+                logger.info(
+                    "[Salla Token Refresh] tenant=%s — needs_reauth=True, skipping "
+                    "(waiting for merchant to re-authorize)",
+                    intg.tenant_id,
+                )
+                skipped += 1
+                continue
+
             # Re-enable soft-disabled integrations that still have an api_key
             if not intg.enabled and cfg.get("soft_disabled") and api_key:
                 intg.enabled = True
@@ -251,11 +261,26 @@ async def _refresh_all_salla_tokens() -> None:
                             else:
                                 skipped += 1
                         else:
-                            failed += 1
-                            logger.warning(
-                                "[Salla Token Refresh] tenant=%s — refresh failed %d: %s",
-                                intg.tenant_id, resp.status_code, resp.text[:200],
-                            )
+                            resp_text = resp.text[:300]
+                            # invalid_grant = permanently revoked — mark and stop retrying
+                            if resp.status_code == 400 and "invalid_grant" in resp_text:
+                                logger.error(
+                                    "[Salla Token Refresh] INVALID_GRANT — token permanently revoked | "
+                                    "tenant=%s store=%s — marking needs_reauth",
+                                    intg.tenant_id, cfg.get("store_id", "?"),
+                                )
+                                cfg["needs_reauth"] = True
+                                cfg["needs_reauth_at"] = datetime.now(timezone.utc).isoformat()
+                                cfg["needs_reauth_reason"] = "invalid_grant"
+                                intg.config = cfg
+                                intg.enabled = False
+                                db.commit()
+                            else:
+                                failed += 1
+                                logger.warning(
+                                    "[Salla Token Refresh] tenant=%s — refresh failed %d: %s",
+                                    intg.tenant_id, resp.status_code, resp_text,
+                                )
                 except Exception as exc:
                     db.rollback()
                     failed += 1
@@ -346,7 +371,18 @@ async def _sync_all_stores() -> None:
 
         for intg in integrations:
             tenant_id = intg.tenant_id
-            api_key = (intg.config or {}).get("api_key", "")
+            cfg = intg.config or {}
+            api_key = cfg.get("api_key", "")
+
+            # Skip integrations that have been permanently flagged for re-auth
+            if cfg.get("needs_reauth"):
+                logger.warning(
+                    "[StoreSync Scheduler] tenant=%s — needs_reauth=True, skipping sync "
+                    "(merchant must re-authorize Salla app)",
+                    tenant_id,
+                )
+                continue
+
             if not api_key:
                 logger.warning("[StoreSync Scheduler] tenant=%s has empty api_key — skipping", tenant_id)
                 continue

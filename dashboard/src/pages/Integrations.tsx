@@ -11,6 +11,7 @@ interface SallaStatus {
   store_id?: string
   store_name?: string
   last_sync?: string
+  needs_reauth?: boolean
 }
 
 interface WaStatus {
@@ -161,9 +162,10 @@ export default function Integrations() {
       .then(d => {
         const si = d?.salla_integration ?? {}
         setSallaStatus({
-          connected: si.connected === true || (si.enabled && si.has_api_key && si.store_id && si.store_id !== 'not_connected' && si.store_id !== '?'),
-          store_id:   si.store_id,
-          store_name: si.store_name,
+          connected:    si.connected === true,
+          store_id:     si.store_id,
+          store_name:   si.store_name,
+          needs_reauth: si.needs_reauth === true,
         })
       })
       .catch(() => setSallaStatus({ connected: false }))
@@ -239,6 +241,27 @@ export default function Integrations() {
           </div>
         </div>
       </div>
+
+      {/* Salla needs-reauth urgent banner */}
+      {!sallaLoading && sallaStatus.needs_reauth && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-4 flex items-start gap-3">
+          <XCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-red-800">انتهت صلاحية ربط سلة — مطلوب إعادة الربط</p>
+            <p className="text-xs text-red-600 mt-0.5">
+              انتهت صلاحية توكن سلة بشكل نهائي ولا يمكن تجديده تلقائياً. افتح تطبيق سلة وأعِد تثبيت تطبيق نحلة لاستعادة الربط.
+            </p>
+          </div>
+          <a
+            href="https://s.salla.sa/apps/nahla"
+            target="_blank"
+            rel="noreferrer"
+            className="shrink-0 rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-500 transition-colors"
+          >
+            فتح سلة وإعادة الربط
+          </a>
+        </div>
+      )}
 
       {/* Integration cards */}
       <div className="grid lg:grid-cols-2 gap-4">
