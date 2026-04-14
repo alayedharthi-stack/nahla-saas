@@ -4,6 +4,7 @@ import { Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
 import { register } from '../auth'
 import { API_BASE } from '../api/client'
 import { useLanguage } from '../i18n/context'
+import LegalFooter from '../components/LegalFooter'
 
 export default function Register() {
   const navigate = useNavigate()
@@ -255,10 +256,11 @@ export default function Register() {
         </div>
 
         {/* Footer */}
-        <div className="mt-5 pb-4 flex flex-col items-center">
+        <div className="mt-5 pb-4 flex flex-col items-center gap-2">
           <p className="text-slate-500 text-xs font-medium tracking-wide">
             {t(tr => tr.login.dev)}
           </p>
+          <LegalFooter variant="light" />
         </div>
       </div>
     </div>

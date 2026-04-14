@@ -43,6 +43,8 @@ import WhatsAppConnect from './pages/WhatsAppConnect'
 import WaUsage        from './pages/WaUsage'
 import PrivacyPolicy  from './pages/PrivacyPolicy'
 import DataDeletion   from './pages/DataDeletion'
+import Terms          from './pages/Terms'
+import Contact        from './pages/Contact'
 import VerifyEmail from './pages/VerifyEmail'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
@@ -61,6 +63,8 @@ export default function App() {
           <Route path="/landing"              element={<Landing />} />
           <Route path="/privacy"              element={<PrivacyPolicy />} />
           <Route path="/data-deletion"        element={<DataDeletion />} />
+          <Route path="/terms"               element={<Terms />} />
+          <Route path="/contact"             element={<Contact />} />
 
           {/* Public — auth */}
           <Route path="/login"                element={<Login />} />

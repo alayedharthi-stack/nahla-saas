@@ -1,3 +1,5 @@
+import LegalFooter from '../components/LegalFooter'
+
 /**
  * PrivacyPolicy.tsx
  * Public page — no auth required
@@ -265,6 +267,10 @@ export default function PrivacyPolicy() {
             </p>
           </div>
 
+        </div>
+        {/* Legal nav */}
+        <div className="mt-6">
+          <LegalFooter variant="light" />
         </div>
       </div>
     </div>

@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react'
 import { login } from '../auth'
 import { useLanguage } from '../i18n/context'
+import LegalFooter from '../components/LegalFooter'
 export default function Login() {
   const navigate = useNavigate()
   const { t, lang, setLang, dir } = useLanguage()
@@ -142,10 +143,10 @@ export default function Login() {
 
         {/* Footer */}
         <div className="mt-6 pb-4 flex flex-col items-center gap-2">
-          {/* Made in Saudi Arabia */}
           <p className="text-slate-500 text-xs font-medium tracking-wide">
             {t(tr => tr.login.dev)}
           </p>
+          <LegalFooter variant="light" />
         </div>
       </div>
     </div>

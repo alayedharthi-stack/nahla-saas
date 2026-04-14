@@ -1,3 +1,5 @@
+import LegalFooter from '../components/LegalFooter'
+
 /**
  * DataDeletion.tsx
  * Public page — no auth required
@@ -130,6 +132,10 @@ export default function DataDeletion() {
             </p>
           </div>
 
+        </div>
+        {/* Legal nav */}
+        <div className="mt-6">
+          <LegalFooter variant="light" />
         </div>
       </div>
     </div>
