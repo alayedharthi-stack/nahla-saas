@@ -1878,6 +1878,16 @@ async def admin_resubscribe_debug(
     if not conn:
         return {"error": "no connection found"}
     tok = conn.access_token or ""
+    # Also check token validity via /me
+    import httpx as _httpx  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+    me_resp = _httpx.get(
+        f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/me",
+        params={"access_token": tok, "fields": "id,name"},
+        timeout=10,
+    )
+    me_data = me_resp.json()
+
     return {
         "phone_number_id":              conn.phone_number_id,
         "whatsapp_business_account_id": conn.whatsapp_business_account_id,
@@ -1889,6 +1899,7 @@ async def admin_resubscribe_debug(
         "connection_type":              conn.connection_type,
         "access_token_preview":         tok[:20] + "..." + tok[-6:] if len(tok) > 30 else tok[:10] + "...",
         "access_token_length":          len(tok),
+        "token_check_via_me":           me_data,
     }
 
 
