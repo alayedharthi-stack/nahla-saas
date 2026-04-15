@@ -26,6 +26,7 @@ import {
   X,
   Puzzle,
   Smartphone,
+  Wrench,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -60,6 +61,7 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
       { to: '/admin/coexistence',     icon: Smartphone,    label: _tr => 'طلبات الجوال + AI'   },
       { to: '/admin/team',            icon: Layers,        label: _tr => 'الفريق'               },
       { to: '/admin/system',          icon: Activity,      label: _tr => 'حالة النظام'          },
+      { to: '/admin/tools',           icon: Wrench,        label: _tr => 'أدوات التنظيف'        },
     ],
   },
   {

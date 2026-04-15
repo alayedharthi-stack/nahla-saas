@@ -7,7 +7,7 @@ import {
   Users, Search, LogIn, ToggleLeft, ToggleRight,
   Send, Clock, CheckCircle, Bell, X, Plus,
   Loader2, ExternalLink, Wifi, WifiOff,
-  ShieldCheck, Eye, EyeOff,
+  ShieldCheck, Eye, EyeOff, Trash2,
 } from 'lucide-react'
 
 interface Merchant {
@@ -152,12 +152,14 @@ function AddMerchantModal({ onClose, onCreated }: { onClose: () => void; onCreat
 // ── Merchant Detail Drawer ────────────────────────────────────────────────────
 
 function MerchantDrawer({
-  m, onClose, onToggle, onEnter, accessState, enterBusy,
+  m, onClose, onToggle, onEnter, onDisconnectWA, onDeleteTenant, accessState, enterBusy,
 }: {
   m: Merchant
   onClose: () => void
   onToggle: () => void
   onEnter: () => void
+  onDisconnectWA: () => void
+  onDeleteTenant: () => void
   accessState: AccessState
   enterBusy: boolean
 }) {
@@ -278,6 +280,26 @@ function MerchantDrawer({
                 : <><ToggleRight className="w-4 h-4" /> تفعيل الحساب</>
               }
             </button>
+
+            {/* Disconnect WhatsApp */}
+            {m.tenant_id && m.wa_status !== 'not_connected' && (
+              <button
+                onClick={onDisconnectWA}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium border border-orange-200 text-orange-600 hover:bg-orange-50 transition"
+              >
+                <WifiOff className="w-4 h-4" /> فصل واتساب
+              </button>
+            )}
+
+            {/* Delete tenant */}
+            {m.tenant_id && (
+              <button
+                onClick={onDeleteTenant}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium border border-red-300 text-red-600 hover:bg-red-50 transition"
+              >
+                <Trash2 className="w-4 h-4" /> حذف المتجر نهائياً
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -296,6 +318,8 @@ export default function AdminMerchants() {
   const [approvedAlerts, setApprovedAlerts] = useState<{id: number; name: string}[]>([])
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null)
   const [showAddModal, setShowAddModal]   = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
+  const [deleting, setDeleting]           = useState(false)
   const pollingRef                        = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadMerchants = () => {
@@ -420,6 +444,52 @@ export default function AdminMerchants() {
       alert(e instanceof Error ? e.message : 'حدث خطأ')
     } finally {
       setToggling(null)
+    }
+  }
+
+  const handleDisconnectWA = async (m: Merchant) => {
+    if (!m.tenant_id) return
+    if (!window.confirm(`هل أنت متأكد من فصل واتساب لمتجر "${m.store_name}"؟\nسيتم حذف WABA_ID، PHONE_NUMBER_ID، وACCESS_TOKEN.`)) return
+    setDisconnecting(true)
+    try {
+      const res = await fetch(`${API_BASE}/admin/whatsapp/disconnect/${m.tenant_id}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      })
+      const data = await res.json()
+      if (!res.ok) { alert(data.detail || 'فشل الفصل'); return }
+      const updated = { ...m, wa_status: 'disconnected' }
+      setMerchants(prev => prev.map(x => x.id === m.id ? updated : x))
+      if (selectedMerchant?.id === m.id) setSelectedMerchant(updated)
+      alert('✅ تم فصل واتساب بنجاح')
+    } catch {
+      alert('خطأ في الاتصال بالخادم')
+    } finally {
+      setDisconnecting(false)
+    }
+  }
+
+  const handleDeleteTenant = async (m: Merchant) => {
+    if (!m.tenant_id) return
+    const confirmed = window.confirm(
+      `⚠️ تحذير: سيتم حذف المتجر "${m.store_name}" وجميع بياناته نهائياً.\n\nيشمل الحذف: المستخدمين، التكاملات، واتساب، الطلبات، المحادثات، والفواتير.\n\nهذا الإجراء لا يمكن التراجع عنه. تأكيد؟`
+    )
+    if (!confirmed) return
+    setDeleting(true)
+    try {
+      const res = await fetch(`${API_BASE}/admin/tenants/${m.tenant_id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${getToken()}` },
+      })
+      const data = await res.json()
+      if (!res.ok) { alert(data.detail || 'فشل الحذف'); return }
+      setMerchants(prev => prev.filter(x => x.id !== m.id))
+      setSelectedMerchant(null)
+      alert('✅ تم حذف المتجر نهائياً')
+    } catch {
+      alert('خطأ في الاتصال بالخادم')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -580,8 +650,13 @@ export default function AdminMerchants() {
           onClose={() => setSelectedMerchant(null)}
           onToggle={() => handleToggle(selectedMerchant)}
           onEnter={() => handleEnter(selectedMerchant)}
+          onDisconnectWA={() => handleDisconnectWA(selectedMerchant)}
+          onDeleteTenant={() => handleDeleteTenant(selectedMerchant)}
           accessState={accessState[selectedMerchant.id] ?? 'idle'}
-          enterBusy={accessState[selectedMerchant.id] === 'entering' || accessState[selectedMerchant.id] === 'requesting'}
+          enterBusy={
+            (accessState[selectedMerchant.id] === 'entering' || accessState[selectedMerchant.id] === 'requesting')
+            || disconnecting || deleting
+          }
         />
       )}
 

@@ -261,7 +261,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             # ── Check by store_id first to avoid duplicate tenant creation ────
             existing_integration = db.query(Integration).filter(
                 Integration.provider == "salla",
-                Integration.config["store_id"].astext == str(merchant_id_str),
+                Integration.external_store_id == str(merchant_id_str),
             ).first() if merchant_id_str else None
 
             if existing_integration:
@@ -304,8 +304,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         # ── Save / update Salla integration record ────────────────────────────
         if merchant_id_str:
             integration = db.query(Integration).filter(
-                Integration.tenant_id == tenant_id,
-                Integration.provider  == "salla",
+                Integration.provider == "salla",
+                Integration.external_store_id == str(merchant_id_str),
             ).first()
 
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -317,6 +317,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     "last_seen":  now_iso,
                 })
                 integration.config = cfg
+                integration.external_store_id = merchant_id_str
                 # token-login: enable if api_key exists (refresh_token
                 # arrives separately via app.store.authorize webhook).
                 # OAuth callback uses the stricter has_valid_tokens() check.
@@ -333,6 +334,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 db.add(Integration(
                     tenant_id = tenant_id,
                     provider  = "salla",
+                    external_store_id = merchant_id_str,
                     config    = {
                         "store_id":          merchant_id_str,
                         "store_name":        store_name,
@@ -1134,7 +1136,7 @@ async def salla_oauth_callback(
                 # Check by store_id to avoid duplicate tenant name error
                 existing_integ = db.query(Integration).filter(
                     Integration.provider == "salla",
-                    Integration.config["store_id"].astext == str(salla_store_id),
+                    Integration.external_store_id == str(salla_store_id),
                 ).first() if salla_store_id else None
 
                 if existing_integ:
@@ -1194,7 +1196,7 @@ async def salla_oauth_callback(
             # Search ALL integrations (enabled+disabled) to find the tenant.
             existing_integ = db.query(Integration).filter(
                 Integration.provider == "salla",
-                Integration.config["store_id"].astext == str(salla_store_id),
+                Integration.external_store_id == str(salla_store_id),
             ).first()
             if existing_integ:
                 tenant_id = existing_integ.tenant_id

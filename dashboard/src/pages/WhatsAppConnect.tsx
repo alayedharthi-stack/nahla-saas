@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  AlertTriangle,
   BadgeCheck,
   Building2,
   CheckCircle2,
@@ -980,6 +981,7 @@ export default function WhatsAppConnect() {
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState('')
   const [status, setStatus]   = useState<WaConnection | null>(null)
+  const [showDisconnectModal, setShowDisconnectModal] = useState(false)
 
   // Step 1
   const [phone, setPhone]             = useState('')
@@ -1129,7 +1131,7 @@ export default function WhatsAppConnect() {
     finally { setBusy(false) }
   }, [phoneNumberId, vertical, about, address, email, website])
 
-  const handleDisconnect = useCallback(async () => {
+  const handleDisconnect = useCallback(() => {
     const managedByOps =
       status?.provider === 'dialog360' ||
       status?.connection_type === 'coexistence' ||
@@ -1138,15 +1140,19 @@ export default function WhatsAppConnect() {
       setError('فصل هذا النوع من الربط يتم عبر فريق نحلة حفاظًا على استقرار القناة.')
       return
     }
-    if (!confirm('فصل واتساب؟ سيتوقف الرد التلقائي.')) return
+    setShowDisconnectModal(true)
+  }, [connLabel, status])
+
+  const confirmDisconnect = useCallback(async () => {
     setBusy(true)
     try {
       await disconnect()
+      setShowDisconnectModal(false)
       setStep(1); setPhone(''); setDisplayName(''); setOtp('')
       setConnPhone(''); setConnName('')
-    } catch { setError('فشل الفصل') }
+    } catch { setError('تعذّر فصل واتساب — حاول مرة أخرى') }
     finally { setBusy(false) }
-  }, [connLabel, status])
+  }, [])
 
   // ─────────────────────────────────────────────────────────────────────────
   if (loading) return (
@@ -1156,6 +1162,13 @@ export default function WhatsAppConnect() {
   )
 
   return (
+    <>
+    <DisconnectModal
+      open={showDisconnectModal}
+      busy={busy}
+      onConfirm={confirmDisconnect}
+      onCancel={() => setShowDisconnectModal(false)}
+    />
     <div className="max-w-lg mx-auto space-y-4" dir="rtl">
 
       {/* Header */}
@@ -1541,6 +1554,80 @@ export default function WhatsAppConnect() {
           </div>
         </div>
       )}
+    </div>
+    </>
+  )
+}
+
+// ── Disconnect Confirmation Modal ─────────────────────────────────────────
+
+function DisconnectModal({
+  open,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  open:      boolean
+  busy:      boolean
+  onConfirm: () => void
+  onCancel:  () => void
+}) {
+  if (!open) return null
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm"
+      onClick={e => { if (e.target === e.currentTarget) onCancel() }}
+    >
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-5" dir="rtl">
+        {/* Icon + title */}
+        <div className="flex flex-col items-center gap-3 text-center">
+          <div className="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center">
+            <AlertTriangle className="w-7 h-7 text-red-500" />
+          </div>
+          <div>
+            <p className="text-base font-black text-slate-800">فصل واتساب؟</p>
+            <p className="text-sm text-slate-500 mt-1">
+              سيتوقف الرد التلقائي على العملاء فور الفصل.
+              يمكنك إعادة الربط في أي وقت.
+            </p>
+          </div>
+        </div>
+
+        {/* Checklist of consequences */}
+        <ul className="space-y-2 text-sm text-slate-600 bg-slate-50 rounded-xl p-4">
+          {[
+            'سيتوقف نحلة AI عن الرد على رسائل واتساب',
+            'لن تُرسل الحملات التسويقية عبر واتساب',
+            'تبقى بيانات المتجر والمحادثات السابقة محفوظة',
+          ].map(line => (
+            <li key={line} className="flex items-start gap-2">
+              <span className="mt-0.5 shrink-0 text-red-400">•</span>
+              {line}
+            </li>
+          ))}
+        </ul>
+
+        {/* Actions */}
+        <div className="flex gap-3">
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="flex-1 border border-slate-200 rounded-xl py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition disabled:opacity-60"
+          >
+            إلغاء
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className="flex-1 bg-red-500 hover:bg-red-600 rounded-xl py-2.5 text-sm font-bold text-white transition disabled:opacity-60 flex items-center justify-center gap-2"
+          >
+            {busy
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ الفصل...</>
+              : <><Unplug className="w-4 h-4" /> تأكيد الفصل</>
+            }
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

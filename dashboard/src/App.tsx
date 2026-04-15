@@ -34,6 +34,7 @@ import AdminFeatures from './pages/AdminFeatures'
 import AdminTroubleshooting from './pages/AdminTroubleshooting'
 import AdminCoexistence from './pages/AdminCoexistence'
 import AdminSystemStatus from './pages/AdminSystemStatus'
+import AdminTools from './pages/AdminTools'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
@@ -119,6 +120,7 @@ export default function App() {
             <Route path="admin/coexistence"  element={<AdminCoexistence />} />
             <Route path="admin/team"         element={<AdminTeam />} />
             <Route path="admin/system"       element={<AdminSystemStatus />} />
+            <Route path="admin/tools"        element={<AdminTools />} />
             <Route path="billing"            element={<Billing />} />
             <Route path="widgets"            element={<MerchantWidgets />} />
           </Route>

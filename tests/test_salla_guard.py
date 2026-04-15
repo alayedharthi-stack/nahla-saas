@@ -59,6 +59,7 @@ def _integration(db, tenant_id: int, store_id: str, *, api_key="tok", refresh_to
     i = Integration(
         tenant_id=tenant_id,
         provider="salla",
+        external_store_id=store_id,
         config={"store_id": store_id, "api_key": api_key, "refresh_token": refresh_token},
         enabled=enabled,
     )
@@ -152,6 +153,16 @@ class TestClaimStore:
         assert result.enabled is True
 
     def test_revokes_stale_on_same_store(self, db):
+        """
+        When a different tenant claims the store, `claim_store_for_tenant`
+        revokes the old binding then repurposes the existing Integration row
+        for the new tenant.
+
+        Observable postconditions:
+          • result belongs to new tenant and is enabled
+          • exactly one active integration exists for that store_id
+          • the old tenant has no active binding for that store_id
+        """
         from services.salla_guard import claim_store_for_tenant
         old = _integration(db, 1, "S200")
         assert old.enabled is True
@@ -161,14 +172,27 @@ class TestClaimStore:
         result = claim_store_for_tenant(db, store_id="S200", tenant_id=2, new_config=cfg)
         db.commit()
 
-        db.refresh(old)
-        assert old.enabled is False
-        assert old.config.get("api_key") is None
-        assert old.config.get("refresh_token") is None
-        assert "revoked_reason" in old.config
-
+        # New tenant is the owner
         assert result.tenant_id == 2
         assert result.enabled is True
+
+        # Only one active binding for the store
+        from database.models import Integration as _Int
+        active = db.query(_Int).filter(
+            _Int.provider == "salla",
+            _Int.external_store_id == "S200",
+            _Int.enabled == True,  # noqa: E712
+        ).all()
+        assert len(active) == 1, "Exactly one active binding must exist after claim"
+
+        # Old tenant (1) no longer has an active binding
+        old_active = db.query(_Int).filter(
+            _Int.provider == "salla",
+            _Int.external_store_id == "S200",
+            _Int.tenant_id == 1,
+            _Int.enabled == True,  # noqa: E712
+        ).first()
+        assert old_active is None, "Old tenant must lose its active binding after store transfer"
 
     def test_updates_existing_for_same_tenant(self, db):
         from services.salla_guard import claim_store_for_tenant

@@ -668,6 +668,7 @@ async def link_salla_store(
         cfg = dict(existing.config or {})
         cfg["store_id"] = body.salla_store_id
         existing.config = cfg
+        existing.external_store_id = body.salla_store_id
         existing.enabled = True
         db.commit()
         return {"status": "updated", "tenant_id": body.tenant_id, "salla_store_id": body.salla_store_id}
@@ -675,6 +676,7 @@ async def link_salla_store(
     new_integ = Integration(
         provider="salla",
         tenant_id=body.tenant_id,
+        external_store_id=body.salla_store_id,
         enabled=True,
         config={"store_id": body.salla_store_id},
     )
@@ -1516,6 +1518,284 @@ async def admin_force_connect_whatsapp(
 
 
 # ── Coexistence (360dialog) request management ──────────────────────────────
+
+@router.post("/admin/whatsapp/disconnect/{tenant_id}")
+async def admin_force_disconnect_whatsapp(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Force-disconnect WhatsApp for any tenant (admin only).
+    Wipes WABA_ID, PHONE_NUMBER_ID, ACCESS_TOKEN and sets status to disconnected.
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id
+    ).first()
+
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد اتصال واتساب لهذا التاجر")
+
+    now           = datetime.now(timezone.utc)
+    actor_user_id = _admin.get("user_id")
+
+    conn.status                       = "disconnected"
+    conn.whatsapp_business_account_id = None
+    conn.phone_number_id              = None
+    conn.access_token                 = None
+    conn.token_type                   = None
+    conn.token_expires_at             = None
+    conn.sending_enabled              = False
+    conn.webhook_verified             = False
+    conn.last_error                   = None
+    conn.updated_at                   = now
+    conn.disconnect_reason            = "admin_forced_disconnect"
+    conn.disconnected_at              = now
+    conn.disconnected_by_user_id      = actor_user_id
+
+    db.commit()
+    audit(
+        "admin_force_disconnect_whatsapp",
+        admin=_admin.get("sub"),
+        actor_user_id=actor_user_id,
+        tenant_id=tenant_id,
+    )
+    return {"ok": True, "tenant_id": tenant_id, "status": "disconnected"}
+
+
+@router.delete("/admin/tenants/{tenant_id}")
+async def delete_tenant(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Permanently delete a tenant and ALL related data (admin only).
+    Removes: users, integrations, whatsapp_connections, sync_jobs, billing records.
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    audit(
+        "tenant_deleted_by_admin",
+        admin=_admin.get("sub"),
+        tenant_id=tenant_id,
+        tenant_name=tenant.name,
+    )
+
+    # Delete child records that have FK to tenant
+    from sqlalchemy import text  # noqa: PLC0415
+    tables_with_tenant_fk = [
+        "whatsapp_connections",
+        "whatsapp_usage",
+        "integrations",
+        "store_sync_jobs",
+        "store_knowledge_snapshots",
+        "billing_subscriptions",
+        "billing_invoices",
+        "billing_payments",
+        "conversation_logs",
+        "conversation_traces",
+        "ai_action_logs",
+        "system_events",
+        "orders",
+        "products",
+        "customers",
+        "coupon_codes",
+        "tenant_settings",
+        "merchant_addons",
+        "merchant_widgets",
+        "users",
+    ]
+    for table in tables_with_tenant_fk:
+        try:
+            db.execute(text(f"DELETE FROM {table} WHERE tenant_id = :tid"), {"tid": tenant_id})
+        except Exception as _e:
+            logger.warning("delete_tenant: could not delete from %s: %s", table, _e)
+
+    db.delete(tenant)
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("delete_tenant: commit failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"فشل حذف المتجر: {exc}")
+
+    return {"deleted": True, "tenant_id": tenant_id}
+
+
+# ── Admin Tools: Duplicate Detection & Cleanup ───────────────────────────────
+
+@router.get("/admin/tools/duplicate-salla-stores")
+async def list_duplicate_salla_stores(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Detect Salla stores where multiple tenants share the same store_id.
+    Returns groups of duplicates sorted by store_id.
+    """
+    salla_integrations = (
+        db.query(Integration)
+        .filter(Integration.provider == "salla")
+        .order_by(Integration.id.asc())
+        .all()
+    )
+
+    groups: Dict[str, list] = {}
+    for intg in salla_integrations:
+        store_id = (intg.config or {}).get("store_id", "")
+        if not store_id:
+            continue
+        if store_id not in groups:
+            groups[store_id] = []
+
+        tenant = db.query(Tenant).filter(Tenant.id == intg.tenant_id).first()
+        wa = db.query(WhatsAppConnection).filter(
+            WhatsAppConnection.tenant_id == intg.tenant_id
+        ).first()
+        users = db.query(User).filter(User.tenant_id == intg.tenant_id).all()
+
+        groups[store_id].append({
+            "integration_id": intg.id,
+            "tenant_id":      intg.tenant_id,
+            "tenant_name":    tenant.name if tenant else "—",
+            "is_active":      bool(tenant.is_active) if tenant else False,
+            "store_id":       store_id,
+            "store_name":     (intg.config or {}).get("store_name", ""),
+            "enabled":        bool(intg.enabled),
+            "created_at":     tenant.created_at.isoformat() if tenant and tenant.created_at else None,
+            "wa_status":      wa.status if wa else "not_connected",
+            "wa_connected":   bool(wa and wa.status == "connected" and wa.sending_enabled),
+            "user_count":     len(users),
+            "user_emails":    [u.email for u in users],
+        })
+
+    duplicates = [
+        {"store_id": sid, "count": len(entries), "entries": entries}
+        for sid, entries in groups.items()
+        if len(entries) > 1
+    ]
+    duplicates.sort(key=lambda g: g["count"], reverse=True)
+
+    return {
+        "total_duplicate_groups": len(duplicates),
+        "total_extra_tenants": sum(g["count"] - 1 for g in duplicates),
+        "groups": duplicates,
+    }
+
+
+class FixDuplicatesIn(BaseModel):
+    store_id:    str
+    keep_tenant_id: Optional[int] = None  # If None, keeps the one with highest ID (newest)
+    dry_run:     bool = True
+
+
+@router.post("/admin/tools/fix-duplicates")
+async def fix_duplicate_salla_stores(
+    body: FixDuplicatesIn,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Merge duplicate tenants for a given Salla store_id.
+    Keeps the specified tenant (or the newest by ID) and deletes the rest.
+    Set dry_run=false to actually apply changes.
+    """
+    salla_integrations = (
+        db.query(Integration)
+        .filter(
+            Integration.provider == "salla",
+            Integration.external_store_id == body.store_id,
+        )
+        .order_by(Integration.tenant_id.desc())
+        .all()
+    )
+
+    if len(salla_integrations) <= 1:
+        return {"message": "لا يوجد تكرار لهذا المتجر", "store_id": body.store_id, "count": len(salla_integrations)}
+
+    # Determine which tenant to keep
+    if body.keep_tenant_id:
+        keep_tenant_id = body.keep_tenant_id
+    else:
+        # Keep the one with the highest tenant_id (most recently created)
+        keep_tenant_id = max(intg.tenant_id for intg in salla_integrations)
+
+    to_delete = [intg.tenant_id for intg in salla_integrations if intg.tenant_id != keep_tenant_id]
+
+    preview = {
+        "store_id":       body.store_id,
+        "keep_tenant_id": keep_tenant_id,
+        "delete_tenant_ids": to_delete,
+        "dry_run":        body.dry_run,
+    }
+
+    if body.dry_run:
+        return {**preview, "status": "dry_run — no changes made"}
+
+    from sqlalchemy import text  # noqa: PLC0415
+    tables_with_tenant_fk = [
+        "whatsapp_connections",
+        "whatsapp_usage",
+        "integrations",
+        "store_sync_jobs",
+        "store_knowledge_snapshots",
+        "billing_subscriptions",
+        "billing_invoices",
+        "billing_payments",
+        "conversation_logs",
+        "conversation_traces",
+        "ai_action_logs",
+        "system_events",
+        "orders",
+        "products",
+        "customers",
+        "coupon_codes",
+        "tenant_settings",
+        "merchant_addons",
+        "merchant_widgets",
+        "users",
+    ]
+
+    deleted_tenant_ids = []
+    for tid in to_delete:
+        tenant = db.query(Tenant).filter(Tenant.id == tid).first()
+        if not tenant:
+            continue
+        audit(
+            "duplicate_tenant_deleted",
+            admin=_admin.get("sub"),
+            store_id=body.store_id,
+            deleted_tenant_id=tid,
+            kept_tenant_id=keep_tenant_id,
+        )
+        for table in tables_with_tenant_fk:
+            try:
+                db.execute(text(f"DELETE FROM {table} WHERE tenant_id = :tid"), {"tid": tid})
+            except Exception as _e:
+                logger.warning("fix_duplicates: could not delete from %s tenant=%s: %s", table, tid, _e)
+        db.delete(tenant)
+        deleted_tenant_ids.append(tid)
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("fix_duplicates: commit failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"فشل تنظيف التكرارات: {exc}")
+
+    return {
+        **preview,
+        "status":              "done",
+        "deleted_tenant_ids":  deleted_tenant_ids,
+    }
+
 
 @router.get("/admin/coexistence/requests")
 async def admin_list_coexistence_requests(

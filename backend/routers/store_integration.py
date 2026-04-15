@@ -52,7 +52,7 @@ async def get_store_integration_settings(request: Request, db: Session = Depends
     return {
         "configured": True,
         "platform":   integration.provider,
-        "store_id":   cfg.get("store_id", ""),
+        "store_id":   integration.external_store_id or cfg.get("store_id", ""),
         "api_key_hint": ("***" + cfg.get("api_key", "")[-4:]) if cfg.get("api_key") else "",
         "enabled":    integration.enabled,
     }
@@ -78,6 +78,7 @@ async def put_store_integration_settings(
             "store_id":      body.store_id,
             "webhook_secret": body.webhook_secret,
         })
+        integration.external_store_id = body.store_id or None
         integration.config  = merged_config
         integration.enabled = body.enabled
     else:
@@ -89,6 +90,7 @@ async def put_store_integration_settings(
         integration = Integration(
             tenant_id=tenant_id,
             provider=body.platform,
+            external_store_id=body.store_id or None,
             config=new_config,
             enabled=body.enabled,
         )
@@ -151,7 +153,7 @@ async def debug_salla_integration(request: Request, db: Session = Depends(get_db
     cfg = integration.config or {}
     has_token = bool(cfg.get("api_key"))
     has_refresh = bool(cfg.get("refresh_token"))
-    store_id = cfg.get("store_id", "")
+    store_id = integration.external_store_id or cfg.get("store_id", "")
 
     from models import Product, Order, Coupon  # noqa: PLC0415
     local_products = db.query(Product).filter_by(tenant_id=tenant_id).count()
@@ -253,6 +255,7 @@ async def copy_integration_from_tenant(
         target = Integration(
             tenant_id=tenant_id,
             provider="salla",
+            external_store_id=source.external_store_id or (source.config or {}).get("store_id"),
             config=dict(source.config),
             enabled=True,
         )

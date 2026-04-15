@@ -36,7 +36,7 @@ def get_tenant_id_for_store(provider: str, store_id: str) -> Optional[int]:
             .filter(
                 Integration.provider == provider,
                 Integration.enabled  == True,
-                Integration.config["store_id"].astext == str(store_id),
+                Integration.external_store_id == str(store_id),
             )
             .first()
         )
@@ -58,7 +58,7 @@ def get_integration_config(provider: str, store_id: str) -> Optional[Dict[str, A
             .filter(
                 Integration.provider == provider,
                 Integration.enabled  == True,
-                Integration.config["store_id"].astext == str(store_id),
+                Integration.external_store_id == str(store_id),
             )
             .first()
         )
@@ -99,20 +99,28 @@ def upsert_tenant_and_integration(
             db.query(Integration)
             .filter(
                 Integration.provider == provider,
-                Integration.config["store_id"].astext == store_id,
+                Integration.external_store_id == store_id,
             )
             .first()
         )
 
         if existing:
+            tenant = db.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
+            if tenant:
+                tenant.name = store_name or tenant.name
+                tenant.domain = domain
             existing.config = {
                 **existing.config,
+                "store_id": store_id,
+                "store_name": store_name,
+                "store_domain": store_data.get("store_domain", ""),
+                "store_email": store_data.get("store_email", ""),
                 "access_token":  store_data.get("access_token"),
                 "refresh_token": store_data.get("refresh_token"),
             }
+            existing.external_store_id = store_id
             existing.enabled = True
             db.commit()
-            tenant = db.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
             return _to_dict(tenant, existing, provider)
 
         # Fresh install
@@ -123,6 +131,7 @@ def upsert_tenant_and_integration(
         integration = Integration(
             provider   = provider,
             tenant_id  = tenant.id,
+            external_store_id = store_id,
             enabled    = True,
             config     = {
                 "store_id":    store_id,
@@ -148,6 +157,6 @@ def _to_dict(tenant: Tenant, integration: Integration, provider: str) -> Dict[st
         "name":           tenant.name,
         "domain":         tenant.domain,
         "provider":       provider,
-        "store_id":       integration.config.get("store_id"),
+        "store_id":       integration.external_store_id or integration.config.get("store_id"),
         "integration_id": integration.id,
     }

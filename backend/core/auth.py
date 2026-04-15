@@ -263,6 +263,22 @@ def get_jwt_tenant_id(request: Request) -> int:
     return int(tid)
 
 
+def get_jwt_user_id(request: Request) -> Optional[int]:
+    """
+    Read user_id from the validated JWT payload stored in request.state.
+
+    Returns None (never raises) when the claim is absent — the caller decides
+    whether that is an error.  Suitable for audit fields that should not block
+    the main operation if the claim is missing.
+    """
+    try:
+        payload = require_authenticated(request)
+        uid = payload.get("user_id")
+        return int(uid) if uid is not None else None
+    except (HTTPException, TypeError, ValueError):
+        return None
+
+
 def get_client_ip(request: Request) -> str:
     """Extract real client IP, honouring common reverse-proxy headers."""
     return (

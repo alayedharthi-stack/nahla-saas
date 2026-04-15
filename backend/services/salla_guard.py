@@ -97,7 +97,7 @@ def claim_store_for_tenant(
         .filter(
             Integration.provider == "salla",
             Integration.tenant_id != tenant_id,
-            Integration.config["store_id"].astext == str(store_id),
+            Integration.external_store_id == str(store_id),
         )
         .all()
     )
@@ -116,10 +116,15 @@ def claim_store_for_tenant(
     # ── Upsert the winning integration ────────────────────────────────────
     integration = (
         db.query(Integration)
-        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .filter(
+            Integration.provider == "salla",
+            Integration.external_store_id == str(store_id),
+        )
         .first()
     )
     if integration:
+        integration.tenant_id = tenant_id
+        integration.external_store_id = str(store_id)
         integration.config = new_config
         integration.enabled = True
         logger.info(
@@ -130,6 +135,7 @@ def claim_store_for_tenant(
         integration = Integration(
             tenant_id=tenant_id,
             provider="salla",
+            external_store_id=str(store_id),
             config=new_config,
             enabled=True,
         )
@@ -172,7 +178,7 @@ def validate_before_sync(db: Session, tenant_id: int) -> tuple[bool, str]:
         )
         return False, "توكن سلة مفقود. أعد تثبيت التطبيق من متجر سلة أو أعد الربط عبر OAuth."
 
-    store_id = (integration.config or {}).get("store_id", "")
+    store_id = integration.external_store_id or (integration.config or {}).get("store_id", "")
     if store_id:
         duplicate = (
             db.query(Integration)
@@ -180,7 +186,7 @@ def validate_before_sync(db: Session, tenant_id: int) -> tuple[bool, str]:
                 Integration.provider == "salla",
                 Integration.enabled == True,  # noqa: E712
                 Integration.tenant_id != tenant_id,
-                Integration.config["store_id"].astext == str(store_id),
+                Integration.external_store_id == str(store_id),
             )
             .first()
         )

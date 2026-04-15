@@ -193,7 +193,7 @@ def _resolve_tenant_from_store(db, store_id) -> int | None:
     active = db.query(Integration).filter(
         Integration.provider == "salla",
         Integration.enabled == True,  # noqa: E712
-        Integration.config["store_id"].astext == sid,
+        Integration.external_store_id == sid,
     ).first()
     if active:
         logger.info("[Salla WH] resolved store_id=%s → tenant=%s (integration id=%s)", sid, active.tenant_id, active.id)
@@ -201,7 +201,7 @@ def _resolve_tenant_from_store(db, store_id) -> int | None:
 
     disabled = db.query(Integration).filter(
         Integration.provider == "salla",
-        Integration.config["store_id"].astext == sid,
+        Integration.external_store_id == sid,
     ).first()
     if disabled:
         logger.warning(
@@ -244,7 +244,7 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
     try:
         existing_integration = db.query(Integration).filter(
             Integration.provider == "salla",
-            Integration.config["store_id"].astext == salla_store_id,
+            Integration.external_store_id == salla_store_id,
         ).first()
     except Exception as _e:
         logger.warning("[Salla Webhook] Integration lookup error: %s", _e)
@@ -315,6 +315,7 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         integration = Integration(
             tenant_id=tenant_id,
             provider="salla",
+            external_store_id=salla_store_id,
             config={
                 "api_key":       access_token,
                 "refresh_token": refresh_token,
@@ -354,7 +355,7 @@ def _disable_salla_integration(db, store_id: str) -> None:
     sid = str(store_id)
     integrations = db.query(Integration).filter(
         Integration.provider == "salla",
-        Integration.config["store_id"].astext == sid,
+        Integration.external_store_id == sid,
     ).all()
 
     for intg in integrations:

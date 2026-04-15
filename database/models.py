@@ -174,8 +174,12 @@ class CouponRule(Base):
 
 class Integration(Base):
     __tablename__ = 'integrations'
+    __table_args__ = (
+        UniqueConstraint('provider', 'external_store_id', name='uq_integrations_provider_external_store_id'),
+    )
     id = Column(Integer, primary_key=True)
     provider = Column(String, nullable=False)
+    external_store_id = Column(String, nullable=True)
     config = Column(JSONB, nullable=True)
     enabled = Column(Boolean, default=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
@@ -838,6 +842,13 @@ class WhatsAppConnection(Base):
     last_verified_at  = Column(DateTime, nullable=True)
     last_attempt_at   = Column(DateTime, nullable=True)
     last_error        = Column(Text, nullable=True)
+
+    # Disconnect audit — structured record of every explicit disconnect event.
+    # Values: 'merchant_requested_disconnect' | 'admin_forced_disconnect'
+    # Cleared to NULL when the merchant initiates a reconnect.
+    disconnect_reason       = Column(String,   nullable=True)
+    disconnected_at         = Column(DateTime, nullable=True)
+    disconnected_by_user_id = Column(Integer,  nullable=True)
 
     # Prerequisites flags ─────────────────────────────────────────────────────
     webhook_verified  = Column(Boolean, default=False)

@@ -34,7 +34,8 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from models import WhatsAppConnection  # noqa: E402
 
-from core.auth import require_admin
+from core.audit import audit
+from core.auth import get_jwt_user_id, require_admin
 from core.config import (
     BACKEND_URL,
     D360_COHOST_ALLOW_SELF_REQUEST,
@@ -563,14 +564,27 @@ async def disconnect(request: Request, db: Session = Depends(get_db)):
             detail="فصل واتساب الجوال + الذكاء الاصطناعي يتم حاليًا عبر فريق نحلة حفاظًا على سلامة الربط.",
         )
 
-    conn.status          = "disconnected"
-    conn.access_token    = None
-    conn.token_type      = None
-    conn.token_expires_at = None
-    conn.sending_enabled = False
-    conn.last_error      = None
+    actor_user_id = get_jwt_user_id(request)
+    now           = datetime.now(timezone.utc)
+
+    conn.status                  = "disconnected"
+    conn.access_token            = None
+    conn.token_type              = None
+    conn.token_expires_at        = None
+    conn.sending_enabled         = False
+    conn.last_error              = None
+    conn.disconnect_reason       = "merchant_requested_disconnect"
+    conn.disconnected_at         = now
+    conn.disconnected_by_user_id = actor_user_id
+
     db.commit()
-    logger.info("tenant=%s WhatsApp disconnected", tenant_id)
+    audit(
+        "whatsapp_disconnect",
+        reason="merchant_requested_disconnect",
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+    )
+    logger.info("tenant=%s WhatsApp disconnected by merchant user_id=%s", tenant_id, actor_user_id)
     return {"status": "disconnected"}
 
 
@@ -582,9 +596,12 @@ async def reconnect(request: Request, db: Session = Depends(get_db)):
 
     if _wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
         _set_coexistence_state(conn, status="pending_activation")
-        conn.status = "pending_activation"
-        conn.last_attempt_at = datetime.now(timezone.utc)
-        conn.last_error = None
+        conn.status                  = "pending_activation"
+        conn.last_attempt_at         = datetime.now(timezone.utc)
+        conn.last_error              = None
+        conn.disconnect_reason       = None
+        conn.disconnected_at         = None
+        conn.disconnected_by_user_id = None
         db.commit()
         return {
             "status": "pending_activation",
@@ -592,9 +609,12 @@ async def reconnect(request: Request, db: Session = Depends(get_db)):
             **_coexistence_status_payload(conn),
         }
 
-    conn.status          = "pending"
-    conn.last_attempt_at = datetime.now(timezone.utc)
-    conn.last_error      = None
+    conn.status                  = "pending"
+    conn.last_attempt_at         = datetime.now(timezone.utc)
+    conn.last_error              = None
+    conn.disconnect_reason       = None
+    conn.disconnected_at         = None
+    conn.disconnected_by_user_id = None
     db.commit()
     return {
         "status":      "pending",
