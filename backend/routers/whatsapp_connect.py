@@ -615,13 +615,53 @@ async def manual_connect(
         tenant_id, pid, wid, actor_user_id,
     )
 
+    # Try to subscribe the WABA to our Meta App's webhooks automatically.
+    # This uses the merchant-provided access_token to call the Meta Graph API.
+    # Failure is non-fatal — the merchant can configure the webhook manually.
+    webhook_subscribed = False
+    try:
+        import httpx as _httpx  # noqa: PLC0415
+        from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+        sub_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{wid}/subscribed_apps"
+        sub_resp = _httpx.post(
+            sub_url,
+            params={"access_token": token},
+            json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+            timeout=10,
+        )
+        if sub_resp.status_code == 200 and sub_resp.json().get("success"):
+            webhook_subscribed = True
+            conn.webhook_verified = True
+            db.commit()
+            logger.info(
+                "[manual_connect] WABA webhook subscribed successfully tenant=%s waba_id=%s",
+                tenant_id, wid,
+            )
+        else:
+            logger.warning(
+                "[manual_connect] WABA webhook subscription failed tenant=%s waba_id=%s resp=%s",
+                tenant_id, wid, sub_resp.text[:200],
+            )
+    except Exception as _sub_err:
+        logger.warning(
+            "[manual_connect] WABA webhook subscription error tenant=%s: %s",
+            tenant_id, _sub_err,
+        )
+
     return {
-        "status":          "connected",
-        "phone_number_id": conn.phone_number_id,
-        "waba_id":         conn.whatsapp_business_account_id,
-        "connection_type": conn.connection_type,
-        "sending_enabled": conn.sending_enabled,
-        "connected_at":    conn.connected_at.isoformat() if conn.connected_at else None,
+        "status":             "connected",
+        "phone_number_id":    conn.phone_number_id,
+        "waba_id":            conn.whatsapp_business_account_id,
+        "connection_type":    conn.connection_type,
+        "sending_enabled":    conn.sending_enabled,
+        "connected_at":       conn.connected_at.isoformat() if conn.connected_at else None,
+        "webhook_subscribed": webhook_subscribed,
+        "webhook_setup_note": (
+            None if webhook_subscribed else
+            "يرجى التأكد من إعداد Webhook في Meta Developers: "
+            "URL=https://api.nahlah.ai/webhook/whatsapp "
+            "وVerify Token=nahla2025 مع الاشتراك في messages"
+        ),
     }
 
 

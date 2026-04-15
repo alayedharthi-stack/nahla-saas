@@ -1679,6 +1679,63 @@ async def admin_force_disconnect_whatsapp(
     return {"ok": True, "tenant_id": tenant_id, "status": "disconnected"}
 
 
+@router.post("/admin/whatsapp/resubscribe-webhook/{tenant_id}")
+async def admin_resubscribe_webhook(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Re-subscribe the tenant's WABA to Meta webhooks using their stored access_token.
+    Useful when manual-connect was done but webhook is not receiving messages.
+    """
+    conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id
+    ).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد اتصال واتساب")
+    if not conn.whatsapp_business_account_id:
+        raise HTTPException(status_code=400, detail="WABA ID غير متوفر — أعد الربط اليدوي أولاً")
+    if not conn.access_token:
+        raise HTTPException(status_code=400, detail="Access Token غير متوفر — أعد الربط اليدوي أولاً")
+
+    import httpx as _httpx  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+
+    waba_id   = conn.whatsapp_business_account_id
+    token     = conn.access_token
+    sub_url   = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{waba_id}/subscribed_apps"
+    try:
+        resp = _httpx.post(
+            sub_url,
+            params={"access_token": token},
+            json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+            timeout=15,
+        )
+        data = resp.json()
+        success = bool(data.get("success"))
+        if success:
+            conn.webhook_verified = True
+            conn.updated_at       = datetime.now(timezone.utc)
+            db.commit()
+            logger.info(
+                "[admin] WABA webhook resubscribed tenant=%s waba_id=%s",
+                tenant_id, waba_id,
+            )
+        return {
+            "ok":          success,
+            "tenant_id":   tenant_id,
+            "waba_id":     waba_id,
+            "meta_response": data,
+            "note": (
+                "تم الاشتراك بنجاح — يجب أن تصل الرسائل الآن." if success
+                else "فشل الاشتراك — تحقق من صلاحية الـ Access Token وأنه يملك صلاحية whatsapp_business_messaging"
+            ),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"خطأ في الاتصال بـ Meta: {exc}") from exc
+
+
 @router.delete("/admin/tenants/{tenant_id}")
 async def delete_tenant(
     tenant_id: int,
