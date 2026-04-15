@@ -34,6 +34,17 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Return dt as a timezone-aware UTC datetime.
+    DB columns stored as naive UTC are made aware; already-aware datetimes
+    are converted to UTC.  None is passed through unchanged."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _read_meta(conn: Any) -> Dict[str, Any]:
     return dict(getattr(conn, "extra_metadata", None) or {})
 
@@ -41,10 +52,11 @@ def _read_meta(conn: Any) -> Dict[str, Any]:
 def _merchant_token_health(conn: Any) -> Tuple[str, Optional[datetime]]:
     if not conn or not getattr(conn, "access_token", None):
         return "missing", None
-    expires_at = getattr(conn, "token_expires_at", None)
-    if expires_at and _now_utc() > expires_at:
+    expires_at = _as_utc(getattr(conn, "token_expires_at", None))
+    now = _now_utc()
+    if expires_at and now > expires_at:
         return "expired", expires_at
-    if expires_at and expires_at - _now_utc() <= timedelta(days=7):
+    if expires_at and expires_at - now <= timedelta(days=7):
         return "expiring_soon", expires_at
     if not expires_at:
         return "expiring_soon", None
@@ -60,7 +72,7 @@ def get_oauth_session_state(conn: Any) -> tuple[str, Optional[str]]:
     if getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT and not getattr(conn, "access_token", None):
         return "not_applicable", None
     access_token = getattr(conn, "access_token", None)
-    expires_at = getattr(conn, "token_expires_at", None)
+    expires_at = _as_utc(getattr(conn, "token_expires_at", None))
     if access_token and expires_at and _now_utc() > expires_at:
         return (
             "expired",
