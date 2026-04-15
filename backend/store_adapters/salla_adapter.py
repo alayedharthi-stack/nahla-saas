@@ -561,24 +561,39 @@ class SallaAdapter(BaseStoreAdapter):
         discount_value: int = 10,
         expiry_days: int = 3,
     ) -> Optional[Dict[str, Any]]:
-        """Create a coupon in Salla. Returns the created coupon data or None."""
+        """Create a coupon in Salla. Returns the created coupon data or None.
+
+        Salla Admin API v2 expects:
+          type        = "PERCENT" | "FIXED"  (uppercase)
+          percent_off = integer (when PERCENT)
+          amount_off  = integer (when FIXED)
+        The old fields "amount" + lowercase "type" are rejected with 422.
+        """
         start_dt = datetime.now(timezone.utc)
         expiry_dt = start_dt + timedelta(days=expiry_days)
-        start = start_dt.strftime("%Y-%m-%d")
+        start  = start_dt.strftime("%Y-%m-%d")
         expiry = expiry_dt.strftime("%Y-%m-%d")
+
+        # Normalise type to what Salla v2 API actually expects
+        salla_type = "PERCENT" if discount_type in ("percentage", "PERCENT") else "FIXED"
+        is_percent = salla_type == "PERCENT"
+
         payload = {
-            "code": code,
-            "type": discount_type,
-            "amount": discount_value,
-            "free_shipping": False,
-            "start_date": start,
-            "expiry_date": expiry,
-            "exclude_sale_products": False,
+            "code":                   code,
+            "type":                   salla_type,
+            "percent_off":            int(discount_value) if is_percent else 0,
+            "amount_off":             int(discount_value) if not is_percent else 0,
+            "status":                 "active",
+            "start_date":             start,
+            "expiry_date":            expiry,
+            "free_shipping":          False,
+            "exclude_sale_products":  False,
         }
         try:
             data = await self._post("/coupons", payload)
             if isinstance(data, dict) and isinstance(data.get("data"), dict):
                 data["data"].setdefault("expires_at", expiry_dt.isoformat())
+                data["data"].setdefault("expiry_date", expiry)
             elif isinstance(data, dict):
                 data.setdefault("expires_at", expiry_dt.isoformat())
             logger.info("Salla coupon created: %s | tenant=%s", code, self._tenant_id)
@@ -587,7 +602,7 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("create_coupon", exc)
             logger.error(
                 "Salla create_coupon HTTP %s: %s",
-                exc.response.status_code, exc.response.text[:300],
+                exc.response.status_code, exc.response.text[:500],
             )
             return None
         except Exception as exc:

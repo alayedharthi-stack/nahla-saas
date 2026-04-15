@@ -1911,3 +1911,45 @@ async def admin_list_coexistence_requests(
         logger.error("[admin/coexistence/requests] unhandled error: %s\n%s", exc, _tb.format_exc())
         from fastapi.responses import JSONResponse as _J  # noqa: PLC0415
         return _J(status_code=500, content={"detail": "خطأ في تحميل طلبات الربط", "error": str(exc)})
+
+
+# ── Admin: trigger coupon pool generation immediately ────────────────────────
+
+@router.post("/admin/coupons/generate-pool")
+async def admin_trigger_coupon_pool(
+    tenant_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Immediately trigger coupon pool generation for one or all tenants.
+    Useful after fixing coupon creation bugs to replenish pools without
+    waiting for the 6-hour scheduler cycle.
+    """
+    from models import Integration  # noqa: PLC0415
+    from services.coupon_generator import CouponGeneratorService  # noqa: PLC0415
+
+    query = db.query(Integration).filter(
+        Integration.provider == "salla",
+        Integration.enabled == True,  # noqa: E712
+    )
+    if tenant_id is not None:
+        query = query.filter(Integration.tenant_id == tenant_id)
+
+    integrations = query.all()
+    if not integrations:
+        return {"ok": False, "detail": "لا توجد تكاملات سلة مفعّلة"}
+
+    results = {}
+    for intg in integrations:
+        tid = intg.tenant_id
+        try:
+            svc = CouponGeneratorService(db, tid)
+            created = await svc.ensure_coupon_pool()
+            results[tid] = {"created": created, "total": sum(created.values())}
+            logger.info("[admin/coupons/generate-pool] tenant=%s created=%s", tid, created)
+        except Exception as exc:
+            results[tid] = {"error": str(exc)}
+            logger.error("[admin/coupons/generate-pool] tenant=%s error: %s", tid, exc)
+
+    return {"ok": True, "results": results}
