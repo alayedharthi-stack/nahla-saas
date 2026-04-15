@@ -85,12 +85,16 @@ export interface AdminMerchantSummary {
   created_at: string | null
 }
 
+export type VisibilityTag = 'archived' | 'disconnected' | 'test' | 'pending_payment'
+
 export interface AdminTenantSummary {
   id: number
   name: string
   domain: string | null
   is_active: boolean
   created_at: string | null
+  /** null = visible by default; non-null = would be hidden in filtered view */
+  visibility_tag: VisibilityTag | null
   subscription: {
     status: string
     plan: string
@@ -126,6 +130,8 @@ export interface AdminTenantSummary {
 
 export interface AdminTenantsResponse {
   total: number
+  total_active: number
+  total_hidden: number
   offset: number
   limit: number
   tenants: AdminTenantSummary[]
@@ -223,10 +229,17 @@ export interface AdminSystemHealth {
 export const adminApi = {
   stats: () => apiCall<AdminPlatformStats>('/admin/stats'),
 
-  tenants: (params?: { search?: string; status?: '' | 'active' | 'inactive'; limit?: number; offset?: number }) => {
+  tenants: (params?: {
+    search?: string
+    status?: '' | 'active' | 'inactive'
+    show_all?: boolean
+    limit?: number
+    offset?: number
+  }) => {
     const qs = new URLSearchParams()
     if (params?.search) qs.set('search', params.search)
     if (params?.status) qs.set('status', params.status)
+    if (params?.show_all) qs.set('show_all', 'true')
     if (params?.limit !== undefined) qs.set('limit', String(params.limit))
     if (params?.offset !== undefined) qs.set('offset', String(params.offset))
     const query = qs.toString() ? `?${qs.toString()}` : ''

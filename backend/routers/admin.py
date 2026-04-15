@@ -728,37 +728,85 @@ async def link_salla_store(
     return {"status": "created", "tenant_id": body.tenant_id, "salla_store_id": body.salla_store_id}
 
 
+def _compute_visibility_tag(summary: Dict[str, Any]) -> Optional[str]:
+    """
+    Classify a tenant for the default-view filter.
+
+    Returns one of: 'archived' | 'disconnected' | 'test' | 'pending_payment'
+    Returns None when the tenant should be visible by default (active & relevant).
+
+    Priority (first match wins):
+      1. archived       — tenant is disabled (is_active=False)
+      2. pending_payment — subscription is past_due / canceled / incomplete
+      3. disconnected   — WA explicitly disconnected + no active store integration
+      4. test           — no integration, no WA connection, zero activity
+    """
+    if not summary.get("is_active", True):
+        return "archived"
+
+    sub_status = (summary.get("subscription") or {}).get("status", "")
+    if sub_status in ("past_due", "canceled", "incomplete"):
+        return "pending_payment"
+
+    wa_status = (summary.get("whatsapp") or {}).get("status", "not_connected")
+    integ = summary.get("integration") or {}
+    has_active_integration = bool(integ.get("external_store_id")) and integ.get("enabled") is not False
+
+    if wa_status == "disconnected" and not has_active_integration:
+        return "disconnected"
+
+    stats = summary.get("stats") or {}
+    no_activity = (
+        stats.get("orders", 0) == 0
+        and stats.get("conversations", 0) == 0
+        and stats.get("revenue_sar", 0.0) == 0.0
+    )
+    if not has_active_integration and wa_status in ("not_connected", "") and no_activity:
+        return "test"
+
+    return None
+
+
 @router.get("/admin/tenants")
 async def list_tenants(
     db: Session = Depends(get_db),
     _admin: Dict[str, Any] = Depends(require_admin),
     search: str = "",
     status: str = Query("", pattern="^(|active|inactive)$"),
+    show_all: bool = False,
     limit: int = 50,
     offset: int = 0,
 ):
+    """
+    List tenants for the owner admin panel.
+
+    Default (show_all=false): returns only active, relevant tenants —
+    hides archived, test, disconnected, and pending-payment stores.
+
+    show_all=true: returns every tenant record with its visibility_tag badge.
+    """
     query = db.query(Tenant)
     if search:
         like = f"%{search.strip()}%"
         query = query.filter((Tenant.name.ilike(like)) | (Tenant.domain.ilike(like)))
     if status == "active":
-        query = query.filter(Tenant.is_active == True)  # noqa: E712
+        query = query.filter(Tenant.is_active.is_(True))
     elif status == "inactive":
-        query = query.filter(Tenant.is_active == False)  # noqa: E712
+        query = query.filter(Tenant.is_active.is_(False))
 
-    total = query.count()
+    # Fetch all matching rows (we filter by visibility in Python after computing summaries)
     rows = (
         query.order_by(Tenant.created_at.desc(), Tenant.id.desc())
-        .offset(offset)
-        .limit(min(limit, 200))
+        .limit(2000)   # safety cap — owners rarely have more than a few hundred
         .all()
     )
+
     def _safe_summary(t: Tenant) -> Optional[Dict[str, Any]]:
         try:
-            return _tenant_summary_payload(db, t)
+            s = _tenant_summary_payload(db, t)
         except Exception as _e:
             logger.warning("[admin/tenants] summary failed for tenant %s: %s", t.id, _e)
-            return {
+            s = {
                 "id": t.id, "name": t.name or f"tenant-{t.id}", "domain": t.domain,
                 "is_active": bool(t.is_active),
                 "created_at": t.created_at.isoformat() if t.created_at else None,
@@ -774,12 +822,25 @@ async def list_tenants(
                 "stats":       {"orders": 0, "conversations": 0, "revenue_sar": 0.0},
                 "integration": {"integration_id": None, "external_store_id": None, "enabled": None, "provider": None},
             }
+        s["visibility_tag"] = _compute_visibility_tag(s)
+        return s
+
+    all_summaries = [s for t in rows if (s := _safe_summary(t)) is not None]
+    total_hidden  = sum(1 for s in all_summaries if s["visibility_tag"] is not None)
+    total_active  = len(all_summaries) - total_hidden
+
+    visible = all_summaries if show_all else [s for s in all_summaries if s["visibility_tag"] is None]
+
+    # Apply pagination AFTER visibility filter
+    page = visible[offset : offset + min(limit, 200)]
 
     return {
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "tenants": [s for t in rows if (s := _safe_summary(t)) is not None],
+        "total":        len(visible),
+        "total_active": total_active,
+        "total_hidden": total_hidden,
+        "offset":       offset,
+        "limit":        limit,
+        "tenants":      page,
     }
 
 

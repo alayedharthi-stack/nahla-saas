@@ -674,6 +674,8 @@ class SmartAutomation(Base):
     config = Column(JSONB, nullable=True)          # delays, conditions, coupon_code, etc.
     template_id = Column(Integer, ForeignKey('whatsapp_templates.id'), nullable=True)
     template = relationship('WhatsAppTemplate')
+    # Event-driven engine: which AutomationEvent.event_type triggers this automation
+    trigger_event = Column(String, nullable=True)
     # Aggregate stats
     stats_triggered = Column(Integer, default=0, nullable=False)
     stats_sent = Column(Integer, default=0, nullable=False)
@@ -700,6 +702,27 @@ class AutomationEvent(Base):
     processed = Column(Boolean, default=False, nullable=False)
     automation_id = Column(Integer, ForeignKey('smart_automations.id'), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AutomationExecution(Base):
+    """
+    Records every attempt the automation engine makes to execute a SmartAutomation
+    in response to an AutomationEvent.  Provides idempotency and an audit trail.
+    """
+    __tablename__ = 'automation_executions'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    automation_id = Column(Integer, ForeignKey('smart_automations.id'), nullable=False)
+    event_id = Column(Integer, ForeignKey('automation_events.id'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=True)
+    # sent | skipped | failed
+    status = Column(String, nullable=False)
+    # Reason for skipping or failing
+    skip_reason = Column(String, nullable=True)
+    # What was actually sent: {template_name, to, vars, response}
+    action_taken = Column(JSONB, nullable=True)
+    error_message = Column(Text, nullable=True)
+    executed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class PredictiveReorderEstimate(Base):

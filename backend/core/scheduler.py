@@ -23,6 +23,7 @@ _SYNC_INTERVAL_SECONDS = 3600  # store sync every 1 hour
 _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
 _SALLA_TOKEN_REFRESH_SECONDS = 6 * 3600  # Salla token refresh every 6 hours
+_AUTOMATION_POLL_SECONDS = 60  # automation engine poll interval
 
 
 async def run_scheduler() -> None:
@@ -71,6 +72,12 @@ async def run_wa_token_refresh_scheduler() -> None:
         except Exception as exc:
             logger.error("[WA Token Refresh] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_TOKEN_REFRESH_INTERVAL_SECONDS)
+
+
+async def run_automation_engine_scheduler() -> None:
+    """Event-driven automation engine — polls every 60 s for unprocessed events."""
+    from core.automation_engine import run_automation_engine_scheduler as _engine_loop  # noqa: PLC0415
+    await _engine_loop()
 
 
 async def run_salla_token_refresh_scheduler() -> None:

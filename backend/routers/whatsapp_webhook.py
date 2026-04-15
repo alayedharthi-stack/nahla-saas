@@ -290,8 +290,9 @@ async def _dispatch_message(
 
     normalized_sender = normalize_phone(sender) or sender
     contact_name = _extract_contact_name(value, sender)
+    _inbound_customer_id: int | None = None
     try:
-        CustomerIntelligenceService(db, resolved_tenant_id).upsert_lead_customer(
+        _lead = CustomerIntelligenceService(db, resolved_tenant_id).upsert_lead_customer(
             phone=normalized_sender,
             name=contact_name or normalized_sender,
             source="whatsapp_inbound",
@@ -302,6 +303,8 @@ async def _dispatch_message(
             },
             commit=True,
         )
+        if _lead:
+            _inbound_customer_id = _lead.id
         track_conversation(
             db,
             resolved_tenant_id,
@@ -314,6 +317,24 @@ async def _dispatch_message(
             "[Webhook] Failed to sync inbound customer lead | tenant=%s sender=%s err=%s",
             resolved_tenant_id, normalized_sender, exc,
         )
+
+    # Emit automation event for inbound WhatsApp message (non-blocking)
+    try:
+        from core.automation_engine import emit_automation_event  # noqa: PLC0415
+        emit_automation_event(
+            db,
+            resolved_tenant_id,
+            "whatsapp_message_received",
+            customer_id=_inbound_customer_id,
+            payload={
+                "phone": normalized_sender,
+                "msg_type": msg_type,
+                "phone_number_id": phone_number_id,
+            },
+            commit=True,
+        )
+    except Exception as exc:
+        logger.debug("[Webhook] emit whatsapp_message_received failed: %s", exc)
 
     # ── Handle interactive button replies ──────────────────────────────────────
     if msg_type == "interactive":

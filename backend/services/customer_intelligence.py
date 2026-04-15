@@ -761,6 +761,7 @@ class CustomerIntelligenceService:
             return None
 
         profile = self.ensure_profile(customer)
+        old_status = profile.customer_status  # capture before recompute
         orders = self._orders_for_customer(customer)
         now = utcnow()
         metrics = self._build_metrics(customer, profile=profile, orders=orders, now=now)
@@ -777,6 +778,25 @@ class CustomerIntelligenceService:
             computed_at=now,
         )
         self.db.add(profile)
+
+        # Emit customer_status_changed when the status actually transitions
+        if old_status and old_status != status:
+            try:
+                from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                emit_automation_event(
+                    self.db,
+                    self.tenant_id,
+                    "customer_status_changed",
+                    customer_id=customer.id,
+                    payload={
+                        "from": old_status,
+                        "to": status,
+                        "rfm_segment": rfm_segment,
+                        "reason": reason,
+                    },
+                )
+            except Exception as _ae:
+                logger.debug("[Intelligence] emit customer_status_changed failed: %s", _ae)
 
         if emit_event:
             log_event(

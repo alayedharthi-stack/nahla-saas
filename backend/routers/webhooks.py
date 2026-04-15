@@ -435,6 +435,30 @@ async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
                         logger.info(
                             "[Moyasar Webhook] Order #%s marked paid for tenant=%s", oid, tenant_id,
                         )
+                        # Emit automation event for order payment
+                        try:
+                            from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                            from models import Customer  # noqa: PLC0415
+                            _ci = order.customer_info or {}
+                            _phone = _ci.get("mobile") or _ci.get("phone")
+                            _cust = None
+                            if _phone:
+                                _cust = db.query(Customer).filter(
+                                    Customer.tenant_id == tenant_id,
+                                    Customer.phone == _phone,
+                                ).first()
+                            emit_automation_event(
+                                db, tenant_id, "order_paid",
+                                customer_id=_cust.id if _cust else None,
+                                payload={
+                                    "order_id": oid,
+                                    "payment_id": payment_id,
+                                    "amount": data.get("amount"),
+                                    "gateway": "moyasar",
+                                },
+                            )
+                        except Exception as _ae:
+                            logger.debug("[Webhook] emit order_paid failed: %s", _ae)
                     elif payment_status == "failed":
                         order.status = "payment_failed"
             except (ValueError, TypeError):

@@ -3,9 +3,10 @@ import {
   Search, Store, ToggleLeft, ToggleRight,
   X, Hash, Calendar, Wifi, WifiOff, Phone, Copy,
   CheckCircle2, AlertCircle, Clock, Unplug, AlertTriangle, Loader2,
+  Eye, EyeOff, Archive, Plug, FlaskConical, CreditCard,
 } from 'lucide-react'
 import { apiCall } from '../api/client'
-import { adminApi, type AdminTenantSummary } from '../api/admin'
+import { adminApi, type AdminTenantSummary, type VisibilityTag } from '../api/admin'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,59 @@ function ActiveBadge({ active }: { active: boolean }) {
     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
       {active ? 'نشط' : 'موقوف'}
     </span>
+  )
+}
+
+const VISIBILITY_TAG_META: Record<VisibilityTag, {
+  label: string
+  cls: string
+  icon: React.ElementType
+}> = {
+  archived:        { label: 'مؤرشف',          cls: 'bg-slate-100 text-slate-500 border border-slate-200',   icon: Archive },
+  disconnected:    { label: 'مقطوع',           cls: 'bg-red-50 text-red-500 border border-red-100',         icon: Plug },
+  test:            { label: 'اختباري',          cls: 'bg-purple-50 text-purple-500 border border-purple-100', icon: FlaskConical },
+  pending_payment: { label: 'متأخر الدفع',     cls: 'bg-orange-50 text-orange-500 border border-orange-100', icon: CreditCard },
+}
+
+function VisibilityBadge({ tag }: { tag: VisibilityTag }) {
+  const meta = VISIBILITY_TAG_META[tag]
+  if (!meta) return null
+  const Icon = meta.icon
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded-full font-medium ${meta.cls}`}>
+      <Icon className="w-3 h-3 shrink-0" />
+      {meta.label}
+    </span>
+  )
+}
+
+/** Button that toggles between "Active Stores" and "Show All" */
+function ShowAllToggle({
+  showAll,
+  totalHidden,
+  onClick,
+}: {
+  showAll: boolean
+  totalHidden: number
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`
+        inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold
+        border transition-all
+        ${showAll
+          ? 'bg-slate-800 text-white border-slate-700 shadow-md'
+          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+        }
+      `}
+    >
+      {showAll
+        ? <><EyeOff className="w-4 h-4" /> المتاجر النشطة فقط</>
+        : <><Eye className="w-4 h-4" /> عرض الكل {totalHidden > 0 && <span className="bg-slate-200 text-slate-600 text-xs rounded-full px-1.5 py-0.5 mr-0.5">{totalHidden}</span>}</>
+      }
+    </button>
   )
 }
 
@@ -275,6 +329,8 @@ export default function AdminTenants() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'' | 'active' | 'inactive'>('')
   const [waFilter, setWaFilter] = useState('')
+  const [showAll, setShowAll] = useState(false)
+  const [totalHidden, setTotalHidden] = useState(0)
   const [selected, setSelected] = useState<AdminTenantSummary | null>(null)
   const [togglingId, setTogglingId] = useState<number | null>(null)
   const [showDisconnectModal, setShowDisconnectModal] = useState(false)
@@ -282,11 +338,14 @@ export default function AdminTenants() {
 
   useEffect(() => {
     setLoading(true)
-    adminApi.tenants({ search, status: statusFilter, limit: 200 })
-      .then(data => setTenants(data.tenants))
+    adminApi.tenants({ search, status: statusFilter, show_all: showAll, limit: 200 })
+      .then(data => {
+        setTenants(data.tenants)
+        setTotalHidden(data.total_hidden ?? 0)
+      })
       .catch(() => setTenants([]))
       .finally(() => setLoading(false))
-  }, [search, statusFilter])
+  }, [search, statusFilter, showAll])
 
   const rows = useMemo(() => {
     if (!waFilter) return tenants
@@ -332,21 +391,35 @@ export default function AdminTenants() {
           <div>
             <h1 className="text-lg font-black text-slate-800">المتاجر</h1>
             <p className="text-slate-400 text-xs">
-              {loading ? 'جارٍ التحميل...' : `${rows.length} متجر`} — إدارة تشخيصية شاملة
+              {loading
+                ? 'جارٍ التحميل...'
+                : showAll
+                  ? `${rows.length} متجر (الكل)`
+                  : `${rows.length} متجر نشط`}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Show All toggle — most prominent control */}
+          <ShowAllToggle
+            showAll={showAll}
+            totalHidden={totalHidden}
+            onClick={() => setShowAll(v => !v)}
+          />
+
+          {/* Search */}
           <div className="relative">
             <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="اسم، دومين..."
-              className="pr-9 pl-4 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 w-56"
+              className="pr-9 pl-4 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 w-52"
             />
           </div>
+
+          {/* Status filter */}
           <select
             value={statusFilter}
             onChange={e => setStatusFilter(e.target.value as '' | 'active' | 'inactive')}
@@ -356,6 +429,8 @@ export default function AdminTenants() {
             <option value="active">نشط</option>
             <option value="inactive">موقوف</option>
           </select>
+
+          {/* WA filter */}
           <select
             value={waFilter}
             onChange={e => setWaFilter(e.target.value)}
@@ -369,6 +444,23 @@ export default function AdminTenants() {
           </select>
         </div>
       </div>
+
+      {/* Informational banner when in filtered mode and there are hidden tenants */}
+      {!showAll && totalHidden > 0 && (
+        <div className="flex items-center gap-3 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-500">
+          <EyeOff className="w-4 h-4 shrink-0 text-slate-400" />
+          <span>
+            مخفي تلقائياً: <strong className="text-slate-700">{totalHidden}</strong> متجر (مؤرشف، مقطوع، اختباري، أو متأخر الدفع).
+            اضغط <strong className="text-slate-700">"عرض الكل"</strong> لرؤيتها.
+          </span>
+          <button
+            onClick={() => setShowAll(true)}
+            className="mr-auto text-amber-600 font-semibold hover:text-amber-700 whitespace-nowrap"
+          >
+            عرض الكل →
+          </button>
+        </div>
+      )}
 
       {/* Table */}
       <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
@@ -396,6 +488,7 @@ export default function AdminTenants() {
                     'WABA ID',
                     'الخطة',
                     'الحالة',
+                    ...(showAll ? ['التصنيف'] : []),
                     'إجراء',
                   ].map(h => (
                     <th key={h} className="text-right px-3 py-3 text-xs font-semibold text-slate-500 whitespace-nowrap">
@@ -409,7 +502,11 @@ export default function AdminTenants() {
                   <tr
                     key={tenant.id}
                     onClick={() => setSelected(tenant)}
-                    className="hover:bg-amber-50/40 cursor-pointer transition"
+                    className={`cursor-pointer transition ${
+                      tenant.visibility_tag
+                        ? 'bg-slate-50/60 hover:bg-slate-100/60 opacity-75'
+                        : 'hover:bg-amber-50/40'
+                    }`}
                   >
                     {/* Store */}
                     <td className="px-3 py-3 min-w-[160px]">
@@ -471,6 +568,18 @@ export default function AdminTenants() {
                     <td className="px-3 py-3">
                       <ActiveBadge active={tenant.is_active} />
                     </td>
+
+                    {/* Visibility badge — only visible when showAll is on */}
+                    {showAll && (
+                      <td className="px-3 py-3">
+                        {tenant.visibility_tag
+                          ? <VisibilityBadge tag={tenant.visibility_tag} />
+                          : <span className="inline-flex items-center gap-1 text-xs text-green-600 font-medium">
+                              <CheckCircle2 className="w-3 h-3" /> نشط
+                            </span>
+                        }
+                      </td>
+                    )}
 
                     {/* Toggle */}
                     <td className="px-3 py-3" onClick={e => e.stopPropagation()}>

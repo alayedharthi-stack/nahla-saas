@@ -421,6 +421,14 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("Salla token refresh scheduler could not start: %s", exc)
 
+    # 7. Event-driven automation engine (every 60s)
+    try:
+        from core.scheduler import run_automation_engine_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_automation_engine_scheduler())
+        logger.info("Automation engine scheduler started (60s).")
+    except Exception as exc:
+        logger.warning("Automation engine scheduler could not start: %s", exc)
+
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.
 _REQUIRED_PROD_VARS = ("JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD")

@@ -802,6 +802,31 @@ class StoreSyncService:
                 emit_event=True,
             )
 
+        # Emit automation event for new order
+        if not existing:
+            try:
+                from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                order_row = (
+                    self.db.query(Order)
+                    .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+                    .first()
+                )
+                emit_automation_event(
+                    self.db,
+                    self.tenant_id,
+                    "order_created",
+                    customer_id=customer.id if customer else None,
+                    payload={
+                        "external_id": ext_id,
+                        "order_id": order_row.id if order_row else None,
+                        "status": normalised.get("status"),
+                        "total": normalised.get("total"),
+                    },
+                    commit=True,
+                )
+            except Exception as _ae:
+                logger.debug("[StoreSync] emit order_created failed: %s", _ae)
+
         snap = (
             self.db.query(StoreKnowledgeSnapshot)
             .filter_by(tenant_id=self.tenant_id)
