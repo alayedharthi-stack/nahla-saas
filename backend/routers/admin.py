@@ -1781,6 +1781,35 @@ async def admin_resubscribe_now(
     return {"ok": success, "waba_id": waba_id, "meta": data}
 
 
+@router.get("/admin/whatsapp/resubscribe-now/{tenant_id}")
+async def admin_resubscribe_debug(
+    tenant_id: int,
+    key: str,
+    db: Session = Depends(get_db),
+):
+    """Debug: show stored WA connection fields for tenant (masked token)."""
+    if key != _BYPASS_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+    conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id
+    ).first()
+    if not conn:
+        return {"error": "no connection found"}
+    tok = conn.access_token or ""
+    return {
+        "phone_number_id":              conn.phone_number_id,
+        "whatsapp_business_account_id": conn.whatsapp_business_account_id,
+        "meta_business_account_id":     conn.meta_business_account_id,
+        "phone_number":                 conn.phone_number,
+        "business_display_name":        conn.business_display_name,
+        "status":                       conn.status,
+        "webhook_verified":             conn.webhook_verified,
+        "connection_type":              conn.connection_type,
+        "access_token_preview":         tok[:20] + "..." + tok[-6:] if len(tok) > 30 else tok[:10] + "...",
+        "access_token_length":          len(tok),
+    }
+
+
 @router.delete("/admin/tenants/{tenant_id}")
 async def delete_tenant(
     tenant_id: int,
