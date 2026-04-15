@@ -184,9 +184,17 @@ async def on_startup() -> None:
                     check=False,
                     env=os.environ.copy(),
                 )
+                # exit 0  → clean / cleaned successfully
+                # exit 1  → could mean "duplicates still exist in dry-run" (won't happen
+                #           with --execute) OR an exception was raised internally.
+                # Either way: log the outcome but do NOT abort startup — let Alembic's
+                # own pre-check be the gate.  If real duplicates remain, migration 0017
+                # raises RuntimeError and the server refuses to start with a clear message.
                 if r1.returncode != 0:
-                    raise RuntimeError(
-                        f"cleanup_salla_duplicates.py failed with exit {r1.returncode}"
+                    logger.warning(
+                        "cleanup_salla_duplicates.py exited %d — continuing to Alembic; "
+                        "migration 0017 will fail loudly if duplicates remain.",
+                        r1.returncode,
                     )
 
                 subprocess.run(

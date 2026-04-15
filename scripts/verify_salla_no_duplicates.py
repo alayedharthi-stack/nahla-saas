@@ -39,6 +39,11 @@ def _has_external_store_id_column(db) -> bool:
         db.execute(text("SELECT external_store_id FROM integrations LIMIT 0"))
         return True
     except (OperationalError, ProgrammingError):
+        # PostgreSQL aborts the transaction on error — rollback so the session stays usable.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return False
 
 

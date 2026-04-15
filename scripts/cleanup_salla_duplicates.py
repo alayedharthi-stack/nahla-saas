@@ -93,6 +93,11 @@ def _fetch_salla_rows(db) -> list[dict[str, Any]]:
     try:
         rows = db.execute(text(sql_with)).mappings().all()
     except (OperationalError, ProgrammingError):
+        # PostgreSQL aborts the transaction on error — must rollback before retrying.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         rows = db.execute(text(sql_without)).mappings().all()
     return [dict(row) for row in rows]
 
