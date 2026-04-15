@@ -1781,6 +1781,88 @@ async def admin_resubscribe_now(
     return {"ok": success, "waba_id": waba_id, "meta": data}
 
 
+@router.post("/admin/whatsapp/fix-waba-id/{tenant_id}")
+async def admin_fix_waba_id(
+    tenant_id: int,
+    key: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Temporary bypass: use phone_number_id to discover the correct WABA ID from Meta,
+    update the DB, then subscribe to webhooks automatically.
+    """
+    if key != _BYPASS_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id
+    ).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="no connection")
+
+    import httpx as _httpx  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+
+    pid   = conn.phone_number_id
+    token = conn.access_token
+    if not pid or not token:
+        raise HTTPException(status_code=400, detail="missing phone_number_id or token")
+
+    # Step 1: fetch phone number info → discover correct WABA ID
+    phone_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{pid}"
+    phone_resp = _httpx.get(
+        phone_url,
+        params={
+            "fields": "id,display_phone_number,verified_name,whatsapp_business_account",
+            "access_token": token,
+        },
+        timeout=15,
+    )
+    phone_data = phone_resp.json()
+
+    if "error" in phone_data:
+        return {"step": "fetch_phone", "ok": False, "meta": phone_data}
+
+    waba_info  = phone_data.get("whatsapp_business_account", {})
+    real_waba_id = waba_info.get("id") or conn.whatsapp_business_account_id
+
+    # Step 2: update DB if WABA ID changed
+    old_waba = conn.whatsapp_business_account_id
+    if real_waba_id and real_waba_id != old_waba:
+        conn.whatsapp_business_account_id = real_waba_id
+        db.commit()
+        logger.info(
+            "[admin-bypass] Fixed WABA ID tenant=%s  old=%s  new=%s",
+            tenant_id, old_waba, real_waba_id,
+        )
+
+    # Step 3: subscribe to webhooks with correct WABA ID
+    sub_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{real_waba_id}/subscribed_apps"
+    sub_resp = _httpx.post(
+        sub_url,
+        params={"access_token": token},
+        json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+        timeout=15,
+    )
+    sub_data    = sub_resp.json()
+    sub_success = bool(sub_data.get("success"))
+
+    if sub_success:
+        conn.webhook_verified = True
+        conn.updated_at       = datetime.now(timezone.utc)
+        db.commit()
+
+    return {
+        "ok":                    sub_success,
+        "phone_number_id":       pid,
+        "old_waba_id":           old_waba,
+        "discovered_waba_id":    real_waba_id,
+        "waba_id_was_corrected": real_waba_id != old_waba,
+        "phone_data":            phone_data,
+        "subscribe_result":      sub_data,
+    }
+
+
 @router.get("/admin/whatsapp/resubscribe-now/{tenant_id}")
 async def admin_resubscribe_debug(
     tenant_id: int,
