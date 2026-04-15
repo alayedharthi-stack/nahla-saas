@@ -4,10 +4,12 @@ scripts/cleanup_salla_duplicates.py
 ─────────────────────────────────────
 Step 1 (pre-migration): identify and clean up duplicate Salla integrations.
 
-A "duplicate" means two or more `integrations` rows share the same
-  (provider='salla', external_store_id)
-value.  Migration 0017 creates a UNIQUE constraint on that pair and will
-raise a RuntimeError if any duplicates remain.
+IMPORTANT: This script must NOT use the SQLAlchemy Integration ORM for reads.
+The `external_store_id` column may not exist yet in the database; ORM queries
+would generate SELECT ... external_store_id and crash.  We use raw SQL only.
+
+A "duplicate" means two or more `integrations` rows share the same logical
+Salla store id (from config->>'store_id' or legacy external_store_id if present).
 
 Winner-selection strategy (per group):
   1. Prefer the integration that has both api_key + refresh_token (full OAuth).
@@ -16,9 +18,10 @@ Winner-selection strategy (per group):
 
 Loser rows:
   • tokens (api_key, access_token, refresh_token) are wiped.
+  • config["store_id"] is removed so migration 0017 does not assign the same
+    external_store_id as the winner (UNIQUE constraint).
   • enabled is set to False.
   • config["revoked_reason"] is set for audit trail.
-  • external_store_id is backfilled if it was NULL (preparation for migration).
 
 Usage
 ─────
@@ -28,6 +31,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,60 +42,105 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if s not in sys.path:
         sys.path.insert(0, s)
 
-from database.models import Integration, Tenant  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import OperationalError, ProgrammingError  # noqa: E402
 from database.session import SessionLocal  # noqa: E402
 
 
-# ── Winner scoring ────────────────────────────────────────────────────────────
+# ── Row type (plain dicts from raw SQL) ───────────────────────────────────────
 
-def _score(row: Integration) -> int:
+def _store_id_from_row(r: dict[str, Any]) -> str:
+    """Logical Salla store id: prefer DB column if present, else config."""
+    # When external_store_id column is missing, r won't have the key
+    ext = r.get("external_store_id")
+    if ext:
+        return str(ext)
+    cfg = r.get("config") or {}
+    if isinstance(cfg, dict):
+        sid = cfg.get("store_id")
+        return str(sid) if sid else ""
+    return ""
+
+
+def _score(r: dict[str, Any]) -> int:
     """Higher score = better candidate to keep in a duplicate group."""
-    cfg: dict[str, Any] = row.config or {}
-    has_access  = bool(cfg.get("api_key") or cfg.get("access_token"))
+    cfg: dict[str, Any] = r.get("config") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    has_access = bool(cfg.get("api_key") or cfg.get("access_token"))
     has_refresh = bool(cfg.get("refresh_token"))
-    return (has_access * 2 + has_refresh) * 1_000_000 + row.id
+    rid = int(r["id"])
+    return (has_access * 2 + has_refresh) * 1_000_000 + rid
 
 
-# ── Duplicate finder ──────────────────────────────────────────────────────────
+def _fetch_salla_rows(db) -> list[dict[str, Any]]:
+    """
+    Load Salla integrations.  Prefer `external_store_id` when the column exists;
+    if the DB predates migration 0017, fall back to a narrower SELECT (no ORM).
+    """
+    sql_with = """
+        SELECT id, tenant_id, provider, config, enabled, external_store_id
+        FROM integrations
+        WHERE provider = 'salla'
+        ORDER BY id
+    """
+    sql_without = """
+        SELECT id, tenant_id, provider, config, enabled
+        FROM integrations
+        WHERE provider = 'salla'
+        ORDER BY id
+    """
+    try:
+        rows = db.execute(text(sql_with)).mappings().all()
+    except (OperationalError, ProgrammingError):
+        rows = db.execute(text(sql_without)).mappings().all()
+    return [dict(row) for row in rows]
 
-def find_duplicate_groups(db) -> dict[str, list[Integration]]:
-    """Return {store_id: [integration, ...]} for groups with > 1 member."""
-    rows: list[Integration] = (
-        db.query(Integration)
-        .filter(Integration.provider == "salla")
-        .order_by(Integration.id)
-        .all()
-    )
 
-    groups: dict[str, list[Integration]] = {}
+def find_duplicate_groups(db) -> dict[str, list[dict[str, Any]]]:
+    """Return {store_id: [row dict, ...]} for groups with > 1 member."""
+    rows = _fetch_salla_rows(db)
+    groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        # Use external_store_id first; fall back to config for pre-migration rows
-        sid = row.external_store_id or (row.config or {}).get("store_id") or ""
+        sid = _store_id_from_row(row)
         if not sid:
             continue
         groups.setdefault(sid, []).append(row)
-
     return {k: v for k, v in groups.items() if len(v) > 1}
 
 
-# ── Tenant audit ──────────────────────────────────────────────────────────────
-
 def _tenant_has_other_data(db, tenant_id: int, skip_integration_id: int) -> bool:
-    """
-    Returns True when the tenant owns data besides the duplicate integration.
-    Used to decide whether to mention potential orphan cleanup.
-    """
-    from database.models import User, Integration as _Int  # noqa: PLC0415
-    has_users = db.query(User).filter_by(tenant_id=tenant_id).first() is not None
-    other_integrations = (
-        db.query(_Int)
-        .filter(
-            _Int.tenant_id == tenant_id,
-            _Int.id != skip_integration_id,
-        )
-        .first()
-    ) is not None
-    return has_users or other_integrations
+    """Raw SQL only — no Integration ORM."""
+    u = db.execute(
+        text("SELECT 1 FROM users WHERE tenant_id = :tid LIMIT 1"),
+        {"tid": tenant_id},
+    ).scalar()
+    if u:
+        return True
+    o = db.execute(
+        text(
+            """
+            SELECT 1 FROM integrations
+            WHERE tenant_id = :tid AND id != :skip
+            LIMIT 1
+            """
+        ),
+        {"tid": tenant_id, "skip": skip_integration_id},
+    ).scalar()
+    return bool(o)
+
+
+def _apply_loser_update(db, loser_id: int, new_cfg: dict[str, Any]) -> None:
+    db.execute(
+        text(
+            """
+            UPDATE integrations
+            SET config = CAST(:cfg AS jsonb), enabled = false
+            WHERE id = :id
+            """
+        ),
+        {"cfg": json.dumps(new_cfg), "id": loser_id},
+    )
 
 
 # ── Main cleanup ──────────────────────────────────────────────────────────────
@@ -101,7 +150,6 @@ def cleanup(dry_run: bool = True) -> int:
     Scan for and (optionally) clean up duplicate Salla integrations.
 
     Returns the number of duplicate groups found.
-    Exits 0 when no groups found (migration can proceed safely).
     """
     db = SessionLocal()
     try:
@@ -119,54 +167,52 @@ def cleanup(dry_run: bool = True) -> int:
         )
 
         for store_id, rows in sorted(groups.items()):
-            ranked   = sorted(rows, key=_score, reverse=True)
-            winner   = ranked[0]
-            losers   = ranked[1:]
-            win_cfg  = winner.config or {}
+            ranked = sorted(rows, key=_score, reverse=True)
+            winner = ranked[0]
+            losers = ranked[1:]
+            win_cfg = winner.get("config") or {}
+            if not isinstance(win_cfg, dict):
+                win_cfg = {}
 
             print(f"  store_id: {store_id}  ({len(rows)} rows)")
             print(
-                f"    ✅ KEEP   → id={winner.id:>5}  tenant={winner.tenant_id:<6}  "
-                f"enabled={str(winner.enabled):<5}  "
+                f"    ✅ KEEP   → id={winner['id']:>5}  tenant={winner['tenant_id']:<6}  "
+                f"enabled={str(winner.get('enabled')):<5}  "
                 f"api_key={'✓' if win_cfg.get('api_key') else '✗'}  "
                 f"refresh={'✓' if win_cfg.get('refresh_token') else '✗'}"
             )
             for loser in losers:
-                lc = loser.config or {}
+                lc = loser.get("config") or {}
+                if not isinstance(lc, dict):
+                    lc = {}
                 print(
-                    f"    ⛔ REVOKE → id={loser.id:>5}  tenant={loser.tenant_id:<6}  "
-                    f"enabled={str(loser.enabled):<5}  "
+                    f"    ⛔ REVOKE → id={loser['id']:>5}  tenant={loser['tenant_id']:<6}  "
+                    f"enabled={str(loser.get('enabled')):<5}  "
                     f"api_key={'✓' if lc.get('api_key') else '✗'}  "
                     f"refresh={'✓' if lc.get('refresh_token') else '✗'}"
                 )
                 if not dry_run:
-                    has_other = _tenant_has_other_data(db, loser.tenant_id, loser.id)
+                    has_other = _tenant_has_other_data(db, loser["tenant_id"], loser["id"])
                     if not has_other:
                         print(
-                            f"          (tenant {loser.tenant_id} has no other data — "
+                            f"          (tenant {loser['tenant_id']} has no other data — "
                             "safe to delete manually after this script)"
                         )
 
             if not dry_run:
-                # Backfill winner's external_store_id if missing
-                if not winner.external_store_id:
-                    winner.external_store_id = store_id
-
                 for loser in losers:
-                    # Backfill external_store_id so constraint is satisfied
-                    if not loser.external_store_id:
-                        loser.external_store_id = store_id
-
-                    new_cfg = dict(loser.config or {})
-                    new_cfg.pop("api_key",       None)
-                    new_cfg.pop("access_token",  None)
+                    new_cfg = dict(loser.get("config") or {})
+                    if not isinstance(new_cfg, dict):
+                        new_cfg = {}
+                    new_cfg.pop("api_key", None)
+                    new_cfg.pop("access_token", None)
                     new_cfg.pop("refresh_token", None)
+                    new_cfg.pop("store_id", None)
                     new_cfg["revoked_reason"] = (
-                        f"duplicate-cleanup: kept tenant {winner.tenant_id} "
-                        f"integration {winner.id} for store {store_id}"
+                        f"duplicate-cleanup: kept tenant {winner['tenant_id']} "
+                        f"integration {winner['id']} for store {store_id}"
                     )
-                    loser.config  = new_cfg
-                    loser.enabled = False
+                    _apply_loser_update(db, loser["id"], new_cfg)
 
             print()
 
@@ -216,6 +262,4 @@ Steps:
     args = parser.parse_args()
 
     found = cleanup(dry_run=not args.execute)
-    # Exit 0 only when DB is clean OR changes were applied.
-    # Exit 1 in dry-run mode when duplicates still exist — signals CI to stop.
     sys.exit(0 if (found == 0 or args.execute) else 1)

@@ -30,7 +30,16 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
         sys.path.insert(0, s)
 
 from sqlalchemy import text  # noqa: E402
+from sqlalchemy.exc import OperationalError, ProgrammingError  # noqa: E402
 from database.session import SessionLocal  # noqa: E402
+
+
+def _has_external_store_id_column(db) -> bool:
+    try:
+        db.execute(text("SELECT external_store_id FROM integrations LIMIT 0"))
+        return True
+    except (OperationalError, ProgrammingError):
+        return False
 
 
 def verify() -> bool:
@@ -40,54 +49,82 @@ def verify() -> bool:
     """
     db = SessionLocal()
     try:
-        # ── Check 1: rows with external_store_id set ──────────────────────────
-        dup_rows = list(
-            db.execute(
-                text("""
-                    SELECT   provider,
-                             external_store_id,
-                             COUNT(*) AS cnt
-                    FROM     integrations
-                    WHERE    provider = 'salla'
-                      AND    external_store_id IS NOT NULL
-                    GROUP BY provider, external_store_id
-                    HAVING   COUNT(*) > 1
-                """)
-            )
-        )
+        has_ext_col = _has_external_store_id_column(db)
 
-        # ── Check 2: rows where external_store_id is NULL but config has store_id
-        #    These wouldn't violate the constraint (NULL != NULL) but are a sign
-        #    that the migration backfill hasn't run yet.
-        unset_rows = list(
-            db.execute(
-                text("""
-                    SELECT id, tenant_id, config->>'store_id' AS config_store_id
-                    FROM   integrations
-                    WHERE  provider = 'salla'
-                      AND  external_store_id IS NULL
-                      AND  config->>'store_id' IS NOT NULL
-                """)
+        # ── Check 1: duplicate external_store_id (only after migration 0017) ───
+        dup_rows: list = []
+        if has_ext_col:
+            dup_rows = list(
+                db.execute(
+                    text("""
+                        SELECT   provider,
+                                 external_store_id,
+                                 COUNT(*) AS cnt
+                        FROM     integrations
+                        WHERE    provider = 'salla'
+                          AND    external_store_id IS NOT NULL
+                        GROUP BY provider, external_store_id
+                        HAVING   COUNT(*) > 1
+                    """)
+                )
             )
-        )
+
+        # ── Check 2: pre-migration — duplicate config store_id for enabled rows ─
+        if not has_ext_col:
+            dup_rows = list(
+                db.execute(
+                    text("""
+                        SELECT config->>'store_id' AS store_id, COUNT(*) AS cnt
+                        FROM integrations
+                        WHERE provider = 'salla'
+                          AND config->>'store_id' IS NOT NULL
+                          AND config->>'store_id' != ''
+                        GROUP BY config->>'store_id'
+                        HAVING COUNT(*) > 1
+                    """)
+                )
+            )
+
+        # ── Check 3: rows where external_store_id is NULL but config has store_id
+        unset_rows: list = []
+        if has_ext_col:
+            unset_rows = list(
+                db.execute(
+                    text("""
+                        SELECT id, tenant_id, config->>'store_id' AS config_store_id
+                        FROM   integrations
+                        WHERE  provider = 'salla'
+                          AND  external_store_id IS NULL
+                          AND  config->>'store_id' IS NOT NULL
+                    """)
+                )
+            )
 
         clean = True
 
         if dup_rows:
             clean = False
-            print(f"❌  Found {len(dup_rows)} duplicate (provider, external_store_id) group(s):\n")
-            for row in dup_rows:
-                print(
-                    f"    provider={row.provider}  "
-                    f"external_store_id={row.external_store_id}  "
-                    f"count={row.cnt}"
-                )
+            if has_ext_col:
+                print(f"❌  Found {len(dup_rows)} duplicate (provider, external_store_id) group(s):\n")
+                for row in dup_rows:
+                    print(
+                        f"    provider={row.provider}  "
+                        f"external_store_id={row.external_store_id}  "
+                        f"count={row.cnt}"
+                    )
+            else:
+                print(f"❌  Found {len(dup_rows)} duplicate config store_id group(s) (pre-migration):\n")
+                for row in dup_rows:
+                    print(f"    store_id={row.store_id}  count={row.cnt}")
             print(
                 "\n  ➜  Run:  python scripts/cleanup_salla_duplicates.py --execute\n"
                 "     Then re-run this script to confirm clean state.\n"
             )
         else:
-            print("✅  No duplicate (provider, external_store_id) pairs found.")
+            if has_ext_col:
+                print("✅  No duplicate (provider, external_store_id) pairs found.")
+            else:
+                print("✅  No duplicate config store_id groups found (pre-migration).")
 
         if unset_rows:
             print(

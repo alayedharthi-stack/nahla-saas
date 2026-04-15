@@ -5,4 +5,4 @@ cmds = ["pip install --no-cache-dir -r /app/requirements.txt"]
 PYTHONPATH = "/app:/app/backend:/app/database"
 
 [start]
-cmd = "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+cmd = "bash /app/start.sh"

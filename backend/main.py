@@ -165,6 +165,43 @@ app.include_router(_widgets_router)
 @app.on_event("startup")
 async def on_startup() -> None:
     """Run database migrations and start background scheduler."""
+    # 0. Blocking bootstrap — MUST run before any code issues SQL that references
+    #    new columns (e.g. integrations.external_store_id).  Railway may start
+    #    `uvicorn …` directly without start.sh; background safe_alters are too late.
+    _skip = os.environ.get("NAHLA_SKIP_DB_BOOTSTRAP", "").lower() in ("1", "true", "yes")
+    if _skip:
+        logger.info("NAHLA_SKIP_DB_BOOTSTRAP set — skipping cleanup + Alembic bootstrap.")
+    else:
+        try:
+
+            def _bootstrap_db_schema() -> None:
+                import subprocess
+
+                cleanup = os.path.join(_REPO_ROOT, "scripts", "cleanup_salla_duplicates.py")
+                r1 = subprocess.run(
+                    [sys.executable, cleanup, "--execute"],
+                    cwd=_REPO_ROOT,
+                    check=False,
+                    env=os.environ.copy(),
+                )
+                if r1.returncode != 0:
+                    raise RuntimeError(
+                        f"cleanup_salla_duplicates.py failed with exit {r1.returncode}"
+                    )
+
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "upgrade", "head"],
+                    cwd=_DATABASE_DIR,
+                    check=True,
+                    env=os.environ.copy(),
+                )
+
+            await asyncio.get_running_loop().run_in_executor(None, _bootstrap_db_schema)
+            logger.info("Database bootstrap (Salla cleanup + Alembic) completed.")
+        except Exception as exc:
+            logger.exception("Database bootstrap failed — refusing to start: %s", exc)
+            raise
+
     # 1. DB table creation / column migrations (non-fatal)
     try:
         from database.session import engine  # noqa: PLC0415
