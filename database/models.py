@@ -463,9 +463,19 @@ class CustomerProfile(Base):
     max_single_order_sar = Column(Float, default=0.0)
     first_seen_at = Column(DateTime, nullable=True)
     last_seen_at = Column(DateTime, nullable=True)
+    first_order_at = Column(DateTime, nullable=True)
     last_order_at = Column(DateTime, nullable=True)
     # Segmentation
     segment = Column(String, default='new')   # new | active | at_risk | churned | vip
+    customer_status = Column(String, default='lead')
+    rfm_recency_score = Column(Integer, default=0)
+    rfm_frequency_score = Column(Integer, default=0)
+    rfm_monetary_score = Column(Integer, default=0)
+    rfm_total_score = Column(Integer, default=0)
+    rfm_code = Column(String, nullable=True)
+    rfm_segment = Column(String, default='lead')
+    metrics_computed_at = Column(DateTime, nullable=True)
+    last_recomputed_reason = Column(String, nullable=True)
     churn_risk_score = Column(Float, default=0.0)   # 0.0 – 1.0
     lifetime_value_score = Column(Float, default=0.0)
     is_returning = Column(Boolean, default=False)

@@ -327,7 +327,8 @@ class CustomerContextBuilder:
             "phone":          customer.phone,
             "total_orders":   profile.total_orders    if profile else 0,
             "total_spend":    profile.total_spend_sar  if profile else 0,
-            "segment":        profile.segment          if profile else "new",
+            "segment":        (profile.customer_status if profile and getattr(profile, "customer_status", None) else profile.segment if profile else "lead"),
+            "rfm_segment":    (getattr(profile, "rfm_segment", None) if profile else None) or "lead",
             "is_returning":   profile.is_returning     if profile else False,
             "churn_risk":     profile.churn_risk_score if profile else 0,
         }
@@ -337,8 +338,12 @@ class CustomerContextBuilder:
         if not p:
             return "عميل جديد — لا يوجد سجل مشتريات سابق."
         segment_label = {
-            "new": "جديد", "active": "نشط", "at_risk": "معرض للمغادرة",
-            "churned": "خامل", "vip": "VIP",
+            "lead": "محتمل",
+            "new": "جديد",
+            "active": "نشط",
+            "at_risk": "معرض للمغادرة",
+            "inactive": "غير نشط",
+            "vip": "VIP",
         }.get(p["segment"], p["segment"])
         lines = [
             f"### معلومات العميل:",
@@ -346,6 +351,7 @@ class CustomerContextBuilder:
             f"- الشريحة: {segment_label}",
             f"- إجمالي الطلبات: {p['total_orders']}",
             f"- إجمالي الإنفاق: {p['total_spend']:.0f} ريال",
+            f"- قطاع RFM: {p['rfm_segment']}",
         ]
         if p["is_returning"]:
             lines.append("- عميل متكرر")

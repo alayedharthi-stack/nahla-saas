@@ -11,8 +11,15 @@ export interface WaTemplate {
   name: string
   language: string
   category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION'
-  status: 'APPROVED' | 'PENDING' | 'REJECTED'
+  status: 'APPROVED' | 'PENDING' | 'REJECTED' | 'DRAFT'
   components: WaTemplateComponent[]
+  library?: {
+    library_key: string
+    label: string
+    objective: string
+    customer_statuses: string[]
+    rfm_segments: string[]
+  } | null
 }
 
 export interface CampaignRecord {
@@ -24,6 +31,7 @@ export interface CampaignRecord {
   template_name: string
   template_language: string
   template_category: string
+  template_status?: string
   template_body: string
   template_variables: Record<string, string>
   audience_type: string

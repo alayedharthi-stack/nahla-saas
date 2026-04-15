@@ -194,6 +194,25 @@ export default function Intelligence() {
             />
           </div>
 
+          <div className="grid grid-cols-2 lg:grid-cols-2 gap-4">
+            <StatCard
+              label="عملاء محتملون"
+              value={String(data.summary.leads_count ?? 0)}
+              change={0}
+              icon={Users}
+              iconColor="text-blue-600"
+              iconBg="bg-blue-50"
+            />
+            <StatCard
+              label="غير نشطين"
+              value={String(data.summary.inactive_count ?? 0)}
+              change={0}
+              icon={Clock}
+              iconColor="text-slate-600"
+              iconBg="bg-slate-100"
+            />
+          </div>
+
           {/* ── Suggestions Panel ──────────────────────────────────────────── */}
           {data.suggestions.length > 0 && (
             <div className="card">
@@ -354,7 +373,7 @@ export default function Intelligence() {
           {/* ── Customer Segments ──────────────────────────────────────────── */}
           {data.segments.length > 0 && (
             <div className="card p-5">
-              <h2 className="text-sm font-semibold text-slate-900 mb-4">شرائح العملاء</h2>
+              <h2 className="text-sm font-semibold text-slate-900 mb-4">حالات العملاء التشغيلية</h2>
               {(() => {
                 const total = data.segments.reduce((sum, s) => sum + s.count, 0) || 1
                 return (
@@ -395,6 +414,22 @@ export default function Intelligence() {
                   </div>
                 )
               })()}
+            </div>
+          )}
+
+          {!!data.rfm_segments?.length && (
+            <div className="card p-5">
+              <h2 className="text-sm font-semibold text-slate-900 mb-4">قطاعات RFM الذكية</h2>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {data.rfm_segments.map((segment) => (
+                  <div key={segment.key} className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                    <p className="text-xs text-slate-500">{segment.label}</p>
+                    <p className="text-lg font-semibold text-slate-900 mt-1">
+                      {segment.count.toLocaleString('ar-SA')}
+                    </p>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

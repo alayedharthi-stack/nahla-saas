@@ -138,7 +138,7 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
 
     vip_count = db.query(CustomerProfile).filter(
         CustomerProfile.tenant_id == tenant_id,
-        CustomerProfile.segment == "vip",
+        CustomerProfile.customer_status == "vip",
     ).count()
 
     rules = list(coupon_dash.get("rules") or DEFAULT_COUPON_RULES)

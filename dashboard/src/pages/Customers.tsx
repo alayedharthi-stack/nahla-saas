@@ -21,11 +21,19 @@ import { customersApi, type CustomerRecord } from '../api/customers'
 function segmentVariant(
   seg: string,
 ): 'green' | 'amber' | 'red' | 'blue' | 'slate' {
+  if (seg === 'lead') return 'blue'
   if (seg === 'active') return 'green'
   if (seg === 'vip') return 'amber'
   if (seg === 'at_risk') return 'red'
-  if (seg === 'churned') return 'slate'
+  if (seg === 'inactive') return 'slate'
   return 'blue'
+}
+
+function rfmVariant(score: number): 'green' | 'amber' | 'red' | 'blue' | 'slate' {
+  if (score >= 12) return 'green'
+  if (score >= 8) return 'amber'
+  if (score >= 4) return 'blue'
+  return 'slate'
 }
 
 function formatDate(dateStr: string | null): string {
@@ -45,6 +53,15 @@ export default function Customers() {
   useLanguage()
 
   const [customers, setCustomers] = useState<CustomerRecord[]>([])
+  const [metrics, setMetrics] = useState<{
+    totalCustomers: number
+    activeCustomers: number
+    vipCustomers: number
+    newCustomers: number
+    atRiskCustomers: number
+    inactiveCustomers: number
+    leads: number
+  } | null>(null)
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [pages, setPages] = useState(1)
@@ -62,12 +79,17 @@ export default function Customers() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await customersApi.list(search, page)
+      const [res, metricsRes] = await Promise.all([
+        customersApi.list(search, page),
+        customersApi.metrics(),
+      ])
       setCustomers(res.customers)
       setTotal(res.total)
       setPages(res.pages)
+      setMetrics(metricsRes)
     } catch {
       setCustomers([])
+      setMetrics(null)
     } finally {
       setLoading(false)
     }
@@ -119,14 +141,6 @@ export default function Customers() {
     }
   }
 
-  const segmentCounts = customers.reduce(
-    (acc, c) => {
-      acc[c.segment] = (acc[c.segment] || 0) + 1
-      return acc
-    },
-    {} as Record<string, number>,
-  )
-
   return (
     <div className="space-y-5">
       <PageHeader
@@ -147,7 +161,7 @@ export default function Customers() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label="إجمالي العملاء"
-          value={String(total)}
+          value={String(metrics?.totalCustomers ?? total)}
           change={0}
           icon={Users}
           iconColor="text-brand-600"
@@ -155,7 +169,7 @@ export default function Customers() {
         />
         <StatCard
           label="عملاء VIP"
-          value={String(segmentCounts['vip'] || 0)}
+          value={String(metrics?.vipCustomers ?? 0)}
           change={0}
           icon={Crown}
           iconColor="text-amber-600"
@@ -163,10 +177,7 @@ export default function Customers() {
         />
         <StatCard
           label="في خطر المغادرة"
-          value={String(
-            (segmentCounts['at_risk'] || 0) +
-              (segmentCounts['churned'] || 0),
-          )}
+          value={String((metrics?.atRiskCustomers ?? 0) + (metrics?.inactiveCustomers ?? 0))}
           change={0}
           icon={AlertTriangle}
           iconColor="text-red-600"
@@ -174,7 +185,7 @@ export default function Customers() {
         />
         <StatCard
           label="عملاء نشطون"
-          value={String(segmentCounts['active'] || 0)}
+          value={String(metrics?.activeCustomers ?? 0)}
           change={0}
           icon={ShoppingCart}
           iconColor="text-emerald-600"
@@ -231,7 +242,13 @@ export default function Customers() {
                     البريد
                   </th>
                   <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    الشريحة
+                    الحالة
+                  </th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">
+                    RFM
+                  </th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">
+                    القطاع الذكي
                   </th>
                   <th className="text-start px-3 py-3 font-medium text-slate-500">
                     الطلبات
@@ -270,18 +287,27 @@ export default function Customers() {
                     </td>
                     <td className="px-3 py-3">
                       <Badge
-                        label={c.segment_label}
-                        variant={segmentVariant(c.segment)}
+                        label={c.status_label}
+                        variant={segmentVariant(c.status)}
                       />
                     </td>
+                    <td className="px-3 py-3">
+                      <Badge
+                        label={String(c.rfm_scores?.total ?? c.rfm_total_score ?? 0)}
+                        variant={rfmVariant(c.rfm_scores?.total ?? c.rfm_total_score ?? 0)}
+                      />
+                    </td>
+                    <td className="px-3 py-3 text-slate-600 whitespace-nowrap">
+                      {c.rfm_segment_label || '—'}
+                    </td>
                     <td className="px-3 py-3 text-slate-700 font-semibold">
-                      {c.total_orders}
+                      {c.orders_count ?? c.total_orders}
                     </td>
                     <td className="px-3 py-3 text-slate-700 whitespace-nowrap">
-                      {c.total_spend.toLocaleString('ar-SA')} ر.س
+                      {(c.total_spent ?? c.total_spend).toLocaleString('ar-SA')} ر.س
                     </td>
                     <td className="px-3 py-3 text-slate-500 whitespace-nowrap">
-                      {formatDate(c.last_order_at)}
+                      {formatDate(c.last_order_date ?? c.last_order_at)}
                     </td>
                     <td className="px-3 py-3">
                       {c.source === 'manual' ? (
@@ -452,8 +478,8 @@ export default function Customers() {
                   {selectedCustomer.name}
                 </h4>
                 <Badge
-                  label={selectedCustomer.segment_label}
-                  variant={segmentVariant(selectedCustomer.segment)}
+                  label={selectedCustomer.status_label}
+                  variant={segmentVariant(selectedCustomer.status)}
                 />
                 {selectedCustomer.source === 'manual' && (
                   <span className="block text-xs text-blue-600">
@@ -480,19 +506,19 @@ export default function Customers() {
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-50 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-slate-900">
-                    {selectedCustomer.total_orders}
+                    {selectedCustomer.orders_count ?? selectedCustomer.total_orders}
                   </p>
                   <p className="text-xs text-slate-500">الطلبات</p>
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-slate-900">
-                    {selectedCustomer.total_spend.toLocaleString('ar-SA')}
+                    {(selectedCustomer.total_spent ?? selectedCustomer.total_spend).toLocaleString('ar-SA')}
                   </p>
                   <p className="text-xs text-slate-500">الإنفاق (ر.س)</p>
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-slate-900">
-                    {selectedCustomer.average_order_value.toLocaleString(
+                    {(selectedCustomer.avg_order_value ?? selectedCustomer.average_order_value).toLocaleString(
                       'ar-SA',
                     )}
                   </p>
@@ -510,15 +536,39 @@ export default function Customers() {
 
               <div className="space-y-2 text-xs">
                 <div className="flex justify-between">
+                  <span className="text-slate-500">قطاع RFM</span>
+                  <span className="text-slate-700">
+                    {selectedCustomer.rfm_segment_label || '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">درجة RFM</span>
+                  <span className="text-slate-700 font-mono">
+                    {selectedCustomer.rfm_scores?.code || selectedCustomer.rfm_code || '000'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">أول طلب</span>
+                  <span className="text-slate-700">
+                    {formatDate(selectedCustomer.first_order_date ?? selectedCustomer.first_order_at)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
                   <span className="text-slate-500">آخر طلب</span>
                   <span className="text-slate-700">
-                    {formatDate(selectedCustomer.last_order_at)}
+                    {formatDate(selectedCustomer.last_order_date ?? selectedCustomer.last_order_at)}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">أول ظهور</span>
                   <span className="text-slate-700">
                     {formatDate(selectedCustomer.first_seen_at)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">آخر إعادة حساب</span>
+                  <span className="text-slate-700">
+                    {formatDate(selectedCustomer.metrics_computed_at)}
                   </span>
                 </div>
                 <div className="flex justify-between">

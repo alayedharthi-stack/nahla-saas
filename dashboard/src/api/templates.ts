@@ -1,6 +1,7 @@
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type TemplateStatus =
+  | 'DRAFT'
   | 'APPROVED'
   | 'PENDING'
   | 'REJECTED'
@@ -33,12 +34,22 @@ export interface WhatsAppTemplateRecord {
   language: string
   category: TemplateCategory
   status: TemplateStatus
+  workflow_status?: string
   status_raw?: string | null
   rejection_reason: string | null
   components: TemplateComponent[]
   created_at: string | null
   updated_at: string | null
   synced_at: string | null
+  editable?: boolean
+  submittable?: boolean
+  library?: {
+    library_key: string
+    label: string
+    objective: string
+    customer_statuses: string[]
+    rfm_segments: string[]
+  } | null
   compatibility?: TemplateCompatibility
 }
 
@@ -47,6 +58,14 @@ export interface CreateTemplatePayload {
   language: string
   category: TemplateCategory
   components: TemplateComponent[]
+  auto_submit?: boolean
+}
+
+export interface UpdateTemplatePayload {
+  name?: string
+  language?: string
+  category?: TemplateCategory
+  components?: TemplateComponent[]
 }
 
 // ── API client ────────────────────────────────────────────────────────────────
@@ -101,10 +120,21 @@ export const templatesApi = {
       body: JSON.stringify(payload),
     }),
 
+  update: (id: number, payload: UpdateTemplatePayload) =>
+    apiCall<WhatsAppTemplateRecord>(`/templates/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
   updateStatus: (id: number, status: TemplateStatus, rejectionReason?: string) =>
     apiCall<WhatsAppTemplateRecord>(`/templates/${id}/status`, {
       method: 'PUT',
       body: JSON.stringify({ status, rejection_reason: rejectionReason }),
+    }),
+
+  submit: (id: number) =>
+    apiCall<{ submitted: boolean; template: WhatsAppTemplateRecord }>(`/templates/${id}/submit`, {
+      method: 'POST',
     }),
 
   delete: (id: number) =>
@@ -123,6 +153,9 @@ export const templatesApi = {
       method: 'POST',
       body: JSON.stringify({ customer_id: customerId, extra }),
     }),
+
+  library: () =>
+    apiCall<{ templates: Array<{ template_name: string; library_key: string; label: string; objective: string; customer_statuses: string[]; rfm_segments: string[] }> }>('/templates/library'),
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,6 +191,7 @@ export function countVars(tpl: WhatsAppTemplateRecord): number {
 }
 
 export const STATUS_COLORS: Record<string, string> = {
+  DRAFT: 'slate',
   APPROVED: 'green',
   PENDING:  'amber',
   REJECTED: 'red',
@@ -168,6 +202,7 @@ export const STATUS_COLORS: Record<string, string> = {
 }
 
 export const STATUS_LABELS: Record<string, string> = {
+  DRAFT: 'مسودة',
   APPROVED: 'معتمد',
   PENDING:  'قيد المراجعة',
   REJECTED: 'مرفوض',

@@ -43,8 +43,17 @@ SEGMENT_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "active":  {"discount_pct": 5,  "expiry_days": 3, "label": "عميل نشط"},
     "vip":     {"discount_pct": 20, "expiry_days": 3, "label": "عميل مميز"},
     "at_risk": {"discount_pct": 25, "expiry_days": 1, "label": "في خطر المغادرة"},
-    "churned": {"discount_pct": 30, "expiry_days": 1, "label": "عميل خامل"},
+    "inactive": {"discount_pct": 30, "expiry_days": 1, "label": "عميل غير نشط"},
 }
+
+SEGMENT_ALIASES: Dict[str, str] = {
+    "churned": "inactive",
+}
+
+
+def _canonical_segment(segment: str) -> str:
+    raw = str(segment or "").strip().lower()
+    return SEGMENT_ALIASES.get(raw, raw or "active")
 
 
 def _is_short_coupon_code(code: Optional[str]) -> bool:
@@ -184,6 +193,7 @@ class CouponGeneratorService:
 
     def _count_pool(self, segment: str) -> int:
         """Count unused auto-coupons for a segment that haven't expired."""
+        segment = _canonical_segment(segment)
         now = datetime.now(timezone.utc)
         return (
             self.db.query(Coupon)
@@ -282,6 +292,7 @@ class CouponGeneratorService:
 
     def pick_coupon_for_segment(self, segment: str) -> Optional[Coupon]:
         """Pick an available auto-coupon for the given segment."""
+        segment = _canonical_segment(segment)
         now = datetime.now(timezone.utc)
         coupon = (
             self.db.query(Coupon)
@@ -307,6 +318,7 @@ class CouponGeneratorService:
         requested_discount_pct: Optional[int] = None,
     ) -> Optional[Coupon]:
         """Create a single coupon on-demand when the pool is empty."""
+        segment = _canonical_segment(segment)
         limits = _get_merchant_limits(self.db, self.tenant_id)
         defaults = SEGMENT_DEFAULTS.get(segment, SEGMENT_DEFAULTS["active"])
         base_discount = defaults["discount_pct"]

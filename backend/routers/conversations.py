@@ -16,9 +16,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from core.wa_usage import has_open_service_window
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
 from models import Conversation, ConversationLog, ConversationTrace, Customer, HandoffSession, MessageEvent, WhatsAppConnection
+from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
 
@@ -40,20 +42,23 @@ class CloseIn(BaseModel):
 
 
 def _get_or_create_customer(db: Session, tenant_id: int, customer_phone: str, customer_name: str = "") -> Customer:
-    customer = db.query(Customer).filter(
-        Customer.tenant_id == tenant_id,
-        Customer.phone == customer_phone,
-    ).first()
-    if not customer:
+    service = CustomerIntelligenceService(db, tenant_id)
+    normalized_phone = normalize_phone(customer_phone) or customer_phone
+    customer = service.upsert_customer_identity(
+        phone=normalized_phone,
+        name=customer_name or normalized_phone,
+        source="whatsapp_inbound",
+        extra_metadata={"source": "whatsapp_inbound"},
+        seen_at=datetime.now(timezone.utc),
+    )
+    if customer is None:
         customer = Customer(
             tenant_id=tenant_id,
-            phone=customer_phone,
-            name=customer_name or customer_phone,
+            phone=normalized_phone,
+            name=customer_name or normalized_phone,
         )
         db.add(customer)
         db.flush()
-    elif customer_name and not customer.name:
-        customer.name = customer_name
     return customer
 
 
@@ -240,6 +245,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
 async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+    customer_phone = normalize_phone(body.customer_phone) or body.customer_phone
 
     wa_conn = db.query(WhatsAppConnection).filter(
         WhatsAppConnection.tenant_id == tenant_id,
@@ -249,12 +255,21 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
     if not wa_conn or not wa_conn.phone_number_id:
         raise HTTPException(status_code=409, detail="WhatsApp is not connected for this tenant")
 
-    convo = _get_or_create_conversation(db, tenant_id, body.customer_phone)
+    if not has_open_service_window(db, tenant_id, customer_phone):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "لا يمكن إرسال رسالة نصية حرة خارج نافذة خدمة واتساب (24 ساعة). "
+                "استخدم قالبًا معتمدًا من Meta أولاً أو انتظر رد العميل."
+            ),
+        )
+
+    convo = _get_or_create_conversation(db, tenant_id, customer_phone)
 
     from routers.whatsapp_webhook import _send_whatsapp_message  # noqa: PLC0415
     await _send_whatsapp_message(
         phone_id=wa_conn.phone_number_id,
-        to=body.customer_phone,
+        to=customer_phone,
         text=body.message,
         _tenant_id=tenant_id,
         _db=db,
@@ -266,7 +281,7 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
         direction="outbound",
         body=body.message,
         event_type="manual_reply",
-        extra_metadata={"customer_phone": body.customer_phone, "is_ai": False},
+        extra_metadata={"customer_phone": customer_phone, "is_ai": False},
     ))
     convo.status = "active"
     convo.is_human_handoff = False

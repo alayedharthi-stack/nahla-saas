@@ -59,10 +59,22 @@ from services.whatsapp_platform.service import provider_send_message
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
 from core.database import get_db
 from core.nahla_knowledge import build_nahla_system_prompt
+from core.wa_usage import track_conversation
 from modules.ai.orchestrator.adapter import generate_ai_reply
+from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
 
 logger = logging.getLogger("nahla-backend")
 router = APIRouter(tags=["WhatsApp Webhook"])
+
+
+def _extract_contact_name(value: Dict[str, Any], sender: str) -> str:
+    sender_digits = "".join(ch for ch in str(sender or "") if ch.isdigit())
+    for contact in value.get("contacts", []) or []:
+        wa_id = str(contact.get("wa_id") or "")
+        if wa_id == sender or "".join(ch for ch in wa_id if ch.isdigit()) == sender_digits:
+            profile = contact.get("profile") or {}
+            return str(profile.get("name") or "").strip()
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -275,6 +287,33 @@ async def _dispatch_message(
         "[TRACE][2/6] TENANT_RESOLVED | phone_number_id=%s tenant_id=%s status=%s",
         used_pid, resolved_tenant_id, wa_conn.status,
     )
+
+    normalized_sender = normalize_phone(sender) or sender
+    contact_name = _extract_contact_name(value, sender)
+    try:
+        CustomerIntelligenceService(db, resolved_tenant_id).upsert_lead_customer(
+            phone=normalized_sender,
+            name=contact_name or normalized_sender,
+            source="whatsapp_inbound",
+            extra_metadata={
+                "channel": "whatsapp",
+                "phone_number_id": phone_number_id,
+                "provider": wa_provider(wa_conn),
+            },
+            commit=True,
+        )
+        track_conversation(
+            db,
+            resolved_tenant_id,
+            normalized_sender,
+            source="inbound",
+            category="service",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Webhook] Failed to sync inbound customer lead | tenant=%s sender=%s err=%s",
+            resolved_tenant_id, normalized_sender, exc,
+        )
 
     # ── Handle interactive button replies ──────────────────────────────────────
     if msg_type == "interactive":

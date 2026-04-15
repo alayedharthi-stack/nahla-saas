@@ -46,6 +46,11 @@ from models import (  # noqa: E402
     StoreKnowledgeSnapshot,
     TenantSettings,
 )
+from services.customer_intelligence import (  # noqa: E402
+    CustomerIntelligenceService,
+    extract_order_datetime as intelligence_extract_order_datetime,
+    normalize_phone as intelligence_normalize_phone,
+)
 
 logger = logging.getLogger("nahla-backend")
 
@@ -55,55 +60,11 @@ logger = logging.getLogger("nahla-backend")
 import re as _re
 
 def _normalize_phone(raw_phone) -> str:
-    """Normalize a Saudi phone number to 9-digit local format (5xxxxxxxx).
-
-    Handles: +966..., 00966..., 966..., 05..., 5..., int values.
-    Returns empty string for non-Saudi or invalid numbers.
-    """
-    s = _re.sub(r"[^\d]", "", str(raw_phone or ""))
-    if not s:
-        return ""
-    if s.startswith("00966"):
-        s = s[5:]
-    elif s.startswith("966") and len(s) >= 12:
-        s = s[3:]
-    if s.startswith("0") and len(s) == 10:
-        s = s[1:]
-    if len(s) == 9 and s[0] == "5":
-        return s
-    return str(raw_phone or "")
+    return intelligence_normalize_phone(raw_phone)
 
 
 def _extract_order_datetime(raw: Any) -> Optional[datetime]:
-    """Extract a reliable order datetime from adapter payloads / stored metadata."""
-    candidates: List[Any] = []
-    if isinstance(raw, dict):
-        candidates.extend([
-            raw.get("created_at"),
-            raw.get("date"),
-            (raw.get("date") or {}).get("date") if isinstance(raw.get("date"), dict) else None,
-            raw.get("updated_at"),
-        ])
-
-    for value in candidates:
-        if not value:
-            continue
-        text = str(value).strip()
-        if not text:
-            continue
-        for candidate in (
-            text.replace("Z", "+00:00"),
-            text.replace(" ", "T", 1),
-            text.split(".", 1)[0].replace(" ", "T", 1),
-        ):
-            try:
-                dt = datetime.fromisoformat(candidate)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone(timezone.utc)
-            except Exception:
-                continue
-    return None
+    return intelligence_extract_order_datetime(raw)
 
 
 def _normalise_product(raw: Any) -> Dict:
@@ -218,6 +179,7 @@ class StoreSyncService:
         self.db        = db
         self.tenant_id = tenant_id
         self._adapter  = None   # lazy-loaded
+        self._customer_intelligence = CustomerIntelligenceService(db, tenant_id)
 
     # ── Adapter access ─────────────────────────────────────────────────────────
 
@@ -652,101 +614,12 @@ class StoreSyncService:
     # ── Customer profile builder ─────────────────────────────────────────────
 
     def _build_customer_profiles(self) -> int:
-        """Create/update CustomerProfile for every customer using order data."""
-        customers = (
-            self.db.query(Customer)
-            .filter(Customer.tenant_id == self.tenant_id)
-            .all()
+        """Create/update CustomerProfile for every customer using unified intelligence rules."""
+        return self._customer_intelligence.rebuild_profiles_for_tenant(
+            reason="store_sync_build_profiles",
+            commit=True,
+            emit_event=True,
         )
-        updated = 0
-        now = datetime.now(timezone.utc)
-        for cust in customers:
-            profile = (
-                self.db.query(CustomerProfile)
-                .filter_by(customer_id=cust.id, tenant_id=self.tenant_id)
-                .first()
-            )
-            if not profile:
-                profile = CustomerProfile(
-                    customer_id=cust.id,
-                    tenant_id=self.tenant_id,
-                    segment="new",
-                )
-                self.db.add(profile)
-                self.db.flush()
-
-            norm_phone = _normalize_phone(cust.phone) if cust.phone else ""
-            orders = []
-            if norm_phone:
-                matched = {}
-                for order in (
-                    self.db.query(Order)
-                    .filter(Order.tenant_id == self.tenant_id)
-                    .all()
-                ):
-                    info = order.customer_info or {}
-                    order_phone = _normalize_phone(info.get("mobile", info.get("phone", "")))
-                    if order_phone == norm_phone:
-                        matched[order.id] = order
-                orders = list(matched.values())
-
-            if not orders and cust.name:
-                orders = (
-                    self.db.query(Order)
-                    .filter(
-                        Order.tenant_id == self.tenant_id,
-                        Order.customer_info["name"].astext == cust.name,
-                    )
-                    .all()
-                )
-
-            total_orders = len(orders)
-            total_spend = 0.0
-            last_order_at = None
-            first_seen_at = None
-            for o in orders:
-                try:
-                    total_spend += float(o.total or 0)
-                except (ValueError, TypeError):
-                    pass
-                o_date = None
-                raw_created_at = (
-                    (o.extra_metadata or {}).get("created_at")
-                    if getattr(o, "extra_metadata", None) else None
-                )
-                if raw_created_at:
-                    try:
-                        o_date = datetime.fromisoformat(str(raw_created_at).replace("Z", "+00:00"))
-                    except Exception:
-                        o_date = None
-                if o_date is None:
-                    o_date = getattr(o, "created_at", None)
-                if o_date is None and isinstance(getattr(o, "customer_info", None), dict):
-                    o_date = _extract_order_datetime(o.customer_info)
-                if o_date:
-                    if o_date.tzinfo is None:
-                        o_date = o_date.replace(tzinfo=timezone.utc)
-                    if last_order_at is None or o_date > last_order_at:
-                        last_order_at = o_date
-                    if first_seen_at is None or o_date < first_seen_at:
-                        first_seen_at = o_date
-
-            profile.total_orders = total_orders
-            profile.total_spend_sar = round(total_spend, 2)
-            profile.average_order_value_sar = round(total_spend / total_orders, 2) if total_orders else 0
-            profile.last_order_at = last_order_at
-            profile.first_seen_at = first_seen_at or now
-            profile.is_returning = total_orders > 1
-
-            days_inactive = (now - (last_order_at or now)).days if last_order_at else 999
-            segment, churn_risk = _compute_segment(total_orders, total_spend, days_inactive)
-            profile.segment = segment
-            profile.churn_risk_score = churn_risk
-            profile.updated_at = now
-            updated += 1
-
-        self.db.commit()
-        return updated
 
     # ── Full sync ──────────────────────────────────────────────────────────────
 
@@ -786,7 +659,11 @@ class StoreSyncService:
             orders_n    = await self.sync_orders(incremental=is_incremental)
             coupons_n   = await self.sync_coupons()
             customers_n = await self.sync_customers(incremental=is_incremental)
-            profiles_n  = self._build_customer_profiles()
+            profiles_n  = self._customer_intelligence.rebuild_profiles_for_tenant(
+                reason=f"full_sync:{triggered_by}",
+                commit=True,
+                emit_event=True,
+            )
 
             self._rebuild_snapshot(products_n, orders_n, coupons_n)
             self._finish_job(
@@ -912,8 +789,18 @@ class StoreSyncService:
             ))
         self.db.commit()
 
-        if not existing:
-            self._update_customer_profile_from_order(normalised)
+        customer = self._customer_intelligence.upsert_customer_from_order(
+            normalised,
+            source="order_webhook",
+            commit=False,
+        )
+        if customer:
+            self._customer_intelligence.recompute_profile_for_customer(
+                customer.id,
+                reason="order_webhook",
+                commit=True,
+                emit_event=True,
+            )
 
         snap = (
             self.db.query(StoreKnowledgeSnapshot)
@@ -929,67 +816,19 @@ class StoreSyncService:
             self.db.commit()
 
     def _update_customer_profile_from_order(self, normalised: Dict) -> None:
-        """Update CustomerProfile when a new order arrives."""
-        cust_info = normalised.get("customer_info") or {}
-        phone = _normalize_phone(cust_info.get("mobile", cust_info.get("phone", "")))
-        name = cust_info.get("name", "")
-        if not phone and not name:
-            return
-
-        cust = None
-        if phone:
-            cust = self.db.query(Customer).filter(
-                Customer.tenant_id == self.tenant_id, Customer.phone == phone,
-            ).first()
-        if not cust and name:
-            cust = self.db.query(Customer).filter(
-                Customer.tenant_id == self.tenant_id, Customer.name == name,
-            ).first()
-        if not cust:
-            return
-
-        profile = self.db.query(CustomerProfile).filter_by(
-            customer_id=cust.id, tenant_id=self.tenant_id,
-        ).first()
-        if not profile:
-            profile = CustomerProfile(customer_id=cust.id, tenant_id=self.tenant_id, segment="new")
-            self.db.add(profile)
-            self.db.flush()
-
-        now = datetime.now(timezone.utc)
-        order_total = 0.0
-        try:
-            order_total = float(normalised.get("total", 0))
-        except (ValueError, TypeError):
-            pass
-
-        profile.total_orders = (profile.total_orders or 0) + 1
-        profile.total_spend_sar = round((profile.total_spend_sar or 0) + order_total, 2)
-        profile.average_order_value_sar = round(
-            profile.total_spend_sar / profile.total_orders, 2
-        ) if profile.total_orders else 0
-        order_created_at = normalised.get("created_at")
-        order_dt = now
-        if order_created_at:
-            try:
-                order_dt = datetime.fromisoformat(str(order_created_at).replace("Z", "+00:00"))
-                if order_dt.tzinfo is None:
-                    order_dt = order_dt.replace(tzinfo=timezone.utc)
-            except Exception:
-                order_dt = now
-        profile.last_order_at = order_dt
-        if not profile.first_seen_at or order_dt < profile.first_seen_at:
-            profile.first_seen_at = order_dt
-        profile.is_returning = profile.total_orders > 1
-
-        days_inactive = 0
-        segment, churn_risk = _compute_segment(
-            profile.total_orders, profile.total_spend_sar, days_inactive,
+        """Backward-compatible wrapper around the unified customer intelligence service."""
+        customer = self._customer_intelligence.upsert_customer_from_order(
+            normalised,
+            source="order_incremental",
+            commit=False,
         )
-        profile.segment = segment
-        profile.churn_risk_score = churn_risk
-        profile.updated_at = now
-        self.db.commit()
+        if customer:
+            self._customer_intelligence.recompute_profile_for_customer(
+                customer.id,
+                reason="order_incremental",
+                commit=True,
+                emit_event=True,
+            )
 
     # ── Incremental customer update (called by webhook) ───────────────────
 
@@ -1005,49 +844,24 @@ class StoreSyncService:
         if not ext_id:
             return
 
-        existing = (
-            self.db.query(Customer)
-            .filter(
-                Customer.tenant_id == self.tenant_id,
-                Customer.extra_metadata["salla_id"].astext == ext_id,
-            )
-            .first()
+        existing = self._customer_intelligence.upsert_customer_identity(
+            phone=phone,
+            name=name,
+            email=email,
+            external_id=ext_id,
+            source="customer_webhook",
+            extra_metadata=payload.get("metadata", {}) or {},
+            seen_at=datetime.now(timezone.utc),
         )
-        meta = {"salla_id": ext_id, **(payload.get("metadata", {}) or {})}
-
-        if existing:
-            if name:
-                existing.name  = name
-            if email:
-                existing.email = email
-            if phone:
-                existing.phone = phone
-            existing.extra_metadata = {**(existing.extra_metadata or {}), **meta}
-        else:
-            new_cust = Customer(
-                tenant_id      = self.tenant_id,
-                name           = name or None,
-                email          = email or None,
-                phone          = phone or None,
-                extra_metadata = meta,
-            )
-            self.db.add(new_cust)
-            self.db.flush()
-            existing = new_cust
-
         if existing and existing.id:
-            prof = self.db.query(CustomerProfile).filter_by(
-                customer_id=existing.id, tenant_id=self.tenant_id,
-            ).first()
-            if not prof:
-                self.db.add(CustomerProfile(
-                    customer_id=existing.id,
-                    tenant_id=self.tenant_id,
-                    segment="new",
-                    first_seen_at=datetime.now(timezone.utc),
-                ))
-
-        self.db.commit()
+            self._customer_intelligence.recompute_profile_for_customer(
+                existing.id,
+                reason="customer_webhook",
+                commit=True,
+                emit_event=True,
+            )
+        else:
+            self.db.commit()
 
         snap = (
             self.db.query(StoreKnowledgeSnapshot)

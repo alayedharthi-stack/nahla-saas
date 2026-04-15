@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from models import Campaign  # noqa: E402
+from models import Campaign, WhatsAppTemplate  # noqa: E402
 
 from core.database import get_db
 from core.tenant import (
@@ -77,6 +77,7 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
         "template_name": c.template_name,
         "template_language": c.template_language,
         "template_category": c.template_category,
+        "template_status": getattr(c, "template_status", None) or "APPROVED",
         "template_body": c.template_body,
         "template_variables": c.template_variables or {},
         "audience_type": c.audience_type,
@@ -116,10 +117,27 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
+    try:
+        template_db_id = int(body.template_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="template_id غير صالح")
+
+    template = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_db_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if template.status != "APPROVED":
+        raise HTTPException(
+            status_code=422,
+            detail="لا يمكن إنشاء حملة إلا باستخدام قالب معتمد من Meta",
+        )
+
     schedule_dt = None
     if body.schedule_time:
         try:
-            from datetime import datetime as _dt, timezone
+            from datetime import datetime as _dt
             schedule_dt = _dt.fromisoformat(body.schedule_time)
         except ValueError:
             pass
@@ -129,11 +147,11 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
         name=body.name,
         campaign_type=body.campaign_type,
         status="scheduled" if body.schedule_type == "scheduled" and schedule_dt else "draft",
-        template_id=body.template_id,
-        template_name=body.template_name,
-        template_language=body.template_language,
-        template_category=body.template_category,
-        template_body=body.template_body,
+        template_id=str(template.id),
+        template_name=template.name,
+        template_language=template.language,
+        template_category=template.category,
+        template_body=next((c.get("text", "") for c in (template.components or []) if c.get("type") == "BODY"), body.template_body),
         template_variables=body.template_variables or {},
         audience_type=body.audience_type,
         audience_count=body.audience_count,

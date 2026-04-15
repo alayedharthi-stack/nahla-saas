@@ -254,6 +254,42 @@ def _open_new_window(
     return True
 
 
+def has_open_service_window(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+    *,
+    now: Optional[datetime] = None,
+) -> bool:
+    """
+    Return True when the customer currently has an open *service* window.
+
+    Free-form text replies are only allowed after a customer-initiated message.
+    A marketing conversation opened by a template must not be treated as a
+    customer-service window for manual text replies.
+    """
+    if not customer_phone:
+        return False
+
+    from models import WaConversationWindow  # noqa: PLC0415
+
+    now_naive = _naive(now or _utcnow())
+    cutoff = now_naive - timedelta(hours=WINDOW_HOURS)
+    window = (
+        db.query(WaConversationWindow)
+        .filter(
+            WaConversationWindow.tenant_id == tenant_id,
+            WaConversationWindow.customer_phone == customer_phone,
+        )
+        .first()
+    )
+    return bool(
+        window is not None
+        and window.category == "service"
+        and window.window_start >= cutoff
+    )
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def track_conversation(

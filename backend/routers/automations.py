@@ -522,7 +522,7 @@ def _job_inactive_customers(db: Session, tenant_id: int, config: Dict[str, Any])
         .join(Customer, CustomerProfile.customer_id == Customer.id)
         .filter(
             CustomerProfile.tenant_id == tenant_id,
-            CustomerProfile.segment.in_(["at_risk", "churned"]),
+            CustomerProfile.customer_status.in_(["at_risk", "inactive"]),
             CustomerProfile.last_order_at <= threshold,
         )
         .all()
@@ -548,6 +548,8 @@ def _job_inactive_customers(db: Session, tenant_id: int, config: Dict[str, Any])
                 "customer_name": customer.name,
                 "days_inactive": (datetime.now(timezone.utc) - profile.last_order_at).days if profile.last_order_at else inactive_days,
                 "template": config.get("template_name", "win_back"),
+                "customer_status": profile.customer_status or profile.segment,
+                "rfm_segment": getattr(profile, "rfm_segment", None),
                 "discount_pct": discount_pct,
                 "vars": {
                     "{{1}}": customer.name or "العميل",

@@ -1,7 +1,7 @@
 """
 routers/intelligence.py
 ────────────────────────
-Customer intelligence dashboard — segments, churn risk, reorder predictions.
+Customer intelligence dashboard — unified deterministic status + RFM insights.
 
 Routes:
   GET  /intelligence/dashboard              — full intelligence summary
@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from models import (  # noqa: E402
@@ -30,6 +31,11 @@ from models import (  # noqa: E402
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
 from core.automations_seed import seed_automations_if_empty as _seed_automations_if_empty
+from services.customer_intelligence import (
+    CUSTOMER_STATUS_LABELS,
+    RFM_SEGMENT_LABELS,
+    CustomerIntelligenceService,
+)
 
 
 def _utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -41,42 +47,6 @@ def _utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 router = APIRouter()
-
-
-# Demo data removed — no mock seeding
-
-
-# ── Helper functions ───────────────────────────────────────────────────────────
-
-def _compute_customer_segment(total_orders: int, total_spend: float, days_inactive: int) -> tuple:
-    """Classify a customer into one of 5 segments and compute a churn risk score."""
-    from math import exp
-
-    if days_inactive <= 14:
-        churn_risk = max(0.02, days_inactive * 0.005)
-    elif days_inactive <= 30:
-        churn_risk = 0.10 + (days_inactive - 14) * 0.008
-    elif days_inactive <= 60:
-        churn_risk = 0.23 + (days_inactive - 30) * 0.01
-    elif days_inactive <= 90:
-        churn_risk = 0.53 + (days_inactive - 60) * 0.008
-    else:
-        churn_risk = 0.77 + min((days_inactive - 90) * 0.002, 0.23)
-
-    churn_risk = round(min(churn_risk, 1.0), 3)
-
-    if days_inactive > 90:
-        segment = "churned"
-    elif days_inactive > 60:
-        segment = "at_risk"
-    elif total_orders <= 1:
-        segment = "new"
-    elif total_spend >= 2000 and total_orders >= 5:
-        segment = "vip"
-    else:
-        segment = "active"
-
-    return segment, churn_risk
 
 
 def _cleanup_demo_customers(db: Session, tenant_id: int) -> None:
@@ -117,24 +87,17 @@ async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)
 
     autos = db.query(SmartAutomation).filter(SmartAutomation.tenant_id == tenant_id).all()
     active_automations = sum(1 for a in autos if a.enabled)
-
-    from sqlalchemy import func as sqlfunc
     now = datetime.now(timezone.utc)
-
-    seg_rows = (
-        db.query(CustomerProfile.segment, sqlfunc.count(CustomerProfile.id))
-        .filter(CustomerProfile.tenant_id == tenant_id)
-        .group_by(CustomerProfile.segment)
-        .all()
-    )
-    seg_map = {row[0]: row[1] for row in seg_rows}
+    intelligence = CustomerIntelligenceService(db, tenant_id)
+    metrics = intelligence.customers_metrics_summary()
+    seg_map = metrics["status_counts"]
 
     vip_rows = (
         db.query(CustomerProfile, Customer)
         .join(Customer, CustomerProfile.customer_id == Customer.id)
         .filter(
             CustomerProfile.tenant_id == tenant_id,
-            CustomerProfile.segment == "vip",
+            CustomerProfile.customer_status == "vip",
         )
         .order_by(CustomerProfile.total_spend_sar.desc())
         .limit(10)
@@ -155,7 +118,7 @@ async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)
         .join(Customer, CustomerProfile.customer_id == Customer.id)
         .filter(
             CustomerProfile.tenant_id == tenant_id,
-            CustomerProfile.segment.in_(["at_risk", "churned"]),
+            CustomerProfile.customer_status.in_(["at_risk", "inactive"]),
         )
         .order_by(CustomerProfile.churn_risk_score.desc())
         .limit(10)
@@ -206,7 +169,7 @@ async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)
         suggestions.append({
             "id": "s2", "type": "winback", "priority": "medium",
             "title": f"{len(churn_risk)} عملاء في خطر المغادرة",
-            "desc": "لم يتسوقوا منذ أكثر من 60 يوماً — أرسل عرضاً لاستعادتهم.",
+            "desc": "العملاء غير النشطين أو المعرّضين للمغادرة يحتاجون حملة استعادة.",
             "action": "launch_campaign",
             "automation_type": "customer_winback",
         })
@@ -226,17 +189,25 @@ async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)
             "churn_risk_count": len(churn_risk),
             "vip_count": len(vip_customers),
             "active_automations": active_automations,
+            "leads_count": metrics["leads"],
+            "inactive_count": metrics["inactive_customers"],
         },
         "reorder_predictions": reorder_list,
         "churn_risk": churn_risk,
         "vip_customers": vip_customers,
         "suggestions": suggestions,
         "segments": [
-            {"key": "new",     "label": "عملاء جدد",      "count": seg_map.get("new", 0),     "color": "blue"},
-            {"key": "active",  "label": "عملاء نشطون",     "count": seg_map.get("active", 0),  "color": "green"},
-            {"key": "vip",     "label": "VIP",              "count": seg_map.get("vip", 0),     "color": "amber"},
-            {"key": "at_risk", "label": "خطر المغادرة",    "count": seg_map.get("at_risk", 0), "color": "red"},
-            {"key": "churned", "label": "خاملون",           "count": seg_map.get("churned", 0), "color": "slate"},
+            {"key": "lead",     "label": CUSTOMER_STATUS_LABELS["lead"],     "count": seg_map.get("lead", 0),     "color": "blue"},
+            {"key": "new",      "label": CUSTOMER_STATUS_LABELS["new"],      "count": seg_map.get("new", 0),      "color": "blue"},
+            {"key": "active",   "label": CUSTOMER_STATUS_LABELS["active"],   "count": seg_map.get("active", 0),   "color": "green"},
+            {"key": "vip",      "label": "VIP",                              "count": seg_map.get("vip", 0),      "color": "amber"},
+            {"key": "at_risk",  "label": CUSTOMER_STATUS_LABELS["at_risk"],  "count": seg_map.get("at_risk", 0),  "color": "red"},
+            {"key": "inactive", "label": CUSTOMER_STATUS_LABELS["inactive"], "count": seg_map.get("inactive", 0), "color": "slate"},
+        ],
+        "rfm_segments": [
+            {"key": key, "label": RFM_SEGMENT_LABELS.get(key, key), "count": count}
+            for key, count in metrics["rfm_segment_counts"].items()
+            if count > 0
         ],
     }
 
@@ -270,43 +241,24 @@ async def reorder_predictions(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/intelligence/analyze-customers")
 async def analyze_customers(request: Request, db: Session = Depends(get_db)):
-    """Rebuild profiles from orders, then re-compute segment + churn_risk_score."""
+    """Rebuild all profiles using the unified deterministic intelligence service."""
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
     _cleanup_demo_customers(db, tenant_id)
     db.commit()
 
     try:
-        from services.store_sync import StoreSyncService  # noqa: PLC0415
-        svc = StoreSyncService(db, tenant_id)
-        rebuilt = svc._build_customer_profiles()
+        rebuilt = CustomerIntelligenceService(db, tenant_id).rebuild_profiles_for_tenant(
+            reason="manual_analyze_customers",
+            commit=True,
+            emit_event=True,
+        )
     except Exception:
         rebuilt = 0
-
-    profiles = db.query(CustomerProfile).filter(CustomerProfile.tenant_id == tenant_id).all()
-    updated = 0
-
-    for profile in profiles:
-        days_inactive = (
-            (datetime.now(timezone.utc) - _utc(profile.last_order_at)).days
-            if profile.last_order_at
-            else 999
-        )
-        segment, churn_risk = _compute_customer_segment(
-            profile.total_orders or 0,
-            float(profile.total_spend_sar or 0),
-            days_inactive,
-        )
-        profile.segment = segment
-        profile.churn_risk_score = churn_risk
-        profile.updated_at = datetime.now(timezone.utc)
-        updated += 1
-
-    db.commit()
     return {
-        "analyzed": updated,
+        "analyzed": rebuilt,
         "profiles_rebuilt": rebuilt,
-        "message": f"تم تحليل {updated} عميل وتحديث شرائحهم",
+        "message": f"تم تحليل {rebuilt} عميل وتحديث حالتهم ودرجات RFM",
     }
 
 
@@ -317,23 +269,16 @@ async def live_segments(request: Request, db: Session = Depends(get_db)):
     get_or_create_tenant(db, tenant_id)
     _cleanup_demo_customers(db, tenant_id)
     db.commit()
-
-    from sqlalchemy import func as sqlfunc
-    rows = (
-        db.query(CustomerProfile.segment, sqlfunc.count(CustomerProfile.id))
-        .filter(CustomerProfile.tenant_id == tenant_id)
-        .group_by(CustomerProfile.segment)
-        .all()
-    )
-    seg_map = {r[0]: r[1] for r in rows}
+    seg_map = CustomerIntelligenceService(db, tenant_id).status_counts()
 
     return {
         "segments": [
-            {"key": "new",     "label": "عملاء جدد",      "count": seg_map.get("new", 0),     "color": "blue"},
-            {"key": "active",  "label": "عملاء نشطون",     "count": seg_map.get("active", 0),  "color": "green"},
-            {"key": "vip",     "label": "VIP",              "count": seg_map.get("vip", 0),     "color": "amber"},
-            {"key": "at_risk", "label": "خطر المغادرة",    "count": seg_map.get("at_risk", 0), "color": "red"},
-            {"key": "churned", "label": "خاملون",           "count": seg_map.get("churned", 0), "color": "slate"},
+            {"key": "lead",     "label": CUSTOMER_STATUS_LABELS["lead"],     "count": seg_map.get("lead", 0),     "color": "blue"},
+            {"key": "new",      "label": CUSTOMER_STATUS_LABELS["new"],      "count": seg_map.get("new", 0),      "color": "blue"},
+            {"key": "active",   "label": CUSTOMER_STATUS_LABELS["active"],   "count": seg_map.get("active", 0),   "color": "green"},
+            {"key": "vip",      "label": "VIP",                              "count": seg_map.get("vip", 0),      "color": "amber"},
+            {"key": "at_risk",  "label": CUSTOMER_STATUS_LABELS["at_risk"],  "count": seg_map.get("at_risk", 0),  "color": "red"},
+            {"key": "inactive", "label": CUSTOMER_STATUS_LABELS["inactive"], "count": seg_map.get("inactive", 0), "color": "slate"},
         ],
         "total": sum(seg_map.values()),
     }
@@ -365,14 +310,6 @@ async def get_customer_profile(customer_id: int, request: Request, db: Session =
         .all()
     )
 
-    SEGMENT_LABELS = {
-        "new": "عميل جديد",
-        "active": "عميل نشط",
-        "vip": "عميل VIP",
-        "at_risk": "في خطر المغادرة",
-        "churned": "خامل",
-    }
-
     profile_data: Dict[str, Any] = {
         "customer_id": customer.id,
         "customer_name": customer.name,
@@ -390,21 +327,39 @@ async def get_customer_profile(customer_id: int, request: Request, db: Session =
             "total_orders": profile.total_orders,
             "total_spent": profile.total_spend_sar,
             "average_order_value": profile.average_order_value_sar,
+            "first_order_date": profile.first_order_at.isoformat() if getattr(profile, "first_order_at", None) else None,
             "last_order_date": profile.last_order_at.isoformat() if profile.last_order_at else None,
             "first_seen_date": profile.first_seen_at.isoformat() if profile.first_seen_at else None,
             "days_inactive": days_inactive,
-            "segment": profile.segment,
-            "segment_label": SEGMENT_LABELS.get(profile.segment or "new", profile.segment),
+            "status": profile.customer_status or profile.segment or "lead",
+            "status_label": CUSTOMER_STATUS_LABELS.get(profile.customer_status or profile.segment or "lead", profile.customer_status or profile.segment or "lead"),
+            "segment": profile.customer_status or profile.segment or "lead",
+            "segment_label": CUSTOMER_STATUS_LABELS.get(profile.customer_status or profile.segment or "lead", profile.customer_status or profile.segment or "lead"),
+            "rfm_segment": getattr(profile, "rfm_segment", None) or "lead",
+            "rfm_segment_label": RFM_SEGMENT_LABELS.get(getattr(profile, "rfm_segment", None) or "lead", getattr(profile, "rfm_segment", None) or "lead"),
+            "rfm_scores": {
+                "recency": int(getattr(profile, "rfm_recency_score", 0) or 0),
+                "frequency": int(getattr(profile, "rfm_frequency_score", 0) or 0),
+                "monetary": int(getattr(profile, "rfm_monetary_score", 0) or 0),
+                "total": int(getattr(profile, "rfm_total_score", 0) or 0),
+                "code": getattr(profile, "rfm_code", None),
+            },
             "churn_risk_score": profile.churn_risk_score,
             "lifetime_value_score": profile.lifetime_value_score,
             "is_returning": profile.is_returning,
+            "metrics_computed_at": profile.metrics_computed_at.isoformat() if getattr(profile, "metrics_computed_at", None) else None,
+            "last_recomputed_reason": getattr(profile, "last_recomputed_reason", None),
         })
     else:
         profile_data.update({
             "total_orders": 0, "total_spent": 0, "average_order_value": 0,
-            "last_order_date": None, "first_seen_date": None, "days_inactive": None,
-            "segment": "new", "segment_label": "عميل جديد",
+            "first_order_date": None, "last_order_date": None, "first_seen_date": None, "days_inactive": None,
+            "status": "lead", "status_label": CUSTOMER_STATUS_LABELS["lead"],
+            "segment": "lead", "segment_label": CUSTOMER_STATUS_LABELS["lead"],
+            "rfm_segment": "lead", "rfm_segment_label": RFM_SEGMENT_LABELS["lead"],
+            "rfm_scores": {"recency": 0, "frequency": 0, "monetary": 0, "total": 0, "code": "000"},
             "churn_risk_score": 0.0, "lifetime_value_score": 0.0, "is_returning": False,
+            "metrics_computed_at": None, "last_recomputed_reason": None,
         })
 
     reorder_data = []

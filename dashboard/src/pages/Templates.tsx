@@ -80,8 +80,8 @@ function WaPreview({
 // ── Template row ──────────────────────────────────────────────────────────────
 
 function TemplateRow({
-  tpl, onPreview, onDelete,
-}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void }) {
+  tpl, onPreview, onDelete, onSubmit,
+}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void }) {
   const vars = countVars(tpl)
   const sm = (STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'
   const isDefault = isDefaultTemplate(tpl.name)
@@ -164,6 +164,15 @@ function TemplateRow({
           >
             <Eye className="w-4 h-4" />
           </button>
+          {tpl.submittable && (
+            <button
+              onClick={onSubmit}
+              className="text-brand-500 hover:text-brand-700 transition-colors text-[11px] font-medium"
+              title="إرسال إلى Meta"
+            >
+              إرسال
+            </button>
+          )}
           {tpl.status !== 'APPROVED' && (
             <button
               onClick={onDelete}
@@ -409,7 +418,13 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
     if (wiz.buttons.length > 0) {
       components.push({ type: 'BUTTONS', buttons: wiz.buttons })
     }
-    return { name: wiz.name.toLowerCase().replace(/\s+/g, '_'), language: wiz.language, category: wiz.category, components }
+    return {
+      name: wiz.name.toLowerCase().replace(/\s+/g, '_'),
+      language: wiz.language,
+      category: wiz.category,
+      components,
+      auto_submit: false,
+    }
   }
 
   const handleSubmit = async () => {
@@ -671,7 +686,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
           ) : (
             <button onClick={handleSubmit} disabled={saving} className="btn-primary text-sm">
               {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-              {saving ? 'جارٍ الإرسال…' : 'إرسال لـ Meta'}
+              {saving ? 'جارٍ الحفظ…' : 'حفظ كمسودة'}
             </button>
           )}
         </div>
@@ -684,6 +699,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
 const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
   { key: 'all',      label: 'الكل' },
+  { key: 'DRAFT',    label: 'مسودات' },
   { key: 'APPROVED', label: 'معتمدة' },
   { key: 'PENDING',  label: 'قيد المراجعة' },
   { key: 'REJECTED', label: 'مرفوضة' },
@@ -731,11 +747,21 @@ export default function Templates() {
     } catch { /* ignore */ }
   }
 
+  const handleSubmitTemplate = async (id: number) => {
+    try {
+      const res = await templatesApi.submit(id)
+      setTemplates(ts => ts.map(t => (t.id === id ? res.template : t)))
+    } catch {
+      // ignore for now
+    }
+  }
+
   const filtered = filterTab === 'all'
     ? templates
     : templates.filter(t => t.status === filterTab)
 
   const counts = {
+    draft: templates.filter(t => t.status === 'DRAFT').length,
     approved: templates.filter(t => t.status === 'APPROVED').length,
     pending:  templates.filter(t => t.status === 'PENDING').length,
     rejected: templates.filter(t => t.status === 'REJECTED').length,
@@ -775,9 +801,9 @@ export default function Templates() {
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4">
-        <StatCard label="معتمدة"          value={String(counts.approved)} change={0}  icon={CheckCircle}  iconColor="text-emerald-600" iconBg="bg-emerald-50" />
-        <StatCard label="قيد المراجعة"   value={String(counts.pending)}  change={0}  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
-        <StatCard label="مرفوضة"         value={String(counts.rejected)} change={0}  icon={XCircle}      iconColor="text-red-600"     iconBg="bg-red-50" />
+        <StatCard label="مسودات"         value={String(counts.draft)}    change={0}  icon={Type}         iconColor="text-slate-600"    iconBg="bg-slate-100" />
+        <StatCard label="معتمدة"         value={String(counts.approved)} change={0}  icon={CheckCircle}  iconColor="text-emerald-600" iconBg="bg-emerald-50" />
+        <StatCard label="قيد المراجعة"  value={String(counts.pending)}  change={0}  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
       </div>
 
       {/* Compliance notice */}
@@ -852,6 +878,7 @@ export default function Templates() {
                     tpl={tpl}
                     onPreview={() => setPreview(tpl)}
                     onDelete={() => handleDelete(tpl.id)}
+                    onSubmit={() => handleSubmitTemplate(tpl.id)}
                   />
                 ))}
               </tbody>

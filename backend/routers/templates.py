@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from models import Customer, TenantSettings, WhatsAppTemplate  # noqa: E402
+from models import Customer, CustomerProfile, TenantSettings, WhatsAppTemplate  # noqa: E402
 
 from core.database import get_db
 from core.tenant import (
@@ -48,6 +48,7 @@ from services.whatsapp_platform.provider_utils import (
     wa_provider,
 )
 from services.whatsapp_platform.service import provider_list_templates, provider_submit_template
+from services.customer_intelligence import CUSTOMER_STATUS_LABELS
 
 router = APIRouter()
 
@@ -65,10 +66,73 @@ SUPPORTED_FEATURE_RULES: Dict[str, Dict[str, Any]] = {
     "inactive_recovery": {"category": {"MARKETING"}, "min_vars": 2, "max_vars": 3},
 }
 
+DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
+    "welcome_intro": {
+        "library_key": "welcome",
+        "label": "رسالة ترحيب",
+        "objective": "welcome",
+        "customer_statuses": ["lead", "new"],
+        "rfm_segments": ["lead", "new_customers", "promising"],
+    },
+    "abandoned_cart_reminder": {
+        "library_key": "abandoned_cart",
+        "label": "استرداد سلة متروكة",
+        "objective": "abandoned_cart",
+        "customer_statuses": ["new", "active"],
+        "rfm_segments": ["regulars", "potential_loyalists", "promising"],
+    },
+    "win_back": {
+        "library_key": "reactivation",
+        "label": "استرجاع العملاء",
+        "objective": "reactivation",
+        "customer_statuses": ["at_risk", "inactive"],
+        "rfm_segments": ["at_risk", "hibernating", "lost_customers", "cant_lose_them"],
+    },
+    "vip_exclusive": {
+        "library_key": "vip_offers",
+        "label": "عروض VIP",
+        "objective": "vip_offer",
+        "customer_statuses": ["vip"],
+        "rfm_segments": ["champions", "loyal_customers", "cant_lose_them"],
+    },
+    "product_recommendations": {
+        "library_key": "product_recommendations",
+        "label": "توصيات منتجات",
+        "objective": "product_recommendations",
+        "customer_statuses": ["active", "vip"],
+        "rfm_segments": ["champions", "loyal_customers", "potential_loyalists", "regulars"],
+    },
+    "order_confirmed": {
+        "library_key": "order_notifications",
+        "label": "إشعارات الطلبات",
+        "objective": "order_notifications",
+        "customer_statuses": ["new", "active", "vip"],
+        "rfm_segments": ["new_customers", "regulars", "champions", "loyal_customers"],
+    },
+    "predictive_reorder_reminder_ar": {
+        "library_key": "product_recommendations",
+        "label": "تذكير إعادة الطلب",
+        "objective": "predictive_reorder",
+        "customer_statuses": ["active", "vip"],
+        "rfm_segments": ["loyal_customers", "potential_loyalists", "regulars"],
+    },
+}
+
 
 # ── Seed data ─────────────────────────────────────────────────────────────────
 
 SEED_TEMPLATES: List[Dict[str, Any]] = [
+    {
+        "name": "welcome_intro",
+        "language": "ar",
+        "category": "MARKETING",
+        "status": "APPROVED",
+        "components": [
+            {"type": "HEADER", "format": "TEXT", "text": "أهلًا بك في متجرنا"},
+            {"type": "BODY", "text": "مرحباً {{1}}، يسعدنا وجودك معنا. اكتشف أفضل العروض والمنتجات الجديدة من {{2}}."},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+        ],
+    },
     {
         "name": "abandoned_cart_reminder",
         "language": "ar",
@@ -100,6 +164,17 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "وصل جديد! ✨"},
             {"type": "BODY",   "text": "مرحباً {{1}}،\nيسعدنا إعلامك بوصول منتجات جديدة في متجر {{2}}.\nاكتشف أحدث التشكيلة الآن وكن أول من يحصل عليها."},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+        ],
+    },
+    {
+        "name": "product_recommendations",
+        "language": "ar",
+        "category": "MARKETING",
+        "status": "APPROVED",
+        "components": [
+            {"type": "HEADER", "format": "TEXT", "text": "اخترنا لك هذه التوصية"},
+            {"type": "BODY", "text": "مرحباً {{1}}، بناءً على اهتماماتك ننصحك بتجربة {{2}} من متجر {{3}}."},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -163,6 +238,10 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
 ]
 
 TEMPLATE_VAR_MAP: Dict[str, Dict[str, str]] = {
+    "welcome_intro": {
+        "{{1}}": "customer_name",
+        "{{2}}": "store_name",
+    },
     "predictive_reorder_reminder_ar": {
         "{{1}}": "customer_name",
         "{{2}}": "product_name",
@@ -196,6 +275,11 @@ TEMPLATE_VAR_MAP: Dict[str, Dict[str, str]] = {
         "{{1}}": "customer_name",
         "{{2}}": "store_name",
     },
+    "product_recommendations": {
+        "{{1}}": "customer_name",
+        "{{2}}": "product_name",
+        "{{3}}": "store_name",
+    },
     "order_confirmed": {
         "{{1}}": "customer_name",
         "{{2}}": "order_id",
@@ -212,6 +296,8 @@ VAR_FIELD_LABELS: Dict[str, str] = {
     "coupon_code":    "كود الكوبون",
     "store_name":     "اسم المتجر",
     "order_id":       "رقم الطلب",
+    "discount_code":  "كود الخصم",
+    "status_label":   "وصف الحالة",
 }
 
 MOCK_TEMPLATES: List[Dict[str, Any]] = [
@@ -305,6 +391,14 @@ class CreateTemplateIn(BaseModel):
     language: str = "ar"
     category: str
     components: List[TemplateComponentIn]
+    auto_submit: bool = False
+
+
+class UpdateTemplateIn(BaseModel):
+    name: Optional[str] = None
+    language: Optional[str] = None
+    category: Optional[str] = None
+    components: Optional[List[TemplateComponentIn]] = None
 
 
 class UpdateTemplateStatusIn(BaseModel):
@@ -347,6 +441,7 @@ def _seed_templates_if_empty(db: Session, tenant_id: int) -> None:
         )
         return
     for seed in SEED_TEMPLATES:
+        library_meta = DEFAULT_TEMPLATE_LIBRARY.get(seed["name"], {})
         tpl = WhatsAppTemplate(
             tenant_id=tenant_id,
             meta_template_id=f"seed_{seed['name']}",
@@ -355,6 +450,8 @@ def _seed_templates_if_empty(db: Session, tenant_id: int) -> None:
             category=seed["category"],
             status=seed["status"],
             components=seed["components"],
+            source="library_default",
+            objective=library_meta.get("objective"),
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
             synced_at=datetime.now(timezone.utc),
@@ -402,6 +499,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         status=t.status,
         template_name=t.name,
     )
+    library_meta = DEFAULT_TEMPLATE_LIBRARY.get(t.name, {})
     return {
         "id": t.id,
         "meta_template_id": t.meta_template_id,
@@ -409,6 +507,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "language": t.language,
         "category": t.category,
         "status": t.status,
+        "workflow_status": "pending_approval" if t.status == "PENDING" else str(t.status or "DRAFT").lower(),
         "status_raw": meta.get("meta_status_raw", t.status),
         "rejection_reason": t.rejection_reason,
         "components": t.components or [],
@@ -423,6 +522,9 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "recommendation_state": getattr(t, "recommendation_state", "none") or "none",
         "recommendation_note": getattr(t, "recommendation_note", None),
         "ai_generation_metadata": getattr(t, "ai_generation_metadata", None),
+        "editable": t.status in {"DRAFT", "REJECTED"},
+        "submittable": t.status in {"DRAFT", "REJECTED"},
+        "library": library_meta or None,
         "compatibility": compatibility,
     }
 
@@ -441,6 +543,7 @@ def _tpl_bump_usage(db: Session, template_id: int, tenant_id: int | None = None)
 def _normalize_template_status(raw_status: Any) -> str:
     raw = str(raw_status or "PENDING").strip().upper()
     status_map = {
+        "DRAFT": "DRAFT",
         "APPROVED": "APPROVED",
         "ACTIVE": "APPROVED",
         "PENDING": "PENDING",
@@ -466,9 +569,15 @@ def _normalize_template_category(raw_category: Any) -> str:
     return category if category in {"MARKETING", "UTILITY", "AUTHENTICATION"} else "MARKETING"
 
 
+def _placeholder_sort_key(value: str) -> tuple[int, Any]:
+    raw = str(value or "").strip()
+    inner = raw[2:-2].strip() if raw.startswith("{{") and raw.endswith("}}") else raw
+    return (0, int(inner)) if inner.isdigit() else (1, inner)
+
+
 def _extract_placeholders_from_text(text: str) -> List[str]:
     import re
-    return sorted(set(re.findall(r"\{\{\d+\}\}", text or "")), key=lambda item: int(item.strip("{}")))
+    return sorted(set(re.findall(r"\{\{[^{}]+\}\}", text or "")), key=_placeholder_sort_key)
 
 
 def _extract_template_placeholders(components: List[Dict[str, Any]]) -> List[str]:
@@ -479,10 +588,13 @@ def _extract_template_placeholders(components: List[Dict[str, Any]]) -> List[str
         for btn in comp.get("buttons") or []:
             placeholders.update(_extract_placeholders_from_text(str(btn.get("text") or "")))
             placeholders.update(_extract_placeholders_from_text(str(btn.get("url") or "")))
-    return sorted(placeholders, key=lambda item: int(item.strip("{}")))
+    return sorted(placeholders, key=_placeholder_sort_key)
 
 
 def _guess_field_candidates(placeholder: str, *, category: str, template_name: str) -> List[str]:
+    inner = placeholder.strip("{}").strip()
+    if inner and not inner.isdigit():
+        return [inner]
     try:
         idx = int(placeholder.strip("{}"))
     except Exception:
@@ -524,6 +636,23 @@ def _infer_var_map(
         if candidates:
             inferred[placeholder] = candidates[0]
     return inferred
+
+
+def _validate_placeholder_integrity(
+    *,
+    old_components: List[Dict[str, Any]],
+    new_components: List[Dict[str, Any]],
+) -> None:
+    old_placeholders = _extract_template_placeholders(old_components)
+    new_placeholders = _extract_template_placeholders(new_components)
+    if old_placeholders and old_placeholders != new_placeholders:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "لا يمكن حذف أو إعادة تسمية placeholders في القالب. "
+                "يمكنك تعديل النص المحيط فقط مع الإبقاء على نفس المتغيرات."
+            ),
+        )
 
 
 def _compute_template_compatibility(
@@ -646,7 +775,7 @@ async def list_templates(
 
 @router.post("/templates")
 async def create_template(body: CreateTemplateIn, request: Request, db: Session = Depends(get_db)):
-    """Create a new template locally and submit it to Meta for approval."""
+    """Create a new template locally as DRAFT, with optional immediate submit."""
     from models import WhatsAppConnection  # noqa: PLC0415
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
@@ -661,31 +790,102 @@ async def create_template(body: CreateTemplateIn, request: Request, db: Session 
         (wa_conn.whatsapp_business_account_id if wa_conn else None)
         or wa.get("whatsapp_business_account_id", "")
     )
+    components = [c.model_dump(exclude_none=True) for c in body.components]
+    normalized_language = _normalize_template_language(body.language)
+    normalized_category = _normalize_template_category(body.category)
+    compatibility = _compute_template_compatibility(
+        components,
+        category=normalized_category,
+        language=normalized_language,
+        status="DRAFT",
+        template_name=body.name,
+    )
+
+    tpl = WhatsAppTemplate(
+        tenant_id=tenant_id,
+        meta_template_id=None,
+        name=body.name,
+        language=normalized_language,
+        category=normalized_category,
+        status="DRAFT",
+        components=components,
+        source="merchant",
+        ai_generation_metadata={"meta_compatibility": compatibility},
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    db.add(tpl)
+    db.flush()
+
     meta_id = None
-    if waba_id:
+    if body.auto_submit and waba_id:
         meta_id = await _submit_template_to_meta(
             db=db,
             conn=wa_conn,
             tenant_id=tenant_id,
             waba_id=waba_id,
-            name=body.name,
-            language=body.language,
-            category=body.category,
-            components=[c.model_dump(exclude_none=True) for c in body.components],
+            name=tpl.name,
+            language=tpl.language,
+            category=tpl.category,
+            components=tpl.components or [],
+        )
+        if meta_id:
+            tpl.meta_template_id = meta_id
+            tpl.status = "PENDING"
+            tpl.synced_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(tpl)
+    return _tpl_to_dict(tpl)
+
+
+@router.put("/templates/{template_id}")
+async def update_template(
+    template_id: int,
+    body: UpdateTemplateIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Edit a non-approved template. Any edit moves the workflow back to DRAFT."""
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if tpl.status == "APPROVED":
+        raise HTTPException(
+            status_code=400,
+            detail="لا يمكن تعديل قالب معتمد مباشرةً. أنشئ نسخة جديدة كمسودة إذا أردت تغيير محتواه.",
         )
 
-    tpl = WhatsAppTemplate(
-        tenant_id=tenant_id,
-        meta_template_id=meta_id,
-        name=body.name,
-        language=body.language,
-        category=body.category,
-        status="PENDING",
-        components=[c.model_dump(exclude_none=True) for c in body.components],
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+    new_components = [c.model_dump(exclude_none=True) for c in body.components] if body.components is not None else (tpl.components or [])
+    _validate_placeholder_integrity(
+        old_components=tpl.components or [],
+        new_components=new_components,
     )
-    db.add(tpl)
+
+    if body.name is not None:
+        tpl.name = body.name
+    if body.language is not None:
+        tpl.language = _normalize_template_language(body.language)
+    if body.category is not None:
+        tpl.category = _normalize_template_category(body.category)
+    tpl.components = new_components
+    tpl.status = "DRAFT"
+    tpl.rejection_reason = None
+    tpl.meta_template_id = None
+    tpl.updated_at = datetime.now(timezone.utc)
+    tpl.ai_generation_metadata = {
+        **(tpl.ai_generation_metadata or {}),
+        "meta_compatibility": _compute_template_compatibility(
+            tpl.components or [],
+            category=tpl.category,
+            language=tpl.language,
+            status=tpl.status,
+            template_name=tpl.name,
+        ),
+    }
     db.commit()
     db.refresh(tpl)
     return _tpl_to_dict(tpl)
@@ -971,6 +1171,18 @@ async def list_template_objectives(request: Request):
     }
 
 
+@router.get("/templates/library")
+async def list_template_library(request: Request):
+    """Return the default template library metadata used by Nahla automations."""
+    _ = request
+    return {
+        "templates": [
+            {"template_name": template_name, **meta}
+            for template_name, meta in DEFAULT_TEMPLATE_LIBRARY.items()
+        ]
+    }
+
+
 @router.post("/templates/sync")
 async def sync_templates_from_meta(request: Request, db: Session = Depends(get_db)):
     """
@@ -1164,6 +1376,12 @@ async def resolve_template_vars(
         Customer.id == customer_id,
         Customer.tenant_id == tenant_id,
     ).first()
+    profile = None
+    if customer:
+        profile = db.query(CustomerProfile).filter(
+            CustomerProfile.customer_id == customer.id,
+            CustomerProfile.tenant_id == tenant_id,
+        ).first()
 
     settings = get_or_create_settings(db, tenant_id)
     store = merge_defaults(settings.store_settings, DEFAULT_STORE)
@@ -1171,6 +1389,10 @@ async def resolve_template_vars(
     field_values: Dict[str, str] = {
         "customer_name": (customer.name if customer else "العميل") or "العميل",
         "store_name": store.get("store_name", "") or "المتجر",
+        "status": (profile.customer_status if profile and getattr(profile, "customer_status", None) else profile.segment if profile else "lead"),
+        "status_label": CUSTOMER_STATUS_LABELS.get((profile.customer_status if profile and getattr(profile, "customer_status", None) else profile.segment if profile else "lead"), "العميل"),
+        "rfm_segment": (getattr(profile, "rfm_segment", None) if profile else None) or "lead",
+        "discount_code": extra.get("discount_code", extra.get("coupon_code", "")),
         **extra,
     }
 
@@ -1213,6 +1435,7 @@ async def resolve_template_vars(
         "resolved_components": resolved_components,
         "rendered_body": body_text,
         "wa_parameters": wa_params,
+        "library": DEFAULT_TEMPLATE_LIBRARY.get(tpl.name),
         "compatibility": compatibility,
     }
 
@@ -1240,5 +1463,6 @@ async def get_campaign_templates(request: Request, db: Session = Depends(get_db)
             "category": t.category,
             "status": t.status,
             "components": t.components or [],
+            "library": DEFAULT_TEMPLATE_LIBRARY.get(t.name),
         })
     return {"templates": result, "source": "db"}

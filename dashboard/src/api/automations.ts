@@ -27,6 +27,8 @@ export interface IntelligenceSummary {
   churn_risk_count: number
   vip_count: number
   active_automations: number
+  leads_count?: number
+  inactive_count?: number
 }
 
 export interface ReorderPrediction {
@@ -76,6 +78,7 @@ export interface IntelligenceDashboard {
   vip_customers: VipCustomer[]
   suggestions: IntelligenceSuggestion[]
   segments: CustomerSegment[]
+  rfm_segments?: CustomerSegment[]
 }
 
 // ── API client ────────────────────────────────────────────────────────────────

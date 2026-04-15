@@ -133,6 +133,9 @@ function TemplateCard({ tpl, selected, onClick }: { tpl: WaTemplate; selected: b
         <p className="text-xs font-semibold text-slate-800">{tpl.name.replace(/_/g, ' ')}</p>
         <Badge label={tpl.category === 'MARKETING' ? 'تسويق' : 'خدمة'} variant={tpl.category === 'MARKETING' ? 'amber' : 'blue'} />
       </div>
+      {tpl.library?.label && (
+        <p className="text-[10px] text-brand-600 mb-1">{tpl.library.label}</p>
+      )}
       {header && <p className="text-xs font-medium text-slate-700 mb-1">{header}</p>}
       <p className="text-xs text-slate-500 line-clamp-2 mb-2" dir="rtl">{body}</p>
       {vars.length > 0 && (
@@ -642,6 +645,9 @@ function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; o
       </td>
       <td className="px-5 py-3.5">
         <Badge label={sm.label} variant={sm.variant} dot />
+        {campaign.template_status && (
+          <p className="text-[10px] text-slate-400 mt-1">قالب: {campaign.template_status}</p>
+        )}
       </td>
       <td className="px-5 py-3.5 text-xs text-slate-700">{campaign.audience_count.toLocaleString('ar-SA')}</td>
       <td className="px-5 py-3.5 text-xs text-slate-700">{campaign.sent_count.toLocaleString('ar-SA')}</td>

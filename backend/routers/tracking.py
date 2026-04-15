@@ -20,6 +20,7 @@ from models import AutomationEvent, Customer  # noqa: E402
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant
+from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
 
 logger = logging.getLogger("nahla-backend")
 
@@ -83,10 +84,16 @@ async def track_storefront_event(
     if body.event_type == "cart_abandon":
         customer_phone = payload.get("customer_phone")
         if customer_phone:
-            customer = db.query(Customer).filter(
-                Customer.tenant_id == tenant_id,
-                Customer.phone.like(f"%{customer_phone[-9:]}%"),
-            ).first()
+            service = CustomerIntelligenceService(db, tenant_id)
+            normalized_phone = normalize_phone(customer_phone)
+            customer = service.find_customer_by_phone(normalized_phone or customer_phone)
+            if customer is None and normalized_phone:
+                customer = service.upsert_lead_customer(
+                    phone=normalized_phone,
+                    source="tracking_lead",
+                    extra_metadata={"source": "tracking", "origin_event": "cart_abandon"},
+                    commit=True,
+                )
             cart_event = AutomationEvent(
                 tenant_id=tenant_id,
                 event_type="abandoned_cart",
