@@ -204,6 +204,35 @@ def _merchant_detail(db: Session, user: User) -> Dict[str, Any]:
     }
 
 
+def _salla_integration_summary(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Return the primary Salla integration's diagnostic fields (or empty dict)."""
+    integ = (
+        db.query(Integration)
+        .filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider == "salla",
+            Integration.enabled == True,  # noqa: E712
+        )
+        .order_by(Integration.id.desc())
+        .first()
+    )
+    if not integ:
+        integ = (
+            db.query(Integration)
+            .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+            .order_by(Integration.id.desc())
+            .first()
+        )
+    if not integ:
+        return {"external_store_id": None, "integration_id": None, "enabled": None}
+    return {
+        "integration_id": integ.id,
+        "external_store_id": integ.external_store_id,
+        "enabled": integ.enabled,
+        "provider": integ.provider,
+    }
+
+
 def _tenant_summary_payload(db: Session, tenant: Tenant) -> Dict[str, Any]:
     subscription = _latest_subscription_for_tenant(db, tenant.id)
     wa_conn = db.query(WhatsAppConnection).filter(
@@ -232,15 +261,23 @@ def _tenant_summary_payload(db: Session, tenant: Tenant) -> Dict[str, Any]:
         "whatsapp": {
             "status": wa_conn.status if wa_conn else "not_connected",
             "phone_number": wa_conn.phone_number if wa_conn else None,
+            "phone_number_id": wa_conn.phone_number_id if wa_conn else None,
+            "whatsapp_business_account_id": wa_conn.whatsapp_business_account_id if wa_conn else None,
             "business_display_name": wa_conn.business_display_name if wa_conn else None,
             "sending_enabled": bool(wa_conn.sending_enabled) if wa_conn else False,
             "webhook_verified": bool(wa_conn.webhook_verified) if wa_conn else False,
+            "connection_type": wa_conn.connection_type if wa_conn else None,
+            "provider": wa_conn.provider if wa_conn else None,
+            "connected_at": wa_conn.connected_at.isoformat() if wa_conn and wa_conn.connected_at else None,
+            "disconnect_reason": wa_conn.disconnect_reason if wa_conn else None,
+            "disconnected_at": wa_conn.disconnected_at.isoformat() if wa_conn and wa_conn.disconnected_at else None,
         },
         "stats": {
             "orders": int(order_count),
             "conversations": int(conversation_count),
             "revenue_sar": float(revenue_sar),
         },
+        "integration": _salla_integration_summary(db, tenant.id),
     }
 
 

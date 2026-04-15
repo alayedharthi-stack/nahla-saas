@@ -100,14 +100,27 @@ export interface AdminTenantSummary {
   whatsapp: {
     status: string
     phone_number: string | null
+    phone_number_id: string | null
+    whatsapp_business_account_id: string | null
     business_display_name: string | null
     sending_enabled: boolean
     webhook_verified: boolean
+    connection_type: string | null
+    provider: string | null
+    connected_at: string | null
+    disconnect_reason: string | null
+    disconnected_at: string | null
   }
   stats: {
     orders: number
     conversations: number
     revenue_sar: number
+  }
+  integration: {
+    integration_id: number | null
+    external_store_id: string | null
+    enabled: boolean | null
+    provider: string | null
   }
 }
 

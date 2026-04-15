@@ -27,6 +27,7 @@ import {
   Puzzle,
   Smartphone,
   Wrench,
+  HelpCircle,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -53,7 +54,6 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/admin',                 icon: Crown,         label: _tr => 'لوحة التحكم'          },
       { to: '/admin/tenants',         icon: Store,         label: _tr => 'المتاجر'              },
-      { to: '/admin/merchants',       icon: Users,         label: _tr => 'التجار'               },
       { to: '/admin/revenue',         icon: TrendingUp,    label: _tr => 'الإيرادات'            },
       { to: '/admin/ai-usage',        icon: BrainCircuit,  label: _tr => 'استخدام الذكاء'       },
       { to: '/admin/features',        icon: Flag,          label: _tr => 'الميزات التجريبية'    },
@@ -101,11 +101,12 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/integrations',      icon: Plug,          label: tr  => tr.nav.items.integrations },
       { to: '/store-integration', icon: Store,          label: _tr => 'ربط المتجر'             },
-      { to: '/whatsapp-connect',  icon: MessageCircle,  label: _tr => 'ربط واتساب'             },
-      { to: '/widgets',           icon: TrendingUp,     label: _tr => 'أدوات زيادة المبيعات'   },
-      { to: '/system-status',     icon: Activity,       label: _tr => 'حالة النظام'             },
-      { to: '/billing',           icon: CreditCard,     label: _tr => 'الاشتراك والفوترة'       },
-      { to: '/settings',          icon: Settings,       label: tr  => tr.nav.items.settings     },
+      { to: '/whatsapp-connect',          icon: MessageCircle,  label: _tr => 'ربط واتساب'                     },
+      { to: '/help/whatsapp-manual-setup', icon: HelpCircle,   label: _tr => 'دليل الربط اليدوي'              },
+      { to: '/widgets',                   icon: TrendingUp,     label: _tr => 'أدوات زيادة المبيعات'           },
+      { to: '/system-status',             icon: Activity,       label: _tr => 'حالة النظام'                    },
+      { to: '/billing',                   icon: CreditCard,     label: _tr => 'الاشتراك والفوترة'              },
+      { to: '/settings',                  icon: Settings,       label: tr  => tr.nav.items.settings            },
     ],
   },
 ]

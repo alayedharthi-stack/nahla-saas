@@ -550,6 +550,81 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
         return {"verified": False, "reason": str(exc)}
 
 
+class ManualConnectIn(BaseModel):
+    phone_number_id: str
+    waba_id: str
+    access_token: str
+
+
+@router.post("/connection/manual-connect")
+async def manual_connect(
+    body: ManualConnectIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Merchant self-service manual WhatsApp connection.
+    Accepts Phone Number ID, WABA ID, and Permanent Access Token directly —
+    no OTP or Embedded Signup flow required.
+
+    This is the primary connect method during Meta pre-approval phase.
+    """
+    from core.auth import get_jwt_user_id  # noqa: PLC0415
+
+    tenant_id     = resolve_tenant_id(request)
+    actor_user_id = get_jwt_user_id(request)
+
+    # Input validation
+    pid   = body.phone_number_id.strip()
+    wid   = body.waba_id.strip()
+    token = body.access_token.strip()
+
+    if not pid or not pid.isdigit():
+        raise HTTPException(status_code=422, detail="Phone Number ID يجب أن يكون رقمًا صحيحًا فقط")
+    if not wid or not wid.isdigit():
+        raise HTTPException(status_code=422, detail="WABA ID يجب أن يكون رقمًا صحيحًا فقط")
+    if not token:
+        raise HTTPException(status_code=422, detail="Access Token مطلوب")
+
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if not conn:
+        conn = WhatsAppConnection(tenant_id=tenant_id)
+        db.add(conn)
+
+    now = datetime.now(timezone.utc)
+    conn.phone_number_id              = pid
+    conn.whatsapp_business_account_id = wid
+    conn.access_token                 = token
+    conn.status                       = "connected"
+    conn.sending_enabled              = True
+    conn.connection_type              = "cloud_api"
+    conn.provider                     = "meta"
+    conn.webhook_verified             = False
+    conn.last_error                   = None
+    conn.connected_at                 = now
+    conn.updated_at                   = now
+    conn.disconnect_reason            = None
+    conn.disconnected_at              = None
+    conn.disconnected_by_user_id      = None
+
+    db.commit()
+    db.refresh(conn)
+
+    logger.info(
+        "manual_connect tenant=%s phone_number_id=%s waba_id=%s actor_user_id=%s",
+        tenant_id, pid, wid, actor_user_id,
+    )
+
+    return {
+        "status":          "connected",
+        "phone_number_id": conn.phone_number_id,
+        "waba_id":         conn.whatsapp_business_account_id,
+        "connection_type": conn.connection_type,
+        "sending_enabled": conn.sending_enabled,
+        "connected_at":    conn.connected_at.isoformat() if conn.connected_at else None,
+    }
+
+
 @router.post("/connection/disconnect")
 async def disconnect(request: Request, db: Session = Depends(get_db)):
     """Merchant disconnects WhatsApp — wipes token, preserves identifiers for re-connect."""

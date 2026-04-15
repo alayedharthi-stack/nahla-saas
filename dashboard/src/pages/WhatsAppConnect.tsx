@@ -971,11 +971,161 @@ function Field({
 
 const inputCls = "w-full border border-slate-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 bg-white"
 
+// ── Manual Connect Component ──────────────────────────────────────────────────
+
+function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id: string; waba_id: string; connected_at: string }) => void }) {
+  const [phoneNumberId, setPhoneNumberId] = useState('')
+  const [wabaId, setWabaId]               = useState('')
+  const [accessToken, setAccessToken]     = useState('')
+  const [showToken, setShowToken]         = useState(false)
+  const [busy, setBusy]                   = useState(false)
+  const [error, setError]                 = useState('')
+
+  const validate = (): string => {
+    if (!phoneNumberId.trim())           return 'Phone Number ID مطلوب'
+    if (!/^\d+$/.test(phoneNumberId.trim())) return 'Phone Number ID يجب أن يحتوي على أرقام فقط'
+    if (!wabaId.trim())                  return 'WABA ID مطلوب'
+    if (!/^\d+$/.test(wabaId.trim()))    return 'WABA ID يجب أن يحتوي على أرقام فقط'
+    if (!accessToken.trim())             return 'Access Token مطلوب'
+    return ''
+  }
+
+  const handleConnect = async () => {
+    const err = validate()
+    if (err) { setError(err); return }
+    setBusy(true); setError('')
+    try {
+      const r = await apiCall<{
+        status: string; phone_number_id: string; waba_id: string; connected_at: string | null
+      }>('/whatsapp/connection/manual-connect', {
+        method: 'POST',
+        body: JSON.stringify({
+          phone_number_id: phoneNumberId.trim(),
+          waba_id: wabaId.trim(),
+          access_token: accessToken.trim(),
+        }),
+      })
+      onConnected({
+        phone_number_id: r.phone_number_id,
+        waba_id: r.waba_id,
+        connected_at: r.connected_at ?? new Date().toISOString(),
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'حدث خطأ أثناء الربط')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-emerald-200 shadow-sm p-6 space-y-5">
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center">
+          <MessageCircle className="w-5 h-5 text-emerald-600" />
+        </div>
+        <div>
+          <div className="flex items-center gap-2">
+            <p className="font-bold text-slate-800">الربط اليدوي</p>
+            <span className="text-xs bg-emerald-100 text-emerald-700 font-semibold px-2 py-0.5 rounded-full">المعتمد حاليًا</span>
+          </div>
+          <p className="text-xs text-slate-500">أدخل بيانات حسابك على Meta مباشرةً</p>
+        </div>
+      </div>
+
+      {/* Notice banner */}
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
+        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+        <div className="text-xs text-amber-800 space-y-1">
+          <p className="font-semibold">هذه الطريقة اليدوية هي المعتمدة حاليًا</p>
+          <p>سيتم تفعيل الربط السهل عبر Meta لاحقًا بعد اكتمال عملية الاعتماد.</p>
+        </div>
+      </div>
+
+      {/* Fields */}
+      <Field label="Phone Number ID" hint="الرقم التعريفي للهاتف من Meta Business — أرقام فقط" required>
+        <div className="relative">
+          <Phone className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <input
+            type="text" inputMode="numeric"
+            value={phoneNumberId}
+            onChange={e => { setPhoneNumberId(e.target.value.replace(/\D/g, '')); setError('') }}
+            placeholder="123456789012345"
+            className={`${inputCls} pr-9`} dir="ltr"
+          />
+        </div>
+        {phoneNumberId && !/^\d+$/.test(phoneNumberId) && (
+          <p className="text-xs text-red-500">أرقام فقط</p>
+        )}
+      </Field>
+
+      <Field label="WABA ID (WhatsApp Business Account ID)" hint="معرّف حساب واتساب للأعمال — أرقام فقط" required>
+        <div className="relative">
+          <Building2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <input
+            type="text" inputMode="numeric"
+            value={wabaId}
+            onChange={e => { setWabaId(e.target.value.replace(/\D/g, '')); setError('') }}
+            placeholder="987654321098765"
+            className={`${inputCls} pr-9`} dir="ltr"
+          />
+        </div>
+        {wabaId && !/^\d+$/.test(wabaId) && (
+          <p className="text-xs text-red-500">أرقام فقط</p>
+        )}
+      </Field>
+
+      <Field label="Permanent Access Token" hint="رمز الوصول الدائم من Meta — لا تشاركه مع أي أحد" required>
+        <div className="relative">
+          <ShieldCheck className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <input
+            type={showToken ? 'text' : 'password'}
+            value={accessToken}
+            onChange={e => { setAccessToken(e.target.value); setError('') }}
+            placeholder="EAAxxxxxxxx..."
+            className={`${inputCls} pr-9 pl-10`} dir="ltr"
+          />
+          <button
+            type="button"
+            onClick={() => setShowToken(p => !p)}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+            tabIndex={-1}
+          >
+            <ChevronRight className={`w-4 h-4 transition ${showToken ? 'rotate-90' : ''}`} />
+          </button>
+        </div>
+      </Field>
+
+      {error && <ErrorBox msg={error} />}
+
+      {/* Help link */}
+      <p className="text-xs text-slate-400 text-center">
+        لا تعرف كيف تستخرج هذه البيانات؟{' '}
+        <a href="/help/whatsapp-manual-setup" target="_blank" rel="noreferrer"
+          className="text-emerald-600 hover:text-emerald-700 font-medium underline">
+          راجع الشرح التفصيلي خطوة بخطوة ←
+        </a>
+      </p>
+
+      <button
+        onClick={handleConnect}
+        disabled={busy || !phoneNumberId || !wabaId || !accessToken}
+        className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-50 shadow-lg shadow-emerald-600/20"
+      >
+        {busy
+          ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ الربط...</>
+          : <><MessageCircle className="w-4 h-4" /> ربط واتساب يدويًا</>
+        }
+      </button>
+    </div>
+  )
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function WhatsAppConnect() {
-  // 'embedded' = Meta Embedded Signup (recommended) | 'direct' = old flow
-  const [mode, setMode]       = useState<'embedded'|'direct'|'coexistence'>('embedded')
+  // 'manual' = Manual connect (current) | 'embedded' = Meta Embedded Signup | 'direct' = OTP flow
+  const [mode, setMode]       = useState<'manual'|'embedded'|'direct'|'coexistence'>('manual')
   const [step, setStep]       = useState<1|2|3|4>(1)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy]       = useState(false)
@@ -1184,40 +1334,83 @@ export default function WhatsAppConnect() {
 
       {/* ── Mode switcher (only when not connected) ─────────────────────── */}
       {step < 4 && !loading && (
-        <div className="flex gap-2 bg-slate-100 rounded-xl p-1">
-          <button
-            onClick={() => { setMode('embedded'); setStep(1); setError('') }}
-            className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-              mode === 'embedded'
-                ? 'bg-white shadow text-violet-700'
-                : 'text-slate-500 hover:text-slate-700'
-            }`}
-          >
-            🔗 ربط عبر Meta (موصى به)
-          </button>
-          <button
-            onClick={() => { setMode('direct'); setStep(1); setError('') }}
-            className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-              mode === 'direct'
-                ? 'bg-white shadow text-violet-700'
-                : 'text-slate-500 hover:text-slate-700'
-            }`}
-          >
-            📱 إدخال مباشر
-          </button>
-          {status?.coexistence_available && (
+        <div className="space-y-2">
+          {/* Main tabs */}
+          <div className="flex gap-2 bg-slate-100 rounded-xl p-1">
             <button
-              onClick={() => { setMode('coexistence'); setStep(1); setError('') }}
+              onClick={() => { setMode('manual'); setStep(1); setError('') }}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-1.5 ${
+                mode === 'manual'
+                  ? 'bg-white shadow text-emerald-700'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              🔑 الربط اليدوي
+              {mode === 'manual' && (
+                <span className="text-[10px] bg-emerald-100 text-emerald-700 font-semibold px-1.5 py-0.5 rounded-full">
+                  معتمد حاليًا
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => { setMode('embedded'); setStep(1); setError('') }}
               className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                mode === 'coexistence'
+                mode === 'embedded'
                   ? 'bg-white shadow text-violet-700'
                   : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              ✨ واتساب الجوال + الذكاء
+              🔗 ربط عبر Meta
             </button>
+            <button
+              onClick={() => { setMode('direct'); setStep(1); setError('') }}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                mode === 'direct'
+                  ? 'bg-white shadow text-violet-700'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              📱 OTP
+            </button>
+            {status?.coexistence_available && (
+              <button
+                onClick={() => { setMode('coexistence'); setStep(1); setError('') }}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                  mode === 'coexistence'
+                    ? 'bg-white shadow text-violet-700'
+                    : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                ✨ واتساب الجوال
+              </button>
+            )}
+          </div>
+
+          {/* Context hint per mode */}
+          {mode === 'manual' && (
+            <p className="text-xs text-emerald-700 text-center bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5">
+              أدخل بياناتك من Meta مباشرةً — هذه الطريقة هي الطريقة المعتمدة حاليًا قبل اكتمال اعتماد Meta
+            </p>
+          )}
+          {mode === 'embedded' && (
+            <p className="text-xs text-slate-500 text-center bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5">
+              الربط السهل عبر Meta — سيتم تفعيله بعد اكتمال اعتماد Meta الرسمي
+            </p>
           )}
         </div>
+      )}
+
+      {/* ── Manual connect mode ──────────────────────────────────────────── */}
+      {mode === 'manual' && step < 4 && !loading && (
+        <ManualConnectForm
+          onConnected={(r) => {
+            setConnPhone('')
+            setConnName('')
+            setConnAt(r.connected_at)
+            setConnLabel(`واتساب يدوي — ID: ${r.phone_number_id}`)
+            setStep(4)
+          }}
+        />
       )}
 
       {/* ── Embedded Signup mode ─────────────────────────────────────────── */}

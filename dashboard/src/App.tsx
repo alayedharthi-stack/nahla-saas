@@ -51,6 +51,7 @@ import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
 import MerchantWidgets from './pages/MerchantWidgets'
 import Customers from './pages/Customers'
+import WhatsAppManualSetup from './pages/WhatsAppManualSetup'
 
 export default function App() {
   return (
@@ -123,6 +124,7 @@ export default function App() {
             <Route path="admin/tools"        element={<AdminTools />} />
             <Route path="billing"            element={<Billing />} />
             <Route path="widgets"            element={<MerchantWidgets />} />
+            <Route path="help/whatsapp-manual-setup" element={<WhatsAppManualSetup />} />
           </Route>
         </Routes>
       </BrowserRouter>
