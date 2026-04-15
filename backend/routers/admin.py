@@ -182,7 +182,13 @@ def _plan_name(db: Session, plan_id: Optional[int]) -> str:
     if not plan_id:
         return "—"
     plan = db.query(BillingPlan).filter(BillingPlan.id == plan_id).first()
-    return plan.name_ar or plan.name if plan else "—"
+    if not plan:
+        return "—"
+    return (
+        getattr(plan, "name_ar", None)
+        or getattr(plan, "name", None)
+        or "—"
+    )
 
 
 def _merchant_detail(db: Session, user: User) -> Dict[str, Any]:
@@ -757,8 +763,16 @@ async def list_tenants(
                 "is_active": bool(t.is_active),
                 "created_at": t.created_at.isoformat() if t.created_at else None,
                 "subscription": {"status": "none", "plan": "—", "trial_ends_at": None, "ends_at": None},
-                "whatsapp":     {"status": "not_connected", "phone_number": None, "business_display_name": None, "sending_enabled": False, "webhook_verified": False},
-                "stats":        {"orders": 0, "conversations": 0, "revenue_sar": 0.0},
+                "whatsapp": {
+                    "status": "not_connected", "phone_number": None,
+                    "phone_number_id": None, "whatsapp_business_account_id": None,
+                    "business_display_name": None, "sending_enabled": False,
+                    "webhook_verified": False, "connection_type": None,
+                    "provider": None, "connected_at": None,
+                    "disconnect_reason": None, "disconnected_at": None,
+                },
+                "stats":       {"orders": 0, "conversations": 0, "revenue_sar": 0.0},
+                "integration": {"integration_id": None, "external_store_id": None, "enabled": None, "provider": None},
             }
 
     return {

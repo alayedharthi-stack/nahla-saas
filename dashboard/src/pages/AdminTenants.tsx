@@ -97,8 +97,8 @@ function TenantDrawer({
   onToggle: () => void
   toggling: boolean
 }) {
-  const wa = tenant.whatsapp
-  const integ = tenant.integration
+  const wa = tenant.whatsapp ?? { status: 'not_connected', phone_number: null, phone_number_id: null, whatsapp_business_account_id: null, business_display_name: null, sending_enabled: false, webhook_verified: false, connection_type: null, provider: null, connected_at: null, disconnect_reason: null, disconnected_at: null }
+  const integ = tenant.integration ?? { integration_id: null, external_store_id: null, enabled: null, provider: null }
 
   return (
     <div className="fixed inset-0 z-50 flex justify-start" dir="rtl">
@@ -325,7 +325,7 @@ export default function AdminTenants() {
 
                     {/* External Store ID */}
                     <td className="px-3 py-3">
-                      {tenant.integration.external_store_id
+                      {tenant.integration?.external_store_id
                         ? <span className="font-mono text-xs text-blue-600">{tenant.integration.external_store_id}</span>
                         : <span className="text-xs text-slate-300">—</span>
                       }
@@ -341,12 +341,12 @@ export default function AdminTenants() {
 
                     {/* WA Status */}
                     <td className="px-3 py-3">
-                      <WaBadge status={tenant.whatsapp.status} />
+                      <WaBadge status={tenant.whatsapp?.status ?? 'not_connected'} />
                     </td>
 
                     {/* Phone Number ID */}
                     <td className="px-3 py-3">
-                      {tenant.whatsapp.phone_number_id
+                      {tenant.whatsapp?.phone_number_id
                         ? <span className="font-mono text-xs text-slate-600 truncate block max-w-[120px]">{tenant.whatsapp.phone_number_id}</span>
                         : <span className="text-xs text-slate-300">—</span>
                       }
@@ -354,7 +354,7 @@ export default function AdminTenants() {
 
                     {/* WABA ID */}
                     <td className="px-3 py-3">
-                      {tenant.whatsapp.whatsapp_business_account_id
+                      {tenant.whatsapp?.whatsapp_business_account_id
                         ? <span className="font-mono text-xs text-slate-600 truncate block max-w-[120px]">{tenant.whatsapp.whatsapp_business_account_id}</span>
                         : <span className="text-xs text-slate-300">—</span>
                       }
