@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Search, Store, ToggleLeft, ToggleRight,
   X, Hash, Calendar, Wifi, WifiOff, Phone, Copy,
-  CheckCircle2, AlertCircle, Clock, Unplug,
+  CheckCircle2, AlertCircle, Clock, Unplug, AlertTriangle, Loader2,
 } from 'lucide-react'
+import { apiCall } from '../api/client'
 import { adminApi, type AdminTenantSummary } from '../api/admin'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -86,16 +87,86 @@ function Section({ title, icon: Icon, children }: { title: string; icon: React.E
   )
 }
 
+// ── Disconnect Confirm Modal ───────────────────────────────────────────────────
+
+function DisconnectWaModal({
+  storeName,
+  onConfirm,
+  onCancel,
+  busy,
+}: {
+  storeName: string
+  onConfirm: () => void
+  onCancel: () => void
+  busy: boolean
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm"
+      onClick={e => { if (e.target === e.currentTarget) onCancel() }}
+    >
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-5" dir="rtl">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <div className="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center">
+            <AlertTriangle className="w-7 h-7 text-red-500" />
+          </div>
+          <div>
+            <p className="text-base font-black text-slate-800">فصل واتساب للمتجر؟</p>
+            <p className="text-sm text-slate-500 mt-1">
+              <span className="font-semibold text-slate-700">{storeName}</span>
+            </p>
+          </div>
+        </div>
+        <ul className="space-y-2 text-sm text-slate-600 bg-slate-50 rounded-xl p-4">
+          {[
+            'سيتوقف نحلة AI عن الرد على رسائل هذا المتجر',
+            'سيتم مسح Phone Number ID و WABA ID و Access Token',
+            'يمكن للتاجر إعادة الربط في أي وقت',
+          ].map(line => (
+            <li key={line} className="flex items-start gap-2">
+              <span className="mt-0.5 shrink-0 text-red-400">•</span>
+              {line}
+            </li>
+          ))}
+        </ul>
+        <div className="flex gap-3">
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="flex-1 border border-slate-200 rounded-xl py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition disabled:opacity-60"
+          >
+            إلغاء
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className="flex-1 bg-red-500 hover:bg-red-600 rounded-xl py-2.5 text-sm font-bold text-white transition disabled:opacity-60 flex items-center justify-center gap-2"
+          >
+            {busy
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ الفصل...</>
+              : <><Unplug className="w-4 h-4" /> تأكيد الفصل</>
+            }
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Detail Drawer ─────────────────────────────────────────────────────────────
+
 function TenantDrawer({
   tenant,
   onClose,
   onToggle,
   toggling,
+  onDisconnectWa,
 }: {
   tenant: AdminTenantSummary
   onClose: () => void
   onToggle: () => void
   toggling: boolean
+  onDisconnectWa: () => void
 }) {
   const wa = tenant.whatsapp ?? { status: 'not_connected', phone_number: null, phone_number_id: null, whatsapp_business_account_id: null, business_display_name: null, sending_enabled: false, webhook_verified: false, connection_type: null, provider: null, connected_at: null, disconnect_reason: null, disconnected_at: null }
   const integ = tenant.integration ?? { integration_id: null, external_store_id: null, enabled: null, provider: null }
@@ -162,7 +233,18 @@ function TenantDrawer({
         </div>
 
         {/* Footer actions */}
-        <div className="sticky bottom-0 bg-white border-t border-slate-100 px-5 py-3">
+        <div className="sticky bottom-0 bg-white border-t border-slate-100 px-5 py-3 space-y-2">
+          {/* Disconnect WhatsApp — only show when connected */}
+          {wa.status === 'connected' && (
+            <button
+              onClick={onDisconnectWa}
+              className="w-full py-2.5 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2 bg-orange-50 text-orange-600 hover:bg-orange-100 border border-orange-200"
+            >
+              <Unplug className="w-4 h-4" />
+              فصل واتساب للمتجر
+            </button>
+          )}
+
           <button
             onClick={onToggle}
             disabled={toggling}
@@ -195,6 +277,8 @@ export default function AdminTenants() {
   const [waFilter, setWaFilter] = useState('')
   const [selected, setSelected] = useState<AdminTenantSummary | null>(null)
   const [togglingId, setTogglingId] = useState<number | null>(null)
+  const [showDisconnectModal, setShowDisconnectModal] = useState(false)
+  const [disconnecting, setDisconnecting] = useState(false)
 
   useEffect(() => {
     setLoading(true)
@@ -217,6 +301,23 @@ export default function AdminTenants() {
       if (selected?.id === tenant.id) setSelected(updated)
     } finally {
       setTogglingId(null)
+    }
+  }
+
+  const handleDisconnectWa = async () => {
+    if (!selected) return
+    setDisconnecting(true)
+    try {
+      await apiCall(`/admin/whatsapp/disconnect/${selected.id}`, { method: 'POST' })
+      // Refresh the tenant data
+      const refreshed = await adminApi.tenantSummary(selected.id)
+      setTenants(prev => prev.map(r => r.id === selected.id ? refreshed : r))
+      setSelected(refreshed)
+      setShowDisconnectModal(false)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذر فصل واتساب')
+    } finally {
+      setDisconnecting(false)
     }
   }
 
@@ -400,6 +501,17 @@ export default function AdminTenants() {
           onClose={() => setSelected(null)}
           onToggle={() => toggle(selected)}
           toggling={togglingId === selected.id}
+          onDisconnectWa={() => setShowDisconnectModal(true)}
+        />
+      )}
+
+      {/* Disconnect WhatsApp Modal */}
+      {showDisconnectModal && selected && (
+        <DisconnectWaModal
+          storeName={selected.name}
+          onConfirm={handleDisconnectWa}
+          onCancel={() => setShowDisconnectModal(false)}
+          busy={disconnecting}
         />
       )}
     </div>
