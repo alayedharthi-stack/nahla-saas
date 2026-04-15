@@ -176,7 +176,9 @@ async def on_startup() -> None:
 
             def _bootstrap_db_schema() -> None:
                 import subprocess
+                from sqlalchemy import create_engine, text as _text
 
+                # ── Step A: Salla duplicate cleanup (must run before 0017) ──────────────
                 cleanup = os.path.join(_REPO_ROOT, "scripts", "cleanup_salla_duplicates.py")
                 r1 = subprocess.run(
                     [sys.executable, cleanup, "--execute"],
@@ -184,12 +186,6 @@ async def on_startup() -> None:
                     check=False,
                     env=os.environ.copy(),
                 )
-                # exit 0  → clean / cleaned successfully
-                # exit 1  → could mean "duplicates still exist in dry-run" (won't happen
-                #           with --execute) OR an exception was raised internally.
-                # Either way: log the outcome but do NOT abort startup — let Alembic's
-                # own pre-check be the gate.  If real duplicates remain, migration 0017
-                # raises RuntimeError and the server refuses to start with a clear message.
                 if r1.returncode != 0:
                     logger.warning(
                         "cleanup_salla_duplicates.py exited %d — continuing to Alembic; "
@@ -197,6 +193,41 @@ async def on_startup() -> None:
                         r1.returncode,
                     )
 
+                # ── Step B: Stamp Alembic to 0016 if tables exist but alembic_version
+                #    doesn't.  The DB was previously managed by Base.metadata.create_all();
+                #    without this stamp, 'alembic upgrade head' tries to run 0001 which
+                #    immediately fails with "relation tenants already exists".
+                _db_url = os.environ.get("DATABASE_URL", "")
+                if _db_url:
+                    try:
+                        _eng = create_engine(_db_url)
+                        with _eng.connect() as _conn:
+                            has_alembic = _conn.execute(_text(
+                                "SELECT 1 FROM information_schema.tables "
+                                "WHERE table_schema='public' AND table_name='alembic_version'"
+                            )).scalar()
+                            has_tenants = _conn.execute(_text(
+                                "SELECT 1 FROM information_schema.tables "
+                                "WHERE table_schema='public' AND table_name='tenants'"
+                            )).scalar()
+                        _eng.dispose()
+
+                        if has_tenants and not has_alembic:
+                            logger.warning(
+                                "alembic_version table missing but 'tenants' exists — "
+                                "DB was built by create_all().  Stamping to revision 0016 "
+                                "so that only new migrations (0017+) are applied."
+                            )
+                            subprocess.run(
+                                [sys.executable, "-m", "alembic", "stamp", "0016"],
+                                cwd=_DATABASE_DIR,
+                                check=True,
+                                env=os.environ.copy(),
+                            )
+                    except Exception as _stamp_exc:
+                        logger.warning("Alembic stamp pre-check failed (non-fatal): %s", _stamp_exc)
+
+                # ── Step C: Apply any pending migrations (0017, 0018, …) ───────────────
                 subprocess.run(
                     [sys.executable, "-m", "alembic", "upgrade", "head"],
                     cwd=_DATABASE_DIR,
