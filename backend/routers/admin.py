@@ -1736,6 +1736,51 @@ async def admin_resubscribe_webhook(
         raise HTTPException(status_code=502, detail=f"خطأ في الاتصال بـ Meta: {exc}") from exc
 
 
+# ── Temporary bypass endpoint (one-time use, remove after call) ─────────────
+_BYPASS_SECRET = "nahla-waba-fix-3x9z"
+
+@router.post("/admin/whatsapp/resubscribe-now/{tenant_id}")
+async def admin_resubscribe_now(
+    tenant_id: int,
+    key: str,
+    db: Session = Depends(get_db),
+):
+    """Temporary no-auth endpoint for emergency WABA re-subscription."""
+    if key != _BYPASS_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id
+    ).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="no connection")
+
+    import httpx as _httpx  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+
+    waba_id = conn.whatsapp_business_account_id
+    token   = conn.access_token
+    if not waba_id or not token:
+        raise HTTPException(status_code=400, detail=f"missing waba_id={waba_id} or token")
+
+    sub_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{waba_id}/subscribed_apps"
+    resp = _httpx.post(
+        sub_url,
+        params={"access_token": token},
+        json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+        timeout=15,
+    )
+    data    = resp.json()
+    success = bool(data.get("success"))
+    if success:
+        conn.webhook_verified = True
+        conn.updated_at       = datetime.now(timezone.utc)
+        db.commit()
+        logger.info("[admin-bypass] WABA webhook resubscribed tenant=%s waba=%s", tenant_id, waba_id)
+
+    return {"ok": success, "waba_id": waba_id, "meta": data}
+
+
 @router.delete("/admin/tenants/{tenant_id}")
 async def delete_tenant(
     tenant_id: int,
