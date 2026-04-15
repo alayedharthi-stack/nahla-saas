@@ -41,9 +41,6 @@ JWT_PUBLIC_PREFIXES = (
     "/merchant/widgets/",               # all widget JS/JSON endpoints
     "/salla-auto.js",                   # short alias (configured in Salla Partner Portal)
     "/static/salla-auto.js",            # legacy path (configured in Salla Partner Portal)
-    "/admin/whatsapp/resubscribe-now",  # temporary bypass — remove after use
-    "/admin/whatsapp/fix-waba-id",      # temporary bypass — remove after use
-    "/admin/whatsapp/discover-waba",    # temporary bypass — remove after use
 )
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
 
