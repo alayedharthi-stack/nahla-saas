@@ -1781,6 +1781,53 @@ async def admin_resubscribe_now(
     return {"ok": success, "waba_id": waba_id, "meta": data}
 
 
+@router.get("/admin/whatsapp/discover-waba/{tenant_id}")
+async def admin_discover_waba(
+    tenant_id: int,
+    key: str,
+    db: Session = Depends(get_db),
+):
+    """Discover WABAs and phone numbers accessible with stored token."""
+    if key != _BYPASS_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id
+    ).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="no connection")
+
+    import httpx as _httpx  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+    tok = conn.access_token
+
+    # Discover WABAs accessible to this token
+    wabas_resp = _httpx.get(
+        f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/me/whatsapp_business_accounts",
+        params={"access_token": tok, "fields": "id,name,currency,message_template_namespace"},
+        timeout=15,
+    )
+    wabas_data = wabas_resp.json()
+
+    # Also try listing phone numbers if we have any WABA
+    phone_numbers = []
+    if "data" in wabas_data:
+        for w in (wabas_data["data"] or [])[:3]:
+            ph_resp = _httpx.get(
+                f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{w['id']}/phone_numbers",
+                params={"access_token": tok, "fields": "id,display_phone_number,verified_name"},
+                timeout=10,
+            )
+            phone_numbers.append({"waba_id": w["id"], "phones": ph_resp.json()})
+
+    return {
+        "stored_phone_number_id":       conn.phone_number_id,
+        "stored_waba_id":               conn.whatsapp_business_account_id,
+        "accessible_wabas":             wabas_data,
+        "phone_numbers_per_waba":       phone_numbers,
+    }
+
+
 @router.post("/admin/whatsapp/fix-waba-id/{tenant_id}")
 async def admin_fix_waba_id(
     tenant_id: int,
