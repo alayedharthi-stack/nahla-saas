@@ -399,14 +399,33 @@ async def embedded_signup_callback(
         waba_info  = await _fetch_waba_info(token, waba_id) if waba_id else {}
         phone_info = await _fetch_phone_number_info(token, phone_id) if phone_id else {}
 
-        # 5. Persist
+        # 5. Persist — but first guard against cross-tenant identity theft
+        _pid_to_write = phone_id or phone_info.get("id") or ""
+        _wid_to_write = waba_id or waba_info.get("id") or ""
+        try:
+            from core.tenant_integrity import (  # noqa: PLC0415
+                assert_phone_id_not_claimed, assert_waba_id_not_claimed,
+                evict_phone_id_from_other_tenants, evict_waba_id_from_other_tenants,
+                TenantIntegrityError,
+            )
+            assert_phone_id_not_claimed(db, _pid_to_write, tenant_id)
+            assert_waba_id_not_claimed(db, _wid_to_write, tenant_id)
+            evict_phone_id_from_other_tenants(db, _pid_to_write, tenant_id)
+            evict_waba_id_from_other_tenants(db, _wid_to_write, tenant_id)
+        except TenantIntegrityError as _tie:
+            raise HTTPException(status_code=409, detail=str(_tie)) from _tie
+        except HTTPException:
+            raise
+        except Exception as _g_exc:
+            logger.warning("callback: integrity check error (non-fatal): %s", _g_exc)
+
         conn.status                       = "connected"
         conn.provider                     = WHATSAPP_PROVIDER_META
         conn.access_token                 = token
         conn.token_type                   = token_type
         conn.token_expires_at             = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-        conn.whatsapp_business_account_id = waba_id or waba_info.get("id")
-        conn.phone_number_id              = phone_id or phone_info.get("id")
+        conn.whatsapp_business_account_id = _wid_to_write or None
+        conn.phone_number_id              = _pid_to_write or None
         conn.phone_number                 = phone_info.get("display_phone_number")
         conn.business_display_name        = (
             phone_info.get("verified_name")
@@ -564,17 +583,73 @@ async def manual_connect(
 ):
     """
     Merchant self-service manual WhatsApp connection.
-    Accepts Phone Number ID, WABA ID, and Permanent Access Token directly —
-    no OTP or Embedded Signup flow required.
 
-    This is the primary connect method during Meta pre-approval phase.
+    TENANT-STRICT: The connection is bound exclusively to the tenant embedded
+    in the verified JWT.  No fallback, no tenant creation, no drift.
+    Any ambiguity is rejected loudly before any write happens.
     """
     from core.auth import get_jwt_user_id  # noqa: PLC0415
+    from models import Tenant as _Tenant   # noqa: PLC0415
 
-    tenant_id     = resolve_tenant_id(request)
+    # ── Step 1: resolve tenant directly from the JWT payload ─────────────────
+    # We read the raw payload instead of going through resolve_tenant_id() so
+    # the code path is explicit and cannot silently fall through to any header-
+    # based fallback that only exists for dev/testing.
+    jwt_payload = getattr(request.state, "jwt_payload", None)
+    if not jwt_payload:
+        logger.critical(
+            "[manual_connect] REJECTED — no JWT payload on request.state. "
+            "Possible middleware bypass. ip=%s path=%s",
+            request.client.host if request.client else "unknown",
+            request.url.path,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="لا يمكن تحديد هوية المستخدم. يرجى تسجيل الدخول مرة أخرى.",
+        )
+
+    raw_tid = jwt_payload.get("tenant_id")
+    if raw_tid is None:
+        logger.critical(
+            "[manual_connect] REJECTED — JWT has no tenant_id claim. sub=%s role=%s",
+            jwt_payload.get("sub"), jwt_payload.get("role"),
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="الرمز المميز لا يحتوي على معرّف المتجر. يرجى تسجيل الدخول مرة أخرى.",
+        )
+
+    try:
+        tenant_id = int(raw_tid)
+    except (ValueError, TypeError):
+        logger.critical(
+            "[manual_connect] REJECTED — JWT tenant_id is not an integer: %r", raw_tid
+        )
+        raise HTTPException(status_code=401, detail="معرّف المتجر في الرمز المميز غير صالح.")
+
     actor_user_id = get_jwt_user_id(request)
+    client_ip     = request.client.host if request.client else "unknown"
 
-    # Input validation
+    # ── Step 2: verify the tenant actually exists in the database ─────────────
+    # A stale or fabricated JWT could carry a tenant_id that has no row in the
+    # tenants table.  Writing a WhatsAppConnection for a ghost tenant causes
+    # silent data drift — catch it before any write.
+    tenant_row = db.query(_Tenant).filter(_Tenant.id == tenant_id).first()
+    if not tenant_row:
+        logger.critical(
+            "[manual_connect] REJECTED — JWT tenant_id=%s has NO row in tenants table. "
+            "Stale token or ghost tenant. actor_user_id=%s ip=%s",
+            tenant_id, actor_user_id, client_ip,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"المتجر رقم {tenant_id} غير موجود في النظام. "
+                "يرجى تسجيل الدخول مرة أخرى أو التواصل مع الدعم."
+            ),
+        )
+
+    # ── Step 3: input validation ──────────────────────────────────────────────
     pid   = body.phone_number_id.strip()
     wid   = body.waba_id.strip()
     token = body.access_token.strip()
@@ -586,10 +661,69 @@ async def manual_connect(
     if not token:
         raise HTTPException(status_code=422, detail="Access Token مطلوب")
 
+    # ── Step 4: log the resolved identity BEFORE any write ────────────────────
+    logger.info(
+        "[manual_connect] IDENTITY RESOLVED — tenant_id=%s tenant_name=%r "
+        "actor_user_id=%s phone_number_id=%s waba_id=%s ip=%s",
+        tenant_id, tenant_row.name, actor_user_id, pid, wid, client_ip,
+    )
+
+    # ── Step 5: tenant integrity guards — conflict checks are ALWAYS fatal ────
+    # The broad `except Exception` that previously swallowed integrity errors
+    # is intentionally gone.  Any unexpected crash here surfaces immediately
+    # rather than silently allowing a cross-tenant write.
+    from core.tenant_integrity import (  # noqa: PLC0415
+        assert_phone_id_not_claimed,
+        assert_waba_id_not_claimed,
+        evict_phone_id_from_other_tenants,
+        evict_waba_id_from_other_tenants,
+        TenantIntegrityError,
+    )
+    try:
+        assert_phone_id_not_claimed(db, pid, tenant_id)
+    except TenantIntegrityError as tie:
+        logger.error(
+            "[manual_connect] BLOCKED — phone_number_id=%s already claimed. tenant=%s conflict: %s",
+            pid, tenant_id, tie,
+        )
+        raise HTTPException(status_code=409, detail=str(tie)) from tie
+
+    try:
+        assert_waba_id_not_claimed(db, wid, tenant_id)
+    except TenantIntegrityError as tie:
+        logger.error(
+            "[manual_connect] BLOCKED — waba_id=%s already claimed. tenant=%s conflict: %s",
+            wid, tenant_id, tie,
+        )
+        raise HTTPException(status_code=409, detail=str(tie)) from tie
+
+    # Evict stale disconnected rows from other tenants.
+    # These are non-connected leftovers — safe to clear, failure is non-fatal.
+    try:
+        evicted_phone = evict_phone_id_from_other_tenants(db, pid, tenant_id)
+        evicted_waba  = evict_waba_id_from_other_tenants(db, wid, tenant_id)
+        if evicted_phone or evicted_waba:
+            logger.info(
+                "[manual_connect] EVICTED stale rows — phone_evicted=%s waba_evicted=%s "
+                "for tenant=%s",
+                evicted_phone, evicted_waba, tenant_id,
+            )
+    except Exception as _evict_exc:
+        logger.warning("[manual_connect] evict warning (non-fatal): %s", _evict_exc)
+
+    # ── Step 6: write — strictly to the verified tenant ──────────────────────
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn:
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
+        logger.info(
+            "[manual_connect] CREATING new WhatsAppConnection for tenant_id=%s", tenant_id,
+        )
+    else:
+        logger.info(
+            "[manual_connect] UPDATING existing WhatsAppConnection id=%s for tenant_id=%s",
+            conn.id, tenant_id,
+        )
 
     now = datetime.now(timezone.utc)
     conn.phone_number_id              = pid
@@ -611,8 +745,9 @@ async def manual_connect(
     db.refresh(conn)
 
     logger.info(
-        "manual_connect tenant=%s phone_number_id=%s waba_id=%s actor_user_id=%s",
-        tenant_id, pid, wid, actor_user_id,
+        "[manual_connect] COMMITTED — tenant_id=%s tenant_name=%r phone_number_id=%s "
+        "waba_id=%s wa_conn_id=%s actor_user_id=%s",
+        tenant_id, tenant_row.name, pid, wid, conn.id, actor_user_id,
     )
 
     # Try to subscribe the WABA to our Meta App's webhooks automatically.
