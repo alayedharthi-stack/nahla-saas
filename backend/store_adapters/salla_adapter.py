@@ -579,27 +579,23 @@ class SallaAdapter(BaseStoreAdapter):
     ) -> Optional[Dict[str, Any]]:
         """Create a coupon in Salla. Returns the created coupon data or None.
 
-        Salla Admin API v2 expects:
-          type        = "PERCENT" | "FIXED"  (uppercase)
-          percent_off = integer (when PERCENT)
-          amount_off  = integer (when FIXED)
-        The old fields "amount" + lowercase "type" are rejected with 422.
+        Salla Admin API v2 (verified live, April 2026) expects:
+          type   = "percentage" | "fixed"   (lowercase)
+          amount = numeric discount value   (single field; no percent_off/amount_off)
+        The previous uppercase/split-field shape is rejected with
+        422 alert.invalid_fields{type, amount}.
         """
         start_dt = datetime.now(timezone.utc)
         expiry_dt = start_dt + timedelta(days=expiry_days)
         start  = start_dt.strftime("%Y-%m-%d")
         expiry = expiry_dt.strftime("%Y-%m-%d")
 
-        # Normalise type to what Salla v2 API actually expects
-        salla_type = "PERCENT" if discount_type in ("percentage", "PERCENT") else "FIXED"
-        is_percent = salla_type == "PERCENT"
+        salla_type = "percentage" if discount_type in ("percentage", "PERCENT", "percent") else "fixed"
 
         payload = {
             "code":                   code,
             "type":                   salla_type,
-            "percent_off":            int(discount_value) if is_percent else 0,
-            "amount_off":             int(discount_value) if not is_percent else 0,
-            "status":                 "active",
+            "amount":                 int(discount_value),
             "start_date":             start,
             "expiry_date":            expiry,
             "free_shipping":          False,
