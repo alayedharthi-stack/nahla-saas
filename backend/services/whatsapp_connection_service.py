@@ -141,13 +141,16 @@ def commit_connection(
       1. Assert phone_number_id is not actively claimed by another tenant  → 409 on conflict.
       2. Assert waba_id is not actively claimed by another tenant          → 409 on conflict.
       3. Evict stale (disconnected/error) rows from other tenants.
-      4. Write the WhatsAppConnection row (create or update).
-      5. Attempt Meta webhook subscription.
-      6. Persist webhook_verified flag based on step 5 result.
-      7. Return ConnectionResult with all three readiness flags.
+      4. Validate phone_number_id belongs to waba_id via Meta API         → 422 on mismatch.
+      5. Write the WhatsAppConnection row (create or update).
+      6. Register the phone number (POST /{phone_number_id}/register) if new/changed.
+      7. Attempt Meta webhook subscription (POST /{waba_id}/subscribed_apps).
+      8. Persist webhook_verified flag based on step 7 result.
+      9. Return ConnectionResult with all four readiness flags.
 
     Raises:
-      WhatsAppConnectionConflict — if phone_number_id or waba_id is owned elsewhere.
+      WhatsAppConnectionConflict — if phone_number_id or waba_id is owned elsewhere,
+                                   OR if phone→waba mismatch is detected.
       WhatsAppConnectionError    — on unexpected DB failure.
     """
     from database.models import WhatsAppConnection  # noqa: PLC0415
@@ -184,7 +187,21 @@ def commit_connection(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[WASvc] eviction warning (non-fatal): %s", exc)
 
-    # ── Step 4: Write ─────────────────────────────────────────────────────────
+    # ── Step 4: Validate phone_number_id → waba_id ownership ─────────────────
+    # Ask Meta whether phone_number_id actually belongs to the supplied waba_id.
+    # If Meta returns a definitive mismatch → reject with a clear error.
+    # If Meta cannot return the WABA (permission gap) → proceed with a warning.
+    match, resolved_waba, _val_err = validate_phone_waba_match(
+        phone_number_id, waba_id, access_token, tenant_id
+    )
+    if not match:
+        raise WhatsAppConnectionConflict(
+            f"phone_number_id {phone_number_id} belongs to WABA {resolved_waba}, "
+            f"not to the supplied waba_id {waba_id}. "
+            f"يرجى إدخال الـ WABA ID الصحيح: {resolved_waba}"
+        )
+
+    # ── Step 5: Write ─────────────────────────────────────────────────────────
     # Capture old phone_number_id BEFORE overwriting so we can detect a change.
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     action        = "updated" if conn else "created"
@@ -237,7 +254,7 @@ def commit_connection(
         action          = action,
     )
 
-    # ── Step 5: Phone registration (once per new/changed phone_number_id) ────
+    # ── Step 6: Phone registration (once per new/changed phone_number_id) ────
     # Meta requires a POST /{phone_number_id}/register call to lift the phone
     # from "Pending" to "Active" on the Cloud API.  We run this only when the
     # phone_number_id is brand-new or just changed, so it is never called on
@@ -255,7 +272,7 @@ def commit_connection(
             tenant_id, phone_number_id,
         )
 
-    # ── Step 6–7: Webhook subscription ───────────────────────────────────────
+    # ── Step 7–8: Webhook subscription ───────────────────────────────────────
     webhook_ok, webhook_err = subscribe_waba_webhook(waba_id, access_token, tenant_id)
     result.webhook_subscribed = webhook_ok
     result.webhook_error      = webhook_err
@@ -274,7 +291,7 @@ def commit_connection(
             tenant_id, waba_id, webhook_err,
         )
 
-    # ── Step 8: Compute inbound_usable ────────────────────────────────────────
+    # ── Step 9: Compute inbound_usable ────────────────────────────────────────
     result.inbound_usable = (
         result.credentials_saved
         and result.phone_registered
@@ -370,6 +387,111 @@ def begin_waba_session(
         raise WhatsAppConnectionError(f"DB write failed: {exc}") from exc
 
     logger.info("[WASvc] begin_waba_session COMMITTED — tenant=%s waba=%s", tenant_id, waba_id)
+
+
+def resolve_waba_for_phone(
+    phone_number_id: str,
+    access_token: str,
+    tenant_id: int,
+) -> tuple[str | None, str | None]:
+    """
+    Ask Meta which WABA owns this phone_number_id.
+
+    Strategy (two attempts so we work with both system-user and user tokens):
+      1. GET /{phone_number_id}?fields=id,whatsapp_business_account
+         → returns waba {"id": "..."} when token has whatsapp_business_management scope.
+      2. Fallback: not possible without listing all accessible WABAs.
+
+    Returns (waba_id: str | None, error: str | None).
+    waba_id is None when Meta doesn't return the WABA (permission gap — not an error).
+    """
+    try:
+        from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+        url  = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{phone_number_id}"
+        resp = httpx.get(
+            url,
+            params={
+                "fields":       "id,display_phone_number,verified_name,whatsapp_business_account",
+                "access_token": access_token,
+            },
+            timeout=10,
+        )
+        data = resp.json()
+
+        if resp.status_code != 200:
+            err = (data.get("error") or {}).get("message", f"HTTP {resp.status_code}")
+            logger.warning(
+                "[WhatsApp] resolve_waba_for_phone FAILED — tenant=%s phone=%s err=%r",
+                tenant_id, phone_number_id, err,
+            )
+            return None, err
+
+        wba = data.get("whatsapp_business_account")
+        if isinstance(wba, dict):
+            waba_id = wba.get("id")
+            return waba_id, None
+        if isinstance(wba, str):
+            return wba, None
+
+        # Field absent — token lacks whatsapp_business_management scope
+        logger.info(
+            "[WhatsApp] resolve_waba_for_phone: no waba field in response "
+            "(token may lack whatsapp_business_management scope) — tenant=%s phone=%s",
+            tenant_id, phone_number_id,
+        )
+        return None, None
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[WhatsApp] resolve_waba_for_phone exception — tenant=%s phone=%s: %s",
+            tenant_id, phone_number_id, exc,
+        )
+        return None, str(exc)
+
+
+def validate_phone_waba_match(
+    phone_number_id: str,
+    input_waba_id: str,
+    access_token: str,
+    tenant_id: int,
+) -> tuple[bool, str | None, str | None]:
+    """
+    Validate that phone_number_id actually belongs to input_waba_id.
+
+    Returns (match: bool, resolved_waba_id: str | None, error: str | None).
+
+    match=True  → OK to proceed.
+    match=False → mismatch detected; caller MUST reject with 422.
+    match=True + resolved_waba_id=None → could not resolve (graceful degradation).
+
+    Always logs:
+      [WhatsApp] validate phone->waba phone_number_id=... input_waba_id=... resolved_waba_id=... match=True/False
+    """
+    resolved_waba_id, err = resolve_waba_for_phone(phone_number_id, access_token, tenant_id)
+
+    if resolved_waba_id is None:
+        # Cannot resolve — could be permission gap; allow with warning
+        logger.warning(
+            "[WhatsApp] validate phone->waba phone_number_id=%s input_waba_id=%s "
+            "resolved_waba_id=unknown match=unknown (cannot verify — proceeding with warning)",
+            phone_number_id, input_waba_id,
+        )
+        return True, None, err
+
+    match = (resolved_waba_id == input_waba_id)
+    logger.info(
+        "[WhatsApp] validate phone->waba phone_number_id=%s input_waba_id=%s "
+        "resolved_waba_id=%s match=%s",
+        phone_number_id, input_waba_id, resolved_waba_id, match,
+    )
+
+    if not match:
+        logger.error(
+            "[WhatsApp] MISMATCH — phone %s belongs to WABA %s, not %s — tenant=%s",
+            phone_number_id, resolved_waba_id, input_waba_id, tenant_id,
+        )
+
+    return match, resolved_waba_id, None
 
 
 def register_phone_number(

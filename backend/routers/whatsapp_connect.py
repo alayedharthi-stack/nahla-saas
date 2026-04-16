@@ -578,6 +578,56 @@ class ManualConnectIn(BaseModel):
     access_token: str
 
 
+class ResolveWabaIn(BaseModel):
+    phone_number_id: str
+    access_token: str
+
+
+@router.post("/connection/resolve-waba")
+async def resolve_waba(
+    body: ResolveWabaIn,
+    request: Request,
+):
+    """
+    Ask Meta which WABA owns a given phone_number_id.
+
+    Call this BEFORE manual-connect to auto-fill the correct waba_id.
+    Returns the resolved waba_id, or an error explaining why it could not be determined.
+    This endpoint never writes to the database.
+    """
+    from services.whatsapp_connection_service import resolve_waba_for_phone  # noqa: PLC0415
+
+    pid   = body.phone_number_id.strip()
+    token = body.access_token.strip()
+
+    if not pid or not pid.isdigit():
+        raise HTTPException(status_code=422, detail="phone_number_id يجب أن يحتوي على أرقام فقط")
+    if not token:
+        raise HTTPException(status_code=422, detail="access_token مطلوب")
+
+    # Best-effort: no tenant_id needed here since we never write
+    resolved_waba, err = resolve_waba_for_phone(pid, token, tenant_id=0)
+
+    if resolved_waba:
+        return {
+            "ok":             True,
+            "phone_number_id": pid,
+            "resolved_waba_id": resolved_waba,
+            "message": f"الـ WABA الصحيح لهذا الرقم هو: {resolved_waba}",
+        }
+
+    return {
+        "ok":             False,
+        "phone_number_id": pid,
+        "resolved_waba_id": None,
+        "error":          err,
+        "message": (
+            "تعذر تحديد الـ WABA تلقائياً. يرجى استخدام Meta Business Manager: "
+            "WhatsApp → WhatsApp Accounts → اختر الحساب → انسخ الـ ID من الرابط."
+        ),
+    }
+
+
 @router.post("/connection/manual-connect")
 async def manual_connect(
     body: ManualConnectIn,

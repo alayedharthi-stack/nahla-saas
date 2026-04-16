@@ -1001,13 +1001,39 @@ function ReadinessBadge({ ok, label, detail }: { ok: boolean; label: string; det
 }
 
 function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id: string; waba_id: string; connected_at: string }) => void }) {
-  const [phoneNumberId, setPhoneNumberId] = useState('')
-  const [wabaId, setWabaId]               = useState('')
-  const [accessToken, setAccessToken]     = useState('')
-  const [showToken, setShowToken]         = useState(false)
-  const [busy, setBusy]                   = useState(false)
-  const [error, setError]                 = useState('')
-  const [readiness, setReadiness]         = useState<ConnectReadiness | null>(null)
+  const [phoneNumberId, setPhoneNumberId]   = useState('')
+  const [wabaId, setWabaId]                 = useState('')
+  const [accessToken, setAccessToken]       = useState('')
+  const [showToken, setShowToken]           = useState(false)
+  const [busy, setBusy]                     = useState(false)
+  const [resolvingWaba, setResolvingWaba]   = useState(false)
+  const [wabaResolved, setWabaResolved]     = useState(false)
+  const [error, setError]                   = useState('')
+  const [readiness, setReadiness]           = useState<ConnectReadiness | null>(null)
+
+  const handleResolveWaba = async () => {
+    if (!phoneNumberId.trim() || !accessToken.trim()) {
+      setError('أدخل Phone Number ID و Access Token أولاً ثم اضغط "اكتشاف WABA"')
+      return
+    }
+    setResolvingWaba(true); setError(''); setWabaResolved(false)
+    try {
+      const r = await apiCall<{ ok: boolean; resolved_waba_id: string | null; error?: string; message: string }>(
+        '/whatsapp/connection/resolve-waba',
+        { method: 'POST', body: JSON.stringify({ phone_number_id: phoneNumberId.trim(), access_token: accessToken.trim() }) }
+      )
+      if (r.ok && r.resolved_waba_id) {
+        setWabaId(r.resolved_waba_id)
+        setWabaResolved(true)
+      } else {
+        setError(r.message || r.error || 'تعذر اكتشاف الـ WABA تلقائياً')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'خطأ أثناء اكتشاف WABA')
+    } finally {
+      setResolvingWaba(false)
+    }
+  }
 
   const validate = (): string => {
     if (!phoneNumberId.trim())           return 'Phone Number ID مطلوب'
@@ -1090,16 +1116,35 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
       </Field>
 
       <Field label="WABA ID (WhatsApp Business Account ID)" hint="معرّف حساب واتساب للأعمال — أرقام فقط" required>
-        <div className="relative">
-          <Building2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <input
-            type="text" inputMode="numeric"
-            value={wabaId}
-            onChange={e => { setWabaId(e.target.value.replace(/\D/g, '')); setError('') }}
-            placeholder="987654321098765"
-            className={`${inputCls} pr-9`} dir="ltr"
-          />
+        <div className="flex gap-2 items-center">
+          <div className="relative flex-1">
+            <Building2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input
+              type="text" inputMode="numeric"
+              value={wabaId}
+              onChange={e => { setWabaId(e.target.value.replace(/\D/g, '')); setError(''); setWabaResolved(false) }}
+              placeholder="987654321098765"
+              className={`${inputCls} pr-9 ${wabaResolved ? 'border-emerald-400 bg-emerald-50' : ''}`} dir="ltr"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleResolveWaba}
+            disabled={resolvingWaba || !phoneNumberId || !accessToken}
+            title="اكتشاف WABA تلقائياً من Phone Number ID والتوكن"
+            className="shrink-0 px-3 py-2.5 rounded-xl text-xs font-semibold border border-violet-300 bg-violet-50 hover:bg-violet-100 text-violet-700 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+          >
+            {resolvingWaba
+              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> جارٍ...</>
+              : wabaResolved
+                ? <><CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> تم</>
+                : <><RefreshCw className="w-3.5 h-3.5" /> اكتشاف</>
+            }
+          </button>
         </div>
+        {wabaResolved && (
+          <p className="text-xs text-emerald-600 mt-1">✓ تم اكتشاف الـ WABA تلقائياً من Meta</p>
+        )}
         {wabaId && !/^\d+$/.test(wabaId) && (
           <p className="text-xs text-red-500">أرقام فقط</p>
         )}
