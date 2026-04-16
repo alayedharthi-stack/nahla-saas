@@ -144,6 +144,7 @@ const ar: Translations = {
       notifications: 'الإشعارات',
       security:      'الأمان',
       widget:        'ويدجت المتجر',
+      system:        'معلومات النظام',
     },
     whatsapp: {
       accountTitle:   'بيانات حساب واتساب',

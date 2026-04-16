@@ -7,6 +7,7 @@ import {
   getEmail,
   getRole,
   getStoreName,
+  getTenantId,
   isImpersonating,
   getImpersonation,
   stopImpersonation,
@@ -143,6 +144,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const email      = getEmail()
   const role       = getRole()
   const storeName  = getStoreName()
+  const tenantId   = getTenantId()
   const impersonating = isImpersonating()
   const impersonInfo  = getImpersonation()
 
@@ -390,15 +392,22 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
               <div className="px-3 py-2.5 border-b border-slate-100">
                 <p className="text-xs font-semibold text-slate-900 truncate">{displayName}</p>
                 <p className="text-xs text-slate-400 truncate">{email || '—'}</p>
-                <span className={`mt-1 inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
-                  impersonating
-                    ? 'bg-amber-100 text-amber-700'
-                    : isPlatformOwner()
-                      ? 'bg-rose-100 text-rose-700'
-                      : 'bg-emerald-100 text-emerald-700'
-                }`}>
-                  {roleLabel}
-                </span>
+                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                  <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
+                    impersonating
+                      ? 'bg-amber-100 text-amber-700'
+                      : isPlatformOwner()
+                        ? 'bg-rose-100 text-rose-700'
+                        : 'bg-emerald-100 text-emerald-700'
+                  }`}>
+                    {roleLabel}
+                  </span>
+                  {tenantId !== null && (
+                    <span className="inline-block text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 select-all">
+                      tenant:{tenantId}
+                    </span>
+                  )}
+                </div>
               </div>
 
               <button

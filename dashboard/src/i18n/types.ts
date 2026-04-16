@@ -159,6 +159,7 @@ export interface Translations {
       notifications: string
       security:      string
       widget:        string
+      system:        string
     }
     whatsapp: {
       accountTitle:   string

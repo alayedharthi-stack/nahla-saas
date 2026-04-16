@@ -146,7 +146,7 @@ function SaveBar({
 
 // ── Tab definitions ─────────────────────────────────────────────────────────
 
-const TAB_IDS = ['whatsapp', 'ai', 'automation', 'ai_sales', 'store', 'team', 'notifications', 'security', 'widget'] as const
+const TAB_IDS = ['whatsapp', 'ai', 'automation', 'ai_sales', 'store', 'team', 'notifications', 'security', 'widget', 'system'] as const
 type TabId = typeof TAB_IDS[number]
 
 const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
@@ -159,6 +159,7 @@ const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
   notifications: Bell,
   security:      ShieldCheck,
   widget:        Code2,
+  system:        Zap,
 }
 
 // ── Tab: WhatsApp ────────────────────────────────────────────────────────────
@@ -2047,6 +2048,79 @@ function WidgetTab() {
 }
 
 
+// ── Tab: System Info ─────────────────────────────────────────────────────────
+
+function SystemInfoTab() {
+  const { lang } = useLanguage()
+  const isAr = lang === 'ar'
+
+  const tenantId  = localStorage.getItem('nahla_tenant_id')  ?? '—'
+  const userId    = localStorage.getItem('nahla_user_id')    ?? '—'
+  const role      = localStorage.getItem('nahla_role')       ?? '—'
+  const email     = localStorage.getItem('nahla_email')      ?? '—'
+
+  const rows = [
+    { label: isAr ? 'Tenant ID'    : 'Tenant ID',    value: tenantId,                 copy: tenantId  !== '—' },
+    { label: isAr ? 'User ID'      : 'User ID',      value: userId,                   copy: false },
+    { label: isAr ? 'الدور'        : 'Role',         value: role,                     copy: false },
+    { label: isAr ? 'البريد'       : 'Email',        value: email,                    copy: false },
+    { label: isAr ? 'الخادم'       : 'API Base',     value: import.meta.env.VITE_API_BASE ?? 'https://api.nahlah.ai', copy: false },
+  ]
+
+  const [copied, setCopied] = useState<string | null>(null)
+  const doCopy = (v: string) => {
+    navigator.clipboard.writeText(v).then(() => {
+      setCopied(v)
+      setTimeout(() => setCopied(null), 1500)
+    })
+  }
+
+  return (
+    <div className="space-y-4">
+      <Section
+        title={isAr ? 'معلومات الجلسة الحالية' : 'Current Session Info'}
+        description={isAr
+          ? 'بيانات تقنية مفيدة عند التشخيص وتتبع مشاكل الربط.'
+          : 'Technical identifiers useful for debugging integration issues.'}
+      >
+        <div className="divide-y divide-slate-100">
+          {rows.map(({ label, value, copy }) => (
+            <div key={label} className="flex items-center justify-between py-2.5 gap-4">
+              <span className="text-xs text-slate-500 w-32 shrink-0">{label}</span>
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm font-mono font-semibold text-slate-800 truncate">{value}</span>
+                {copy && (
+                  <button
+                    onClick={() => doCopy(value)}
+                    className="text-xs text-brand-600 hover:text-brand-700 shrink-0 flex items-center gap-1 px-1.5 py-0.5 rounded border border-brand-200 hover:bg-brand-50 transition-colors"
+                  >
+                    <Copy className="w-3 h-3" />
+                    {copied === value ? (isAr ? 'تم' : 'Copied') : (isAr ? 'نسخ' : 'Copy')}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      <Section
+        title={isAr ? 'ما هو Tenant ID؟' : 'What is Tenant ID?'}
+        description={isAr
+          ? 'يُستخدم عند الإبلاغ عن مشاكل أو التحقق من ربط واتساب وسلة.'
+          : 'Used when reporting issues or verifying WhatsApp and Salla integration routing.'}
+      >
+        <p className="text-xs text-slate-500 leading-relaxed">
+          {isAr
+            ? 'كل متجر في نحلة له معرّف فريد (Tenant ID). جميع بيانات الواتساب والمتجر والمحادثات يجب أن تنتمي لنفس هذا المعرّف. إذا رأيت خطأ في التوجيه أو الرسائل، أعطِ فريق الدعم هذا الرقم.'
+            : 'Every store in Nahla has a unique Tenant ID. All WhatsApp connections, store integrations, and conversation data must belong to this same ID. When reporting routing or message delivery issues, share this number with the support team.'}
+        </p>
+      </Section>
+    </div>
+  )
+}
+
+
 // ── Main Settings page ───────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -2202,6 +2276,7 @@ export default function Settings() {
       )}
       {activeTab === 'security' && !_isOwner && <SupportAccessTab />}
       {activeTab === 'widget'   && <WidgetTab />}
+      {activeTab === 'system'   && <SystemInfoTab />}
     </div>
   )
 }
