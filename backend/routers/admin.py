@@ -1684,46 +1684,42 @@ async def admin_resubscribe_webhook(
     ).first()
     if not conn:
         raise HTTPException(status_code=404, detail="لا يوجد اتصال واتساب")
-    if not conn.whatsapp_business_account_id:
-        raise HTTPException(status_code=400, detail="WABA ID غير متوفر — أعد الربط اليدوي أولاً")
+    if not conn.phone_number_id and not conn.whatsapp_business_account_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Phone Number ID و WABA ID غير متوفرين — أعد الربط اليدوي أولاً",
+        )
     if not conn.access_token:
         raise HTTPException(status_code=400, detail="Access Token غير متوفر — أعد الربط اليدوي أولاً")
 
-    import httpx as _httpx  # noqa: PLC0415
-    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+    from services.whatsapp_connection_service import subscribe_phone_webhook  # noqa: PLC0415
 
-    waba_id   = conn.whatsapp_business_account_id
-    token     = conn.access_token
-    sub_url   = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{waba_id}/subscribed_apps"
-    try:
-        resp = _httpx.post(
-            sub_url,
-            params={"access_token": token},
-            json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
-            timeout=15,
+    waba_id  = conn.whatsapp_business_account_id
+    phone_id = conn.phone_number_id
+    token    = conn.access_token
+
+    success, err = subscribe_phone_webhook(
+        phone_id or "", token, tenant_id, waba_id=waba_id,
+    )
+    if success:
+        conn.webhook_verified = True
+        conn.updated_at       = datetime.now(timezone.utc)
+        db.commit()
+        logger.info(
+            "[admin] webhook resubscribed tenant=%s phone=%s waba=%s",
+            tenant_id, phone_id, waba_id,
         )
-        data = resp.json()
-        success = bool(data.get("success"))
-        if success:
-            conn.webhook_verified = True
-            conn.updated_at       = datetime.now(timezone.utc)
-            db.commit()
-            logger.info(
-                "[admin] WABA webhook resubscribed tenant=%s waba_id=%s",
-                tenant_id, waba_id,
-            )
-        return {
-            "ok":          success,
-            "tenant_id":   tenant_id,
-            "waba_id":     waba_id,
-            "meta_response": data,
-            "note": (
-                "تم الاشتراك بنجاح — يجب أن تصل الرسائل الآن." if success
-                else "فشل الاشتراك — تحقق من صلاحية الـ Access Token وأنه يملك صلاحية whatsapp_business_messaging"
-            ),
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"خطأ في الاتصال بـ Meta: {exc}") from exc
+    return {
+        "ok":              success,
+        "tenant_id":       tenant_id,
+        "phone_number_id": phone_id,
+        "waba_id":         waba_id,
+        "error":           err,
+        "note": (
+            "تم الاشتراك بنجاح — يجب أن تصل الرسائل الآن." if success
+            else "فشل الاشتراك — تحقق من صلاحية الـ Access Token وأنه يملك صلاحية whatsapp_business_messaging"
+        ),
+    }
 
 
 @router.delete("/admin/tenants/{tenant_id}")
@@ -2228,20 +2224,25 @@ async def admin_resubscribe_all_webhooks(
     Force-resubscribe every connected merchant WABA.
     Useful after a major deployment to ensure no merchant lost their webhook.
     """
-    from core.webhook_guardian import _subscribe_waba, _guardian_log  # noqa: PLC0415
+    from core.webhook_guardian import _subscribe_phone, _guardian_log  # noqa: PLC0415
     from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
     from datetime import timezone as _tz  # noqa: PLC0415
+    from sqlalchemy import or_  # noqa: PLC0415
 
     conns = db.query(WhatsAppConnection).filter(
         WhatsAppConnection.status == "connected",
         WhatsAppConnection.access_token.isnot(None),
-        WhatsAppConnection.whatsapp_business_account_id.isnot(None),
+        or_(
+            WhatsAppConnection.phone_number_id.isnot(None),
+            WhatsAppConnection.whatsapp_business_account_id.isnot(None),
+        ),
     ).all()
 
     results = {}
     for conn in conns:
         try:
-            ok = await _subscribe_waba(
+            ok = await _subscribe_phone(
+                conn.phone_number_id,
                 conn.whatsapp_business_account_id,
                 conn.access_token,
                 META_GRAPH_API_VERSION,

@@ -273,7 +273,12 @@ def commit_connection(
         )
 
     # ── Step 7–8: Webhook subscription ───────────────────────────────────────
-    webhook_ok, webhook_err = subscribe_waba_webhook(waba_id, access_token, tenant_id)
+    # Per Meta Cloud API docs: subscription happens on the PHONE_NUMBER_ID,
+    # not the WABA_ID. The WABA endpoint returns "Unsupported post request"
+    # for many tokens. We pass waba_id only as a defensive fallback.
+    webhook_ok, webhook_err = subscribe_phone_webhook(
+        phone_number_id, access_token, tenant_id, waba_id=waba_id,
+    )
     result.webhook_subscribed = webhook_ok
     result.webhook_error      = webhook_err
 
@@ -283,12 +288,15 @@ def commit_connection(
             db.commit()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[WASvc] webhook_verified commit failed: %s", exc)
-        logger.info("[WASvc] webhook subscribed — tenant=%s waba=%s", tenant_id, waba_id)
+        logger.info(
+            "[WASvc] webhook subscribed — tenant=%s phone=%s waba=%s",
+            tenant_id, phone_number_id, waba_id,
+        )
     else:
         logger.warning(
             "[WASvc] webhook subscription failed (credentials still saved) — "
-            "tenant=%s waba=%s error=%r",
-            tenant_id, waba_id, webhook_err,
+            "tenant=%s phone=%s waba=%s error=%r",
+            tenant_id, phone_number_id, waba_id, webhook_err,
         )
 
     # ── Step 9: Compute inbound_usable ────────────────────────────────────────
@@ -558,25 +566,45 @@ def register_phone_number(
         return False, str(exc)
 
 
-def subscribe_waba_webhook(
-    waba_id: str,
+def subscribe_phone_webhook(
+    phone_number_id: str,
     access_token: str,
     tenant_id: int,
+    *,
+    waba_id: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """
-    Attempt POST /{waba_id}/subscribed_apps to subscribe Nahla's Meta app to
-    receive messages for this WABA.
+    Subscribe Nahla's Meta app to receive webhooks for a specific WhatsApp
+    phone number.
+
+    Per Meta WhatsApp Cloud API docs, the correct endpoint is:
+        POST /{PHONE_NUMBER_ID}/subscribed_apps
+
+    The legacy WABA-level endpoint (/{WABA_ID}/subscribed_apps) returns
+    "Unsupported post request (400)" for many tokens/configurations, so we
+    use phone-number-level as the primary path. The WABA endpoint is only
+    used as a last-resort fallback when phone_number_id is missing — for
+    example, during the brief window in Embedded Signup between WABA
+    discovery and phone selection.
 
     Returns (success: bool, error_detail: str | None).
     NEVER raises — the caller decides how to handle failure.
     The caller MUST surface the result to the merchant; it MUST NOT treat a
     False return as a silent success.
     """
+    if not phone_number_id and not waba_id:
+        return False, "phone_number_id (or waba_id) is required for subscription"
+
     try:
         from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+
+        # Prefer phone-number-level subscription (Meta-recommended).
+        target_id = phone_number_id or waba_id
+        target_kind = "phone" if phone_number_id else "waba"
+
         url = (
             f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-            f"/{waba_id}/subscribed_apps"
+            f"/{target_id}/subscribed_apps"
         )
         resp = httpx.post(
             url,
@@ -588,22 +616,68 @@ def subscribe_waba_webhook(
 
         if resp.status_code == 200 and data.get("success"):
             logger.info(
-                "[WASvc] subscribed_apps OK — tenant=%s waba=%s",
-                tenant_id, waba_id,
+                "[WASvc] subscribed_apps OK — tenant=%s %s_id=%s",
+                tenant_id, target_kind, target_id,
             )
             return True, None
 
         err = data.get("error", {})
         msg = err.get("message") or f"HTTP {resp.status_code}"
         logger.warning(
-            "[WASvc] subscribed_apps FAILED — tenant=%s waba=%s status=%s err=%r",
-            tenant_id, waba_id, resp.status_code, msg,
+            "[WASvc] subscribed_apps FAILED — tenant=%s %s_id=%s status=%s err=%r",
+            tenant_id, target_kind, target_id, resp.status_code, msg,
         )
+
+        # Defensive fallback: if we attempted phone-level and Meta returned a
+        # legacy "Unsupported post request" we try WABA-level once. This
+        # should only ever fire on misconfigured tokens; it is NOT the
+        # primary path.
+        if target_kind == "phone" and waba_id and resp.status_code == 400 and "unsupported" in msg.lower():
+            logger.info(
+                "[WASvc] phone-level subscribe rejected — retrying WABA-level "
+                "tenant=%s waba=%s",
+                tenant_id, waba_id,
+            )
+            fallback_url = (
+                f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+                f"/{waba_id}/subscribed_apps"
+            )
+            fb_resp = httpx.post(
+                fallback_url,
+                params={"access_token": access_token},
+                json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+                timeout=10,
+            )
+            fb_data = fb_resp.json()
+            if fb_resp.status_code == 200 and fb_data.get("success"):
+                logger.info(
+                    "[WASvc] subscribed_apps OK via WABA fallback — tenant=%s waba=%s",
+                    tenant_id, waba_id,
+                )
+                return True, None
+
         return False, msg
 
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[WASvc] subscribed_apps EXCEPTION — tenant=%s waba=%s: %s",
-            tenant_id, waba_id, exc,
+            "[WASvc] subscribed_apps EXCEPTION — tenant=%s phone=%s waba=%s: %s",
+            tenant_id, phone_number_id, waba_id, exc,
         )
         return False, str(exc)
+
+
+# Backwards-compat alias so older imports keep working until callers migrate.
+# New code should call subscribe_phone_webhook(...) and pass phone_number_id.
+def subscribe_waba_webhook(
+    waba_id: str,
+    access_token: str,
+    tenant_id: int,
+    *,
+    phone_number_id: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    return subscribe_phone_webhook(
+        phone_number_id or "",
+        access_token,
+        tenant_id,
+        waba_id=waba_id,
+    )

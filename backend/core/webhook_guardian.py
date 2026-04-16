@@ -190,24 +190,34 @@ async def _inspect_connection(db, conn, now: datetime, stall_cutoff: datetime) -
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _check_platform_waba() -> None:
-    """Verify the platform-level WABA subscription (Nahla's own number)."""
+    """
+    Verify the platform-level subscription (Nahla's own number). Prefer
+    PHONE_NUMBER_ID over WABA_ID per Meta Cloud API spec.
+    """
     import os  # noqa: PLC0415
     from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
 
-    token   = os.getenv("WA_TOKEN") or os.getenv("WHATSAPP_TOKEN", "")
-    waba_id = os.getenv("WA_BUSINESS_ACCOUNT_ID", "")
-    if not token or not waba_id:
-        logger.info("[Guardian] Platform WABA not configured — skipping")
+    token    = os.getenv("WA_TOKEN") or os.getenv("WHATSAPP_TOKEN", "")
+    phone_id = os.getenv("PHONE_NUMBER_ID", "")
+    waba_id  = os.getenv("WA_BUSINESS_ACCOUNT_ID", "")
+    if not token or (not phone_id and not waba_id):
+        logger.info("[Guardian] Platform WhatsApp not configured — skipping")
         return
 
-    subscribed = await _check_subscribed(waba_id, token, META_GRAPH_API_VERSION)
+    subscribed = await _check_subscribed(phone_id, waba_id, token, META_GRAPH_API_VERSION)
     if subscribed:
-        logger.info("[Guardian] Platform WABA %s — subscription OK", waba_id)
+        logger.info(
+            "[Guardian] Platform WhatsApp phone=%s waba=%s — subscription OK",
+            phone_id, waba_id,
+        )
         return
 
-    logger.warning("[Guardian] Platform WABA %s not subscribed — resubscribing …", waba_id)
-    ok = await _subscribe_waba(waba_id, token, META_GRAPH_API_VERSION)
-    logger.info("[Guardian] Platform WABA resubscription: %s", "OK" if ok else "FAILED")
+    logger.warning(
+        "[Guardian] Platform WhatsApp phone=%s waba=%s not subscribed — resubscribing …",
+        phone_id, waba_id,
+    )
+    ok = await _subscribe_phone(phone_id, waba_id, token, META_GRAPH_API_VERSION)
+    logger.info("[Guardian] Platform resubscription: %s", "OK" if ok else "FAILED")
 
 
 async def _check_all_merchant_wabas() -> None:
@@ -240,12 +250,15 @@ async def _check_all_merchant_wabas() -> None:
 
         for conn in conns:
             try:
-                waba_id = conn.whatsapp_business_account_id
-                token   = conn.access_token
-                if not waba_id or not token:
+                waba_id  = conn.whatsapp_business_account_id
+                phone_id = conn.phone_number_id
+                token    = conn.access_token
+                if not token or (not waba_id and not phone_id):
                     continue
 
-                subscribed = await _check_subscribed(waba_id, token, META_GRAPH_API_VERSION)
+                subscribed = await _check_subscribed(
+                    phone_id, waba_id, token, META_GRAPH_API_VERSION,
+                )
                 if subscribed:
                     if not conn.webhook_verified:
                         conn.webhook_verified = True
@@ -253,14 +266,16 @@ async def _check_all_merchant_wabas() -> None:
                     ok_count += 1
                     continue
 
-                # Not subscribed → resubscribe
+                # Not subscribed → resubscribe (phone-level, with WABA fallback)
                 logger.warning(
-                    "[Guardian] Startup: tenant=%s WABA=%s not subscribed — resubscribing",
-                    conn.tenant_id, waba_id,
+                    "[Guardian] Startup: tenant=%s phone=%s waba=%s not subscribed — resubscribing",
+                    conn.tenant_id, phone_id, waba_id,
                 )
-                success = await _subscribe_waba(waba_id, token, META_GRAPH_API_VERSION)
+                success = await _subscribe_phone(
+                    phone_id, waba_id, token, META_GRAPH_API_VERSION,
+                )
                 _guardian_log(
-                    db, conn.tenant_id, conn.phone_number_id, waba_id,
+                    db, conn.tenant_id, phone_id, waba_id,
                     "webhook_subscribed" if success else "webhook_verification_failed",
                     success=success,
                     detail="Startup health check resubscription",
@@ -299,34 +314,84 @@ async def _check_all_merchant_wabas() -> None:
 # Meta API helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _check_subscribed(waba_id: str, token: str, graph_version: str) -> bool:
+async def _check_subscribed(
+    phone_number_id: Optional[str],
+    waba_id: Optional[str],
+    token: str,
+    graph_version: str,
+) -> bool:
     """
-    GET {waba_id}/subscribed_apps and return True if our app_id appears.
+    GET /{phone_number_id}/subscribed_apps (preferred) or /{waba_id}/subscribed_apps
+    (fallback) and return True if our app_id appears.
     Falls back to True on any API error so we don't erroneously resubscribe.
     """
     import os  # noqa: PLC0415
     app_id = os.getenv("META_APP_ID", "")
-    url = f"https://graph.facebook.com/{graph_version}/{waba_id}/subscribed_apps"
+
+    target_id   = phone_number_id or waba_id
+    target_kind = "phone" if phone_number_id else "waba"
+    if not target_id:
+        return False
+
+    url = f"https://graph.facebook.com/{graph_version}/{target_id}/subscribed_apps"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
         if resp.status_code != 200:
-            logger.warning("[Guardian] subscribed_apps GET returned %s for WABA=%s", resp.status_code, waba_id)
+            logger.warning(
+                "[Guardian] subscribed_apps GET returned %s for %s=%s",
+                resp.status_code, target_kind, target_id,
+            )
+            # If phone-level GET 400s with "Unsupported", try WABA-level once.
+            if (
+                target_kind == "phone"
+                and waba_id
+                and resp.status_code == 400
+                and "unsupported" in resp.text.lower()
+            ):
+                fb_url = f"https://graph.facebook.com/{graph_version}/{waba_id}/subscribed_apps"
+                async with httpx.AsyncClient(timeout=10) as client:
+                    fb_resp = await client.get(fb_url, headers={"Authorization": f"Bearer {token}"})
+                if fb_resp.status_code == 200:
+                    data = fb_resp.json()
+                    apps = data.get("data", [])
+                    if not app_id:
+                        return bool(apps)
+                    return any(str(a.get("id") or a.get("app_id", "")) == app_id for a in apps)
             return False
         data = resp.json()
         apps: List[Dict[str, Any]] = data.get("data", [])
         if not app_id:
-            # No app_id configured — if list is non-empty assume subscribed
             return bool(apps)
         return any(str(a.get("id") or a.get("app_id", "")) == app_id for a in apps)
     except Exception as exc:
-        logger.warning("[Guardian] subscribed_apps check failed for WABA=%s: %s", waba_id, exc)
+        logger.warning(
+            "[Guardian] subscribed_apps check failed for %s=%s: %s",
+            target_kind, target_id, exc,
+        )
         return True  # optimistic — don't blind-resubscribe on network error
 
 
-async def _subscribe_waba(waba_id: str, token: str, graph_version: str) -> bool:
-    """POST {waba_id}/subscribed_apps — returns True on success."""
-    url = f"https://graph.facebook.com/{graph_version}/{waba_id}/subscribed_apps"
+async def _subscribe_phone(
+    phone_number_id: Optional[str],
+    waba_id: Optional[str],
+    token: str,
+    graph_version: str,
+) -> bool:
+    """
+    POST /{phone_number_id}/subscribed_apps (preferred) or
+    /{waba_id}/subscribed_apps (fallback) — returns True on success.
+
+    Per Meta WhatsApp Cloud API docs the subscription belongs to the
+    PHONE_NUMBER_ID, not the WABA_ID. The WABA endpoint frequently returns
+    "Unsupported post request" for newer tokens, hence the preference order.
+    """
+    target_id   = phone_number_id or waba_id
+    target_kind = "phone" if phone_number_id else "waba"
+    if not target_id:
+        return False
+
+    url = f"https://graph.facebook.com/{graph_version}/{target_id}/subscribed_apps"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
@@ -337,33 +402,66 @@ async def _subscribe_waba(waba_id: str, token: str, graph_version: str) -> bool:
         data = resp.json()
         success = bool(data.get("success"))
         logger.info(
-            "[Guardian] subscribe WABA=%s status=%s result=%s",
-            waba_id, resp.status_code, data,
+            "[Guardian] subscribe %s=%s status=%s result=%s",
+            target_kind, target_id, resp.status_code, data,
         )
-        return success
+        if success:
+            return True
+
+        # Defensive fallback to WABA when phone-level 400s as "Unsupported".
+        err_msg = (data.get("error") or {}).get("message", "")
+        if (
+            target_kind == "phone"
+            and waba_id
+            and resp.status_code == 400
+            and "unsupported" in err_msg.lower()
+        ):
+            fb_url = f"https://graph.facebook.com/{graph_version}/{waba_id}/subscribed_apps"
+            async with httpx.AsyncClient(timeout=10) as client:
+                fb_resp = await client.post(
+                    fb_url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+                )
+            fb_data = fb_resp.json()
+            fb_success = bool(fb_data.get("success"))
+            logger.info(
+                "[Guardian] subscribe WABA fallback waba=%s status=%s result=%s",
+                waba_id, fb_resp.status_code, fb_data,
+            )
+            return fb_success
+
+        return False
     except Exception as exc:
-        logger.error("[Guardian] subscribe WABA=%s failed: %s", waba_id, exc)
+        logger.error(
+            "[Guardian] subscribe %s=%s failed: %s",
+            target_kind, target_id, exc,
+        )
         return False
 
 
 async def _resubscribe(db, conn) -> bool:
     """
-    Attempt to resubscribe the given WhatsAppConnection's WABA.
-    Handles missing token or WABA ID gracefully.
+    Attempt to resubscribe the given WhatsAppConnection.
+    Handles missing token / phone_number_id / WABA ID gracefully.
     """
     from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
 
-    waba_id = conn.whatsapp_business_account_id
-    token   = conn.access_token
+    waba_id  = conn.whatsapp_business_account_id
+    phone_id = conn.phone_number_id
+    token    = conn.access_token
 
-    if not waba_id:
-        logger.warning("[Guardian] tenant=%s has no WABA ID — cannot resubscribe", conn.tenant_id)
+    if not phone_id and not waba_id:
+        logger.warning(
+            "[Guardian] tenant=%s has no phone_number_id or WABA ID — cannot resubscribe",
+            conn.tenant_id,
+        )
         return False
     if not token:
         logger.warning("[Guardian] tenant=%s has no access_token — cannot resubscribe", conn.tenant_id)
         return False
 
-    return await _subscribe_waba(waba_id, token, META_GRAPH_API_VERSION)
+    return await _subscribe_phone(phone_id, waba_id, token, META_GRAPH_API_VERSION)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

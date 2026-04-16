@@ -275,15 +275,20 @@ async def _get_waba_id_from_token(token: str) -> str:
     )
 
 
-async def _subscribe_app_to_waba(waba_id: str, token: str) -> None:
-    """Subscribe Nahla app to the merchant's WABA to receive webhooks."""
+async def _subscribe_app_to_phone(phone_number_id: str, token: str) -> None:
+    """
+    Subscribe Nahla app to a specific WhatsApp phone number to receive
+    webhooks. Per Meta docs the subscription must happen on the
+    PHONE_NUMBER_ID, not on the WABA_ID.
+    """
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
-            f"{GRAPH}/{waba_id}/subscribed_apps",
+            f"{GRAPH}/{phone_number_id}/subscribed_apps",
             headers={"Authorization": f"Bearer {token}"},
+            json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
         )
         data = resp.json()
-    logger.info("[EmbeddedSignup] subscribed_apps WABA=%s result=%s", waba_id, data)
+    logger.info("[EmbeddedSignup] subscribed_apps phone=%s result=%s", phone_number_id, data)
 
 
 async def _get_phone_numbers(waba_id: str, token: str) -> List[dict]:
@@ -757,23 +762,26 @@ async def sync_embedded_connection_from_meta(
     # When the connection finalises (status=connected), attempt webhook subscription
     # if it hasn't been done yet, and persist the verified flag explicitly.
     if sync_state.get("connected") and not conn.webhook_verified:
-        from services.whatsapp_connection_service import subscribe_waba_webhook  # noqa: PLC0415
-        wh_ok, wh_err = subscribe_waba_webhook(
-            conn.whatsapp_business_account_id or "",
+        from services.whatsapp_connection_service import subscribe_phone_webhook  # noqa: PLC0415
+        wh_ok, wh_err = subscribe_phone_webhook(
+            conn.phone_number_id or "",
             conn.access_token or "",
             conn.tenant_id,
+            waba_id=conn.whatsapp_business_account_id or None,
         )
         if wh_ok:
             conn.webhook_verified = True
             logger.info(
-                "[EmbeddedSignup] webhook subscribed on finalise — tenant=%s waba=%s",
-                conn.tenant_id, conn.whatsapp_business_account_id,
+                "[EmbeddedSignup] webhook subscribed on finalise — "
+                "tenant=%s phone=%s waba=%s",
+                conn.tenant_id, conn.phone_number_id, conn.whatsapp_business_account_id,
             )
         else:
             logger.warning(
                 "[EmbeddedSignup] webhook subscription FAILED on finalise — "
-                "tenant=%s waba=%s err=%r",
-                conn.tenant_id, conn.whatsapp_business_account_id, wh_err,
+                "tenant=%s phone=%s waba=%s err=%r",
+                conn.tenant_id, conn.phone_number_id,
+                conn.whatsapp_business_account_id, wh_err,
             )
         meta = dict(conn.extra_metadata or {})
         meta["webhook_subscription_error"] = wh_err
@@ -877,7 +885,7 @@ async def exchange_code(
     #     This also evicts stale disconnected rows that reference this WABA.
     from services.whatsapp_connection_service import (  # noqa: PLC0415
         begin_waba_session,
-        subscribe_waba_webhook,
+        subscribe_phone_webhook,
         WhatsAppConnectionConflict,
         WhatsAppConnectionError,
     )
@@ -920,20 +928,17 @@ async def exchange_code(
     )
     db.commit()
 
-    # 4 — Subscribe app to WABA (result surfaces clearly in response, not swallowed)
-    webhook_ok, webhook_err = subscribe_waba_webhook(waba_id, user_token, tenant_id)
-    if webhook_ok:
-        conn.webhook_verified = True
-        db.commit()
-        logger.info("[EmbeddedSignup] WABA webhook subscribed — tenant=%s waba=%s", tenant_id, waba_id)
-    else:
-        logger.warning(
-            "[EmbeddedSignup] WABA webhook subscription FAILED — tenant=%s waba=%s err=%r",
-            tenant_id, waba_id, webhook_err,
-        )
-
-    # 5 — List phone numbers
+    # 4 — List phone numbers FIRST (Meta requires phone-level subscription, not WABA-level).
+    # We defer subscription until a phone is selected; if exactly one phone exists we
+    # auto-select it below and subscription happens during finalize. Multi-phone setups
+    # subscribe inside /select-phone via the same finalize path.
     phones = await _get_phone_numbers(waba_id, user_token)
+
+    # If we land on the "auto-select" path the per-phone subscription happens inside
+    # sync_embedded_connection_from_meta(); otherwise it happens after the merchant
+    # picks a phone in /select-phone. The boolean below is reported to the UI so it
+    # knows the WABA half is healthy even before the phone half completes.
+    webhook_ok, webhook_err = (False, "deferred until phone is selected")
 
     # ── Auto-select when exactly one phone exists ─────────────────────────
     if len(phones) == 1:

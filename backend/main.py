@@ -415,19 +415,39 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("DB migration skipped (non-fatal): %s", exc)
 
-    # 2. Subscribe platform WABA to app (ensures webhooks are delivered)
+    # 2. Subscribe platform phone number to app (ensures webhooks are delivered).
+    #    Per Meta Cloud API docs the subscription must target the
+    #    PHONE_NUMBER_ID, not the WABA_ID. Falls back to WABA only if no
+    #    PHONE_NUMBER_ID is configured (legacy installs).
     try:
         import httpx as _httpx  # noqa: PLC0415
-        from core.config import WA_TOKEN, WA_BUSINESS_ACCOUNT_ID, META_GRAPH_API_VERSION  # noqa: PLC0415
-        if WA_TOKEN and WA_BUSINESS_ACCOUNT_ID:
-            async def _subscribe_platform_waba():
-                url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{WA_BUSINESS_ACCOUNT_ID}/subscribed_apps"
+        from core.config import (  # noqa: PLC0415
+            WA_TOKEN,
+            WA_PHONE_ID,
+            WA_BUSINESS_ACCOUNT_ID,
+            META_GRAPH_API_VERSION,
+        )
+        target_id   = WA_PHONE_ID or WA_BUSINESS_ACCOUNT_ID
+        target_kind = "phone" if WA_PHONE_ID else "waba"
+        if WA_TOKEN and target_id:
+            async def _subscribe_platform_phone():
+                url = (
+                    f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+                    f"/{target_id}/subscribed_apps"
+                )
                 async with _httpx.AsyncClient(timeout=10) as client:
-                    resp = await client.post(url, headers={"Authorization": f"Bearer {WA_TOKEN}"})
-                logger.info("[Startup] platform WABA subscribed_apps: %s %s", resp.status_code, resp.text[:200])
-            asyncio.create_task(_subscribe_platform_waba())
+                    resp = await client.post(
+                        url,
+                        headers={"Authorization": f"Bearer {WA_TOKEN}"},
+                        json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+                    )
+                logger.info(
+                    "[Startup] platform %s subscribed_apps id=%s status=%s body=%s",
+                    target_kind, target_id, resp.status_code, resp.text[:200],
+                )
+            asyncio.create_task(_subscribe_platform_phone())
     except Exception as exc:
-        logger.warning("[Startup] WABA subscription skipped: %s", exc)
+        logger.warning("[Startup] webhook subscription skipped: %s", exc)
 
     # 3. Background scheduler (billing/subscription checks)
     try:
