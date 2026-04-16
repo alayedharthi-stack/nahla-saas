@@ -50,6 +50,15 @@ from services.whatsapp_platform.provider_utils import (
 from services.whatsapp_platform.service import provider_list_templates, provider_submit_template
 from services.customer_intelligence import CUSTOMER_STATUS_LABELS
 
+# Default library: AR + EN templates for the 3 core revenue automations
+# (cart_abandoned, customer_inactive, vip_customer_upgrade). Single source of
+# truth for the named-slot contract enforced by the placeholder validator.
+from core.template_library import (
+    DEFAULT_AUTOMATION_TEMPLATES as CORE_FEATURE_TEMPLATES,
+    iter_template_seeds as _iter_core_template_seeds,
+    numeric_var_map_for as _core_lib_var_map_for,
+)
+
 router = APIRouter()
 
 SUPPORTED_TEMPLATE_FIELDS: Dict[int, List[str]] = {
@@ -292,13 +301,28 @@ VAR_FIELD_LABELS: Dict[str, str] = {
     "reorder_url":    "رابط إعادة الطلب",
     "order_amount":   "مبلغ الطلب (ر.س)",
     "cart_url":       "رابط السلة المتروكة",
+    "checkout_url":   "رابط إتمام الطلب",
+    "cart_total":     "إجمالي السلة",
     "discount_pct":   "نسبة الخصم",
     "coupon_code":    "كود الكوبون",
+    "vip_coupon":     "كوبون VIP",
     "store_name":     "اسم المتجر",
+    "store_url":      "رابط المتجر",
+    "product_url":    "رابط المنتج",
     "order_id":       "رقم الطلب",
     "discount_code":  "كود الخصم",
     "status_label":   "وصف الحالة",
 }
+
+# Splice in the default library's var maps so the variable resolver, the AI
+# rewrite assistant, and the placeholder integrity checker all see the new
+# AR/EN core templates as first-class. This is additive — merchant-authored
+# templates remain merchant-defined.
+for _feature in CORE_FEATURE_TEMPLATES.values():
+    for _lang_spec in _feature["languages"].values():
+        TEMPLATE_VAR_MAP[_lang_spec["template_name"]] = _core_lib_var_map_for(
+            _lang_spec["template_name"]
+        )
 
 MOCK_TEMPLATES: List[Dict[str, Any]] = [
     {
@@ -412,6 +436,20 @@ class GenerateTemplateIn(BaseModel):
     language: str = "ar"
 
 
+class TemplateAIRewriteIn(BaseModel):
+    """
+    Request body for `POST /templates/{id}/ai-rewrite`.
+
+    `mode` selects one of the four canonical assistant actions the merchant
+    UI exposes ("Improve message", "Rewrite professionally", "Shorten",
+    "Make friendlier"). `apply` controls whether we persist the rewrite or
+    just return a preview the merchant can accept/reject in the UI.
+    """
+    mode: str  # "improve" | "professional" | "shorten" | "friendlier"
+    language: Optional[str] = None    # falls back to the template's language
+    apply: bool = False               # save when True, preview-only when False
+
+
 class RecommendationActionIn(BaseModel):
     action: str  # accepted | dismissed
 
@@ -440,7 +478,19 @@ def _seed_templates_if_empty(db: Session, tenant_id: int) -> None:
             tenant_id,
         )
         return
-    for seed in SEED_TEMPLATES:
+
+    # Combine legacy seeds with the canonical default-library seeds (AR + EN
+    # for the 3 core revenue automations). Library seeds win on name conflict
+    # so the canonical numeric body and named-slot contract take precedence.
+    library_seeds: List[Dict[str, Any]] = []
+    for lang in ("ar", "en"):
+        library_seeds.extend(_iter_core_template_seeds(lang))
+    library_names = {s["name"] for s in library_seeds}
+    combined_seeds: List[Dict[str, Any]] = [
+        s for s in SEED_TEMPLATES if s["name"] not in library_names
+    ] + library_seeds
+
+    for seed in combined_seeds:
         library_meta = DEFAULT_TEMPLATE_LIBRARY.get(seed["name"], {})
         tpl = WhatsAppTemplate(
             tenant_id=tenant_id,
@@ -935,6 +985,278 @@ async def delete_template(template_id: int, request: Request, db: Session = Depe
     db.delete(tpl)
     db.commit()
     return {"deleted": True}
+
+
+_AI_REWRITE_MODES: Dict[str, Dict[str, str]] = {
+    # Each mode carries a system-prompt instruction in both AR and EN. The AI
+    # call uses the language matching the template, so the model is asked to
+    # rewrite in the same language it sees.
+    "improve": {
+        "ar": "حسّن صياغة الرسالة لتكون أكثر وضوحًا وجاذبية مع الحفاظ على نفس المعنى والطول التقريبي.",
+        "en": "Improve the wording for clarity and engagement while keeping the same meaning and roughly the same length.",
+    },
+    "professional": {
+        "ar": "أعد صياغة الرسالة بأسلوب احترافي ومهذّب يناسب التواصل التجاري الرسمي.",
+        "en": "Rewrite the message in a polished, professional tone suitable for business communication.",
+    },
+    "shorten": {
+        "ar": "اختصر الرسالة لتكون أقصر بنسبة 30-40% مع الحفاظ على المعنى الأساسي والمتغيرات.",
+        "en": "Shorten the message by about 30–40% while keeping the core meaning and the variables intact.",
+    },
+    "friendlier": {
+        "ar": "أعد كتابة الرسالة بأسلوب أكثر ودًا ودفئًا مع الحفاظ على الاحترافية.",
+        "en": "Rewrite the message in a warmer, friendlier tone while staying professional.",
+    },
+}
+
+
+def _placeholder_protect(text: str) -> tuple[str, Dict[str, str]]:
+    """
+    Replace each `{{N}}` (or named `{{slot}}`) placeholder in `text` with a
+    sentinel like `__NHVAR1__` that LLMs do not touch, and return the
+    sentinel→placeholder mapping so we can restore them after the rewrite.
+
+    This is significantly more reliable than asking the LLM to "preserve
+    `{{1}}`" — Anthropic and OpenAI both occasionally drop or normalise
+    Arabic-adjacent placeholders even with explicit instructions.
+    """
+    import re  # noqa: PLC0415
+
+    mapping: Dict[str, str] = {}
+    counter = {"i": 0}
+
+    def _swap(match):
+        counter["i"] += 1
+        sentinel = f"__NHVAR{counter['i']}__"
+        mapping[sentinel] = match.group(0)
+        return sentinel
+
+    protected = re.sub(r"\{\{[^{}]+\}\}", _swap, text or "")
+    return protected, mapping
+
+
+def _placeholder_restore(text: str, mapping: Dict[str, str]) -> str:
+    out = text or ""
+    for sentinel, original in mapping.items():
+        out = out.replace(sentinel, original)
+    return out
+
+
+def _ai_rewrite_body_text(
+    *,
+    body_text: str,
+    mode: str,
+    language: str,
+    tenant_id: int,
+    store_name: str,
+) -> str:
+    """
+    Run the merchant-facing rewrite assistant on a single BODY string.
+
+    Strategy:
+      1. Mask every `{{…}}` placeholder with a sentinel that the LLM cannot
+         meaningfully alter. This guarantees the contract — even if the
+         model rewrites everything else, the placeholders survive verbatim.
+      2. Build a tight system prompt containing the mode instruction and a
+         hard rule about not touching the sentinels.
+      3. Call the existing AI orchestration adapter so we benefit from the
+         provider chain (Anthropic → OpenAI fallback) already in place.
+      4. Restore placeholders.
+
+    Raises HTTPException with a clear merchant-facing message on failure.
+    """
+    instruction = _AI_REWRITE_MODES.get(mode, {}).get(language) or _AI_REWRITE_MODES["improve"][language]
+    masked, sentinel_map = _placeholder_protect(body_text)
+
+    system_prompt = (
+        "You are a careful copy editor for WhatsApp Business marketing messages.\n"
+        "Rules you MUST follow:\n"
+        "  1. Never modify, translate, remove, or re-order tokens that match `__NHVAR\\d+__`.\n"
+        "  2. Keep approximately the same number of lines; do not add bullet lists or HTML.\n"
+        "  3. Stay within WhatsApp Business policy — no spammy claims, no shortened links, "
+        "no excessive emojis, no all-caps shouting.\n"
+        "  4. Output ONLY the rewritten body text. Do not add any preface, explanation, or quotes.\n"
+        f"\nLanguage of the message: {language}\n"
+        f"Store name (for context — do not insert it unless already present): {store_name}\n"
+        f"\nTask: {instruction}"
+    )
+
+    full_prompt = f"{system_prompt}\n\nORIGINAL MESSAGE:\n{masked}\n\nREWRITTEN MESSAGE:\n"
+
+    try:
+        import sys as _sys  # noqa: PLC0415
+        _sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+        from modules.ai.orchestrator.adapter import generate_ai_reply  # noqa: PLC0415
+
+        payload = generate_ai_reply(
+            tenant_id=tenant_id,
+            customer_phone="",
+            message=masked,
+            store_name=store_name,
+            channel="system",
+            locale=language,
+            context_metadata={"mode": "template_rewrite", "rewrite_mode": mode},
+            prompt_overrides={"__full_system_prompt": full_prompt},
+        )
+        rewritten_masked = (payload.reply_text or "").strip()
+    except Exception as exc:
+        logger.warning("[templates/ai-rewrite] orchestrator failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="تعذّر الاتصال بمساعد الذكاء الاصطناعي حاليًا. حاول مرة أخرى بعد قليل.",
+        )
+
+    if not rewritten_masked:
+        raise HTTPException(
+            status_code=502,
+            detail="لم يُرجع المساعد أي نص. حاول مرة أخرى أو استخدم وضعًا مختلفًا.",
+        )
+
+    rewritten = _placeholder_restore(rewritten_masked, sentinel_map)
+
+    # Defensive contract check: every sentinel must round-trip back into
+    # the final text. Surfacing this as a 422 lets the dashboard show a
+    # specific error and offer the merchant the un-rewritten body.
+    missing = [orig for sentinel, orig in sentinel_map.items() if orig not in rewritten]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "المساعد فقد بعض المتغيرات أثناء إعادة الصياغة: "
+                + ", ".join(missing)
+                + ". لم نطبّق التعديل."
+            ),
+        )
+
+    return rewritten
+
+
+@router.post("/templates/{template_id}/ai-rewrite")
+async def ai_rewrite_template_body(
+    template_id: int,
+    body: TemplateAIRewriteIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Merchant assistant — rewrite a template's BODY text in one of four modes:
+
+      • improve       — clearer / more engaging
+      • professional  — more formal business tone
+      • shorten       — ~30–40% shorter
+      • friendlier    — warmer, more personal
+
+    Guarantees
+    ──────────
+    The rewrite NEVER drops or renames placeholders. Every `{{…}}` token in
+    the original body is preserved verbatim in the result; if the AI fails
+    to honour that contract, we return 422 and do not save anything.
+
+    `apply=false` (default) returns a preview the merchant can accept in
+    the UI. `apply=true` saves the change and resets the template back to
+    DRAFT (the merchant must re-submit it to Meta for approval — that is
+    handled by the existing `PUT /templates/{id}` write path).
+    """
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    if body.mode not in _AI_REWRITE_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"الوضع '{body.mode}' غير مدعوم. الأوضاع المتاحة: {', '.join(_AI_REWRITE_MODES.keys())}",
+        )
+
+    if tpl.status == "APPROVED" and body.apply:
+        raise HTTPException(
+            status_code=400,
+            detail="لا يمكن تعديل قالب معتمد مباشرةً. اطلب معاينة فقط أو أنشئ نسخة جديدة كمسودة.",
+        )
+
+    language = (body.language or tpl.language or "ar").lower()
+    if language not in ("ar", "en"):
+        language = "ar"
+
+    settings = get_or_create_settings(db, tenant_id)
+    store = merge_defaults(settings.store_settings, DEFAULT_STORE)
+    store_name = store.get("store_name") or "متجرنا"
+
+    components = list(tpl.components or [])
+    body_idx: Optional[int] = next(
+        (i for i, c in enumerate(components) if str(c.get("type")).upper() == "BODY"),
+        None,
+    )
+    if body_idx is None or not (components[body_idx].get("text") or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="هذا القالب لا يحتوي على نص BODY قابل لإعادة الصياغة.",
+        )
+
+    original_body_text = components[body_idx]["text"]
+    rewritten_body_text = _ai_rewrite_body_text(
+        body_text=original_body_text,
+        mode=body.mode,
+        language=language,
+        tenant_id=int(tenant_id),
+        store_name=store_name,
+    )
+
+    proposed_components = [dict(c) for c in components]
+    proposed_components[body_idx] = {**proposed_components[body_idx], "text": rewritten_body_text}
+
+    # Re-run the placeholder integrity check end-to-end. Belt-and-braces:
+    # the body-level sentinel check above already guarantees this, but the
+    # template might also have placeholders inside BUTTONS/HEADER and we
+    # want a single, authoritative invariant for the whole template.
+    _validate_placeholder_integrity(
+        old_components=components,
+        new_components=proposed_components,
+    )
+
+    if not body.apply:
+        return {
+            "template_id":         tpl.id,
+            "mode":                body.mode,
+            "language":            language,
+            "original_body":       original_body_text,
+            "rewritten_body":      rewritten_body_text,
+            "proposed_components": proposed_components,
+            "applied":             False,
+        }
+
+    # apply=True: persist the rewrite and reset to DRAFT so re-submission
+    # can be triggered. We do this here directly (rather than POST /update)
+    # so the merchant sees an atomic "rewritten and saved" outcome.
+    tpl.components = proposed_components
+    tpl.status = "DRAFT"
+    tpl.rejection_reason = None
+    tpl.meta_template_id = None
+    tpl.updated_at = datetime.now(timezone.utc)
+    tpl.ai_generation_metadata = {
+        **(tpl.ai_generation_metadata or {}),
+        "last_ai_rewrite": {
+            "mode": body.mode,
+            "language": language,
+            "at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    db.commit()
+    db.refresh(tpl)
+
+    return {
+        "template_id":         tpl.id,
+        "mode":                body.mode,
+        "language":            language,
+        "original_body":       original_body_text,
+        "rewritten_body":      rewritten_body_text,
+        "proposed_components": proposed_components,
+        "applied":             True,
+        "template":            _tpl_to_dict(tpl),
+    }
 
 
 @router.post("/templates/generate")

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from models import AutomationEvent, Customer  # noqa: E402
 
+from core.automation_triggers import AutomationTrigger
 from core.database import get_db
 from core.tenant import get_or_create_tenant
 from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
@@ -96,7 +97,7 @@ async def track_storefront_event(
                 )
             cart_event = AutomationEvent(
                 tenant_id=tenant_id,
-                event_type="abandoned_cart",
+                event_type=AutomationTrigger.CART_ABANDONED.value,
                 customer_id=customer.id if customer else None,
                 payload={
                     "source":     "storefront_snippet",
@@ -110,8 +111,8 @@ async def track_storefront_event(
             db.add(cart_event)
             db.commit()
             logger.info(
-                "[Snippet] cart_abandon → autopilot event tenant=%s phone=%s",
-                tenant_id, customer_phone,
+                "[Snippet] cart_abandon → %s event tenant=%s phone=%s",
+                AutomationTrigger.CART_ABANDONED.value, tenant_id, customer_phone,
             )
 
     return {"received": True, "event_type": body.event_type}

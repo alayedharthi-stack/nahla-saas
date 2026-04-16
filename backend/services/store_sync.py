@@ -42,6 +42,7 @@ from models import (  # noqa: E402
     CustomerProfile,
     Order,
     Product,
+    ProductInterest,
     StoreSyncJob,
     StoreKnowledgeSnapshot,
     TenantSettings,
@@ -88,6 +89,16 @@ def _normalise_product(raw: Any) -> Dict:
         "variants":      raw.get("variants", []),
         "metadata":      raw.get("metadata", {}),
     }
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    """Best-effort conversion of stock_qty (str/int/None) to a real int."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_status_string(status: Any, fallback: str = "unknown") -> str:
@@ -387,38 +398,142 @@ class StoreSyncService:
 
         created = 0
         updated = 0
+        # (product_id, external_id, title) for products that just transitioned
+        # from out-of-stock → in-stock. Fan-out is performed once after the
+        # loop so we don't slow down each iteration with ProductInterest queries
+        # for products no one is waiting on.
+        restocked: List[Dict[str, Any]] = []
         for raw in raw_list:
             normalised = _normalise_product(raw)
             ext_id = normalised["external_id"]
+            new_qty = _coerce_int(normalised.get("stock_qty"))
+            new_in_stock = bool(normalised.get("in_stock", True))
+            new_available = new_in_stock and (new_qty is None or new_qty > 0)
+
             existing = (
                 self.db.query(Product)
                 .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
                 .first()
             )
             if existing:
+                # Detect 0 → >0 transition BEFORE we overwrite the columns.
+                # We treat (in_stock=false) OR (stock_quantity<=0) as "was zero".
+                was_unavailable = (
+                    (getattr(existing, "in_stock", True) is False)
+                    or (existing.stock_quantity is not None and existing.stock_quantity <= 0)
+                )
                 existing.title       = normalised["title"]
                 existing.description = normalised["description"]
                 existing.price       = normalised["price"]
                 existing.sku         = normalised["sku"]
+                existing.in_stock    = new_in_stock
+                existing.stock_quantity = new_qty
                 existing.extra_metadata = normalised
                 updated += 1
+
+                if was_unavailable and new_available:
+                    restocked.append({
+                        "product_id":  existing.id,
+                        "external_id": ext_id,
+                        "title":       normalised["title"],
+                    })
             else:
-                self.db.add(Product(
+                p = Product(
                     tenant_id    = self.tenant_id,
                     external_id  = ext_id,
                     title        = normalised["title"],
                     description  = normalised["description"],
                     price        = normalised["price"],
                     sku          = normalised["sku"],
+                    in_stock     = new_in_stock,
+                    stock_quantity = new_qty,
                     extra_metadata = normalised,
-                ))
+                )
+                self.db.add(p)
                 created += 1
         self.db.flush()
+
+        # ── Back-in-stock fan-out ─────────────────────────────────────────────
+        # For each product that just came back, emit one
+        # `product_back_in_stock` AutomationEvent per pending ProductInterest
+        # row. The engine then processes each event as a normal single-customer
+        # send, so all the existing idempotency/delay/condition machinery
+        # continues to apply (including per-execution metrics).
+        if restocked:
+            self._fan_out_back_in_stock(restocked)
+
         logger.info(
-            "tenant=%s products sync done — created=%d updated=%d total_upserted=%d",
-            self.tenant_id, created, updated, created + updated,
+            "tenant=%s products sync done — created=%d updated=%d total_upserted=%d restocked=%d",
+            self.tenant_id, created, updated, created + updated, len(restocked),
         )
         return created + updated
+
+    def _fan_out_back_in_stock(self, restocked: List[Dict[str, Any]]) -> None:
+        """
+        Emit one product_back_in_stock event per pending ProductInterest row
+        for each restocked product. Called from sync_products after the
+        upsert loop has flushed the new stock state.
+        """
+        from core.automation_engine import emit_automation_event  # noqa: PLC0415
+
+        # Look up the merchant's store URL once so we can synthesize a
+        # clickable product URL in the event payload — the named slot
+        # `product_url` is the contract every back_in_stock_* template uses.
+        store_cfg = (
+            self.db.query(TenantSettings)
+            .filter_by(tenant_id=self.tenant_id)
+            .first()
+        )
+        store_url_root = ""
+        if store_cfg and store_cfg.store_settings:
+            store_url_root = str(store_cfg.store_settings.get("store_url") or "").rstrip("/")
+
+        emitted = 0
+        for prod in restocked:
+            interests: List[ProductInterest] = (
+                self.db.query(ProductInterest)
+                .filter(
+                    ProductInterest.tenant_id  == self.tenant_id,
+                    ProductInterest.product_id == prod["product_id"],
+                    ProductInterest.notified   == False,  # noqa: E712
+                )
+                .all()
+            )
+            if not interests:
+                continue
+            now = datetime.now(timezone.utc)
+            for interest in interests:
+                product_url = ""
+                if store_url_root and prod["external_id"]:
+                    product_url = f"{store_url_root}/p/{prod['external_id']}"
+                emit_automation_event(
+                    self.db,
+                    self.tenant_id,
+                    "product_back_in_stock",
+                    customer_id=interest.customer_id,
+                    payload={
+                        "product_id":          prod["product_id"],
+                        "product_external_id": prod["external_id"],
+                        "product_name":        prod["title"],
+                        "product_url":         product_url,
+                        "store_url":           store_url_root,
+                        "interest_id":         interest.id,
+                    },
+                    commit=False,
+                )
+                # Mark the interest as notified up-front. If the engine fails
+                # to actually send (no template, no WA connection), the
+                # AutomationExecution row records the failure — re-arming the
+                # waitlist on every restock would double-spam customers.
+                interest.notified = True
+                interest.notified_at = now
+                emitted += 1
+        if emitted:
+            self.db.flush()
+            logger.info(
+                "tenant=%s back-in-stock fan-out — products=%d events=%d",
+                self.tenant_id, len(restocked), emitted,
+            )
 
     # ── Orders sync ────────────────────────────────────────────────────────────
 

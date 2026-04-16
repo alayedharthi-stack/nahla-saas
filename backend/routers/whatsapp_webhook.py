@@ -408,8 +408,36 @@ async def _dispatch_message(
 
     # ── Handle interactive button replies ──────────────────────────────────────
     if msg_type == "interactive":
-        if msg.get("interactive", {}).get("type") == "button_reply":
-            btn_id = msg["interactive"]["button_reply"].get("id", "")
+        interactive = msg.get("interactive", {})
+        if interactive.get("type") == "button_reply":
+            br      = interactive.get("button_reply", {}) or {}
+            btn_id  = br.get("id", "")
+            btn_txt = br.get("title", "") or btn_id
+
+            # COD confirmation flow runs for every tenant (it's a merchant-
+            # facing template, not the Nahla SaaS sales bot). Try it FIRST so
+            # the platform-sales button handler doesn't accidentally swallow
+            # a "تأكيد الطلب" tap on a merchant tenant.
+            try:
+                from services.cod_confirmation import (  # noqa: PLC0415
+                    classify_cod_reply, handle_cod_reply,
+                )
+                if classify_cod_reply(btn_txt) is not None:
+                    decision, order = await handle_cod_reply(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        customer_phone=sender,
+                        text=btn_txt,
+                    )
+                    if order is not None:
+                        await _send_cod_followup_message(
+                            phone_id=used_pid, to=sender,
+                            decision=decision, order=order,
+                        )
+                        return
+            except Exception as exc:
+                logger.error("[Webhook] COD button handler failed: %s", exc)
+
             await _handle_button_reply(
                 btn_id=btn_id, phone_id=used_pid, to=sender,
                 tenant_id=resolved_tenant_id, db=db,
@@ -600,6 +628,29 @@ async def _dispatch_message(
 # MERCHANT AI HANDLER — bypasses platform sales logic entirely
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def _send_cod_followup_message(
+    *, phone_id: str, to: str, decision: str, order: Any,
+) -> None:
+    """
+    Reply to the customer after their COD button tap is processed. Kept
+    plain text (no template) because we're inside the 24-hour customer
+    care window — the customer just messaged us, so a session message is
+    Meta-policy compliant and does not require a pre-approved template.
+    """
+    if decision == "confirm":
+        body = (
+            f"شكراً لك ✅\n"
+            f"تم تأكيد طلبك #{order.id}.\n"
+            f"سيتم تجهيزه والتواصل معك قريباً لتأكيد التوصيل."
+        )
+    else:
+        body = (
+            f"تم إلغاء طلبك #{order.id} بنجاح.\n"
+            f"إذا كان هناك أي خطأ يمكنك إعادة الطلب في أي وقت."
+        )
+    await _send_whatsapp_message(phone_id=phone_id, to=to, text=body)
+
+
 async def _handle_merchant_message(
     phone_id: str,
     to: str,
@@ -612,6 +663,34 @@ async def _handle_merchant_message(
     Bypasses the platform sales engine (intent/stage/decision) entirely.
     """
     logger.info("[Merchant] tenant=%s from=%s text_snippet=%s", tenant_id, to, text[:60])
+
+    # ── COD reply interception ────────────────────────────────────────────────
+    # Some WhatsApp clients render QUICK_REPLY taps as plain text rather
+    # than interactive button payloads. We pattern-match the message
+    # against the COD whitelist BEFORE the AI takes over, otherwise the
+    # store's AI assistant would happily reply "ok!" without ever
+    # transitioning the order. classify_cod_reply returns None on any
+    # unrelated text, so this guard is safe to run on every message.
+    try:
+        from services.cod_confirmation import (  # noqa: PLC0415
+            classify_cod_reply, handle_cod_reply,
+        )
+        if classify_cod_reply(text) is not None:
+            decision, order = await handle_cod_reply(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=to,
+                text=text,
+            )
+            if order is not None:
+                await _send_cod_followup_message(
+                    phone_id=phone_id, to=to, decision=decision, order=order,
+                )
+                return
+            # No pending COD order → fall through to normal AI reply, but
+            # don't block the rest of the conversation.
+    except Exception as exc:
+        logger.error("[Merchant] COD text-reply handler failed: %s", exc)
 
     try:
         from core.store_knowledge import build_ai_context  # noqa: PLC0415

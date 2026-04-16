@@ -87,6 +87,16 @@ class EVENTS:
     COUPON_AUTOGEN_ROLLED_BACK = "coupon.autogen.rolled_back"
     COUPON_POOL_EXHAUSTED      = "coupon.pool.exhausted"
 
+    # ── Automation engine ─────────────────────────────────────────────────────
+    AUTOMATION_EVENT_EMITTED         = "automation.event.emitted"
+    AUTOMATION_EVENT_ALIASED         = "automation.event.aliased"
+    AUTOMATION_UNMATCHED_TRIGGER     = "automation.event.unmatched_trigger"
+    AUTOMATION_NO_AUTOMATION_FOUND   = "automation.event.no_automation_found"
+    AUTOMATION_EXECUTION_SENT        = "automation.execution.sent"
+    AUTOMATION_EXECUTION_SKIPPED     = "automation.execution.skipped"
+    AUTOMATION_EXECUTION_FAILED      = "automation.execution.failed"
+    AUTOMATION_SEED_REPAIRED         = "automation.seed.trigger_repaired"
+
 
 def _coerce(value: Any) -> Any:
     """Coerce value into something JSON-safe; Exceptions become str repr."""

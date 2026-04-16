@@ -78,8 +78,26 @@ def emit_automation_event(
     Called by event sources (whatsapp_webhook, store_sync, webhooks,
     customer_intelligence).  Does NOT commit by default — the caller controls
     the transaction boundary.
+
+    Legacy event names (e.g. "abandoned_cart") are aliased to their canonical
+    AutomationTrigger value at write time so the engine's exact-match lookup
+    resolves correctly even if a caller hasn't been migrated yet.
     """
+    from core.automation_triggers import LEGACY_EVENT_ALIASES  # noqa: PLC0415
+    from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
     from models import AutomationEvent  # noqa: PLC0415
+
+    original_type = event_type
+    aliased = LEGACY_EVENT_ALIASES.get(event_type)
+    if aliased is not None:
+        event_type = aliased.value
+        _log_event(
+            _EVENTS.AUTOMATION_EVENT_ALIASED,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            from_event_type=original_type,
+            to_event_type=event_type,
+        )
 
     ev = AutomationEvent(
         tenant_id=tenant_id,
@@ -95,9 +113,11 @@ def emit_automation_event(
     else:
         db.flush()
 
-    logger.debug(
-        "[AutoEngine] emit tenant=%s type=%s customer=%s",
-        tenant_id, event_type, customer_id,
+    _log_event(
+        _EVENTS.AUTOMATION_EVENT_EMITTED,
+        tenant_id=tenant_id,
+        customer_id=customer_id,
+        event_type=event_type,
     )
     return ev
 
@@ -109,7 +129,28 @@ async def process_pending_events(db: Session, tenant_id: int) -> int:
     Scan and process unprocessed AutomationEvent rows for one tenant.
     Returns the total number of WhatsApp messages sent in this cycle.
     """
+    from core.automations_seed import ensure_trigger_event_for_tenant  # noqa: PLC0415
+    from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
     from models import AutomationEvent  # noqa: PLC0415
+
+    # Defensive repair: if any SmartAutomation row has a stale/NULL
+    # trigger_event (e.g. a tenant was seeded before migration 0024 ran),
+    # normalise it now so this cycle can actually match. Cheap no-op on
+    # already-healthy tenants.
+    try:
+        repaired = ensure_trigger_event_for_tenant(db, tenant_id)
+        if repaired:
+            _log_event(
+                _EVENTS.AUTOMATION_SEED_REPAIRED,
+                tenant_id=tenant_id,
+                rows_repaired=repaired,
+            )
+            db.flush()
+    except Exception as exc:
+        logger.error(
+            "[AutoEngine] trigger_event repair failed tenant=%s: %s",
+            tenant_id, exc, exc_info=True,
+        )
 
     now = _utcnow_naive()
     cutoff = now - timedelta(hours=_MAX_EVENT_AGE_HOURS)
@@ -157,25 +198,50 @@ async def _process_event(
     Find matching automations for one event and try to execute each.
     Returns the number of messages actually sent.
     """
+    from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
     from models import SmartAutomation  # noqa: PLC0415
 
-    automations: List[Any] = (
+    # Any row whose trigger_event matches, regardless of enabled — used to
+    # distinguish "unmatched trigger" (no row with this trigger_event at all)
+    # from "no enabled automation" (rows exist but all disabled).
+    all_matches: List[Any] = (
         db.query(SmartAutomation)
         .filter(
             SmartAutomation.tenant_id == tenant_id,
             SmartAutomation.trigger_event == event.event_type,
-            SmartAutomation.enabled.is_(True),
         )
         .all()
     )
+    automations: List[Any] = [a for a in all_matches if a.enabled]
 
     if not automations:
-        # No automation is configured for this event type — mark done
+        # Previously this branch called `logger.debug(...)` and silently set
+        # processed=True. That hid every trigger-name mismatch in production.
+        # Now we emit a structured WARNING log so the drift is searchable in
+        # Railway logs, but we still set processed=True because reprocessing
+        # on every cycle would only flood the logs with the same failure.
+        if not all_matches:
+            _log_event(
+                _EVENTS.AUTOMATION_UNMATCHED_TRIGGER,
+                level=logging.WARNING,
+                tenant_id=tenant_id,
+                event_id=event.id,
+                event_type=event.event_type,
+                customer_id=event.customer_id,
+                reason="no_smart_automation_row_has_this_trigger_event",
+            )
+        else:
+            _log_event(
+                _EVENTS.AUTOMATION_NO_AUTOMATION_FOUND,
+                level=logging.WARNING,
+                tenant_id=tenant_id,
+                event_id=event.id,
+                event_type=event.event_type,
+                customer_id=event.customer_id,
+                reason="all_matching_automations_disabled",
+                matching_automation_ids=[a.id for a in all_matches],
+            )
         event.processed = True
-        logger.debug(
-            "[AutoEngine] No matching automation for event=%s type=%s — marking processed",
-            event.id, event.event_type,
-        )
         return 0
 
     sent = 0
@@ -236,15 +302,22 @@ async def _try_execute(
         return "delay"
 
     # ── Condition evaluation ──────────────────────────────────────────────────
+    from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
+
     passed, skip_reason = _evaluate_conditions(db, event, config)
     if not passed:
         _write_execution(
             db, event.id, automation.id, event.customer_id, tenant_id,
             status="skipped", skip_reason=skip_reason,
         )
-        logger.info(
-            "[AutoEngine] SKIPPED event=%s automation=%s reason=%s tenant=%s",
-            event.id, automation.id, skip_reason, tenant_id,
+        _log_event(
+            _EVENTS.AUTOMATION_EXECUTION_SKIPPED,
+            tenant_id=tenant_id,
+            event_id=event.id,
+            event_type=event.event_type,
+            automation_id=automation.id,
+            customer_id=event.customer_id,
+            reason=skip_reason,
         )
         return "skipped"
 
@@ -263,12 +336,27 @@ async def _try_execute(
         automation.stats_triggered = (automation.stats_triggered or 0) + 1
         automation.stats_sent = (automation.stats_sent or 0) + 1
         automation.updated_at = _utcnow_naive()
-
-    logger.info(
-        "[AutoEngine] %s event=%s type=%s automation=%s tenant=%s customer=%s",
-        status.upper(), event.id, event.event_type,
-        automation.id, tenant_id, event.customer_id,
-    )
+        _log_event(
+            _EVENTS.AUTOMATION_EXECUTION_SENT,
+            tenant_id=tenant_id,
+            event_id=event.id,
+            event_type=event.event_type,
+            automation_id=automation.id,
+            customer_id=event.customer_id,
+            template=action_info.get("template"),
+            wa_message_id=action_info.get("wa_message_id"),
+        )
+    else:
+        _log_event(
+            _EVENTS.AUTOMATION_EXECUTION_FAILED,
+            level=logging.ERROR,
+            tenant_id=tenant_id,
+            event_id=event.id,
+            event_type=event.event_type,
+            automation_id=automation.id,
+            customer_id=event.customer_id,
+            reason=action_info.get("error"),
+        )
     return status
 
 
@@ -412,8 +500,25 @@ async def _execute_action(
     if not template:
         return False, {"error": "no_approved_template"}
 
+    # ── Auto-coupon resolution ───────────────────────────────────────────────
+    # When the automation step opts in via `auto_coupon: true` (e.g.
+    # cart_abandoned reminder #3 or vip_customer_upgrade), we pull a real
+    # discount code from the merchant's Salla-synced coupon pool and feed
+    # it into the named-slot resolver below as `discount_code` / `vip_coupon`.
+    # Any failure here is non-fatal — we log a structured event and let the
+    # template render with an empty coupon slot rather than block the send.
+    coupon_extras = await _resolve_auto_coupon(
+        db, tenant_id=tenant_id, customer=customer, config=config,
+        active_step=_active_step_for_event(event, config),
+    )
+
     # ── Build template variables ──────────────────────────────────────────────
-    vars_map = _build_template_vars(event, customer, config)
+    vars_map = _build_template_vars(
+        event, customer, config,
+        template_name=template.name,
+        store_name=_resolve_store_name(db, tenant_id),
+        coupon_extras=coupon_extras,
+    )
 
     # Build Meta API body components
     body_params = [{"type": "text", "text": str(v)} for v in vars_map.values()]
@@ -461,41 +566,275 @@ async def _execute_action(
 
 
 def _build_template_vars(
-    event: Any, customer: Any, config: Dict[str, Any]
+    event: Any,
+    customer: Any,
+    config: Dict[str, Any],
+    *,
+    template_name: Optional[str] = None,
+    store_name: Optional[str] = None,
+    coupon_extras: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """
-    Build a flat ordered dict of template variable values.
-    Priority: explicit var_map from config > event payload > customer defaults.
+    Resolve a template's `{{1}}, {{2}}, …` placeholders to real values.
+
+    Resolution order for the var_map (which named slot each placeholder
+    represents):
+
+      1. Explicit `var_map` on the automation config (legacy contract).
+      2. Default library lookup by `template_name` — this is how the 3 core
+         revenue automations get their named-slot contract for free.
+      3. Positional fallback `{{1}}=customer_name, {{2}}=checkout_url-or-coupon`
+         to keep ad-hoc / merchant-authored templates working.
+
+    Resolution order for each slot's *value*:
+
+      coupon_extras > event.payload > config defaults > customer defaults.
+
+    `coupon_extras` is the output of `_resolve_auto_coupon` — when an
+    automation step opts in via `auto_coupon=True`, the engine pre-resolves
+    a real coupon and passes it down here so the same code path renders
+    both ad-hoc and pool-backed templates.
     """
     customer_name: str = getattr(customer, "name", None) or "العميل"
     payload: Dict[str, Any] = event.payload or {}
+    coupon_extras = coupon_extras or {}
 
-    # Use var_map from config if provided (keys like "{{1}}", "{{2}}")
+    # ── Determine the var_map (placeholder → named-slot) ──────────────────
     var_map: Dict[str, str] = config.get("var_map") or {}
-    if var_map:
-        resolved: Dict[str, str] = {}
-        for placeholder, field in var_map.items():
-            if field == "customer_name":
-                resolved[placeholder] = customer_name
-            elif field == "product_name":
-                resolved[placeholder] = str(payload.get("product_name", ""))
-            elif field == "reorder_url":
-                resolved[placeholder] = str(payload.get("reorder_url", ""))
-            elif field == "checkout_url":
-                resolved[placeholder] = str(payload.get("checkout_url", ""))
-            elif field == "coupon_code":
-                resolved[placeholder] = str(
-                    config.get("coupon_code") or payload.get("coupon_code", "")
-                )
-            else:
-                resolved[placeholder] = str(payload.get(field, ""))
-        return resolved
+    if not var_map and template_name:
+        # Falls back to {} for non-library templates, which the positional
+        # fallback below will handle.
+        try:
+            from core.template_library import numeric_var_map_for  # noqa: PLC0415
+            var_map = numeric_var_map_for(template_name)
+        except Exception:
+            var_map = {}
 
-    # Fallback: simple positional defaults
+    if var_map:
+        return {
+            placeholder: _resolve_slot_value(
+                slot=field,
+                customer_name=customer_name,
+                store_name=store_name,
+                payload=payload,
+                config=config,
+                coupon_extras=coupon_extras,
+            )
+            for placeholder, field in var_map.items()
+        }
+
+    # Positional fallback for templates not in the library and without an
+    # explicit var_map. Keeps backwards-compat with merchant-authored
+    # templates whose body is just `Hi {{1}}, here: {{2}}`.
     return {
         "{{1}}": customer_name,
-        "{{2}}": str(payload.get("checkout_url") or payload.get("coupon_code") or ""),
+        "{{2}}": str(
+            payload.get("checkout_url")
+            or coupon_extras.get("discount_code")
+            or coupon_extras.get("vip_coupon")
+            or payload.get("coupon_code")
+            or ""
+        ),
     }
+
+
+def _resolve_slot_value(
+    *,
+    slot: str,
+    customer_name: str,
+    store_name: Optional[str],
+    payload: Dict[str, Any],
+    config: Dict[str, Any],
+    coupon_extras: Dict[str, str],
+) -> str:
+    """
+    Single-slot resolver. Centralised so the AI rewriter, the dashboard
+    preview endpoint, and the engine all agree on what each named slot
+    means at send time.
+    """
+    if slot == "customer_name":
+        return customer_name
+    if slot == "store_name":
+        return str(store_name or payload.get("store_name") or "متجرنا")
+    if slot == "store_url":
+        return str(payload.get("store_url") or config.get("store_url") or "")
+    if slot == "checkout_url":
+        return str(payload.get("checkout_url") or payload.get("cart_url") or "")
+    if slot == "cart_total":
+        return str(payload.get("cart_total") or payload.get("total") or "")
+    if slot == "product_name":
+        return str(payload.get("product_name") or "")
+    if slot == "product_url":
+        # Used by back_in_stock_{ar,en}. Prefer the URL the emitter
+        # baked into the payload, fall back to a synthesized store URL +
+        # external_id pattern when only the bare external id is known.
+        url = (
+            payload.get("product_url")
+            or payload.get("url")
+            or ""
+        )
+        if url:
+            return str(url)
+        store_url = str(payload.get("store_url") or config.get("store_url") or "").rstrip("/")
+        ext = payload.get("external_id") or payload.get("product_external_id")
+        if store_url and ext:
+            return f"{store_url}/p/{ext}"
+        return ""
+    if slot == "order_id":
+        return str(payload.get("order_id") or payload.get("external_id") or "")
+    if slot in ("discount_code", "coupon_code"):
+        return str(
+            coupon_extras.get("discount_code")
+            or config.get("coupon_code")
+            or payload.get("coupon_code")
+            or ""
+        )
+    if slot == "vip_coupon":
+        return str(
+            coupon_extras.get("vip_coupon")
+            or coupon_extras.get("discount_code")
+            or config.get("coupon_code")
+            or payload.get("coupon_code")
+            or ""
+        )
+    # Unknown named slot → fall back to the raw payload key so merchant
+    # extensions still work without us having to teach this resolver.
+    return str(payload.get(slot, ""))
+
+
+def _active_step_for_event(event: Any, config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    For multi-step automations (e.g. cart_abandoned with 3 reminders), pick
+    the step whose `delay_minutes` matches how old the event is. Returns the
+    flat config when there are no steps.
+    """
+    steps = config.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return {}
+    age_minutes = max(
+        0,
+        int((_utcnow_naive() - _naive_utc(event.created_at)).total_seconds() // 60),
+    )
+    chosen: Dict[str, Any] = steps[0]
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if int(step.get("delay_minutes", 0)) <= age_minutes:
+            chosen = step
+    return chosen
+
+
+async def _resolve_auto_coupon(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer: Any,
+    config: Dict[str, Any],
+    active_step: Dict[str, Any],
+) -> Dict[str, str]:
+    """
+    Pull a real coupon from the merchant's pool when the automation opts in.
+
+    Opt-in signals (any of these enables auto-coupon resolution):
+      • config.auto_coupon == True              (e.g. vip_upgrade, customer_winback)
+      • active_step.auto_coupon == True         (e.g. cart_abandoned step #3)
+      • active_step.message_type == "coupon"    (legacy form, same semantics)
+
+    Segment selection priority:
+      1. config.coupon_segment             (explicit override)
+      2. customer profile's segment        (vip / inactive / at_risk / active / new)
+      3. fallback to "active"
+
+    Returns `{"discount_code": "NHA2X", "vip_coupon": "NHA2X"}` on success
+    (both keys are populated so VIP and cart templates can both consume the
+    same pool). Returns `{}` on any failure — never raises, never blocks
+    the send.
+    """
+    wants_coupon = bool(
+        config.get("auto_coupon")
+        or (active_step or {}).get("auto_coupon")
+        or (active_step or {}).get("message_type") == "coupon"
+    )
+    if not wants_coupon:
+        return {}
+
+    # Resolve segment
+    segment = (
+        config.get("coupon_segment")
+        or _customer_segment_for(db, tenant_id, getattr(customer, "id", None))
+        or "active"
+    )
+
+    try:
+        from services.coupon_generator import CouponGeneratorService  # noqa: PLC0415
+
+        svc = CouponGeneratorService(db, tenant_id)
+        coupon = svc.pick_coupon_for_segment(segment)
+        if coupon is None:
+            coupon = await svc.create_on_demand(segment)
+    except Exception as exc:
+        logger.warning(
+            "[AutoEngine] auto_coupon resolution failed tenant=%s segment=%s: %s",
+            tenant_id, segment, exc,
+        )
+        return {}
+
+    if coupon is None or not getattr(coupon, "code", None):
+        from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
+        _log_event(
+            _EVENTS.COUPON_AUTOGEN_FAILED,
+            tenant_id=tenant_id,
+            customer_id=getattr(customer, "id", None),
+            segment=segment,
+            stage="automation_engine_auto_coupon",
+            err="pool_empty_and_create_on_demand_returned_none",
+        )
+        return {}
+
+    code = str(coupon.code).strip().upper()
+    return {"discount_code": code, "vip_coupon": code, "coupon_code": code}
+
+
+def _customer_segment_for(
+    db: Session, tenant_id: int, customer_id: Optional[int]
+) -> Optional[str]:
+    """Look up the latest customer_status / segment from CustomerProfile."""
+    if not customer_id:
+        return None
+    try:
+        from models import CustomerProfile  # noqa: PLC0415
+        profile = (
+            db.query(CustomerProfile)
+            .filter(
+                CustomerProfile.tenant_id == tenant_id,
+                CustomerProfile.customer_id == customer_id,
+            )
+            .first()
+        )
+        if not profile:
+            return None
+        return getattr(profile, "customer_status", None) or getattr(profile, "segment", None)
+    except Exception:
+        return None
+
+
+def _resolve_store_name(db: Session, tenant_id: int) -> str:
+    """Return the merchant-configured store name, or a sensible default."""
+    try:
+        from core.tenant import (  # noqa: PLC0415
+            DEFAULT_STORE,
+            get_or_create_settings,
+            merge_defaults,
+        )
+
+        settings = get_or_create_settings(db, tenant_id)
+        store = merge_defaults(getattr(settings, "store_settings", None), DEFAULT_STORE)
+        name = (store.get("store_name") or "").strip()
+        if name:
+            return name
+    except Exception as exc:
+        logger.debug("[AutoEngine] store_name resolution failed tenant=%s: %s", tenant_id, exc)
+    return "متجرنا"
 
 
 def _write_execution(

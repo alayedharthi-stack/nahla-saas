@@ -127,6 +127,7 @@ from routers.integrations      import router as _integrations_router       # noq
 from routers.support_access    import router as _support_access_router     # noqa: E402
 from routers.addons            import router as _addons_router               # noqa: E402
 from routers.widgets           import router as _widgets_router              # noqa: E402
+from routers.product_interests import router as _product_interests_router    # noqa: E402
 
 app.include_router(_health_router)
 app.include_router(_admin_router)
@@ -159,6 +160,7 @@ app.include_router(_integrations_router)
 app.include_router(_support_access_router)
 app.include_router(_addons_router)
 app.include_router(_widgets_router)
+app.include_router(_product_interests_router)
 
 
 # ── Startup events ────────────────────────────────────────────────────────────────

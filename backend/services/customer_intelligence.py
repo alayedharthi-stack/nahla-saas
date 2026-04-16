@@ -797,23 +797,50 @@ class CustomerIntelligenceService:
             )
             try:
                 from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                from core.automation_triggers import AutomationTrigger  # noqa: PLC0415
+
+                payload = {
+                    "from":        old_status,
+                    "to":          status,
+                    "rfm_segment": rfm_segment,
+                    "reason":      reason,
+                }
+
+                # Always emit the generic status-change event — kept for
+                # backward compat with any custom tenant automations.
                 emit_automation_event(
                     self.db,
                     self.tenant_id,
                     "customer_status_changed",
                     customer_id=customer.id,
-                    payload={
-                        "from": old_status,
-                        "to": status,
-                        "rfm_segment": rfm_segment,
-                        "reason": reason,
-                    },
+                    payload=payload,
                 )
+
+                # Emit specific triggers so the seeded automations
+                # (customer_winback / vip_upgrade) — whose trigger_event was
+                # normalised in migration 0024 to the canonical names below —
+                # can match without relying on payload conditions alone.
+                if status in ("inactive", "at_risk"):
+                    emit_automation_event(
+                        self.db,
+                        self.tenant_id,
+                        AutomationTrigger.CUSTOMER_INACTIVE.value,
+                        customer_id=customer.id,
+                        payload=payload,
+                    )
+                elif status == "vip":
+                    emit_automation_event(
+                        self.db,
+                        self.tenant_id,
+                        AutomationTrigger.VIP_CUSTOMER_UPGRADE.value,
+                        customer_id=customer.id,
+                        payload=payload,
+                    )
             except Exception as exc:
                 # Errors in automation emission used to be silently debug-logged,
                 # hiding real outages. Now surfaced as ERROR with full stack.
                 logger.exception(
-                    "[Intelligence] emit customer_status_changed failed tenant=%s customer=%s: %s",
+                    "[Intelligence] emit automation events failed tenant=%s customer=%s: %s",
                     self.tenant_id, customer.id, exc,
                 )
 

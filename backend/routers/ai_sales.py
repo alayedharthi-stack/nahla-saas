@@ -861,15 +861,16 @@ async def ai_sales_create_order(
     db.add(order)
     db.flush()
 
-    if order_status == "pending_confirmation":
-        from routers.automations import (  # noqa: PLC0415
-            _get_autopilot_settings as _get_ap,
-            _log_autopilot_event as _log_ap,
-        )
-        ap = _get_ap(db, tenant_id)
-        if ap.get("enabled") and ap.get("order_status_update", ap.get("cod_confirmation", {})).get("enabled"):
-            _log_ap(db, tenant_id, "order_status_update", customer.id,
-                    {"order_id": order.id, "source": "ai_sales_agent"})
+    # NOTE: An earlier version of this path called
+    #   _log_autopilot_event(..., "autopilot_order_update_sent", ...)
+    # which wrote a fake AutomationEvent row that looked like a WhatsApp send
+    # but never invoked `provider_send_message`. That legacy execution path has
+    # been removed. The conversational agent already replies to the customer
+    # inline through the WhatsApp webhook, so no additional automation-side
+    # event is needed here. If we later want an explicit "order pending
+    # confirmation" automation, emit it via:
+    #   emit_automation_event(tenant_id, "order_status_changed", customer.id, {...})
+    # and wire a SmartAutomation with trigger_event='order_status_changed'.
 
     _log_ai_sales_event(
         db, tenant_id, body.customer_phone, body.customer_name,
@@ -890,6 +891,44 @@ async def ai_sales_create_order(
                  "qty": body.quantity, "method": body.payment_method, "external_id": external_order_id},
         reference_id=str(order.id),
     )
+
+    # ── COD: send the customer the confirmation template ─────────────────────
+    # The order is in `pending_confirmation` locally and has NOT been pushed
+    # to the merchant's store yet. The customer must tap "تأكيد الطلب ✅" on
+    # the template; the WhatsApp webhook then routes the reply through
+    # services.cod_confirmation.handle_cod_reply, which transitions the
+    # order to `under_review` and pushes it to the store.
+    cod_template_sent = False
+    cod_template_error: Optional[str] = None
+    if body.payment_method in ("cash_on_delivery", "cod"):
+        from services.cod_confirmation import send_cod_confirmation_template  # noqa: PLC0415
+        cod_result = await send_cod_confirmation_template(
+            db,
+            tenant_id=tenant_id,
+            order=order,
+            customer_phone=body.customer_phone,
+            customer_name=body.customer_name or body.customer_phone,
+            product_name=product_display or "طلبك",
+            total_amount=str(total_str).replace(" ر.س", "").replace("—", "0"),
+        )
+        cod_template_sent  = bool(cod_result.get("sent"))
+        cod_template_error = cod_result.get("error")
+        log_event(
+            db, tenant_id, category="order", event_type="order.cod.confirmation_requested",
+            summary=(
+                f"COD order #{order.id}: confirmation template "
+                f"{'sent' if cod_template_sent else 'NOT sent'}"
+            ),
+            severity="info" if cod_template_sent else "warning",
+            payload={
+                "order_id":       order.id,
+                "wa_message_id":  cod_result.get("wa_message_id"),
+                "error":          cod_template_error,
+                "template_name":  "cod_order_confirmation_ar",
+            },
+            reference_id=str(order.id),
+        )
+
     db.commit()
 
     # Recompute the customer's profile so their segment reflects this new
@@ -912,15 +951,22 @@ async def ai_sales_create_order(
             tenant_id, customer.id, order.id, exc,
         )
 
+    is_cod = body.payment_method in ("cash_on_delivery", "cod")
     return {
-        "order_id":     order.id,
-        "order_status": order_status,
-        "payment_link": payment_link,
-        "customer_id":  customer.id,
-        "total":        total_str,
+        "order_id":            order.id,
+        "order_status":        order_status,
+        "payment_link":        payment_link,
+        "customer_id":         customer.id,
+        "total":               total_str,
+        "cod_template_sent":   cod_template_sent if is_cod else None,
+        "cod_template_error":  cod_template_error if is_cod else None,
         "message": (
             f"تم إنشاء الطلب #{order.id} بنجاح ✅ "
-            + ("رابط الدفع أُرسل إليك." if payment_link else "سيتواصل معك فريقنا لتأكيد الطلب.")
+            + (
+                "أرسلنا لك رسالة لتأكيد الطلب على واتساب."
+                if is_cod
+                else ("رابط الدفع أُرسل إليك." if payment_link else "سيتواصل معك فريقنا لتأكيد الطلب.")
+            )
         ),
     }
 

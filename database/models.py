@@ -129,6 +129,12 @@ class Product(Base):
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     price = Column(String, nullable=True)
+    # Real columns (added in migration 0025) for back-in-stock detection.
+    # The store_sync upsert populates these alongside the JSONB blob so
+    # transition detection can compare old-vs-new at the column level
+    # without parsing JSON.
+    stock_quantity = Column(Integer, nullable=True)
+    in_stock = Column(Boolean, default=True, nullable=False)
     extra_metadata = Column('metadata', JSONB, nullable=True)
     recommendation_tags = Column(JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
@@ -745,6 +751,46 @@ class PredictiveReorderEstimate(Base):
     notified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProductInterest(Base):
+    """
+    "Notify me when back in stock" waitlist row.
+
+    One row = one customer asking to be alerted the next time a specific
+    product transitions from out-of-stock to in-stock. Created by the
+    storefront widget (POST /products/{id}/notify-me) or by the AI sales
+    flow when a customer asks for a sold-out item. Consumed by the
+    automation engine when store_sync detects a 0 → >0 stock transition
+    and fans out one `product_back_in_stock` event per still-pending row.
+
+    The (tenant_id, product_id, customer_id) triple is unique while the
+    row is pending — once we send the notification we mark it `notified`
+    so a future restock doesn't re-spam the same customer for the same
+    product unless they re-subscribe.
+    """
+    __tablename__ = 'product_interests'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=False)
+    customer_phone = Column(String, nullable=True)
+    source = Column(String, nullable=True)   # widget | whatsapp | ai_sales | manual
+    notified = Column(Boolean, default=False, nullable=False)
+    notified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
+
+    tenant = relationship('Tenant')
+    product = relationship('Product')
+    customer = relationship('Customer')
+
+    __table_args__ = (
+        UniqueConstraint(
+            'tenant_id', 'product_id', 'customer_id', 'notified',
+            name='uq_product_interest_pending_per_customer',
+        ),
+    )
 
 
 class AIActionLog(Base):

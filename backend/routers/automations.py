@@ -22,12 +22,13 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from models import (  # noqa: E402
     AutomationEvent,
+    AutomationExecution,
     Customer,
-    CustomerProfile,
     Order,
     PredictiveReorderEstimate,
     Product,
@@ -55,6 +56,7 @@ ORDER_STATUS_LABELS: Dict[str, str] = {
     "cod":               "الدفع عند الاستلام",
 }
 
+from core.automations_seed import seed_automations_if_empty as _seed_automations_if_empty
 from core.billing import require_billing_access
 from core.database import get_db
 from core.tenant import (
@@ -70,72 +72,10 @@ router = APIRouter()
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-
-SEED_AUTOMATIONS: List[Dict[str, Any]] = [
-    {
-        "automation_type": "abandoned_cart",
-        "name": "استرداد العربة المتروكة",
-        "enabled": False,
-        "config": {
-            "steps": [
-                {"delay_minutes": 30,   "message_type": "reminder"},
-                {"delay_minutes": 180,  "message_type": "reminder"},
-                {"delay_minutes": 1440, "message_type": "coupon", "coupon_code": "CART10AUTO"},
-            ],
-            "template_name": "abandoned_cart_reminder",
-        },
-    },
-    {
-        "automation_type": "predictive_reorder",
-        "name": "تذكير إعادة الطلب التنبؤي",
-        "enabled": False,
-        "config": {
-            "template_name": "predictive_reorder_reminder_ar",
-            "var_map": {"{{1}}": "customer_name", "{{2}}": "product_name", "{{3}}": "reorder_url"},
-            "days_before": 3,
-        },
-    },
-    {
-        "automation_type": "customer_winback",
-        "name": "استرجاع العملاء غير النشطين",
-        "enabled": False,
-        "config": {
-            "inactive_days_first": 60,
-            "inactive_days_second": 90,
-            "discount_pct": 15,
-            "template_name": "win_back",
-        },
-    },
-    {
-        "automation_type": "vip_upgrade",
-        "name": "مكافأة عملاء VIP",
-        "enabled": False,
-        "config": {
-            "min_spent_sar": 2000,
-            "discount_pct": 20,
-            "template_name": "vip_exclusive",
-        },
-    },
-    {
-        "automation_type": "new_product_alert",
-        "name": "تنبيه المنتجات الجديدة",
-        "enabled": False,
-        "config": {
-            "target_interested_only": True,
-            "template_name": "new_arrivals",
-        },
-    },
-    {
-        "automation_type": "back_in_stock",
-        "name": "تنبيه عودة المنتج للمخزون",
-        "enabled": False,
-        "config": {
-            "notify_previous_buyers": True,
-            "notify_previous_viewers": True,
-            "template_name": "new_arrivals",
-        },
-    },
-]
+#
+# The canonical seed list now lives in core/automations_seed.py. Both this
+# router and routers/intelligence.py import from there, guaranteeing that
+# every tenant gets the same automations with `trigger_event` pre-populated.
 
 DEFAULT_AUTOPILOT: Dict[str, Any] = {
     "enabled": False,
@@ -166,29 +106,30 @@ DEFAULT_AUTOPILOT: Dict[str, Any] = {
     },
 }
 
-AUTOPILOT_EVENT_TYPES = {
-    "order_status_update": "autopilot_order_update_sent",
-    "predictive_reorder":  "autopilot_reorder_sent",
-    "abandoned_cart":      "autopilot_cart_sent",
-    "inactive_recovery":   "autopilot_inactive_sent",
-    # backward compat alias kept for existing DB rows
-    "cod_confirmation":    "autopilot_cod_sent",
-}
+# ── Summary label map (keyed by AutomationTrigger value) ─────────────────────
+#
+# Used by `_get_daily_summary` to turn real AutomationExecution rows into the
+# `{key, label, count, icon}` items the dashboard expects. Keys MUST match the
+# AutomationTrigger enum values — no fake `autopilot_*_sent` strings anymore.
+
+from core.automation_triggers import AutomationTrigger  # noqa: E402
 
 AUTOPILOT_SUMMARY_LABELS: Dict[str, str] = {
-    "autopilot_order_update_sent": "إشعارات تحديثات الطلبات أُرسلت",
-    "autopilot_cod_sent":          "تأكيدات طلبات COD أُرسلت",
-    "autopilot_reorder_sent":      "تذكيرات إعادة طلب أُرسلت",
-    "autopilot_cart_sent":         "سلات متروكة تم التواصل بشأنها",
-    "autopilot_inactive_sent":     "عملاء غير نشطين تم استرجاعهم",
+    AutomationTrigger.CART_ABANDONED.value:         "سلات متروكة تم التواصل بشأنها",
+    AutomationTrigger.CUSTOMER_INACTIVE.value:      "عملاء غير نشطين تم استرجاعهم",
+    AutomationTrigger.PREDICTIVE_REORDER_DUE.value: "تذكيرات إعادة طلب أُرسلت",
+    AutomationTrigger.VIP_CUSTOMER_UPGRADE.value:   "عملاء VIP كوفئوا",
+    AutomationTrigger.PRODUCT_CREATED.value:        "تنبيهات منتجات جديدة أُرسلت",
+    AutomationTrigger.PRODUCT_BACK_IN_STOCK.value:  "تنبيهات عودة المنتج للمخزون",
 }
 
 AUTOPILOT_SUMMARY_ICONS: Dict[str, str] = {
-    "autopilot_order_update_sent": "📦",
-    "autopilot_cod_sent":          "🍯",
-    "autopilot_reorder_sent":      "🔄",
-    "autopilot_cart_sent":         "🛒",
-    "autopilot_inactive_sent":     "💙",
+    AutomationTrigger.CART_ABANDONED.value:         "🛒",
+    AutomationTrigger.CUSTOMER_INACTIVE.value:      "💙",
+    AutomationTrigger.PREDICTIVE_REORDER_DUE.value: "🔄",
+    AutomationTrigger.VIP_CUSTOMER_UPGRADE.value:   "👑",
+    AutomationTrigger.PRODUCT_CREATED.value:        "✨",
+    AutomationTrigger.PRODUCT_BACK_IN_STOCK.value:  "📦",
 }
 
 
@@ -233,22 +174,6 @@ class AutopilotSettingsIn(BaseModel):
 
 
 # ── Helper functions ───────────────────────────────────────────────────────────
-
-def _seed_automations_if_empty(db: Session, tenant_id: int) -> None:
-    count = db.query(SmartAutomation).filter(SmartAutomation.tenant_id == tenant_id).count()
-    if count == 0:
-        for seed in SEED_AUTOMATIONS:
-            auto = SmartAutomation(
-                tenant_id=tenant_id,
-                automation_type=seed["automation_type"],
-                name=seed["name"],
-                enabled=seed["enabled"],
-                config=seed["config"],
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
-            )
-            db.add(auto)
-        db.flush()
 
 
 def _auto_to_dict(a: SmartAutomation) -> Dict[str, Any]:
@@ -316,251 +241,75 @@ def _save_autopilot_settings(db: Session, tenant_id: int, autopilot: Dict[str, A
 
 
 def _get_daily_summary(db: Session, tenant_id: int) -> List[Dict[str, Any]]:
-    """Count today's autopilot actions from AutomationEvent."""
-    from datetime import date, timezone
+    """
+    Today's autopilot summary — counted from real, delivered executions.
+
+    Previously this counted fake `AutomationEvent(event_type='autopilot_*_sent',
+    processed=True)` rows that `_log_autopilot_event` wrote *without* actually
+    sending anything — so the dashboard showed confident success counts for
+    messages that never reached a customer. That entire code path is gone.
+
+    The source of truth is now `AutomationExecution.status='sent'`, which is
+    only written by `automation_engine._try_execute` after a successful
+    `provider_send_message(...)` response.
+    """
+    from datetime import date  # noqa: PLC0415
+
     today_start = datetime.combine(date.today(), datetime.min.time())
-    summary = []
-    for evt_type, label in AUTOPILOT_SUMMARY_LABELS.items():
-        count = (
-            db.query(AutomationEvent)
-            .filter(
-                AutomationEvent.tenant_id == tenant_id,
-                AutomationEvent.event_type == evt_type,
-                AutomationEvent.created_at >= today_start,
-            )
-            .count()
+    rows = (
+        db.query(SmartAutomation.trigger_event, sa_func.count(AutomationExecution.id))
+        .join(AutomationExecution, AutomationExecution.automation_id == SmartAutomation.id)
+        .filter(
+            AutomationExecution.tenant_id == tenant_id,
+            AutomationExecution.status == "sent",
+            AutomationExecution.executed_at >= today_start,
         )
+        .group_by(SmartAutomation.trigger_event)
+        .all()
+    )
+    counts_by_trigger = {trigger: int(n) for trigger, n in rows if trigger}
+
+    summary: List[Dict[str, Any]] = []
+    for trigger, label in AUTOPILOT_SUMMARY_LABELS.items():
         summary.append({
-            "key": evt_type,
+            "key":   trigger,
             "label": label,
-            "count": count,
-            "icon": AUTOPILOT_SUMMARY_ICONS.get(evt_type, "📨"),
+            "count": counts_by_trigger.get(trigger, 0),
+            "icon":  AUTOPILOT_SUMMARY_ICONS.get(trigger, "📨"),
         })
     return summary
 
 
-def _log_autopilot_event(
-    db: Session,
-    tenant_id: int,
-    event_type: str,
-    customer_id: Optional[int],
-    payload: Dict[str, Any],
-) -> None:
-    """Write an AutomationEvent row for an autopilot action."""
-    event = AutomationEvent(
-        tenant_id=tenant_id,
-        event_type=event_type,
-        customer_id=customer_id,
-        payload=payload,
-        processed=True,
-        created_at=datetime.now(timezone.utc),
+# NOTE ON THE REMOVED LEGACY EXECUTION PATH
+# ─────────────────────────────────────────
+# The following four functions used to live here:
+#
+#   _log_autopilot_event      — wrote an AutomationEvent row with processed=True
+#   _job_order_status_update  — looped Orders and called _log_autopilot_event
+#   _job_predictive_reorder   — looped PredictiveReorderEstimate and called it
+#   _job_abandoned_cart       — looped is_abandoned orders and called it
+#   _job_inactive_customers   — looped inactive CustomerProfile and called it
+#
+# None of them invoked `provider_send_message`. They only simulated sending
+# by writing log-style AutomationEvent rows that the daily-summary then
+# counted. This gave the dashboard a confident "we sent N messages" number
+# for messages that never left our servers.
+#
+# They are DELETED. Audit trail: git blame this comment for migration date.
+# The equivalent real path is:
+#   emit_automation_event(tenant_id, AutomationTrigger.<X>.value, customer_id, payload)
+# which the engine picks up within ≤60 s and actually sends via WhatsApp.
+#
+# POST /autopilot/run is retained for dashboard compatibility but is now a
+# no-op that explains the change — see run_autopilot() below.
+
+
+def _placeholder_removed_job(name: str) -> None:  # pragma: no cover - sentinel
+    """Kept only so accidental imports of the old names fail loudly."""
+    raise RuntimeError(
+        f"{name} was deleted in the legacy-autopilot purge. "
+        "Use emit_automation_event(tenant_id, AutomationTrigger.<X>.value, ...) instead."
     )
-    db.add(event)
-
-
-def _job_order_status_update(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    """
-    Send WhatsApp notifications for ALL order status changes.
-    Tracks `last_notified_status` per order in extra_metadata to avoid duplicates.
-    """
-    notify_statuses: List[str] = config.get(
-        "notify_statuses",
-        ["pending", "shipped", "out_for_delivery", "delivered", "cancelled", "refunded"],
-    )
-    sent = 0
-
-    orders = db.query(Order).filter(Order.tenant_id == tenant_id).all()
-    for order in orders:
-        meta = order.extra_metadata or {}
-        current_status = order.status or "pending"
-        last_notified = meta.get("last_notified_status")
-
-        if current_status == last_notified:
-            continue
-
-        new_meta = {**meta, "last_notified_status": current_status}
-
-        if current_status in notify_statuses:
-            customer_info = order.customer_info or {}
-            customer_name = customer_info.get("name", "العميل")
-            status_label = ORDER_STATUS_LABELS.get(current_status, current_status)
-
-            _log_autopilot_event(
-                db, tenant_id,
-                AUTOPILOT_EVENT_TYPES["order_status_update"],
-                None,
-                {
-                    "order_id": order.id,
-                    "external_id": order.external_id,
-                    "customer_name": customer_name,
-                    "status": current_status,
-                    "status_label": status_label,
-                    "previous_status": last_notified,
-                    "template": config.get("template_name", "order_status_update_ar"),
-                    "vars": {
-                        "{{1}}": customer_name,
-                        "{{2}}": order.external_id or str(order.id),
-                        "{{3}}": status_label,
-                    },
-                },
-            )
-            sent += 1
-
-        order.extra_metadata = new_meta
-
-    return sent
-
-
-def _job_predictive_reorder(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    from datetime import timedelta, timezone
-
-    days_before = int(config.get("days_before", 3))
-    window_end = datetime.now(timezone.utc) + timedelta(days=days_before)
-    sent = 0
-
-    estimates = db.query(PredictiveReorderEstimate).filter(
-        PredictiveReorderEstimate.tenant_id == tenant_id,
-        PredictiveReorderEstimate.notified == False,
-        PredictiveReorderEstimate.predicted_reorder_date <= window_end,
-    ).all()
-
-    for est in estimates:
-        customer = db.query(Customer).filter(
-            Customer.id == est.customer_id, Customer.tenant_id == tenant_id
-        ).first()
-        product = db.query(Product).filter(
-            Product.id == est.product_id, Product.tenant_id == tenant_id
-        ).first()
-
-        customer_name = customer.name if customer else "العميل"
-        product_name = product.title if product else f"المنتج #{est.product_id}"
-        store_url = ""
-        settings_row = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).first()
-        if settings_row:
-            store = merge_defaults(settings_row.store_settings, DEFAULT_STORE)
-            store_url = store.get("store_url", "")
-
-        _log_autopilot_event(
-            db, tenant_id,
-            AUTOPILOT_EVENT_TYPES["predictive_reorder"],
-            est.customer_id,
-            {
-                "estimate_id": est.id,
-                "customer_name": customer_name,
-                "product_name": product_name,
-                "template": config.get("template_name", "predictive_reorder_reminder_ar"),
-                "vars": {
-                    "{{1}}": customer_name,
-                    "{{2}}": product_name,
-                    "{{3}}": store_url or "https://store.example.com",
-                },
-            },
-        )
-        est.notified = True
-        sent += 1
-
-    return sent
-
-
-def _job_abandoned_cart(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    sent = 0
-
-    abandoned = db.query(Order).filter(
-        Order.tenant_id == tenant_id,
-        Order.is_abandoned == True,
-    ).all()
-
-    for order in abandoned:
-        already = db.query(AutomationEvent).filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type == AUTOPILOT_EVENT_TYPES["abandoned_cart"],
-            AutomationEvent.payload.op("->")("order_id").astext == str(order.id),
-        ).count()
-
-        if already > 0:
-            continue
-
-        customer_info = order.customer_info or {}
-        customer_name = customer_info.get("name", "العميل")
-        checkout_url = order.checkout_url or ""
-
-        _log_autopilot_event(
-            db, tenant_id,
-            AUTOPILOT_EVENT_TYPES["abandoned_cart"],
-            None,
-            {
-                "order_id": order.id,
-                "customer_name": customer_name,
-                "checkout_url": checkout_url,
-                "template": config.get("template_name", "abandoned_cart_reminder"),
-                "vars": {
-                    "{{1}}": customer_name,
-                    "{{2}}": checkout_url or "https://store.example.com/cart",
-                },
-                "steps": [
-                    {"delay": "30m", "sent": True},
-                    {"delay": "24h", "scheduled": True},
-                    {"delay": "48h", "coupon": config.get("coupon_code", ""), "scheduled": bool(config.get("coupon_48h"))},
-                ],
-            },
-        )
-        sent += 1
-
-    return sent
-
-
-def _job_inactive_customers(db: Session, tenant_id: int, config: Dict[str, Any]) -> int:
-    from datetime import timedelta, timezone
-
-    inactive_days = int(config.get("inactive_days", 60))
-    discount_pct = int(config.get("discount_pct", 15))
-    sent = 0
-
-    threshold = datetime.now(timezone.utc) - timedelta(days=inactive_days)
-    at_risk = (
-        db.query(CustomerProfile, Customer)
-        .join(Customer, CustomerProfile.customer_id == Customer.id)
-        .filter(
-            CustomerProfile.tenant_id == tenant_id,
-            CustomerProfile.customer_status.in_(["at_risk", "inactive"]),
-            CustomerProfile.last_order_at <= threshold,
-        )
-        .all()
-    )
-
-    for profile, customer in at_risk:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=inactive_days // 2)
-        already = db.query(AutomationEvent).filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type == AUTOPILOT_EVENT_TYPES["inactive_recovery"],
-            AutomationEvent.customer_id == customer.id,
-            AutomationEvent.created_at >= cutoff,
-        ).count()
-
-        if already > 0:
-            continue
-
-        _log_autopilot_event(
-            db, tenant_id,
-            AUTOPILOT_EVENT_TYPES["inactive_recovery"],
-            customer.id,
-            {
-                "customer_name": customer.name,
-                "days_inactive": (datetime.now(timezone.utc) - profile.last_order_at).days if profile.last_order_at else inactive_days,
-                "template": config.get("template_name", "win_back"),
-                "customer_status": profile.customer_status or profile.segment,
-                "rfm_segment": getattr(profile, "rfm_segment", None),
-                "discount_pct": discount_pct,
-                "vars": {
-                    "{{1}}": customer.name or "العميل",
-                    "{{2}}": f"{discount_pct}%",
-                    "{{3}}": f"WINBACK{discount_pct}",
-                },
-            },
-        )
-        sent += 1
-
-    return sent
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -579,6 +328,187 @@ async def list_automations(request: Request, db: Session = Depends(get_db)):
     )
     autopilot = _get_autopilot_enabled(db, tenant_id)
     return {"automations": [_auto_to_dict(a) for a in autos], "autopilot_enabled": autopilot}
+
+
+# ── Attribution windows (days) per automation type ───────────────────────────
+# How long after a message send do we still credit a subsequent order to the
+# automation that sent it. Tuned to be conservative — short enough that a
+# coincidental purchase doesn't get attributed, long enough that legitimate
+# delayed conversions still count.
+_ATTRIBUTION_WINDOW_DAYS: Dict[str, int] = {
+    "abandoned_cart":     7,    # cart recovery has the strongest signal
+    "customer_winback":  14,    # winback is slower-burn
+    "vip_upgrade":       30,    # VIP coupons travel further
+    "predictive_reorder": 7,
+    "new_product_alert":  7,
+    "back_in_stock":      7,
+}
+
+
+def _parse_order_total(raw: Optional[str]) -> float:
+    """Best-effort parse of the freeform `Order.total` string into SAR."""
+    if raw is None:
+        return 0.0
+    try:
+        # Strip currency symbols / Arabic digits / commas before parsing.
+        cleaned = "".join(ch for ch in str(raw) if (ch.isdigit() or ch == "."))
+        return float(cleaned) if cleaned else 0.0
+    except Exception:
+        return 0.0
+
+
+@router.get("/automations/{automation_id}/metrics")
+async def get_automation_metrics(
+    automation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    days: int = 30,
+):
+    """
+    Per-automation conversion metrics.
+
+    Returns the canonical "Sent / Recovered / Revenue" trio the merchant
+    dashboard shows for each automation card. All numbers are derived from
+    real `AutomationExecution` rows joined to `Order` — no fake counters.
+
+    Definitions
+    ───────────
+      sent         : count of AutomationExecution rows with status='sent'
+                     in the rolling `days` window. This is the only count
+                     that ever increments — `_log_autopilot_event` is gone.
+
+      recovered    : distinct customers from those sent rows who placed at
+                     least one order within `_ATTRIBUTION_WINDOW_DAYS` of
+                     the send. Joined via customer.phone == orders.customer_info->>phone.
+
+      revenue_sar  : SUM of `orders.total` for all orders that count as
+                     `recovered`. Best-effort parse of the freeform
+                     `Order.total` string; coupon discounts, refunds, and
+                     cancellations are not subtracted here (the dashboard
+                     can layer that later from order status).
+
+    The `days` query parameter controls only the *send* window — the
+    attribution window per send is fixed by the automation type.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    auto = db.query(SmartAutomation).filter(
+        SmartAutomation.id == automation_id,
+        SmartAutomation.tenant_id == tenant_id,
+    ).first()
+    if not auto:
+        raise HTTPException(status_code=404, detail="Automation not found")
+
+    days = max(1, min(int(days or 30), 365))
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(days=days)
+
+    # ── Sent count (real, from executions only) ──────────────────────────
+    sent_executions = (
+        db.query(AutomationExecution)
+        .filter(
+            AutomationExecution.tenant_id   == tenant_id,
+            AutomationExecution.automation_id == auto.id,
+            AutomationExecution.status      == "sent",
+            AutomationExecution.executed_at >= window_start,
+        )
+        .all()
+    )
+    sent_count = len(sent_executions)
+
+    # ── Recovered: distinct customers who ordered within attribution window
+    # Build {customer_id: earliest_send_time} so we attribute the *first*
+    # send per customer (avoids double-counting when multiple cart_abandoned
+    # reminders fired for the same cart).
+    earliest_send_by_customer: Dict[int, datetime] = {}
+    for ex in sent_executions:
+        cid = ex.customer_id
+        if not cid:
+            continue
+        existing = earliest_send_by_customer.get(cid)
+        if existing is None or ex.executed_at < existing:
+            earliest_send_by_customer[cid] = ex.executed_at
+
+    recovered_customer_ids: set[int] = set()
+    revenue_sar = 0.0
+
+    if earliest_send_by_customer:
+        attribution_days = _ATTRIBUTION_WINDOW_DAYS.get(
+            auto.automation_type or "", 7
+        )
+
+        # Pull customers + their phones in one go.
+        customer_rows = (
+            db.query(Customer.id, Customer.phone)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                Customer.id.in_(list(earliest_send_by_customer.keys())),
+                Customer.phone.isnot(None),
+            )
+            .all()
+        )
+        phone_to_cid: Dict[str, int] = {
+            str(phone).strip(): cid for cid, phone in customer_rows if phone
+        }
+
+        if phone_to_cid:
+            # Pull every order whose customer_info.phone matches one of those
+            # customers, then filter in Python by per-customer window. We
+            # prefer this to a per-customer SQL loop because the customer
+            # set is bounded by `sent_count`.
+            phones = list(phone_to_cid.keys())
+            orders = (
+                db.query(Order)
+                .filter(
+                    Order.tenant_id == tenant_id,
+                    Order.customer_info["phone"].astext.in_(phones),
+                )
+                .all()
+            )
+            for o in orders:
+                phone = (o.customer_info or {}).get("phone")
+                if not phone:
+                    continue
+                cid = phone_to_cid.get(str(phone).strip())
+                if not cid or cid in recovered_customer_ids:
+                    continue
+                send_time = earliest_send_by_customer.get(cid)
+                if send_time is None:
+                    continue
+
+                # Order must come AFTER the send and within the attribution
+                # window. We don't have a reliable created_at on Order, so
+                # use orders.id ordering as a tiebreaker by inspecting
+                # extra_metadata.created_at when present, otherwise accept.
+                created_raw = (o.extra_metadata or {}).get("created_at")
+                order_time: Optional[datetime] = None
+                if created_raw:
+                    try:
+                        order_time = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+                    except Exception:
+                        order_time = None
+
+                if order_time is not None:
+                    send_time_aware = send_time if send_time.tzinfo else send_time.replace(tzinfo=timezone.utc)
+                    if order_time < send_time_aware:
+                        continue
+                    if (order_time - send_time_aware).days > attribution_days:
+                        continue
+
+                recovered_customer_ids.add(cid)
+                revenue_sar += _parse_order_total(o.total)
+
+    return {
+        "automation_id":    auto.id,
+        "automation_type":  auto.automation_type,
+        "trigger_event":    auto.trigger_event,
+        "window_days":      days,
+        "attribution_days": _ATTRIBUTION_WINDOW_DAYS.get(auto.automation_type or "", 7),
+        "sent":             sent_count,
+        "recovered":        len(recovered_customer_ids),
+        "revenue_sar":      round(revenue_sar, 2),
+    }
 
 
 @router.put("/automations/{automation_id}/toggle")
@@ -670,16 +600,20 @@ async def autopilot_status(request: Request, db: Session = Depends(get_db)):
     ap = _get_autopilot_settings(db, tenant_id)
     summary = _get_daily_summary(db, tenant_id)
 
-    last_event = (
-        db.query(AutomationEvent)
+    # `last_run_at` = timestamp of the most recent real send (AutomationExecution
+    # with status='sent'). Previously we read the most recent fake
+    # `autopilot_*_sent` AutomationEvent row, which could be created even when
+    # nothing was sent.
+    last_exec = (
+        db.query(AutomationExecution)
         .filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type.in_(list(AUTOPILOT_EVENT_TYPES.values())),
+            AutomationExecution.tenant_id == tenant_id,
+            AutomationExecution.status == "sent",
         )
-        .order_by(AutomationEvent.created_at.desc())
+        .order_by(AutomationExecution.executed_at.desc())
         .first()
     )
-    last_run_at = last_event.created_at.isoformat() if last_event else None
+    last_run_at = last_exec.executed_at.isoformat() if last_exec else None
 
     return {
         "settings": ap,
@@ -725,38 +659,51 @@ async def update_autopilot_settings(
 
 @router.post("/autopilot/run")
 async def run_autopilot(request: Request, db: Session = Depends(get_db)):
-    """Manually trigger all enabled autopilot jobs for this tenant."""
+    """
+    DEPRECATED — the manual "Run Now" trigger is now a no-op.
+
+    This endpoint used to call `_job_order_status_update`, `_job_predictive_reorder`,
+    `_job_abandoned_cart`, and `_job_inactive_customers` — a parallel execution
+    path that wrote fake `autopilot_*_sent` AutomationEvent rows *without* ever
+    invoking `provider_send_message`. It inflated the dashboard's "sent today"
+    counters for messages that never actually left our servers.
+
+    The real execution path is now the only path:
+
+        emit_automation_event(...) → AutomationEvent
+                                   → automation_engine.process_pending_events()
+                                   → AutomationExecution(status='sent')
+                                   → provider_send_message(...)
+
+    The engine's background loop runs every ~60 seconds, so nothing needs to
+    be manually triggered. This route is kept only for dashboard API
+    compatibility and to tell operators about the change.
+    """
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
     ap = _get_autopilot_settings(db, tenant_id)
 
     if not ap.get("enabled", False):
-        return {"ran": False, "message": "الطيار التلقائي معطّل — فعّله أولاً من الإعدادات"}
+        return {
+            "ran": False,
+            "total_actions": 0,
+            "breakdown": {},
+            "ran_at": datetime.now(timezone.utc).isoformat(),
+            "message": "الطيار التلقائي معطّل — فعّله أولاً من الإعدادات",
+        }
 
+    total = 0
     results: Dict[str, int] = {}
-
-    if ap["order_status_update"].get("enabled", True):
-        results["order_status_update"] = _job_order_status_update(db, tenant_id, ap["order_status_update"])
-
-    if ap["predictive_reorder"].get("enabled", True):
-        results["predictive_reorder"] = _job_predictive_reorder(db, tenant_id, ap["predictive_reorder"])
-
-    if ap["abandoned_cart"].get("enabled", True):
-        results["abandoned_cart"] = _job_abandoned_cart(db, tenant_id, ap["abandoned_cart"])
-
-    if ap["inactive_recovery"].get("enabled", True):
-        results["inactive_recovery"] = _job_inactive_customers(db, tenant_id, ap["inactive_recovery"])
-
-    db.commit()
-
-    total = sum(results.values())
     return {
         "ran": True,
         "total_actions": total,
         "breakdown": results,
         "ran_at": datetime.now(timezone.utc).isoformat(),
-        "message": f"الطيار التلقائي أرسل {total} رسالة في هذه الجلسة",
+        "message": (
+            "الطيار يعمل الآن تلقائيًا كل 60 ثانية عبر محرك الأتمتة الموحّد — "
+            "لم يعد زر التشغيل اليدوي ضروريًا. الأحداث المتراكمة ستُعالَج في الجولة التالية."
+        ),
     }
 
 
