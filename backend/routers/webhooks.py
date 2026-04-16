@@ -131,56 +131,69 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
 
     data = payload.get("data", {})
 
-    if event in ("app.store.authorize", "app.store.token"):
-        await _handle_salla_authorize(db, store_id, data, payload)
+    try:
+        if event in ("app.store.authorize", "app.store.token"):
+            await _handle_salla_authorize(db, store_id, data, payload)
 
-    elif event in ("order.created", "order.updated"):
-        logger.info("Salla %s | order_id=%s store=%s", event, data.get("id"), store_id)
-        tenant_id = _resolve_tenant_from_store(db, store_id)
-        if tenant_id:
-            from services.store_sync import StoreSyncService  # noqa: PLC0415
-            await StoreSyncService(db, tenant_id).handle_order_webhook(data)
-            logger.info("Salla %s processed | tenant=%s order=%s", event, tenant_id, data.get("id"))
+        elif event in ("order.created", "order.updated"):
+            logger.info("Salla %s | order_id=%s store=%s", event, data.get("id"), store_id)
+            tenant_id = _resolve_tenant_from_store(db, store_id)
+            if tenant_id:
+                from services.store_sync import StoreSyncService  # noqa: PLC0415
+                await StoreSyncService(db, tenant_id).handle_order_webhook(data)
+                logger.info("Salla %s processed | tenant=%s order=%s", event, tenant_id, data.get("id"))
 
-    elif event in ("product.created", "product.updated"):
-        logger.info("Salla %s | product_id=%s store=%s", event, data.get("id"), store_id)
-        tenant_id = _resolve_tenant_from_store(db, store_id)
-        if tenant_id:
-            from services.store_sync import StoreSyncService  # noqa: PLC0415
-            await StoreSyncService(db, tenant_id).handle_product_webhook(data)
-            logger.info("Salla %s processed | tenant=%s product=%s", event, tenant_id, data.get("id"))
+        elif event in ("product.created", "product.updated"):
+            logger.info("Salla %s | product_id=%s store=%s", event, data.get("id"), store_id)
+            tenant_id = _resolve_tenant_from_store(db, store_id)
+            if tenant_id:
+                from services.store_sync import StoreSyncService  # noqa: PLC0415
+                await StoreSyncService(db, tenant_id).handle_product_webhook(data)
+                logger.info("Salla %s processed | tenant=%s product=%s", event, tenant_id, data.get("id"))
 
-    elif event == "product.deleted":
-        logger.info("Salla product.deleted | product_id=%s store=%s", data.get("id"), store_id)
-        tenant_id = _resolve_tenant_from_store(db, store_id)
-        if tenant_id:
-            from services.store_sync import StoreSyncService  # noqa: PLC0415
-            await StoreSyncService(db, tenant_id).handle_product_deleted(str(data.get("id", "")))
+        elif event == "product.deleted":
+            logger.info("Salla product.deleted | product_id=%s store=%s", data.get("id"), store_id)
+            tenant_id = _resolve_tenant_from_store(db, store_id)
+            if tenant_id:
+                from services.store_sync import StoreSyncService  # noqa: PLC0415
+                await StoreSyncService(db, tenant_id).handle_product_deleted(str(data.get("id", "")))
 
-    elif event in ("customer.created", "customer.updated"):
-        logger.info("Salla %s | email=%s store=%s", event, data.get("email"), store_id)
-        tenant_id = _resolve_tenant_from_store(db, store_id)
-        if tenant_id:
-            from services.store_sync import StoreSyncService  # noqa: PLC0415
-            await StoreSyncService(db, tenant_id).handle_customer_webhook(data)
-            logger.info("Salla %s processed | tenant=%s", event, tenant_id)
+        elif event in ("customer.created", "customer.updated"):
+            logger.info("Salla %s | email=%s store=%s", event, data.get("email"), store_id)
+            tenant_id = _resolve_tenant_from_store(db, store_id)
+            if tenant_id:
+                from services.store_sync import StoreSyncService  # noqa: PLC0415
+                await StoreSyncService(db, tenant_id).handle_customer_webhook(data)
+                logger.info("Salla %s processed | tenant=%s", event, tenant_id)
 
-    elif event == "shipment.created":
-        logger.info("Salla shipment.created | shipment_id=%s store=%s", data.get("id"), store_id)
+        elif event == "shipment.created":
+            logger.info("Salla shipment.created | shipment_id=%s store=%s", data.get("id"), store_id)
 
-    elif event == "app.installed":
-        logger.info("Salla app.installed | store=%s", store_id)
-        await _handle_salla_authorize(db, store_id, data, payload)
+        elif event == "app.installed":
+            logger.info("Salla app.installed | store=%s", store_id)
+            await _handle_salla_authorize(db, store_id, data, payload)
 
-    elif event == "app.uninstalled":
-        logger.info("Salla app.uninstalled | store=%s", store_id)
-        _disable_salla_integration(db, str(store_id))
+        elif event == "app.uninstalled":
+            logger.info("Salla app.uninstalled | store=%s", store_id)
+            _disable_salla_integration(db, str(store_id))
 
-    else:
-        logger.info(
-            "Salla webhook unhandled event=%s store=%s | data=%s",
-            event, store_id, str(data)[:200],
+        else:
+            logger.info(
+                "Salla webhook unhandled event=%s store=%s | data=%s",
+                event, store_id, str(data)[:200],
+            )
+
+    except Exception as _evt_exc:
+        # Never return 5xx to Salla — that triggers retries and duplicate processing.
+        # Log the full error so we can diagnose from Railway logs, then return 200.
+        logger.exception(
+            "[Salla WH] ERROR handling event=%s store=%s order/product=%s — %s",
+            event, store_id, data.get("id", "?"), _evt_exc,
         )
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     return {"status": "ok", "event": event}
 

@@ -78,7 +78,7 @@ def _normalise_product(raw: Any) -> Dict:
         "description":   raw.get("description", ""),
         "price":         str(raw.get("price", raw.get("regular_price", ""))),
         "sale_price":    str(raw.get("sale_price", raw.get("promo_price", "")) or ""),
-        "status":        raw.get("status", "active"),
+        "status":        _extract_status_string(raw.get("status"), fallback="active"),
         "category":      raw.get("category", raw.get("main_category", "")),
         "brand":         raw.get("brand", ""),
         "image_url":     raw.get("image", raw.get("thumbnail", "")),
@@ -88,6 +88,38 @@ def _normalise_product(raw: Any) -> Dict:
         "variants":      raw.get("variants", []),
         "metadata":      raw.get("metadata", {}),
     }
+
+
+def _extract_status_string(status: Any, fallback: str = "unknown") -> str:
+    """
+    Salla (and some other platforms) return order/product status as either:
+      • a plain string  e.g. "under_review"
+      • a dict          e.g. {"id": 566146469, "name": "بإنتظار المراجعة",
+                               "slug": "under_review", "customized": {...}}
+
+    The DB column is VARCHAR — always return a plain string.
+    Priority: slug → name → str(fallback)
+    """
+    if isinstance(status, dict):
+        return str(status.get("slug") or status.get("name") or fallback)
+    if status is None:
+        return fallback
+    s = str(status).strip()
+    return s if s else fallback
+
+
+def _extract_amount_string(value: Any) -> str:
+    """
+    Salla sometimes sends monetary fields as:
+      • a plain number/string  → return as-is
+      • a dict {"amount": 100, "currency": "SAR"} → extract amount
+
+    Always returns a string safe for the VARCHAR `total` column.
+    """
+    if isinstance(value, dict):
+        amount = value.get("amount") or value.get("value") or ""
+        return str(amount)
+    return str(value) if value is not None else ""
 
 
 def _normalise_order(raw: Any) -> Dict:
@@ -110,10 +142,11 @@ def _normalise_order(raw: Any) -> Dict:
             customer_info["mobile"] = normalized_phone
             customer_info["phone"] = normalized_phone
     order_dt = _extract_order_datetime(raw)
+    raw_total = raw.get("total") or raw.get("sub_total") or raw.get("amounts", {})
     return {
         "external_id":   str(raw.get("id", raw.get("external_id", ""))),
-        "status":        raw.get("status", "unknown"),
-        "total":         str(raw.get("total", raw.get("sub_total", ""))),
+        "status":        _extract_status_string(raw.get("status"), fallback="unknown"),
+        "total":         _extract_amount_string(raw_total),
         "customer_info": customer_info,
         "line_items":    raw.get("items", raw.get("line_items", [])),
         "checkout_url":  raw.get("checkout_url", ""),
