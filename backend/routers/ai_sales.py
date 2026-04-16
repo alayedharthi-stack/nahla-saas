@@ -791,18 +791,26 @@ async def ai_sales_create_order(
         if order_status == "payment_pending":
             payment_link = await store_payment_link(tenant_id, str(tenant_id), 0.0)
 
-    customer = db.query(Customer).filter(
-        Customer.phone == body.customer_phone,
-        Customer.tenant_id == tenant_id,
-    ).first()
-    if not customer:
-        customer = Customer(
-            tenant_id=tenant_id,
-            phone=body.customer_phone,
-            name=body.customer_name or body.customer_phone,
+    # ── Unified customer resolution: route every create/update through the
+    # canonical upsert_customer_identity so we dedupe on normalised phone and
+    # external_id. This prevents the old raw-phone-match path from inserting
+    # duplicate rows when the same shopper orders via store sync vs AI sales.
+    from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
+
+    _intel = CustomerIntelligenceService(db, tenant_id)
+    customer = _intel.upsert_customer_identity(
+        phone=body.customer_phone,
+        name=body.customer_name or body.customer_phone,
+        source="ai_sales",
+        extra_metadata={"source": "ai_sales"},
+        seen_at=datetime.now(timezone.utc),
+    )
+    if customer is None:
+        raise HTTPException(
+            status_code=400,
+            detail="customer_phone or customer_name is required to create an order.",
         )
-        db.add(customer)
-        db.flush()
+    db.flush()
 
     product_display = body.product_name
     if not product_display and body.product_id:
@@ -883,6 +891,26 @@ async def ai_sales_create_order(
         reference_id=str(order.id),
     )
     db.commit()
+
+    # Recompute the customer's profile so their segment reflects this new
+    # order immediately. Previously the AI-sales path skipped this, causing
+    # "classification in Nahla doesn't match the store" — the classifier only
+    # saw store-sync orders, never AI-sales-created orders.
+    try:
+        _intel.recompute_profile_for_customer(
+            customer.id,
+            reason="ai_sales_order_created",
+            commit=True,
+            emit_event=True,
+        )
+    except Exception as exc:
+        # The order is already durably committed — recompute failure does
+        # not roll back the customer-visible transaction. But we surface the
+        # error loudly (not logger.debug) so ops sees it.
+        logger.exception(
+            "[AI Sales] profile recompute failed tenant=%s customer=%s order=%s: %s",
+            tenant_id, customer.id, order.id, exc,
+        )
 
     return {
         "order_id":     order.id,

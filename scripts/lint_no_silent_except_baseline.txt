@@ -1,0 +1,46 @@
+# Auto-generated baseline for scripts/lint_no_silent_except.py
+# Each line is `<relative_path>::<message>`. Duplicates are allowed —
+# one line per pre-existing violation. The linter fails CI only if the
+# number of violations in a file grows beyond this count.
+# To regenerate: python scripts/lint_no_silent_except.py --update-baseline
+backend/core/conversation_engine.py::silent pass on broad except
+backend/core/conversation_engine.py::silent pass on broad except
+backend/core/conversation_engine.py::silent pass on broad except
+backend/core/tenant_integrity.py::silent pass on broad except
+backend/core/webhook_dispatcher.py::silent pass on broad except
+backend/core/webhook_dispatcher.py::silent pass on broad except
+backend/core/webhook_dispatcher.py::silent pass on broad except
+backend/core/webhook_events.py::silent pass on broad except
+backend/core/webhook_events.py::silent return on broad except
+backend/core/webhook_guardian.py::silent pass on broad except
+backend/core/webhook_guardian.py::silent pass on broad except
+backend/core/webhook_guardian.py::silent pass on broad except
+backend/core/webhook_guardian.py::silent pass on broad except
+backend/routers/ai_sales.py::silent pass on broad except
+backend/routers/handoff.py::silent pass on broad except
+backend/routers/intelligence.py::silent pass on broad except
+backend/routers/salla_oauth.py::silent pass on broad except
+backend/routers/salla_oauth.py::silent pass on broad except
+backend/routers/salla_oauth.py::silent pass on broad except
+backend/routers/salla_oauth.py::silent pass on broad except
+backend/routers/templates.py::silent return on broad except
+backend/routers/webhooks.py::logger.debug-only on broad except (use logger.exception)
+backend/routers/webhooks.py::silent pass on broad except
+backend/routers/whatsapp_embedded.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::logger.debug-only on broad except (use logger.exception)
+backend/routers/whatsapp_webhook.py::logger.debug-only on broad except (use logger.exception)
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/services/store_sync.py::silent pass on broad except
+backend/store_adapters/salla_adapter.py::silent pass on broad except
+scripts/cleanup_salla_duplicates.py::silent pass on broad except
+scripts/verify_salla_no_duplicates.py::silent pass on broad except

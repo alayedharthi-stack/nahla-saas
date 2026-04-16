@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+          pip install pytest
+
+      # Guardrail from ADR 0001: no new silent except Exception swallowers.
+      # The baseline captures the 42 pre-existing offenders at the time of
+      # the durable-webhook-queue rollout. CI fails if a new commit adds
+      # another silent swallow without a `# noqa: silent-ok` justification.
+      - name: Lint — no new silent excepts
+        run: python scripts/lint_no_silent_except.py
+
+      - name: Run unit tests
+        run: python -m pytest -q --maxfail=1

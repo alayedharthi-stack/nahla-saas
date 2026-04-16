@@ -204,6 +204,22 @@ class SallaAdapter(BaseStoreAdapter):
             resp.raise_for_status()
             return resp.json()
 
+    async def _delete(self, path: str) -> bool:
+        """DELETE helper. Returns True on 2xx, False otherwise (never raises)."""
+        url = f"{SALLA_API_BASE}{path}"
+        try:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                resp = await client.delete(url, headers=self._headers())
+                if resp.status_code == 401 and await self._refresh_access_token():
+                    resp = await client.delete(url, headers=self._headers())
+                logger.info(
+                    "[Salla API] DELETE %s → %d | tenant=%s", path, resp.status_code, self._tenant_id,
+                )
+                return 200 <= resp.status_code < 300 or resp.status_code == 404
+        except Exception as exc:
+            self._log_error("_delete", exc)
+            return False
+
     def _log_error(self, method: str, exc: Exception) -> None:
         logger.error(f"SallaAdapter.{method} failed: {exc}", exc_info=True)
 
@@ -608,6 +624,31 @@ class SallaAdapter(BaseStoreAdapter):
         except Exception as exc:
             self._log_error("create_coupon", exc)
             return None
+
+    async def delete_coupon_by_code(self, code: str) -> bool:
+        """
+        Delete a Salla coupon by its code. Used for compensation when we
+        created a coupon in Salla but the local DB insert then failed — we
+        must remove the orphan to keep the two sides in sync.
+
+        Returns True if Salla confirms deletion (or the coupon is already
+        gone), False on any other failure. Never raises.
+        """
+        if not code:
+            return False
+        try:
+            data = await self._get("/coupons", {"code": code, "per_page": 1})
+            rows = data.get("data") or [] if isinstance(data, dict) else []
+            if not rows:
+                return True
+            target = rows[0]
+            coupon_id = target.get("id") if isinstance(target, dict) else None
+            if not coupon_id:
+                return False
+            return await self._delete(f"/coupons/{coupon_id}")
+        except Exception as exc:
+            self._log_error("delete_coupon_by_code", exc)
+            return False
 
     async def get_active_offers(self) -> List[NormalizedOffer]:
         try:

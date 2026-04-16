@@ -2300,3 +2300,120 @@ async def admin_guardian_log(
             for e in entries
         ]
     }
+
+
+# ── Webhook events (durable queue) ─────────────────────────────────────────────
+# Inspect and replay rows in the webhook_events table. This is the admin-facing
+# DLQ tool: every inbound Salla/WhatsApp/Moyasar webhook that failed business
+# processing lands in status='dead_letter' after exhausting retries and shows
+# up here for manual review.
+
+
+def _webhook_event_row(ev) -> Dict[str, Any]:
+    return {
+        "id": ev.id,
+        "tenant_id": ev.tenant_id,
+        "provider": ev.provider,
+        "event_type": ev.event_type,
+        "external_event_id": ev.external_event_id,
+        "store_id": ev.store_id,
+        "signature_valid": ev.signature_valid,
+        "status": ev.status,
+        "attempts": ev.attempts,
+        "last_error": ev.last_error,
+        "last_error_at": ev.last_error_at.isoformat() if ev.last_error_at else None,
+        "next_retry_at": ev.next_retry_at.isoformat() if ev.next_retry_at else None,
+        "received_at": ev.received_at.isoformat() if ev.received_at else None,
+        "processed_at": ev.processed_at.isoformat() if ev.processed_at else None,
+    }
+
+
+@router.get("/admin/webhook-events")
+async def admin_list_webhook_events(
+    status: Optional[str] = Query(None),
+    provider: Optional[str] = Query(None),
+    tenant_id: Optional[int] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    List recent webhook_events (newest first), filterable by status/provider/tenant.
+
+    Statuses: received | processing | processed | failed | dead_letter
+    """
+    from database.models import WebhookEvent  # noqa: PLC0415
+    from core.webhook_events import count_by_status  # noqa: PLC0415
+
+    q = db.query(WebhookEvent)
+    if status:
+        q = q.filter(WebhookEvent.status == status)
+    if provider:
+        q = q.filter(WebhookEvent.provider == provider)
+    if tenant_id is not None:
+        q = q.filter(WebhookEvent.tenant_id == tenant_id)
+
+    rows = q.order_by(WebhookEvent.received_at.desc()).limit(limit).all()
+
+    return {
+        "summary": count_by_status(db, provider=provider),
+        "events": [_webhook_event_row(e) for e in rows],
+    }
+
+
+@router.get("/admin/webhook-events/{event_id}")
+async def admin_get_webhook_event(
+    event_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Return a single webhook_event with full payload + headers for debugging."""
+    from database.models import WebhookEvent  # noqa: PLC0415
+
+    ev = db.query(WebhookEvent).filter(WebhookEvent.id == event_id).first()
+    if ev is None:
+        raise HTTPException(status_code=404, detail="webhook_event not found")
+
+    row = _webhook_event_row(ev)
+    row["raw_headers"] = ev.raw_headers
+    row["raw_body"] = ev.raw_body
+    row["parsed_payload"] = ev.parsed_payload
+    return row
+
+
+@router.post("/admin/webhook-events/{event_id}/replay")
+async def admin_replay_webhook_event(
+    event_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Reset a webhook_event back to status='received' so the dispatcher picks it
+    up on the next tick. Safe for failed and dead_letter rows. Refuses to touch
+    rows currently in 'processing' (would race a live worker).
+    """
+    from core.webhook_events import replay  # noqa: PLC0415
+
+    ev = replay(db, event_id)
+    if ev is None:
+        raise HTTPException(status_code=404, detail="webhook_event not found")
+    return {"ok": True, "event": _webhook_event_row(ev)}
+
+
+class WebhookReplayBulkIn(BaseModel):
+    status: str = "dead_letter"
+    provider: Optional[str] = None
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
+@router.post("/admin/webhook-events/replay-bulk")
+async def admin_replay_webhook_events_bulk(
+    body: WebhookReplayBulkIn,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Reset ALL events matching filters back to 'received'. Use for DLQ flushes."""
+    from core.webhook_events import replay_bulk  # noqa: PLC0415
+
+    n = replay_bulk(db, status=body.status, provider=body.provider, limit=body.limit)
+    return {"ok": True, "replayed": n, "status_from": body.status, "provider": body.provider}

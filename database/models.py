@@ -1196,3 +1196,50 @@ class WebhookGuardianLog(Base):
     created_at      = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     tenant = relationship('Tenant')
+
+
+class WebhookEvent(Base):
+    """
+    Durable inbound-webhook queue.
+
+    Every external webhook (Salla, Zid, WhatsApp, Moyasar, ...) is FIRST
+    persisted to this table — before any business processing — so that:
+
+      • a 200 OK from the receiver means the event is durably stored.
+      • async processing can retry on failure with exponential backoff.
+      • any failure eventually lands in status='dead_letter' visible to admins.
+      • the raw body + headers are preserved for offline debugging / replay.
+
+    Finite state machine for `status`:
+        received   → dispatcher has not yet claimed this row
+        processing → dispatcher has claimed it (heartbeat via updated_at)
+        processed  → business logic completed successfully
+        failed     → transient error; will retry at next_retry_at
+        dead_letter→ exhausted retries; requires manual replay by admin
+    """
+    __tablename__ = 'webhook_events'
+
+    id                 = Column(Integer, primary_key=True)
+    tenant_id          = Column(Integer, nullable=True, index=True)
+    provider           = Column(String, nullable=False, index=True)
+    event_type         = Column(String, nullable=True, index=True)
+    external_event_id  = Column(String, nullable=True)
+    store_id           = Column(String, nullable=True)
+    raw_headers        = Column(JSONB, nullable=True)
+    raw_body           = Column(Text, nullable=True)
+    parsed_payload     = Column(JSONB, nullable=True)
+    signature_valid    = Column(Boolean, nullable=True)
+    status             = Column(String, nullable=False, default='received', index=True)
+    attempts           = Column(Integer, nullable=False, default=0)
+    last_error         = Column(Text, nullable=True)
+    last_error_at      = Column(DateTime(timezone=True), nullable=True)
+    next_retry_at      = Column(DateTime(timezone=True), nullable=True)
+    received_at        = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    processed_at       = Column(DateTime(timezone=True), nullable=True)
+    created_at         = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at         = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )

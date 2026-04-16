@@ -40,6 +40,12 @@ from core.config import (
     SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE,
 )
 from core.database import get_db
+from core.obs import EVENTS, log_event
+from core.webhook_events import (
+    STATUS_FAILED,
+    STATUS_RECEIVED,
+    persist_event,
+)
 
 logger = logging.getLogger("nahla-backend")
 
@@ -90,112 +96,129 @@ def _verify_salla_signature(raw_body: bytes, request_headers) -> tuple[bool, str
 @router.post("/webhook/salla")
 async def salla_webhook(request: Request, db: Session = Depends(get_db)):
     """
-    Receive event notifications from Salla.
-    Verifies HMAC-SHA256 signature when SALLA_WEBHOOK_SECRET is set.
+    Durable receiver for Salla webhooks.
+
+    Responsibilities (in order):
+      1. Read raw body + verify HMAC signature.
+      2. Parse JSON (failures are still persisted with status='failed').
+      3. Persist the raw event to `webhook_events` and COMMIT.
+      4. Return 200 OK immediately — a 200 from this endpoint ONLY means
+         "event received and durably stored", NOT "business logic ran".
+
+    All business processing (order upsert, customer recompute, coupon
+    triggers, OAuth token saves, uninstall handling) is performed
+    asynchronously by `core.webhook_dispatcher` claiming rows from
+    `webhook_events`.
+
+    Failures in the dispatcher retry with exponential backoff and land in
+    `status='dead_letter'` for admin replay — nothing is silently lost.
     """
     raw_body  = await request.body()
     client_ip = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
 
-    logger.info(
-        "[Salla WH] ══════ HIT ══════ method=%s ip=%s content-type=%s user-agent=%s body_len=%d",
-        request.method, client_ip,
-        request.headers.get("content-type", ""),
-        request.headers.get("user-agent", "")[:80],
-        len(raw_body),
+    log_event(
+        EVENTS.WEBHOOK_RECEIVED,
+        provider="salla",
+        ip=client_ip,
+        body_len=len(raw_body),
+        content_type=request.headers.get("content-type", ""),
+        user_agent=(request.headers.get("user-agent", "") or "")[:80],
     )
 
+    # ── 1. Signature verification ────────────────────────────────────────────
     sig_accepted, sig_reason = _verify_salla_signature(raw_body, request.headers)
-    logger.info("[Salla WH] %s (enforce=%s)", sig_reason, SALLA_WEBHOOK_ENFORCE_SIGNATURE)
+    signature_valid = sig_accepted
+
     if not sig_accepted:
-        logger.warning("[Salla WH] REJECTED — %s | ip=%s", sig_reason, client_ip)
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
-    try:
-        payload = await request.json()
-    except Exception:
-        logger.warning("[Salla WH] body is not valid JSON — raw[:200]=%s", raw_body[:200])
-        payload = {}
-
-    event      = payload.get("event", "unknown")
-    store_id   = payload.get("merchant", payload.get("store_id", "unknown"))
-    created_at = payload.get("created_at", "")
-
-    logger.info(
-        "[Salla WH] event=%s store_id=%s created_at=%s ip=%s data_keys=%s",
-        event, store_id, created_at, client_ip,
-        list(payload.get("data", {}).keys())[:10] if isinstance(payload.get("data"), dict) else "N/A",
-    )
-    audit("salla_webhook", salla_event=event, store_id=store_id, ip=client_ip)
-
-    data = payload.get("data", {})
-
-    try:
-        if event in ("app.store.authorize", "app.store.token"):
-            await _handle_salla_authorize(db, store_id, data, payload)
-
-        elif event in ("order.created", "order.updated"):
-            logger.info("Salla %s | order_id=%s store=%s", event, data.get("id"), store_id)
-            tenant_id = _resolve_tenant_from_store(db, store_id)
-            if tenant_id:
-                from services.store_sync import StoreSyncService  # noqa: PLC0415
-                await StoreSyncService(db, tenant_id).handle_order_webhook(data)
-                logger.info("Salla %s processed | tenant=%s order=%s", event, tenant_id, data.get("id"))
-
-        elif event in ("product.created", "product.updated"):
-            logger.info("Salla %s | product_id=%s store=%s", event, data.get("id"), store_id)
-            tenant_id = _resolve_tenant_from_store(db, store_id)
-            if tenant_id:
-                from services.store_sync import StoreSyncService  # noqa: PLC0415
-                await StoreSyncService(db, tenant_id).handle_product_webhook(data)
-                logger.info("Salla %s processed | tenant=%s product=%s", event, tenant_id, data.get("id"))
-
-        elif event == "product.deleted":
-            logger.info("Salla product.deleted | product_id=%s store=%s", data.get("id"), store_id)
-            tenant_id = _resolve_tenant_from_store(db, store_id)
-            if tenant_id:
-                from services.store_sync import StoreSyncService  # noqa: PLC0415
-                await StoreSyncService(db, tenant_id).handle_product_deleted(str(data.get("id", "")))
-
-        elif event in ("customer.created", "customer.updated"):
-            logger.info("Salla %s | email=%s store=%s", event, data.get("email"), store_id)
-            tenant_id = _resolve_tenant_from_store(db, store_id)
-            if tenant_id:
-                from services.store_sync import StoreSyncService  # noqa: PLC0415
-                await StoreSyncService(db, tenant_id).handle_customer_webhook(data)
-                logger.info("Salla %s processed | tenant=%s", event, tenant_id)
-
-        elif event == "shipment.created":
-            logger.info("Salla shipment.created | shipment_id=%s store=%s", data.get("id"), store_id)
-
-        elif event == "app.installed":
-            logger.info("Salla app.installed | store=%s", store_id)
-            await _handle_salla_authorize(db, store_id, data, payload)
-
-        elif event == "app.uninstalled":
-            logger.info("Salla app.uninstalled | store=%s", store_id)
-            _disable_salla_integration(db, str(store_id))
-
-        else:
-            logger.info(
-                "Salla webhook unhandled event=%s store=%s | data=%s",
-                event, store_id, str(data)[:200],
-            )
-
-    except Exception as _evt_exc:
-        # Never return 5xx to Salla — that triggers retries and duplicate processing.
-        # Log the full error so we can diagnose from Railway logs, then return 200.
-        logger.exception(
-            "[Salla WH] ERROR handling event=%s store=%s order/product=%s — %s",
-            event, store_id, data.get("id", "?"), _evt_exc,
+        # Persist the rejected event for audit, then reject so the caller
+        # knows we won't process it. This is the only HTTP error we return.
+        log_event(
+            EVENTS.WEBHOOK_SIGNATURE_INVALID,
+            provider="salla",
+            reason=sig_reason,
+            ip=client_ip,
         )
         try:
-            db.rollback()
-        except Exception:
-            pass
+            persist_event(
+                db,
+                provider="salla",
+                raw_body=raw_body,
+                headers=request.headers,
+                signature_valid=False,
+                initial_status=STATUS_FAILED,
+                initial_error=f"signature_invalid: {sig_reason}",
+            )
+        except Exception as _exc:
+            logger.exception("[Salla WH] Could not persist rejected event: %s", _exc)
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
-    return {"status": "ok", "event": event}
+    # ── 2. JSON parsing (tolerant) ───────────────────────────────────────────
+    parsed_payload: dict | None = None
+    parse_error: str | None = None
+    try:
+        parsed_payload = await request.json()
+        if not isinstance(parsed_payload, dict):
+            parse_error = f"payload_not_object: {type(parsed_payload).__name__}"
+            parsed_payload = None
+    except Exception as exc:
+        parse_error = f"invalid_json: {exc}"
+        log_event(
+            EVENTS.WEBHOOK_INVALID_JSON,
+            provider="salla",
+            ip=client_ip,
+            err=exc,
+            raw_preview=raw_body[:200].decode("utf-8", errors="replace") if raw_body else "",
+        )
+
+    # ── 3. Extract event metadata for indexing ───────────────────────────────
+    event_type: str | None = None
+    store_id: str | None = None
+    external_event_id: str | None = None
+    if parsed_payload is not None:
+        event_type = parsed_payload.get("event") or None
+        store_id = str(parsed_payload.get("merchant") or parsed_payload.get("store_id") or "") or None
+        data = parsed_payload.get("data") or {}
+        if isinstance(data, dict):
+            # Salla uses `id` inside `data` for orders/products/customers.
+            # Combine with event_type to form a synthetic external_event_id
+            # that's deterministic for this event so retries idempotent.
+            entity_id = data.get("id")
+            if entity_id is not None and event_type:
+                external_event_id = f"salla:{event_type}:{entity_id}"
+
+    audit("salla_webhook", salla_event=event_type or "unknown", store_id=store_id or "unknown", ip=client_ip)
+
+    # ── 4. Persist durably (the ONLY business effect of this handler) ────────
+    initial_status = STATUS_RECEIVED if parsed_payload is not None else STATUS_FAILED
+    initial_error = parse_error
+
+    try:
+        ev = persist_event(
+            db,
+            provider="salla",
+            raw_body=raw_body,
+            headers=request.headers,
+            parsed_payload=parsed_payload,
+            event_type=event_type,
+            external_event_id=external_event_id,
+            store_id=store_id,
+            signature_valid=signature_valid,
+            initial_status=initial_status,
+            initial_error=initial_error,
+        )
+    except Exception as exc:
+        # Could not even persist — this is a real outage. Return 500 so
+        # Salla will retry; returning 200 here would silently lose the event.
+        logger.exception("[Salla WH] FATAL: could not persist webhook event: %s", exc)
+        raise HTTPException(status_code=500, detail="webhook persistence failure")
+
+    return {
+        "status": "received",
+        "webhook_event_id": ev.id,
+        "event": event_type or "unknown",
+    }
 
 
 def _resolve_tenant_from_store(db, store_id) -> int | None:

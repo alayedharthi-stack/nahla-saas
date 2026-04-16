@@ -451,6 +451,17 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("Coupon generator scheduler could not start: %s", exc)
 
+    # 5b. Webhook event dispatcher — drains webhook_events table with FSM + DLQ.
+    # This is the SINGLE async worker that owns all business processing for
+    # inbound webhooks. Receivers (e.g. /webhook/salla) only persist; the
+    # dispatcher does the real work and advances the FSM.
+    try:
+        from core.webhook_dispatcher import run_dispatcher_loop  # noqa: PLC0415
+        asyncio.create_task(run_dispatcher_loop())
+        logger.info("Webhook dispatcher started.")
+    except Exception as exc:
+        logger.warning("Webhook dispatcher could not start: %s", exc)
+
     # 6. WhatsApp token auto-refresh (every 12h)
     try:
         from core.scheduler import run_wa_token_refresh_scheduler  # noqa: PLC0415

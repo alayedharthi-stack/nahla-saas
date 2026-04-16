@@ -1,6 +1,19 @@
 """
 Salla webhook handlers.
 
+DEPRECATED (ADR 0001, 2026-04-16)
+─────────────────────────────────
+This module is superseded by the durable webhook queue
+(`backend/core/webhook_events.py`) and the async dispatcher
+(`backend/core/webhook_dispatcher.py`). All live Salla traffic now lands in
+the `webhook_events` table at `POST /webhook/salla` and is processed by
+`_dispatch_salla(...)` in the dispatcher, which delegates to
+`services/store_sync.StoreSyncService`.
+
+Do NOT extend this file. It is retained only until the transition has
+baked in production for at least one release. New Salla handling logic
+belongs in `StoreSyncService` or the dispatcher, not here.
+
 All HMAC verification and tenant resolution are delegated to the shared
 layer.  This module focuses only on mapping Salla event payloads to the
 Nahla data models.
@@ -8,7 +21,14 @@ Nahla data models.
 
 import sys
 import os
+import warnings
 from typing import Any, Dict
+
+warnings.warn(
+    "integrations.salla.webhooks.handlers is deprecated; see docs/adr/0001-durable-webhook-queue-and-nh-coupons.md",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 if _REPO_ROOT not in sys.path:

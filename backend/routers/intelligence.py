@@ -253,8 +253,28 @@ async def analyze_customers(request: Request, db: Session = Depends(get_db)):
             commit=True,
             emit_event=True,
         )
-    except Exception:
-        rebuilt = 0
+    except Exception as exc:
+        # Fail loudly — this endpoint used to silently catch-and-return 0, which
+        # hid classification bugs. Surface the real error so ops can diagnose.
+        import logging as _logging  # noqa: PLC0415
+        _logging.getLogger("nahla-backend").exception(
+            "[Intelligence] rebuild_profiles_for_tenant failed tenant=%s: %s",
+            tenant_id, exc,
+        )
+        try:
+            from core.obs import EVENTS, log_event  # noqa: PLC0415
+            log_event(
+                EVENTS.CUSTOMER_CLASSIFICATION_ERROR,
+                tenant_id=tenant_id,
+                reason="manual_analyze_customers",
+                err=exc,
+            )
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Customer analysis failed: {type(exc).__name__}: {exc}",
+        )
     return {
         "analyzed": rebuilt,
         "profiles_rebuilt": rebuilt,

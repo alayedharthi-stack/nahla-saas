@@ -42,6 +42,18 @@ class CloseIn(BaseModel):
 
 
 def _get_or_create_customer(db: Session, tenant_id: int, customer_phone: str, customer_name: str = "") -> Customer:
+    """
+    Create or retrieve a customer via the single unified identity path.
+
+    Historical note: this function used to fall back to a raw ``Customer(...)``
+    insert when ``upsert_customer_identity`` returned ``None``. That was the
+    source of duplicate-customer rows (un-normalised phone matching against
+    normalised rows). Removed 2026-04-16. If ``upsert_customer_identity``
+    cannot produce a customer from the given inputs, we raise instead of
+    silently corrupting the data set.
+    """
+    from core.obs import EVENTS, log_event  # noqa: PLC0415
+
     service = CustomerIntelligenceService(db, tenant_id)
     normalized_phone = normalize_phone(customer_phone) or customer_phone
     customer = service.upsert_customer_identity(
@@ -52,13 +64,18 @@ def _get_or_create_customer(db: Session, tenant_id: int, customer_phone: str, cu
         seen_at=datetime.now(timezone.utc),
     )
     if customer is None:
-        customer = Customer(
+        log_event(
+            EVENTS.CUSTOMER_UPSERT_FAILED,
             tenant_id=tenant_id,
-            phone=normalized_phone,
-            name=customer_name or normalized_phone,
+            source="whatsapp_inbound",
+            phone_raw=customer_phone,
+            phone_normalized=normalized_phone,
+            name=customer_name,
         )
-        db.add(customer)
-        db.flush()
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot resolve customer: phone, name, email or external_id is required.",
+        )
     return customer
 
 

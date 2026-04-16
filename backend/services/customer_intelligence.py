@@ -779,8 +779,22 @@ class CustomerIntelligenceService:
         )
         self.db.add(profile)
 
-        # Emit customer_status_changed when the status actually transitions
-        if old_status and old_status != status:
+        # Emit customer_status_changed when the status actually transitions.
+        # Also fire the event-driven coupon autogen for the new segment so the
+        # merchant's coupon pool reflects the classification change in real
+        # time (previously this only happened via the 6-hour scheduler).
+        status_changed = bool(old_status and old_status != status)
+        if status_changed:
+            from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
+            _log_event(
+                _EVENTS.CUSTOMER_CLASSIFICATION_CHANGED,
+                tenant_id=self.tenant_id,
+                customer_id=customer.id,
+                old_status=old_status,
+                new_status=status,
+                rfm_segment=rfm_segment,
+                reason=reason,
+            )
             try:
                 from core.automation_engine import emit_automation_event  # noqa: PLC0415
                 emit_automation_event(
@@ -795,8 +809,13 @@ class CustomerIntelligenceService:
                         "reason": reason,
                     },
                 )
-            except Exception as _ae:
-                logger.debug("[Intelligence] emit customer_status_changed failed: %s", _ae)
+            except Exception as exc:
+                # Errors in automation emission used to be silently debug-logged,
+                # hiding real outages. Now surfaced as ERROR with full stack.
+                logger.exception(
+                    "[Intelligence] emit customer_status_changed failed tenant=%s customer=%s: %s",
+                    self.tenant_id, customer.id, exc,
+                )
 
         if emit_event:
             log_event(
@@ -820,6 +839,46 @@ class CustomerIntelligenceService:
             self.db.commit()
         else:
             self.db.flush()
+
+        # Event-driven coupon autogen: if the classification just changed
+        # into a segment we auto-reward (new/active/vip/at_risk), schedule a
+        # coupon for this customer. Done AFTER commit so a coupon failure
+        # never rolls back the profile update. Wrapped in its own try/except
+        # so the coupon pipeline never takes down the classification pipeline.
+        if status_changed and commit:
+            try:
+                import asyncio as _asyncio  # noqa: PLC0415
+                from services.coupon_generator import (  # noqa: PLC0415
+                    CouponGeneratorService,
+                    EVENT_DRIVEN_SEGMENTS,
+                )
+                if status in EVENT_DRIVEN_SEGMENTS:
+                    svc = CouponGeneratorService(self.db, self.tenant_id)
+
+                    async def _run():
+                        await svc.generate_for_customer(
+                            customer.id, status, reason=f"status_change:{reason}"
+                        )
+
+                    try:
+                        loop = _asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+                    if loop is not None:
+                        # Fire-and-forget inside an async context (the common
+                        # case — we are called from the dispatcher / FastAPI
+                        # handler). The coupon generator does its own error
+                        # logging; we do not await so the caller is not blocked.
+                        loop.create_task(_run())
+                    else:
+                        # Synchronous call site (scripts/tests). Run to completion.
+                        _asyncio.run(_run())
+            except Exception as exc:
+                logger.exception(
+                    "[Intelligence] event-driven coupon trigger failed tenant=%s customer=%s: %s",
+                    self.tenant_id, customer.id, exc,
+                )
+
         return profile
 
     def rebuild_profiles_for_tenant(

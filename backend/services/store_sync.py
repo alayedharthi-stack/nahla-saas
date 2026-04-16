@@ -172,32 +172,13 @@ def _normalise_coupon(raw: Any) -> Dict:
     }
 
 
-def _compute_segment(total_orders: int, total_spend: float, days_inactive: int):
-    """Classify a customer into a segment and compute churn risk."""
-    if days_inactive <= 14:
-        churn_risk = max(0.02, days_inactive * 0.005)
-    elif days_inactive <= 30:
-        churn_risk = 0.10 + (days_inactive - 14) * 0.008
-    elif days_inactive <= 60:
-        churn_risk = 0.23 + (days_inactive - 30) * 0.01
-    elif days_inactive <= 90:
-        churn_risk = 0.53 + (days_inactive - 60) * 0.008
-    else:
-        churn_risk = 0.77 + min((days_inactive - 90) * 0.002, 0.23)
-    churn_risk = round(min(churn_risk, 1.0), 3)
-
-    if days_inactive > 90:
-        segment = "churned"
-    elif days_inactive > 60:
-        segment = "at_risk"
-    elif total_orders <= 1:
-        segment = "new"
-    elif (total_spend >= 2000 and total_orders >= 5) or total_spend >= 3000:
-        segment = "vip"
-    else:
-        segment = "active"
-
-    return segment, churn_risk
+# NOTE: The segment classifier used to live here as ``_compute_segment`` with
+# a different label set (``churned|new|vip|active``) than the authoritative
+# one in ``services/customer_intelligence.compute_customer_status`` (``lead|
+# new|active|vip|at_risk|inactive``). It was never called from anywhere but
+# caused confusion during refactors, so it was deleted as part of the
+# 2026-04-16 root-cause fix. Use ``CustomerIntelligenceService`` for ALL
+# classification decisions.
 
 
 # ── Sync service ──────────────────────────────────────────────────────────────
@@ -787,29 +768,49 @@ class StoreSyncService:
     # ── Incremental order update (called by webhook) ────────────────────────
 
     async def handle_order_webhook(self, payload: Dict) -> None:
-        """Process a single order create/update from a platform webhook."""
+        """
+        Process a single order create/update from a platform webhook.
+
+        Idempotent by ``(tenant_id, external_id)`` — the DB enforces this via
+        the partial unique index ``uq_orders_tenant_external_id`` added in
+        migration 0023. Concurrent webhooks can no longer double-insert.
+        """
+        from core.obs import EVENTS, log_event  # noqa: PLC0415
+        from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+
         normalised = _normalise_order(payload)
         ext_id     = normalised["external_id"]
         if not ext_id:
+            log_event(
+                EVENTS.ORDER_UPSERT_ERROR,
+                tenant_id=self.tenant_id,
+                reason="missing_external_id",
+            )
             return
 
-        existing = (
+        is_new = False
+        order_row = (
             self.db.query(Order)
             .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
             .first()
         )
-        if existing:
-            existing.status        = normalised["status"]
-            existing.total         = normalised["total"]
-            existing.customer_info = normalised["customer_info"]
-            existing.line_items    = normalised["line_items"]
-            existing.is_abandoned  = normalised["is_abandoned"]
-            existing.extra_metadata = {
-                **(existing.extra_metadata or {}),
+        if order_row is not None:
+            order_row.status        = normalised["status"]
+            order_row.total         = normalised["total"]
+            order_row.customer_info = normalised["customer_info"]
+            order_row.line_items    = normalised["line_items"]
+            order_row.is_abandoned  = normalised["is_abandoned"]
+            order_row.extra_metadata = {
+                **(order_row.extra_metadata or {}),
                 "created_at": normalised.get("created_at"),
             }
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
         else:
-            self.db.add(Order(
+            order_row = Order(
                 tenant_id     = self.tenant_id,
                 external_id   = ext_id,
                 status        = normalised["status"],
@@ -819,8 +820,46 @@ class StoreSyncService:
                 checkout_url  = normalised["checkout_url"],
                 is_abandoned  = normalised["is_abandoned"],
                 extra_metadata = {"created_at": normalised.get("created_at")},
-            ))
-        self.db.commit()
+            )
+            self.db.add(order_row)
+            try:
+                self.db.commit()
+                is_new = True
+            except IntegrityError:
+                # Concurrent writer beat us to it — fall back to UPDATE path.
+                self.db.rollback()
+                log_event(
+                    EVENTS.ORDER_UPSERT_CONFLICT,
+                    tenant_id=self.tenant_id,
+                    external_id=ext_id,
+                )
+                order_row = (
+                    self.db.query(Order)
+                    .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+                    .first()
+                )
+                if order_row is None:
+                    # Should be impossible, but fail loudly rather than silently.
+                    raise
+                order_row.status        = normalised["status"]
+                order_row.total         = normalised["total"]
+                order_row.customer_info = normalised["customer_info"]
+                order_row.line_items    = normalised["line_items"]
+                order_row.is_abandoned  = normalised["is_abandoned"]
+                try:
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
+
+        log_event(
+            EVENTS.ORDER_UPSERT_SUCCESS,
+            tenant_id=self.tenant_id,
+            external_id=ext_id,
+            order_id=order_row.id,
+            is_new=is_new,
+            status=normalised["status"],
+        )
 
         customer = self._customer_intelligence.upsert_customer_from_order(
             normalised,
@@ -835,15 +874,9 @@ class StoreSyncService:
                 emit_event=True,
             )
 
-        # Emit automation event for new order
-        if not existing:
+        if is_new:
             try:
                 from core.automation_engine import emit_automation_event  # noqa: PLC0415
-                order_row = (
-                    self.db.query(Order)
-                    .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
-                    .first()
-                )
                 emit_automation_event(
                     self.db,
                     self.tenant_id,
@@ -851,14 +884,21 @@ class StoreSyncService:
                     customer_id=customer.id if customer else None,
                     payload={
                         "external_id": ext_id,
-                        "order_id": order_row.id if order_row else None,
+                        "order_id": order_row.id,
                         "status": normalised.get("status"),
                         "total": normalised.get("total"),
                     },
                     commit=True,
                 )
-            except Exception as _ae:
-                logger.debug("[StoreSync] emit order_created failed: %s", _ae)
+            except Exception as exc:
+                # Automation failures are logged at ERROR so they are visible,
+                # but do not fail the whole webhook — the order is already
+                # durably stored and the dispatcher will retry this webhook
+                # if we re-raise, potentially double-inserting automation rows.
+                logger.exception(
+                    "[StoreSync] emit order_created failed tenant=%s order=%s: %s",
+                    self.tenant_id, order_row.id, exc,
+                )
 
         snap = (
             self.db.query(StoreKnowledgeSnapshot)
