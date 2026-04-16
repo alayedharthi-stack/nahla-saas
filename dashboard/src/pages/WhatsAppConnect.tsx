@@ -425,10 +425,17 @@ function EmbeddedSignupFlow({
     setError('')
     window.FB.login((response: any) => {
       if (!response?.authResponse) { setError('تم إلغاء عملية الربط'); return }
-      handleExchange(response.authResponse.code, response.authResponse.accessToken)
+      const auth = response.authResponse
+      // Prefer accessToken if present — avoids redirect_uri mismatch on code exchange.
+      // 'code,token' response_type makes Meta JS SDK return both; backend uses
+      // access_token directly and skips the problematic code-exchange step.
+      handleExchange(
+        auth.accessToken ? undefined : auth.code,
+        auth.accessToken || undefined,
+      )
     }, {
       config_id: configId,
-      response_type: 'code',
+      response_type: 'code,token',
       override_default_response_type: true,
       extras: {
         setup: {},

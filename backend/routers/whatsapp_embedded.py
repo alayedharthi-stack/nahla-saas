@@ -96,17 +96,22 @@ def resolve_tenant_id(request: Request) -> int:
     return int(tid)
 
 
+_JS_SDK_REDIRECT_URI = "https://www.facebook.com/connect/login_success.html"
+
+
 async def _exchange_code_for_token(code: str, redirect_uri: str = "") -> dict:
-    """Exchange a short-lived code for a user access token."""
-    # For FB JS SDK codes, redirect_uri must match what was used during login.
-    # If not provided, we try without it first, then with the app URL.
+    """Exchange a short-lived code for a user access token.
+
+    When using FB.login() JS SDK the internal redirect_uri Meta uses is
+    https://www.facebook.com/connect/login_success.html — it must always be
+    included in the exchange request or Meta will reject with 'redirect_uri mismatch'.
+    """
     params: dict = {
-        "client_id":     META_APP_ID,
+        "client_id":    META_APP_ID,
         "client_secret": META_APP_SECRET,
-        "code":          code,
+        "code":         code,
+        "redirect_uri": redirect_uri or _JS_SDK_REDIRECT_URI,
     }
-    if redirect_uri:
-        params["redirect_uri"] = redirect_uri
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(f"{GRAPH}/oauth/access_token", params=params)
