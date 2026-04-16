@@ -973,6 +973,31 @@ const inputCls = "w-full border border-slate-300 rounded-xl px-4 py-2.5 text-sm 
 
 // ── Manual Connect Component ──────────────────────────────────────────────────
 
+interface ConnectReadiness {
+  credentials_saved:  boolean
+  webhook_subscribed: boolean
+  inbound_usable:     boolean
+  webhook_error:      string | null
+  readiness:          string
+  phone_number_id:    string
+  waba_id:            string
+}
+
+function ReadinessBadge({ ok, label, detail }: { ok: boolean; label: string; detail?: string | null }) {
+  return (
+    <div className={`flex items-start gap-2.5 p-3 rounded-xl border ${ok ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}`}>
+      {ok
+        ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+        : <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+      }
+      <div className="flex-1 min-w-0">
+        <p className={`text-sm font-semibold ${ok ? 'text-emerald-800' : 'text-amber-800'}`}>{label}</p>
+        {detail && <p className="text-xs mt-0.5 text-slate-500 break-words">{detail}</p>}
+      </div>
+    </div>
+  )
+}
+
 function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id: string; waba_id: string; connected_at: string }) => void }) {
   const [phoneNumberId, setPhoneNumberId] = useState('')
   const [wabaId, setWabaId]               = useState('')
@@ -980,6 +1005,7 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
   const [showToken, setShowToken]         = useState(false)
   const [busy, setBusy]                   = useState(false)
   const [error, setError]                 = useState('')
+  const [readiness, setReadiness]         = useState<ConnectReadiness | null>(null)
 
   const validate = (): string => {
     if (!phoneNumberId.trim())           return 'Phone Number ID مطلوب'
@@ -993,11 +1019,9 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
   const handleConnect = async () => {
     const err = validate()
     if (err) { setError(err); return }
-    setBusy(true); setError('')
+    setBusy(true); setError(''); setReadiness(null)
     try {
-      const r = await apiCall<{
-        status: string; phone_number_id: string; waba_id: string; connected_at: string | null
-      }>('/whatsapp/connection/manual-connect', {
+      const r = await apiCall<ConnectReadiness & { connected_at?: string | null }>('/whatsapp/connection/manual-connect', {
         method: 'POST',
         body: JSON.stringify({
           phone_number_id: phoneNumberId.trim(),
@@ -1005,11 +1029,15 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
           access_token: accessToken.trim(),
         }),
       })
-      onConnected({
-        phone_number_id: r.phone_number_id,
-        waba_id: r.waba_id,
-        connected_at: r.connected_at ?? new Date().toISOString(),
-      })
+      setReadiness(r)
+      // If fully ready, advance immediately
+      if (r.inbound_usable) {
+        onConnected({
+          phone_number_id: r.phone_number_id,
+          waba_id: r.waba_id,
+          connected_at: r.connected_at ?? new Date().toISOString(),
+        })
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'حدث خطأ أثناء الربط')
     } finally {
@@ -1098,6 +1126,58 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
 
       {error && <ErrorBox msg={error} />}
 
+      {/* ── Readiness panel (shown after connect attempt) ───────────────────── */}
+      {readiness && (
+        <div className="space-y-2">
+          <p className="text-xs font-bold text-slate-600 uppercase tracking-wide">حالة الربط</p>
+          <ReadinessBadge
+            ok={readiness.credentials_saved}
+            label="البيانات محفوظة"
+            detail={readiness.credentials_saved ? 'تم حفظ بيانات الاعتماد في النظام بنجاح' : 'فشل حفظ بيانات الاعتماد'}
+          />
+          <ReadinessBadge
+            ok={readiness.webhook_subscribed}
+            label="اشتراك Webhook في Meta"
+            detail={
+              readiness.webhook_subscribed
+                ? 'نحلة مشترك في أحداث WABA — الرسائل الواردة ستصل'
+                : readiness.webhook_error
+                  ? `فشل الاشتراك: ${readiness.webhook_error}`
+                  : 'لم يتم الاشتراك في webhook — قد لا تصل الرسائل الواردة'
+            }
+          />
+          <ReadinessBadge
+            ok={readiness.inbound_usable}
+            label="جاهز للرسائل الواردة"
+            detail={
+              readiness.inbound_usable
+                ? 'الربط مكتمل — الرسائل الواردة ستُوجَّه بشكل صحيح'
+                : 'الربط جزئي — يمكن الإرسال لكن الرسائل الواردة قد لا تعمل حتى يُصلح اشتراك webhook'
+            }
+          />
+          {!readiness.inbound_usable && readiness.credentials_saved && (
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => onConnected({
+                  phone_number_id: readiness.phone_number_id,
+                  waba_id: readiness.waba_id,
+                  connected_at: new Date().toISOString(),
+                })}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-white transition-all"
+              >
+                المتابعة رغم ذلك (إرسال فقط)
+              </button>
+              <button
+                onClick={() => { setReadiness(null); setError('') }}
+                className="px-4 py-2.5 rounded-xl text-sm border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all"
+              >
+                إعادة المحاولة
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Help link */}
       <p className="text-xs text-slate-400 text-center">
         لا تعرف كيف تستخرج هذه البيانات؟{' '}
@@ -1107,16 +1187,18 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
         </a>
       </p>
 
-      <button
-        onClick={handleConnect}
-        disabled={busy || !phoneNumberId || !wabaId || !accessToken}
-        className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-50 shadow-lg shadow-emerald-600/20"
-      >
-        {busy
-          ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ الربط...</>
-          : <><MessageCircle className="w-4 h-4" /> ربط واتساب يدويًا</>
-        }
-      </button>
+      {!readiness && (
+        <button
+          onClick={handleConnect}
+          disabled={busy || !phoneNumberId || !wabaId || !accessToken}
+          className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-50 shadow-lg shadow-emerald-600/20"
+        >
+          {busy
+            ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ الربط...</>
+            : <><MessageCircle className="w-4 h-4" /> ربط واتساب يدويًا</>
+          }
+        </button>
+      )}
     </div>
   )
 }

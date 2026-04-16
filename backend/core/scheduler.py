@@ -80,6 +80,12 @@ async def run_automation_engine_scheduler() -> None:
     await _engine_loop()
 
 
+async def run_webhook_guardian_scheduler() -> None:
+    """WhatsApp Webhook Guardian — monitors health and auto-recovers every 5 min."""
+    from core.webhook_guardian import run_webhook_guardian  # noqa: PLC0415
+    await run_webhook_guardian()
+
+
 async def run_salla_token_refresh_scheduler() -> None:
     """Proactively refresh Salla OAuth tokens and re-enable soft-disabled integrations."""
     await asyncio.sleep(240)

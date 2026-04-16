@@ -178,6 +178,16 @@ async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None
                     logger.warning("[Webhook360] Invalid internal secret tenant=%s", wa_conn.tenant_id)
                     return
 
+                if field in ("messages", "smb_message_echoes"):
+                    # Stamp activity for guardian — one lightweight update per webhook delivery
+                    try:
+                        from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
+                        wa_conn.last_webhook_received_at = _dt.now(_tz.utc)
+                        db.add(wa_conn)
+                        db.flush()
+                    except Exception:
+                        pass
+
                 if field == "messages":
                     for msg in value.get("messages", []):
                         await _dispatch_message(phone_number_id, msg, value)
@@ -267,19 +277,69 @@ async def _dispatch_message(
         logger.error("[Engine] Cannot open DB session for phone=%s", sender)
         return
 
-    # ── Resolve tenant from phone_number_id (unique global key) ──────────────
-    wa_conn = (
+    # ── Resolve tenant from phone_number_id (must be exactly 1 match) ────────
+    wa_matches = (
         db.query(WhatsAppConnection)
-        .filter_by(phone_number_id=phone_number_id)
-        .first()
+        .filter(WhatsAppConnection.phone_number_id == phone_number_id)
+        .all()
     )
 
-    if not wa_conn:
+    if len(wa_matches) == 0:
         logger.warning(
             "[Webhook] DROPPED — no WhatsAppConnection for phone_number_id=%s from=%s",
             phone_number_id, sender,
         )
+        # Log integrity event for observability
+        try:
+            from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
+            _lie(
+                db, "tenant_resolved",
+                phone_number_id=phone_number_id,
+                action="webhook_dispatch",
+                result="dropped_no_match",
+                detail=f"No WhatsAppConnection for phone_number_id={phone_number_id}",
+            )
+            db.commit()
+        except Exception:
+            pass
         return
+
+    if len(wa_matches) > 1:
+        # CRITICAL: ambiguous routing — phone_number_id is supposed to be globally unique.
+        # The unique partial index should prevent this, but we guard defensively.
+        tenant_ids = [c.tenant_id for c in wa_matches]
+        logger.critical(
+            "[Webhook] CRITICAL — AMBIGUOUS phone_number_id=%s matched %d tenants=%s — DROPPED",
+            phone_number_id, len(wa_matches), tenant_ids,
+        )
+        try:
+            from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
+            _lie(
+                db, "duplicate_identity",
+                phone_number_id=phone_number_id,
+                action="webhook_dispatch",
+                result="dropped_ambiguous",
+                detail=f"phone_number_id={phone_number_id} matched {len(wa_matches)} tenants: {tenant_ids}",
+            )
+            db.commit()
+        except Exception:
+            pass
+        return
+
+    wa_conn = wa_matches[0]
+
+    # Log successful tenant resolution
+    try:
+        from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
+        _lie(
+            db, "tenant_resolved",
+            tenant_id=wa_conn.tenant_id,
+            phone_number_id=phone_number_id,
+            action="webhook_dispatch",
+            result="ok",
+        )
+    except Exception:
+        pass
 
     used_pid           = wa_conn.phone_number_id
     resolved_tenant_id = wa_conn.tenant_id
@@ -287,6 +347,16 @@ async def _dispatch_message(
         "[TRACE][2/6] TENANT_RESOLVED | phone_number_id=%s tenant_id=%s status=%s",
         used_pid, resolved_tenant_id, wa_conn.status,
     )
+
+    # ── Stamp last_webhook_received_at for guardian activity tracking ─────────
+    try:
+        from datetime import timezone as _tz  # noqa: PLC0415
+        from datetime import datetime as _dt  # noqa: PLC0415
+        wa_conn.last_webhook_received_at = _dt.now(_tz.utc)
+        db.add(wa_conn)
+        db.flush()
+    except Exception as _stamp_exc:
+        logger.debug("[Webhook] Failed to stamp last_webhook_received_at: %s", _stamp_exc)
 
     normalized_sender = normalize_phone(sender) or sender
     contact_name = _extract_contact_name(value, sender)

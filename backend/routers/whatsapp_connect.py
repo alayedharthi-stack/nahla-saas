@@ -399,51 +399,51 @@ async def embedded_signup_callback(
         waba_info  = await _fetch_waba_info(token, waba_id) if waba_id else {}
         phone_info = await _fetch_phone_number_info(token, phone_id) if phone_id else {}
 
-        # 5. Persist — but first guard against cross-tenant identity theft
-        _pid_to_write = phone_id or phone_info.get("id") or ""
-        _wid_to_write = waba_id or waba_info.get("id") or ""
+        # 5. Write through canonical service — integrity + webhook surfaced explicitly
+        _pid_to_write = (phone_id or phone_info.get("id") or "").strip()
+        _wid_to_write = (waba_id or waba_info.get("id") or "").strip()
+
+        from services.whatsapp_connection_service import (  # noqa: PLC0415
+            commit_connection,
+            WhatsAppConnectionConflict,
+            WhatsAppConnectionError,
+        )
         try:
-            from core.tenant_integrity import (  # noqa: PLC0415
-                assert_phone_id_not_claimed, assert_waba_id_not_claimed,
-                evict_phone_id_from_other_tenants, evict_waba_id_from_other_tenants,
-                TenantIntegrityError,
+            result = commit_connection(
+                db,
+                tenant_id       = tenant_id,
+                phone_number_id = _pid_to_write,
+                waba_id         = _wid_to_write,
+                access_token    = token,
+                connection_type = "cloud_api",
+                phone_number    = phone_info.get("display_phone_number", ""),
+                display_name    = (
+                    phone_info.get("verified_name") or waba_info.get("name", "")
+                ),
+                actor           = "oauth_callback",
             )
-            assert_phone_id_not_claimed(db, _pid_to_write, tenant_id)
-            assert_waba_id_not_claimed(db, _wid_to_write, tenant_id)
-            evict_phone_id_from_other_tenants(db, _pid_to_write, tenant_id)
-            evict_waba_id_from_other_tenants(db, _wid_to_write, tenant_id)
-        except TenantIntegrityError as _tie:
-            raise HTTPException(status_code=409, detail=str(_tie)) from _tie
-        except HTTPException:
-            raise
-        except Exception as _g_exc:
-            logger.warning("callback: integrity check error (non-fatal): %s", _g_exc)
+        except WhatsAppConnectionConflict as _exc:
+            raise HTTPException(status_code=409, detail=str(_exc)) from _exc
+        except WhatsAppConnectionError as _exc:
+            raise HTTPException(
+                status_code=502, detail=f"Meta callback failed: {_exc}"
+            ) from _exc
 
-        conn.status                       = "connected"
-        conn.provider                     = WHATSAPP_PROVIDER_META
-        conn.access_token                 = token
-        conn.token_type                   = token_type
-        conn.token_expires_at             = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-        conn.whatsapp_business_account_id = _wid_to_write or None
-        conn.phone_number_id              = _pid_to_write or None
-        conn.phone_number                 = phone_info.get("display_phone_number")
-        conn.business_display_name        = (
-            phone_info.get("verified_name")
-            or waba_info.get("name")
-        )
-        conn.meta_business_account_id     = (
-            body.business_id
-            or (waba_info.get("on_behalf_of_business_info") or {}).get("id")
-        )
-        conn.connected_at                 = datetime.now(timezone.utc)
-        conn.last_error                   = None
-        conn.webhook_verified             = False  # must be checked separately
-        conn.sending_enabled              = bool(conn.phone_number_id and conn.whatsapp_business_account_id)
+        # Update Meta-specific metadata that lives outside the service's scope
+        conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+        if conn:
+            conn.token_type           = token_type
+            conn.token_expires_at     = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+            conn.meta_business_account_id = (
+                body.business_id
+                or (waba_info.get("on_behalf_of_business_info") or {}).get("id")
+            )
+            db.commit()
 
-        db.commit()
         logger.info(
-            "tenant=%s WhatsApp connected — WABA=%s phone=%s",
-            tenant_id, conn.whatsapp_business_account_id, conn.phone_number,
+            "tenant=%s WhatsApp oauth callback done — WABA=%s phone=%s readiness=%s",
+            tenant_id, _wid_to_write, _pid_to_write,
+            result.to_api_dict().get("readiness"),
         )
 
         # Notify merchant — WhatsApp connected
@@ -454,14 +454,17 @@ async def embedded_signup_callback(
             _s      = get_or_create_settings(db, tenant_id)
             _wa     = merge_defaults(_s.whatsapp_settings or {}, DEFAULT_WHATSAPP)
             _st     = merge_defaults(_s.store_settings    or {}, DEFAULT_STORE)
-            _phone  = _wa.get("owner_whatsapp_number", "") or conn.phone_number or ""
+            _phone  = _wa.get("owner_whatsapp_number", "") or (conn and conn.phone_number) or ""
             _sname  = _st.get("store_name", "") or f"متجر #{tenant_id}"
             if _phone:
                 _asyncio.ensure_future(notify_whatsapp_connected(_phone, _sname))
-        except Exception as _exc:
+        except Exception as _exc:  # noqa: BLE001
             logger.warning("tenant=%s WhatsApp-connected notification error: %s", tenant_id, _exc)
 
-        return {"status": "connected", **_safe_view(conn)}
+        api_dict = result.to_api_dict()
+        if conn:
+            api_dict.update(_safe_view(conn))
+        return api_dict
 
     except HTTPException:
         raise
@@ -668,136 +671,37 @@ async def manual_connect(
         tenant_id, tenant_row.name, actor_user_id, pid, wid, client_ip,
     )
 
-    # ── Step 5: tenant integrity guards — conflict checks are ALWAYS fatal ────
-    # The broad `except Exception` that previously swallowed integrity errors
-    # is intentionally gone.  Any unexpected crash here surfaces immediately
-    # rather than silently allowing a cross-tenant write.
-    from core.tenant_integrity import (  # noqa: PLC0415
-        assert_phone_id_not_claimed,
-        assert_waba_id_not_claimed,
-        evict_phone_id_from_other_tenants,
-        evict_waba_id_from_other_tenants,
-        TenantIntegrityError,
+    # ── Step 5+6: delegate write + webhook to the canonical connection service ──
+    # All integrity checks, the DB write, and webhook subscription happen inside
+    # commit_connection().  Conflict errors surface as HTTP 409.  No silent
+    # fallback, no broad except-swallowing here.
+    from services.whatsapp_connection_service import (  # noqa: PLC0415
+        commit_connection,
+        WhatsAppConnectionConflict,
+        WhatsAppConnectionError,
     )
     try:
-        assert_phone_id_not_claimed(db, pid, tenant_id)
-    except TenantIntegrityError as tie:
-        logger.error(
-            "[manual_connect] BLOCKED — phone_number_id=%s already claimed. tenant=%s conflict: %s",
-            pid, tenant_id, tie,
+        result = commit_connection(
+            db,
+            tenant_id       = tenant_id,
+            phone_number_id = pid,
+            waba_id         = wid,
+            access_token    = token,
+            connection_type = "cloud_api",
+            actor           = str(actor_user_id),
         )
-        raise HTTPException(status_code=409, detail=str(tie)) from tie
-
-    try:
-        assert_waba_id_not_claimed(db, wid, tenant_id)
-    except TenantIntegrityError as tie:
-        logger.error(
-            "[manual_connect] BLOCKED — waba_id=%s already claimed. tenant=%s conflict: %s",
-            wid, tenant_id, tie,
-        )
-        raise HTTPException(status_code=409, detail=str(tie)) from tie
-
-    # Evict stale disconnected rows from other tenants.
-    # These are non-connected leftovers — safe to clear, failure is non-fatal.
-    try:
-        evicted_phone = evict_phone_id_from_other_tenants(db, pid, tenant_id)
-        evicted_waba  = evict_waba_id_from_other_tenants(db, wid, tenant_id)
-        if evicted_phone or evicted_waba:
-            logger.info(
-                "[manual_connect] EVICTED stale rows — phone_evicted=%s waba_evicted=%s "
-                "for tenant=%s",
-                evicted_phone, evicted_waba, tenant_id,
-            )
-    except Exception as _evict_exc:
-        logger.warning("[manual_connect] evict warning (non-fatal): %s", _evict_exc)
-
-    # ── Step 6: write — strictly to the verified tenant ──────────────────────
-    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    if not conn:
-        conn = WhatsAppConnection(tenant_id=tenant_id)
-        db.add(conn)
-        logger.info(
-            "[manual_connect] CREATING new WhatsAppConnection for tenant_id=%s", tenant_id,
-        )
-    else:
-        logger.info(
-            "[manual_connect] UPDATING existing WhatsAppConnection id=%s for tenant_id=%s",
-            conn.id, tenant_id,
-        )
-
-    now = datetime.now(timezone.utc)
-    conn.phone_number_id              = pid
-    conn.whatsapp_business_account_id = wid
-    conn.access_token                 = token
-    conn.status                       = "connected"
-    conn.sending_enabled              = True
-    conn.connection_type              = "cloud_api"
-    conn.provider                     = "meta"
-    conn.webhook_verified             = False
-    conn.last_error                   = None
-    conn.connected_at                 = now
-    conn.updated_at                   = now
-    conn.disconnect_reason            = None
-    conn.disconnected_at              = None
-    conn.disconnected_by_user_id      = None
-
-    db.commit()
-    db.refresh(conn)
+    except WhatsAppConnectionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WhatsAppConnectionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     logger.info(
-        "[manual_connect] COMMITTED — tenant_id=%s tenant_name=%r phone_number_id=%s "
-        "waba_id=%s wa_conn_id=%s actor_user_id=%s",
-        tenant_id, tenant_row.name, pid, wid, conn.id, actor_user_id,
+        "[manual_connect] DONE — tenant_id=%s tenant_name=%r phone=%s waba=%s "
+        "readiness=%s actor=%s",
+        tenant_id, tenant_row.name, pid, wid,
+        result.to_api_dict().get("readiness"), actor_user_id,
     )
-
-    # Try to subscribe the WABA to our Meta App's webhooks automatically.
-    # This uses the merchant-provided access_token to call the Meta Graph API.
-    # Failure is non-fatal — the merchant can configure the webhook manually.
-    webhook_subscribed = False
-    try:
-        import httpx as _httpx  # noqa: PLC0415
-        from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
-        sub_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{wid}/subscribed_apps"
-        sub_resp = _httpx.post(
-            sub_url,
-            params={"access_token": token},
-            json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
-            timeout=10,
-        )
-        if sub_resp.status_code == 200 and sub_resp.json().get("success"):
-            webhook_subscribed = True
-            conn.webhook_verified = True
-            db.commit()
-            logger.info(
-                "[manual_connect] WABA webhook subscribed successfully tenant=%s waba_id=%s",
-                tenant_id, wid,
-            )
-        else:
-            logger.warning(
-                "[manual_connect] WABA webhook subscription failed tenant=%s waba_id=%s resp=%s",
-                tenant_id, wid, sub_resp.text[:200],
-            )
-    except Exception as _sub_err:
-        logger.warning(
-            "[manual_connect] WABA webhook subscription error tenant=%s: %s",
-            tenant_id, _sub_err,
-        )
-
-    return {
-        "status":             "connected",
-        "phone_number_id":    conn.phone_number_id,
-        "waba_id":            conn.whatsapp_business_account_id,
-        "connection_type":    conn.connection_type,
-        "sending_enabled":    conn.sending_enabled,
-        "connected_at":       conn.connected_at.isoformat() if conn.connected_at else None,
-        "webhook_subscribed": webhook_subscribed,
-        "webhook_setup_note": (
-            None if webhook_subscribed else
-            "يرجى التأكد من إعداد Webhook في Meta Developers: "
-            "URL=https://api.nahlah.ai/webhook/whatsapp "
-            "وVerify Token=nahla2025 مع الاشتراك في messages"
-        ),
-    }
+    return result.to_api_dict()
 
 
 @router.post("/connection/disconnect")

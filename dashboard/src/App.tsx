@@ -35,6 +35,8 @@ import AdminTroubleshooting from './pages/AdminTroubleshooting'
 import AdminCoexistence from './pages/AdminCoexistence'
 import AdminSystemStatus from './pages/AdminSystemStatus'
 import AdminTools from './pages/AdminTools'
+import AdminWebhookHealth from './pages/AdminWebhookHealth'
+import AdminTenantIntegrity from './pages/AdminTenantIntegrity'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
@@ -121,7 +123,9 @@ export default function App() {
             <Route path="admin/coexistence"  element={<AdminCoexistence />} />
             <Route path="admin/team"         element={<AdminTeam />} />
             <Route path="admin/system"       element={<AdminSystemStatus />} />
-            <Route path="admin/tools"        element={<AdminTools />} />
+            <Route path="admin/tools"          element={<AdminTools />} />
+            <Route path="admin/webhook-health"    element={<AdminWebhookHealth />} />
+            <Route path="admin/tenant-integrity" element={<AdminTenantIntegrity />} />
             <Route path="billing"            element={<Billing />} />
             <Route path="widgets"            element={<MerchantWidgets />} />
             <Route path="help/whatsapp-manual-setup" element={<WhatsAppManualSetup />} />

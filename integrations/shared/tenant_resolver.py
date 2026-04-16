@@ -87,14 +87,24 @@ def upsert_tenant_and_integration(
       store_domain, store_email
 
     Returns a dict: {id, name, domain, provider, store_id, integration_id}
+
+    Duplicate-store protection:
+      The DB has a partial unique index on (provider, external_store_id) for
+      active integrations. If a second tenant tries to bind the same store_id
+      we gracefully find the existing integration and update it instead of
+      creating a duplicate, which would cause routing errors for WhatsApp.
     """
+    import logging as _logging  # noqa: PLC0415
+    _logger = _logging.getLogger("nahla.tenant_resolver")
+
     store_id   = str(store_data.get("store_id", ""))
     store_name = store_data.get("store_name") or f"{provider.capitalize()} Store"
     domain     = store_data.get("store_domain") or None
 
     db = SessionLocal()
     try:
-        # Re-install: update tokens on existing integration
+        # Re-install or duplicate-prevention: find any existing binding for this store_id.
+        # Matches on external_store_id (indexed column) OR config->>'store_id' (legacy).
         existing = (
             db.query(Integration)
             .filter(
@@ -104,48 +114,95 @@ def upsert_tenant_and_integration(
             .first()
         )
 
+        # Fallback for legacy rows where external_store_id was not yet backfilled
+        if not existing:
+            from sqlalchemy import text as _text  # noqa: PLC0415
+            row = db.execute(
+                _text(
+                    "SELECT id FROM integrations "
+                    "WHERE provider = :prov AND config->>'store_id' = :sid "
+                    "ORDER BY id ASC LIMIT 1"
+                ),
+                {"prov": provider, "sid": store_id},
+            ).first()
+            if row:
+                existing = db.query(Integration).filter(Integration.id == row[0]).first()
+
         if existing:
+            if existing.external_store_id != store_id:
+                existing.external_store_id = store_id
             tenant = db.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
             if tenant:
-                tenant.name = store_name or tenant.name
+                tenant.name   = store_name or tenant.name
                 tenant.domain = domain
             existing.config = {
                 **existing.config,
-                "store_id": store_id,
-                "store_name": store_name,
-                "store_domain": store_data.get("store_domain", ""),
-                "store_email": store_data.get("store_email", ""),
-                "access_token":  store_data.get("access_token"),
-                "refresh_token": store_data.get("refresh_token"),
-            }
-            existing.external_store_id = store_id
-            existing.enabled = True
-            db.commit()
-            return _to_dict(tenant, existing, provider)
-
-        # Fresh install
-        tenant = Tenant(name=store_name, domain=domain, is_active=True)
-        db.add(tenant)
-        db.flush()  # populate tenant.id
-
-        integration = Integration(
-            provider   = provider,
-            tenant_id  = tenant.id,
-            external_store_id = store_id,
-            enabled    = True,
-            config     = {
-                "store_id":    store_id,
-                "store_name":  store_name,
+                "store_id":     store_id,
+                "store_name":   store_name,
                 "store_domain": store_data.get("store_domain", ""),
                 "store_email":  store_data.get("store_email", ""),
                 "access_token":  store_data.get("access_token"),
                 "refresh_token": store_data.get("refresh_token"),
-            },
-        )
-        db.add(integration)
-        db.commit()
-        db.refresh(tenant)
-        return _to_dict(tenant, integration, provider)
+            }
+            existing.enabled = True
+            try:
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                _logger.error(
+                    "upsert_tenant_and_integration: commit failed for existing store=%s: %s",
+                    store_id, exc,
+                )
+                raise
+            return _to_dict(tenant, existing, provider)
+
+        # Fresh install — guard against race-condition duplicates from a
+        # concurrent OAuth callback hitting at the same millisecond.
+        try:
+            tenant = Tenant(name=store_name, domain=domain, is_active=True)
+            db.add(tenant)
+            db.flush()
+
+            integration = Integration(
+                provider          = provider,
+                tenant_id         = tenant.id,
+                external_store_id = store_id,
+                enabled           = True,
+                config            = {
+                    "store_id":     store_id,
+                    "store_name":   store_name,
+                    "store_domain": store_data.get("store_domain", ""),
+                    "store_email":  store_data.get("store_email", ""),
+                    "access_token":  store_data.get("access_token"),
+                    "refresh_token": store_data.get("refresh_token"),
+                },
+            )
+            db.add(integration)
+            db.commit()
+            db.refresh(tenant)
+            return _to_dict(tenant, integration, provider)
+
+        except Exception as exc:
+            db.rollback()
+            # If a unique-constraint violation occurred (race condition),
+            # fall back to loading the winning row rather than failing.
+            _logger.warning(
+                "upsert_tenant_and_integration: insert failed for store=%s (%s) "
+                "— attempting fallback lookup",
+                store_id, exc,
+            )
+            existing = (
+                db.query(Integration)
+                .filter(
+                    Integration.provider == provider,
+                    Integration.external_store_id == store_id,
+                )
+                .first()
+            )
+            if existing:
+                tenant = db.query(Tenant).filter(Tenant.id == existing.tenant_id).first()
+                return _to_dict(tenant, existing, provider)
+            raise
 
     finally:
         db.close()

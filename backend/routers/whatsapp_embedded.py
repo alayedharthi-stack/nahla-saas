@@ -748,6 +748,32 @@ async def sync_embedded_connection_from_meta(
             sync_state = _build_phone_sync_state(phone_data)
 
     _apply_embedded_state(conn, phone_data, sync_state, register_data)
+
+    # When the connection finalises (status=connected), attempt webhook subscription
+    # if it hasn't been done yet, and persist the verified flag explicitly.
+    if sync_state.get("connected") and not conn.webhook_verified:
+        from services.whatsapp_connection_service import subscribe_waba_webhook  # noqa: PLC0415
+        wh_ok, wh_err = subscribe_waba_webhook(
+            conn.whatsapp_business_account_id or "",
+            conn.access_token or "",
+            conn.tenant_id,
+        )
+        if wh_ok:
+            conn.webhook_verified = True
+            logger.info(
+                "[EmbeddedSignup] webhook subscribed on finalise — tenant=%s waba=%s",
+                conn.tenant_id, conn.whatsapp_business_account_id,
+            )
+        else:
+            logger.warning(
+                "[EmbeddedSignup] webhook subscription FAILED on finalise — "
+                "tenant=%s waba=%s err=%r",
+                conn.tenant_id, conn.whatsapp_business_account_id, wh_err,
+            )
+        meta = dict(conn.extra_metadata or {})
+        meta["webhook_subscription_error"] = wh_err
+        conn.extra_metadata = meta
+
     db.commit()
     return _build_embedded_status_payload(conn)
 
@@ -811,6 +837,17 @@ async def exchange_code(
 
     logger.info("[EmbeddedSignup] exchange START tenant=%s", tenant_id)
 
+    # 0 — Verify the tenant row exists (no ghost-tenant writes)
+    from database.models import Tenant as _Tenant  # noqa: PLC0415
+    if not db.query(_Tenant).filter(_Tenant.id == tenant_id).first():
+        logger.error(
+            "[EmbeddedSignup] exchange REJECTED — tenant_id=%s has no DB row", tenant_id
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"المتجر رقم {tenant_id} غير موجود. يرجى تسجيل الدخول مرة أخرى.",
+        )
+
     # 1 — Get user token: either passed directly from JS SDK or exchanged from code
     token_data: dict = {}
     if body.access_token:
@@ -830,26 +867,37 @@ async def exchange_code(
     waba_id = await _get_waba_id_from_token(user_token)
     logger.info("[EmbeddedSignup] waba_id=%s tenant=%s", waba_id, tenant_id)
 
-    # 3 — Subscribe app to WABA
-    await _subscribe_app_to_waba(waba_id, user_token)
+    # 3 — Enforce WABA uniqueness (fatal if claimed by another tenant) and
+    #     store intermediate credentials via the canonical service.
+    #     This also evicts stale disconnected rows that reference this WABA.
+    from services.whatsapp_connection_service import (  # noqa: PLC0415
+        begin_waba_session,
+        subscribe_waba_webhook,
+        WhatsAppConnectionConflict,
+        WhatsAppConnectionError,
+    )
+    try:
+        begin_waba_session(
+            db,
+            tenant_id       = tenant_id,
+            waba_id         = waba_id,
+            access_token    = user_token,
+            connection_type = "embedded",
+            actor           = "embedded_exchange",
+        )
+    except WhatsAppConnectionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WhatsAppConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    # 4 — List phone numbers
-    phones = await _get_phone_numbers(waba_id, user_token)
-
-    # 5 — Upsert WhatsAppConnection (keyed by phone_number_id when possible)
+    # Re-fetch conn after service write so we can update token metadata
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn:
-        conn = WhatsAppConnection(tenant_id=tenant_id)
-        db.add(conn)
+        raise HTTPException(status_code=500, detail="Internal error: connection row missing after write.")
 
-    conn.whatsapp_business_account_id = waba_id
-    conn.access_token                 = user_token
-    conn.token_type                   = long_data.get("token_type") or token_data.get("token_type", "user")
-    conn.connection_type              = "embedded"
-    conn.provider                     = WHATSAPP_PROVIDER_META
-    conn.sending_enabled              = False
-    conn.last_error                   = None
-    conn.extra_metadata               = {}
+    conn.token_type = long_data.get("token_type") or token_data.get("token_type", "user")
+    conn.last_error = None
+    conn.extra_metadata = {}
 
     # Token expiry (Meta user tokens expire in ~60 days)
     expires_in = long_data.get("expires_in") or token_data.get("expires_in")
@@ -865,6 +913,22 @@ async def exchange_code(
         debug_info=debug_info,
         expires_at=expires_at,
     )
+    db.commit()
+
+    # 4 — Subscribe app to WABA (result surfaces clearly in response, not swallowed)
+    webhook_ok, webhook_err = subscribe_waba_webhook(waba_id, user_token, tenant_id)
+    if webhook_ok:
+        conn.webhook_verified = True
+        db.commit()
+        logger.info("[EmbeddedSignup] WABA webhook subscribed — tenant=%s waba=%s", tenant_id, waba_id)
+    else:
+        logger.warning(
+            "[EmbeddedSignup] WABA webhook subscription FAILED — tenant=%s waba=%s err=%r",
+            tenant_id, waba_id, webhook_err,
+        )
+
+    # 5 — List phone numbers
+    phones = await _get_phone_numbers(waba_id, user_token)
 
     # ── Auto-select when exactly one phone exists ─────────────────────────
     if len(phones) == 1:
@@ -898,15 +962,17 @@ async def exchange_code(
     db.commit()
 
     logger.info(
-        "[EmbeddedSignup] exchange OK tenant=%s waba=%s phones=%d",
-        tenant_id, waba_id, len(phones),
+        "[EmbeddedSignup] exchange OK tenant=%s waba=%s phones=%d webhook_subscribed=%s",
+        tenant_id, waba_id, len(phones), webhook_ok,
     )
 
     return {
-        "status":   "waba_connected",
-        "waba_id":  waba_id,
-        "phones":   _serialize_phones(phones),
-        "message":  "تم ربط حساب واتساب للأعمال بنجاح. اختر رقم الهاتف.",
+        "status":              "waba_connected",
+        "waba_id":             waba_id,
+        "phones":              _serialize_phones(phones),
+        "webhook_subscribed":  webhook_ok,
+        "webhook_error":       webhook_err,
+        "message":             "تم ربط حساب واتساب للأعمال بنجاح. اختر رقم الهاتف.",
     }
 
 
@@ -937,12 +1003,25 @@ async def select_phone(
             ),
         )
 
-    # Remove any stale connection for this phone_number_id from OTHER tenants
-    # so we never have duplicate phone_number_id records across tenants.
-    db.query(WhatsAppConnection).filter(
-        WhatsAppConnection.phone_number_id == body.phone_number_id,
-        WhatsAppConnection.tenant_id != tenant_id,
-    ).update({"phone_number_id": None, "status": "disconnected", "sending_enabled": False})
+    # ── Integrity guard: phone_number_id uniqueness — always fatal ───────────
+    from core.tenant_integrity import (  # noqa: PLC0415
+        assert_phone_id_not_claimed,
+        evict_phone_id_from_other_tenants,
+        TenantIntegrityError,
+    )
+    try:
+        assert_phone_id_not_claimed(db, body.phone_number_id, tenant_id)
+    except TenantIntegrityError as _tie:
+        logger.error(
+            "[EmbeddedSignup] select-phone BLOCKED — phone_number_id=%s already "
+            "claimed by another tenant. tenant=%s conflict: %s",
+            body.phone_number_id, tenant_id, _tie,
+        )
+        raise HTTPException(status_code=409, detail=str(_tie)) from _tie
+    try:
+        evict_phone_id_from_other_tenants(db, body.phone_number_id, tenant_id)
+    except Exception as _evict_exc:  # noqa: BLE001
+        logger.warning("[EmbeddedSignup] select-phone eviction warning (non-fatal): %s", _evict_exc)
 
     conn.phone_number_id       = body.phone_number_id
     conn.phone_number          = phone_data.get("display_phone_number", "")

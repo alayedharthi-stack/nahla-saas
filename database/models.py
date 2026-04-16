@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -887,6 +887,9 @@ class WhatsAppConnection(Base):
     webhook_verified  = Column(Boolean, default=False)
     sending_enabled   = Column(Boolean, default=False)
 
+    # Guardian: last time a real inbound webhook was received for this tenant
+    last_webhook_received_at = Column(DateTime(timezone=True), nullable=True)
+
     extra_metadata    = Column(JSONB, nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
     updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -1128,5 +1131,68 @@ class MerchantWidget(Base):
     display_rules = Column(JSONB, nullable=True, default=dict)
     created_at    = Column(DateTime, default=datetime.utcnow)
     updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship('Tenant')
+
+
+# ── Webhook Guardian Audit Log ────────────────────────────────────────────────
+
+class IntegrityEvent(Base):
+    """
+    Append-only structured audit trail for all identity-resolution and
+    cross-tenant conflict events detected or blocked by the integrity layer.
+
+    event values:
+        tenant_resolved        – normal routing: phone_number_id → tenant
+        duplicate_identity     – same phone/waba/store_id found on >1 tenant
+        cross_tenant_conflict  – WA connection and store on different tenants
+        write_blocked          – write rejected by integrity guard
+        reconciliation_started – merge workflow initiated
+        reconciliation_done    – merge workflow completed
+        orphaned_wa_connection – WA conn exists but no store integration
+        orphaned_store         – store integration exists but no WA conn
+    """
+    __tablename__ = 'integrity_events'
+
+    id              = Column(Integer, primary_key=True)
+    event           = Column(String, nullable=False, index=True)
+    tenant_id       = Column(Integer, nullable=True, index=True)
+    other_tenant_id = Column(Integer, nullable=True)
+    phone_number_id = Column(String, nullable=True)
+    waba_id         = Column(String, nullable=True)
+    store_id        = Column(String, nullable=True)
+    provider        = Column(String, nullable=True)
+    action          = Column(String, nullable=True)
+    result          = Column(String, nullable=True)
+    detail          = Column(Text, nullable=True)
+    actor           = Column(String, nullable=True)
+    dry_run         = Column(Boolean, nullable=True)
+    created_at      = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class WebhookGuardianLog(Base):
+    """
+    Structured audit trail of every webhook-reliability action taken by the
+    guardian background worker or admin tooling.
+
+    event values:
+        webhook_subscribed        – WABA was just subscribed (first time)
+        webhook_resubscribed      – guardian re-subscribed a stalled connection
+        webhook_verification_failed – subscribed_apps call returned false/error
+        webhook_recovered         – connection went from stalled → healthy
+        webhook_stalled           – guardian detected no inbound for >15 min
+        critical_error_detected   – webhook_verified=false while status=connected
+    """
+    __tablename__ = 'webhook_guardian_log'
+
+    id              = Column(Integer, primary_key=True)
+    tenant_id       = Column(Integer, ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    phone_number_id = Column(String, nullable=True)
+    waba_id         = Column(String, nullable=True)
+    # event type (see docstring above)
+    event           = Column(String, nullable=False, index=True)
+    success         = Column(Boolean, nullable=False, default=True)
+    detail          = Column(Text, nullable=True)
+    created_at      = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     tenant = relationship('Tenant')

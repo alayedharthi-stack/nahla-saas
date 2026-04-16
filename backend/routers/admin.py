@@ -1593,40 +1593,30 @@ async def admin_force_connect_whatsapp(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
-    conn = db.query(WhatsAppConnection).filter(
-        WhatsAppConnection.tenant_id == body.tenant_id
-    ).first()
-    if not conn:
-        conn = WhatsAppConnection(tenant_id=body.tenant_id)
-        db.add(conn)
+    # ── Canonical write through service (integrity + webhook surfaced) ──────────
+    from services.whatsapp_connection_service import (  # noqa: PLC0415
+        commit_connection,
+        WhatsAppConnectionConflict,
+        WhatsAppConnectionError,
+    )
+    try:
+        result = commit_connection(
+            db,
+            tenant_id       = body.tenant_id,
+            phone_number_id = body.phone_number_id.strip(),
+            waba_id         = body.waba_id.strip(),
+            access_token    = body.access_token.strip(),
+            connection_type = "cloud_api",
+            phone_number    = (body.phone_number or "").strip(),
+            display_name    = (body.display_name or "").strip(),
+            actor           = "admin_force_connect",
+        )
+    except WhatsAppConnectionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WhatsAppConnectionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    conn.phone_number_id              = body.phone_number_id.strip()
-    conn.whatsapp_business_account_id = body.waba_id.strip()
-    conn.access_token                 = body.access_token.strip()
-    conn.phone_number                 = (body.phone_number or '').strip() or None
-    conn.business_display_name        = (body.display_name or '').strip() or None
-    conn.status                       = "connected"
-    conn.sending_enabled              = True
-    conn.connection_type              = "cloud_api"
-    conn.provider                     = "meta"
-    conn.webhook_verified             = False
-    conn.last_error                   = None
-    conn.connected_at                 = datetime.now(timezone.utc)
-    conn.updated_at                   = datetime.now(timezone.utc)
-
-    db.commit()
-    db.refresh(conn)
-
-    return {
-        "ok": True,
-        "tenant_id":       body.tenant_id,
-        "phone_number_id": conn.phone_number_id,
-        "waba_id":         conn.whatsapp_business_account_id,
-        "phone_number":    conn.phone_number,
-        "display_name":    conn.business_display_name,
-        "status":          conn.status,
-        "sending_enabled": conn.sending_enabled,
-    }
+    return result.to_api_dict()
 
 
 # ── Coexistence (360dialog) request management ──────────────────────────────
@@ -2071,3 +2061,242 @@ async def admin_trigger_coupon_pool(
             logger.error("[admin/coupons/generate-pool] tenant=%s error: %s", tid, exc)
 
     return {"ok": True, "results": results}
+
+
+# ── Tenant Integrity: audit, reconcile, events ───────────────────────────────
+
+@router.get("/admin/tenant-integrity")
+async def admin_tenant_integrity_audit(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Full tenant integrity audit.
+    Returns per-tenant health, duplicate detection lists, and orphan detection.
+    Run this after every deployment or any time routing seems wrong.
+    """
+    from core.tenant_integrity import run_integrity_audit  # noqa: PLC0415
+    return run_integrity_audit(db)
+
+
+class ReconcileIn(BaseModel):
+    source_tenant_id: int
+    target_tenant_id: int
+    dry_run: bool = True
+
+
+@router.post("/admin/tenant-integrity/reconcile")
+async def admin_reconcile_tenants(
+    body: ReconcileIn,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Merge source_tenant into target_tenant.
+    Always run with dry_run=true first to review the plan.
+    Set dry_run=false to execute the merge.
+    """
+    from core.tenant_integrity import reconcile_tenants  # noqa: PLC0415
+    actor = f"admin:{_admin.get('sub', 'unknown')}"
+    result = reconcile_tenants(
+        db=db,
+        source_tenant_id=body.source_tenant_id,
+        target_tenant_id=body.target_tenant_id,
+        dry_run=body.dry_run,
+        actor=actor,
+    )
+    return result
+
+
+@router.get("/admin/tenant-integrity/events")
+async def admin_integrity_events(
+    tenant_id: Optional[int] = None,
+    event: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Recent integrity audit events (newest first)."""
+    from database.models import IntegrityEvent  # noqa: PLC0415
+
+    q = db.query(IntegrityEvent)
+    if tenant_id is not None:
+        q = q.filter(IntegrityEvent.tenant_id == tenant_id)
+    if event:
+        q = q.filter(IntegrityEvent.event == event)
+    entries = q.order_by(IntegrityEvent.created_at.desc()).limit(limit).all()
+
+    return {
+        "entries": [
+            {
+                "id":              e.id,
+                "event":           e.event,
+                "tenant_id":       e.tenant_id,
+                "other_tenant_id": e.other_tenant_id,
+                "phone_number_id": e.phone_number_id,
+                "waba_id":         e.waba_id,
+                "store_id":        e.store_id,
+                "provider":        e.provider,
+                "action":          e.action,
+                "result":          e.result,
+                "detail":          e.detail,
+                "actor":           e.actor,
+                "dry_run":         e.dry_run,
+                "created_at":      e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in entries
+        ]
+    }
+
+
+# ── Webhook Guardian: health overview + manual resubscribe ───────────────────
+
+@router.get("/admin/whatsapp/health")
+async def admin_webhook_health(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Return webhook health for every connected WhatsApp tenant.
+
+    Health status values:
+        active      – webhook_verified=true AND received event in last 15 min
+        warning     – webhook_verified=true BUT last event >15 min ago (or never)
+        critical    – webhook_verified=false while status=connected
+        disconnected – status != connected
+    """
+    from datetime import timezone as _tz  # noqa: PLC0415
+
+    conns = db.query(WhatsAppConnection).order_by(WhatsAppConnection.id.asc()).all()
+    now   = datetime.now(_tz.utc)
+
+    rows = []
+    for conn in conns:
+        tenant = db.query(Tenant).filter(Tenant.id == conn.tenant_id).first()
+
+        last_recv = conn.last_webhook_received_at
+        if last_recv and last_recv.tzinfo is None:
+            last_recv = last_recv.replace(tzinfo=_tz.utc)
+
+        minutes_since_last = None
+        if last_recv:
+            minutes_since_last = int((now - last_recv).total_seconds() / 60)
+
+        if conn.status != "connected":
+            health = "disconnected"
+        elif not conn.webhook_verified:
+            health = "critical"
+        elif last_recv is None or minutes_since_last > 15:
+            health = "warning"
+        else:
+            health = "active"
+
+        rows.append({
+            "tenant_id":              conn.tenant_id,
+            "tenant_name":            tenant.name if tenant else f"#{conn.tenant_id}",
+            "phone_number":           conn.phone_number,
+            "phone_number_id":        conn.phone_number_id,
+            "waba_id":                conn.whatsapp_business_account_id,
+            "status":                 conn.status,
+            "webhook_verified":       bool(conn.webhook_verified),
+            "sending_enabled":        bool(conn.sending_enabled),
+            "health":                 health,
+            "last_webhook_received_at": last_recv.isoformat() if last_recv else None,
+            "minutes_since_last_event": minutes_since_last,
+            "last_error":             conn.last_error,
+            "connection_type":        conn.connection_type,
+            "provider":               conn.provider,
+        })
+
+    summary = {
+        "active":       sum(1 for r in rows if r["health"] == "active"),
+        "warning":      sum(1 for r in rows if r["health"] == "warning"),
+        "critical":     sum(1 for r in rows if r["health"] == "critical"),
+        "disconnected": sum(1 for r in rows if r["health"] == "disconnected"),
+        "total":        len(rows),
+    }
+
+    return {"summary": summary, "connections": rows}
+
+
+@router.post("/admin/whatsapp/resubscribe-all")
+async def admin_resubscribe_all_webhooks(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Force-resubscribe every connected merchant WABA.
+    Useful after a major deployment to ensure no merchant lost their webhook.
+    """
+    from core.webhook_guardian import _subscribe_waba, _guardian_log  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+    from datetime import timezone as _tz  # noqa: PLC0415
+
+    conns = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.status == "connected",
+        WhatsAppConnection.access_token.isnot(None),
+        WhatsAppConnection.whatsapp_business_account_id.isnot(None),
+    ).all()
+
+    results = {}
+    for conn in conns:
+        try:
+            ok = await _subscribe_waba(
+                conn.whatsapp_business_account_id,
+                conn.access_token,
+                META_GRAPH_API_VERSION,
+            )
+            _guardian_log(
+                db, conn.tenant_id, conn.phone_number_id,
+                conn.whatsapp_business_account_id,
+                "webhook_resubscribed" if ok else "webhook_verification_failed",
+                success=ok,
+                detail=f"admin_resubscribe_all by {_admin.get('sub', 'admin')}",
+            )
+            if ok:
+                conn.webhook_verified = True
+                conn.updated_at = datetime.now(_tz.utc)
+            results[conn.tenant_id] = {"ok": ok}
+        except Exception as exc:
+            results[conn.tenant_id] = {"ok": False, "error": str(exc)}
+
+    db.commit()
+    audit(
+        "admin_resubscribe_all_webhooks",
+        admin=_admin.get("sub"),
+        total=len(conns),
+        succeeded=sum(1 for v in results.values() if v.get("ok")),
+    )
+    return {"ok": True, "total": len(conns), "results": results}
+
+
+@router.get("/admin/whatsapp/guardian-log")
+async def admin_guardian_log(
+    tenant_id: Optional[int] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Recent webhook guardian audit log entries (newest first)."""
+    from database.models import WebhookGuardianLog  # noqa: PLC0415
+
+    q = db.query(WebhookGuardianLog)
+    if tenant_id is not None:
+        q = q.filter(WebhookGuardianLog.tenant_id == tenant_id)
+    entries = q.order_by(WebhookGuardianLog.created_at.desc()).limit(limit).all()
+
+    return {
+        "entries": [
+            {
+                "id":               e.id,
+                "tenant_id":        e.tenant_id,
+                "phone_number_id":  e.phone_number_id,
+                "waba_id":          e.waba_id,
+                "event":            e.event,
+                "success":          e.success,
+                "detail":           e.detail,
+                "created_at":       e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in entries
+        ]
+    }

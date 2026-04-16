@@ -346,6 +346,51 @@ async def on_startup() -> None:
                           AND config->>'store_id' IS NOT NULL;
                     END IF;
                 END $$""",
+                # ── Tenant Integrity (migration 0022) ──────────────────────────
+                """DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_indexes
+                        WHERE tablename='whatsapp_connections'
+                        AND indexname='uq_wa_conn_waba_id'
+                    ) THEN
+                        CREATE UNIQUE INDEX uq_wa_conn_waba_id
+                        ON whatsapp_connections (whatsapp_business_account_id)
+                        WHERE whatsapp_business_account_id IS NOT NULL;
+                    END IF;
+                END $$""",
+                """CREATE TABLE IF NOT EXISTS integrity_events (
+                    id              SERIAL PRIMARY KEY,
+                    event           VARCHAR NOT NULL,
+                    tenant_id       INTEGER,
+                    other_tenant_id INTEGER,
+                    phone_number_id VARCHAR,
+                    waba_id         VARCHAR,
+                    store_id        VARCHAR,
+                    provider        VARCHAR,
+                    action          VARCHAR,
+                    result          VARCHAR,
+                    detail          TEXT,
+                    actor           VARCHAR,
+                    dry_run         BOOLEAN,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )""",
+                "CREATE INDEX IF NOT EXISTS ix_integrity_events_event ON integrity_events (event)",
+                "CREATE INDEX IF NOT EXISTS ix_integrity_events_tenant_id ON integrity_events (tenant_id)",
+                "CREATE INDEX IF NOT EXISTS ix_integrity_events_created_at ON integrity_events (created_at)",
+                # ── Webhook Guardian (migration 0021) ─────────────────────────
+                "ALTER TABLE whatsapp_connections ADD COLUMN IF NOT EXISTS last_webhook_received_at TIMESTAMPTZ",
+                """CREATE TABLE IF NOT EXISTS webhook_guardian_log (
+                    id              SERIAL PRIMARY KEY,
+                    tenant_id       INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                    phone_number_id VARCHAR,
+                    waba_id         VARCHAR,
+                    event           VARCHAR NOT NULL,
+                    success         BOOLEAN NOT NULL DEFAULT true,
+                    detail          TEXT,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )""",
+                "CREATE INDEX IF NOT EXISTS ix_webhook_guardian_log_tenant_created ON webhook_guardian_log (tenant_id, created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_webhook_guardian_log_event ON webhook_guardian_log (event)",
             ]
             for stmt in safe_alters:
                 try:
@@ -428,6 +473,43 @@ async def on_startup() -> None:
         logger.info("Automation engine scheduler started (60s).")
     except Exception as exc:
         logger.warning("Automation engine scheduler could not start: %s", exc)
+
+    # 8. Webhook Guardian — stall detection + auto-resubscription (every 5 min)
+    try:
+        from core.scheduler import run_webhook_guardian_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_webhook_guardian_scheduler())
+        logger.info("Webhook Guardian started (5min interval).")
+    except Exception as exc:
+        logger.warning("Webhook Guardian could not start: %s", exc)
+
+    # 9. Startup webhook health check — verify all merchant WABAs are subscribed
+    try:
+        from core.webhook_guardian import run_startup_webhook_health_check  # noqa: PLC0415
+        asyncio.create_task(run_startup_webhook_health_check())
+        logger.info("Startup webhook health check scheduled.")
+    except Exception as exc:
+        logger.warning("Startup webhook health check could not start: %s", exc)
+
+    # 10. Post-deploy tenant integrity scan — detects cross-tenant conflicts
+    async def _run_integrity_check():
+        await asyncio.sleep(90)  # let DB migrations and WA startup checks settle first
+        try:
+            from core.database import SessionLocal as _SL  # noqa: PLC0415
+            from core.tenant_integrity import run_post_deploy_check  # noqa: PLC0415
+            _db = _SL()
+            try:
+                result = run_post_deploy_check(_db)
+                logger.info("[Startup] Tenant integrity check complete: %s", result.get("summary", {}))
+            finally:
+                _db.close()
+        except Exception as _exc:
+            logger.warning("[Startup] Tenant integrity check error: %s", _exc)
+
+    try:
+        asyncio.create_task(_run_integrity_check())
+        logger.info("Post-deploy tenant integrity check scheduled.")
+    except Exception as exc:
+        logger.warning("Tenant integrity check could not start: %s", exc)
 
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.
