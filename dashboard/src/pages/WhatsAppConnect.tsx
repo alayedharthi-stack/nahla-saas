@@ -974,13 +974,15 @@ const inputCls = "w-full border border-slate-300 rounded-xl px-4 py-2.5 text-sm 
 // ── Manual Connect Component ──────────────────────────────────────────────────
 
 interface ConnectReadiness {
-  credentials_saved:  boolean
-  webhook_subscribed: boolean
-  inbound_usable:     boolean
-  webhook_error:      string | null
-  readiness:          string
-  phone_number_id:    string
-  waba_id:            string
+  credentials_saved:          boolean
+  phone_registered:           boolean
+  webhook_subscribed:         boolean
+  inbound_usable:             boolean
+  phone_registration_error:   string | null
+  webhook_error:              string | null
+  readiness:                  string
+  phone_number_id:            string
+  waba_id:                    string
 }
 
 function ReadinessBadge({ ok, label, detail }: { ok: boolean; label: string; detail?: string | null }) {
@@ -1136,6 +1138,17 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
             detail={readiness.credentials_saved ? 'تم حفظ بيانات الاعتماد في النظام بنجاح' : 'فشل حفظ بيانات الاعتماد'}
           />
           <ReadinessBadge
+            ok={readiness.phone_registered}
+            label="تسجيل الرقم في Meta Cloud API"
+            detail={
+              readiness.phone_registered
+                ? 'الرقم مُسجَّل ونشط في Meta — لا توجد حالة Pending'
+                : readiness.phone_registration_error
+                  ? `فشل تسجيل الرقم: ${readiness.phone_registration_error}`
+                  : 'الرقم لم يُسجَّل — قد يبقى في حالة Pending في Meta'
+            }
+          />
+          <ReadinessBadge
             ok={readiness.webhook_subscribed}
             label="اشتراك Webhook في Meta"
             detail={
@@ -1152,7 +1165,7 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
             detail={
               readiness.inbound_usable
                 ? 'الربط مكتمل — الرسائل الواردة ستُوجَّه بشكل صحيح'
-                : 'الربط جزئي — يمكن الإرسال لكن الرسائل الواردة قد لا تعمل حتى يُصلح اشتراك webhook'
+                : 'الربط جزئي — تحقق من تسجيل الرقم واشتراك webhook أعلاه'
             }
           />
           {!readiness.inbound_usable && readiness.credentials_saved && (

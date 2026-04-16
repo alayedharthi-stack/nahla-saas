@@ -15,11 +15,14 @@ Guarantees enforced here so routers never have to duplicate them:
   2. waba_id          — globally unique across tenants (active rows only).
   3. Stale disconnected rows on other tenants are evicted before writing.
   4. The target tenant_id exists in the tenants table (caller must verify).
-  5. Meta webhook subscription is attempted synchronously inside the write.
-  6. The result always carries three explicit readiness flags:
+  5. Phone registration via Meta Cloud API — called ONCE when the phone_number_id
+     is new or changed, to lift Meta's "Pending" state to "Active".
+  6. Meta webhook subscription is attempted synchronously inside the write.
+  7. The result carries four explicit readiness flags:
        credentials_saved  – credentials written to DB.
+       phone_registered   – Meta /register API returned 200 OK.
        webhook_subscribed – Meta app subscription confirmed.
-       inbound_usable     – phone unique + webhook verified + sending enabled.
+       inbound_usable     – registered + webhook active + sending enabled.
 
 Callers are responsible for:
   - Resolving the tenant_id from the authenticated JWT (not from fallback).
@@ -55,53 +58,61 @@ class WhatsAppConnectionError(Exception):
 @dataclass
 class ConnectionResult:
     """
-    Returned by commit_connection() and begin_waba_session().
+    Returned by commit_connection().
 
-    Three-state model:
-      credentials_saved  → the DB row is written; credentials are stored.
-      webhook_subscribed → Meta confirmed the app subscription for this WABA.
-      inbound_usable     → phone unique + webhook active + sending_enabled=True.
-                           Only True means end-to-end inbound routing will work.
+    Four-state readiness model:
+      credentials_saved  → DB row written; credentials stored.
+      phone_registered   → Meta /register API returned 200 OK (phone lifted from Pending).
+      webhook_subscribed → Meta confirmed app subscription for this WABA.
+      inbound_usable     → registered + webhook active + sending_enabled=True.
+                           Only True here means end-to-end inbound routing will work.
     """
-    tenant_id:          int
-    wa_conn_id:         Optional[int]
-    phone_number_id:    Optional[str]
-    waba_id:            str
-    connection_type:    str
+    tenant_id:                  int
+    wa_conn_id:                 Optional[int]
+    phone_number_id:            Optional[str]
+    waba_id:                    str
+    connection_type:            str
 
-    credentials_saved:  bool = False
-    webhook_subscribed: bool = False
-    inbound_usable:     bool = False
+    credentials_saved:          bool = False
+    phone_registered:           bool = False
+    webhook_subscribed:         bool = False
+    inbound_usable:             bool = False
 
-    webhook_error:      Optional[str] = None
-    action:             str = "unknown"   # "created" | "updated"
+    phone_registration_error:   Optional[str] = None
+    webhook_error:              Optional[str] = None
+    action:                     str = "unknown"   # "created" | "updated"
 
     def to_api_dict(self) -> dict:
         return {
-            "ok":                  self.credentials_saved,
-            "status":              "connected" if self.credentials_saved else "error",
-            "tenant_id":           self.tenant_id,
-            "phone_number_id":     self.phone_number_id,
-            "waba_id":             self.waba_id,
-            "connection_type":     self.connection_type,
-            "credentials_saved":   self.credentials_saved,
-            "webhook_subscribed":  self.webhook_subscribed,
-            "inbound_usable":      self.inbound_usable,
-            "webhook_error":       self.webhook_error,
-            "action":              self.action,
-            "readiness":           _readiness_label(
+            "ok":                       self.credentials_saved,
+            "status":                   "connected" if self.credentials_saved else "error",
+            "tenant_id":                self.tenant_id,
+            "phone_number_id":          self.phone_number_id,
+            "waba_id":                  self.waba_id,
+            "connection_type":          self.connection_type,
+            "credentials_saved":        self.credentials_saved,
+            "phone_registered":         self.phone_registered,
+            "webhook_subscribed":       self.webhook_subscribed,
+            "inbound_usable":           self.inbound_usable,
+            "phone_registration_error": self.phone_registration_error,
+            "webhook_error":            self.webhook_error,
+            "action":                   self.action,
+            "readiness":                _readiness_label(
                 self.credentials_saved,
+                self.phone_registered,
                 self.webhook_subscribed,
                 self.inbound_usable,
             ),
         }
 
 
-def _readiness_label(creds: bool, webhook: bool, inbound: bool) -> str:
+def _readiness_label(creds: bool, registered: bool, webhook: bool, inbound: bool) -> str:
     if inbound:
         return "inbound_usable"
     if webhook:
         return "webhook_subscribed"
+    if registered:
+        return "phone_registered"
     if creds:
         return "credentials_saved"
     return "not_connected"
@@ -174,8 +185,10 @@ def commit_connection(
         logger.warning("[WASvc] eviction warning (non-fatal): %s", exc)
 
     # ── Step 4: Write ─────────────────────────────────────────────────────────
+    # Capture old phone_number_id BEFORE overwriting so we can detect a change.
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    action = "updated" if conn else "created"
+    action        = "updated" if conn else "created"
+    old_phone_id  = conn.phone_number_id if conn else None   # used for registration gate
     if not conn:
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
@@ -224,7 +237,25 @@ def commit_connection(
         action          = action,
     )
 
-    # ── Step 5–6: Webhook subscription ───────────────────────────────────────
+    # ── Step 5: Phone registration (once per new/changed phone_number_id) ────
+    # Meta requires a POST /{phone_number_id}/register call to lift the phone
+    # from "Pending" to "Active" on the Cloud API.  We run this only when the
+    # phone_number_id is brand-new or just changed, so it is never called on
+    # server restarts or credential-only refreshes.
+    phone_is_new = (action == "created") or (old_phone_id != phone_number_id)
+    if phone_is_new:
+        reg_ok, reg_err = register_phone_number(phone_number_id, access_token, tenant_id)
+        result.phone_registered         = reg_ok
+        result.phone_registration_error = reg_err
+    else:
+        # Phone unchanged — assume already registered; preserve previous status.
+        result.phone_registered = True
+        logger.info(
+            "[WASvc] phone registration SKIPPED — phone unchanged tenant=%s phone=%s",
+            tenant_id, phone_number_id,
+        )
+
+    # ── Step 6–7: Webhook subscription ───────────────────────────────────────
     webhook_ok, webhook_err = subscribe_waba_webhook(waba_id, access_token, tenant_id)
     result.webhook_subscribed = webhook_ok
     result.webhook_error      = webhook_err
@@ -243,18 +274,25 @@ def commit_connection(
             tenant_id, waba_id, webhook_err,
         )
 
-    # ── Step 7: Compute inbound_usable ────────────────────────────────────────
+    # ── Step 8: Compute inbound_usable ────────────────────────────────────────
     result.inbound_usable = (
         result.credentials_saved
+        and result.phone_registered
         and result.webhook_subscribed
         and conn.sending_enabled
     )
 
     logger.info(
-        "[WASvc] RESULT — tenant=%s readiness=%s creds=%s webhook=%s inbound=%s",
+        "[WASvc] RESULT — tenant=%s readiness=%s creds=%s registered=%s webhook=%s inbound=%s",
         tenant_id,
-        _readiness_label(result.credentials_saved, result.webhook_subscribed, result.inbound_usable),
+        _readiness_label(
+            result.credentials_saved,
+            result.phone_registered,
+            result.webhook_subscribed,
+            result.inbound_usable,
+        ),
         result.credentials_saved,
+        result.phone_registered,
         result.webhook_subscribed,
         result.inbound_usable,
     )
@@ -332,6 +370,70 @@ def begin_waba_session(
         raise WhatsAppConnectionError(f"DB write failed: {exc}") from exc
 
     logger.info("[WASvc] begin_waba_session COMMITTED — tenant=%s waba=%s", tenant_id, waba_id)
+
+
+def register_phone_number(
+    phone_number_id: str,
+    access_token: str,
+    tenant_id: int,
+) -> tuple[bool, Optional[str]]:
+    """
+    POST /{phone_number_id}/register — lifts the phone from Meta's "Pending"
+    state to "Active" so it can send and receive messages via Cloud API.
+
+    This MUST be called once after a phone number is first connected.
+    Calling it on an already-active phone is idempotent and harmless.
+
+    Returns (success: bool, error_detail: str | None).
+    NEVER raises — the caller decides how to handle failure.
+    """
+    try:
+        from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+        url  = (
+            f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+            f"/{phone_number_id}/register"
+        )
+        resp = httpx.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type":  "application/json",
+            },
+            json={"messaging_product": "whatsapp"},
+            timeout=15,
+        )
+        data = resp.json()
+
+        if resp.status_code == 200 and data.get("success"):
+            logger.info(
+                "[WhatsApp] phone registration success — tenant=%s phone_number_id=%s",
+                tenant_id, phone_number_id,
+            )
+            return True, None
+
+        err = data.get("error", {})
+        msg = err.get("message") or f"HTTP {resp.status_code}"
+
+        # Code 80007 means the number is already registered — treat as success.
+        if err.get("code") == 80007:
+            logger.info(
+                "[WhatsApp] phone already registered (80007) — tenant=%s phone_number_id=%s",
+                tenant_id, phone_number_id,
+            )
+            return True, None
+
+        logger.warning(
+            "[WhatsApp] phone registration failed — tenant=%s phone_number_id=%s error=%r",
+            tenant_id, phone_number_id, msg,
+        )
+        return False, msg
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[WhatsApp] phone registration exception — tenant=%s phone_number_id=%s: %s",
+            tenant_id, phone_number_id, exc,
+        )
+        return False, str(exc)
 
 
 def subscribe_waba_webhook(
