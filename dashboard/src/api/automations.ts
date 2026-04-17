@@ -8,6 +8,7 @@ export type AutomationType =
   | 'new_product_alert'
   | 'back_in_stock'
   | 'unpaid_order_reminder'
+  | 'cod_confirmation'
   | 'seasonal_offer'
   | 'salary_payday_offer'
 
@@ -220,6 +221,13 @@ export const AUTOMATION_META: Record<AutomationType, {
     trigger: 'order_payment_pending',
     icon: '💳',
     color: 'red',
+  },
+  cod_confirmation: {
+    label: 'تأكيد طلبات الدفع عند الاستلام',
+    desc: 'يطلب من العميل تأكيد طلب COD، يُذكّره بعد 6 ساعات، ويُلغي الطلب تلقائياً بعد 24 ساعة بدون تأكيد. منفصل تماماً عن تذكير الطلبات غير المدفوعة.',
+    trigger: 'order_cod_pending',
+    icon: '📞',
+    color: 'amber',
   },
   seasonal_offer: {
     label: 'عروض المناسبات الذكية',

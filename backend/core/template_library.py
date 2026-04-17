@@ -464,6 +464,175 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
     },
 
+    # ── 9) Abandoned cart — stage 2 (6h follow-up, no discount) ─────────
+    #
+    # Sent by `automation_emitters.scan_abandoned_cart_followups` six
+    # hours after the original abandonment if the cart is still open.
+    # Tone: empathetic, "do you need help?" — explicitly NO coupon at
+    # this stage. Same slot contract as stage 1 so the same store/url
+    # vars resolve uniformly.
+    "abandoned_cart_followup": {
+        "automation_type": "abandoned_cart",
+        "trigger_event":   "cart_abandoned",
+        "category":        "MARKETING",
+        "languages": {
+            "ar": {
+                "template_name": "abandoned_cart_followup_ar",
+                "slots":         ["customer_name", "store_name", "checkout_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 🌷\n\n"
+                            "ما زال طلبك في متجر {{2}} بانتظارك.\n\n"
+                            "إذا واجهتَ أي صعوبة في إتمام الطلب — سواء بالدفع أو "
+                            "الشحن أو معلومات المنتج — يسعدنا مساعدتك مباشرة عبر هذه المحادثة.\n\n"
+                            "أو يمكنك إكمال الطلب من هنا متى أردت:\n\n"
+                            "{{3}}"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "إكمال الطلب", "url": "{{3}}"}],
+                    },
+                ],
+            },
+            "en": {
+                "template_name": "abandoned_cart_followup_en",
+                "slots":         ["customer_name", "store_name", "checkout_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 🌷\n\n"
+                            "Your cart at {{2}} is still waiting for you.\n\n"
+                            "If you ran into any trouble — payment, shipping, or "
+                            "questions about the product — just reply here and we'll help.\n\n"
+                            "Or pick up where you left off any time:\n\n"
+                            "{{3}}"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "Complete order", "url": "{{3}}"}],
+                    },
+                ],
+            },
+        },
+    },
+
+    # ── 10) Abandoned cart — stage 3 (24h, optional coupon) ────────────
+    #
+    # Last reminder. The merchant's `auto_coupon=True` step config (or
+    # the OfferDecisionService when the tenant is on ENFORCE/ADVISORY)
+    # decides whether `discount_code` is populated. When the resolver
+    # returns no code, the engine renders an empty discount slot — the
+    # template still ships, just without the price-off line.
+    "abandoned_cart_final_offer": {
+        "automation_type": "abandoned_cart",
+        "trigger_event":   "cart_abandoned",
+        "category":        "MARKETING",
+        "languages": {
+            "ar": {
+                "template_name": "abandoned_cart_final_offer_ar",
+                "slots":         ["customer_name", "store_name", "discount_code", "checkout_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 💛\n\n"
+                            "آخر تذكير لطلبك في متجر {{2}}.\n\n"
+                            "حضّرنا لك عرضاً صغيراً لتجربة مريحة — استخدم الكود التالي:\n\n"
+                            "{{3}}\n\n"
+                            "أكمل طلبك الآن:\n\n"
+                            "{{4}}"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "إكمال الطلب", "url": "{{4}}"}],
+                    },
+                ],
+            },
+            "en": {
+                "template_name": "abandoned_cart_final_offer_en",
+                "slots":         ["customer_name", "store_name", "discount_code", "checkout_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 💛\n\n"
+                            "Last nudge for your cart at {{2}}.\n\n"
+                            "We've prepared a small offer to make this easy — use this code:\n\n"
+                            "{{3}}\n\n"
+                            "Finish your order:\n\n"
+                            "{{4}}"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "Complete order", "url": "{{4}}"}],
+                    },
+                ],
+            },
+        },
+    },
+
+    # ── 11) COD confirmation reminder ──────────────────────────────────
+    #
+    # Sent by `automation_emitters.scan_cod_confirmations` when a COD
+    # order has been in `pending_confirmation` for the configured
+    # window (default 6 h) without the customer tapping the QUICK_REPLY
+    # buttons on the original `cod_order_confirmation_ar` template.
+    #
+    # UTILITY category because this is a confirmation request for a
+    # transactional flow the customer themselves initiated, not a
+    # promotional nudge.
+    "cod_confirmation_reminder": {
+        "automation_type": "cod_confirmation",
+        "trigger_event":   "order_cod_pending",
+        "category":        "UTILITY",
+        "languages": {
+            "ar": {
+                "template_name": "cod_confirmation_reminder_ar",
+                "slots":         ["customer_name", "order_id", "store_name"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 👋\n\n"
+                            "طلبك رقم #{{2}} في متجر {{3}} بانتظار تأكيدك.\n\n"
+                            "للتأكيد فقط ردّ على هذه الرسالة بكلمة \"تأكيد\"، "
+                            "وللإلغاء ردّ بكلمة \"إلغاء\".\n\n"
+                            "إن لم نتلقَّ ردّك خلال الفترة المحددة سيتم إلغاء الطلب تلقائياً 🌟"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                ],
+            },
+            "en": {
+                "template_name": "cod_confirmation_reminder_en",
+                "slots":         ["customer_name", "order_id", "store_name"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 👋\n\n"
+                            "Your order #{{2}} at {{3}} is still waiting for your confirmation.\n\n"
+                            "Reply \"confirm\" to confirm, or \"cancel\" to cancel.\n\n"
+                            "If we don't hear back, the order will be cancelled automatically 🌟"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                ],
+            },
+        },
+    },
+
     # ── 3) VIP customer reward ───────────────────────────────────────────
     "vip_customer_upgrade": {
         "automation_type": "vip_upgrade",

@@ -36,7 +36,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
-from models import Coupon, Promotion
+from models import Coupon, Promotion, SmartAutomation
 from services.promotion_engine import (
     ACTIVE_STATUS,
     DRAFT_STATUS,
@@ -182,6 +182,104 @@ async def list_promotions(
 
     rows = q.order_by(Promotion.id.desc()).limit(500).all()
     return {"promotions": [_to_dict(r) for r in rows]}
+
+
+@router.get("/seasonal-calendar")
+async def seasonal_calendar(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Structured view of the public seasonal calendar — one entry per
+    occasion (Founding Day, National Day, Ramadan, Eid Fitr, Eid Adha,
+    White Friday, Salary Payday).
+
+    Each entry binds the merchant-editable Promotion row that drives the
+    occasion to the linked SmartAutomation surface plus an AI summary
+    explaining what the autopilot does once the offer is activated. The
+    Promotions page renders this as the "Seasonal Calendar" panel above
+    the freeform promotions grid so the merchant has a first-class
+    configuration surface for every public occasion the engine knows
+    about — without having to invent the offer from scratch.
+
+    Idempotently calls `ensure_default_promotions_for_tenant` so a fresh
+    tenant gets the default seasonal Promotion rows on first visit. The
+    response always includes the canonical occasion list even if a row
+    is missing — the card renders with a "configure" CTA in that case.
+    """
+    from core.automations_seed import (  # noqa: PLC0415
+        SEASONAL_OCCASIONS,
+        ensure_default_promotions_for_tenant,
+    )
+    from core.calendar_events import event_for_slug, next_occurrence_for  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    try:
+        ensure_default_promotions_for_tenant(db, tenant_id)
+        db.commit()
+    except Exception:  # pragma: no cover — never block a read
+        db.rollback()
+
+    sweep_expired(db, tenant_id)
+
+    promos = (
+        db.query(Promotion)
+        .filter(Promotion.tenant_id == tenant_id)
+        .all()
+    )
+    by_promo_slug: Dict[str, Promotion] = {}
+    by_occasion: Dict[str, Promotion] = {}
+    for promo in promos:
+        meta = promo.extra_metadata or {}
+        if meta.get("slug"):
+            by_promo_slug[str(meta["slug"])] = promo
+        if meta.get("occasion_slug"):
+            by_occasion.setdefault(str(meta["occasion_slug"]), promo)
+
+    automations_by_type: Dict[str, SmartAutomation] = {}
+    for auto in (
+        db.query(SmartAutomation)
+        .filter(SmartAutomation.tenant_id == tenant_id)
+        .all()
+    ):
+        automations_by_type.setdefault(auto.automation_type, auto)
+
+    occasions: List[Dict[str, Any]] = []
+    for spec in SEASONAL_OCCASIONS:
+        occasion_slug = spec["occasion_slug"]
+        promo = by_occasion.get(occasion_slug) or by_promo_slug.get(spec["promotion_slug"])
+
+        ev = event_for_slug(occasion_slug)
+        if ev is not None:
+            display_name = ev.name_ar
+            category = ev.category
+            next_date = next_occurrence_for(occasion_slug)
+        elif occasion_slug == "salary_payday":
+            display_name = "يوم الراتب"
+            category = "salary"
+            next_date = None
+        else:
+            display_name = occasion_slug
+            category = "other"
+            next_date = None
+
+        auto = automations_by_type.get(spec["automation_type"])
+        occasions.append({
+            "occasion_slug":   occasion_slug,
+            "name":            display_name,
+            "category":        category,
+            "next_date":       next_date.isoformat() if next_date else None,
+            "ai_summary":      spec["ai_summary"],
+            "automation_type": spec["automation_type"],
+            "automation_id":   getattr(auto, "id", None),
+            "automation_enabled": bool(getattr(auto, "enabled", False)),
+            "promotion":       _to_dict(promo) if promo is not None else None,
+            "promotion_slug":  spec["promotion_slug"],
+        })
+
+    return {"occasions": occasions}
 
 
 @router.get("/summary")

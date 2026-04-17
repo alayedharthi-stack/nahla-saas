@@ -422,7 +422,7 @@ async def _try_execute(
 
     # ── Delay check ───────────────────────────────────────────────────────────
     config: Dict[str, Any] = automation.config or {}
-    delay_minutes: int = _resolve_delay(config)
+    delay_minutes: int = _resolve_delay(config, event=event)
     event_age_minutes = (now - _naive_utc(event.created_at)).total_seconds() / 60.0
     if event_age_minutes < delay_minutes:
         remaining = delay_minutes - event_age_minutes
@@ -493,8 +493,29 @@ async def _try_execute(
 
 # ── Internal: helpers ─────────────────────────────────────────────────────────
 
-def _resolve_delay(config: Dict[str, Any]) -> int:
-    """Extract delay_minutes from automation config (flat or steps-based)."""
+def _resolve_delay(config: Dict[str, Any], *, event: Optional[Any] = None) -> int:
+    """Extract delay_minutes from automation config (flat or steps-based).
+
+    Multi-stage workflows (abandoned cart, cod confirmation, …) re-emit
+    follow-up events that already carry an explicit `step_idx` in the
+    payload — emitted by the periodic sweeper EXACTLY when its delay
+    has elapsed, so the engine should NOT re-apply a delay on top of
+    that. When `event.payload.step_idx` is present (and not 0 / stage 1)
+    we return 0 unconditionally so the engine ticks the new event
+    through immediately on its next cycle.
+
+    Stage 1 (`step_idx = 0` or no `step_idx`) is the original event
+    coming from the storefront snippet / order creation, and must
+    still respect `steps[0].delay_minutes` so the merchant's "reminder
+    after 30 minutes" promise holds.
+    """
+    if event is not None:
+        try:
+            step_idx = (event.payload or {}).get("step_idx")
+        except Exception:
+            step_idx = None
+        if step_idx is not None and int(step_idx) > 0:
+            return 0
     # Flat form: {"delay_minutes": 30}
     if "delay_minutes" in config:
         return int(config["delay_minutes"])
@@ -617,7 +638,18 @@ async def _execute_action(
             .first()
         )
     if not template:
-        tpl_name = config.get("template_name")
+        # Per-step override wins over the automation-level default.
+        # Multi-stage workflows (abandoned cart) need a different
+        # template per stage — stage 1 is a pure reminder, stage 3
+        # carries a coupon slot — and they declare each via
+        # `step.template_name`. Fall back to `config.template_name`
+        # for single-template automations and for stages that don't
+        # need their own copy.
+        active_step_for_template = _active_step_for_event(event, config)
+        tpl_name = (
+            (active_step_for_template or {}).get("template_name")
+            or config.get("template_name")
+        )
         if tpl_name:
             template = (
                 db.query(WhatsAppTemplate)
@@ -647,6 +679,7 @@ async def _execute_action(
         active_step=_active_step_for_event(event, config),
         automation_id=getattr(automation, "id", None),
         event_id=getattr(event, "id", None),
+        event_payload=event.payload or {},
     )
 
     # ── Build template variables ──────────────────────────────────────────────
@@ -876,13 +909,37 @@ def _resolve_slot_value(
 
 def _active_step_for_event(event: Any, config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    For multi-step automations (e.g. cart_abandoned with 3 reminders), pick
-    the step whose `delay_minutes` matches how old the event is. Returns the
-    flat config when there are no steps.
+    Pick the active step for a multi-step automation.
+
+    Resolution order:
+
+      1. `event.payload.step_idx` (0-indexed) — set by sweepers that
+         re-emit follow-up events at exact stage boundaries (abandoned
+         cart stages 2/3, cod confirmation reminder, unpaid order
+         escalations). This is authoritative because the sweeper has
+         already decided which stage is due — second-guessing by event
+         age would race with sweeper cadence.
+
+      2. Largest `step.delay_minutes` ≤ event age — the original
+         single-event path used by automations that don't have a
+         re-emitter (legacy contract, kept intact).
+
+    Returns `{}` when the config has no steps.
     """
     steps = config.get("steps")
     if not isinstance(steps, list) or not steps:
         return {}
+
+    payload = getattr(event, "payload", None) or {}
+    raw_idx = payload.get("step_idx")
+    if raw_idx is not None:
+        try:
+            idx = int(raw_idx)
+        except (TypeError, ValueError):
+            idx = -1
+        if 0 <= idx < len(steps) and isinstance(steps[idx], dict):
+            return steps[idx]
+
     age_minutes = max(
         0,
         int((_utcnow_naive() - _naive_utc(event.created_at)).total_seconds() // 60),
@@ -966,6 +1023,7 @@ async def _resolve_auto_coupon(
     active_step: Dict[str, Any],
     automation_id: Optional[int] = None,
     event_id: Optional[int] = None,
+    event_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """
     Resolve the discount artifact for this automation step.
@@ -1007,6 +1065,7 @@ async def _resolve_auto_coupon(
             active_step=active_step,
             automation_id=automation_id,
             event_id=event_id,
+            event_payload=event_payload,
         )
 
     if mode is DecisionMode.ADVISORY:
@@ -1025,6 +1084,7 @@ async def _resolve_auto_coupon(
             customer=customer,
             config=config,
             active_step=active_step,
+            event_payload=event_payload,
         )
         if advisory_decision is not None and extras.get("coupon_code"):
             _stamp_advisory_on_legacy_coupon(
@@ -1042,6 +1102,7 @@ async def _resolve_auto_coupon(
         customer=customer,
         config=config,
         active_step=active_step,
+        event_payload=event_payload,
     )
 
 
@@ -1052,6 +1113,7 @@ async def _resolve_auto_coupon_legacy(
     customer: Any,
     config: Dict[str, Any],
     active_step: Dict[str, Any],
+    event_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """The pre-OfferDecisionService resolver.
 
@@ -1060,15 +1122,27 @@ async def _resolve_auto_coupon_legacy(
     identical to the pre-rollout codebase — the only change in
     ADVISORY is that the resulting Coupon gets a back-stamped
     `decision_id`.
+
+    `event_payload` is the upstream `AutomationEvent.payload` (or `{}`).
+    For SEASONAL_EVENT_DUE events it carries `event_slug` (e.g.
+    `"founding_day"`), which lets the promotion path prefer a
+    merchant-edited per-occasion Promotion before falling back to the
+    automation's configured `promotion_id`.
     """
     source = _resolve_discount_source(config, active_step)
 
     if source == "promotion":
+        promotion_id = _pick_promotion_id_for_event(
+            db,
+            tenant_id=tenant_id,
+            event_payload=event_payload,
+            fallback_promotion_id=config.get("promotion_id"),
+        )
         return await _materialise_promotion_for_send(
             db,
             tenant_id=tenant_id,
             customer=customer,
-            promotion_id=config.get("promotion_id"),
+            promotion_id=promotion_id,
         )
 
     if source != "coupon":
@@ -1135,6 +1209,66 @@ async def _resolve_auto_coupon_legacy(
     return {"discount_code": code, "vip_coupon": code, "coupon_code": code}
 
 
+def _pick_promotion_id_for_event(
+    db: Session,
+    *,
+    tenant_id: int,
+    event_payload: Optional[Dict[str, Any]],
+    fallback_promotion_id: Any,
+) -> Any:
+    """
+    Choose the most-specific Promotion id for the current event.
+
+    For seasonal events (`SEASONAL_EVENT_DUE`) the emitter writes
+    `event_slug` into the payload — e.g. `"founding_day"` or
+    `"white_friday"`. We look up the tenant's active Promotion whose
+    `extra_metadata.occasion_slug` matches and prefer that row over the
+    automation's configured fallback. This is what lets the merchant
+    set a per-occasion discount inside the Seasonal Calendar panel
+    without ever touching the SmartAutomation config.
+
+    Falls back to `fallback_promotion_id` (the automation's
+    `config.promotion_id`) when:
+      • there is no event_slug (e.g. salary_payday flows);
+      • no per-occasion promotion exists for this tenant;
+      • the per-occasion promotion is paused / drafted / expired
+        (i.e. `is_promotion_active` returns False).
+
+    The fallback is never overridden when an active per-occasion row is
+    found — explicit merchant configuration always wins. Errors are
+    swallowed and the fallback is returned so a misconfigured row never
+    blocks a WhatsApp send.
+    """
+    payload = event_payload or {}
+    event_slug = (payload.get("event_slug") or "").strip()
+    if not event_slug:
+        return fallback_promotion_id
+
+    try:
+        from models import Promotion  # noqa: PLC0415
+        from services.promotion_engine import is_promotion_active  # noqa: PLC0415
+
+        candidates = (
+            db.query(Promotion)
+            .filter(Promotion.tenant_id == tenant_id)
+            .all()
+        )
+        for promo in candidates:
+            slug = (promo.extra_metadata or {}).get("occasion_slug")
+            if slug != event_slug:
+                continue
+            if not is_promotion_active(promo):
+                continue
+            return promo.id
+    except Exception as exc:  # pragma: no cover — defensive only
+        logger.debug(
+            "[AutoEngine] occasion-specific promotion lookup failed "
+            "tenant=%s event_slug=%s: %s — falling back",
+            tenant_id, event_slug, exc,
+        )
+    return fallback_promotion_id
+
+
 async def _materialise_promotion_for_send(
     db: Session,
     *,
@@ -1191,6 +1325,7 @@ async def _resolve_via_decision_service(
     active_step: Dict[str, Any],
     automation_id: Optional[int],
     event_id: Optional[int],
+    event_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """
     ENFORCE path: delegate to the shared `OfferDecisionService`.
@@ -1217,11 +1352,28 @@ async def _resolve_via_decision_service(
         logger.warning("[AutoEngine] decision service import failed: %s", exc)
         return {}
 
+    # Per-occasion override: if a SEASONAL_EVENT_DUE event is in flight
+    # and the merchant has an active per-occasion Promotion, route the
+    # decision toward that row instead of the automation's static
+    # `config.promotion_id`. We mutate a *shallow* copy of `config` only
+    # — never the live row — so the override is scoped to this single
+    # decision call.
+    occasion_promo_id = _pick_promotion_id_for_event(
+        db,
+        tenant_id=tenant_id,
+        event_payload=event_payload,
+        fallback_promotion_id=config.get("promotion_id"),
+    )
+    config_for_ctx = config
+    if occasion_promo_id and occasion_promo_id != config.get("promotion_id"):
+        config_for_ctx = dict(config)
+        config_for_ctx["promotion_id"] = occasion_promo_id
+
     ctx = _build_automation_decision_context(
         db,
         tenant_id=tenant_id,
         customer=customer,
-        config=config,
+        config=config_for_ctx,
         active_step=active_step,
         automation_id=automation_id,
         event_id=event_id,

@@ -50,6 +50,14 @@ class AutomationTrigger(str, Enum):
     # Growth engine: scheduled by automation_emitters.scan_calendar_events
     # one day before each tenant's configured payday.
     SALARY_PAYDAY_DUE      = "salary_payday_due"
+    # Recovery engine: a Cash-on-Delivery order has been left in
+    # `pending_confirmation` past the merchant's reminder window.
+    # Emitted by `automation_emitters.scan_cod_confirmations` and
+    # consumed by the `cod_confirmation` SmartAutomation. Distinct from
+    # ORDER_PAYMENT_PENDING, which fires for online-payment orders only
+    # — the two sweepers operate on disjoint status sets and never
+    # collide on the same order.
+    ORDER_COD_PENDING      = "order_cod_pending"
 
 
 # Canonical mapping: SmartAutomation.automation_type → AutomationTrigger
@@ -65,6 +73,7 @@ AUTOMATION_TYPE_TO_TRIGGER: Dict[str, AutomationTrigger] = {
     "unpaid_order_reminder": AutomationTrigger.ORDER_PAYMENT_PENDING,
     "seasonal_offer":        AutomationTrigger.SEASONAL_EVENT_DUE,
     "salary_payday_offer":   AutomationTrigger.SALARY_PAYDAY_DUE,
+    "cod_confirmation":      AutomationTrigger.ORDER_COD_PENDING,
 }
 
 

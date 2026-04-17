@@ -939,12 +939,12 @@ function SubAutomationCard({
                   <Clock className="w-3 h-3" /> 30 دقيقة
                 </span>
                 <span className="text-slate-300">→</span>
-                <span className={`flex items-center gap-1 ${(config as AutopilotSettings['abandoned_cart']).reminder_24h ? 'text-emerald-600' : 'text-slate-400 line-through'}`}>
-                  <Clock className="w-3 h-3" /> 24 ساعة
+                <span className={`flex items-center gap-1 ${(config as AutopilotSettings['abandoned_cart']).reminder_6h ? 'text-emerald-600' : 'text-slate-400 line-through'}`}>
+                  <Clock className="w-3 h-3" /> 6 ساعات
                 </span>
                 <span className="text-slate-300">→</span>
-                <span className={`flex items-center gap-1 ${(config as AutopilotSettings['abandoned_cart']).coupon_48h ? 'text-emerald-600' : 'text-slate-400 line-through'}`}>
-                  <Clock className="w-3 h-3" /> 48 ساعة + كوبون
+                <span className={`flex items-center gap-1 ${(config as AutopilotSettings['abandoned_cart']).coupon_24h ? 'text-emerald-600' : 'text-slate-400 line-through'}`}>
+                  <Clock className="w-3 h-3" /> 24 ساعة + كوبون اختياري
                 </span>
               </div>
             </>
@@ -1105,7 +1105,7 @@ function AutopilotTab() {
     enabled: false,
     order_status_update: { enabled: true, notify_statuses: ['pending', 'shipped', 'delivered', 'cancelled'], template_name: 'order_status_update_ar' },
     predictive_reorder:  { enabled: true, days_before: 3, consumption_days_default: 45, template_name: 'predictive_reorder_reminder_ar' },
-    abandoned_cart:      { enabled: true, reminder_30min: true, reminder_24h: true, coupon_48h: false, coupon_code: '', template_name: 'abandoned_cart_reminder' },
+    abandoned_cart:      { enabled: true, reminder_30min: true, reminder_6h: true, coupon_24h: false, coupon_code: '', template_name: 'abandoned_cart_recovery_ar' },
     inactive_recovery:   { enabled: true, inactive_days: 60, discount_pct: 15, template_name: 'win_back' },
   }
 

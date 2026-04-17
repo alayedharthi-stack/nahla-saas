@@ -87,6 +87,39 @@ export interface PromotionCreatePayload {
 
 export type PromotionPatchPayload = Partial<PromotionCreatePayload>
 
+// ── Seasonal calendar (new) ──────────────────────────────────────────────────
+// Backend-driven view of the public Saudi calendar. Each entry pairs a
+// known occasion (Founding Day, National Day, Ramadan, …) with the
+// merchant-editable Promotion that drives it AND with the linked
+// SmartAutomation that fans it out. The Promotions page renders this
+// as the headline configuration surface above the freeform grid.
+
+export type SeasonalOccasionSlug =
+  | 'founding_day'
+  | 'national_day'
+  | 'white_friday'
+  | 'ramadan_start'
+  | 'eid_al_fitr'
+  | 'eid_al_adha'
+  | 'salary_payday'
+
+export interface SeasonalOccasion {
+  occasion_slug:        SeasonalOccasionSlug | string
+  name:                 string
+  category:             string
+  next_date:            string | null
+  ai_summary:           string
+  automation_type:      string
+  automation_id:        number | null
+  automation_enabled:   boolean
+  promotion:            Promotion | null
+  promotion_slug:       string
+}
+
+export interface SeasonalCalendar {
+  occasions: SeasonalOccasion[]
+}
+
 export const promotionsApi = {
   list: (filter?: { status?: PromotionStatus; promotion_type?: PromotionType }) => {
     const qs = new URLSearchParams()
@@ -97,6 +130,8 @@ export const promotionsApi = {
   },
 
   summary: () => apiCall<PromotionsSummary>('/promotions/summary'),
+
+  seasonalCalendar: () => apiCall<SeasonalCalendar>('/promotions/seasonal-calendar'),
 
   get: (id: number) => apiCall<Promotion>(`/promotions/${id}`),
 

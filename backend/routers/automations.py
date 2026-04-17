@@ -95,12 +95,23 @@ DEFAULT_AUTOPILOT: Dict[str, Any] = {
         "template_name": "predictive_reorder_reminder_ar",
     },
     "abandoned_cart": {
+        # Three-stage recovery workflow (managed end-to-end by the
+        # `abandoned_cart` SmartAutomation row + the cart_followups
+        # sweeper). The merchant sees one toggle per stage in the
+        # dashboard, but execution is unified in the engine.
+        #   • reminder_30min  — stage 1, friendly nudge, no discount.
+        #   • reminder_6h     — stage 2, "need help?", no discount.
+        #   • coupon_24h      — stage 3, optional last-chance coupon.
+        # The legacy `coupon_48h` field is RETIRED and intentionally
+        # absent here; merchants who saved it under the old shape get
+        # it migrated to `coupon_24h` on next read (see
+        # `_migrate_legacy_abandoned_cart_settings`).
         "enabled": True,
         "reminder_30min": True,
-        "reminder_24h": True,
-        "coupon_48h": False,
-        "coupon_code": "",
-        "template_name": "abandoned_cart_reminder",
+        "reminder_6h":    True,
+        "coupon_24h":     False,
+        "coupon_code":    "",
+        "template_name":  "abandoned_cart_recovery_ar",
     },
     "inactive_recovery": {
         "enabled": True,
@@ -161,6 +172,11 @@ class AutopilotSubIn(BaseModel):
     days_before: Optional[int] = None
     consumption_days_default: Optional[int] = None
     reminder_30min: Optional[bool] = None
+    reminder_6h: Optional[bool] = None
+    coupon_24h: Optional[bool] = None
+    # Legacy shape — accepted for backward compat with merchants who
+    # saved settings before the 3-stage rollout. Migrated to
+    # `reminder_6h` / `coupon_24h` by `_migrate_legacy_abandoned_cart_settings`.
     reminder_24h: Optional[bool] = None
     coupon_48h: Optional[bool] = None
     coupon_code: Optional[str] = None
@@ -234,7 +250,54 @@ def _get_autopilot_settings(db: Session, tenant_id: int) -> Dict[str, Any]:
         merged["enabled"] = legacy_enabled
     if legacy_enabled is not None and "enabled" not in stored:
         merged["enabled"] = legacy_enabled
+    merged["abandoned_cart"] = _migrate_legacy_abandoned_cart_settings(
+        merged.get("abandoned_cart") or {}
+    )
     return merged
+
+
+def _migrate_legacy_abandoned_cart_settings(sub: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Translate the pre-3-stage abandoned-cart shape into the new shape.
+
+    The dashboard used to expose `reminder_24h` and `coupon_48h` because
+    the old engine only wired stage 1 → no follow-up + an optional 48h
+    coupon. The new 3-stage workflow uses `reminder_6h` (stage 2) and
+    `coupon_24h` (stage 3) instead. Merchants who saved the legacy
+    shape get an in-memory rewrite on every read so:
+
+      • their previous "send a coupon" intent is preserved
+        (legacy `coupon_48h=True` → new `coupon_24h=True`);
+      • the absence of `reminder_6h` defaults to ON (the workflow's
+        own default) so an upgrade never silently disables a stage;
+      • the legacy keys are stripped from the response so the dashboard
+        never renders the retired toggles.
+
+    Pure function — does NOT write back to the DB. The next save from
+    the merchant's UI will persist the new shape.
+    """
+    if not isinstance(sub, dict):
+        return dict(DEFAULT_AUTOPILOT["abandoned_cart"])
+
+    out = dict(sub)
+    # `reminder_24h` was the legacy stage-2 toggle (24h reminder, no
+    # coupon). The new workflow places the second nudge at 6h. We map
+    # the merchant's intent ("yes, do send a second reminder") onto
+    # the new field; merchants who turned the old toggle off keep
+    # second-stage nudges off too.
+    if "reminder_24h" in out and "reminder_6h" not in out:
+        out["reminder_6h"] = bool(out.get("reminder_24h"))
+    out.pop("reminder_24h", None)
+
+    # Same for the old coupon toggle.
+    if "coupon_48h" in out and "coupon_24h" not in out:
+        out["coupon_24h"] = bool(out.get("coupon_48h"))
+    out.pop("coupon_48h", None)
+
+    # Backfill defaults for any keys the merchant never had.
+    base = dict(DEFAULT_AUTOPILOT["abandoned_cart"])
+    base.update(out)
+    return base
 
 
 def _save_autopilot_settings(db: Session, tenant_id: int, autopilot: Dict[str, Any]) -> None:

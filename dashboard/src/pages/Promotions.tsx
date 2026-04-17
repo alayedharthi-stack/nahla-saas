@@ -14,10 +14,12 @@ import {
   Coins,
   Bot,
   X,
+  Sparkles,
+  CalendarDays,
+  Settings as SettingsIcon,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
-import AiBanner from '../components/ui/AiBanner'
 import PageHeader from '../components/ui/PageHeader'
 import {
   promotionsApi,
@@ -27,6 +29,8 @@ import {
   type PromotionStatus,
   type PromotionType,
   type PromotionsSummary,
+  type SeasonalCalendar,
+  type SeasonalOccasion,
 } from '../api/promotions'
 import {
   automationsApi,
@@ -386,12 +390,343 @@ function usagesForPromotion(promotionId: number, automations: AutomationRecord[]
   return out
 }
 
+// ── Seasonal calendar panel ──────────────────────────────────────────────────
+//
+// First-class configuration surface for the public Saudi promotional
+// calendar. Each card binds one occasion (Founding Day, Ramadan, …)
+// to its merchant-editable Promotion row plus the SmartAutomation that
+// fans it out. The merchant edits the *terms* (discount, status, window)
+// and the autopilot decides *when* to fire and *who* receives it —
+// see the AI summary line on each card.
+//
+// Architectural note: occasion → Promotion linkage is keyed on
+// `extra_metadata.occasion_slug` (server-side, see
+// `core/automations_seed.SEASONAL_OCCASIONS`). The engine prefers the
+// per-occasion row at materialisation time and falls back to the
+// generic `seasonal_default_15` row, so deleting a per-occasion card
+// is safe.
+
+const OCCASION_ICON: Record<string, string> = {
+  founding_day:  '🇸🇦',
+  national_day:  '🟢',
+  white_friday:  '🛍️',
+  ramadan_start: '🌙',
+  eid_al_fitr:   '🕌',
+  eid_al_adha:   '🕋',
+  salary_payday: '💰',
+}
+
+function formatOccasionDate(iso: string | null): string {
+  if (!iso) return '—'
+  try {
+    return new Date(iso).toLocaleDateString('ar-SA', {
+      year:  'numeric',
+      month: 'long',
+      day:   'numeric',
+    })
+  } catch {
+    return iso
+  }
+}
+
+interface OccasionCardProps {
+  occasion: SeasonalOccasion
+  onUpdated: () => void
+}
+
+function OccasionCard({ occasion, onUpdated }: OccasionCardProps) {
+  const promo = occasion.promotion
+  const [editing, setEditing] = useState(false)
+  const [discount, setDiscount] = useState<string>(
+    promo?.discount_value != null ? String(promo.discount_value) : '15',
+  )
+  const [endsAt, setEndsAt] = useState<string>(
+    promo?.ends_at ? promo.ends_at.slice(0, 16) : '',
+  )
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const status = promo ? PROMOTION_STATUS_META[promo.effective_status] : null
+  const isActive = promo?.effective_status === 'active'
+
+  const handleSaveTerms = async () => {
+    if (!promo) return
+    const value = Number(discount)
+    if (!Number.isFinite(value) || value < 0 || value > 100) {
+      setErr('قيمة الخصم يجب أن تكون بين 0 و 100')
+      return
+    }
+    setSaving(true); setErr(null)
+    try {
+      await promotionsApi.update(promo.id, {
+        discount_value: value,
+        ends_at:        endsAt ? endsAt : null,
+      })
+      setEditing(false)
+      onUpdated()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'تعذّر الحفظ')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleToggle = async () => {
+    if (!promo) return
+    setSaving(true); setErr(null)
+    try {
+      if (isActive) {
+        await promotionsApi.pause(promo.id)
+      } else {
+        await promotionsApi.activate(promo.id)
+      }
+      onUpdated()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'تعذّر تحديث الحالة')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleCreate = async () => {
+    setSaving(true); setErr(null)
+    try {
+      const value = Number(discount) || 15
+      await promotionsApi.create({
+        name:           occasion.name,
+        description:    occasion.ai_summary,
+        promotion_type: 'percentage',
+        discount_value: value,
+        conditions:     { min_orders_for_eligibility: 1 } as Record<string, unknown>,
+        status:         'draft',
+        extra_metadata: {
+          occasion_slug: occasion.occasion_slug,
+          kind:          'seasonal',
+        },
+      })
+      onUpdated()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'تعذّر إنشاء العرض')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="card p-4 flex flex-col">
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-10 h-10 rounded-lg bg-amber-50 text-2xl flex items-center justify-center shrink-0">
+            <span aria-hidden>{OCCASION_ICON[occasion.occasion_slug] || '🎉'}</span>
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-slate-900 truncate">{occasion.name}</h3>
+            <p className="text-[11px] text-slate-500 flex items-center gap-1">
+              <CalendarDays className="w-3 h-3" />
+              {occasion.next_date ? `القادم: ${formatOccasionDate(occasion.next_date)}` : 'تاريخ متغيّر'}
+            </p>
+          </div>
+        </div>
+        {status && <Badge label={status.label} variant={status.variant} dot />}
+      </div>
+
+      {/* Promotion terms */}
+      {promo ? (
+        <>
+          {!editing ? (
+            <div className="flex items-baseline gap-2 my-2">
+              <span className="text-2xl font-bold text-slate-900">
+                {promo.discount_value ?? '—'}%
+              </span>
+              <span className="text-[11px] text-slate-500">خصم تلقائي</span>
+            </div>
+          ) : (
+            <div className="my-2 space-y-2">
+              <div>
+                <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                  نسبة الخصم (%)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={discount}
+                  onChange={e => setDiscount(e.target.value)}
+                  className="w-full text-sm px-2.5 py-1.5 rounded-md border border-slate-200 focus:border-brand-400 focus:ring-2 focus:ring-brand-100 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                  ينتهي في (اختياري)
+                </label>
+                <input
+                  type="datetime-local"
+                  value={endsAt}
+                  onChange={e => setEndsAt(e.target.value)}
+                  className="w-full text-sm px-2.5 py-1.5 rounded-md border border-slate-200 focus:border-brand-400 focus:ring-2 focus:ring-brand-100 outline-none"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* AI summary — what the autopilot does once activated */}
+          <div className="rounded-lg bg-amber-50/60 border border-amber-200/70 px-2.5 py-2 mb-3">
+            <div className="flex items-center gap-1.5 mb-1">
+              <Sparkles className="w-3 h-3 text-amber-600" />
+              <span className="text-[10px] font-semibold text-amber-800 uppercase tracking-wide">
+                ماذا يفعل الذكاء الاصطناعي
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-600 leading-relaxed">
+              {occasion.ai_summary}
+            </p>
+          </div>
+
+          {err && <p className="text-xs text-red-600 mb-2">{err}</p>}
+
+          <div className="flex items-center justify-between mt-auto pt-3 border-t border-slate-100">
+            <Link
+              to="/smart-automations"
+              className="text-[11px] text-brand-600 hover:underline"
+            >
+              {occasion.automation_enabled ? 'الأتمتة مفعّلة' : 'الأتمتة متوقفة'} ←
+            </Link>
+            <div className="flex items-center gap-1.5">
+              {!editing ? (
+                <>
+                  <button
+                    onClick={handleToggle}
+                    disabled={saving}
+                    title={isActive ? 'إيقاف' : 'تفعيل'}
+                    className="p-1.5 rounded hover:bg-slate-100 text-slate-600 disabled:opacity-50"
+                  >
+                    {isActive ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                  </button>
+                  <button
+                    onClick={() => { setEditing(true); setErr(null) }}
+                    title="تعديل الشروط"
+                    className="p-1.5 rounded hover:bg-slate-100 text-slate-600"
+                  >
+                    <SettingsIcon className="w-4 h-4" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => { setEditing(false); setErr(null) }}
+                    disabled={saving}
+                    className="text-xs px-2.5 py-1 rounded text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    onClick={handleSaveTerms}
+                    disabled={saving}
+                    className="btn-primary text-xs disabled:opacity-50"
+                  >
+                    {saving ? 'حفظ…' : 'حفظ'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </>
+      ) : (
+        // No promotion exists for this occasion yet — show a CTA
+        <>
+          <p className="text-xs text-slate-500 leading-relaxed mb-3">
+            لم يتم إعداد عرض لهذه المناسبة بعد. أنشئ عرضاً افتراضياً ليُستخدم تلقائياً
+            عند تشغيل الأتمتة.
+          </p>
+          <div className="rounded-lg bg-amber-50/60 border border-amber-200/70 px-2.5 py-2 mb-3">
+            <p className="text-[11px] text-slate-600 leading-relaxed">
+              {occasion.ai_summary}
+            </p>
+          </div>
+          {err && <p className="text-xs text-red-600 mb-2">{err}</p>}
+          <button
+            onClick={handleCreate}
+            disabled={saving}
+            className="btn-primary text-sm mt-auto disabled:opacity-50"
+          >
+            <Plus className="w-4 h-4" /> إعداد العرض
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+interface SeasonalCalendarPanelProps {
+  calendar: SeasonalCalendar | null
+  loading: boolean
+  onChanged: () => void
+}
+
+function SeasonalCalendarPanel({ calendar, loading, onChanged }: SeasonalCalendarPanelProps) {
+  if (loading && !calendar) {
+    return (
+      <div className="card p-6 text-center text-sm text-slate-500">
+        جارٍ تحميل التقويم الموسمي…
+      </div>
+    )
+  }
+  if (!calendar || calendar.occasions.length === 0) return null
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <Calendar className="w-4 h-4 text-amber-600" />
+            التقويم الموسمي
+          </h2>
+          <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+            عروض المناسبات السعودية الجاهزة — اضبط النسبة، فعّل العرض، والباقي يتولّاه الطيار
+            الآلي (التوقيت، الاستهداف، توليد الكود الشخصي لكل عميل).
+          </p>
+        </div>
+      </div>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {calendar.occasions.map(o => (
+          <OccasionCard key={o.occasion_slug} occasion={o} onUpdated={onChanged} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// Slugs that are managed by the seasonal calendar panel above. These
+// promotions are *also* in the Promotion table, but we hide them from
+// the "freeform" grid below to keep the two surfaces semantically
+// distinct (calendar = curated public occasions; grid = ad-hoc /
+// custom merchant promos).
+const SEASONAL_PROMO_SLUGS = new Set<string>([
+  'seasonal_founding_day_15',
+  'seasonal_national_day_15',
+  'seasonal_white_friday_25',
+  'seasonal_ramadan_20',
+  'seasonal_eid_fitr_15',
+  'seasonal_eid_adha_15',
+  'salary_payday_default_10',
+  'seasonal_default_15',
+])
+
+function isSeasonalManagedPromotion(p: Promotion): boolean {
+  const meta = (p.extra_metadata || {}) as Record<string, unknown>
+  if (typeof meta.slug === 'string' && SEASONAL_PROMO_SLUGS.has(meta.slug)) return true
+  if (typeof meta.occasion_slug === 'string' && meta.occasion_slug.length > 0) return true
+  return false
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Promotions() {
   const [promotions, setPromotions] = useState<Promotion[]>([])
   const [summary, setSummary] = useState<PromotionsSummary | null>(null)
   const [automations, setAutomations] = useState<AutomationRecord[]>([])
+  const [calendar, setCalendar] = useState<SeasonalCalendar | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<typeof STATUS_FILTERS[number]['key']>('all')
@@ -401,14 +736,16 @@ export default function Promotions() {
     setLoading(true)
     setError(null)
     try {
-      const [list, sum, autos] = await Promise.all([
+      const [list, sum, autos, cal] = await Promise.all([
         promotionsApi.list(),
         promotionsApi.summary(),
         automationsApi.list().catch(() => ({ automations: [], autopilot_enabled: false })),
+        promotionsApi.seasonalCalendar().catch(() => ({ occasions: [] } as SeasonalCalendar)),
       ])
       setPromotions(list.promotions)
       setSummary(sum)
       setAutomations(autos.automations || [])
+      setCalendar(cal)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تعذّر تحميل العروض')
     } finally {
@@ -418,10 +755,19 @@ export default function Promotions() {
 
   useEffect(() => { load() }, [load])
 
+  // Freeform grid below the Seasonal Calendar shows only promotions
+  // that are NOT seasonal-managed — the calendar panel above is the
+  // first-class surface for those, and showing them twice would
+  // confuse the merchant about where to edit.
+  const customPromotions = useMemo(
+    () => promotions.filter(p => !isSeasonalManagedPromotion(p)),
+    [promotions],
+  )
+
   const filtered = useMemo(() => {
-    if (filter === 'all') return promotions
-    return promotions.filter(p => p.effective_status === filter)
-  }, [promotions, filter])
+    if (filter === 'all') return customPromotions
+    return customPromotions.filter(p => p.effective_status === filter)
+  }, [customPromotions, filter])
 
   const handleToggle = async (promo: Promotion) => {
     const isActive = promo.effective_status === 'active'
@@ -455,24 +801,12 @@ export default function Promotions() {
     <div className="space-y-5">
       <PageHeader
         title="العروض الذكية"
-        subtitle="تعريفات الحوافز التي يستخدمها الطيار الآلي عند إطلاق الحملات — أنت تضع الإطار، نحلة تختار التوقيت والعميل"
+        subtitle="أنت تضبط شروط العرض — التوقيت والاستهداف وتوليد الكود الشخصي يتولّاهم الطيار الآلي."
         action={
           <button className="btn-primary text-sm" onClick={() => setCreateOpen(true)}>
             <Plus className="w-4 h-4" /> عرض جديد
           </button>
         }
-      />
-
-      {/* AI banner — sets the tone */}
-      <AiBanner
-        title="العروض هي وقود الطيار الآلي للحملات"
-        body="عرّف العرض هنا (نوع، نسبة، شروط، نافذة زمنية)، ثم اربطه بأتمتة في الطيار الآلي. عند إطلاق الحملة، يولّد الطيار الآلي كوداً شخصياً (NHxxx) لكل عميل يحقّق الشروط ويرسله عبر واتساب."
-        bullets={[
-          'العرض = قاعدة، ليس كوداً فردياً',
-          'الطيار الآلي يختار التوقيت والعميل المناسب',
-          'كل تفعيل يُسجَّل ككود شخصي قابل للتتبع',
-          'يدعم: نسبة، مبلغ ثابت، شحن مجاني، اشترِ X واحصل على Y',
-        ]}
       />
 
       {/* KPI strip */}
@@ -484,6 +818,27 @@ export default function Promotions() {
           <KpiCard label="كوبونات مولّدة"   value={summary.codes_materialised} accent="purple" icon={Users} />
         </div>
       )}
+
+      {/* Seasonal Calendar — the headline configuration surface */}
+      <SeasonalCalendarPanel
+        calendar={calendar}
+        loading={loading}
+        onChanged={load}
+      />
+
+      {/* Custom promotions header */}
+      <div className="flex items-end justify-between gap-3 pt-2">
+        <div>
+          <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <Gift className="w-4 h-4 text-brand-600" />
+            عروض مخصّصة
+          </h2>
+          <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+            عروض إضافية تنشئها بنفسك (تخفيضات لفئة منتجات، شحن مجاني، اشترِ X واحصل
+            على Y …). تُربط بأتمتات الطيار الآلي من صفحة الأتمتات.
+          </p>
+        </div>
+      </div>
 
       {/* Filters */}
       <div className="card p-2 flex flex-wrap gap-1">
@@ -514,10 +869,15 @@ export default function Promotions() {
       {loading ? (
         <div className="card p-8 text-center text-sm text-slate-500">جارٍ التحميل…</div>
       ) : filtered.length === 0 ? (
-        <div className="card p-12 text-center">
-          <Gift className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-          <p className="text-sm text-slate-600 font-medium">لا توجد عروض في هذا التصنيف</p>
-          <p className="text-xs text-slate-400 mt-1">أنشئ أول عرض ليبدأ النظام بتوليد كوبونات شخصية تلقائياً</p>
+        <div className="card p-10 text-center">
+          <Gift className="w-9 h-9 text-slate-300 mx-auto mb-3" />
+          <p className="text-sm text-slate-600 font-medium">
+            لا توجد عروض مخصّصة في هذا التصنيف
+          </p>
+          <p className="text-xs text-slate-400 mt-1">
+            عروض المناسبات تُدار من التقويم الموسمي أعلاه. أنشئ هنا عرضاً مخصّصاً
+            (مثال: شحن مجاني فوق 200 ر.س، خصم على فئة منتج معيّن).
+          </p>
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">

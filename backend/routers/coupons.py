@@ -56,17 +56,6 @@ DEFAULT_COUPON_RULES: List[Dict[str, Any]] = [
         "max_uses":         1,
     },
     {
-        "id":               "birthday",
-        "label":            "هدية يوم الميلاد",
-        "description":      "كود تلقائي يوم ميلاد العميل (إن توفّر تاريخ الميلاد)",
-        "enabled":          False,
-        "discount_type":    "percentage",
-        "discount_value":   10,
-        "validity_days":    7,
-        "min_order_amount": 0,
-        "max_uses":         1,
-    },
-    {
         "id":               "repeat_purchase",
         "label":            "تحفيز الشراء المتكرر",
         "description":      "كود يُرسل بعد أول طلب لتشجيع الطلب الثاني خلال أيام قليلة",
@@ -93,13 +82,29 @@ DEFAULT_COUPON_RULES: List[Dict[str, Any]] = [
 # Legacy rule ids (`r1`..`r5`) → semantic ids. When we read settings stored
 # by older builds we silently rewrite them so the new editable form binds
 # to the right defaults.
+#
+# `r3` historically pointed at a per-customer "birthday gift" rule that we
+# never wired into any automation. The concept was retired in favour of
+# *seasonal* promotions (Founding Day, National Day, Ramadan, …) which live
+# in the Promotions surface — see `core/automations_seed.SEASONAL_OCCASIONS`
+# and the `seasonal_offer` automation. Old `r3` payloads now collapse onto
+# the most-similar surviving rule (`repeat_purchase`) so the merchant's
+# previous on/off intent isn't lost; truly deprecated rule ids are then
+# filtered out by `_normalise_rules` so they never re-appear in the UI.
 _LEGACY_RULE_ID_MAP = {
     "r1": "abandoned_cart",
     "r2": "vip_customers",
-    "r3": "birthday",
+    "r3": "repeat_purchase",
     "r4": "repeat_purchase",
     "r5": "first_purchase",
 }
+
+# Rule ids that previously shipped in `DEFAULT_COUPON_RULES` but were
+# retired. `_normalise_rules` drops any persisted entry matching one of
+# these so the dashboard never re-surfaces them — including the old
+# `birthday` rule, which is now modelled as a seasonal Promotion (see
+# `core/automations_seed.SEASONAL_OCCASIONS`).
+_DEPRECATED_RULE_IDS = frozenset({"birthday"})
 
 # Slug → rule id used by the automation engine when picking which rule's
 # discount/validity overrides apply to a given automation. Public so the
@@ -237,6 +242,11 @@ def _normalise_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen: Dict[str, Dict[str, Any]] = {}
     for r in rules or []:
         normalised = _normalise_rule(r)
+        if normalised["id"] in _DEPRECATED_RULE_IDS:
+            # Persisted entry for a retired rule (e.g. `birthday`). Drop it
+            # so the surface stays in sync with the new architecture
+            # without forcing a one-shot data migration.
+            continue
         seen[normalised["id"]] = normalised
     # Always guarantee the catalogue of default rules exists so the merchant
     # never sees a half-empty list — they may have only configured one rule

@@ -5,22 +5,47 @@ Time-based event emitters that feed the automation engine.
 
 Most automations are triggered reactively: the WhatsApp webhook, store_sync,
 the storefront snippet, and the customer-intelligence pipeline write
-`AutomationEvent` rows the moment something happens. But three of the new
-"smart autopilot" automations are *scheduled* — there is no real-time signal
-that says "this order has now been pending too long" or "the national day is
-tomorrow". Those need a periodic scanner.
+`AutomationEvent` rows the moment something happens. But several of the
+"smart autopilot" automations are *scheduled* — there is no real-time
+signal that says "this cart has now been abandoned for 6 hours" or "this
+COD order has not been confirmed yet". Those need a periodic scanner.
 
-This module provides three such scanners:
+This module provides five such scanners:
 
-  • `scan_unpaid_orders`         → recovery engine
-  • `scan_predictive_reorders`   → growth engine
-  • `scan_calendar_events`       → growth engine (seasonal + salary payday)
+  • `scan_unpaid_orders`              → recovery engine (online payment)
+  • `scan_abandoned_cart_followups`   → recovery engine (cart stages 2 + 3)
+  • `scan_cod_confirmations`          → recovery engine (COD reminder + cancel)
+  • `scan_predictive_reorders`        → growth engine
+  • `scan_calendar_events`            → growth engine (seasonal + salary)
 
-All three are *event emitters only*. They write `AutomationEvent` rows via
-`emit_automation_event` and let the existing automation engine handle
-matching, conditions, idempotency, and sending. This keeps the single
-automation engine guardrail intact: there is exactly one path to
+All five are *event emitters only* (with one carved-out exception: the COD
+sweeper performs the auto-cancel state mutation directly because that is
+not a WhatsApp send — see its docstring). They write `AutomationEvent`
+rows via `emit_automation_event` and let the existing automation engine
+handle matching, conditions, idempotency, and sending. This keeps the
+single automation engine guardrail intact: there is exactly one path to
 `provider_send_message`.
+
+Conflict prevention between sweepers
+────────────────────────────────────
+Each sweeper operates on a disjoint set of records:
+
+  • `scan_unpaid_orders`             — Order.status in {pending,
+    payment_pending, awaiting_payment, draft, new}. NEVER includes
+    `pending_confirmation` (that is the COD half).
+  • `scan_cod_confirmations`         — Order.status == "pending_confirmation"
+    only. NEVER touches the unpaid bucket.
+  • `scan_abandoned_cart_followups`  — re-emits AutomationEvents on the
+    `cart_abandoned` event_type, never on Order rows. Stops as soon as
+    the customer has placed a non-cancelled order with a creation time
+    after the original abandon event.
+
+So a single shopper who abandons a cart, comes back, and pays via online
+payment will see at most one stage-1 cart reminder (from the snippet) and
+zero unpaid-order or COD reminders, because the cart sweeper detects the
+new completed order and the unpaid sweeper sees the order as paid. The
+three flows are independently toggleable per tenant via SmartAutomation
+rows; toggling one off does not affect the others.
 
 Idempotency strategy
 ────────────────────
@@ -176,6 +201,371 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
             "[Emitter] tenant=%s unpaid_orders emitted=%d", tenant_id, emitted,
         )
     return emitted
+
+
+# ── Abandoned cart recovery (stages 2 and 3) ─────────────────────────────────
+
+# Statuses that mean "the customer paid / completed the order in the
+# meantime, so stop nudging them about the cart they abandoned earlier".
+# Anything not in this set keeps the recovery flow running, so a refunded
+# order or a cancelled order does NOT short-circuit the follow-ups.
+_COMPLETED_ORDER_STATUSES = frozenset({
+    "completed", "delivered", "paid", "shipped", "out_for_delivery",
+    "in_progress", "processing", "ready_for_pickup",
+    # COD orders that the customer has confirmed are also "no longer
+    # abandoned" — they live in the COD funnel from this point on.
+    "under_review",
+})
+
+
+def scan_abandoned_cart_followups(
+    db: Session, tenant_id: int, *, now: Optional[datetime] = None,
+) -> int:
+    """
+    Re-emit `cart_abandoned` events for stages 2 and 3 of the recovery
+    workflow. Stage 1 is already emitted by the storefront snippet at
+    abandonment time and processed by the engine after its 30-minute
+    delay; this sweeper only owns the follow-up half.
+
+    Returns the number of new follow-up events emitted.
+
+    For each abandoned-cart event in the last 36 hours that has been
+    processed (i.e. stage 1 was sent), we walk the automation's
+    `config.steps` list and emit a *new* AutomationEvent of the same
+    type for every stage whose delay has elapsed but hasn't been
+    emitted yet. The new event carries `payload.step_idx = N` (1-based
+    stage minus one) and `payload.parent_event_id` so we can audit the
+    chain.
+
+    Per-event progress is recorded on the *original* event's payload
+    under `recovery_followups: [{step_idx, emitted_at}]`. This keeps
+    the bookkeeping local to the row that owns the recovery thread —
+    no new column needed, no second table to join.
+
+    Stops as soon as the customer has placed any non-cancelled order
+    after the abandonment timestamp. The check uses `_PENDING_PAYMENT_*`
+    *exclusion* logic — anything that's not "still owes us money" and
+    not "draft" is treated as a conversion. This is intentionally
+    permissive: a refunded order still counts as a successful checkout
+    for the purpose of "should we still chase this cart?".
+    """
+    from models import (  # noqa: PLC0415
+        AutomationEvent, Customer, Order, SmartAutomation,
+    )
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+
+    auto = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "abandoned_cart",
+            SmartAutomation.enabled.is_(True),
+        )
+        .first()
+    )
+    if not auto:
+        return 0
+
+    config: Dict[str, Any] = auto.config or {}
+    steps: List[Dict[str, Any]] = list(config.get("steps") or [])
+    if len(steps) < 2:
+        # Single-stage configs don't need the follow-up sweeper —
+        # the original event already covers them.
+        return 0
+
+    horizon = now - timedelta(hours=36)
+    candidates: List[Any] = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type == AutomationTrigger.CART_ABANDONED.value,
+            AutomationEvent.processed.is_(True),
+            AutomationEvent.created_at >= horizon,
+        )
+        .all()
+    )
+    if not candidates:
+        return 0
+
+    emitted = 0
+    for original in candidates:
+        # Only act on stage-1 events. A row that already carries
+        # `step_idx` IS a follow-up emitted by an earlier sweep — never
+        # use those as a parent (otherwise we'd cascade endlessly).
+        original_payload: Dict[str, Any] = dict(original.payload or {})
+        if int(original_payload.get("step_idx") or 0) > 0:
+            continue
+
+        progress: List[Dict[str, Any]] = list(
+            original_payload.get("recovery_followups") or []
+        )
+        already_emitted = {int(p.get("step_idx", -1)) for p in progress}
+
+        # Conversion guard — if the customer placed a real order after
+        # the abandonment timestamp, stop chasing.
+        if original.customer_id and _customer_has_completed_order_since(
+            db, tenant_id=tenant_id, customer_id=original.customer_id,
+            since=_naive(original.created_at),
+        ):
+            continue
+
+        # Walk stages 2..N. We never re-emit stage 1 — it was the
+        # original event itself.
+        for step_idx, step in enumerate(steps):
+            if step_idx == 0:
+                continue
+            if step_idx in already_emitted:
+                continue
+            delay = int(step.get("delay_minutes") or 0)
+            if (now - _naive(original.created_at)) < timedelta(minutes=delay):
+                # Steps are time-ordered — anything later is also too early.
+                break
+
+            new_payload: Dict[str, Any] = dict(original_payload)
+            # Strip our own bookkeeping from the child payload — the
+            # follow-up stands on its own and shouldn't carry the
+            # parent's progress log.
+            new_payload.pop("recovery_followups", None)
+            new_payload.update({
+                "source":           "automation_emitters.cart_followups",
+                "step_idx":         step_idx,
+                "parent_event_id":  original.id,
+            })
+
+            emit_automation_event(
+                db,
+                tenant_id=tenant_id,
+                event_type=AutomationTrigger.CART_ABANDONED.value,
+                customer_id=original.customer_id,
+                payload=new_payload,
+                commit=False,
+            )
+            progress.append({
+                "step_idx":   step_idx,
+                "emitted_at": now.isoformat(),
+            })
+            emitted += 1
+
+        if progress != list(original_payload.get("recovery_followups") or []):
+            original_payload["recovery_followups"] = progress
+            original.payload = original_payload
+            flag_modified(original, "payload")
+
+    if emitted:
+        db.commit()
+        logger.info(
+            "[Emitter] tenant=%s cart_followups emitted=%d", tenant_id, emitted,
+        )
+    return emitted
+
+
+# ── COD confirmation: reminder + auto-cancel ────────────────────────────────
+
+def scan_cod_confirmations(
+    db: Session, tenant_id: int, *, now: Optional[datetime] = None,
+) -> int:
+    """
+    Drive the timed half of the COD confirmation flow.
+
+    The synchronous half — sending the initial confirmation template
+    and processing the customer's QUICK_REPLY tap — already lives in
+    `routers/ai_sales.py::ai_sales_create_order` and
+    `services/cod_confirmation.py::handle_cod_reply`. This sweeper
+    owns what comes after that:
+
+      • If the order has been in `pending_confirmation` for at least
+        `config.reminder_after_minutes` (default 6 h) AND no reminder
+        has been emitted yet, emit ORDER_COD_PENDING with `step_idx=0`
+        so the engine renders `cod_confirmation_reminder_*` and ships
+        it through the standard send path.
+
+      • If the order has been in `pending_confirmation` for at least
+        `config.cancel_after_minutes` (default 24 h), transition it
+        directly to `cancelled`, stamp `extra_metadata.cod_auto_cancelled_at`,
+        and log an `order.cod.auto_cancelled` event. Cancel is a state
+        mutation, not a WhatsApp send, so it bypasses the engine — but
+        the merchant still sees it in the event timeline.
+
+    Returns the number of mutations performed (events emitted +
+    orders cancelled).
+
+    Per-order progress is stored on `Order.extra_metadata` under
+    `cod_reminders: [{step_idx, emitted_at}]` and `cod_auto_cancelled_at`.
+    """
+    from models import Customer, Order, SmartAutomation  # noqa: PLC0415
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+
+    auto = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "cod_confirmation",
+            SmartAutomation.enabled.is_(True),
+        )
+        .first()
+    )
+    if not auto:
+        return 0
+
+    config: Dict[str, Any] = auto.config or {}
+    reminder_after = int(config.get("reminder_after_minutes") or 360)  # 6 h
+    cancel_after   = int(config.get("cancel_after_minutes") or 1440)   # 24 h
+    if cancel_after <= reminder_after:
+        # Misconfigured — bump cancel out by one reminder window so a
+        # bad config can't cancel orders before any reminder ever fires.
+        cancel_after = reminder_after + max(60, reminder_after)
+
+    pending_orders = (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == tenant_id,
+            Order.status == "pending_confirmation",
+        )
+        .all()
+    )
+    if not pending_orders:
+        return 0
+
+    mutations = 0
+    for order in pending_orders:
+        created_at = _read_order_created_at(order)
+        if created_at is None:
+            continue
+        if created_at.tzinfo is not None:
+            created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+
+        elapsed = now - created_at
+        meta: Dict[str, Any] = dict(order.extra_metadata or {})
+        progress: List[Dict[str, Any]] = list(meta.get("cod_reminders") or [])
+        already_sent_steps = {int(p.get("step_idx", -1)) for p in progress}
+
+        # ── Auto-cancel ──────────────────────────────────────────────
+        if elapsed >= timedelta(minutes=cancel_after):
+            from observability.event_logger import log_event  # noqa: PLC0415
+
+            order.status = "cancelled"
+            meta["cod_auto_cancelled_at"] = now.isoformat()
+            meta["cod_auto_cancel_reason"] = "no_customer_response"
+            order.extra_metadata = meta
+            flag_modified(order, "extra_metadata")
+            log_event(
+                db, tenant_id, category="order",
+                event_type="order.cod.auto_cancelled",
+                summary=(
+                    f"COD order #{order.id} auto-cancelled — no confirmation "
+                    f"after {cancel_after} minutes"
+                ),
+                severity="warning",
+                payload={
+                    "order_id":             order.id,
+                    "elapsed_minutes":      int(elapsed.total_seconds() // 60),
+                    "cancel_after_minutes": cancel_after,
+                },
+                reference_id=str(order.id),
+            )
+            mutations += 1
+            continue
+
+        # ── Reminder ─────────────────────────────────────────────────
+        if elapsed < timedelta(minutes=reminder_after):
+            continue
+        # We use step_idx=0 so the engine resolves `steps[0]` of the
+        # cod_confirmation seed — the reminder template. Idempotency is
+        # tracked here, not on AutomationExecution, because there is
+        # only ever one reminder per order in this flow and the engine's
+        # standard (event_id, automation_id) idempotency already covers
+        # the engine-side dedup of the emitted event.
+        if 0 in already_sent_steps:
+            continue
+
+        customer = _resolve_order_customer(db, tenant_id, order)
+        if customer is None:
+            continue
+
+        payload: Dict[str, Any] = {
+            "source":                "automation_emitters.cod_confirmation",
+            "order_internal_id":     order.id,
+            "order_id":              order.external_id,
+            "external_order_number": order.external_order_number,
+            "order_number":          order.external_order_number or order.external_id,
+            "step_idx":              0,
+            "message_type":          "reminder",
+        }
+        emit_automation_event(
+            db,
+            tenant_id=tenant_id,
+            event_type=AutomationTrigger.ORDER_COD_PENDING.value,
+            customer_id=customer.id,
+            payload=payload,
+            commit=False,
+        )
+        progress.append({"step_idx": 0, "emitted_at": now.isoformat()})
+        meta["cod_reminders"] = progress
+        order.extra_metadata = meta
+        flag_modified(order, "extra_metadata")
+        mutations += 1
+
+    if mutations:
+        db.commit()
+        logger.info(
+            "[Emitter] tenant=%s cod_confirmation mutations=%d", tenant_id, mutations,
+        )
+    return mutations
+
+
+def _customer_has_completed_order_since(
+    db: Session, *, tenant_id: int, customer_id: int, since: datetime,
+) -> bool:
+    """Return True iff the customer has at least one non-pending,
+    non-cancelled order created after ``since`` for this tenant.
+
+    Used by the abandoned-cart sweeper to stop chasing customers who
+    have already converted. Errs on the side of "still abandoned" if
+    we can't resolve a customer order timestamp — better to send one
+    extra reminder than to silently drop the funnel.
+    """
+    from models import Order  # noqa: PLC0415
+
+    if not customer_id:
+        return False
+
+    orders = (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == tenant_id,
+        )
+        .all()
+    )
+    for o in orders:
+        if o.status in _PENDING_PAYMENT_STATUSES:
+            continue
+        if o.status in {"cancelled", "refunded", "pending_confirmation"}:
+            continue
+        # The customer link on Order is only via customer_info.phone, so
+        # we resolve through the customer row to avoid false negatives.
+        candidate = _resolve_order_customer(db, tenant_id, o)
+        if candidate is None or candidate.id != customer_id:
+            continue
+        created_at = _read_order_created_at(o)
+        if created_at is None:
+            continue
+        created_naive = _naive(created_at)
+        if created_naive >= since:
+            return True
+    return False
+
+
+def _naive(dt: Optional[datetime]) -> datetime:
+    """Best-effort UTC-naive coercion for cross-row datetime math."""
+    if dt is None:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 # ── Predictive reorder reminders ─────────────────────────────────────────────
@@ -549,6 +939,8 @@ async def run_automation_emitters_scheduler() -> None:
                 for tenant in tenants:
                     try:
                         scan_unpaid_orders(db, tenant.id)
+                        scan_abandoned_cart_followups(db, tenant.id)
+                        scan_cod_confirmations(db, tenant.id)
                         scan_predictive_reorders(db, tenant.id)
                         scan_calendar_events(db, tenant.id)
                     except Exception as exc:

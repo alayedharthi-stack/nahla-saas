@@ -107,11 +107,10 @@ interface RuleEngineMeta {
 }
 
 const RULE_ENGINE: Record<string, RuleEngineMeta> = {
-  abandoned_cart: { engine: 'recovery', label: 'محرك الاسترجاع', desc: 'استرداد السلات المتروكة' },
+  abandoned_cart: { engine: 'recovery', label: 'محرك الاسترجاع', desc: 'قيمة الكوبون المُستخدم في المرحلة الأخيرة من سير استرداد السلات (24 ساعة) — التوقيت يُدار من الأتمتة الذكية' },
   unpaid_order:   { engine: 'recovery', label: 'محرك الاسترجاع', desc: 'تحصيل الطلبات غير المدفوعة' },
   customer_winback:{engine: 'recovery', label: 'محرك الاسترجاع', desc: 'استعادة العملاء الخاملين' },
   vip_customers:  { engine: 'growth',   label: 'محرك النمو',     desc: 'مكافأة العملاء الأكثر قيمة' },
-  birthday:       { engine: 'experience',label: 'محرك التجربة',  desc: 'هدية يوم الميلاد' },
   repeat_purchase:{ engine: 'growth',   label: 'محرك النمو',     desc: 'تحفيز الشراء المتكرر' },
   predictive_reorder:{engine: 'growth', label: 'محرك النمو',     desc: 'إعادة الطلب التنبؤي' },
   active_coupons: { engine: 'recovery', label: 'محرك الاسترجاع', desc: 'الكوبونات النشطة في الحملات' },

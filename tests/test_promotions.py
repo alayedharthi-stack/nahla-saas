@@ -89,11 +89,13 @@ from services.promotion_engine import (  # noqa: E402
 )
 from core.automation_engine import (  # noqa: E402
     _materialise_promotion_for_send,
+    _pick_promotion_id_for_event,
     _resolve_auto_coupon,
     _resolve_discount_source,
 )
 from core.automations_seed import (  # noqa: E402
     DEFAULT_PROMOTIONS,
+    SEASONAL_OCCASIONS,
     SEED_AUTOMATIONS,
     ensure_default_promotions_for_tenant,
     seed_automations_if_empty,
@@ -843,7 +845,176 @@ class TestPromotionsRouter:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 11. Single-engine guardrail still green — no new outbound provider
+# 11. Seasonal calendar — per-occasion Promotion rows + endpoint
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# `seasonal_offer` automation fans out across every entry in the
+# Saudi calendar (founding_day, national_day, white_friday,
+# ramadan_start, eid_al_fitr, eid_al_adha). Each occasion is now a
+# first-class merchant-editable Promotion (tagged via
+# `extra_metadata.occasion_slug`) so the merchant can set a different
+# discount for Founding Day vs White Friday without touching the
+# automation config. The engine prefers the per-occasion row at
+# materialisation time and falls back to the generic
+# `seasonal_default_15` Promotion that the automation's
+# `config.promotion_id` points at.
+
+EXPECTED_OCCASION_SLUGS = {
+    "founding_day", "national_day", "white_friday",
+    "ramadan_start", "eid_al_fitr", "eid_al_adha",
+    "salary_payday",
+}
+
+
+class TestSeasonalOccasionCatalogue:
+    def test_every_seasonal_occasion_has_a_default_promotion(self) -> None:
+        # Each entry in SEASONAL_OCCASIONS must point at a Promotion
+        # slug that is actually seeded by ensure_default_promotions_for_tenant
+        # — otherwise the dashboard would render a card whose `promotion`
+        # field never resolves.
+        for spec in SEASONAL_OCCASIONS:
+            assert spec["promotion_slug"] in DEFAULT_PROMOTIONS, (
+                f"Seasonal occasion {spec['occasion_slug']!r} references "
+                f"unknown promotion slug {spec['promotion_slug']!r}"
+            )
+
+    def test_calendar_covers_known_saudi_occasions(self) -> None:
+        slugs = {spec["occasion_slug"] for spec in SEASONAL_OCCASIONS}
+        assert slugs == EXPECTED_OCCASION_SLUGS
+
+    def test_per_occasion_promotions_carry_occasion_slug_metadata(self) -> None:
+        # The engine matches Promotion → CalendarEvent via the
+        # `occasion_slug` key in extra_metadata. If it's missing, the
+        # per-occasion routing silently falls back to the generic row,
+        # which would defeat the merchant's per-occasion edits.
+        for spec in SEASONAL_OCCASIONS:
+            if spec["occasion_slug"] == "salary_payday":
+                # Salary payday is NOT calendar-event-driven — it lives
+                # under salary_payday_offer and is selected by the
+                # automation's config.promotion_id alone.
+                continue
+            promo_spec = DEFAULT_PROMOTIONS[spec["promotion_slug"]]
+            extras = promo_spec.get("extra_metadata") or {}
+            assert extras.get("occasion_slug") == spec["occasion_slug"]
+
+
+class TestPickPromotionIdForEvent:
+    def test_returns_fallback_when_no_event_payload(self) -> None:
+        db, engine = _make_db()
+        try:
+            t = _seed_tenant(db)
+            picked = _pick_promotion_id_for_event(
+                db,
+                tenant_id=t.id,
+                event_payload=None,
+                fallback_promotion_id=42,
+            )
+            assert picked == 42
+        finally:
+            db.close(); engine.dispose()
+
+    def test_returns_fallback_when_no_matching_occasion_promotion(self) -> None:
+        db, engine = _make_db()
+        try:
+            t = _seed_tenant(db)
+            # Generic seasonal promotion exists but has no occasion_slug.
+            _seed_promotion(db, t.id, status=ACTIVE_STATUS)
+            picked = _pick_promotion_id_for_event(
+                db,
+                tenant_id=t.id,
+                event_payload={"event_slug": "founding_day"},
+                fallback_promotion_id=999,
+            )
+            assert picked == 999
+        finally:
+            db.close(); engine.dispose()
+
+    def test_prefers_active_per_occasion_promotion(self) -> None:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        db, engine = _make_db()
+        try:
+            t = _seed_tenant(db)
+            generic = _seed_promotion(db, t.id, status=ACTIVE_STATUS, name="Generic")
+            specific = _seed_promotion(db, t.id, status=ACTIVE_STATUS, name="Founding")
+            specific.extra_metadata = {"occasion_slug": "founding_day"}
+            flag_modified(specific, "extra_metadata")
+            db.commit()
+
+            picked = _pick_promotion_id_for_event(
+                db,
+                tenant_id=t.id,
+                event_payload={"event_slug": "founding_day"},
+                fallback_promotion_id=generic.id,
+            )
+            assert picked == specific.id
+        finally:
+            db.close(); engine.dispose()
+
+    def test_skips_paused_per_occasion_promotion(self) -> None:
+        # If the merchant paused the per-occasion row, the engine must
+        # fall back to the configured automation-level promotion rather
+        # than silently using the paused one.
+        from sqlalchemy.orm.attributes import flag_modified
+
+        db, engine = _make_db()
+        try:
+            t = _seed_tenant(db)
+            paused = _seed_promotion(db, t.id, status=PAUSED_STATUS, name="PausedFD")
+            paused.extra_metadata = {"occasion_slug": "founding_day"}
+            flag_modified(paused, "extra_metadata")
+            db.commit()
+
+            picked = _pick_promotion_id_for_event(
+                db,
+                tenant_id=t.id,
+                event_payload={"event_slug": "founding_day"},
+                fallback_promotion_id=777,
+            )
+            assert picked == 777
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestSeasonalCalendarEndpoint:
+    def test_returns_one_entry_per_known_occasion(self) -> None:
+        from routers.promotions import seasonal_calendar
+        db, engine = _make_db()
+        try:
+            t = _seed_tenant(db)
+            seed_automations_if_empty(db, t.id)
+            payload = asyncio.run(seasonal_calendar(
+                request=_StubRequest(t.id), db=db,
+            ))
+            slugs = {o["occasion_slug"] for o in payload["occasions"]}
+            assert slugs == EXPECTED_OCCASION_SLUGS
+        finally:
+            db.close(); engine.dispose()
+
+    def test_each_occasion_has_a_seeded_promotion_after_call(self) -> None:
+        from routers.promotions import seasonal_calendar
+        db, engine = _make_db()
+        try:
+            t = _seed_tenant(db)
+            seed_automations_if_empty(db, t.id)
+            payload = asyncio.run(seasonal_calendar(
+                request=_StubRequest(t.id), db=db,
+            ))
+            # `seasonal_calendar` calls ensure_default_promotions_for_tenant
+            # so every occasion entry must come back with a non-None
+            # `promotion` payload.
+            for o in payload["occasions"]:
+                assert o["promotion"] is not None, (
+                    f"occasion {o['occasion_slug']} has no Promotion linked"
+                )
+                assert o["ai_summary"]
+                assert o["automation_type"] in {"seasonal_offer", "salary_payday_offer"}
+        finally:
+            db.close(); engine.dispose()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 12. Single-engine guardrail still green — no new outbound provider
 # ═════════════════════════════════════════════════════════════════════════════
 
 def test_promotion_path_does_not_send_directly() -> None:

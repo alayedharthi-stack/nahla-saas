@@ -15,9 +15,14 @@ export interface PredictiveReorderConfig {
 
 export interface AbandonedCartConfig {
   enabled: boolean
+  // Stage 1 — 30 minute friendly nudge, no discount.
   reminder_30min: boolean
-  reminder_24h: boolean
-  coupon_48h: boolean
+  // Stage 2 — 6 hour empathetic follow-up, no discount.
+  reminder_6h: boolean
+  // Stage 3 — 24 hour last-chance reminder. May include a coupon
+  // depending on AI decision (cart value / customer value) when the
+  // tenant is on OfferDecisionService advisory or enforce mode.
+  coupon_24h: boolean
   coupon_code: string
   template_name: string
 }
@@ -189,8 +194,8 @@ export const AUTOPILOT_SUB_META: Record<
   },
   abandoned_cart: {
     label: 'استرداد السلة المتروكة',
-    desc:  'بعد 30 دقيقة، 24 ساعة، وخيارياً 48 ساعة مع كوبون.',
-    template: 'abandoned_cart_reminder',
+    desc:  'تذكير ودود بعد 30 دقيقة، متابعة بعد 6 ساعات، ثم تذكير أخير بعد 24 ساعة (كوبون اختياري حسب قرار الذكاء الاصطناعي).',
+    template: 'abandoned_cart_recovery_ar',
     icon: '🛒',
     triggerLabel: 'cart_abandoned',
   },

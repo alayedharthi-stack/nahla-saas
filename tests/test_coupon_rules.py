@@ -289,3 +289,47 @@ def test_every_mapped_rule_id_exists_in_catalogue() -> None:
         assert rule_id in catalogue, (
             f"{automation_type} → {rule_id} is not in DEFAULT_COUPON_RULES"
         )
+
+
+# ── 5. Birthday rule retirement ──────────────────────────────────────────────
+#
+# `birthday` was a per-customer coupon rule that was never wired into any
+# automation (not in AUTOMATION_TO_RULE_ID). The concept now belongs to the
+# Promotions surface as part of the seasonal calendar (see
+# `core/automations_seed.SEASONAL_OCCASIONS`). These tests pin the
+# retirement so the rule can never silently come back through a stored
+# configuration.
+
+class TestBirthdayRuleRetired:
+    def test_birthday_is_not_in_default_catalogue(self) -> None:
+        ids = {r["id"] for r in DEFAULT_COUPON_RULES}
+        assert "birthday" not in ids, (
+            "The `birthday` rule was retired in favour of seasonal Promotions. "
+            "Re-introducing it here would make it appear in the Coupons UI again."
+        )
+
+    def test_persisted_birthday_rule_is_dropped_on_read(self) -> None:
+        # A merchant whose tenant_settings still hold the legacy birthday
+        # entry (from before the retirement) must NOT see it re-emerge in
+        # the dashboard. _normalise_rules is the read-side filter that
+        # guarantees this without a one-shot data migration.
+        out = _normalise_rules([
+            {
+                "id":             "birthday",
+                "label":          "هدية يوم الميلاد",
+                "enabled":        True,
+                "discount_type":  "percentage",
+                "discount_value": 10,
+            },
+        ])
+        assert "birthday" not in {r["id"] for r in out}
+
+    def test_legacy_r3_collapses_onto_a_surviving_rule(self) -> None:
+        # `r3` historically mapped to the now-retired birthday rule. To
+        # preserve the merchant's previous on/off intent without putting
+        # the rule back, the legacy id must collapse onto a still-present
+        # semantic id (currently `repeat_purchase`).
+        normalised = _normalise_rule({"id": "r3", "label": "x", "enabled": True})
+        assert normalised["id"] != "birthday"
+        catalogue_ids = {r["id"] for r in DEFAULT_COUPON_RULES}
+        assert normalised["id"] in catalogue_ids

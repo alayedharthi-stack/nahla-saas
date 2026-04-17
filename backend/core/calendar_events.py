@@ -133,3 +133,53 @@ def event_for_slug(slug: str) -> CalendarEvent | None:
         if ev.slug == slug:
             return ev
     return None
+
+
+def next_occurrence_for(slug: str, *, today: _date | None = None) -> _date | None:
+    """
+    Return the next Gregorian date this occasion will fall on, looking
+    forward from `today` (default: today). Returns None if the slug is
+    unknown or, for Hijri-derived events, the lookup table has no
+    matching entry within the next 4 years.
+
+    Used by the dashboard's Seasonal Calendar panel so the merchant
+    sees "next time: 22 February 2027" without the frontend having to
+    duplicate the holiday formulae.
+    """
+    today = today or _date.today()
+
+    # Gregorian-fixed: founding day (Feb 22), national day (Sep 23).
+    if slug == "founding_day":
+        return _next_fixed(today, month=2, day=22)
+    if slug == "national_day":
+        return _next_fixed(today, month=9, day=23)
+    if slug == "white_friday":
+        # Last Friday of November — try this year first, else next.
+        this_year = _white_friday_for(today.year)
+        if this_year >= today:
+            return this_year
+        return _white_friday_for(today.year + 1)
+
+    # Hijri-derived: walk the lookup table forward until we find a date
+    # >= today. If we exhaust the table, return None — the caller will
+    # render a "—" rather than fabricate a date.
+    if slug in {"ramadan_start", "eid_al_fitr", "eid_al_adha"}:
+        for year in sorted(HIJRI_EVENT_DATES.keys()):
+            entry = HIJRI_EVENT_DATES[year].get(slug)
+            if entry is None:
+                continue
+            yy, mm, dd = entry
+            candidate = _date(yy, mm, dd)
+            if candidate >= today:
+                return candidate
+        return None
+
+    return None
+
+
+def _next_fixed(today: _date, *, month: int, day: int) -> _date:
+    """Next occurrence of a fixed (month, day) anchor, including today."""
+    candidate = _date(today.year, month, day)
+    if candidate >= today:
+        return candidate
+    return _date(today.year + 1, month, day)
