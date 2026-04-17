@@ -459,16 +459,20 @@ async def _execute_suggest_coupon(
     """
     Pick or create a real coupon for the customer segment.
 
-    Phase-3 wiring: regardless of which surface the merchant has opted
-    into, we ALSO call `OfferDecisionService.decide` here so the chat
-    decision is captured in the ledger. Two modes are supported via the
-    per-tenant feature flag (`offer_decision_service`):
+    Phase-3 wiring: dispatch is driven by the shared
+    `tenant_decision_mode` resolver (single source of truth for the
+    OfferDecisionService rollout — see
+    `services.offer_decision_flags`):
 
-      • flag OFF → **advisory mode**. The decision service runs purely
-        for telemetry; the LLM-suggested discount % stays in effect.
-        This is the default — it lets us measure parity before flipping
-        any merchant to enforcement.
-      • flag ON  → **enforce mode**. The decision service's output
+      • OFF / ADVISORY → **advisory behaviour**. The legacy resolver
+        produces the actual coupon and the LLM-suggested discount %
+        stays in effect. The decision service still runs for telemetry
+        and a ledger row is written; the issued coupon is back-stamped
+        with `decision_id` so attribution works. This is the default —
+        it lets us measure parity before flipping merchants to
+        enforcement, and keeps the chat surface safe under both OFF
+        and ADVISORY rollout modes.
+      • ENFORCE → **enforce mode**. The decision service's output
         (source/value/validity) is the source of truth, the LLM's
         suggested % is treated as a hint, and the resulting Coupon
         carries `decision_id` so order_paid attribution works.
@@ -480,10 +484,11 @@ async def _execute_suggest_coupon(
 
         from core.database import SessionLocal
         from services.coupon_generator import CouponGeneratorService, build_coupon_send_payload
+        from services.offer_decision_flags import DecisionMode, tenant_decision_mode
 
         db = SessionLocal()
         try:
-            enforce = _tenant_uses_decision_service_enforce(db, tenant_id)
+            enforce = tenant_decision_mode(db, tenant_id) is DecisionMode.ENFORCE
             requested_discount = payload.get("discount_pct")
 
             if enforce:
@@ -593,22 +598,6 @@ async def _execute_suggest_coupon(
     except Exception as exc:
         logger.error("suggest_coupon execution failed: %s", exc, exc_info=True)
     return None
-
-
-def _tenant_uses_decision_service_enforce(db, tenant_id: int) -> bool:
-    """Per-tenant flag identical to the automation engine wiring. When
-    True the chat path is fully delegated to OfferDecisionService."""
-    try:
-        from models import TenantSettings  # noqa: PLC0415
-
-        ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
-        if ts is None:
-            return False
-        meta = dict(ts.extra_metadata or {})
-        flags = dict(meta.get("tenant_features") or {})
-        return bool(flags.get("offer_decision_service"))
-    except Exception:
-        return False
 
 
 def _stamp_advisory_decision_id(db, coupon, decision) -> None:

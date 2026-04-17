@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from models import Customer, CustomerProfile, Order
 from observability.event_logger import log_event
+from services.offer_decision_flags import DecisionMode, tenant_decision_mode
 
 logger = logging.getLogger("nahla.customer_intelligence")
 
@@ -905,18 +906,23 @@ class CustomerIntelligenceService:
                     EVENT_DRIVEN_SEGMENTS,
                 )
                 if status in EVENT_DRIVEN_SEGMENTS:
-                    use_decision_service = self._tenant_uses_decision_service()
+                    decision_mode = self._tenant_decision_mode()
 
                     async def _run():
-                        if use_decision_service:
+                        if decision_mode is DecisionMode.ENFORCE:
                             await self._segment_change_via_decision_service(
                                 customer_id=customer.id, segment=status, reason=reason,
                             )
-                        else:
-                            svc = CouponGeneratorService(self.db, self.tenant_id)
-                            await svc.generate_for_customer(
-                                customer.id, status, reason=f"status_change:{reason}"
+                            return
+                        if decision_mode is DecisionMode.ADVISORY:
+                            await self._segment_change_advisory(
+                                customer_id=customer.id, segment=status, reason=reason,
                             )
+                            return
+                        svc = CouponGeneratorService(self.db, self.tenant_id)
+                        await svc.generate_for_customer(
+                            customer.id, status, reason=f"status_change:{reason}"
+                        )
 
                     try:
                         loop = _asyncio.get_running_loop()
@@ -941,31 +947,22 @@ class CustomerIntelligenceService:
 
     # ── Decision-service routing (Phase 4) ──────────────────────────────
     #
-    # When the per-tenant `offer_decision_service` flag is on, segment-
-    # change coupons go through the shared OfferDecisionService so:
-    #   • merchant rules apply (the same rules editable on /coupons),
-    #   • the resulting coupon carries `decision_id` for attribution,
-    #   • the ledger captures *every* segment-change discount (not just
-    #     the ones that are eventually redeemed).
-    # Default (flag off): legacy `generate_for_customer` path is used and
-    # behaviour is unchanged.
+    # The per-tenant rollout mode for OfferDecisionService is owned by
+    # `services.offer_decision_flags`. On a segment status change we
+    # dispatch to one of three branches:
+    #
+    #   ENFORCE  → service issues the coupon (`_segment_change_via_decision_service`).
+    #   ADVISORY → service writes a ledger row only; legacy
+    #              `CouponGeneratorService.generate_for_customer` still
+    #              issues the coupon, which we back-stamp with
+    #              `decision_id` (`_segment_change_advisory`).
+    #   OFF      → legacy path runs unchanged, no ledger writes.
+    #
+    # All three branches absorb their own failures so the classification
+    # path is never affected by a coupon-side issue.
 
-    def _tenant_uses_decision_service(self) -> bool:
-        try:
-            from models import TenantSettings  # noqa: PLC0415
-
-            ts = (
-                self.db.query(TenantSettings)
-                .filter_by(tenant_id=self.tenant_id)
-                .first()
-            )
-            if ts is None:
-                return False
-            meta = dict(ts.extra_metadata or {})
-            flags = dict(meta.get("tenant_features") or {})
-            return bool(flags.get("offer_decision_service"))
-        except Exception:
-            return False
+    def _tenant_decision_mode(self) -> DecisionMode:
+        return tenant_decision_mode(self.db, self.tenant_id)
 
     async def _segment_change_via_decision_service(
         self,
@@ -974,28 +971,19 @@ class CustomerIntelligenceService:
         segment: str,
         reason: str,
     ) -> None:
-        """Decide → apply through the shared service. Failures are
-        absorbed (logged) — never escalates to the classification path."""
+        """ENFORCE — decide → apply through the shared service. Failures
+        are absorbed (logged) — never escalates to the classification
+        path."""
+        ctx = self._build_segment_change_context(customer_id=customer_id, segment=segment)
+        if ctx is None:
+            return
         try:
             from services.offer_decision_service import (  # noqa: PLC0415
-                OfferDecisionContext,
                 SOURCE_NONE,
-                SURFACE_SEGMENT_CHANGE,
                 apply_decision,
-                collect_signals,
                 decide,
             )
 
-            signals = collect_signals(self.db, tenant_id=self.tenant_id, customer_id=customer_id)
-            ctx = OfferDecisionContext(
-                tenant_id         = self.tenant_id,
-                surface           = SURFACE_SEGMENT_CHANGE,
-                customer_id       = customer_id,
-                automation_type   = f"segment_change:{segment}",
-                suggested_source  = "coupon",
-                suggested_segment = segment,
-                signals           = signals,
-            )
             decision = decide(self.db, ctx)
             self.db.commit()
             if decision.source == SOURCE_NONE:
@@ -1018,6 +1006,95 @@ class CustomerIntelligenceService:
                 "[Intelligence] decision-service segment_change failed tenant=%s customer=%s: %s",
                 self.tenant_id, customer_id, exc,
             )
+
+    async def _segment_change_advisory(
+        self,
+        *,
+        customer_id: int,
+        segment: str,
+        reason: str,
+    ) -> None:
+        """ADVISORY — write a ledger row capturing what the policy would
+        have done, then fall through to the legacy
+        `CouponGeneratorService` and stamp the resulting coupon with
+        `decision_id`."""
+        from services.coupon_generator import CouponGeneratorService  # noqa: PLC0415
+
+        decision = None
+        try:
+            from services.offer_decision_service import decide  # noqa: PLC0415
+
+            ctx = self._build_segment_change_context(customer_id=customer_id, segment=segment)
+            if ctx is not None:
+                decision = decide(self.db, ctx)
+                self.db.commit()
+                logger.info(
+                    "[Intelligence] advisory segment-change tenant=%s customer=%s "
+                    "segment=%s would-have %s/%s reasons=%s",
+                    self.tenant_id, customer_id, segment,
+                    decision.source, decision.discount_value, decision.reason_codes,
+                )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug(
+                "[Intelligence] advisory segment-change decide failed tenant=%s customer=%s: %s",
+                self.tenant_id, customer_id, exc,
+            )
+
+        try:
+            svc = CouponGeneratorService(self.db, self.tenant_id)
+            coupon = await svc.generate_for_customer(
+                customer_id, segment, reason=f"status_change:{reason}"
+            )
+        except Exception as exc:
+            logger.exception(
+                "[Intelligence] legacy generate_for_customer failed tenant=%s customer=%s: %s",
+                self.tenant_id, customer_id, exc,
+            )
+            return
+
+        if decision is not None and coupon is not None:
+            try:
+                from services.offer_decision_flags import (  # noqa: PLC0415
+                    stamp_decision_id_on_coupon,
+                )
+                stamp_decision_id_on_coupon(
+                    self.db, coupon, decision, mode_label="advisory_segment_change",
+                )
+                self.db.commit()
+            except Exception as exc:  # pragma: no cover
+                logger.debug(
+                    "[Intelligence] advisory coupon stamp failed tenant=%s: %s",
+                    self.tenant_id, exc,
+                )
+
+    def _build_segment_change_context(
+        self,
+        *,
+        customer_id: int,
+        segment: str,
+    ) -> Optional["Any"]:
+        """Compose the OfferDecisionContext for a segment-change event.
+        Shared between the ENFORCE and ADVISORY branches so the ledger
+        row is byte-identical (modulo decision_id) across modes."""
+        try:
+            from services.offer_decision_service import (  # noqa: PLC0415
+                OfferDecisionContext,
+                SURFACE_SEGMENT_CHANGE,
+                collect_signals,
+            )
+            signals = collect_signals(self.db, tenant_id=self.tenant_id, customer_id=customer_id)
+            return OfferDecisionContext(
+                tenant_id         = self.tenant_id,
+                surface           = SURFACE_SEGMENT_CHANGE,
+                customer_id       = customer_id,
+                automation_type   = f"segment_change:{segment}",
+                suggested_source  = "coupon",
+                suggested_segment = segment,
+                signals           = signals,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("[Intelligence] segment-change ctx build failed: %s", exc)
+            return None
 
     def rebuild_profiles_for_tenant(
         self,

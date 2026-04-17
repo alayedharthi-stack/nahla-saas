@@ -939,27 +939,22 @@ def _resolve_discount_source(
     return "none"
 
 
-# Per-tenant feature flag: when ON, the automation engine routes every
-# discount decision through the shared OfferDecisionService so the choice
-# is recorded in the ledger and obeys the merchant's frequency cap, hard
-# discount cap, and signal-driven nudges. Default OFF — Phase 2 ships
-# behaviourally inert; merchants opt in via the admin features API.
-OFFER_DECISION_FLAG = "offer_decision_service"
-
-
-def _tenant_uses_offer_decision_service(db: Session, tenant_id: int) -> bool:
-    """Check `TenantSettings.extra_metadata.tenant_features.offer_decision_service`."""
-    try:
-        from models import TenantSettings  # noqa: PLC0415
-
-        ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
-        if ts is None:
-            return False
-        meta = dict(ts.extra_metadata or {})
-        flags = dict(meta.get("tenant_features") or {})
-        return bool(flags.get(OFFER_DECISION_FLAG))
-    except Exception:
-        return False
+# Per-tenant rollout for OfferDecisionService.
+#
+# The automation engine routes through the shared service when the
+# tenant's mode is ENFORCE (decision is authoritative) or ADVISORY (a
+# ledger row is written and the legacy resolver still produces the
+# coupon — used to measure parity before flipping merchants to
+# enforcement). The single source of truth for the mode lives in
+# `services.offer_decision_flags`; see that module for the truth table.
+#
+# Re-exported here for backward compatibility with code/tests that
+# imported the legacy flag constant.
+from services.offer_decision_flags import (  # noqa: E402
+    FLAG_SERVICE as OFFER_DECISION_FLAG,
+    DecisionMode,
+    tenant_decision_mode,
+)
 
 
 async def _resolve_auto_coupon(
@@ -988,12 +983,22 @@ async def _resolve_auto_coupon(
     consume the same code). Returns `{}` on any failure — never raises,
     never blocks the send.
 
-    Phase 2 routing — when the per-tenant `offer_decision_service` flag is
-    set, this body delegates to `OfferDecisionService.decide` +
-    `apply_decision`. Behavioural parity is locked down by the seed-parity
+    Phase 2 routing — the dispatch is driven by `tenant_decision_mode`:
+
+      • ENFORCE  → delegate to `OfferDecisionService.decide` +
+        `apply_decision`. Service is authoritative.
+      • ADVISORY → write a ledger row via `decide`, then run the legacy
+        path below. Stamp the issued coupon with `decision_id` so
+        attribution still closes the loop. Used to measure parity
+        before flipping merchants to enforcement.
+      • OFF      → legacy path only, no ledger writes.
+
+    Behavioural parity for ENFORCE is locked down by the seed-parity
     test suite in `tests/test_offer_decision.py`.
     """
-    if _tenant_uses_offer_decision_service(db, tenant_id):
+    mode = tenant_decision_mode(db, tenant_id)
+
+    if mode is DecisionMode.ENFORCE:
         return await _resolve_via_decision_service(
             db,
             tenant_id=tenant_id,
@@ -1004,6 +1009,58 @@ async def _resolve_auto_coupon(
             event_id=event_id,
         )
 
+    if mode is DecisionMode.ADVISORY:
+        advisory_decision = _write_advisory_automation_decision(
+            db,
+            tenant_id=tenant_id,
+            customer=customer,
+            config=config,
+            active_step=active_step,
+            automation_id=automation_id,
+            event_id=event_id,
+        )
+        extras = await _resolve_auto_coupon_legacy(
+            db,
+            tenant_id=tenant_id,
+            customer=customer,
+            config=config,
+            active_step=active_step,
+        )
+        if advisory_decision is not None and extras.get("coupon_code"):
+            _stamp_advisory_on_legacy_coupon(
+                db,
+                tenant_id=tenant_id,
+                decision=advisory_decision,
+                coupon_code=extras["coupon_code"],
+                mode_label="advisory_automation",
+            )
+        return extras
+
+    return await _resolve_auto_coupon_legacy(
+        db,
+        tenant_id=tenant_id,
+        customer=customer,
+        config=config,
+        active_step=active_step,
+    )
+
+
+async def _resolve_auto_coupon_legacy(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer: Any,
+    config: Dict[str, Any],
+    active_step: Dict[str, Any],
+) -> Dict[str, str]:
+    """The pre-OfferDecisionService resolver.
+
+    Kept as a private helper so the ADVISORY branch can run it after
+    writing a ledger row. Behaviour for OFF and ADVISORY tenants is
+    identical to the pre-rollout codebase — the only change in
+    ADVISORY is that the resulting Coupon gets a back-stamped
+    `decision_id`.
+    """
     source = _resolve_discount_source(config, active_step)
 
     if source == "promotion":
@@ -1017,15 +1074,12 @@ async def _resolve_auto_coupon(
     if source != "coupon":
         return {}
 
-    # Resolve segment
     segment = (
         config.get("coupon_segment")
         or _customer_segment_for(db, tenant_id, getattr(customer, "id", None))
         or "active"
     )
 
-    # Honour the merchant-edited rule (discount value + validity window) from
-    # the new editable Coupons page when an automation_type maps to a rule.
     rule_override_discount: Optional[int] = None
     rule_override_validity: Optional[int] = None
     automation_type = str(config.get("automation_type") or "") or str(active_step.get("automation_type") or "")
@@ -1139,10 +1193,10 @@ async def _resolve_via_decision_service(
     event_id: Optional[int],
 ) -> Dict[str, str]:
     """
-    Phase-2 path: delegate to the shared `OfferDecisionService`.
+    ENFORCE path: delegate to the shared `OfferDecisionService`.
 
     Mirrors the legacy precedence by translating the existing config keys
-    into a `OfferDecisionContext`:
+    into a `OfferDecisionContext` (see `_build_automation_decision_context`):
 
       • config.discount_source / step.discount_source → suggested_source
       • config.promotion_id                           → suggested_promotion_id
@@ -1155,16 +1209,61 @@ async def _resolve_via_decision_service(
     """
     try:
         from services.offer_decision_service import (  # noqa: PLC0415
-            OfferDecisionContext,
             SOURCE_NONE,
-            SURFACE_AUTOMATION,
             apply_decision,
-            collect_signals,
             decide,
         )
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning("[AutoEngine] decision service import failed: %s", exc)
         return {}
+
+    ctx = _build_automation_decision_context(
+        db,
+        tenant_id=tenant_id,
+        customer=customer,
+        config=config,
+        active_step=active_step,
+        automation_id=automation_id,
+        event_id=event_id,
+    )
+    if ctx is None:
+        return {}
+
+    decision = decide(db, ctx)
+    if decision.source == SOURCE_NONE:
+        return {}
+
+    return await apply_decision(db, ctx=ctx, decision=decision, customer=customer)
+
+
+def _build_automation_decision_context(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer: Any,
+    config: Dict[str, Any],
+    active_step: Dict[str, Any],
+    automation_id: Optional[int],
+    event_id: Optional[int],
+) -> Optional["Any"]:
+    """Compose the `OfferDecisionContext` for an automation send.
+
+    Shared between the ENFORCE and ADVISORY paths so the ledger row
+    written in shadow mode is byte-identical (modulo `decision_id`) to
+    the row that would be written if the same tenant flipped to
+    enforcement. Returns ``None`` only if the OfferDecisionService
+    module fails to import — in which case both branches degrade to
+    the legacy resolver.
+    """
+    try:
+        from services.offer_decision_service import (  # noqa: PLC0415
+            OfferDecisionContext,
+            SURFACE_AUTOMATION,
+            collect_signals,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("[AutoEngine] decision service import failed: %s", exc)
+        return None
 
     legacy_source = _resolve_discount_source(config, active_step)
     suggested_source: Optional[str] = legacy_source if legacy_source != "none" else None
@@ -1183,7 +1282,7 @@ async def _resolve_via_decision_service(
     customer_id = getattr(customer, "id", None)
     signals = collect_signals(db, tenant_id=tenant_id, customer_id=customer_id)
 
-    ctx = OfferDecisionContext(
+    return OfferDecisionContext(
         tenant_id              = tenant_id,
         surface                = SURFACE_AUTOMATION,
         customer_id            = customer_id,
@@ -1196,11 +1295,80 @@ async def _resolve_via_decision_service(
         signals                = signals,
     )
 
-    decision = decide(db, ctx)
-    if decision.source == SOURCE_NONE:
-        return {}
 
-    return await apply_decision(db, ctx=ctx, decision=decision, customer=customer)
+def _write_advisory_automation_decision(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer: Any,
+    config: Dict[str, Any],
+    active_step: Dict[str, Any],
+    automation_id: Optional[int],
+    event_id: Optional[int],
+) -> Optional["Any"]:
+    """ADVISORY path: write a ledger row capturing what the policy
+    *would* have done, without touching the legacy artefact.
+
+    Returns the `OfferDecision` on success (so the caller can stamp
+    the legacy coupon with its `decision_id`), or ``None`` on any
+    failure. Never raises — a misconfigured tenant must not block an
+    automation send.
+    """
+    ctx = _build_automation_decision_context(
+        db,
+        tenant_id=tenant_id,
+        customer=customer,
+        config=config,
+        active_step=active_step,
+        automation_id=automation_id,
+        event_id=event_id,
+    )
+    if ctx is None:
+        return None
+    try:
+        from services.offer_decision_service import decide  # noqa: PLC0415
+
+        decision = decide(db, ctx)
+        db.commit()
+        logger.info(
+            "[AutoEngine] advisory decision tenant=%s automation=%s would-have %s/%s reasons=%s",
+            tenant_id, automation_id, decision.source, decision.discount_value,
+            decision.reason_codes,
+        )
+        return decision
+    except Exception as exc:  # pragma: no cover — never block the send
+        logger.debug("[AutoEngine] advisory decide failed tenant=%s: %s", tenant_id, exc)
+        return None
+
+
+def _stamp_advisory_on_legacy_coupon(
+    db: Session,
+    *,
+    tenant_id: int,
+    decision: "Any",
+    coupon_code: str,
+    mode_label: str,
+) -> None:
+    """Find the legacy-issued Coupon row and back-stamp it with the
+    advisory `decision_id` so the attribution service can still join
+    redeemed orders → coupon → ledger row. No-op on any failure."""
+    try:
+        from models import Coupon  # noqa: PLC0415
+        from services.offer_decision_flags import (  # noqa: PLC0415
+            stamp_decision_id_on_coupon,
+        )
+
+        coupon = (
+            db.query(Coupon)
+            .filter(Coupon.tenant_id == tenant_id, Coupon.code == coupon_code)
+            .first()
+        )
+        if coupon is None:
+            return
+        stamp_decision_id_on_coupon(db, coupon, decision, mode_label=mode_label)
+        db.commit()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.debug("[AutoEngine] advisory coupon stamp failed: %s", exc)
 
 
 def _customer_segment_for(
