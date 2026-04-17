@@ -105,6 +105,7 @@ from routers.analytics    import router as _analytics_router     # noqa: E402
 from routers.conversations import router as _conversations_router # noqa: E402
 from routers.coupons      import router as _coupons_router       # noqa: E402
 from routers.promotions   import router as _promotions_router    # noqa: E402
+from routers.offer_decisions import router as _offer_decisions_router  # noqa: E402
 from routers.orders       import router as _orders_router        # noqa: E402
 from routers.intelligence import router as _intelligence_router  # noqa: E402
 from routers.customers    import router as _customers_router     # noqa: E402
@@ -141,6 +142,7 @@ app.include_router(_analytics_router)
 app.include_router(_conversations_router)
 app.include_router(_coupons_router)
 app.include_router(_promotions_router)
+app.include_router(_offer_decisions_router)
 app.include_router(_orders_router)
 app.include_router(_intelligence_router)
 app.include_router(_customers_router)

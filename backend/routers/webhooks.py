@@ -495,6 +495,24 @@ async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
                             )
                         except Exception as _ae:
                             logger.debug("[Webhook] emit order_paid failed: %s", _ae)
+
+                        # Attribute the order back to its decision (if any).
+                        # Failures here MUST NOT block the webhook ack.
+                        try:
+                            from services.offer_attribution_service import (  # noqa: PLC0415
+                                attribute_order_to_decision,
+                            )
+                            attribute_order_to_decision(
+                                db,
+                                tenant_id=tenant_id,
+                                order_id=oid,
+                                payload={
+                                    "amount": data.get("amount"),
+                                    "payment_id": payment_id,
+                                },
+                            )
+                        except Exception as _ae:
+                            logger.debug("[Webhook] offer attribution failed: %s", _ae)
                     elif payment_status == "failed":
                         order.status = "payment_failed"
             except (ValueError, TypeError):

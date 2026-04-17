@@ -232,6 +232,7 @@ async def generate_orchestrate_response(
             elif action["type"] == "suggest_coupon":
                 coupon_payload = await _execute_suggest_coupon(
                     tenant_id, customer_segment, fp,
+                    customer_id=customer_id,
                 )
                 if coupon_payload:
                     coupon_code_to_inject = coupon_payload.get("code")
@@ -452,8 +453,26 @@ async def _execute_suggest_coupon(
     tenant_id: int,
     customer_segment: str,
     payload: Dict[str, Any],
+    *,
+    customer_id: Optional[int] = None,
 ) -> Optional[Dict[str, str]]:
-    """Pick or create a real coupon for the customer segment."""
+    """
+    Pick or create a real coupon for the customer segment.
+
+    Phase-3 wiring: regardless of which surface the merchant has opted
+    into, we ALSO call `OfferDecisionService.decide` here so the chat
+    decision is captured in the ledger. Two modes are supported via the
+    per-tenant feature flag (`offer_decision_service`):
+
+      • flag OFF → **advisory mode**. The decision service runs purely
+        for telemetry; the LLM-suggested discount % stays in effect.
+        This is the default — it lets us measure parity before flipping
+        any merchant to enforcement.
+      • flag ON  → **enforce mode**. The decision service's output
+        (source/value/validity) is the source of truth, the LLM's
+        suggested % is treated as a hint, and the resulting Coupon
+        carries `decision_id` so order_paid attribution works.
+    """
     try:
         db_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         if db_root not in sys.path:
@@ -464,6 +483,90 @@ async def _execute_suggest_coupon(
 
         db = SessionLocal()
         try:
+            enforce = _tenant_uses_decision_service_enforce(db, tenant_id)
+            requested_discount = payload.get("discount_pct")
+
+            if enforce:
+                # Decision service is authoritative. It returns the
+                # Coupon-shaped extras dict (`coupon_code` etc.) and
+                # writes the ledger row with stamped decision_id.
+                from services.offer_decision_service import (  # noqa: PLC0415
+                    OfferDecisionContext,
+                    SOURCE_NONE,
+                    SURFACE_CHAT,
+                    apply_decision,
+                    collect_signals,
+                    decide,
+                )
+                signals = collect_signals(db, tenant_id=tenant_id, customer_id=customer_id)
+                ctx = OfferDecisionContext(
+                    tenant_id              = tenant_id,
+                    surface                = SURFACE_CHAT,
+                    customer_id            = customer_id,
+                    suggested_source       = "coupon",
+                    suggested_segment      = customer_segment,
+                    suggested_discount_pct = (
+                        int(requested_discount) if requested_discount is not None else None
+                    ),
+                    signals                = signals,
+                )
+                decision = decide(db, ctx)
+                if decision.source == SOURCE_NONE:
+                    logger.info(
+                        "[suggest_coupon] decision-service enforce: skipped tenant=%s reasons=%s",
+                        tenant_id, decision.reason_codes,
+                    )
+                    return None
+                extras = await apply_decision(db, ctx=ctx, decision=decision, customer=None)
+                if not extras.get("coupon_code"):
+                    return None
+                code = extras["coupon_code"]
+                coupon_row = (
+                    db.query(__import__("models").Coupon)
+                    .filter_by(tenant_id=tenant_id, code=code)
+                    .first()
+                )
+                if coupon_row is None:
+                    return None
+                logger.info(
+                    "[suggest_coupon] decision-service enforce: issued %s tenant=%s reasons=%s",
+                    code, tenant_id, decision.reason_codes,
+                )
+                return build_coupon_send_payload(coupon_row)
+
+            # ─ Advisory mode (default) ─ run the policy for telemetry only.
+            try:
+                from services.offer_decision_service import (  # noqa: PLC0415
+                    OfferDecisionContext,
+                    SURFACE_CHAT,
+                    collect_signals,
+                    decide,
+                )
+                signals = collect_signals(db, tenant_id=tenant_id, customer_id=customer_id)
+                advisory_decision = decide(
+                    db,
+                    OfferDecisionContext(
+                        tenant_id              = tenant_id,
+                        surface                = SURFACE_CHAT,
+                        customer_id            = customer_id,
+                        suggested_source       = "coupon",
+                        suggested_segment      = customer_segment,
+                        suggested_discount_pct = (
+                            int(requested_discount) if requested_discount is not None else None
+                        ),
+                        signals                = signals,
+                    ),
+                )
+                db.commit()
+                logger.info(
+                    "[suggest_coupon] advisory decision tenant=%s would-have-issued=%s reasons=%s",
+                    tenant_id, advisory_decision.discount_value, advisory_decision.reason_codes,
+                )
+            except Exception as exc:  # pragma: no cover — never block the chat path
+                logger.debug("[suggest_coupon] advisory decision write failed: %s", exc)
+                advisory_decision = None  # type: ignore
+
+            # Legacy code path stays intact when in advisory mode.
             svc = CouponGeneratorService(db, tenant_id)
             coupon = svc.pick_coupon_for_segment(customer_segment)
             if coupon:
@@ -471,9 +574,9 @@ async def _execute_suggest_coupon(
                     "suggest_coupon: picked pool coupon %s for tenant=%s segment=%s",
                     coupon.code, tenant_id, customer_segment,
                 )
+                _stamp_advisory_decision_id(db, coupon, advisory_decision)
                 return build_coupon_send_payload(coupon)
 
-            requested_discount = payload.get("discount_pct")
             coupon = await svc.create_on_demand(
                 customer_segment,
                 requested_discount_pct=requested_discount,
@@ -483,9 +586,50 @@ async def _execute_suggest_coupon(
                     "suggest_coupon: created on-demand coupon %s for tenant=%s segment=%s",
                     coupon.code, tenant_id, customer_segment,
                 )
+                _stamp_advisory_decision_id(db, coupon, advisory_decision)
                 return build_coupon_send_payload(coupon)
         finally:
             db.close()
     except Exception as exc:
         logger.error("suggest_coupon execution failed: %s", exc, exc_info=True)
     return None
+
+
+def _tenant_uses_decision_service_enforce(db, tenant_id: int) -> bool:
+    """Per-tenant flag identical to the automation engine wiring. When
+    True the chat path is fully delegated to OfferDecisionService."""
+    try:
+        from models import TenantSettings  # noqa: PLC0415
+
+        ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+        if ts is None:
+            return False
+        meta = dict(ts.extra_metadata or {})
+        flags = dict(meta.get("tenant_features") or {})
+        return bool(flags.get("offer_decision_service"))
+    except Exception:
+        return False
+
+
+def _stamp_advisory_decision_id(db, coupon, decision) -> None:
+    """In advisory mode the legacy path is still authoritative, but we
+    still want to attribute redemptions back to the (advisory) decision
+    that *would* have run. Stamp the ledger's decision_id and back-link
+    the coupon — no-op when the advisory write failed."""
+    if coupon is None or decision is None:
+        return
+    try:
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        from services.offer_decision_service import _link_coupon_to_ledger  # noqa: PLC0415
+
+        meta = dict(coupon.extra_metadata or {})
+        if meta.get("decision_id") == decision.decision_id:
+            return
+        meta["decision_id"] = decision.decision_id
+        meta.setdefault("decision_mode", "advisory")
+        coupon.extra_metadata = meta
+        flag_modified(coupon, "extra_metadata")
+        _link_coupon_to_ledger(db, decision.decision_id, coupon.id)
+        db.commit()
+    except Exception as exc:  # pragma: no cover
+        logger.debug("[suggest_coupon] advisory stamp failed: %s", exc)

@@ -246,6 +246,88 @@ class Promotion(Base):
 
     tenant = relationship('Tenant', back_populates='promotions')
 
+class OfferDecisionLedger(Base):
+    """
+    One row per *decision* the OfferDecisionService makes.
+
+    A "decision" is the act of choosing — for a given customer at a given
+    moment on a given trigger surface (campaign / chat / segment-change) —
+    whether to issue a discount, and if so which one (promotion vs coupon)
+    with what value and validity. The decision is then materialised into
+    a `Coupon` (or no coupon at all) by the existing primitives.
+
+    This table is the **closing of the loop**: every decision is captured
+    with its inputs (`signals_snapshot`), its output (`chosen_*`), the
+    explainability trail (`reason_codes`), and — once an order arrives
+    that redeems the coupon — the realised outcome (`redeemed_at`,
+    `order_id`, `revenue_amount`, `attributed`).
+
+    Bandit-ready by design: `policy_version` and `experiment_arm` are
+    populated from day one so a future contextual-bandit policy can be
+    added behind the same `OfferDecisionService.decide(...)` interface
+    without a schema migration. In v1 (deterministic policy) every row
+    has `policy_version='v1.0-deterministic'` and `experiment_arm=None`.
+    """
+    __tablename__ = 'offer_decisions'
+    __table_args__ = (
+        UniqueConstraint('decision_id', name='uq_offer_decisions_decision_id'),
+        Index('ix_offer_decisions_tenant_created', 'tenant_id', 'created_at'),
+        Index('ix_offer_decisions_tenant_surface', 'tenant_id', 'surface'),
+        Index('ix_offer_decisions_tenant_chosen', 'tenant_id', 'chosen_source'),
+        Index('ix_offer_decisions_tenant_attributed', 'tenant_id', 'attributed'),
+    )
+
+    id              = Column(Integer, primary_key=True)
+    tenant_id       = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+
+    # UUID string — generated at decision time, stamped into the resulting
+    # `Coupon.extra_metadata.decision_id` so attribution can join on it.
+    decision_id     = Column(String, nullable=False, index=True)
+
+    # Where was the decision made?
+    #   automation       — automation_engine._resolve_auto_coupon
+    #   chat             — orchestrator._execute_suggest_coupon
+    #   segment_change   — customer_intelligence event-driven
+    surface         = Column(String, nullable=False)
+
+    # Optional foreign-key-ish ids — kept as plain integers (no FK) so a
+    # row deleted upstream doesn't cascade-delete decision history.
+    automation_id   = Column(Integer, nullable=True, index=True)
+    event_id        = Column(Integer, nullable=True)
+    customer_id     = Column(Integer, nullable=True, index=True)
+
+    # Snapshot of the signals fed to the policy at decision time.
+    # Lets us re-run the decision offline or train a bandit later without
+    # racing against mutated CustomerProfile rows.
+    signals_snapshot = Column(JSONB, nullable=True)
+
+    # ── Decision output ──────────────────────────────────────────────
+    chosen_source       = Column(String, nullable=False)        # promotion | coupon | none
+    chosen_promotion_id = Column(Integer, nullable=True)
+    chosen_coupon_id    = Column(Integer, nullable=True)        # filled after issuance
+
+    discount_type   = Column(String, nullable=True)             # percentage | fixed | free_shipping
+    discount_value  = Column(Numeric(10, 2), nullable=True)
+    validity_days   = Column(Integer, nullable=True)
+
+    # Ordered list of short codes explaining *why* the policy made this
+    # choice — e.g. ["legacy_step_override", "merchant_rule_applied",
+    # "capped_by_max_discount"]. Surfaced in observability.
+    reason_codes    = Column(JSONB, nullable=True)
+
+    # Bandit-ready columns — never null in v1 (advisory string only).
+    policy_version  = Column(String, nullable=False, default='v1.0-deterministic')
+    experiment_arm  = Column(String, nullable=True)
+
+    # ── Attribution (filled by OfferAttributionService) ───────────────
+    redeemed_at     = Column(DateTime, nullable=True)
+    order_id        = Column(Integer, nullable=True)
+    revenue_amount  = Column(Numeric(12, 2), nullable=True)
+    attributed      = Column(Boolean, nullable=False, default=False)
+
+    created_at      = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class Integration(Base):
     __tablename__ = 'integrations'
     __table_args__ = (

@@ -5,6 +5,7 @@ import {
 } from 'recharts'
 import { DollarSign, TrendingUp, ShoppingCart, MessageSquare } from 'lucide-react'
 import StatCard from '../components/ui/StatCard'
+import SmartOfferPerformance from '../components/SmartOfferPerformance'
 import { featureRealityApi, type AnalyticsDashboard } from '../api/featureReality'
 
 const emptyData: AnalyticsDashboard = {
@@ -78,6 +79,9 @@ export default function Analytics() {
           </AreaChart>
         </ResponsiveContainer>
       </div>
+
+      {/* Smart Offer Performance — AI-driven incentive telemetry */}
+      <SmartOfferPerformance />
 
       {/* Conversion chart + pie */}
       <div className="grid lg:grid-cols-2 gap-4">

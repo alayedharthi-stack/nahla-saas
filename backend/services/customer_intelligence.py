@@ -905,12 +905,18 @@ class CustomerIntelligenceService:
                     EVENT_DRIVEN_SEGMENTS,
                 )
                 if status in EVENT_DRIVEN_SEGMENTS:
-                    svc = CouponGeneratorService(self.db, self.tenant_id)
+                    use_decision_service = self._tenant_uses_decision_service()
 
                     async def _run():
-                        await svc.generate_for_customer(
-                            customer.id, status, reason=f"status_change:{reason}"
-                        )
+                        if use_decision_service:
+                            await self._segment_change_via_decision_service(
+                                customer_id=customer.id, segment=status, reason=reason,
+                            )
+                        else:
+                            svc = CouponGeneratorService(self.db, self.tenant_id)
+                            await svc.generate_for_customer(
+                                customer.id, status, reason=f"status_change:{reason}"
+                            )
 
                     try:
                         loop = _asyncio.get_running_loop()
@@ -932,6 +938,86 @@ class CustomerIntelligenceService:
                 )
 
         return profile
+
+    # ── Decision-service routing (Phase 4) ──────────────────────────────
+    #
+    # When the per-tenant `offer_decision_service` flag is on, segment-
+    # change coupons go through the shared OfferDecisionService so:
+    #   • merchant rules apply (the same rules editable on /coupons),
+    #   • the resulting coupon carries `decision_id` for attribution,
+    #   • the ledger captures *every* segment-change discount (not just
+    #     the ones that are eventually redeemed).
+    # Default (flag off): legacy `generate_for_customer` path is used and
+    # behaviour is unchanged.
+
+    def _tenant_uses_decision_service(self) -> bool:
+        try:
+            from models import TenantSettings  # noqa: PLC0415
+
+            ts = (
+                self.db.query(TenantSettings)
+                .filter_by(tenant_id=self.tenant_id)
+                .first()
+            )
+            if ts is None:
+                return False
+            meta = dict(ts.extra_metadata or {})
+            flags = dict(meta.get("tenant_features") or {})
+            return bool(flags.get("offer_decision_service"))
+        except Exception:
+            return False
+
+    async def _segment_change_via_decision_service(
+        self,
+        *,
+        customer_id: int,
+        segment: str,
+        reason: str,
+    ) -> None:
+        """Decide → apply through the shared service. Failures are
+        absorbed (logged) — never escalates to the classification path."""
+        try:
+            from services.offer_decision_service import (  # noqa: PLC0415
+                OfferDecisionContext,
+                SOURCE_NONE,
+                SURFACE_SEGMENT_CHANGE,
+                apply_decision,
+                collect_signals,
+                decide,
+            )
+
+            signals = collect_signals(self.db, tenant_id=self.tenant_id, customer_id=customer_id)
+            ctx = OfferDecisionContext(
+                tenant_id         = self.tenant_id,
+                surface           = SURFACE_SEGMENT_CHANGE,
+                customer_id       = customer_id,
+                automation_type   = f"segment_change:{segment}",
+                suggested_source  = "coupon",
+                suggested_segment = segment,
+                signals           = signals,
+            )
+            decision = decide(self.db, ctx)
+            self.db.commit()
+            if decision.source == SOURCE_NONE:
+                logger.info(
+                    "[Intelligence] segment-change decision skipped tenant=%s customer=%s "
+                    "segment=%s reasons=%s",
+                    self.tenant_id, customer_id, segment, decision.reason_codes,
+                )
+                return
+            extras = await apply_decision(self.db, ctx=ctx, decision=decision, customer=None)
+            if extras.get("coupon_code"):
+                logger.info(
+                    "[Intelligence] segment-change coupon issued tenant=%s customer=%s "
+                    "segment=%s code=%s reasons=%s reason=%s",
+                    self.tenant_id, customer_id, segment, extras["coupon_code"],
+                    decision.reason_codes, reason,
+                )
+        except Exception as exc:
+            logger.exception(
+                "[Intelligence] decision-service segment_change failed tenant=%s customer=%s: %s",
+                self.tenant_id, customer_id, exc,
+            )
 
     def rebuild_profiles_for_tenant(
         self,

@@ -1113,6 +1113,29 @@ class StoreSyncService:
                     self.tenant_id, order_row.id, exc,
                 )
 
+            # Close the offer-decision attribution loop. We do this on every
+            # *new* order — not only on `order_paid` — because Salla orders
+            # frequently arrive already paid, and waiting for `order_paid`
+            # would miss them. Idempotent on re-runs.
+            try:
+                from services.offer_attribution_service import (  # noqa: PLC0415
+                    attribute_order_to_decision,
+                )
+                attribute_order_to_decision(
+                    self.db,
+                    tenant_id=self.tenant_id,
+                    order_id=order_row.id,
+                    payload={
+                        "total":  normalised.get("total"),
+                        "status": normalised.get("status"),
+                    },
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[StoreSync] offer attribution failed tenant=%s order=%s: %s",
+                    self.tenant_id, order_row.id, exc,
+                )
+
         snap = (
             self.db.query(StoreKnowledgeSnapshot)
             .filter_by(tenant_id=self.tenant_id)

@@ -645,6 +645,8 @@ async def _execute_action(
     coupon_extras = await _resolve_auto_coupon(
         db, tenant_id=tenant_id, customer=customer, config=_config_with_type,
         active_step=_active_step_for_event(event, config),
+        automation_id=getattr(automation, "id", None),
+        event_id=getattr(event, "id", None),
     )
 
     # ── Build template variables ──────────────────────────────────────────────
@@ -937,6 +939,29 @@ def _resolve_discount_source(
     return "none"
 
 
+# Per-tenant feature flag: when ON, the automation engine routes every
+# discount decision through the shared OfferDecisionService so the choice
+# is recorded in the ledger and obeys the merchant's frequency cap, hard
+# discount cap, and signal-driven nudges. Default OFF — Phase 2 ships
+# behaviourally inert; merchants opt in via the admin features API.
+OFFER_DECISION_FLAG = "offer_decision_service"
+
+
+def _tenant_uses_offer_decision_service(db: Session, tenant_id: int) -> bool:
+    """Check `TenantSettings.extra_metadata.tenant_features.offer_decision_service`."""
+    try:
+        from models import TenantSettings  # noqa: PLC0415
+
+        ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+        if ts is None:
+            return False
+        meta = dict(ts.extra_metadata or {})
+        flags = dict(meta.get("tenant_features") or {})
+        return bool(flags.get(OFFER_DECISION_FLAG))
+    except Exception:
+        return False
+
+
 async def _resolve_auto_coupon(
     db: Session,
     *,
@@ -944,6 +969,8 @@ async def _resolve_auto_coupon(
     customer: Any,
     config: Dict[str, Any],
     active_step: Dict[str, Any],
+    automation_id: Optional[int] = None,
+    event_id: Optional[int] = None,
 ) -> Dict[str, str]:
     """
     Resolve the discount artifact for this automation step.
@@ -960,7 +987,23 @@ async def _resolve_auto_coupon(
     on success (all three keys populated so cart/vip/winback templates
     consume the same code). Returns `{}` on any failure — never raises,
     never blocks the send.
+
+    Phase 2 routing — when the per-tenant `offer_decision_service` flag is
+    set, this body delegates to `OfferDecisionService.decide` +
+    `apply_decision`. Behavioural parity is locked down by the seed-parity
+    test suite in `tests/test_offer_decision.py`.
     """
+    if _tenant_uses_offer_decision_service(db, tenant_id):
+        return await _resolve_via_decision_service(
+            db,
+            tenant_id=tenant_id,
+            customer=customer,
+            config=config,
+            active_step=active_step,
+            automation_id=automation_id,
+            event_id=event_id,
+        )
+
     source = _resolve_discount_source(config, active_step)
 
     if source == "promotion":
@@ -1083,6 +1126,81 @@ async def _materialise_promotion_for_send(
 
     code = str(coupon.code).strip().upper()
     return {"discount_code": code, "vip_coupon": code, "coupon_code": code}
+
+
+async def _resolve_via_decision_service(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer: Any,
+    config: Dict[str, Any],
+    active_step: Dict[str, Any],
+    automation_id: Optional[int],
+    event_id: Optional[int],
+) -> Dict[str, str]:
+    """
+    Phase-2 path: delegate to the shared `OfferDecisionService`.
+
+    Mirrors the legacy precedence by translating the existing config keys
+    into a `OfferDecisionContext`:
+
+      • config.discount_source / step.discount_source → suggested_source
+      • config.promotion_id                           → suggested_promotion_id
+      • legacy `auto_coupon` heuristic                → suggested_source="coupon"
+      • config.coupon_segment                         → suggested_segment
+
+    Stamps `decision_id` onto the issued coupon (handled inside
+    `apply_decision`) so order_paid attribution can join back to the
+    ledger row written by `decide`.
+    """
+    try:
+        from services.offer_decision_service import (  # noqa: PLC0415
+            OfferDecisionContext,
+            SOURCE_NONE,
+            SURFACE_AUTOMATION,
+            apply_decision,
+            collect_signals,
+            decide,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("[AutoEngine] decision service import failed: %s", exc)
+        return {}
+
+    legacy_source = _resolve_discount_source(config, active_step)
+    suggested_source: Optional[str] = legacy_source if legacy_source != "none" else None
+    suggested_promo_id = config.get("promotion_id") if legacy_source == "promotion" else None
+
+    suggested_segment = (
+        config.get("coupon_segment")
+        or _customer_segment_for(db, tenant_id, getattr(customer, "id", None))
+    )
+    automation_type = (
+        str(config.get("automation_type") or "")
+        or str((active_step or {}).get("automation_type") or "")
+        or None
+    )
+
+    customer_id = getattr(customer, "id", None)
+    signals = collect_signals(db, tenant_id=tenant_id, customer_id=customer_id)
+
+    ctx = OfferDecisionContext(
+        tenant_id              = tenant_id,
+        surface                = SURFACE_AUTOMATION,
+        customer_id            = customer_id,
+        automation_id          = automation_id,
+        automation_type        = automation_type,
+        event_id               = event_id,
+        suggested_source       = suggested_source,
+        suggested_promotion_id = int(suggested_promo_id) if suggested_promo_id else None,
+        suggested_segment      = suggested_segment,
+        signals                = signals,
+    )
+
+    decision = decide(db, ctx)
+    if decision.source == SOURCE_NONE:
+        return {}
+
+    return await apply_decision(db, ctx=ctx, decision=decision, customer=customer)
 
 
 def _customer_segment_for(
