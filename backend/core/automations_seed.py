@@ -19,19 +19,40 @@ from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
+from sqlalchemy.orm.attributes import flag_modified
+
 from core.automation_triggers import (
     AUTOMATION_TYPE_TO_TRIGGER,
     AutomationTrigger,
 )
-from models import SmartAutomation
+from models import Promotion, SmartAutomation
 
 
-# Canonical seed list. Each row carries its trigger_event so the automation
-# engine can match it immediately on creation — no backfill migration needed
-# for fresh tenants.
+# Canonical engine assignment per automation_type. Mirrors the backfill table
+# in `database/migrations/versions/0027_automation_engine_column.py` and is
+# used both by `seed_automations_if_empty` (for new tenants) and by
+# `ensure_engine_for_tenant` (defensive runtime repair after the migration).
+ENGINE_BY_TYPE: Dict[str, str] = {
+    "abandoned_cart":        "recovery",
+    "customer_winback":      "recovery",
+    "unpaid_order_reminder": "recovery",
+    "vip_upgrade":           "growth",
+    "predictive_reorder":    "growth",
+    "new_product_alert":     "growth",
+    "back_in_stock":         "growth",
+    "seasonal_offer":        "growth",
+    "salary_payday_offer":   "growth",
+}
+
+
+# Canonical seed list. Each row carries its trigger_event AND its engine so
+# the automation engine can match it immediately on creation and the merchant
+# dashboard can render it inside the right operational bucket — no backfill
+# migration needed for fresh tenants.
 SEED_AUTOMATIONS: List[Dict[str, Any]] = [
     {
         "automation_type": "abandoned_cart",
+        "engine":          "recovery",
         "trigger_event":   AutomationTrigger.CART_ABANDONED.value,
         "name":            "استرداد العربة المتروكة",
         "enabled":         False,
@@ -52,6 +73,7 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
     },
     {
         "automation_type": "predictive_reorder",
+        "engine":          "growth",
         "trigger_event":   AutomationTrigger.PREDICTIVE_REORDER_DUE.value,
         "name":            "تذكير إعادة الطلب التنبؤي",
         "enabled":         False,
@@ -63,6 +85,7 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
     },
     {
         "automation_type": "customer_winback",
+        "engine":          "recovery",
         "trigger_event":   AutomationTrigger.CUSTOMER_INACTIVE.value,
         "name":            "استرجاع العملاء غير النشطين",
         "enabled":         False,
@@ -83,6 +106,7 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
     },
     {
         "automation_type": "vip_upgrade",
+        "engine":          "growth",
         "trigger_event":   AutomationTrigger.VIP_CUSTOMER_UPGRADE.value,
         "name":            "مكافأة عملاء VIP",
         "enabled":         False,
@@ -100,6 +124,7 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
     },
     {
         "automation_type": "new_product_alert",
+        "engine":          "growth",
         "trigger_event":   AutomationTrigger.PRODUCT_CREATED.value,
         "name":            "تنبيه المنتجات الجديدة",
         "enabled":         False,
@@ -110,6 +135,7 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
     },
     {
         "automation_type": "back_in_stock",
+        "engine":          "growth",
         "trigger_event":   AutomationTrigger.PRODUCT_BACK_IN_STOCK.value,
         "name":            "تنبيه عودة المنتج للمخزون",
         "enabled":         False,
@@ -122,6 +148,88 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             "template_name":    "back_in_stock_ar",
             "template_name_en": "back_in_stock_en",
             "language":         "ar",
+        },
+    },
+    {
+        "automation_type": "unpaid_order_reminder",
+        "engine":          "recovery",
+        "trigger_event":   AutomationTrigger.ORDER_PAYMENT_PENDING.value,
+        "name":            "تذكير الطلبات غير المدفوعة",
+        "enabled":         False,
+        "config": {
+            # Three escalating reminders for orders left in pending /
+            # awaiting_payment after their grace period. The emitter
+            # (`automation_emitters.scan_unpaid_orders`) re-emits an event
+            # every step interval; the engine deduplicates per (order, step)
+            # via AutomationExecution.event_id idempotency.
+            "language":          "ar",
+            "template_name":     "unpaid_order_reminder_ar",
+            "template_name_en":  "unpaid_order_reminder_en",
+            "grace_minutes":     60,
+            "steps": [
+                {"delay_minutes": 60,   "message_type": "reminder"},
+                {"delay_minutes": 360,  "message_type": "reminder"},
+                {"delay_minutes": 1440, "message_type": "final"},
+            ],
+            "stop_on_payment": True,
+            "stop_on_reply":   True,
+        },
+    },
+    {
+        "automation_type": "seasonal_offer",
+        "engine":          "growth",
+        "trigger_event":   AutomationTrigger.SEASONAL_EVENT_DUE.value,
+        "name":            "عروض المناسبات الذكية",
+        "enabled":         False,
+        "config": {
+            # Calendar-driven. `automation_emitters.scan_calendar_events`
+            # emits SEASONAL_EVENT_DUE one day before each entry in the
+            # built-in Saudi calendar (national_day, founding_day, ramadan,
+            # eid_fitr, eid_adha, white_friday). The merchant configures the
+            # offer once and the engine fires it for every applicable event.
+            "language":         "ar",
+            "template_name":    "seasonal_offer_ar",
+            "template_name_en": "seasonal_offer_en",
+            "discount_pct":     15,
+            # Promotion-backed: the engine reads `promotion_id` from the
+            # tenant's auto-seeded "Seasonal — 15% off" promotion (created
+            # on first toggle by `ensure_default_promotions_for_tenant`)
+            # and materialises a personal NHxxx code per recipient. Falls
+            # back gracefully to no discount if no promotion is configured.
+            "discount_source":  "promotion",
+            "default_promotion_slug": "seasonal_default_15",
+            "audience": {
+                # Optional segment filter; default broadcasts to everyone
+                # who has bought at least once.
+                "min_orders": 1,
+            },
+        },
+    },
+    {
+        "automation_type": "salary_payday_offer",
+        "engine":          "growth",
+        "trigger_event":   AutomationTrigger.SALARY_PAYDAY_DUE.value,
+        "name":            "عروض الرواتب",
+        "enabled":         False,
+        "config": {
+            # Default payday in Saudi private sector is the 27th of the
+            # Gregorian month. Emitted one day before so customers see the
+            # offer when their salary lands. Configurable per tenant via
+            # `payday_day` (1-31).
+            "language":         "ar",
+            "template_name":    "salary_payday_offer_ar",
+            "template_name_en": "salary_payday_offer_en",
+            "payday_day":       27,
+            "discount_pct":     10,
+            # Promotion-backed (see seasonal_offer above for the rationale).
+            "discount_source":  "promotion",
+            "default_promotion_slug": "salary_payday_default_10",
+            "audience": {
+                # Default targeting: customers who have bought at least
+                # once and are not currently inactive (>120 days silent).
+                "min_orders":          1,
+                "max_inactive_days":   120,
+            },
         },
     },
 ]
@@ -148,6 +256,7 @@ def seed_automations_if_empty(db: Session, tenant_id: int) -> None:
         auto = SmartAutomation(
             tenant_id=tenant_id,
             automation_type=seed["automation_type"],
+            engine=seed.get("engine") or ENGINE_BY_TYPE.get(seed["automation_type"], "recovery"),
             trigger_event=seed["trigger_event"],
             name=seed["name"],
             enabled=seed["enabled"],
@@ -157,6 +266,145 @@ def seed_automations_if_empty(db: Session, tenant_id: int) -> None:
         )
         db.add(auto)
     db.flush()
+
+
+def ensure_engine_for_tenant(db: Session, tenant_id: int) -> int:
+    """
+    Defensive runtime repair: if any SmartAutomation row for this tenant has
+    an unknown / NULL `engine`, set it from the canonical ENGINE_BY_TYPE map.
+
+    The 0027 migration already backfills production rows once, but in tests
+    that build the schema with `Base.metadata.create_all` (no Alembic) the
+    `engine` column is added with its model default of "recovery", which is
+    wrong for growth-engine rows like vip_upgrade. Calling this from the
+    `/automations/engines/summary` and `/automations` handlers keeps both
+    paths consistent without forcing every test to run the migration.
+
+    Returns the number of rows repaired.
+    """
+    rows = (
+        db.query(SmartAutomation)
+        .filter(SmartAutomation.tenant_id == tenant_id)
+        .all()
+    )
+    repaired = 0
+    for r in rows:
+        canonical = ENGINE_BY_TYPE.get(r.automation_type)
+        if canonical is None:
+            continue
+        if (r.engine or "").strip() == canonical:
+            continue
+        r.engine = canonical
+        repaired += 1
+    if repaired:
+        db.flush()
+    return repaired
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default Promotions
+# ─────────────────────────────────────────────────────────────────────────────
+# Each `default_promotion_slug` referenced in SEED_AUTOMATIONS above maps to
+# one entry here. We seed the row in `draft` status so the merchant has to
+# review and activate it explicitly — the automation may be enabled while the
+# promotion is still draft, in which case `materialise_for_customer` returns
+# None and the WhatsApp send falls back to a discount-less template.
+#
+# Slug → terms. The slug is stored in `Promotion.extra_metadata.slug` and
+# also in the automation's `config.default_promotion_slug` so the linker
+# below can rebind the IDs after re-seeding.
+DEFAULT_PROMOTIONS: Dict[str, Dict[str, Any]] = {
+    "seasonal_default_15": {
+        "name":           "خصم المناسبات — 15%",
+        "description":    "خصم تلقائي 15% يُولِّد كوبوناً شخصياً عند تشغيل أتمتة المناسبات.",
+        "promotion_type": "percentage",
+        "discount_value": 15.0,
+        "conditions":     {"min_orders_for_eligibility": 1},
+    },
+    "salary_payday_default_10": {
+        "name":           "عرض الرواتب — 10%",
+        "description":    "خصم تلقائي 10% يُولِّد كوبوناً شخصياً يوم الرواتب.",
+        "promotion_type": "percentage",
+        "discount_value": 10.0,
+        "conditions":     {},
+    },
+}
+
+
+def ensure_default_promotions_for_tenant(db: Session, tenant_id: int) -> int:
+    """
+    Seed the catalog of default promotions referenced by SEED_AUTOMATIONS,
+    then link each promotion-backed automation to its default promotion by
+    writing `config.promotion_id` if it is missing.
+
+    Idempotent on both sides:
+      • Promotions are matched by `extra_metadata.slug` → never duplicated.
+      • Automations are only updated when `config.promotion_id` is unset.
+
+    Called from the engine before processing events so a freshly seeded
+    tenant gets a working promotion-backed automation on first activation
+    without any merchant action. Returns the number of mutations applied
+    (rows created + automations re-linked).
+    """
+    mutations = 0
+
+    existing_by_slug: Dict[str, Promotion] = {}
+    for promo in db.query(Promotion).filter(Promotion.tenant_id == tenant_id).all():
+        slug = (promo.extra_metadata or {}).get("slug")
+        if slug:
+            existing_by_slug[slug] = promo
+
+    now = datetime.now(timezone.utc)
+    for slug, spec in DEFAULT_PROMOTIONS.items():
+        if slug in existing_by_slug:
+            continue
+        promo = Promotion(
+            tenant_id=tenant_id,
+            name=spec["name"],
+            description=spec.get("description"),
+            promotion_type=spec["promotion_type"],
+            discount_value=spec.get("discount_value"),
+            conditions=spec.get("conditions") or {},
+            status="draft",
+            usage_count=0,
+            extra_metadata={
+                "slug":           slug,
+                "managed_by":     "automations_seed",
+                "auto_seeded_at": now.isoformat(),
+            },
+            created_at=now.replace(tzinfo=None),
+            updated_at=now.replace(tzinfo=None),
+        )
+        db.add(promo)
+        db.flush()
+        existing_by_slug[slug] = promo
+        mutations += 1
+
+    automations = (
+        db.query(SmartAutomation)
+        .filter(SmartAutomation.tenant_id == tenant_id)
+        .all()
+    )
+    for auto in automations:
+        cfg = dict(auto.config or {})
+        if cfg.get("discount_source") != "promotion":
+            continue
+        if cfg.get("promotion_id"):
+            continue
+        slug = cfg.get("default_promotion_slug")
+        if not slug:
+            continue
+        promo = existing_by_slug.get(slug)
+        if promo is None:
+            continue
+        cfg["promotion_id"] = promo.id
+        auto.config = cfg
+        flag_modified(auto, "config")
+        mutations += 1
+
+    if mutations:
+        db.flush()
+    return mutations
 
 
 def ensure_trigger_event_for_tenant(db: Session, tenant_id: int) -> int:

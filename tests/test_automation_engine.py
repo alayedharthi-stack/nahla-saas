@@ -41,6 +41,7 @@ from models import (  # noqa: E402
     CustomerProfile,
     SmartAutomation,
     Tenant,
+    TenantSettings,
     WhatsAppConnection,
     WhatsAppTemplate,
 )
@@ -83,11 +84,20 @@ def _make_db():
 
 # ── Seed helpers ──────────────────────────────────────────────────────────────
 
-def _seed_tenant(db, name="Test Tenant") -> Tenant:
+def _seed_tenant(db, name="Test Tenant", *, autopilot_enabled: bool = True) -> Tenant:
     t = Tenant(name=name, is_active=True)
     db.add(t)
     db.commit()
     db.refresh(t)
+    # The engine now honours the master autopilot toggle stored on
+    # TenantSettings. Tests that exercise the actual send path expect
+    # automation execution to run, so opt-in by default.
+    settings = TenantSettings(
+        tenant_id=t.id,
+        extra_metadata={"autopilot": {"enabled": bool(autopilot_enabled)}},
+    )
+    db.add(settings)
+    db.commit()
     return t
 
 

@@ -124,14 +124,46 @@ def emit_automation_event(
 
 # ── Public: main processing entry point ──────────────────────────────────────
 
+def _is_autopilot_enabled(db: Session, tenant_id: int) -> bool:
+    """
+    Read the master autopilot switch out of `TenantSettings.extra_metadata`.
+
+    Default is False so a tenant that has never touched the toggle does NOT
+    have automated WhatsApp messages going out — the merchant must opt in
+    explicitly. Mirrors the contract `routers.automations._get_autopilot_settings`
+    enforces, but kept import-light here so the engine doesn't pull the
+    whole router on every cycle.
+    """
+    from models import TenantSettings  # noqa: PLC0415
+
+    settings = (
+        db.query(TenantSettings)
+        .filter(TenantSettings.tenant_id == tenant_id)
+        .first()
+    )
+    if settings is None:
+        return False
+    extra = getattr(settings, "extra_metadata", None) or {}
+    autopilot = extra.get("autopilot") or {}
+    if "enabled" in autopilot:
+        return bool(autopilot.get("enabled"))
+    # Backward compat: older tenants stored the flag inside ai_settings.
+    ai = getattr(settings, "ai_settings", None) or {}
+    return bool(ai.get("autopilot_enabled"))
+
+
 async def process_pending_events(db: Session, tenant_id: int) -> int:
     """
     Scan and process unprocessed AutomationEvent rows for one tenant.
     Returns the total number of WhatsApp messages sent in this cycle.
     """
-    from core.automations_seed import ensure_trigger_event_for_tenant  # noqa: PLC0415
+    from core.automations_seed import (  # noqa: PLC0415
+        ensure_default_promotions_for_tenant,
+        ensure_engine_for_tenant,
+        ensure_trigger_event_for_tenant,
+    )
     from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
-    from models import AutomationEvent  # noqa: PLC0415
+    from models import AutomationEvent, AutomationExecution  # noqa: PLC0415
 
     # Defensive repair: if any SmartAutomation row has a stale/NULL
     # trigger_event (e.g. a tenant was seeded before migration 0024 ran),
@@ -146,11 +178,38 @@ async def process_pending_events(db: Session, tenant_id: int) -> int:
                 rows_repaired=repaired,
             )
             db.flush()
+        # Same defensive repair for the `engine` column added in 0027 so
+        # tenants seeded before the migration land in the correct dashboard
+        # bucket on first cycle.
+        ensure_engine_for_tenant(db, tenant_id)
+        # Auto-seed the default Promotions referenced by promotion-backed
+        # automations (seasonal_offer, salary_payday_offer) and link each
+        # automation's `config.promotion_id` if missing. Cheap no-op once
+        # the rows exist.
+        ensure_default_promotions_for_tenant(db, tenant_id)
     except Exception as exc:
         logger.error(
             "[AutoEngine] trigger_event repair failed tenant=%s: %s",
             tenant_id, exc, exc_info=True,
         )
+
+    # ── Master autopilot switch ──────────────────────────────────────────
+    # When the merchant has disabled the master switch every pending event
+    # is recorded as `skipped` with reason="autopilot_disabled" so it does
+    # not pile up forever, and zero messages are sent. We still write the
+    # AutomationExecution rows so the dashboard's daily summary reflects
+    # the truth (0 sends), and so re-enabling the toggle later does not
+    # double-fire on the backlog.
+    if not _is_autopilot_enabled(db, tenant_id):
+        skipped = _drain_pending_for_disabled_autopilot(db, tenant_id)
+        if skipped:
+            _log_event(
+                _EVENTS.AUTOMATION_AUTOPILOT_DISABLED,
+                level=logging.INFO,
+                tenant_id=tenant_id,
+                events_drained=skipped,
+            )
+        return 0
 
     now = _utcnow_naive()
     cutoff = now - timedelta(hours=_MAX_EVENT_AGE_HOURS)
@@ -187,6 +246,78 @@ async def process_pending_events(db: Session, tenant_id: int) -> int:
             tenant_id, total_sent,
         )
     return total_sent
+
+
+def _drain_pending_for_disabled_autopilot(db: Session, tenant_id: int) -> int:
+    """
+    Mark every still-unprocessed AutomationEvent for this tenant as resolved
+    with one `skipped(autopilot_disabled)` AutomationExecution per matched
+    automation. Called when the master switch is OFF so the queue does not
+    grow unbounded while autopilot is paused.
+
+    Idempotent: events already marked processed are left alone, and matched
+    automations that already have an execution record (sent/skipped/failed)
+    are not re-recorded.
+    """
+    from models import AutomationEvent, AutomationExecution, SmartAutomation  # noqa: PLC0415
+
+    cutoff = _utcnow_naive() - timedelta(hours=_MAX_EVENT_AGE_HOURS)
+
+    events: List[Any] = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.processed.is_(False),
+            AutomationEvent.created_at >= cutoff,
+        )
+        .order_by(AutomationEvent.created_at.asc())
+        .limit(_BATCH_SIZE)
+        .all()
+    )
+    if not events:
+        return 0
+
+    drained = 0
+    for event in events:
+        matches: List[Any] = (
+            db.query(SmartAutomation)
+            .filter(
+                SmartAutomation.tenant_id == tenant_id,
+                SmartAutomation.trigger_event == event.event_type,
+            )
+            .all()
+        )
+        for auto in matches:
+            existing = (
+                db.query(AutomationExecution)
+                .filter(
+                    AutomationExecution.event_id == event.id,
+                    AutomationExecution.automation_id == auto.id,
+                )
+                .first()
+            )
+            if existing:
+                continue
+            _write_execution(
+                db,
+                event.id,
+                auto.id,
+                event.customer_id,
+                tenant_id,
+                status="skipped",
+                skip_reason="autopilot_disabled",
+            )
+        event.processed = True
+        drained += 1
+
+    if drained:
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.error("[AutoEngine] drain commit failed tenant=%s: %s", tenant_id, exc)
+            return 0
+    return drained
 
 
 # ── Internal: event processing ────────────────────────────────────────────────
@@ -681,7 +812,42 @@ def _resolve_slot_value(
             return f"{store_url}/p/{ext}"
         return ""
     if slot == "order_id":
-        return str(payload.get("order_id") or payload.get("external_id") or "")
+        # Prefer the human-facing platform number (Salla reference_id, Zid
+        # code, Shopify name) which the unpaid-orders emitter writes into
+        # the payload. Fall back to internal id when nothing else is known.
+        return str(
+            payload.get("order_number")
+            or payload.get("external_order_number")
+            or payload.get("order_id")
+            or payload.get("external_id")
+            or ""
+        )
+    if slot == "payment_url":
+        return str(
+            payload.get("payment_url")
+            or payload.get("checkout_url")
+            or ""
+        )
+    if slot == "reorder_url":
+        url = (
+            payload.get("reorder_url")
+            or payload.get("product_url")
+            or payload.get("url")
+            or ""
+        )
+        if url:
+            return str(url)
+        store_url = str(payload.get("store_url") or config.get("store_url") or "").rstrip("/")
+        ext = payload.get("external_id") or payload.get("product_external_id")
+        if store_url and ext:
+            return f"{store_url}/p/{ext}"
+        return store_url
+    if slot == "occasion_name":
+        return str(
+            payload.get("occasion_name")
+            or payload.get("event_name")
+            or ""
+        )
     if slot in ("discount_code", "coupon_code"):
         return str(
             coupon_extras.get("discount_code")
@@ -724,6 +890,49 @@ def _active_step_for_event(event: Any, config: Dict[str, Any]) -> Dict[str, Any]
     return chosen
 
 
+def _resolve_discount_source(
+    config: Dict[str, Any],
+    active_step: Dict[str, Any],
+) -> str:
+    """
+    Determine which discount artifact this automation step wants to issue.
+
+    Returns one of:
+      'promotion' — materialise a `Coupon` row from a `Promotion` rule
+      'coupon'    — pull from the segmented coupon pool (legacy default)
+      'none'      — no discount; render the template with empty discount slots
+
+    Resolution order — explicit always wins so a merchant who upgrades a
+    seasonal_offer automation to point at a Promotion never accidentally
+    falls back to the old auto_coupon path:
+
+      1. active_step.discount_source     — per-step override (e.g. cart
+                                            recovery stage 3 only)
+      2. config.discount_source          — automation-wide setting
+      3. Legacy `auto_coupon` heuristic  — config.auto_coupon /
+                                            step.auto_coupon /
+                                            step.message_type == 'coupon'
+                                            → 'coupon' (preserves existing
+                                            seeds without a migration)
+      4. 'none'                          — no discount requested
+    """
+    explicit_step = (active_step or {}).get("discount_source")
+    if explicit_step:
+        return str(explicit_step)
+    explicit_cfg = config.get("discount_source")
+    if explicit_cfg:
+        return str(explicit_cfg)
+
+    legacy_coupon = bool(
+        config.get("auto_coupon")
+        or (active_step or {}).get("auto_coupon")
+        or (active_step or {}).get("message_type") == "coupon"
+    )
+    if legacy_coupon:
+        return "coupon"
+    return "none"
+
+
 async def _resolve_auto_coupon(
     db: Session,
     *,
@@ -733,29 +942,32 @@ async def _resolve_auto_coupon(
     active_step: Dict[str, Any],
 ) -> Dict[str, str]:
     """
-    Pull a real coupon from the merchant's pool when the automation opts in.
+    Resolve the discount artifact for this automation step.
 
-    Opt-in signals (any of these enables auto-coupon resolution):
-      • config.auto_coupon == True              (e.g. vip_upgrade, customer_winback)
-      • active_step.auto_coupon == True         (e.g. cart_abandoned step #3)
-      • active_step.message_type == "coupon"    (legacy form, same semantics)
+    Dispatcher that honours `discount_source` (preferred) and falls back
+    to the legacy `auto_coupon` heuristic so existing seeds keep working
+    with zero-touch:
 
-    Segment selection priority:
-      1. config.coupon_segment             (explicit override)
-      2. customer profile's segment        (vip / inactive / at_risk / active / new)
-      3. fallback to "active"
+      • 'promotion' → materialise a personal coupon from a Promotion rule
+      • 'coupon'    → pull from the segmented coupon pool
+      • 'none'      → no discount
 
-    Returns `{"discount_code": "NHA2X", "vip_coupon": "NHA2X"}` on success
-    (both keys are populated so VIP and cart templates can both consume the
-    same pool). Returns `{}` on any failure — never raises, never blocks
-    the send.
+    Returns `{"discount_code": "...", "vip_coupon": "...", "coupon_code": "..."}`
+    on success (all three keys populated so cart/vip/winback templates
+    consume the same code). Returns `{}` on any failure — never raises,
+    never blocks the send.
     """
-    wants_coupon = bool(
-        config.get("auto_coupon")
-        or (active_step or {}).get("auto_coupon")
-        or (active_step or {}).get("message_type") == "coupon"
-    )
-    if not wants_coupon:
+    source = _resolve_discount_source(config, active_step)
+
+    if source == "promotion":
+        return await _materialise_promotion_for_send(
+            db,
+            tenant_id=tenant_id,
+            customer=customer,
+            promotion_id=config.get("promotion_id"),
+        )
+
+    if source != "coupon":
         return {}
 
     # Resolve segment
@@ -789,6 +1001,53 @@ async def _resolve_auto_coupon(
             stage="automation_engine_auto_coupon",
             err="pool_empty_and_create_on_demand_returned_none",
         )
+        return {}
+
+    code = str(coupon.code).strip().upper()
+    return {"discount_code": code, "vip_coupon": code, "coupon_code": code}
+
+
+async def _materialise_promotion_for_send(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer: Any,
+    promotion_id: Any,
+) -> Dict[str, str]:
+    """
+    Issue a personal coupon from a Promotion rule for this customer.
+
+    Mirrors the return shape of `_resolve_auto_coupon`'s coupon path so
+    the template renderer treats both paths identically. A missing or
+    inactive promotion silently degrades to `{}` — the WhatsApp send
+    proceeds without a discount slot rather than blocking on a
+    misconfigured automation.
+    """
+    if not promotion_id:
+        logger.info(
+            "[AutoEngine] discount_source=promotion but no promotion_id "
+            "configured tenant=%s — sending without discount",
+            tenant_id,
+        )
+        return {}
+
+    try:
+        from services.promotion_engine import materialise_for_customer  # noqa: PLC0415
+
+        coupon = await materialise_for_customer(
+            db,
+            promotion_id=int(promotion_id),
+            tenant_id=tenant_id,
+            customer_id=getattr(customer, "id", None),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[AutoEngine] promotion materialise failed tenant=%s promo=%s: %s",
+            tenant_id, promotion_id, exc,
+        )
+        return {}
+
+    if coupon is None or not getattr(coupon, "code", None):
         return {}
 
     code = str(coupon.code).strip().upper()

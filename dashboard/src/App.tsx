@@ -13,6 +13,7 @@ import Conversations from './pages/Conversations'
 import Orders from './pages/Orders'
 import OrderDetail from './pages/OrderDetail'
 import Coupons from './pages/Coupons'
+import Promotions from './pages/Promotions'
 import Campaigns from './pages/Campaigns'
 import Templates from './pages/Templates'
 import SmartAutomations from './pages/SmartAutomations'
@@ -100,6 +101,7 @@ export default function App() {
             <Route path="orders/:orderId"    element={<OrderDetail />} />
             <Route path="customers"          element={<Customers />} />
             <Route path="coupons"            element={<Coupons />} />
+            <Route path="promotions"         element={<Promotions />} />
             <Route path="campaigns"          element={<Campaigns />} />
             <Route path="templates"          element={<Templates />} />
             <Route path="smart-automations"  element={<SmartAutomations />} />

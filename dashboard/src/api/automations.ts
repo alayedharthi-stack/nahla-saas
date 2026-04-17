@@ -7,12 +7,18 @@ export type AutomationType =
   | 'vip_upgrade'
   | 'new_product_alert'
   | 'back_in_stock'
+  | 'unpaid_order_reminder'
+  | 'seasonal_offer'
+  | 'salary_payday_offer'
+
+export type EngineKey = 'recovery' | 'growth' | 'experience' | 'intelligence'
 
 export interface AutomationRecord {
   id: number
   automation_type: AutomationType
   name: string
   enabled: boolean
+  engine: EngineKey
   config: Record<string, unknown>
   template_id: number | null
   template_name: string | null
@@ -20,6 +26,30 @@ export interface AutomationRecord {
   stats_sent: number
   stats_converted: number
   updated_at: string | null
+}
+
+export interface EngineKpis {
+  messages_sent_30d: number
+  orders_attributed_30d: number
+  revenue_sar_30d: number
+}
+
+export interface EngineSummary {
+  engine: EngineKey
+  name: string
+  description: string
+  available: boolean
+  enabled: boolean
+  automations_count: number
+  active_automations: number
+  automation_ids: number[]
+  kpis: EngineKpis
+}
+
+export interface EnginesSummaryResponse {
+  engines: EngineSummary[]
+  autopilot_enabled: boolean
+  window_days: number
 }
 
 export interface IntelligenceSummary {
@@ -115,6 +145,22 @@ export const automationsApi = {
 
   getIntelligence: () =>
     apiCall<IntelligenceDashboard>('/intelligence/dashboard'),
+
+  enginesSummary: (windowDays?: number) =>
+    apiCall<EnginesSummaryResponse>(
+      `/automations/engines/summary${windowDays ? `?days=${windowDays}` : ''}`,
+    ),
+
+  toggleEngine: (engine: EngineKey, enabled: boolean) =>
+    apiCall<{
+      engine: EngineKey
+      enabled: boolean
+      automations_count: number
+      automations_changed: number
+    }>(`/automations/engines/${engine}/toggle`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
 }
 
 // ── Display metadata ──────────────────────────────────────────────────────────
@@ -167,5 +213,26 @@ export const AUTOMATION_META: Record<AutomationType, {
     trigger: 'product_back_in_stock',
     icon: '📦',
     color: 'green',
+  },
+  unpaid_order_reminder: {
+    label: 'تذكير الطلبات غير المدفوعة',
+    desc: 'يُرسل تذكيرات تلقائية للعملاء الذين أنشأوا طلباً ولم يدفعوا',
+    trigger: 'order_payment_pending',
+    icon: '💳',
+    color: 'red',
+  },
+  seasonal_offer: {
+    label: 'عروض المناسبات الذكية',
+    desc: 'حملة تلقائية قبل المناسبات السعودية (اليوم الوطني، رمضان، …)',
+    trigger: 'seasonal_event_due',
+    icon: '🎉',
+    color: 'amber',
+  },
+  salary_payday_offer: {
+    label: 'عروض الرواتب',
+    desc: 'حملة تلقائية شهرياً قبل موعد نزول الرواتب',
+    trigger: 'salary_payday_due',
+    icon: '💰',
+    color: 'emerald',
   },
 }

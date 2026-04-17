@@ -2,19 +2,20 @@ import React, { useState, useEffect, useCallback } from 'react'
 import {
   Zap, Send, CheckCircle, TrendingUp, Sparkles,
   ChevronDown, ChevronUp, AlertCircle, RefreshCw,
-  Settings2, ArrowRight, ShoppingCart, Gift, UserX,
-  Tag, Megaphone, MessageSquare, Package, RotateCcw,
+  Settings2, ArrowRight, ShoppingCart,
+  Package, RotateCcw,
   Clock, Phone, ExternalLink,
+  RefreshCcw, Rocket, HeartHandshake, Brain,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
 import StatCard from '../components/ui/StatCard'
-import { useLanguage } from '../i18n/context'
 import {
   automationsApi,
   AutomationRecord,
-  AutomationType,
   AUTOMATION_META,
+  type EngineKey,
+  type EngineSummary,
 } from '../api/automations'
 import {
   autopilotApi,
@@ -519,6 +520,28 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
       ? ((automation.config as Record<string, unknown>).steps as Record<string, unknown>[])
       : null
 
+  // Discount source (promotion vs coupon vs none) — derived from config so
+  // a merchant who edits the config from /promotions sees the badge update.
+  const cfg = (automation.config || {}) as Record<string, unknown>
+  const stepsForSource = Array.isArray(cfg.steps) ? (cfg.steps as Record<string, unknown>[]) : []
+  const stepHasCoupon = stepsForSource.some(
+    s => s.auto_coupon === true || s.message_type === 'coupon' || s.discount_source === 'coupon',
+  )
+  const stepUsesPromotion = stepsForSource.some(s => s.discount_source === 'promotion')
+  const discountSource: 'promotion' | 'coupon' | 'none' =
+    cfg.discount_source === 'promotion' || stepUsesPromotion
+      ? 'promotion'
+      : cfg.discount_source === 'coupon' || cfg.auto_coupon === true || stepHasCoupon
+      ? 'coupon'
+      : 'none'
+
+  const discountSourceMeta: Record<typeof discountSource, { label: string; variant: 'amber' | 'purple' | 'slate' }> = {
+    promotion: { label: '🎁 عرض ترويجي',     variant: 'purple' },
+    coupon:    { label: '🎟️ كوبون شخصي',     variant: 'amber'  },
+    none:      { label: 'بدون خصم',           variant: 'slate'  },
+  }
+  const dsMeta = discountSourceMeta[discountSource]
+
   return (
     <div className={`card overflow-hidden transition-all duration-200 ${automation.enabled ? 'ring-1 ring-emerald-200' : ''}`}>
       <div className="p-5">
@@ -557,6 +580,10 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
               </span>
             </div>
           )}
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-400">الخصم:</span>
+            <Badge label={dsMeta.label} variant={dsMeta.variant} />
+          </div>
         </div>
 
         <div className="flex items-center gap-5 mt-4 pt-4 border-t border-slate-100">
@@ -648,78 +675,227 @@ function AutomationSkeleton() {
   return <div className="animate-pulse bg-slate-100 rounded-xl h-40" />
 }
 
-// ── Section header ────────────────────────────────────────────────────────────
+// ── Engine metadata (icon + accent color per engine) ─────────────────────────
 
-interface SectionProps {
-  icon: React.ReactNode
-  title: string
-  types: AutomationType[]
-  automations: AutomationRecord[]
-  onToggle: (id: number, enabled: boolean) => void
+const ENGINE_DISPLAY: Record<EngineKey, {
+  icon: React.ComponentType<{ className?: string }>
+  iconColor: string
+  iconBg: string
+  accent: string
+}> = {
+  recovery: {
+    icon: RefreshCcw,
+    iconColor: 'text-amber-600',
+    iconBg: 'bg-amber-50',
+    accent: 'border-amber-200',
+  },
+  growth: {
+    icon: Rocket,
+    iconColor: 'text-emerald-600',
+    iconBg: 'bg-emerald-50',
+    accent: 'border-emerald-200',
+  },
+  experience: {
+    icon: HeartHandshake,
+    iconColor: 'text-blue-600',
+    iconBg: 'bg-blue-50',
+    accent: 'border-blue-200',
+  },
+  intelligence: {
+    icon: Brain,
+    iconColor: 'text-purple-600',
+    iconBg: 'bg-purple-50',
+    accent: 'border-purple-200',
+  },
 }
 
-function AutomationSection({ icon, title, types, automations, onToggle }: SectionProps) {
-  const items = automations.filter(a => types.includes(a.automation_type))
-  if (items.length === 0) return null
+
+// ── EngineSection: one collapsible section per engine ─────────────────────────
+
+interface EngineSectionProps {
+  engine: EngineSummary
+  automations: AutomationRecord[]
+  onToggleAutomation: (id: number, enabled: boolean) => void
+  onToggleEngine: (engine: EngineKey, enabled: boolean) => Promise<void>
+  defaultOpen: boolean
+}
+
+function EngineSection({
+  engine,
+  automations,
+  onToggleAutomation,
+  onToggleEngine,
+  defaultOpen,
+}: EngineSectionProps) {
+  const [open, setOpen] = useState(defaultOpen)
+  const [toggling, setToggling] = useState(false)
+  const display = ENGINE_DISPLAY[engine.engine]
+  const IconCmp = display.icon
+
+  const items = automations.filter(a => a.engine === engine.engine)
+  const showEmpty = engine.available && items.length === 0
+
+  const handleEngineToggle = async (next: boolean) => {
+    if (!engine.available || toggling) return
+    setToggling(true)
+    try {
+      await onToggleEngine(engine.engine, next)
+    } finally {
+      setToggling(false)
+    }
+  }
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <span className="text-slate-400">{icon}</span>
-        <h3 className="text-sm font-semibold text-slate-700">{title}</h3>
-        <div className="flex-1 h-px bg-slate-100" />
-        <span className="text-xs text-slate-400">{items.filter(a => a.enabled).length}/{items.length} مُفعّل</span>
+    <section className={`card overflow-hidden border ${display.accent}`}>
+      {/* Header */}
+      <header className="px-5 py-4 flex items-start justify-between gap-4 bg-white">
+        <button
+          type="button"
+          className="flex items-start gap-3 text-start min-w-0 flex-1"
+          onClick={() => setOpen(v => !v)}
+        >
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${display.iconBg}`}>
+            <IconCmp className={`w-5 h-5 ${display.iconColor}`} />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-sm font-bold text-slate-900">{engine.name}</h2>
+              {!engine.available ? (
+                <Badge label="قريباً" variant="slate" />
+              ) : (
+                <Badge
+                  label={engine.enabled ? 'مُفعّل' : 'متوقف'}
+                  variant={engine.enabled ? 'green' : 'slate'}
+                  dot
+                />
+              )}
+              <span className="text-[11px] text-slate-400">
+                {engine.active_automations}/{engine.automations_count} أتمتة نشطة
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">{engine.description}</p>
+          </div>
+        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {engine.available && (
+            <Toggle
+              enabled={engine.enabled}
+              onChange={handleEngineToggle}
+              disabled={toggling || engine.automations_count === 0}
+              size="sm"
+            />
+          )}
+          <button
+            type="button"
+            onClick={() => setOpen(v => !v)}
+            className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-50"
+            aria-label={open ? 'إغلاق' : 'فتح'}
+          >
+            {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
+        </div>
+      </header>
+
+      {/* KPIs */}
+      <div className="grid grid-cols-3 divide-x divide-slate-100 [direction:rtl] border-t border-slate-100 bg-slate-50/40">
+        <div className="px-4 py-3 text-center">
+          <p className="text-xs text-slate-400">رسائل آخر 30 يوم</p>
+          <p className="text-base font-bold text-slate-900 mt-0.5">
+            {engine.kpis.messages_sent_30d.toLocaleString('ar-SA')}
+          </p>
+        </div>
+        <div className="px-4 py-3 text-center">
+          <p className="text-xs text-slate-400">طلبات منسوبة</p>
+          <p className="text-base font-bold text-slate-900 mt-0.5">
+            {engine.kpis.orders_attributed_30d.toLocaleString('ar-SA')}
+          </p>
+        </div>
+        <div className="px-4 py-3 text-center">
+          <p className="text-xs text-slate-400">إيرادات (ر.س)</p>
+          <p className="text-base font-bold text-emerald-700 mt-0.5">
+            {engine.kpis.revenue_sar_30d.toLocaleString('ar-SA', { maximumFractionDigits: 2 })}
+          </p>
+        </div>
       </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {items.map(automation => (
-          <AutomationCard
-            key={automation.id}
-            automation={automation}
-            onToggle={onToggle}
-          />
-        ))}
-      </div>
+
+      {/* Body */}
+      {open && (
+        <div className="px-5 py-5 border-t border-slate-100 space-y-4">
+          {!engine.available && (
+            <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-6 text-center">
+              <p className="text-sm font-medium text-slate-700">قيد التطوير</p>
+              <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+                {engine.engine === 'experience'
+                  ? 'سيوفّر هذا المحرك رسائل الشكر، طلب التقييم، واقتراح المنتجات المكملة بعد الشراء.'
+                  : 'سيقوم هذا المحرك بتحليل العملاء واقتراح الحملات وتحسين الرسائل وتوقيت الإرسال تلقائياً.'}
+              </p>
+            </div>
+          )}
+          {showEmpty && (
+            <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-6 text-center">
+              <p className="text-sm text-slate-500">لا توجد أتمتات في هذا المحرك بعد.</p>
+            </div>
+          )}
+          {items.length > 0 && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {items.map(automation => (
+                <AutomationCard
+                  key={automation.id}
+                  automation={automation}
+                  onToggle={onToggleAutomation}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+
+// ── Engine KPI strip ─────────────────────────────────────────────────────────
+
+function EngineKpiStrip({ engines }: { engines: EngineSummary[] }) {
+  return (
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {engines.map(eng => {
+        const display = ENGINE_DISPLAY[eng.engine]
+        return (
+          <div key={eng.engine} className="card p-4">
+            <div className="flex items-start gap-3">
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${display.iconBg}`}>
+                <display.icon className={`w-5 h-5 ${display.iconColor}`} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-xs font-semibold text-slate-700 truncate">{eng.name}</p>
+                  {!eng.available && <Badge label="قريباً" variant="slate" />}
+                </div>
+                <p className="text-lg font-bold text-slate-900 mt-1">
+                  {eng.kpis.revenue_sar_30d.toLocaleString('ar-SA', { maximumFractionDigits: 0 })}
+                  <span className="text-xs font-normal text-slate-400 ms-1">ر.س / 30 يوم</span>
+                </p>
+                <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500">
+                  <span>{eng.kpis.messages_sent_30d.toLocaleString('ar-SA')} رسالة</span>
+                  <span className="text-slate-300">•</span>
+                  <span>{eng.kpis.orders_attributed_30d.toLocaleString('ar-SA')} طلب</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
 
-const SECTIONS: { icon: React.ReactNode; title: string; types: AutomationType[] }[] = [
-  {
-    icon: <ShoppingCart className="w-4 h-4" />,
-    title: 'السلة المتروكة',
-    types: ['abandoned_cart'],
-  },
-  {
-    icon: <CheckCircle className="w-4 h-4" />,
-    title: 'رسائل ما بعد الشراء',
-    types: ['predictive_reorder'],
-  },
-  {
-    icon: <UserX className="w-4 h-4" />,
-    title: 'إعادة تنشيط العملاء',
-    types: ['customer_winback'],
-  },
-  {
-    icon: <Tag className="w-4 h-4" />,
-    title: 'إرسال الكوبونات الذكية',
-    types: ['vip_upgrade'],
-  },
-  {
-    icon: <Megaphone className="w-4 h-4" />,
-    title: 'حملات واتساب التلقائية',
-    types: ['new_product_alert', 'back_in_stock'],
-  },
-  {
-    icon: <MessageSquare className="w-4 h-4" />,
-    title: 'الردود التلقائية',
-    types: [],
-  },
-]
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function SmartAutomations() {
   const [automations, setAutomations] = useState<AutomationRecord[]>([])
+  const [engines, setEngines] = useState<EngineSummary[]>([])
   const [autopilot, setAutopilot] = useState(false)
   const [autopilotLoading, setAutopilotLoading] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -743,12 +919,14 @@ export default function SmartAutomations() {
     setLoading(true)
     setError(null)
     try {
-      const [data, autopilotStatus] = await Promise.all([
+      const [data, autopilotStatus, summary] = await Promise.all([
         automationsApi.list(),
         autopilotApi.status(),
+        automationsApi.enginesSummary(30),
       ])
       setAutomations(data.automations)
       setAutopilot(Boolean(autopilotStatus.settings.enabled))
+      setEngines(summary.engines)
     } catch (e) {
       const message = e instanceof Error ? e.message : ''
       if (message.includes('402') || message.includes('خطة نحلة') || message.includes('التجربة')) {
@@ -784,18 +962,47 @@ export default function SmartAutomations() {
 
   const handleToggleAutomation = (id: number, enabled: boolean) => {
     setAutomations(prev => prev.map(a => (a.id === id ? { ...a, enabled } : a)))
+    // Optimistically update the engine's active_automations count.
+    setEngines(prev => prev.map(eng => {
+      const auto = automations.find(a => a.id === id)
+      if (!auto || auto.engine !== eng.engine) return eng
+      const delta = enabled ? 1 : -1
+      const next = Math.max(0, eng.active_automations + delta)
+      return { ...eng, active_automations: next, enabled: next > 0 }
+    }))
+  }
+
+  const handleToggleEngine = async (engineKey: EngineKey, enabled: boolean) => {
+    // Optimistic update.
+    const prevEngines = engines
+    const prevAutomations = automations
+    setEngines(prev => prev.map(e =>
+      e.engine === engineKey
+        ? { ...e, enabled, active_automations: enabled ? e.automations_count : 0 }
+        : e,
+    ))
+    setAutomations(prev => prev.map(a => (a.engine === engineKey ? { ...a, enabled } : a)))
+    try {
+      await automationsApi.toggleEngine(engineKey, enabled)
+    } catch (e) {
+      // Roll back.
+      setEngines(prevEngines)
+      setAutomations(prevAutomations)
+      const message = e instanceof Error ? e.message : 'تعذّر تحديث حالة المحرك.'
+      setError(message)
+    }
   }
 
   const enabledCount   = automations.filter(a => a.enabled).length
-  const totalSent      = automations.reduce((sum, a) => sum + a.stats_sent, 0)
-  const totalConverted = automations.reduce((sum, a) => sum + a.stats_converted, 0)
-  const conversionRate = totalSent > 0 ? ((totalConverted / totalSent) * 100).toFixed(1) : '0.0'
+  const totalSent      = engines.reduce((s, e) => s + e.kpis.messages_sent_30d, 0)
+  const totalAttributed = engines.reduce((s, e) => s + e.kpis.orders_attributed_30d, 0)
+  const totalRevenue   = engines.reduce((s, e) => s + e.kpis.revenue_sar_30d, 0)
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="الطيار الآلي"
-        subtitle="مركز التحكم في جميع العمليات التلقائية"
+        subtitle="مركز تشغيل المبيعات الذكي — 4 محركات تعمل تلقائياً"
       />
 
       {/* ── Master autopilot toggle ── */}
@@ -807,15 +1014,15 @@ export default function SmartAutomations() {
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-base font-bold text-slate-900">تشغيل الطيار الآلي</h2>
+                <h2 className="text-base font-bold text-slate-900">المفتاح الرئيسي للطيار الآلي</h2>
                 <Badge
-                  label={autopilot ? 'مُفعّل' : 'غير مُفعّل'}
+                  label={autopilot ? 'مُفعّل' : 'متوقف'}
                   variant={autopilot ? 'green' : 'slate'}
                   dot
                 />
               </div>
               <p className="text-sm text-slate-500 mt-1 leading-relaxed max-w-lg">
-                عند التفعيل، يبدأ النظام بتشغيل جميع الأتمتة تلقائياً — السلة المتروكة، الكوبونات، استرجاع العملاء، وحملات واتساب.
+                عند الإيقاف، تتوقف جميع المحركات حتى لو كانت أتمتاتها مُفعّلة. عند التشغيل، يبدأ كل محرك بالعمل وفق إعداداته.
               </p>
             </div>
           </div>
@@ -830,7 +1037,12 @@ export default function SmartAutomations() {
         </div>
       </div>
 
-      {/* ── Stats row ── */}
+      {/* ── Top KPI strip — one card per engine ── */}
+      {!loading && engines.length > 0 && (
+        <EngineKpiStrip engines={engines} />
+      )}
+
+      {/* ── Aggregate stats row ── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label="أتمتة مُفعّلة"
@@ -840,22 +1052,22 @@ export default function SmartAutomations() {
           iconBg="bg-emerald-50"
         />
         <StatCard
-          label="رسائل أُرسلت"
+          label="رسائل آخر 30 يوم"
           value={totalSent.toLocaleString('ar-SA')}
           icon={Send}
           iconColor="text-blue-600"
           iconBg="bg-blue-50"
         />
         <StatCard
-          label="تحويلات"
-          value={totalConverted.toLocaleString('ar-SA')}
+          label="طلبات منسوبة"
+          value={totalAttributed.toLocaleString('ar-SA')}
           icon={CheckCircle}
           iconColor="text-purple-600"
           iconBg="bg-purple-50"
         />
         <StatCard
-          label="معدل التحويل"
-          value={`${conversionRate}%`}
+          label="إيرادات (ر.س)"
+          value={totalRevenue.toLocaleString('ar-SA', { maximumFractionDigits: 0 })}
           icon={TrendingUp}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
@@ -895,34 +1107,22 @@ export default function SmartAutomations() {
         </div>
       )}
 
-      {/* ── Sections ── */}
+      {/* ── Engines ── */}
       {loading ? (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => <AutomationSkeleton key={i} />)}
+        <div className="grid grid-cols-1 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => <AutomationSkeleton key={i} />)}
         </div>
       ) : !error && (
-        <div className="space-y-8">
-          {SECTIONS.map(section => (
-            section.types.length === 0 ? (
-              /* Static placeholder for sections with no backend type yet */
-              <div key={section.title} className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">{section.icon}</span>
-                  <h3 className="text-sm font-semibold text-slate-700">{section.title}</h3>
-                  <div className="flex-1 h-px bg-slate-100" />
-                  <span className="text-xs text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full border border-slate-200">قريباً</span>
-                </div>
-              </div>
-            ) : (
-              <AutomationSection
-                key={section.title}
-                icon={section.icon}
-                title={section.title}
-                types={section.types}
-                automations={automations}
-                onToggle={handleToggleAutomation}
-              />
-            )
+        <div className="space-y-5">
+          {engines.map(engine => (
+            <EngineSection
+              key={engine.engine}
+              engine={engine}
+              automations={automations}
+              onToggleAutomation={handleToggleAutomation}
+              onToggleEngine={handleToggleEngine}
+              defaultOpen={engine.available && engine.automations_count > 0}
+            />
           ))}
         </div>
       )}

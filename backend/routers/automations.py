@@ -56,7 +56,11 @@ ORDER_STATUS_LABELS: Dict[str, str] = {
     "cod":               "الدفع عند الاستلام",
 }
 
-from core.automations_seed import seed_automations_if_empty as _seed_automations_if_empty
+from core.automations_seed import (
+    ENGINE_BY_TYPE as _ENGINE_BY_TYPE,
+    ensure_engine_for_tenant as _ensure_engine_for_tenant,
+    seed_automations_if_empty as _seed_automations_if_empty,
+)
 from core.billing import require_billing_access
 from core.database import get_db
 from core.tenant import (
@@ -182,6 +186,11 @@ def _auto_to_dict(a: SmartAutomation) -> Dict[str, Any]:
         "automation_type": a.automation_type,
         "name": a.name,
         "enabled": a.enabled,
+        # 4-engine grouping for the SmartAutomations dashboard. Falls back
+        # to the canonical map for legacy rows whose `engine` column was
+        # never backfilled (defensive — ensure_engine_for_tenant should
+        # already have repaired this on the previous engine cycle).
+        "engine": a.engine or _ENGINE_BY_TYPE.get(a.automation_type, "recovery"),
         "config": a.config or {},
         "template_id": a.template_id,
         "template_name": a.template.name if a.template else None,
@@ -319,6 +328,8 @@ async def list_automations(request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
     _seed_automations_if_empty(db, tenant_id)
+    # Repair the 4-engine bucket for any pre-0027 rows (no-op once migrated).
+    _ensure_engine_for_tenant(db, tenant_id)
     db.commit()
     autos = (
         db.query(SmartAutomation)
@@ -508,6 +519,288 @@ async def get_automation_metrics(
         "sent":             sent_count,
         "recovered":        len(recovered_customer_ids),
         "revenue_sar":      round(revenue_sar, 2),
+    }
+
+
+# ── 4-engine grouping ────────────────────────────────────────────────────────
+
+ENGINE_DEFINITIONS: List[Dict[str, Any]] = [
+    {
+        "engine":      "recovery",
+        "name":        "محرك استرجاع المبيعات",
+        "description": "أتمتات تستعيد المبيعات التي كادت تضيع.",
+        "available":   True,
+    },
+    {
+        "engine":      "growth",
+        "name":        "محرك نمو المبيعات",
+        "description": "أتمتات تخلق مبيعات جديدة من قاعدة عملائك الحالية.",
+        "available":   True,
+    },
+    {
+        "engine":      "experience",
+        "name":        "محرك تجربة العميل",
+        "description": "أتمتات تحسّن تجربة العميل بعد الشراء (قريباً).",
+        "available":   False,
+    },
+    {
+        "engine":      "intelligence",
+        "name":        "محرك الذكاء والتحليل",
+        "description": "تحليل ذكي للعملاء واقتراحات حملات (قريباً).",
+        "available":   False,
+    },
+]
+
+
+def _aggregate_engine_kpis(
+    db: Session,
+    tenant_id: int,
+    automations: List[SmartAutomation],
+    *,
+    days: int = 30,
+) -> Dict[int, Dict[str, float]]:
+    """
+    Compute the per-automation `{messages_sent, orders_attributed, revenue_sar}`
+    triple for every automation in `automations` over the past `days`. Mirrors
+    `get_automation_metrics` exactly so the engines summary can sum the same
+    numbers the per-automation cards display.
+
+    Returns `{automation_id: {messages_sent, orders_attributed, revenue_sar}}`.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    if not automations:
+        return {}
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(days=max(1, min(int(days or 30), 365)))
+    auto_ids = [a.id for a in automations]
+
+    sent_rows = (
+        db.query(AutomationExecution)
+        .filter(
+            AutomationExecution.tenant_id == tenant_id,
+            AutomationExecution.automation_id.in_(auto_ids),
+            AutomationExecution.status == "sent",
+            AutomationExecution.executed_at >= window_start,
+        )
+        .all()
+    )
+    by_auto: Dict[int, Dict[str, Any]] = {
+        a.id: {
+            "messages_sent":      0,
+            "orders_attributed":  0,
+            "revenue_sar":        0.0,
+            "_earliest_by_cust":  {},
+            "_attribution_days":  _ATTRIBUTION_WINDOW_DAYS.get(a.automation_type or "", 7),
+        } for a in automations
+    }
+    for ex in sent_rows:
+        bucket = by_auto.get(ex.automation_id)
+        if bucket is None:
+            continue
+        bucket["messages_sent"] += 1
+        cid = ex.customer_id
+        if cid:
+            existing = bucket["_earliest_by_cust"].get(cid)
+            if existing is None or ex.executed_at < existing:
+                bucket["_earliest_by_cust"][cid] = ex.executed_at
+
+    # Pull every customer in scope at once so per-automation attribution is one
+    # extra query, not N. Same bounded-set assumption as get_automation_metrics.
+    all_cids = {cid for b in by_auto.values() for cid in b["_earliest_by_cust"]}
+    phone_to_cid: Dict[str, int] = {}
+    if all_cids:
+        cust_rows = (
+            db.query(Customer.id, Customer.phone)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                Customer.id.in_(list(all_cids)),
+                Customer.phone.isnot(None),
+            )
+            .all()
+        )
+        phone_to_cid = {str(p).strip(): cid for cid, p in cust_rows if p}
+
+    orders_by_phone: Dict[str, List[Order]] = {}
+    if phone_to_cid:
+        orders = (
+            db.query(Order)
+            .filter(
+                Order.tenant_id == tenant_id,
+                Order.customer_info["phone"].astext.in_(list(phone_to_cid.keys())),
+            )
+            .all()
+        )
+        for o in orders:
+            phone = (o.customer_info or {}).get("phone")
+            if not phone:
+                continue
+            orders_by_phone.setdefault(str(phone).strip(), []).append(o)
+
+    cid_to_phone: Dict[int, str] = {cid: phone for phone, cid in phone_to_cid.items()}
+
+    for auto_id, bucket in by_auto.items():
+        attribution_days = int(bucket.pop("_attribution_days"))
+        earliest = bucket.pop("_earliest_by_cust")
+        attributed: set[int] = set()
+        for cid, send_time in earliest.items():
+            phone = cid_to_phone.get(cid)
+            if not phone:
+                continue
+            for o in orders_by_phone.get(phone, []):
+                created_raw = (o.extra_metadata or {}).get("created_at")
+                order_time: Optional[datetime] = None
+                if created_raw:
+                    try:
+                        order_time = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+                    except Exception:
+                        order_time = None
+                if order_time is not None:
+                    send_time_aware = send_time if send_time.tzinfo else send_time.replace(tzinfo=timezone.utc)
+                    if order_time < send_time_aware:
+                        continue
+                    if (order_time - send_time_aware).days > attribution_days:
+                        continue
+                if cid in attributed:
+                    continue
+                attributed.add(cid)
+                bucket["revenue_sar"] += _parse_order_total(o.total)
+        bucket["orders_attributed"] = len(attributed)
+        bucket["revenue_sar"] = round(bucket["revenue_sar"], 2)
+
+    return by_auto
+
+
+@router.get("/automations/engines/summary")
+async def get_engines_summary(
+    request: Request,
+    db: Session = Depends(get_db),
+    days: int = 30,
+):
+    """
+    Aggregated KPIs for the 4-engine SmartAutopilot dashboard.
+
+    For each of the four engines (recovery, growth, experience, intelligence)
+    returns:
+
+      • automations_count / active_automations  — how many rows live in the
+        engine and how many of those are toggled on right now
+      • enabled                                 — true iff at least one row in
+        the engine is enabled (drives the per-engine master switch UI)
+      • kpis.messages_sent_30d                  — sum of `AutomationExecution`
+        rows with status='sent' across the engine's automations
+      • kpis.orders_attributed_30d              — distinct customers who placed
+        an order within the per-automation attribution window after a send
+      • kpis.revenue_sar_30d                    — SUM of attributed `Order.total`
+
+    The two "coming soon" engines (experience, intelligence) return zero KPIs
+    today because they have no automations seeded yet, but the structure is
+    the same so the frontend can render them with a placeholder badge.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    _seed_automations_if_empty(db, tenant_id)
+    _ensure_engine_for_tenant(db, tenant_id)
+    db.commit()
+
+    autos: List[SmartAutomation] = (
+        db.query(SmartAutomation)
+        .filter(SmartAutomation.tenant_id == tenant_id)
+        .all()
+    )
+
+    by_engine: Dict[str, List[SmartAutomation]] = {}
+    for a in autos:
+        engine = a.engine or _ENGINE_BY_TYPE.get(a.automation_type, "recovery")
+        by_engine.setdefault(engine, []).append(a)
+
+    kpis = _aggregate_engine_kpis(db, tenant_id, autos, days=days)
+
+    autopilot_enabled = _get_autopilot_enabled(db, tenant_id)
+    engines_payload: List[Dict[str, Any]] = []
+    for definition in ENGINE_DEFINITIONS:
+        engine_key = definition["engine"]
+        engine_autos = by_engine.get(engine_key, [])
+        active_count = sum(1 for a in engine_autos if a.enabled)
+        sent = sum(int(kpis.get(a.id, {}).get("messages_sent", 0)) for a in engine_autos)
+        attributed = sum(int(kpis.get(a.id, {}).get("orders_attributed", 0)) for a in engine_autos)
+        revenue = round(sum(float(kpis.get(a.id, {}).get("revenue_sar", 0.0)) for a in engine_autos), 2)
+        engines_payload.append({
+            **definition,
+            "automations_count":   len(engine_autos),
+            "active_automations":  active_count,
+            "enabled":             active_count > 0,
+            "automation_ids":      [a.id for a in engine_autos],
+            "kpis": {
+                "messages_sent_30d":      sent,
+                "orders_attributed_30d":  attributed,
+                "revenue_sar_30d":        revenue,
+            },
+        })
+
+    return {
+        "engines":           engines_payload,
+        "autopilot_enabled": autopilot_enabled,
+        "window_days":       days,
+    }
+
+
+class EngineToggleIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/automations/engines/{engine}/toggle")
+async def toggle_engine(
+    engine: str,
+    body: EngineToggleIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Enable or disable every automation that belongs to a given engine in one
+    request. Returns the updated count + the new state. Refuses unknown
+    engine slugs and the two "coming soon" engines (experience, intelligence)
+    so the merchant can't accidentally toggle a section that has nothing in
+    it.
+    """
+    tenant_id = resolve_tenant_id(request)
+    engine = (engine or "").strip().lower()
+
+    definition = next((d for d in ENGINE_DEFINITIONS if d["engine"] == engine), None)
+    if definition is None:
+        raise HTTPException(status_code=404, detail=f"Unknown engine: {engine}")
+    if not definition["available"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Engine '{engine}' is not available yet (coming soon).",
+        )
+
+    if body.enabled:
+        require_billing_access(db, int(tenant_id))
+
+    _ensure_engine_for_tenant(db, tenant_id)
+
+    rows: List[SmartAutomation] = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.engine == engine,
+        )
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    changed = 0
+    for r in rows:
+        if r.enabled != body.enabled:
+            r.enabled = body.enabled
+            r.updated_at = now
+            changed += 1
+    db.commit()
+    return {
+        "engine":            engine,
+        "enabled":           body.enabled,
+        "automations_count": len(rows),
+        "automations_changed": changed,
     }
 
 

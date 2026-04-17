@@ -116,12 +116,14 @@ def test_back_in_stock_var_map_round_trip() -> None:
     }
 
 
-def test_iter_template_seeds_now_returns_four_features() -> None:
-    """Adding back_in_stock should bump AR and EN seed counts to 4 each."""
+def test_iter_template_seeds_includes_back_in_stock_in_each_language() -> None:
+    """back_in_stock must ship in both AR and EN seeds; total count is open-ended
+    as new engines (recovery/growth) keep adding default templates."""
     ar = iter_template_seeds("ar")
     en = iter_template_seeds("en")
-    assert len(ar) == 4
-    assert len(en) == 4
+    assert len(ar) >= 4
+    assert len(en) >= 4
+    assert len(ar) == len(en), "AR and EN seeds must stay symmetric"
     ar_names = {s["name"] for s in ar}
     en_names = {s["name"] for s in en}
     assert "back_in_stock_ar" in ar_names

@@ -6,7 +6,9 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -55,6 +57,7 @@ class Tenant(Base):
     products = relationship('Product', back_populates='tenant')
     orders = relationship('Order', back_populates='tenant')
     coupons = relationship('Coupon', back_populates='tenant')
+    promotions = relationship('Promotion', back_populates='tenant')
     integrations = relationship('Integration', back_populates='tenant')
     sync_logs = relationship('SyncLog', back_populates='tenant')
     automation_rules = relationship('AutomationRule', back_populates='tenant')
@@ -188,6 +191,60 @@ class CouponRule(Base):
     rule_config = Column(JSONB, nullable=True)
     coupon_id = Column(Integer, ForeignKey('coupons.id'), nullable=False)
     coupon = relationship('Coupon', back_populates='rules')
+
+
+class Promotion(Base):
+    """
+    A *Promotion* is a reusable discount rule the merchant manages from the
+    "العروض" page. Mirrors the Shopify/Magento split between coupon codes
+    (one-off, per-customer, code in hand) and promotional rules (applied
+    automatically when conditions match).
+
+    Promotions in Nahla are the source of truth for the *terms* of an offer
+    (type, value, conditions, validity window, audience). When an automation
+    fires for a customer, `services.promotion_engine.materialise_for_customer`
+    reads the promotion and issues a personal `Coupon` row carrying those
+    terms — that way the same engine works across Salla / Zid / Shopify
+    without depending on each platform's promotional API surface.
+
+    Type catalogue (kept open-ended via String + validation in the service):
+        percentage           — % off cart subtotal
+        fixed                — flat amount off
+        free_shipping        — zero shipping (encoded as 100% off shipping
+                               line in checkout instructions)
+        threshold_discount   — percentage/fixed once cart >= min_order_amount
+        buy_x_get_y          — buy `x_quantity` of x, get `y_quantity` of y free
+                               (materialised as a stacked coupon at issue time)
+    """
+    __tablename__ = 'promotions'
+    __table_args__ = (
+        Index('ix_promotions_tenant_status', 'tenant_id', 'status'),
+        Index('ix_promotions_tenant_type', 'tenant_id', 'promotion_type'),
+    )
+
+    id              = Column(Integer, primary_key=True)
+    tenant_id       = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+
+    name            = Column(String, nullable=False)
+    description     = Column(Text, nullable=True)
+    promotion_type  = Column(String, nullable=False)
+    discount_value  = Column(Numeric(10, 2), nullable=True)
+
+    conditions      = Column(JSONB, nullable=True)
+
+    starts_at       = Column(DateTime, nullable=True)
+    ends_at         = Column(DateTime, nullable=True)
+
+    status          = Column(String, nullable=False, default='draft', index=True)
+
+    usage_count     = Column(Integer, nullable=False, default=0)
+    usage_limit     = Column(Integer, nullable=True)
+
+    extra_metadata  = Column('metadata', JSONB, nullable=True)
+    created_at      = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    tenant = relationship('Tenant', back_populates='promotions')
 
 class Integration(Base):
     __tablename__ = 'integrations'
@@ -685,9 +742,14 @@ class SmartAutomation(Base):
     tenant = relationship('Tenant', back_populates='smart_automations')
     automation_type = Column(String, nullable=False)
     # abandoned_cart | predictive_reorder | customer_winback |
-    # vip_upgrade | new_product_alert | back_in_stock
+    # vip_upgrade | new_product_alert | back_in_stock |
+    # unpaid_order_reminder | seasonal_offer | salary_payday_offer
     name = Column(String, nullable=False)
     enabled = Column(Boolean, default=False, nullable=False)
+    # Which "engine" this automation belongs to in the merchant dashboard:
+    # recovery | growth | experience | intelligence
+    # Drives grouping in /automations/engines/summary and the SmartAutomations UI.
+    engine = Column(String, nullable=False, default='recovery', index=True)
     config = Column(JSONB, nullable=True)          # delays, conditions, coupon_code, etc.
     template_id = Column(Integer, ForeignKey('whatsapp_templates.id'), nullable=True)
     template = relationship('WhatsAppTemplate')

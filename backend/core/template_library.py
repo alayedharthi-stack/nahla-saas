@@ -49,6 +49,9 @@ ALLOWED_VARIABLE_SLOTS: frozenset[str] = frozenset({
     "product_name",
     "product_url",
     "order_id",
+    "payment_url",     # unpaid_order_reminder
+    "reorder_url",     # predictive_reorder_reminder
+    "occasion_name",   # seasonal_offer (e.g. "اليوم الوطني")
 })
 
 
@@ -226,6 +229,235 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
                     {
                         "type": "BUTTONS",
                         "buttons": [{"type": "URL", "text": "Order now", "url": "{{3}}"}],
+                    },
+                ],
+            },
+        },
+    },
+
+    # ── 5) Unpaid order reminder (recovery engine) ──────────────────────
+    #
+    # Triggered by `automation_emitters.scan_unpaid_orders` for orders that
+    # have been left in `pending` / `awaiting_payment` past the configured
+    # grace window. Three escalating steps; the engine picks the right one
+    # by event age. The CTA is a button to the order's payment URL when the
+    # store integration provides one (Salla/Zid/Shopify all do).
+    "unpaid_order_reminder": {
+        "automation_type": "unpaid_order_reminder",
+        "trigger_event":   "order_payment_pending",
+        "category":        "UTILITY",
+        "languages": {
+            "ar": {
+                "template_name": "unpaid_order_reminder_ar",
+                "slots":         ["customer_name", "order_id", "store_name", "payment_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 👋\n\n"
+                            "طلبك رقم #{{2}} في متجر {{3}} لا يزال بانتظار الدفع.\n\n"
+                            "يمكنك إكمال الدفع الآن من هنا:\n\n"
+                            "{{4}}\n\n"
+                            "إذا واجهت أي مشكلة في الدفع نحن هنا لمساعدتك 🌟"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "إكمال الدفع", "url": "{{4}}"}],
+                    },
+                ],
+            },
+            "en": {
+                "template_name": "unpaid_order_reminder_en",
+                "slots":         ["customer_name", "order_id", "store_name", "payment_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 👋\n\n"
+                            "Your order #{{2}} at {{3}} is still awaiting payment.\n\n"
+                            "You can complete the payment here:\n\n"
+                            "{{4}}\n\n"
+                            "Reply if you ran into any trouble during checkout 🌟"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "Complete payment", "url": "{{4}}"}],
+                    },
+                ],
+            },
+        },
+    },
+
+    # ── 6) Predictive reorder reminder (growth engine) ──────────────────
+    #
+    # Triggered by `automation_emitters.scan_predictive_reorders` a few days
+    # before a customer's next predicted reorder date for a consumable
+    # product. UTILITY category because we are reminding about a likely
+    # need rather than promoting.
+    "predictive_reorder": {
+        "automation_type": "predictive_reorder",
+        "trigger_event":   "predictive_reorder_due",
+        "category":        "UTILITY",
+        "languages": {
+            "ar": {
+                "template_name": "predictive_reorder_reminder_ar",
+                "slots":         ["customer_name", "product_name", "reorder_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 👋\n\n"
+                            "نتوقع أنك على وشك الحاجة لإعادة طلب {{2}}.\n\n"
+                            "يمكنك إعادة الطلب بسرعة من هنا:\n\n"
+                            "{{3}}\n\n"
+                            "نسعد بخدمتك دائماً 🌟"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "إعادة الطلب", "url": "{{3}}"}],
+                    },
+                ],
+            },
+            "en": {
+                "template_name": "predictive_reorder_reminder_en",
+                "slots":         ["customer_name", "product_name", "reorder_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 👋\n\n"
+                            "You're probably running low on {{2}} — want a quick top-up?\n\n"
+                            "Reorder in one tap:\n\n"
+                            "{{3}}\n\n"
+                            "Always happy to serve you 🌟"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "Reorder", "url": "{{3}}"}],
+                    },
+                ],
+            },
+        },
+    },
+
+    # ── 7) Seasonal offer (growth engine) ───────────────────────────────
+    #
+    # Triggered one day before each entry in the built-in Saudi calendar
+    # (national_day, founding_day, ramadan, eid_fitr, eid_adha, white_friday).
+    # The occasion name is injected by the calendar emitter; the discount
+    # code comes from the auto_coupon pool when enabled.
+    "seasonal_offer": {
+        "automation_type": "seasonal_offer",
+        "trigger_event":   "seasonal_event_due",
+        "category":        "MARKETING",
+        "languages": {
+            "ar": {
+                "template_name": "seasonal_offer_ar",
+                "slots":         ["customer_name", "occasion_name", "store_name", "discount_code", "store_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 🌟\n\n"
+                            "بمناسبة {{2}}، نقدم لك عرضاً خاصاً في متجر {{3}}.\n\n"
+                            "استخدم الكود التالي عند الشراء:\n\n"
+                            "{{4}}\n\n"
+                            "تسوق الآن:\n\n"
+                            "{{5}}"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "تسوق الآن", "url": "{{5}}"}],
+                    },
+                ],
+            },
+            "en": {
+                "template_name": "seasonal_offer_en",
+                "slots":         ["customer_name", "occasion_name", "store_name", "discount_code", "store_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 🌟\n\n"
+                            "To celebrate {{2}}, we have a special offer for you at {{3}}.\n\n"
+                            "Use this code at checkout:\n\n"
+                            "{{4}}\n\n"
+                            "Shop now:\n\n"
+                            "{{5}}"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "Shop now", "url": "{{5}}"}],
+                    },
+                ],
+            },
+        },
+    },
+
+    # ── 8) Salary payday offer (growth engine) ──────────────────────────
+    #
+    # Triggered one day before each tenant's configured payday (default 27th
+    # of the Gregorian month — Saudi private sector). Same shape as the
+    # generic seasonal offer minus the occasion slot, with copy tuned for
+    # post-salary spending behaviour.
+    "salary_payday_offer": {
+        "automation_type": "salary_payday_offer",
+        "trigger_event":   "salary_payday_due",
+        "category":        "MARKETING",
+        "languages": {
+            "ar": {
+                "template_name": "salary_payday_offer_ar",
+                "slots":         ["customer_name", "store_name", "discount_code", "store_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 🌟\n\n"
+                            "بمناسبة قرب موعد الراتب، أعد متجر {{2}} عرضاً خاصاً لك.\n\n"
+                            "استخدم الكود التالي قبل انتهاء العرض:\n\n"
+                            "{{3}}\n\n"
+                            "تسوق الآن:\n\n"
+                            "{{4}}"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "تسوق الآن", "url": "{{4}}"}],
+                    },
+                ],
+            },
+            "en": {
+                "template_name": "salary_payday_offer_en",
+                "slots":         ["customer_name", "store_name", "discount_code", "store_url"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 🌟\n\n"
+                            "Payday's around the corner — {{2}} put together a little something for you.\n\n"
+                            "Use this code at checkout:\n\n"
+                            "{{3}}\n\n"
+                            "Shop now:\n\n"
+                            "{{4}}"
+                        ),
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{"type": "URL", "text": "Shop now", "url": "{{4}}"}],
                     },
                 ],
             },

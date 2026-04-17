@@ -96,6 +96,7 @@ class EVENTS:
     AUTOMATION_EXECUTION_SKIPPED     = "automation.execution.skipped"
     AUTOMATION_EXECUTION_FAILED      = "automation.execution.failed"
     AUTOMATION_SEED_REPAIRED         = "automation.seed.trigger_repaired"
+    AUTOMATION_AUTOPILOT_DISABLED    = "automation.autopilot.disabled"
 
 
 def _coerce(value: Any) -> Any:

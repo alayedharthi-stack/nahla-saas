@@ -80,6 +80,17 @@ async def run_automation_engine_scheduler() -> None:
     await _engine_loop()
 
 
+async def run_automation_emitters_scheduler() -> None:
+    """Time-based emitters: unpaid orders + predictive reorder + calendar events.
+
+    These three emit `AutomationEvent` rows that the engine then processes
+    on its next cycle. Kept as a separate task so a slow scan can't block
+    the engine's ≤60 s polling loop.
+    """
+    from core.automation_emitters import run_automation_emitters_scheduler as _emitters_loop  # noqa: PLC0415
+    await _emitters_loop()
+
+
 async def run_webhook_guardian_scheduler() -> None:
     """WhatsApp Webhook Guardian — monitors health and auto-recovers every 5 min."""
     from core.webhook_guardian import run_webhook_guardian  # noqa: PLC0415

@@ -42,18 +42,29 @@ class AutomationTrigger(str, Enum):
     VIP_CUSTOMER_UPGRADE   = "vip_customer_upgrade"
     PRODUCT_CREATED        = "product_created"
     PRODUCT_BACK_IN_STOCK  = "product_back_in_stock"
+    # Recovery engine: pending order has not been paid after a delay.
+    ORDER_PAYMENT_PENDING  = "order_payment_pending"
+    # Growth engine: scheduled by automation_emitters.scan_calendar_events
+    # one day before the configured holiday / promo date.
+    SEASONAL_EVENT_DUE     = "seasonal_event_due"
+    # Growth engine: scheduled by automation_emitters.scan_calendar_events
+    # one day before each tenant's configured payday.
+    SALARY_PAYDAY_DUE      = "salary_payday_due"
 
 
 # Canonical mapping: SmartAutomation.automation_type → AutomationTrigger
 # Used by the seeder and the backfill migration so every row gets the right
 # trigger_event on creation.
 AUTOMATION_TYPE_TO_TRIGGER: Dict[str, AutomationTrigger] = {
-    "abandoned_cart":    AutomationTrigger.CART_ABANDONED,
-    "predictive_reorder": AutomationTrigger.PREDICTIVE_REORDER_DUE,
-    "customer_winback":  AutomationTrigger.CUSTOMER_INACTIVE,
-    "vip_upgrade":       AutomationTrigger.VIP_CUSTOMER_UPGRADE,
-    "new_product_alert": AutomationTrigger.PRODUCT_CREATED,
-    "back_in_stock":     AutomationTrigger.PRODUCT_BACK_IN_STOCK,
+    "abandoned_cart":        AutomationTrigger.CART_ABANDONED,
+    "predictive_reorder":    AutomationTrigger.PREDICTIVE_REORDER_DUE,
+    "customer_winback":      AutomationTrigger.CUSTOMER_INACTIVE,
+    "vip_upgrade":           AutomationTrigger.VIP_CUSTOMER_UPGRADE,
+    "new_product_alert":     AutomationTrigger.PRODUCT_CREATED,
+    "back_in_stock":         AutomationTrigger.PRODUCT_BACK_IN_STOCK,
+    "unpaid_order_reminder": AutomationTrigger.ORDER_PAYMENT_PENDING,
+    "seasonal_offer":        AutomationTrigger.SEASONAL_EVENT_DUE,
+    "salary_payday_offer":   AutomationTrigger.SALARY_PAYDAY_DUE,
 }
 
 

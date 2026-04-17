@@ -15,6 +15,7 @@ const PAGE_META: Record<string, MetaSelector> = {
   '/orders':             tr => tr.pages.orders,
   '/customers':          _tr => ({ title: 'العملاء', subtitle: 'إدارة وتصنيف العملاء' }),
   '/coupons':            tr => tr.pages.coupons,
+  '/promotions':         _tr => ({ title: 'العروض', subtitle: 'قواعد الخصم التلقائي بدون كود — تُطبَّق مباشرة عند تحقق الشروط' }),
   '/campaigns':          tr => tr.pages.campaigns,
   '/integrations':       tr => tr.pages.integrations,
   '/analytics':          tr => tr.pages.analytics,
