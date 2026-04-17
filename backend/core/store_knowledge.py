@@ -93,7 +93,17 @@ class StoreKnowledgeLoader:
         snap = self.snapshot()
         if not snap or not snap.last_full_sync_at:
             return False
-        age = (datetime.now(timezone.utc) - snap.last_full_sync_at).total_seconds() / 3600
+        # `last_full_sync_at` is loaded from PostgreSQL as an offset-naive
+        # datetime (TIMESTAMP WITHOUT TIME ZONE), but `datetime.now(timezone.utc)`
+        # is offset-aware — subtracting them raises
+        # `TypeError: can't subtract offset-naive and offset-aware datetimes`
+        # which kills the entire merchant AI reply path. We treat every
+        # naive timestamp from the DB as UTC (which is how every writer
+        # in this codebase persists them) and normalise before the math.
+        last_sync = snap.last_full_sync_at
+        if last_sync.tzinfo is None:
+            last_sync = last_sync.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - last_sync).total_seconds() / 3600
         return age < max_age_hours
 
 

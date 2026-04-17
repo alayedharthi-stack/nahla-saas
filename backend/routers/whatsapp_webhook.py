@@ -865,7 +865,29 @@ async def _handle_merchant_message(
         logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
 
     except Exception as exc:
-        logger.error("[Merchant] Error generating reply for tenant=%s: %s", tenant_id, exc)
+        # Any failure inside the merchant reply pipeline (store_knowledge,
+        # AI orchestrator, WA send) used to leave the customer in dead
+        # silence and the merchant unable to see what went wrong. Log the
+        # full traceback so we can diagnose the next regression, AND
+        # send a single polite fallback so the customer still gets a
+        # reply within the 24-hour service window. The fallback uses the
+        # same tenant-scoped send path as the primary reply.
+        import traceback  # noqa: PLC0415
+        logger.error(
+            "[Merchant] Error generating reply for tenant=%s: %s\n%s",
+            tenant_id, exc, traceback.format_exc(),
+        )
+        try:
+            await _send_whatsapp_message(
+                phone_id=phone_id, to=to,
+                text="وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت.",
+                _tenant_id=tenant_id, _db=db,
+            )
+        except Exception as send_exc:  # noqa: BLE001
+            logger.error(
+                "[Merchant] Fallback send also failed for tenant=%s: %s",
+                tenant_id, send_exc,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
