@@ -21,7 +21,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from core.database import get_db
@@ -147,6 +147,47 @@ def _resolve_order_number(order: Order) -> str:
     return raw if raw.startswith("#") else f"#{raw}"
 
 
+# ── External store URLs ───────────────────────────────────────────────────
+# Each entry is a callable (raw_external_id, raw_order_number) → URL or None.
+# Salla's merchant dashboard accepts the internal id under /orders/<id>.
+# Zid uses its merchant panel; Shopify uses the human "name" (the # number).
+def _store_url_salla(external_id: Optional[str], order_number: Optional[str]) -> Optional[str]:
+    target = (external_id or order_number or "").strip().lstrip("#")
+    if not target:
+        return None
+    return f"https://salla.sa/dashboard/orders/{target}"
+
+
+def _store_url_zid(external_id: Optional[str], order_number: Optional[str]) -> Optional[str]:
+    target = (external_id or order_number or "").strip().lstrip("#")
+    if not target:
+        return None
+    return f"https://web.zid.sa/orders/{target}"
+
+
+def _store_url_shopify(external_id: Optional[str], order_number: Optional[str]) -> Optional[str]:
+    target = (external_id or order_number or "").strip().lstrip("#")
+    if not target:
+        return None
+    return f"https://admin.shopify.com/orders/{target}"
+
+
+_STORE_URL_BUILDERS = {
+    "salla":   _store_url_salla,
+    "zid":     _store_url_zid,
+    "shopify": _store_url_shopify,
+}
+
+
+def _build_store_url(source_key: str, external_id: Optional[str], order_number: Optional[str]) -> Optional[str]:
+    """Return the deep-link to the order page in the upstream store
+    dashboard, or None for sources that don't have one (whatsapp/manual)."""
+    builder = _STORE_URL_BUILDERS.get(source_key)
+    if not builder:
+        return None
+    return builder(external_id, order_number)
+
+
 def _parse_corrupt_status(raw: str) -> str:
     """
     Legacy rows synced before the salla_adapter fix stored a Python repr of
@@ -245,6 +286,124 @@ def _read_created_at(order: Order, fallback: datetime) -> datetime:
     return fallback
 
 
+def _build_customer_lookup(db: Session, tenant_id: int) -> Dict[str, str]:
+    """phone → name map used to fill in missing names on order rows."""
+    out: Dict[str, str] = {}
+    for cust in (
+        db.query(Customer)
+        .filter(Customer.tenant_id == tenant_id, Customer.name.isnot(None))
+        .all()
+    ):
+        if not cust.name:
+            continue
+        if cust.phone:
+            out[cust.phone.strip()] = cust.name.strip()
+            digits = cust.phone.strip().lstrip("+").replace(" ", "").replace("-", "")
+            if digits:
+                out[digits] = cust.name.strip()
+    return out
+
+
+def _serialise_order(
+    order: Order,
+    *,
+    customer_lookup: Dict[str, str],
+    now: datetime,
+    detailed: bool = False,
+) -> Dict[str, Any]:
+    """
+    Render an order for the dashboard. ``detailed=True`` adds line-item
+    breakdowns and the deep-link to the upstream store; the list endpoint
+    keeps it lean for performance.
+    """
+    created_at  = _read_created_at(order, fallback=now)
+    raw_status  = str(order.status or "")
+    status      = _classify_status(raw_status)
+    amount_value = _to_float_sar(order.total)
+
+    customer_info = order.customer_info or {}
+    line_items    = order.line_items or []
+
+    item_titles: List[str] = []
+    detailed_items: List[Dict[str, Any]] = []
+    for item in line_items:
+        name = item.get("product_name") or item.get("title") or item.get("name") or "منتج"
+        qty  = int(item.get("quantity") or 1)
+        item_titles.append(f"{name} ×{qty}")
+        if detailed:
+            unit_price = item.get("unit_price") or item.get("price")
+            try:
+                unit_price_f = float(unit_price) if unit_price is not None else None
+            except Exception:
+                unit_price_f = None
+            detailed_items.append({
+                "product_id":   str(item.get("product_id") or ""),
+                "name":         name,
+                "quantity":     qty,
+                "variant_id":   str(item.get("variant_id") or "") or None,
+                "unit_price":   unit_price_f,
+                "image_url":    item.get("image_url") or item.get("image") or None,
+            })
+
+    source_key   = _resolve_source(order)
+    source_label = SOURCE_LABELS_AR.get(source_key, source_key)
+    order_number = _resolve_order_number(order)
+    display_name = _resolve_customer_display(order, customer_lookup)
+    phone        = (customer_info.get("phone") or customer_info.get("mobile") or "").strip()
+    is_ai_created = source_key == "whatsapp" or (
+        (order.extra_metadata or {}).get("source") in ("ai_sales_agent", "ai_sales", "ai")
+    )
+
+    payload: Dict[str, Any] = {
+        # `id` is kept as the human-visible order number so existing
+        # frontend key/search/filter code shows the platform reference
+        # instead of the DB pk. The internal pk is also exposed for
+        # routing (the detail page is keyed on it).
+        "id":           order_number,
+        "order_number": order_number,
+        "internal_id":  str(order.id),
+        "external_id":  order.external_id,
+        "customer":      display_name,
+        "customer_name": display_name,
+        "phone":         phone or "—",
+        "items":         "، ".join(item_titles) if item_titles else "—",
+        "amount":        _format_total(amount_value, order.total),
+        "amount_sar":    round(amount_value, 2),
+        "status":        status,
+        "status_label":  STATUS_LABELS_AR.get(status, status),
+        "raw_status":    _parse_corrupt_status(raw_status),
+        "source":        source_key,
+        "source_label":  source_label,
+        "paymentLink":   order.checkout_url,
+        "createdAt":     created_at.isoformat(),
+        "is_ai_created": is_ai_created,
+    }
+
+    if detailed:
+        payload["line_items"] = detailed_items
+        payload["customer_address"] = {
+            "city":            customer_info.get("city"),
+            "district":        customer_info.get("district"),
+            "street":          customer_info.get("street"),
+            "building_number": customer_info.get("building_number"),
+            "postal_code":     customer_info.get("postal_code"),
+            "address":         customer_info.get("address"),
+        }
+        store_url = _build_store_url(source_key, order.external_id, order.external_order_number)
+        whatsapp_url = f"https://wa.me/{phone.lstrip('+').replace(' ', '').replace('-', '')}" if phone else None
+        conversation_url = f"/conversations?phone={phone}" if phone else None
+        payload["links"] = {
+            "store":        store_url,
+            "store_label":  f"فتح الطلب في {source_label}" if store_url else None,
+            "whatsapp":     whatsapp_url,
+            "conversation": conversation_url,
+        }
+        payload["payment_method"] = (order.extra_metadata or {}).get("payment_method")
+        payload["notes"]          = (order.extra_metadata or {}).get("notes")
+
+    return payload
+
+
 @router.get("")
 async def list_orders(request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
@@ -258,86 +417,92 @@ async def list_orders(request: Request, db: Session = Depends(get_db)):
         .all()
     )
 
-    # Build a phone → name lookup from the Customer table so the orders
-    # endpoint can fill in names when the upstream order payload only
-    # carries a phone (Salla's listing endpoint frequently omits names).
-    customer_lookup: Dict[str, str] = {}
-    for cust in (
-        db.query(Customer)
-        .filter(Customer.tenant_id == tenant_id, Customer.name.isnot(None))
-        .all()
-    ):
-        if not cust.name:
-            continue
-        if cust.phone:
-            customer_lookup[cust.phone.strip()] = cust.name.strip()
-            digits = cust.phone.strip().lstrip("+").replace(" ", "").replace("-", "")
-            if digits:
-                customer_lookup[digits] = cust.name.strip()
+    customer_lookup = _build_customer_lookup(db, tenant_id)
+    now             = datetime.now(timezone.utc)
+    today           = now.date()
 
-    now = datetime.now(timezone.utc)
     orders: List[Dict[str, Any]] = []
-    pending_count = 0
+    pending_count   = 0
     completed_today = 0
-    today_revenue = 0.0
+    today_revenue   = 0.0
+    whatsapp_today_count   = 0
+    whatsapp_today_revenue = 0.0
 
     for order in rows:
-        created_at = _read_created_at(order, fallback=now)
+        item = _serialise_order(order, customer_lookup=customer_lookup, now=now)
+        orders.append(item)
 
-        raw_status = str(order.status or "")
-        status = _classify_status(raw_status)
-        if status == "pending":
+        if item["status"] == "pending":
             pending_count += 1
 
-        amount_value = _to_float_sar(order.total)
-        if created_at.date() == now.date():
-            today_revenue += amount_value
-            if status == "paid":
+        try:
+            row_date = datetime.fromisoformat(item["createdAt"]).date()
+        except Exception:
+            row_date = today
+
+        if row_date == today:
+            today_revenue += item["amount_sar"]
+            if item["status"] == "paid":
                 completed_today += 1
-
-        customer_info = order.customer_info or {}
-        line_items = order.line_items or []
-        item_titles = []
-        for item in line_items:
-            name = item.get("product_name") or item.get("title") or item.get("name") or "منتج"
-            qty = int(item.get("quantity") or 1)
-            item_titles.append(f"{name} ×{qty}")
-
-        source_key   = _resolve_source(order)
-        source_label = SOURCE_LABELS_AR.get(source_key, source_key)
-        order_number = _resolve_order_number(order)
-        display_name = _resolve_customer_display(order, customer_lookup)
-
-        orders.append({
-            # `id` is kept as the human-visible order number so the
-            # frontend's existing key/search/filter code (which keys on
-            # `o.id`) shows the platform reference instead of the DB pk.
-            "id":           order_number,
-            "order_number": order_number,
-            # Internal DB pk — exposed only for debug / cross-referencing.
-            "internal_id":  str(order.id),
-            "external_id":  order.external_id,
-            "customer":      display_name,
-            "customer_name": display_name,
-            "phone":         customer_info.get("phone") or customer_info.get("mobile") or "—",
-            "items":         "، ".join(item_titles) if item_titles else "—",
-            "amount":        _format_total(amount_value, order.total),
-            "amount_sar":    round(amount_value, 2),
-            "status":        status,
-            "status_label":  STATUS_LABELS_AR.get(status, status),
-            "raw_status":    _parse_corrupt_status(raw_status),
-            "source":        source_key,
-            "source_label":  source_label,
-            "paymentLink":   order.checkout_url,
-            "createdAt":     created_at.isoformat(),
-        })
+            if item["source"] == "whatsapp":
+                whatsapp_today_count += 1
+                whatsapp_today_revenue += item["amount_sar"]
 
     return {
         "summary": {
-            "total_orders": len(orders),
-            "today_revenue_sar": round(today_revenue, 2),
-            "pending_orders": pending_count,
-            "completed_today": completed_today,
+            "total_orders":            len(orders),
+            "today_revenue_sar":       round(today_revenue, 2),
+            "pending_orders":          pending_count,
+            "completed_today":         completed_today,
+            # Nahla-specific KPIs so the merchant sees the value of
+            # WhatsApp + AI-driven sales at a glance.
+            "whatsapp_orders_today":   whatsapp_today_count,
+            "whatsapp_revenue_today":  round(whatsapp_today_revenue, 2),
         },
         "orders": orders,
+    }
+
+
+def _lookup_order(db: Session, tenant_id: int, order_id: str) -> Optional[Order]:
+    """
+    Find an order by either:
+      • its internal Nahla pk (numeric)
+      • its platform external_id
+      • its human-visible external_order_number (with or without leading "#")
+    so the frontend can route /orders/<anything-it-knows> safely.
+    """
+    raw = (order_id or "").strip().lstrip("#")
+    if not raw:
+        return None
+
+    q = db.query(Order).filter(Order.tenant_id == tenant_id)
+
+    if raw.isdigit():
+        hit = q.filter(Order.id == int(raw)).first()
+        if hit:
+            return hit
+
+    return (
+        q.filter(
+            (Order.external_order_number == raw)
+            | (Order.external_id == raw)
+        ).first()
+    )
+
+
+@router.get("/{order_id}")
+async def get_order_detail(order_id: str, request: Request, db: Session = Depends(get_db)):
+    tenant_id = resolve_tenant_id(request)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    customer_lookup = _build_customer_lookup(db, tenant_id)
+    return {
+        "order": _serialise_order(
+            order,
+            customer_lookup=customer_lookup,
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        ),
     }

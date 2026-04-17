@@ -56,12 +56,15 @@ from routers.orders import (  # noqa: E402
     CANCELLED_STATUSES,
     FAILED_STATUSES,
     SOURCE_LABELS_AR,
+    _build_store_url,
     _classify_status,
+    _lookup_order,
     _parse_corrupt_status,
     _read_created_at,
     _resolve_customer_display,
     _resolve_order_number,
     _resolve_source,
+    _serialise_order,
     _to_float_sar,
 )
 from services.customer_intelligence import (  # noqa: E402
@@ -549,3 +552,227 @@ class TestBackfillRepairsCorruption:
         finally:
             db.close()
             engine.dispose()
+
+
+# ── G. Order detail page contract (clickable order #) ────────────────────
+
+class TestStoreUrlBuilders:
+    """Each adapter source must produce a deep-link the merchant can open."""
+
+    def test_salla_uses_external_id(self):
+        assert _build_store_url("salla", "566146469", "1585297702") == (
+            "https://salla.sa/dashboard/orders/566146469"
+        )
+
+    def test_salla_falls_back_to_order_number(self):
+        assert _build_store_url("salla", None, "#1585297702") == (
+            "https://salla.sa/dashboard/orders/1585297702"
+        )
+
+    def test_zid_uses_zid_panel(self):
+        assert _build_store_url("zid", "Z-1", "Z-1") == (
+            "https://web.zid.sa/orders/Z-1"
+        )
+
+    def test_shopify_uses_admin_panel(self):
+        assert _build_store_url("shopify", "1234567890", "#1001") == (
+            "https://admin.shopify.com/orders/1234567890"
+        )
+
+    def test_whatsapp_has_no_store_url(self):
+        assert _build_store_url("whatsapp", "x", "y") is None
+
+    def test_manual_has_no_store_url(self):
+        assert _build_store_url("manual", "x", "y") is None
+
+    def test_missing_identifiers_returns_none(self):
+        assert _build_store_url("salla", None, None) is None
+
+
+class TestSerialiseOrderDetailedPayload:
+    """The detail-mode serialiser must expose links + line items + AI flag."""
+
+    def _order(self, **overrides):
+        defaults = dict(
+            id=11, tenant_id=1,
+            external_id="566146469",
+            external_order_number="1585297702",
+            status="delivered",
+            total="174",
+            customer_name="تركي البخاري",
+            customer_info={
+                "name": "تركي البخاري",
+                "phone": "+966555906901",
+                "city": "الرياض",
+                "district": "النخيل",
+            },
+            line_items=[
+                {"product_id": "p1", "name": "عسل سدر", "quantity": 2, "unit_price": "50"},
+            ],
+            source="salla",
+            extra_metadata={"created_at": "2026-04-15T12:00:00+03:00"},
+        )
+        defaults.update(overrides)
+        return Order(**defaults)
+
+    def test_detailed_payload_exposes_store_link(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert payload["links"]["store"] == "https://salla.sa/dashboard/orders/566146469"
+        assert payload["links"]["store_label"] == "فتح الطلب في سلة"
+
+    def test_detailed_payload_exposes_whatsapp_and_conversation_links(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert payload["links"]["whatsapp"] == "https://wa.me/966555906901"
+        assert payload["links"]["conversation"] == "/conversations?phone=+966555906901"
+
+    def test_detailed_payload_returns_line_items(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert len(payload["line_items"]) == 1
+        item = payload["line_items"][0]
+        assert item["name"] == "عسل سدر"
+        assert item["quantity"] == 2
+        assert item["unit_price"] == 50.0
+
+    def test_detailed_payload_returns_address(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert payload["customer_address"]["city"] == "الرياض"
+        assert payload["customer_address"]["district"] == "النخيل"
+
+    def test_whatsapp_order_is_marked_as_ai_created(self):
+        payload = _serialise_order(
+            self._order(source="whatsapp", external_id="wa-1"),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert payload["is_ai_created"] is True
+        # WhatsApp orders should NOT get a store deep-link.
+        assert payload["links"]["store"] is None
+
+    def test_legacy_ai_metadata_marks_ai_created(self):
+        payload = _serialise_order(
+            self._order(extra_metadata={"source": "ai_sales_agent"}, source=None),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert payload["is_ai_created"] is True
+
+    def test_store_order_is_not_ai_created(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert payload["is_ai_created"] is False
+
+    def test_list_payload_omits_detail_only_keys(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=False,
+        )
+        assert "links" not in payload
+        assert "line_items" not in payload
+        assert "customer_address" not in payload
+
+
+class TestLookupOrder:
+    """The detail endpoint must accept any of: pk, external_id, ref number."""
+
+    def test_lookup_by_internal_pk(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            order = Order(
+                tenant_id=tenant_id,
+                external_id="ext-1",
+                external_order_number="100",
+                status="delivered", total="50",
+                customer_info={}, line_items=[],
+                source="salla",
+            )
+            db.add(order); db.commit()
+
+            hit = _lookup_order(db, tenant_id, str(order.id))
+            assert hit is not None and hit.id == order.id
+        finally:
+            db.close(); engine.dispose()
+
+    def test_lookup_by_external_id(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            order = Order(
+                tenant_id=tenant_id,
+                external_id="ext-1",
+                external_order_number="100",
+                status="delivered", total="50",
+                customer_info={}, line_items=[], source="salla",
+            )
+            db.add(order); db.commit()
+            hit = _lookup_order(db, tenant_id, "ext-1")
+            assert hit is not None
+        finally:
+            db.close(); engine.dispose()
+
+    def test_lookup_by_external_order_number_with_hash(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            order = Order(
+                tenant_id=tenant_id,
+                external_id="ext-1",
+                external_order_number="1585297702",
+                status="delivered", total="50",
+                customer_info={}, line_items=[], source="salla",
+            )
+            db.add(order); db.commit()
+            hit = _lookup_order(db, tenant_id, "#1585297702")
+            assert hit is not None
+        finally:
+            db.close(); engine.dispose()
+
+    def test_lookup_does_not_cross_tenant(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            other = Tenant(name="Other", is_active=True)
+            db.add(other); db.commit()
+            order = Order(
+                tenant_id=other.id,
+                external_id="ext-1",
+                external_order_number="100",
+                status="delivered", total="50",
+                customer_info={}, line_items=[], source="salla",
+            )
+            db.add(order); db.commit()
+            hit = _lookup_order(db, tenant_id, str(order.id))
+            assert hit is None
+        finally:
+            db.close(); engine.dispose()
+
+    def test_lookup_unknown_returns_none(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            assert _lookup_order(db, tenant_id, "no-such-thing") is None
+        finally:
+            db.close(); engine.dispose()

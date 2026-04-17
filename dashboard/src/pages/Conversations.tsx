@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Bot, User, Send, Phone, Search, MoreVertical, UserCheck, RefreshCw } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import { featureRealityApi, type DashboardConversation, type DashboardMessage } from '../api/featureReality'
@@ -15,10 +16,19 @@ const filterLabels: Record<string, string> = {
 }
 
 export default function Conversations() {
+  const [searchParams] = useSearchParams()
+  const requestedPhone = searchParams.get('phone')?.trim() || null
+
   const [selected, setSelected] = useState<Conversation | null>(null)
   const [filter, setFilter] = useState<'all' | 'active' | 'human' | 'closed'>('all')
   const [reply, setReply] = useState('')
   const [conversations, setConversations] = useState<Conversation[]>([])
+
+  const phonesMatch = (a?: string | null, b?: string | null) => {
+    const norm = (p?: string | null) =>
+      (p || '').trim().replace(/^\+/, '').replace(/[\s-]/g, '')
+    return !!a && !!b && norm(a) === norm(b)
+  }
 
   const load = () => {
     featureRealityApi.conversations()
@@ -30,14 +40,22 @@ export default function Conversations() {
           }),
         )
         setConversations(withMessages)
-        setSelected((prev) => withMessages.find(c => c.phone === prev?.phone) ?? prev)
+        setSelected((prev) => {
+          // ?phone=… deep-link wins; otherwise keep previous selection.
+          if (requestedPhone) {
+            const hit = withMessages.find(c => phonesMatch(c.phone, requestedPhone))
+            if (hit) return hit
+          }
+          return withMessages.find(c => c.phone === prev?.phone) ?? prev
+        })
       })
       .catch(() => setConversations([]))
   }
 
   useEffect(() => {
     load()
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedPhone])
 
   const handleReply = async () => {
     if (!selected || !reply.trim()) return

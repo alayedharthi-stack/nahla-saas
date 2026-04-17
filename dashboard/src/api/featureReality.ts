@@ -39,10 +39,45 @@ export interface DashboardOrder {
   amount: string
   amount_sar: number
   status: 'paid' | 'pending' | 'failed' | 'cancelled'
+  status_label?: string
   source: OrderSourceKey
   source_label: string
   paymentLink?: string
   createdAt: string
+  is_ai_created?: boolean
+}
+
+export interface OrderDetailLineItem {
+  product_id: string
+  name: string
+  quantity: number
+  variant_id?: string | null
+  unit_price?: number | null
+  image_url?: string | null
+}
+
+export interface OrderDetailLinks {
+  store?: string | null
+  store_label?: string | null
+  whatsapp?: string | null
+  conversation?: string | null
+}
+
+export interface OrderDetailAddress {
+  city?: string | null
+  district?: string | null
+  street?: string | null
+  building_number?: string | null
+  postal_code?: string | null
+  address?: string | null
+}
+
+export interface OrderDetail extends DashboardOrder {
+  line_items: OrderDetailLineItem[]
+  customer_address: OrderDetailAddress
+  links: OrderDetailLinks
+  payment_method?: string | null
+  notes?: string | null
 }
 
 export interface OrdersDashboard {
@@ -51,6 +86,8 @@ export interface OrdersDashboard {
     today_revenue_sar: number
     pending_orders: number
     completed_today: number
+    whatsapp_orders_today: number
+    whatsapp_revenue_today: number
   }
   orders: DashboardOrder[]
 }
@@ -103,6 +140,9 @@ export const featureRealityApi = {
   },
   orders(): Promise<OrdersDashboard> {
     return apiCall('/orders')
+  },
+  orderDetail(orderId: string | number): Promise<{ order: OrderDetail }> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}`)
   },
   coupons(): Promise<CouponsDashboard> {
     return apiCall('/coupons')

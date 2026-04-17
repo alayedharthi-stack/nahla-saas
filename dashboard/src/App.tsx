@@ -11,6 +11,7 @@ import BillingResult from './pages/BillingResult'
 import Overview from './pages/Overview'
 import Conversations from './pages/Conversations'
 import Orders from './pages/Orders'
+import OrderDetail from './pages/OrderDetail'
 import Coupons from './pages/Coupons'
 import Campaigns from './pages/Campaigns'
 import Templates from './pages/Templates'
@@ -96,6 +97,7 @@ export default function App() {
             <Route path="overview"           element={<Overview />} />
             <Route path="conversations"      element={<Conversations />} />
             <Route path="orders"             element={<Orders />} />
+            <Route path="orders/:orderId"    element={<OrderDetail />} />
             <Route path="customers"          element={<Customers />} />
             <Route path="coupons"            element={<Coupons />} />
             <Route path="campaigns"          element={<Campaigns />} />
