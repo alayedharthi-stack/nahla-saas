@@ -433,6 +433,7 @@ async def _dispatch_message(
                         await _send_cod_followup_message(
                             phone_id=used_pid, to=sender,
                             decision=decision, order=order,
+                            _tenant_id=resolved_tenant_id, _db=db,
                         )
                         return
             except Exception as exc:
@@ -510,17 +511,21 @@ async def _dispatch_message(
         fact_guard_issues: List[str] = []
 
         if action == SHOW_WELCOME_MENU:
-            await _send_welcome_menu(phone_id=used_pid, to=sender)
+            await _send_welcome_menu(phone_id=used_pid, to=sender,
+                                     _tenant_id=effective_tenant_id, _db=db)
 
         elif action == SEND_CHECKOUT_LINK:
             state.stage = "checkout"
-            await _send_checkout_cta(phone_id=used_pid, to=sender)
+            await _send_checkout_cta(phone_id=used_pid, to=sender,
+                                     _tenant_id=effective_tenant_id, _db=db)
 
         elif action == SEND_TRIAL_LINK:
-            await _send_trial_cta(phone_id=used_pid, to=sender)
+            await _send_trial_cta(phone_id=used_pid, to=sender,
+                                  _tenant_id=effective_tenant_id, _db=db)
 
         elif action == SHOW_PLANS:
-            await _send_plans_message(phone_id=used_pid, to=sender, db=db)
+            await _send_plans_message(phone_id=used_pid, to=sender, db=db,
+                                      _tenant_id=effective_tenant_id)
 
         elif action == SEND_FOUNDER_LINK:
             response_text = "زين! تقدر تتواصل مع المؤسس مباشرةً على واتساب 👇\nhttps://wa.me/966555906901"
@@ -545,6 +550,7 @@ async def _dispatch_message(
                         {"type": "reply", "reply": {"id": "store_small", "title": "صغير / ناشئ"}},
                         {"type": "reply", "reply": {"id": "store_big",   "title": "متوسط / كبير"}},
                     ],
+                    _tenant_id=effective_tenant_id, _db=db,
                 )
             else:
                 # Store size already known — go to recommendation
@@ -563,6 +569,7 @@ async def _dispatch_message(
                 body_text=f"الأنسب لمتجرك: {plan_text}\nجرّبها 14 يوم مجاناً — بدون بطاقة.",
                 btn_label="شوف الباقات وسجّل",
                 btn_url="https://app.nahlah.ai/billing",
+                _tenant_id=effective_tenant_id, _db=db,
             )
 
         # ── ⑦ AI reply — only for GENERATE_AI_REPLY ─────────────────────────
@@ -630,6 +637,7 @@ async def _dispatch_message(
 
 async def _send_cod_followup_message(
     *, phone_id: str, to: str, decision: str, order: Any,
+    _tenant_id: Optional[int] = None, _db=None,
 ) -> None:
     """
     Reply to the customer after their COD button tap is processed. Kept
@@ -648,7 +656,10 @@ async def _send_cod_followup_message(
             f"تم إلغاء طلبك #{order.id} بنجاح.\n"
             f"إذا كان هناك أي خطأ يمكنك إعادة الطلب في أي وقت."
         )
-    await _send_whatsapp_message(phone_id=phone_id, to=to, text=body)
+    await _send_whatsapp_message(
+        phone_id=phone_id, to=to, text=body,
+        _tenant_id=_tenant_id, _db=_db,
+    )
 
 
 async def _handle_merchant_message(
@@ -685,6 +696,7 @@ async def _handle_merchant_message(
             if order is not None:
                 await _send_cod_followup_message(
                     phone_id=phone_id, to=to, decision=decision, order=order,
+                    _tenant_id=tenant_id, _db=db,
                 )
                 return
             # No pending COD order → fall through to normal AI reply, but
@@ -856,6 +868,34 @@ async def _call_claude_with_context(
 # WHATSAPP SEND HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_AUTO_REREGISTERED_PHONE_IDS: set[str] = set()
+
+
+def _resolve_wa_conn_by_phone_id(_db, phone_id: str):
+    """Look up a WhatsAppConnection row by phone_number_id when the caller
+    didn't pass one. Many of our internal send helpers (welcome menu,
+    checkout CTA, plan menu, button replies) are invoked with just the
+    phone_number_id and lose the tenant context that the engine had.
+    Without this lookup, _post_wa would call provider_send_message with
+    conn=None / tenant_id=None and fall back to the platform token even
+    when a perfectly valid merchant token exists for that phone_number_id.
+    """
+    if not _db or not phone_id:
+        return None, None
+    try:
+        from database.models import WhatsAppConnection  # noqa: PLC0415
+        conn = (
+            _db.query(WhatsAppConnection)
+            .filter_by(phone_number_id=str(phone_id))
+            .first()
+        )
+        if conn:
+            return conn, getattr(conn, "tenant_id", None)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[WA] phone_id lookup failed: %s", exc)
+    return None, None
+
+
 async def _post_wa(
     phone_id: str,
     payload: dict,
@@ -870,6 +910,22 @@ async def _post_wa(
             wa_conn = _db.query(WhatsAppConnection).filter_by(tenant_id=_tenant_id).first()
         except Exception:
             pass
+
+    # Self-heal: if the caller forgot to pass tenant context, look the
+    # connection up by phone_number_id so we don't fall back to platform.
+    if wa_conn is None and _db is None:
+        try:
+            _db = next(get_db(), None)
+        except Exception:
+            _db = None
+    if wa_conn is None and _db is not None:
+        wa_conn, resolved_tid = _resolve_wa_conn_by_phone_id(_db, phone_id)
+        if wa_conn and not _tenant_id:
+            _tenant_id = resolved_tid
+            logger.info(
+                "[WA] tenant_id self-resolved from phone_number_id=%s → tenant=%s",
+                phone_id, _tenant_id,
+            )
 
     # Fetch store name from DB if not provided
     if _store_name == "unknown" and _tenant_id and _db:
@@ -919,7 +975,77 @@ async def _post_wa(
             _tenant_id, phone_id, resp_data,
         )
         if "error" in (resp_data or {}):
+            err = (resp_data.get("error") or {}) if isinstance(resp_data, dict) else {}
+            err_code = err.get("code")
+            err_subcode = err.get("error_subcode")
             logger.warning("[WA] provider send failed: %.200s", str(resp_data))
+
+            # Self-heal: GraphMethodException (code=100, subcode=33) on
+            # /{phone_id}/messages typically means the phone has not been
+            # registered with the Cloud API under our app, OR the active
+            # token lacks `whatsapp_business_messaging` on this WABA.
+            # Attempt /register once per process for this phone_id and
+            # retry the send. If register also fails, we surface a clear
+            # diagnostic so the merchant can see "needs reauth".
+            if (
+                err_code == 100
+                and err_subcode == 33
+                and phone_id
+                and phone_id not in _AUTO_REREGISTERED_PHONE_IDS
+                and ctx
+                and ctx.token
+            ):
+                _AUTO_REREGISTERED_PHONE_IDS.add(phone_id)
+                logger.warning(
+                    "[WA] auto-register attempt — tenant=%s phone_id=%s "
+                    "token_source=%s (response was code=100/subcode=33; "
+                    "phone likely not registered or token lacks WABA scope)",
+                    _tenant_id, phone_id, ctx.source,
+                )
+                try:
+                    from services.whatsapp_connection_service import (  # noqa: PLC0415
+                        register_phone_number,
+                    )
+                    reg_ok, reg_err = register_phone_number(
+                        phone_id, ctx.token, _tenant_id or 0,
+                    )
+                except Exception as reg_exc:  # noqa: BLE001
+                    reg_ok, reg_err = False, str(reg_exc)
+                if reg_ok:
+                    logger.info(
+                        "[WA] auto-register OK — retrying send tenant=%s phone_id=%s",
+                        _tenant_id, phone_id,
+                    )
+                    try:
+                        retry_data, _retry_ctx = await provider_send_message(
+                            _db, wa_conn,
+                            tenant_id=_tenant_id,
+                            operation="send_message_retry",
+                            phone_id=phone_id,
+                            payload=payload,
+                            prefer_platform=bool(
+                                wa_conn
+                                and getattr(wa_conn, "connection_type", None) == "direct"
+                            ),
+                            timeout=15,
+                        )
+                        logger.info(
+                            "[SEND_DEBUG] retry-after-register | tenant=%s phone_id=%s "
+                            "result=%s",
+                            _tenant_id, phone_id,
+                            "ok" if "error" not in (retry_data or {}) else "still_failed",
+                        )
+                    except Exception as retry_exc:  # noqa: BLE001
+                        logger.error(
+                            "[WA] retry-after-register failed: %s", retry_exc,
+                        )
+                else:
+                    logger.error(
+                        "[WA] auto-register FAILED — tenant=%s phone_id=%s err=%r — "
+                        "merchant likely needs to re-authenticate WhatsApp from the "
+                        "dashboard (active token does not have permission for this WABA)",
+                        _tenant_id, phone_id, reg_err,
+                    )
     except Exception as exc:
         logger.error("[WA] post error: %s", exc)
 
@@ -934,7 +1060,10 @@ async def _send_whatsapp_message(
     }, _tenant_id=_tenant_id, _store_name=_store_name, _db=_db)
 
 
-async def _send_interactive_reply(phone_id: str, to: str, body_text: str, buttons: list) -> None:
+async def _send_interactive_reply(
+    phone_id: str, to: str, body_text: str, buttons: list,
+    _tenant_id: Optional[int] = None, _db=None,
+) -> None:
     await _post_wa(phone_id, {
         "messaging_product": "whatsapp", "to": to, "type": "interactive",
         "interactive": {
@@ -942,11 +1071,14 @@ async def _send_interactive_reply(phone_id: str, to: str, body_text: str, button
             "body": {"text": body_text},
             "action": {"buttons": buttons[:3]},
         },
-    })
+    }, _tenant_id=_tenant_id, _db=_db)
 
 
-async def _send_cta_url(phone_id: str, to: str, body_text: str,
-                         btn_label: str, btn_url: str) -> None:
+async def _send_cta_url(
+    phone_id: str, to: str, body_text: str,
+    btn_label: str, btn_url: str,
+    _tenant_id: Optional[int] = None, _db=None,
+) -> None:
     await _post_wa(phone_id, {
         "messaging_product": "whatsapp", "to": to, "type": "interactive",
         "interactive": {
@@ -954,10 +1086,13 @@ async def _send_cta_url(phone_id: str, to: str, body_text: str,
             "body": {"text": body_text},
             "action": {"name": "cta_url", "parameters": {"display_text": btn_label, "url": btn_url}},
         },
-    })
+    }, _tenant_id=_tenant_id, _db=_db)
 
 
-async def _send_welcome_menu(phone_id: str, to: str) -> None:
+async def _send_welcome_menu(
+    phone_id: str, to: str,
+    _tenant_id: Optional[int] = None, _db=None,
+) -> None:
     await _send_interactive_reply(
         phone_id=phone_id, to=to,
         body_text="هلا! أنا نحلة 🍯\nأساعد أصحاب المتاجر يبيعون أكثر عبر واتساب.\n\nوش تبي تعرف؟",
@@ -966,28 +1101,40 @@ async def _send_welcome_menu(phone_id: str, to: str) -> None:
             {"type": "reply", "reply": {"id": "menu_price", "title": "كم الأسعار؟ 💰"}},
             {"type": "reply", "reply": {"id": "menu_trial", "title": "أبي أجرب 🚀"}},
         ],
+        _tenant_id=_tenant_id, _db=_db,
     )
 
 
-async def _send_checkout_cta(phone_id: str, to: str) -> None:
+async def _send_checkout_cta(
+    phone_id: str, to: str,
+    _tenant_id: Optional[int] = None, _db=None,
+) -> None:
     await _send_cta_url(
         phone_id=phone_id, to=to,
         body_text="ممتاز! سجّل الحين وابدأ تجربتك المجانية 14 يوم 🎁\nبدون بطاقة ائتمان.",
         btn_label="سجّل مجاناً الآن",
         btn_url="https://app.nahlah.ai/register",
+        _tenant_id=_tenant_id, _db=_db,
     )
 
 
-async def _send_trial_cta(phone_id: str, to: str) -> None:
+async def _send_trial_cta(
+    phone_id: str, to: str,
+    _tenant_id: Optional[int] = None, _db=None,
+) -> None:
     await _send_cta_url(
         phone_id=phone_id, to=to,
         body_text="تقدر تبدأ تجربة 14 يوم مجانية — بدون بطاقة ائتمان 🎁",
         btn_label="ابدأ التجربة المجانية",
         btn_url="https://app.nahlah.ai/register",
+        _tenant_id=_tenant_id, _db=_db,
     )
 
 
-async def _send_plans_message(phone_id: str, to: str, db=None) -> None:
+async def _send_plans_message(
+    phone_id: str, to: str, db=None,
+    _tenant_id: Optional[int] = None,
+) -> None:
     plans_text = (
         "🐝 باقات نحلة AI:\n\n"
         "Starter   — 899 ريال/شهر\n"
@@ -996,12 +1143,16 @@ async def _send_plans_message(phone_id: str, to: str, db=None) -> None:
         "كل الباقات: تجربة مجانية 14 يوم — بدون بطاقة.\n\n"
         "متجرك صغير ولا كبير؟ أساعدك تختار الأنسب."
     )
-    await _send_whatsapp_message(phone_id=phone_id, to=to, text=plans_text)
+    await _send_whatsapp_message(
+        phone_id=phone_id, to=to, text=plans_text,
+        _tenant_id=_tenant_id, _db=db,
+    )
     await _send_cta_url(
         phone_id=phone_id, to=to,
         body_text="شوف كل التفاصيل والمقارنة بين الباقات 💎",
         btn_label="عرض الباقات كاملة",
         btn_url="https://app.nahlah.ai/billing",
+        _tenant_id=_tenant_id, _db=db,
     )
 
 
@@ -1022,6 +1173,7 @@ async def _handle_button_reply(
         await _send_whatsapp_message(
             phone_id=phone_id, to=to,
             text="زين! تقدر تتواصل مع المؤسس مباشرةً على واتساب 👇\nhttps://wa.me/966555906901",
+            _tenant_id=tenant_id, _db=db,
         )
 
     elif btn_id == "menu_how":
@@ -1036,15 +1188,18 @@ async def _handle_button_reply(
                 {"type": "reply", "reply": {"id": "store_zid",   "title": "زد 🛒"}},
                 {"type": "reply", "reply": {"id": "store_other", "title": "منصة ثانية"}},
             ],
+            _tenant_id=tenant_id, _db=db,
         )
         if state:
             DeduplicationGuard.mark_asked(state, "ask_platform")
 
     elif btn_id == "menu_price":
-        await _send_plans_message(phone_id=phone_id, to=to, db=db)
+        await _send_plans_message(phone_id=phone_id, to=to, db=db,
+                                  _tenant_id=tenant_id)
 
     elif btn_id == "menu_trial":
-        await _send_trial_cta(phone_id=phone_id, to=to)
+        await _send_trial_cta(phone_id=phone_id, to=to,
+                              _tenant_id=tenant_id, _db=db)
         if state:
             state.stage = "checkout"
             state.purchase_score = 10
@@ -1061,6 +1216,7 @@ async def _handle_button_reply(
                 {"type": "reply", "reply": {"id": "store_small", "title": "صغير / ناشئ"}},
                 {"type": "reply", "reply": {"id": "store_big",   "title": "متوسط / كبير"}},
             ],
+            _tenant_id=tenant_id, _db=db,
         )
         if state:
             DeduplicationGuard.mark_asked(state, "ask_store_size")
@@ -1069,6 +1225,7 @@ async def _handle_button_reply(
         await _send_whatsapp_message(
             phone_id=phone_id, to=to,
             text="حالياً نحلة تدعم سلة وزد بشكل كامل.\nأي منصة تستخدم؟ نشوف إذا في حل 🤝",
+            _tenant_id=tenant_id, _db=db,
         )
 
     elif btn_id in ("store_small", "store_big"):
@@ -1087,6 +1244,7 @@ async def _handle_button_reply(
             body_text=f"الأنسب لمتجرك: {plan_text}\nجرّبها 14 يوم مجاناً — بدون بطاقة.",
             btn_label="شوف الباقات وسجّل",
             btn_url="https://app.nahlah.ai/billing",
+            _tenant_id=tenant_id, _db=db,
         )
 
     else:
