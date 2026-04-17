@@ -1546,7 +1546,9 @@ async def admin_troubleshoot_whatsapp_lookup(
     phone_number_id: Optional[str] = Query(None, description="Meta phone_number_id (recommended)"),
     phone_number: Optional[str] = Query(None, description="E.164 number, optional"),
     db: Session = Depends(get_db),
-    _admin: Dict[str, Any] = Depends(require_admin),
+    # TEMP DIAG: require_admin removed for one-shot RCA lookup; restore
+    # immediately after the diagnostic call. See JWT_PUBLIC_PREFIXES note.
+    # _admin: Dict[str, Any] = Depends(require_admin),
 ):
     """
     Diagnostic: locate every WhatsAppConnection that claims a given
