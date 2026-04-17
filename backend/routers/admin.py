@@ -2418,3 +2418,129 @@ async def admin_replay_webhook_events_bulk(
 
     n = replay_bulk(db, status=body.status, provider=body.provider, limit=body.limit)
     return {"ok": True, "replayed": n, "status_from": body.status, "provider": body.provider}
+
+
+# ── Order data repair (status & customer-profile backfill) ─────────────────
+# Fixes the 2026-04-17 corruption where Salla order statuses were stored as a
+# Python repr of the upstream dict (e.g. "{'id': 566146469, 'name': '...',
+# 'slug': 'under_review'}") instead of just the slug. Symptoms:
+#   • dashboard shows every order as "ملغي"
+#   • customers with real orders classified as "غير نشط" / "محتمل"
+# Run after deploying the salla_adapter fix to heal historical rows.
+
+@router.post("/admin/orders/backfill-status")
+async def admin_backfill_order_status(
+    tenant_id: Optional[int] = Query(None, description="Limit to one tenant; omit for all"),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Repair Order.status rows that were stored as a stringified Salla dict,
+    then rebuild every affected customer's profile so segmentation reflects
+    the recovered statuses.
+
+    Idempotent: rows with already-clean slugs are skipped.
+    """
+    import ast as _ast  # noqa: PLC0415
+    from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
+
+    q = db.query(Order)
+    if tenant_id is not None:
+        q = q.filter(Order.tenant_id == tenant_id)
+
+    repaired_per_tenant: Dict[int, int] = {}
+    examined = 0
+    repaired = 0
+    failed = 0
+    affected_tenants: set[int] = set()
+
+    for order in q.yield_per(500):
+        examined += 1
+        raw = (order.status or "").strip()
+        if not raw or not raw.startswith("{"):
+            continue
+        try:
+            parsed = _ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            failed += 1
+            continue
+        if not isinstance(parsed, dict):
+            failed += 1
+            continue
+        slug = (
+            parsed.get("slug")
+            or parsed.get("name")
+            or parsed.get("code")
+        )
+        if not slug:
+            failed += 1
+            continue
+        order.status = str(slug)
+        repaired += 1
+        repaired_per_tenant[order.tenant_id] = repaired_per_tenant.get(order.tenant_id, 0) + 1
+        affected_tenants.add(order.tenant_id)
+
+    db.commit()
+
+    # Recompute every affected tenant's customer profiles so the dashboard
+    # reflects the repaired statuses immediately (no need to wait for the
+    # next full sync).
+    profile_results: Dict[str, int] = {}
+    for tid in sorted(affected_tenants):
+        try:
+            svc = CustomerIntelligenceService(db, tid)
+            n = svc.rebuild_profiles_for_tenant(
+                reason="admin_backfill_order_status",
+                commit=True,
+                emit_event=False,
+            )
+            profile_results[str(tid)] = n
+        except Exception as exc:
+            logger.exception("[backfill] profile rebuild failed for tenant=%s: %s", tid, exc)
+            profile_results[str(tid)] = -1
+
+    audit(
+        "admin_backfill_order_status",
+        admin=_admin.get("sub"),
+        tenant_id=tenant_id,
+        examined=examined,
+        repaired=repaired,
+        failed=failed,
+        tenants_touched=len(affected_tenants),
+    )
+    return {
+        "ok": True,
+        "examined": examined,
+        "repaired": repaired,
+        "failed": failed,
+        "tenants_repaired": {str(k): v for k, v in repaired_per_tenant.items()},
+        "profiles_rebuilt": profile_results,
+    }
+
+
+@router.post("/admin/customers/recompute-profiles")
+async def admin_recompute_customer_profiles(
+    tenant_id: int = Query(..., description="Tenant whose profiles will be rebuilt"),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Force a fresh customer-profile rebuild for one tenant. Useful after a
+    manual fix in the database, or to verify classification after an order
+    backfill. Equivalent to what `full_sync` runs at the end.
+    """
+    from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
+
+    svc = CustomerIntelligenceService(db, tenant_id)
+    n = svc.rebuild_profiles_for_tenant(
+        reason="admin_recompute_profiles",
+        commit=True,
+        emit_event=True,
+    )
+    audit(
+        "admin_recompute_customer_profiles",
+        admin=_admin.get("sub"),
+        tenant_id=tenant_id,
+        profiles_rebuilt=n,
+    )
+    return {"ok": True, "tenant_id": tenant_id, "profiles_rebuilt": n}

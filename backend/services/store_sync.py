@@ -560,16 +560,50 @@ class StoreSyncService:
 
         created = 0
         updated = 0
+        status_counter: Dict[str, int] = {}
+        zero_total_count = 0
         for raw in raw_list:
+            # Capture the upstream status BEFORE normalisation so we can audit
+            # any future divergence between Salla's slug and our DB string.
+            raw_status = None
+            try:
+                raw_status = (
+                    raw.status if hasattr(raw, "status")
+                    else (raw.get("status") if isinstance(raw, dict) else None)
+                )
+            except Exception:
+                raw_status = None
+
             normalised = _normalise_order(raw)
             ext_id = normalised["external_id"]
+            normalised_status = normalised["status"]
+            status_counter[normalised_status] = status_counter.get(normalised_status, 0) + 1
+
+            # If the normalised status looks like a Python repr, that means
+            # the upstream was a dict the adapter failed to unwrap. Surface
+            # loudly — historically this corruption silently mapped every
+            # order to "ملغي" in the dashboard.
+            if normalised_status.startswith("{"):
+                logger.warning(
+                    "tenant=%s order=%s status looks like a repr (%r) — adapter "
+                    "failed to extract slug from raw=%r",
+                    self.tenant_id, ext_id, normalised_status, raw_status,
+                )
+
+            try:
+                _amount = float(normalised["total"] or 0)
+            except (TypeError, ValueError):
+                _amount = 0.0
+            if _amount == 0.0:
+                zero_total_count += 1
+
             existing = (
                 self.db.query(Order)
                 .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
                 .first()
             )
             if existing:
-                existing.status        = normalised["status"]
+                existing.status        = normalised_status
                 existing.total         = normalised["total"]
                 existing.customer_info = normalised["customer_info"]
                 existing.line_items    = normalised["line_items"]
@@ -583,7 +617,7 @@ class StoreSyncService:
                 self.db.add(Order(
                     tenant_id    = self.tenant_id,
                     external_id  = ext_id,
-                    status       = normalised["status"],
+                    status       = normalised_status,
                     total        = normalised["total"],
                     customer_info = normalised["customer_info"],
                     line_items   = normalised["line_items"],
@@ -593,8 +627,10 @@ class StoreSyncService:
                 ))
                 created += 1
         logger.info(
-            "tenant=%s orders sync done — created=%d updated=%d total_upserted=%d",
+            "tenant=%s orders sync done — created=%d updated=%d total_upserted=%d "
+            "status_distribution=%s zero_total=%d",
             self.tenant_id, created, updated, created + updated,
+            status_counter, zero_total_count,
         )
         self.db.flush()
         return created + updated

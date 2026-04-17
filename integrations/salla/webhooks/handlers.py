@@ -82,7 +82,8 @@ def handle_product_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
         price         = data.get("price", {})
         p.price       = str(price.get("amount", price) if isinstance(price, dict) else price)
         thumb         = data.get("thumbnail", {})
-        p.metadata    = {
+        # `metadata` is a SQLAlchemy reserved name; use the mapped attribute.
+        p.extra_metadata = {
             "status":    data.get("status"),
             "thumbnail": thumb.get("url") if isinstance(thumb, dict) else None,
             "quantity":  data.get("quantity"),
@@ -115,8 +116,21 @@ def handle_order_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
         ).first() or Order(tenant_id=tenant_id, external_id=external_id)
         db.add(o)
 
+        # NOTE: Salla returns `data["status"]` as a dict
+        # ({"id":..., "slug": "under_review", "name": "..."}). Storing
+        # str(dict) used to corrupt every order. Extract slug defensively
+        # even though this handler is deprecated — any straggler webhook
+        # going through this path must not poison the DB.
         status_map = {"order.created": "pending", "order.completed": "completed", "order.cancelled": "cancelled"}
-        o.status        = status_map.get(event, data.get("status", o.status or "pending"))
+        raw_status = data.get("status")
+        if isinstance(raw_status, dict):
+            raw_status = (
+                raw_status.get("slug")
+                or raw_status.get("name")
+                or raw_status.get("code")
+                or "pending"
+            )
+        o.status        = status_map.get(event, str(raw_status or o.status or "pending"))
         amounts         = data.get("amounts", {})
         total           = amounts.get("total", {})
         o.total         = str(total.get("amount", total) if isinstance(total, dict) else total)
@@ -128,7 +142,11 @@ def handle_order_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
             for li in data.get("items", [])
         ]
         o.is_abandoned  = (event == "order.created" and o.status == "pending")
-        o.metadata      = {"source": PROVIDER, "event": event}
+        # `metadata` is reserved by SQLAlchemy's declarative Base; the
+        # mapped column is `extra_metadata = Column('metadata', JSONB)`.
+        # Setting `o.metadata` was a silent no-op (or worse: shadowed Base
+        # metadata). Use the correct attribute.
+        o.extra_metadata = {"source": PROVIDER, "event": event}
         db.commit()
         log_webhook_event(tenant_id, "order", external_id, event.split(".")[-1], PROVIDER)
         return {"processed": True, "action": event, "external_id": external_id}
@@ -152,15 +170,16 @@ def handle_customer_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         c = db.query(Customer).filter(
             Customer.tenant_id == tenant_id,
-            Customer.metadata["external_id"].astext == external_id,
+            Customer.extra_metadata["external_id"].astext == external_id,
         ).first() or Customer(tenant_id=tenant_id)
         db.add(c)
 
         c.name     = data.get("name",   c.name)
         c.email    = data.get("email",  c.email)
         c.phone    = data.get("mobile", c.phone)
-        c.metadata = {"external_id": external_id, "source": PROVIDER,
-                      "city": data.get("city"), "country": data.get("country", "SA")}
+        # `metadata` is a SQLAlchemy reserved name; use the mapped attribute.
+        c.extra_metadata = {"external_id": external_id, "source": PROVIDER,
+                            "city": data.get("city"), "country": data.get("country", "SA")}
         db.commit()
         action = "updated" if "updated" in event else "created"
         log_webhook_event(tenant_id, "customer", external_id, action, PROVIDER)

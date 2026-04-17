@@ -203,9 +203,34 @@ def extract_order_datetime(raw: Any) -> Optional[datetime]:
 
 
 def order_status_key(order_or_status: Any) -> str:
+    """
+    Return a normalized lowercase status string suitable for comparison
+    against COUNTABLE_ORDER_STATUSES / EXCLUDED_ORDER_STATUSES.
+
+    Heals legacy rows that stored the Salla status as a Python repr of the
+    full status dict (e.g. "{'id': 566146469, 'name': '...',
+    'slug': 'under_review'}") — extracts the slug at READ time so customer
+    classification never depends on a backfill having run.
+    """
     if isinstance(order_or_status, Order):
-        return str(getattr(order_or_status, "status", "") or "").strip().lower()
-    return str(order_or_status or "").strip().lower()
+        text = str(getattr(order_or_status, "status", "") or "").strip()
+    else:
+        text = str(order_or_status or "").strip()
+
+    if text.startswith("{"):
+        try:
+            import ast as _ast  # noqa: PLC0415
+            parsed = _ast.literal_eval(text)
+            if isinstance(parsed, dict):
+                text = str(
+                    parsed.get("slug")
+                    or parsed.get("name")
+                    or parsed.get("code")
+                    or text
+                )
+        except (ValueError, SyntaxError):
+            pass
+    return text.strip().lower()
 
 
 def parse_order_total(raw: Any) -> float:

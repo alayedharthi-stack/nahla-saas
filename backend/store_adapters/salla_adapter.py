@@ -473,13 +473,43 @@ class SallaAdapter(BaseStoreAdapter):
 
     def _normalize_order(self, raw: Dict[str, Any], order_input: Optional[OrderInput]) -> NormalizedOrder:
         amounts = raw.get("amounts") or {}
-        total_block = amounts.get("total") or {}
-        if isinstance(total_block, dict):
-            total = float(total_block.get("amount", 0) or 0)
-            currency = total_block.get("currency", "SAR")
-        else:
-            total = float(total_block or 0)
-            currency = "SAR"
+
+        # Salla returns `amounts.total` either as `{"amount": 100, "currency": "SAR"}`
+        # or as a flat number depending on endpoint. Some endpoints (notably the
+        # listing endpoint) put the grand total at `raw["total"]` directly. Fall
+        # through to every plausible shape so we never silently store 0.0 for a
+        # real order.
+        total = 0.0
+        currency = "SAR"
+        for candidate in (
+            amounts.get("total"),
+            amounts.get("sub_total"),
+            raw.get("total"),
+            raw.get("amount"),
+            raw.get("price"),
+        ):
+            if candidate is None:
+                continue
+            if isinstance(candidate, dict):
+                amt = candidate.get("amount") or candidate.get("value") or 0
+                cur = candidate.get("currency")
+                try:
+                    parsed = float(amt or 0)
+                except (TypeError, ValueError):
+                    parsed = 0.0
+                if parsed > 0:
+                    total = parsed
+                    if cur:
+                        currency = str(cur)
+                    break
+            else:
+                try:
+                    parsed = float(candidate or 0)
+                except (TypeError, ValueError):
+                    parsed = 0.0
+                if parsed > 0:
+                    total = parsed
+                    break
 
         payment_link = raw.get("payment_url") or raw.get("checkout_url")
 
@@ -501,16 +531,45 @@ class SallaAdapter(BaseStoreAdapter):
         cname = str(customer.get("name") or (order_input.customer_name if order_input else "") or "")
         cphone = str(customer.get("mobile") or (order_input.customer_phone if order_input else "") or "")
 
+        # CRITICAL: Salla returns `status` as a dict like
+        #   {"id": 566146469, "name": "بإنتظار المراجعة", "slug": "under_review",
+        #    "customized": {...}}
+        # `str(dict)` produced a Python repr (e.g. "{'id': 566146469, ...}") which
+        # poisoned every downstream consumer (dashboard, customer classifier,
+        # automations). Always extract the canonical slug; fall back to name then
+        # to the literal string so unrecognized shapes are still searchable.
+        status_raw = raw.get("status")
+        if isinstance(status_raw, dict):
+            status_str = str(
+                status_raw.get("slug")
+                or status_raw.get("name")
+                or status_raw.get("code")
+                or "pending"
+            ).strip()
+        elif status_raw is None:
+            status_str = "pending"
+        else:
+            status_str = str(status_raw).strip() or "pending"
+
+        # Salla sends `created_at` as either a plain ISO string or
+        # `{"date": "2026-04-15 12:00:00.000000", "timezone_type": 3,
+        #   "timezone": "Asia/Riyadh"}`. Preserve the inner date string when nested.
+        created_raw = raw.get("created_at") or raw.get("date") or ""
+        if isinstance(created_raw, dict):
+            created_str = str(created_raw.get("date") or "")
+        else:
+            created_str = str(created_raw or "")
+
         return NormalizedOrder(
             id=str(raw.get("id") or raw.get("reference_id", "")),
-            status=str(raw.get("status", "pending")),
+            status=status_str,
             total=total,
             currency=currency,
             payment_link=payment_link,
             customer_name=cname,
             customer_phone=cphone,
             items=items,
-            created_at=str(raw.get("created_at", "")),
+            created_at=created_str,
         )
 
     # ── Payment ────────────────────────────────────────────────────────────────
