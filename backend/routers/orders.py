@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
-from models import Order
+from models import Customer, Order
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 logger = logging.getLogger("nahla.orders")
@@ -71,6 +71,80 @@ STATUS_LABELS_AR: Dict[str, str] = {
     "failed":    "فشل الدفع",
     "cancelled": "ملغي",
 }
+
+# Origin platform → Arabic label for the "المصدر" column.
+SOURCE_LABELS_AR: Dict[str, str] = {
+    "salla":    "سلة",
+    "zid":      "زد",
+    "shopify":  "Shopify",
+    "whatsapp": "واتساب",
+    "manual":   "يدوي",
+}
+
+
+def _resolve_source(order: Order) -> str:
+    """
+    Pick the canonical origin for an order. Order of precedence:
+      1. The dedicated `source` column set by adapters / ai_sales.
+      2. extra_metadata.source — supports legacy `ai_sales_agent` rows.
+      3. Default to "salla" so historical syncs (which only ever ran
+         against Salla) don't render a blank المصدر cell.
+    """
+    raw = (getattr(order, "source", None) or "").strip().lower()
+    if raw in SOURCE_LABELS_AR:
+        return raw
+    meta_src = ((order.extra_metadata or {}).get("source") or "").strip().lower()
+    if meta_src in ("ai_sales_agent", "ai_sales", "whatsapp", "ai"):
+        return "whatsapp"
+    if meta_src in SOURCE_LABELS_AR:
+        return meta_src
+    return "salla"
+
+
+def _looks_like_phone(text: str) -> bool:
+    """A 'name' that's actually just a phone number — common when Salla's
+    order payload only ships the customer mobile and no name."""
+    if not text:
+        return False
+    digits = text.lstrip("+").replace(" ", "").replace("-", "")
+    return digits.isdigit() and len(digits) >= 7
+
+
+def _resolve_customer_display(order: Order, customer_lookup: Optional[Dict[str, str]] = None) -> str:
+    """
+    display_name = order.customer_name → customer_info.name →
+                   Customer table lookup by phone → phone → "—"
+    Never returns blank so the merchant always has something to act on.
+    Salla's per-order payload often omits the customer name even though
+    the customer record itself has one — we cross-reference by phone.
+    """
+    direct = (getattr(order, "customer_name", None) or "").strip()
+    if direct and not _looks_like_phone(direct):
+        return direct
+    info = order.customer_info or {}
+    name = (info.get("name") or "").strip()
+    if name and not _looks_like_phone(name):
+        return name
+    phone = (info.get("phone") or info.get("mobile") or "").strip()
+    if customer_lookup and phone:
+        looked_up = customer_lookup.get(phone)
+        if looked_up:
+            return looked_up
+    return direct or name or phone or "—"
+
+
+def _resolve_order_number(order: Order) -> str:
+    """
+    Display "#<external_order_number>" so the merchant sees the same
+    number their store dashboard shows, not Nahla's internal pk.
+    """
+    raw = (
+        (getattr(order, "external_order_number", None) or "").strip()
+        or (order.external_id or "").strip()
+    )
+    if not raw:
+        return f"#{order.id}"
+    return raw if raw.startswith("#") else f"#{raw}"
 
 
 def _parse_corrupt_status(raw: str) -> str:
@@ -184,6 +258,23 @@ async def list_orders(request: Request, db: Session = Depends(get_db)):
         .all()
     )
 
+    # Build a phone → name lookup from the Customer table so the orders
+    # endpoint can fill in names when the upstream order payload only
+    # carries a phone (Salla's listing endpoint frequently omits names).
+    customer_lookup: Dict[str, str] = {}
+    for cust in (
+        db.query(Customer)
+        .filter(Customer.tenant_id == tenant_id, Customer.name.isnot(None))
+        .all()
+    ):
+        if not cust.name:
+            continue
+        if cust.phone:
+            customer_lookup[cust.phone.strip()] = cust.name.strip()
+            digits = cust.phone.strip().lstrip("+").replace(" ", "").replace("-", "")
+            if digits:
+                customer_lookup[digits] = cust.name.strip()
+
     now = datetime.now(timezone.utc)
     orders: List[Dict[str, Any]] = []
     pending_count = 0
@@ -212,22 +303,33 @@ async def list_orders(request: Request, db: Session = Depends(get_db)):
             qty = int(item.get("quantity") or 1)
             item_titles.append(f"{name} ×{qty}")
 
-        source = "AI" if (order.extra_metadata or {}).get("source") == "ai_sales_agent" else "manual"
+        source_key   = _resolve_source(order)
+        source_label = SOURCE_LABELS_AR.get(source_key, source_key)
+        order_number = _resolve_order_number(order)
+        display_name = _resolve_customer_display(order, customer_lookup)
 
         orders.append({
-            "id": str(order.id),
-            "external_id": order.external_id,
-            "customer": customer_info.get("name") or "—",
-            "phone": customer_info.get("phone") or customer_info.get("mobile") or "—",
-            "items": "، ".join(item_titles) if item_titles else "—",
-            "amount": _format_total(amount_value, order.total),
-            "amount_sar": round(amount_value, 2),
-            "status": status,
-            "status_label": STATUS_LABELS_AR.get(status, status),
-            "raw_status": _parse_corrupt_status(raw_status),
-            "source": source,
-            "paymentLink": order.checkout_url,
-            "createdAt": created_at.isoformat(),
+            # `id` is kept as the human-visible order number so the
+            # frontend's existing key/search/filter code (which keys on
+            # `o.id`) shows the platform reference instead of the DB pk.
+            "id":           order_number,
+            "order_number": order_number,
+            # Internal DB pk — exposed only for debug / cross-referencing.
+            "internal_id":  str(order.id),
+            "external_id":  order.external_id,
+            "customer":      display_name,
+            "customer_name": display_name,
+            "phone":         customer_info.get("phone") or customer_info.get("mobile") or "—",
+            "items":         "، ".join(item_titles) if item_titles else "—",
+            "amount":        _format_total(amount_value, order.total),
+            "amount_sar":    round(amount_value, 2),
+            "status":        status,
+            "status_label":  STATUS_LABELS_AR.get(status, status),
+            "raw_status":    _parse_corrupt_status(raw_status),
+            "source":        source_key,
+            "source_label":  source_label,
+            "paymentLink":   order.checkout_url,
+            "createdAt":     created_at.isoformat(),
         })
 
     return {

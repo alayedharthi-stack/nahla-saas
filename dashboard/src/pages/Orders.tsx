@@ -1,14 +1,13 @@
 import { useEffect, useState } from 'react'
-import { Bot, Link2, Search, Filter, Download } from 'lucide-react'
+import { Link2, Search, Filter, Download, Store, MessageCircle, ShoppingBag } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { ShoppingCart, DollarSign, Clock, CheckCircle } from 'lucide-react'
-import { featureRealityApi, type DashboardOrder, type OrdersDashboard } from '../api/featureReality'
+import { featureRealityApi, type DashboardOrder, type OrderSourceKey, type OrdersDashboard } from '../api/featureReality'
 
 type OrderStatus = 'paid' | 'pending' | 'failed' | 'cancelled'
-type OrderSource = 'AI' | 'manual'
 
 const emptyData: OrdersDashboard = {
   summary: {
@@ -22,7 +21,7 @@ const emptyData: OrdersDashboard = {
 
 const TABS = [
   { key: 'all',        label: 'الكل' },
-  { key: 'ai',         label: 'أنشأها الذكاء' },
+  { key: 'whatsapp',   label: 'من واتساب' },
   { key: 'pending',    label: 'بانتظار الدفع' },
   { key: 'completed',  label: 'مكتملة' },
 ] as const
@@ -35,6 +34,26 @@ const statusLabel = (s: OrderStatus) =>
   s === 'paid'      ? 'مدفوع'         :
   s === 'pending'   ? 'قيد الانتظار'  :
   s === 'failed'    ? 'فشل'           : 'ملغي'
+
+const SOURCE_LABEL_FALLBACK: Record<OrderSourceKey, string> = {
+  salla:    'سلة',
+  zid:      'زد',
+  shopify:  'Shopify',
+  whatsapp: 'واتساب',
+  manual:   'يدوي',
+}
+
+const SOURCE_BADGE_CLASS: Record<OrderSourceKey, string> = {
+  salla:    'bg-orange-50 text-orange-700 border-orange-200',
+  zid:      'bg-purple-50 text-purple-700 border-purple-200',
+  shopify:  'bg-emerald-50 text-emerald-700 border-emerald-200',
+  whatsapp: 'bg-green-50 text-green-700 border-green-200',
+  manual:   'bg-slate-50 text-slate-600 border-slate-200',
+}
+
+const sourceIcon = (s: OrderSourceKey) =>
+  s === 'whatsapp' ? MessageCircle :
+  s === 'manual'   ? ShoppingBag   : Store
 
 const TABLE_HEADERS = ['الطلب', 'العميل', 'المنتجات', 'المبلغ', 'الحالة', 'المصدر', 'رابط الدفع', 'التاريخ']
 
@@ -51,11 +70,21 @@ export default function Orders() {
   }, [])
 
   const filtered = data.orders.filter((o: DashboardOrder) => {
-    if (tab === 'ai'        && o.source !== 'AI')     return false
-    if (tab === 'pending'   && o.status !== 'pending') return false
-    if (tab === 'completed' && o.status !== 'paid')    return false
-    if (search && !o.customer.toLowerCase().includes(search.toLowerCase()) &&
-                  !o.id.toLowerCase().includes(search.toLowerCase())) return false
+    if (tab === 'whatsapp'  && o.source !== 'whatsapp') return false
+    if (tab === 'pending'   && o.status !== 'pending')  return false
+    if (tab === 'completed' && o.status !== 'paid')     return false
+    const needle = search.toLowerCase()
+    if (needle) {
+      const haystack = [
+        o.id,
+        o.order_number,
+        o.customer,
+        o.customer_name,
+        o.phone,
+        o.external_id ?? '',
+      ].join(' ').toLowerCase()
+      if (!haystack.includes(needle)) return false
+    }
     return true
   })
 
@@ -130,10 +159,10 @@ export default function Orders() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.map((o) => (
-                <tr key={o.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-5 py-3.5 text-xs font-mono font-medium text-slate-700">{o.id}</td>
+                <tr key={`${o.id}-${o.internal_id ?? ''}`} className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-3.5 text-xs font-mono font-medium text-slate-700" dir="ltr">{o.order_number || o.id}</td>
                   <td className="px-5 py-3.5">
-                    <p className="text-xs font-medium text-slate-900">{o.customer}</p>
+                    <p className="text-xs font-medium text-slate-900">{o.customer_name || o.customer || o.phone || '—'}</p>
                     <p className="text-xs text-slate-400" dir="ltr">{o.phone}</p>
                   </td>
                   <td className="px-5 py-3.5 text-xs text-slate-600 whitespace-nowrap">{o.items}</td>
@@ -142,9 +171,16 @@ export default function Orders() {
                     <Badge label={statusLabel(o.status)} variant={statusVariant(o.status)} dot />
                   </td>
                   <td className="px-5 py-3.5">
-                    {o.source === 'AI'
-                      ? <span className="inline-flex items-center gap-1 text-xs text-brand-600 font-medium"><Bot className="w-3 h-3" /> ذكاء اصطناعي</span>
-                      : <span className="text-xs text-slate-500">يدوي</span>}
+                    {(() => {
+                      const Icon = sourceIcon(o.source)
+                      const label = o.source_label || SOURCE_LABEL_FALLBACK[o.source] || o.source
+                      const cls   = SOURCE_BADGE_CLASS[o.source] || SOURCE_BADGE_CLASS.manual
+                      return (
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium ${cls}`}>
+                          <Icon className="w-3 h-3" /> {label}
+                        </span>
+                      )
+                    })()}
                   </td>
                   <td className="px-5 py-3.5">
                     {o.paymentLink ? (

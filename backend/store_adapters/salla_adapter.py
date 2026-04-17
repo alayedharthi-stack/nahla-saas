@@ -560,8 +560,17 @@ class SallaAdapter(BaseStoreAdapter):
         else:
             created_str = str(created_raw or "")
 
+        # Salla returns BOTH `id` (internal numeric primary key) and
+        # `reference_id` (the human-visible order number the merchant sees
+        # in their Salla dashboard, e.g. 1585297702). We want to keep
+        # using `id` for stable upserts but also expose `reference_id`
+        # to the dashboard so merchants see the same number Salla shows.
+        internal_id = str(raw.get("id") or raw.get("reference_id", "")).strip()
+        reference   = str(raw.get("reference_id") or raw.get("id", "")).strip()
+
         return NormalizedOrder(
-            id=str(raw.get("id") or raw.get("reference_id", "")),
+            id=internal_id,
+            reference_id=reference or internal_id,
             status=status_str,
             total=total,
             currency=currency,
@@ -570,6 +579,7 @@ class SallaAdapter(BaseStoreAdapter):
             customer_phone=cphone,
             items=items,
             created_at=created_str,
+            source="salla",
         )
 
     # ── Payment ────────────────────────────────────────────────────────────────

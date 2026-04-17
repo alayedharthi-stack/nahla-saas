@@ -154,15 +154,40 @@ def _normalise_order(raw: Any) -> Dict:
             customer_info["phone"] = normalized_phone
     order_dt = _extract_order_datetime(raw)
     raw_total = raw.get("total") or raw.get("sub_total") or raw.get("amounts", {})
+
+    external_id = str(raw.get("id", raw.get("external_id", ""))).strip()
+    # Human-visible order number — prefer the platform's explicit
+    # reference_id (Salla), fall back to a few common synonyms (Zid uses
+    # `code`, Shopify uses `name`/`order_number`), and finally to the
+    # external_id so the column is never blank.
+    external_order_number = str(
+        raw.get("reference_id")
+        or raw.get("order_number")
+        or raw.get("number")
+        or raw.get("code")
+        or raw.get("name")
+        or external_id
+    ).strip() or external_id
+
+    customer_name = (
+        (customer_info.get("name") if isinstance(customer_info, dict) else None)
+        or raw.get("customer_name")
+        or ""
+    )
+    customer_name = str(customer_name).strip()
+
     return {
-        "external_id":   str(raw.get("id", raw.get("external_id", ""))),
-        "status":        _extract_status_string(raw.get("status"), fallback="unknown"),
-        "total":         _extract_amount_string(raw_total),
-        "customer_info": customer_info,
-        "line_items":    raw.get("items", raw.get("line_items", [])),
-        "checkout_url":  raw.get("checkout_url", ""),
-        "is_abandoned":  raw.get("is_abandoned", raw.get("abandoned", False)),
-        "created_at":    order_dt.isoformat() if order_dt else raw.get("created_at"),
+        "external_id":           external_id,
+        "external_order_number": external_order_number,
+        "status":                _extract_status_string(raw.get("status"), fallback="unknown"),
+        "total":                 _extract_amount_string(raw_total),
+        "customer_name":         customer_name,
+        "customer_info":         customer_info,
+        "line_items":            raw.get("items", raw.get("line_items", [])),
+        "checkout_url":          raw.get("checkout_url", ""),
+        "is_abandoned":          raw.get("is_abandoned", raw.get("abandoned", False)),
+        "source":                str(raw.get("source") or "").strip().lower() or None,
+        "created_at":            order_dt.isoformat() if order_dt else raw.get("created_at"),
     }
 
 
@@ -597,17 +622,31 @@ class StoreSyncService:
             if _amount == 0.0:
                 zero_total_count += 1
 
+            # Resolve the order's source: prefer what the adapter put on
+            # the normalised row, else fall back to the registered adapter
+            # platform name (salla/zid/shopify). Never leave it blank for a
+            # platform-synced order.
+            adapter_source = (
+                normalised.get("source")
+                or getattr(adapter, "platform", None)
+                or "salla"
+            )
+
             existing = (
                 self.db.query(Order)
                 .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
                 .first()
             )
             if existing:
-                existing.status        = normalised_status
-                existing.total         = normalised["total"]
-                existing.customer_info = normalised["customer_info"]
-                existing.line_items    = normalised["line_items"]
-                existing.is_abandoned  = normalised["is_abandoned"]
+                existing.status                = normalised_status
+                existing.total                 = normalised["total"]
+                existing.customer_info         = normalised["customer_info"]
+                existing.line_items            = normalised["line_items"]
+                existing.is_abandoned          = normalised["is_abandoned"]
+                existing.external_order_number = normalised["external_order_number"]
+                if normalised["customer_name"]:
+                    existing.customer_name = normalised["customer_name"]
+                existing.source = adapter_source
                 existing.extra_metadata = {
                     **(existing.extra_metadata or {}),
                     "created_at": normalised.get("created_at"),
@@ -615,15 +654,18 @@ class StoreSyncService:
                 updated += 1
             else:
                 self.db.add(Order(
-                    tenant_id    = self.tenant_id,
-                    external_id  = ext_id,
-                    status       = normalised_status,
-                    total        = normalised["total"],
-                    customer_info = normalised["customer_info"],
-                    line_items   = normalised["line_items"],
-                    checkout_url = normalised["checkout_url"],
-                    is_abandoned = normalised["is_abandoned"],
-                    extra_metadata = {"created_at": normalised.get("created_at")},
+                    tenant_id             = self.tenant_id,
+                    external_id           = ext_id,
+                    external_order_number = normalised["external_order_number"],
+                    status                = normalised_status,
+                    total                 = normalised["total"],
+                    customer_name         = normalised["customer_name"] or None,
+                    customer_info         = normalised["customer_info"],
+                    line_items            = normalised["line_items"],
+                    checkout_url          = normalised["checkout_url"],
+                    is_abandoned          = normalised["is_abandoned"],
+                    source                = adapter_source,
+                    extra_metadata        = {"created_at": normalised.get("created_at")},
                 ))
                 created += 1
         logger.info(
@@ -945,12 +987,25 @@ class StoreSyncService:
             .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
             .first()
         )
+        # Webhook payload doesn't always tell us which adapter it came
+        # from; resolve from the registered adapter for this tenant so the
+        # source column stays accurate (salla/zid/shopify).
+        webhook_source = (
+            normalised.get("source")
+            or getattr(self._get_adapter(), "platform", None)
+            or "salla"
+        )
+
         if order_row is not None:
-            order_row.status        = normalised["status"]
-            order_row.total         = normalised["total"]
-            order_row.customer_info = normalised["customer_info"]
-            order_row.line_items    = normalised["line_items"]
-            order_row.is_abandoned  = normalised["is_abandoned"]
+            order_row.status                = normalised["status"]
+            order_row.total                 = normalised["total"]
+            order_row.customer_info         = normalised["customer_info"]
+            order_row.line_items            = normalised["line_items"]
+            order_row.is_abandoned          = normalised["is_abandoned"]
+            order_row.external_order_number = normalised["external_order_number"]
+            if normalised["customer_name"]:
+                order_row.customer_name = normalised["customer_name"]
+            order_row.source = webhook_source
             order_row.extra_metadata = {
                 **(order_row.extra_metadata or {}),
                 "created_at": normalised.get("created_at"),
@@ -962,15 +1017,18 @@ class StoreSyncService:
                 raise
         else:
             order_row = Order(
-                tenant_id     = self.tenant_id,
-                external_id   = ext_id,
-                status        = normalised["status"],
-                total         = normalised["total"],
-                customer_info = normalised["customer_info"],
-                line_items    = normalised["line_items"],
-                checkout_url  = normalised["checkout_url"],
-                is_abandoned  = normalised["is_abandoned"],
-                extra_metadata = {"created_at": normalised.get("created_at")},
+                tenant_id             = self.tenant_id,
+                external_id           = ext_id,
+                external_order_number = normalised["external_order_number"],
+                status                = normalised["status"],
+                total                 = normalised["total"],
+                customer_name         = normalised["customer_name"] or None,
+                customer_info         = normalised["customer_info"],
+                line_items            = normalised["line_items"],
+                checkout_url          = normalised["checkout_url"],
+                is_abandoned          = normalised["is_abandoned"],
+                source                = webhook_source,
+                extra_metadata        = {"created_at": normalised.get("created_at")},
             )
             self.db.add(order_row)
             try:
@@ -992,11 +1050,15 @@ class StoreSyncService:
                 if order_row is None:
                     # Should be impossible, but fail loudly rather than silently.
                     raise
-                order_row.status        = normalised["status"]
-                order_row.total         = normalised["total"]
-                order_row.customer_info = normalised["customer_info"]
-                order_row.line_items    = normalised["line_items"]
-                order_row.is_abandoned  = normalised["is_abandoned"]
+                order_row.status                = normalised["status"]
+                order_row.total                 = normalised["total"]
+                order_row.customer_info         = normalised["customer_info"]
+                order_row.line_items            = normalised["line_items"]
+                order_row.is_abandoned          = normalised["is_abandoned"]
+                order_row.external_order_number = normalised["external_order_number"]
+                if normalised["customer_name"]:
+                    order_row.customer_name = normalised["customer_name"]
+                order_row.source = webhook_source
                 try:
                     self.db.commit()
                 except Exception:

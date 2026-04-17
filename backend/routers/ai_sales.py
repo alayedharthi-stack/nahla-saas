@@ -840,11 +840,25 @@ async def ai_sales_create_order(
             except Exception:
                 total_str = prod.price
 
+    # Prefer the human-visible reference number from the upstream store
+    # if we managed to create one there; otherwise expose the same id we
+    # store as `external_id` so the dashboard column is never blank.
+    order_reference_number = None
+    if store_order is not None:
+        order_reference_number = (
+            getattr(store_order, "reference_id", None)
+            or getattr(store_order, "id", None)
+        )
+    if not order_reference_number:
+        order_reference_number = external_order_id
+
     order = Order(
         tenant_id=tenant_id,
         status=order_status,
         total=total_str,
         external_id=external_order_id,
+        external_order_number=str(order_reference_number) if order_reference_number else None,
+        customer_name=(body.customer_name or "").strip() or None,
         customer_info={
             "name": body.customer_name, "phone": body.customer_phone,
             "building_number": body.building_number, "street": body.street,
@@ -853,6 +867,7 @@ async def ai_sales_create_order(
         },
         line_items=line_items,
         checkout_url=payment_link,
+        source="whatsapp",
         extra_metadata={
             "source": "ai_sales_agent", "payment_method": body.payment_method,
             "notes": body.notes, "created_via": "whatsapp_conversation",

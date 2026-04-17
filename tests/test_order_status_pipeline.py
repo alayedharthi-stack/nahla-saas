@@ -55,9 +55,13 @@ from routers.orders import (  # noqa: E402
     PENDING_STATUSES,
     CANCELLED_STATUSES,
     FAILED_STATUSES,
+    SOURCE_LABELS_AR,
     _classify_status,
     _parse_corrupt_status,
     _read_created_at,
+    _resolve_customer_display,
+    _resolve_order_number,
+    _resolve_source,
     _to_float_sar,
 )
 from services.customer_intelligence import (  # noqa: E402
@@ -65,6 +69,7 @@ from services.customer_intelligence import (  # noqa: E402
     is_countable_order,
     order_status_key,
 )
+from services.store_sync import _normalise_order as _ss_normalise_order  # noqa: E402
 from store_adapters.salla_adapter import SallaAdapter  # noqa: E402
 
 
@@ -153,6 +158,35 @@ class TestSallaAdapterStatusExtraction:
         normalized = self.adapter._normalize_order(raw, None)
         assert not normalized.status.startswith("{")
         assert not normalized.status.startswith("'")
+
+    def test_reference_id_extracted_for_dashboard_display(self):
+        """Salla returns BOTH `id` (internal) and `reference_id` (human-visible).
+        The adapter must surface `reference_id` so the dashboard can render
+        the same number the merchant sees in their Salla store."""
+        raw = {
+            "id": 566146469,
+            "reference_id": 1585297702,
+            "status": "delivered",
+            "amounts": {"total": {"amount": 174}},
+            "customer": {"name": "تركي", "mobile": "+966555906901"},
+            "items": [],
+        }
+        normalized = self.adapter._normalize_order(raw, None)
+        assert normalized.id == "566146469"
+        assert normalized.reference_id == "1585297702"
+        assert normalized.source == "salla"
+
+    def test_reference_id_falls_back_to_id_when_missing(self):
+        raw = {
+            "id": 100,
+            "status": "delivered",
+            "amounts": {},
+            "customer": {},
+            "items": [],
+        }
+        normalized = self.adapter._normalize_order(raw, None)
+        assert normalized.reference_id == "100"
+        assert normalized.source == "salla"
 
 
 # ── B. Adapter total recovery ─────────────────────────────────────────────
@@ -252,6 +286,50 @@ class TestDashboardStatusClassifier:
     def test_empty_status_defaults_to_pending(self):
         assert _classify_status("") == "pending"
         assert _classify_status(None) == "pending"
+
+
+# ── C2. store_sync normaliser writes the dashboard fields ─────────────────
+
+class TestStoreSyncNormaliserDashboardFields:
+    """Once an adapter returns a NormalizedOrder, the store_sync layer
+    must propagate `reference_id`, `customer_name`, and `source` into the
+    DB upsert so the dashboard can render them without re-deriving."""
+
+    def test_normaliser_extracts_external_order_number_from_reference_id(self):
+        n = _ss_normalise_order({
+            "id": "566146469",
+            "reference_id": "1585297702",
+            "status": "delivered",
+            "total": 174,
+            "customer": {"name": "تركي", "phone": "+966555906901"},
+            "items": [],
+            "source": "salla",
+        })
+        assert n["external_id"] == "566146469"
+        assert n["external_order_number"] == "1585297702"
+        assert n["customer_name"] == "تركي"
+        assert n["source"] == "salla"
+
+    def test_normaliser_falls_back_to_external_id_when_no_reference(self):
+        n = _ss_normalise_order({
+            "id": "ABC-7", "status": "pending",
+            "total": 0, "customer": {}, "items": [],
+        })
+        assert n["external_id"] == "ABC-7"
+        assert n["external_order_number"] == "ABC-7"
+
+    def test_normaliser_supports_zid_code_and_shopify_name(self):
+        # Zid uses `code`, Shopify uses `name` for the human number.
+        zid = _ss_normalise_order({
+            "id": "z1", "code": "ZID-1024", "status": "paid",
+            "total": 100, "customer": {"name": "X"}, "items": [],
+        })
+        shopify = _ss_normalise_order({
+            "id": "s1", "name": "#1099", "status": "paid",
+            "total": 100, "customer": {"name": "Y"}, "items": [],
+        })
+        assert zid["external_order_number"] == "ZID-1024"
+        assert shopify["external_order_number"] == "#1099"
 
 
 # ── D. Amount + created_at extraction in dashboard ────────────────────────
@@ -395,6 +473,56 @@ class TestBackfillRepairsCorruption:
         finally:
             db.close()
             engine.dispose()
+
+    def test_dashboard_resolvers_use_first_class_columns(self):
+        """The /orders endpoint must prefer Order.external_order_number,
+        Order.customer_name, and Order.source when present so the merchant
+        sees the platform's real values, not Nahla's internal pk."""
+        order = Order(
+            id=11,
+            tenant_id=1,
+            external_id="566146469",
+            external_order_number="1585297702",
+            status="delivered",
+            total="174",
+            customer_name="تركي البخاري",
+            customer_info={"name": "تركي البخاري", "phone": "+966555906901"},
+            line_items=[],
+            source="salla",
+        )
+        assert _resolve_order_number(order) == "#1585297702"
+        assert _resolve_customer_display(order) == "تركي البخاري"
+        assert _resolve_source(order) == "salla"
+        assert SOURCE_LABELS_AR[_resolve_source(order)] == "سلة"
+
+    def test_dashboard_customer_falls_back_to_phone(self):
+        order = Order(
+            id=2, tenant_id=1, external_id="x",
+            status="delivered", total="0",
+            customer_info={"phone": "+966555000000"},
+            line_items=[],
+        )
+        assert _resolve_customer_display(order) == "+966555000000"
+
+    def test_dashboard_order_number_falls_back_to_external_id(self):
+        order = Order(
+            id=99, tenant_id=1, external_id="ABC-7",
+            status="delivered", total="0",
+            customer_info={}, line_items=[],
+        )
+        assert _resolve_order_number(order) == "#ABC-7"
+
+    def test_dashboard_source_legacy_ai_metadata_resolves_whatsapp(self):
+        # Legacy rows wrote source into extra_metadata before the dedicated
+        # column existed. The resolver must still classify them as
+        # "whatsapp" so they show up under the WhatsApp source filter.
+        order = Order(
+            id=3, tenant_id=1, external_id="x",
+            status="pending_confirmation", total="0",
+            customer_info={}, line_items=[],
+            extra_metadata={"source": "ai_sales_agent"},
+        )
+        assert _resolve_source(order) == "whatsapp"
 
     def test_old_order_still_classifies_as_inactive(self):
         # Sanity: backfill doesn't artificially make stale orders "active".

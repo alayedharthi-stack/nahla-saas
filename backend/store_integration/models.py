@@ -59,6 +59,11 @@ class OrderItem(BaseModel):
 
 class NormalizedOrder(BaseModel):
     id: str
+    # Human-visible order number from the platform (Salla `reference_id`,
+    # Zid `code`, Shopify `name`). Distinct from `id` (the platform's
+    # internal numeric primary key). Falls back to `id` when the platform
+    # doesn't expose a separate human number.
+    reference_id: Optional[str] = None
     status: str
     total: float
     currency: str = "SAR"
@@ -67,6 +72,10 @@ class NormalizedOrder(BaseModel):
     customer_phone: str
     items: List[OrderItem] = []
     created_at: Optional[str] = None
+    # Origin platform for this order. One of: salla | zid | shopify |
+    # whatsapp | manual. Set by the adapter; the sync layer falls back to
+    # the adapter's `platform` attribute when unset.
+    source: Optional[str] = None
 
 
 class ShippingOption(BaseModel):

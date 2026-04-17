@@ -143,13 +143,24 @@ class Product(Base):
 class Order(Base):
     __tablename__ = 'orders'
     id = Column(Integer, primary_key=True)
+    # Platform's internal id (e.g. Salla `id`). Stable, used for upserts.
     external_id = Column(String, index=True, nullable=True)
+    # Human-visible order number from the platform (e.g. Salla `reference_id`
+    # 1585297702 → shown to merchant as "#1585297702"). Falls back to
+    # external_id when the platform doesn't expose a separate number.
+    external_order_number = Column(String, index=True, nullable=True)
     status = Column(String, nullable=False)
     total = Column(String, nullable=True)
+    # Denormalised customer name so the dashboard cell is never blank even if
+    # `customer_info` JSON is empty (legacy rows / minimal webhooks).
+    customer_name = Column(String, nullable=True)
     customer_info = Column(JSONB, nullable=True)
     line_items = Column(JSONB, nullable=True)
     checkout_url = Column(String, nullable=True)
     is_abandoned = Column(Boolean, default=False)
+    # Origin of the order so the merchant can tell where it came from:
+    #   "salla" | "zid" | "shopify" | "whatsapp" | "manual"
+    source = Column(String, nullable=True, index=True)
     extra_metadata = Column('metadata', JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='orders')

@@ -16,15 +16,31 @@ export interface AnalyticsDashboard {
   top_products: Array<{ name: string; revenue: number; orders: number; trend: string }>
 }
 
+export type OrderSourceKey =
+  | 'salla'
+  | 'zid'
+  | 'shopify'
+  | 'whatsapp'
+  | 'manual'
+
 export interface DashboardOrder {
+  // The platform's human-visible order number (e.g. "#1585297702"). The
+  // backend now sets `id` to this value so existing key/search code
+  // continues to work and the merchant sees the same number their store
+  // dashboard shows.
   id: string
+  order_number: string
+  internal_id?: string
+  external_id?: string | null
   customer: string
+  customer_name: string
   phone: string
   items: string
   amount: string
   amount_sar: number
   status: 'paid' | 'pending' | 'failed' | 'cancelled'
-  source: 'AI' | 'manual'
+  source: OrderSourceKey
+  source_label: string
   paymentLink?: string
   createdAt: string
 }
