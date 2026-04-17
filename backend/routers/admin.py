@@ -1487,6 +1487,23 @@ async def admin_troubleshoot_whatsapp(
         .limit(6)
         .all()
     )
+
+    # ── Promote OAuth-session signals to top-level so the admin UI doesn't
+    # have to dig into extra_metadata. These were the buried fields that
+    # masked the broken merchant OAuth on tenant=1 — see the RCA at
+    # docs/runbooks/whatsapp-half-bootstrap-rca.md ─────────────────────────
+    extra_meta_dict: dict = wa_conn.extra_metadata if (wa_conn and wa_conn.extra_metadata) else {}
+    if not isinstance(extra_meta_dict, dict):
+        extra_meta_dict = {}
+    oauth_status = extra_meta_dict.get("oauth_session_status")
+    needs_reauth_meta = extra_meta_dict.get("oauth_session_needs_reauth")
+    if needs_reauth_meta is None:
+        needs_reauth_meta = oauth_status in {"expired", "invalid", "missing"}
+    half_bootstrapped = bool(
+        wa_conn
+        and wa_conn.status == "connected"
+        and (not wa_conn.phone_number or not wa_conn.business_display_name)
+    )
     return {
         "tenant_id": tenant_id,
         "tenant_name": tenant.name,
@@ -1501,6 +1518,14 @@ async def admin_troubleshoot_whatsapp(
             "last_error": wa_conn.last_error if wa_conn else None,
             "extra_metadata": wa_conn.extra_metadata if wa_conn else None,
             "updated_at": wa_conn.updated_at.isoformat() if wa_conn and wa_conn.updated_at else None,
+            # Promoted diagnostic signals — flat for easy UI binding.
+            "oauth_session_status":        oauth_status,
+            "oauth_session_message":       extra_meta_dict.get("oauth_session_message"),
+            "oauth_session_needs_reauth":  bool(needs_reauth_meta),
+            "active_graph_token_source":   extra_meta_dict.get("active_graph_token_source"),
+            "token_status":                extra_meta_dict.get("token_status"),
+            "token_health":                extra_meta_dict.get("token_health"),
+            "half_bootstrapped":           half_bootstrapped,
         },
         "usage": [
             {

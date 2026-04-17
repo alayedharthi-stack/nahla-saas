@@ -231,6 +231,33 @@ def commit_connection(
     if display_name:
         conn.business_display_name = display_name
 
+    # ── Auto-fill display fields from Meta if the caller did not supply them ──
+    # Why this lives BEFORE the commit:
+    #   We want the persisted row to never reach `status="connected"` while
+    #   `phone_number` / `business_display_name` are NULL — that combination
+    #   is the "half-bootstrapped" bug observed on tenant=1 (see
+    #   docs/runbooks/whatsapp-half-bootstrap-rca.md).
+    # Why it is best-effort:
+    #   Meta is allowed to be slow or rate-limited, and we never want a
+    #   transient Graph hiccup to block a successful credential write.
+    #   `fetch_phone_metadata` swallows exceptions and returns all-None on
+    #   failure; the row will then persist with whatever the caller passed
+    #   (possibly NULL) and the backfill script can repair it later.
+    if not conn.phone_number or not conn.business_display_name:
+        meta_lookup = fetch_phone_metadata(phone_number_id, access_token, tenant_id)
+        if not conn.phone_number and meta_lookup.get("display_phone_number"):
+            conn.phone_number = meta_lookup["display_phone_number"]
+        if not conn.business_display_name and meta_lookup.get("verified_name"):
+            conn.business_display_name = meta_lookup["verified_name"]
+        if not conn.phone_number or not conn.business_display_name:
+            logger.warning(
+                "[WASvc] half-bootstrapped row — tenant=%s phone_id=%s "
+                "phone_number=%r display_name=%r (Meta lookup did not return them) — "
+                "row will be written but display fields stay NULL until backfilled",
+                tenant_id, phone_number_id,
+                conn.phone_number, conn.business_display_name,
+            )
+
     try:
         db.commit()
         db.refresh(conn)
@@ -395,6 +422,66 @@ def begin_waba_session(
         raise WhatsAppConnectionError(f"DB write failed: {exc}") from exc
 
     logger.info("[WASvc] begin_waba_session COMMITTED — tenant=%s waba=%s", tenant_id, waba_id)
+
+
+def fetch_phone_metadata(
+    phone_number_id: str,
+    access_token: str,
+    tenant_id: int | None = None,
+) -> dict[str, str | None]:
+    """
+    Look up the public display fields for a Cloud API phone number.
+
+    Returns a dict with `display_phone_number`, `verified_name`, and
+    `whatsapp_business_account_id`. Any field that Meta does not return
+    (or that is missing because the token lacks scope) becomes `None`.
+    Network / Graph errors are logged and the call returns an all-None
+    dict — callers MUST treat the result as best-effort, never as a
+    blocking dependency for marking the connection `connected`.
+
+    This helper is intentionally side-effect free so it can be used by:
+      • commit_connection() to populate the row right after the write.
+      • scripts/backfill_whatsapp_phone_metadata.py to repair existing rows.
+    """
+    out: dict[str, str | None] = {
+        "display_phone_number":         None,
+        "verified_name":                None,
+        "whatsapp_business_account_id": None,
+    }
+    try:
+        from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+        url  = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{phone_number_id}"
+        resp = httpx.get(
+            url,
+            params={
+                "fields":       "id,display_phone_number,verified_name,whatsapp_business_account",
+                "access_token": access_token,
+            },
+            timeout=10,
+        )
+        data = resp.json() if resp.content else {}
+        if resp.status_code != 200:
+            err = (data.get("error") or {}).get("message", f"HTTP {resp.status_code}")
+            logger.warning(
+                "[WhatsApp] fetch_phone_metadata FAILED — tenant=%s phone=%s err=%r",
+                tenant_id, phone_number_id, err,
+            )
+            return out
+
+        out["display_phone_number"] = (data.get("display_phone_number") or None)
+        out["verified_name"]        = (data.get("verified_name") or None)
+        wba = data.get("whatsapp_business_account")
+        if isinstance(wba, dict):
+            out["whatsapp_business_account_id"] = wba.get("id") or None
+        elif isinstance(wba, str):
+            out["whatsapp_business_account_id"] = wba
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[WhatsApp] fetch_phone_metadata exception — tenant=%s phone=%s: %s",
+            tenant_id, phone_number_id, exc,
+        )
+        return out
 
 
 def resolve_waba_for_phone(

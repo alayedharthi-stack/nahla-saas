@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   LifeBuoy, Search, Wifi, WifiOff, CheckCircle2,
-  Eye, EyeOff, Loader2, AlertCircle,
+  Eye, EyeOff, Loader2, AlertCircle, ShieldAlert, RefreshCw,
 } from 'lucide-react'
 import { adminApi, type AdminTenantSummary } from '../api/admin'
 import { apiCall } from '../api/client'
@@ -183,6 +183,9 @@ function WaStatusCard({ tenantId, tenantName, onRefreshNeeded }: {
   )
 
   const connected = wa?.status === 'connected' && wa?.sending_enabled
+  const needsReauth = wa?.oauth_session_needs_reauth === true
+  const halfBootstrapped = wa?.half_bootstrapped === true
+  const platformFallback = wa?.active_graph_token_source === 'platform' && needsReauth
 
   return (
     <div className={`bg-white rounded-2xl border shadow-sm p-5 space-y-3 ${connected ? 'border-emerald-200' : 'border-slate-100'}`}>
@@ -206,10 +209,52 @@ function WaStatusCard({ tenantId, tenantName, onRefreshNeeded }: {
               ? <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">إرسال مفعّل</span>
               : <span className="text-xs bg-red-100 text-red-600 px-2 py-0.5 rounded-full">إرسال معطّل</span>
             }
+            {platformFallback && (
+              <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">
+                يعمل عبر توكن المنصة
+              </span>
+            )}
           </div>
           {wa.phone_number && <p className="font-mono text-xs text-slate-600">{wa.phone_number}</p>}
           {wa.business_display_name && <p className="text-xs text-slate-500">{wa.business_display_name}</p>}
           {wa.connection_type && <p className="text-xs text-slate-400">النوع: {wa.connection_type} · {wa.provider ?? '—'}</p>}
+
+          {/* OAuth session reauth banner — surfaced from extra_metadata for support staff */}
+          {needsReauth && (
+            <div className="mt-2 flex items-start gap-2 text-xs bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="font-semibold text-amber-800">جلسة OAuth للتاجر تحتاج إعادة تفويض</p>
+                {wa.oauth_session_message && (
+                  <p className="text-amber-700 mt-0.5">{wa.oauth_session_message}</p>
+                )}
+                <p className="text-amber-700 mt-1">
+                  الإرسال يستمر مؤقتًا عبر توكن المنصة، لكن إعادة الاشتراك في
+                  Webhooks وتحديث القوالب وقراءة أصول WABA لن تعمل قبل أن يقوم
+                  التاجر بإعادة الربط من إعدادات حسابه.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Half-bootstrapped banner — backfill prompt for support staff */}
+          {halfBootstrapped && (
+            <div className="mt-2 flex items-start gap-2 text-xs bg-orange-50 border border-orange-200 rounded-lg px-3 py-2">
+              <RefreshCw className="w-4 h-4 text-orange-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="font-semibold text-orange-800">ربط ناقص — حقول العرض غير معبّأة</p>
+                <p className="text-orange-700 mt-0.5">
+                  الاتصال نشط لكن <code className="font-mono text-[11px]">phone_number</code> أو
+                  <code className="font-mono text-[11px] ms-1">business_display_name</code> فارغ.
+                  شغّل أمر الإصلاح:
+                </p>
+                <code className="block mt-1 px-2 py-1 bg-orange-100 text-orange-900 rounded font-mono text-[11px]">
+                  python scripts/backfill_whatsapp_phone_metadata.py --tenant {tenantId} --commit
+                </code>
+              </div>
+            </div>
+          )}
+
           {wa.last_error && (
             <div className="mt-1 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
               {wa.last_error}
