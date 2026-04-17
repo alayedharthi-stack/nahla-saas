@@ -1541,6 +1541,85 @@ async def admin_troubleshoot_whatsapp(
     }
 
 
+@router.get("/admin/troubleshooting/whatsapp/lookup")
+async def admin_troubleshoot_whatsapp_lookup(
+    phone_number_id: Optional[str] = Query(None, description="Meta phone_number_id (recommended)"),
+    phone_number: Optional[str] = Query(None, description="E.164 number, optional"),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Diagnostic: locate every WhatsAppConnection that claims a given
+    phone_number_id (or display number), so we can detect the case where
+    a webhook is being routed to a *different* tenant than the merchant
+    expects (typical symptom: dashboard conversations look empty even
+    though logs show successful inbound + reply on tenant=X).
+
+    Read-only; admin-only. Safe to call in production.
+    """
+    if not phone_number_id and not phone_number:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide phone_number_id and/or phone_number",
+        )
+
+    q = db.query(WhatsAppConnection)
+    if phone_number_id:
+        q = q.filter(WhatsAppConnection.phone_number_id == phone_number_id)
+    elif phone_number:
+        q = q.filter(WhatsAppConnection.phone_number == phone_number)
+
+    rows = q.all()
+
+    out: List[Dict[str, Any]] = []
+    for wa in rows:
+        tenant = db.query(Tenant).filter(Tenant.id == wa.tenant_id).first()
+        from models import Conversation, MessageEvent  # noqa: PLC0415
+
+        convo_count = (
+            db.query(func.count(Conversation.id))
+            .filter(Conversation.tenant_id == wa.tenant_id)
+            .scalar()
+            or 0
+        )
+        msg_count = (
+            db.query(func.count(MessageEvent.id))
+            .filter(MessageEvent.tenant_id == wa.tenant_id)
+            .scalar()
+            or 0
+        )
+        token_tail = (wa.access_token or "")[-6:] if wa.access_token else None
+        out.append({
+            "tenant_id": wa.tenant_id,
+            "tenant_name": getattr(tenant, "name", None),
+            "is_platform_tenant": bool(getattr(tenant, "is_platform_tenant", False)),
+            "wa_status": wa.status,
+            "phone_number_id": wa.phone_number_id,
+            "phone_number": wa.phone_number,
+            "business_display_name": wa.business_display_name,
+            "whatsapp_business_account_id": wa.whatsapp_business_account_id,
+            "connection_type": wa.connection_type,
+            "provider": wa.provider,
+            "webhook_verified": bool(wa.webhook_verified),
+            "sending_enabled": bool(wa.sending_enabled),
+            "token_tail": token_tail,
+            "token_expires_at": wa.token_expires_at.isoformat() if wa.token_expires_at else None,
+            "last_webhook_received_at": (
+                wa.last_webhook_received_at.isoformat()
+                if wa.last_webhook_received_at else None
+            ),
+            "updated_at": wa.updated_at.isoformat() if wa.updated_at else None,
+            "conversations_in_this_tenant": convo_count,
+            "message_events_in_this_tenant": msg_count,
+        })
+
+    return {
+        "query": {"phone_number_id": phone_number_id, "phone_number": phone_number},
+        "match_count": len(out),
+        "matches": out,
+    }
+
+
 @router.get("/admin/troubleshooting/tenants/{tenant_id}/integrations")
 async def admin_troubleshoot_integrations(
     tenant_id: int,
