@@ -67,6 +67,49 @@ logger = logging.getLogger("nahla-backend")
 router = APIRouter(tags=["WhatsApp Webhook"])
 
 
+# ─── Platform-vs-merchant routing ────────────────────────────────────────────
+# A tenant is the Nahla *platform* sales workspace only when explicitly
+# flagged via `tenants.is_platform_tenant=True`. Until that flag is set on
+# exactly one tenant, every inbound message is treated as merchant traffic
+# and answered by the store's own AI (`_handle_merchant_message`). We
+# cache the lookup per process: this column changes ~never, and the
+# lookup runs on every inbound message.
+
+_PLATFORM_TENANT_CACHE: dict[str, Any] = {"value": None, "loaded": False}
+
+
+def _is_platform_tenant(db, tenant_id: Optional[int]) -> bool:
+    """True iff this tenant has the explicit `is_platform_tenant=True`
+    flag set. Defaults to False — the safe choice for a SaaS where the
+    overwhelmingly common case is "this inbound message belongs to a
+    merchant store, not the platform sales bot"."""
+    if tenant_id is None:
+        return False
+    if not _PLATFORM_TENANT_CACHE["loaded"]:
+        try:
+            from models import Tenant  # noqa: PLC0415
+            row = (
+                db.query(Tenant.id)
+                .filter(Tenant.is_platform_tenant.is_(True))
+                .first()
+            )
+            _PLATFORM_TENANT_CACHE["value"] = row[0] if row else None
+        except Exception as exc:  # noqa: BLE001
+            # Fail-safe: if the column does not exist yet (pre-migration)
+            # or the lookup throws for any reason, treat NO tenant as the
+            # platform — every store-AI path then works correctly.
+            logger.debug("[platform-tenant] resolver lookup failed: %s", exc)
+            _PLATFORM_TENANT_CACHE["value"] = None
+        _PLATFORM_TENANT_CACHE["loaded"] = True
+    return _PLATFORM_TENANT_CACHE["value"] == tenant_id
+
+
+def _reset_platform_tenant_cache() -> None:
+    """Test/admin helper to invalidate the cached platform-tenant id."""
+    _PLATFORM_TENANT_CACHE["value"] = None
+    _PLATFORM_TENANT_CACHE["loaded"] = False
+
+
 def _extract_contact_name(value: Dict[str, Any], sender: str) -> str:
     sender_digits = "".join(ch for ch in str(sender or "") if ch.isdigit())
     for contact in value.get("contacts", []) or []:
@@ -452,9 +495,17 @@ async def _dispatch_message(
     if not text:
         return
 
-    # ── Merchant bypass: tenant_id > 1 uses store AI, not platform sales bot ──
-    PLATFORM_TENANT_ID = 1
-    if resolved_tenant_id != PLATFORM_TENANT_ID:
+    # ── Merchant vs Platform routing ─────────────────────────────────────────
+    # We used to hard-code `PLATFORM_TENANT_ID = 1` here, which silently
+    # routed real merchants whose tenant happened to live at id=1 into
+    # the platform sales-bot flow (CTA "سجّل في نحلة" instead of the
+    # store's AI). The decision now lives in the data: a tenant is the
+    # platform workspace ONLY when `tenants.is_platform_tenant=True`.
+    # When no tenant has the flag, every inbound message defaults to
+    # merchant flow — which is the safe, expected behaviour for any
+    # production environment that hasn't explicitly enabled the
+    # platform-brain workspace.
+    if not _is_platform_tenant(db, resolved_tenant_id):
         await _handle_merchant_message(
             phone_id=used_pid, to=sender, text=text,
             tenant_id=resolved_tenant_id, db=db,

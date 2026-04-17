@@ -24,6 +24,12 @@ class Tenant(Base):
     name = Column(String, unique=True, nullable=False)
     domain = Column(String, unique=True, nullable=True)
     is_active = Column(Boolean, default=True)
+    # When True, this tenant is the Nahla *platform* sales workspace —
+    # inbound WhatsApp messages route to the deterministic Platform-Brain
+    # sales flow (CTA buttons → trial signup) instead of a merchant's
+    # store-AI assistant. Default False so every newly-created tenant is
+    # treated as a merchant store, never as the platform.
+    is_platform_tenant = Column(Boolean, default=False, nullable=False, server_default='false')
     created_at = Column(DateTime, default=datetime.utcnow)
     store_address = Column(Text, nullable=True)
     google_maps_link = Column(String, nullable=True)
