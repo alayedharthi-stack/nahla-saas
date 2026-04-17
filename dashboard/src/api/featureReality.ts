@@ -23,6 +23,14 @@ export type OrderSourceKey =
   | 'whatsapp'
   | 'manual'
 
+export type NeedsActionLevel = 'amber' | 'red' | 'blue' | 'purple'
+
+export interface OrderNeedsAction {
+  key: string
+  label: string
+  level: NeedsActionLevel
+}
+
 export interface DashboardOrder {
   // The platform's human-visible order number (e.g. "#1585297702"). The
   // backend now sets `id` to this value so existing key/search code
@@ -45,6 +53,9 @@ export interface DashboardOrder {
   paymentLink?: string
   createdAt: string
   is_ai_created?: boolean
+  is_vip?: boolean
+  has_open_conversation?: boolean
+  needs_action?: OrderNeedsAction[]
 }
 
 export interface OrderDetailLineItem {
@@ -72,12 +83,30 @@ export interface OrderDetailAddress {
   address?: string | null
 }
 
+export interface OrderTimelineEvent {
+  key:   string
+  label: string
+  at:    string
+  icon:  string
+}
+
 export interface OrderDetail extends DashboardOrder {
   line_items: OrderDetailLineItem[]
   customer_address: OrderDetailAddress
   links: OrderDetailLinks
   payment_method?: string | null
   notes?: string | null
+  timeline: OrderTimelineEvent[]
+  payment_reminder_draft?: string | null
+}
+
+export interface PaymentReminderResult {
+  sent: boolean
+  reason?: string
+  error?: string
+  message: string
+  conversation_url: string
+  sent_at?: string
 }
 
 export interface OrdersDashboard {
@@ -88,6 +117,7 @@ export interface OrdersDashboard {
     completed_today: number
     whatsapp_orders_today: number
     whatsapp_revenue_today: number
+    orders_needing_action: number
   }
   orders: DashboardOrder[]
 }
@@ -143,6 +173,15 @@ export const featureRealityApi = {
   },
   orderDetail(orderId: string | number): Promise<{ order: OrderDetail }> {
     return apiCall(`/orders/${encodeURIComponent(String(orderId))}`)
+  },
+  sendOrderPaymentReminder(
+    orderId: string | number,
+    body: { message?: string } = {},
+  ): Promise<PaymentReminderResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/send-payment-reminder`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
   },
   coupons(): Promise<CouponsDashboard> {
     return apiCall('/coupons')

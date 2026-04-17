@@ -1,19 +1,30 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
+  AlertTriangle,
   ArrowRight,
+  Bell,
   Bot,
+  Crown,
   ExternalLink,
+  Link as LinkIcon,
   MessageCircle,
   MessageSquare,
   Package,
   Phone as PhoneIcon,
+  RefreshCw,
   ShoppingBag,
   Store,
   User,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
-import { featureRealityApi, type OrderDetail as OrderDetailType, type OrderSourceKey } from '../api/featureReality'
+import {
+  featureRealityApi,
+  type NeedsActionLevel,
+  type OrderDetail as OrderDetailType,
+  type OrderSourceKey,
+  type OrderTimelineEvent,
+} from '../api/featureReality'
 
 const STATUS_VARIANT: Record<string, 'green' | 'amber' | 'red' | 'slate'> = {
   paid:      'green',
@@ -55,23 +66,93 @@ function formatDateTime(iso?: string): string {
   }
 }
 
+const NEEDS_ACTION_CLASS: Record<NeedsActionLevel, string> = {
+  amber:  'bg-amber-50  text-amber-700  border-amber-200',
+  red:    'bg-red-50    text-red-700    border-red-200',
+  blue:   'bg-blue-50   text-blue-700   border-blue-200',
+  purple: 'bg-purple-50 text-purple-700 border-purple-200',
+}
+
+const TIMELINE_ICON: Record<string, typeof Package> = {
+  package: Package,
+  link:    LinkIcon,
+  bell:    Bell,
+  refresh: RefreshCw,
+  message: MessageSquare,
+}
+
+function TimelineRow({ event }: { event: OrderTimelineEvent }) {
+  const Icon = TIMELINE_ICON[event.icon] || Package
+  return (
+    <li className="flex items-start gap-3">
+      <div className="w-6 h-6 rounded-full bg-brand-50 text-brand-600 flex items-center justify-center shrink-0 mt-0.5">
+        <Icon className="w-3 h-3" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs text-slate-800">{event.label}</p>
+        {event.at && <p className="text-[11px] text-slate-400">{formatDateTime(event.at)}</p>}
+      </div>
+    </li>
+  )
+}
+
 export default function OrderDetail() {
   const { orderId } = useParams<{ orderId: string }>()
   const navigate    = useNavigate()
   const [order, setOrder]   = useState<OrderDetailType | null>(null)
   const [error, setError]   = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [reminderBusy, setReminderBusy] = useState(false)
+  const [reminderToast, setReminderToast] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const reload = (): Promise<void> => {
+    if (!orderId) return Promise.resolve()
+    return featureRealityApi
+      .orderDetail(orderId)
+      .then(({ order }) => { setOrder(order) })
+      .catch((e) => setError(e instanceof Error ? e.message : 'تعذّر تحميل تفاصيل الطلب'))
+  }
 
   useEffect(() => {
     if (!orderId) return
     setLoading(true)
     setError(null)
-    featureRealityApi
-      .orderDetail(orderId)
-      .then(({ order }) => setOrder(order))
-      .catch((e) => setError(e instanceof Error ? e.message : 'تعذّر تحميل تفاصيل الطلب'))
-      .finally(() => setLoading(false))
+    reload().finally(() => setLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId])
+
+  const handleSendReminder = async () => {
+    if (!order || reminderBusy) return
+    setReminderBusy(true)
+    setReminderToast(null)
+    try {
+      const res = await featureRealityApi.sendOrderPaymentReminder(order.internal_id || order.id)
+      if (res.sent) {
+        setReminderToast({ ok: true, text: 'تم إرسال تذكير الدفع بنجاح ✅' })
+        await reload()
+      } else {
+        const reasonLabel = (
+          res.reason === 'whatsapp_not_connected' ? 'واتساب غير متصل لهذا المتجر'
+          : res.reason === 'service_window_closed' ? 'نافذة محادثة العميل مغلقة (24 ساعة) — افتح المحادثة لإرسال يدوي'
+          : res.reason === 'send_failed'           ? 'فشل الإرسال — افتح المحادثة لإرسال يدوي'
+          : 'تعذّر الإرسال التلقائي — استخدم زر فتح المحادثة'
+        )
+        setReminderToast({ ok: false, text: reasonLabel })
+        // Open the conversation page with the prefilled draft so the
+        // merchant can complete the send manually.
+        if (res.conversation_url) {
+          setTimeout(() => navigate(res.conversation_url), 800)
+        }
+      }
+    } catch (e) {
+      setReminderToast({
+        ok: false,
+        text: e instanceof Error ? e.message : 'تعذّر إرسال التذكير',
+      })
+    } finally {
+      setReminderBusy(false)
+    }
+  }
 
   const subtotal = useMemo(() => {
     if (!order) return null
@@ -104,6 +185,8 @@ export default function OrderDetail() {
   const sourceLabel = order.source_label || SOURCE_FALLBACK[order.source] || order.source
   const sourceCls   = SOURCE_BADGE[order.source] || SOURCE_BADGE.manual
   const statusCls   = STATUS_VARIANT[order.status] || 'slate'
+  const canRemind   = order.status === 'pending' || order.status === 'failed'
+  const needsAction = order.needs_action || []
 
   return (
     <div className="space-y-5">
@@ -121,37 +204,36 @@ export default function OrderDetail() {
             <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium ${sourceCls}`}>
               <SourceIcon className="w-3 h-3" /> {sourceLabel}
             </span>
-            {order.is_ai_created && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-brand-200 bg-brand-50 text-brand-700 text-[11px] font-medium">
-                <Bot className="w-3 h-3" /> أنشأه الذكاء
-              </span>
-            )}
-            {!order.is_ai_created && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 bg-slate-50 text-slate-600 text-[11px] font-medium">
-                <Store className="w-3 h-3" /> من المتجر
+            {order.is_ai_created
+              ? <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-brand-200 bg-brand-50 text-brand-700 text-[11px] font-medium"><Bot className="w-3 h-3" /> أنشأه الذكاء</span>
+              : <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 bg-slate-50 text-slate-600 text-[11px] font-medium"><Store className="w-3 h-3" /> من المتجر</span>}
+            {order.is_vip && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-purple-200 bg-purple-50 text-purple-700 text-[11px] font-medium">
+                <Crown className="w-3 h-3" /> عميل VIP
               </span>
             )}
           </div>
           <p className="text-xs text-slate-400">{formatDateTime(order.createdAt)}</p>
         </div>
 
-        {/* Quick action buttons */}
+        {/* Quick action buttons — ordered by operational priority:
+            conversation → reminder → whatsapp → store. */}
         <div className="flex flex-wrap gap-2">
-          {order.links.store && (
-            <a
-              href={order.links.store}
-              target="_blank"
-              rel="noreferrer"
-              className="btn-primary text-xs"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              {order.links.store_label || `فتح الطلب في ${sourceLabel}`}
-            </a>
-          )}
           {order.links.conversation && (
-            <Link to={order.links.conversation} className="btn-secondary text-xs">
+            <Link to={order.links.conversation} className="btn-primary text-xs">
               <MessageSquare className="w-3.5 h-3.5" /> فتح المحادثة في نحلة
             </Link>
+          )}
+          {canRemind && (
+            <button
+              onClick={handleSendReminder}
+              disabled={reminderBusy}
+              className="btn-secondary text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              title={order.payment_reminder_draft || 'إرسال تذكير دفع للعميل'}
+            >
+              <Bell className="w-3.5 h-3.5 text-amber-600" />
+              {reminderBusy ? 'جارٍ الإرسال…' : 'إرسال تذكير دفع'}
+            </button>
           )}
           {order.links.whatsapp && (
             <a
@@ -163,8 +245,54 @@ export default function OrderDetail() {
               <MessageCircle className="w-3.5 h-3.5 text-green-600" /> فتح واتساب
             </a>
           )}
+          {order.links.store && (
+            <a
+              href={order.links.store}
+              target="_blank"
+              rel="noreferrer"
+              className="btn-secondary text-xs"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              {order.links.store_label || `فتح الطلب في ${sourceLabel}`}
+            </a>
+          )}
         </div>
       </div>
+
+      {/* Toast for reminder result */}
+      {reminderToast && (
+        <div
+          className={`px-4 py-2.5 rounded-lg border text-xs ${
+            reminderToast.ok
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          }`}
+        >
+          {reminderToast.text}
+        </div>
+      )}
+
+      {/* Needs-action banner */}
+      {needsAction.length > 0 && (
+        <div className="card p-4 border-l-4 border-l-amber-400">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-slate-800 mb-2">يحتاج إجراء</p>
+              <div className="flex flex-wrap gap-1.5">
+                {needsAction.map((a) => (
+                  <span
+                    key={a.key}
+                    className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-medium ${NEEDS_ACTION_CLASS[a.level]}`}
+                  >
+                    {a.label}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Main column */}
@@ -262,6 +390,20 @@ export default function OrderDetail() {
               <p className="text-xs text-slate-600 whitespace-pre-wrap">{order.notes}</p>
             </div>
           )}
+
+          {/* Timeline */}
+          <div className="card p-5">
+            <h2 className="text-sm font-semibold text-slate-900 mb-3">سجل الطلب</h2>
+            {order.timeline.length === 0 ? (
+              <p className="text-xs text-slate-400">لا توجد أحداث مسجلة بعد.</p>
+            ) : (
+              <ul className="space-y-3">
+                {order.timeline.map((ev, idx) => (
+                  <TimelineRow key={`${ev.key}-${idx}`} event={ev} />
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
 
         {/* Side column — customer + meta */}

@@ -22,11 +22,19 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
-from models import Customer, Order
+from models import (
+    Conversation,
+    Customer,
+    CustomerProfile,
+    MessageEvent,
+    Order,
+    WhatsAppConnection,
+)
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 logger = logging.getLogger("nahla.orders")
@@ -304,12 +312,241 @@ def _build_customer_lookup(db: Session, tenant_id: int) -> Dict[str, str]:
     return out
 
 
+def _normalise_phone_key(phone: Optional[str]) -> str:
+    """Digits-only phone, with leading + stripped — suitable for DB lookups."""
+    return (phone or "").strip().lstrip("+").replace(" ", "").replace("-", "")
+
+
+def _build_vip_phone_set(db: Session, tenant_id: int) -> set[str]:
+    """
+    Phones (digits-only) of customers whose CustomerProfile marks them as
+    high-value. Used so the orders list can flag a row as `vip` without
+    re-running the full customer-intelligence pipeline per request.
+    Two sources are union-ed:
+      1. CustomerProfile.segment == 'vip'
+      2. CustomerProfile.rfm_segment in {'champion', 'loyal'}
+    """
+    out: set[str] = set()
+    rows = (
+        db.query(CustomerProfile, Customer.phone)
+        .join(Customer, Customer.id == CustomerProfile.customer_id)
+        .filter(
+            CustomerProfile.tenant_id == tenant_id,
+            Customer.phone.isnot(None),
+        )
+        .all()
+    )
+    for prof, phone in rows:
+        is_vip = (
+            (prof.segment or "").lower() == "vip"
+            or (prof.rfm_segment or "").lower() in {"champion", "loyal", "champions", "loyal_customers"}
+        )
+        if not is_vip:
+            continue
+        digits = _normalise_phone_key(phone)
+        if digits:
+            out.add(digits)
+    return out
+
+
+def _build_unread_phone_set(db: Session, tenant_id: int) -> set[str]:
+    """
+    Phones (digits-only) of customers with at least one inbound WhatsApp
+    message in a conversation that is NOT closed. Used so the orders list
+    can flag rows that have an open thread the merchant should look at.
+    """
+    out: set[str] = set()
+    convos = (
+        db.query(Conversation, Customer.phone)
+        .join(Customer, Customer.id == Conversation.customer_id, isouter=True)
+        .filter(
+            Conversation.tenant_id == tenant_id,
+            Conversation.status != "closed",
+        )
+        .all()
+    )
+    for convo, phone in convos:
+        meta_phone = (convo.extra_metadata or {}).get("customer_phone") or (convo.extra_metadata or {}).get("phone")
+        digits = _normalise_phone_key(phone or meta_phone)
+        if digits:
+            out.add(digits)
+    return out
+
+
+def _has_open_conversation(unread_phones: set[str], phone: str) -> bool:
+    return _normalise_phone_key(phone) in unread_phones
+
+
+def _is_vip(vip_phones: set[str], phone: str) -> bool:
+    return _normalise_phone_key(phone) in vip_phones
+
+
+def _compute_needs_action(
+    *,
+    status: str,
+    source_key: str,
+    payment_link: Optional[str],
+    is_vip_customer: bool,
+    has_open_conv: bool,
+    is_ai_created: bool,
+) -> List[Dict[str, str]]:
+    """
+    Build the list of "needs action" reasons for an order. Each reason is a
+    dict the frontend can render as a colored chip:
+        {
+          "key":   "awaiting_payment",
+          "label": "بانتظار الدفع",
+          "level": "amber" | "red" | "blue" | "purple",
+        }
+    Empty list → the order is fine, no chip should be rendered.
+    """
+    reasons: List[Dict[str, str]] = []
+
+    if status == "pending":
+        reasons.append({
+            "key":   "awaiting_payment",
+            "label": "بانتظار الدفع",
+            "level": "amber",
+        })
+        if not payment_link:
+            reasons.append({
+                "key":   "no_payment_link",
+                "label": "لا يوجد رابط دفع",
+                "level": "red",
+            })
+
+    if is_vip_customer:
+        reasons.append({
+            "key":   "vip",
+            "label": "عميل VIP",
+            "level": "purple",
+        })
+
+    if has_open_conv:
+        reasons.append({
+            "key":   "open_conversation",
+            "label": "محادثة مفتوحة",
+            "level": "blue",
+        })
+
+    # Whatsapp-originated, AI-created order with no follow-up conversation
+    # opened means the merchant should at least confirm with the customer.
+    if source_key == "whatsapp" and is_ai_created and not has_open_conv:
+        reasons.append({
+            "key":   "whatsapp_unfollowed",
+            "label": "طلب من واتساب بدون متابعة",
+            "level": "amber",
+        })
+
+    return reasons
+
+
+def _build_timeline(order: Order, *, has_open_conv: bool, source_label: str) -> List[Dict[str, Any]]:
+    """
+    A best-effort, monotonic activity log for an order. Today the data lives
+    in three places: Order columns, Order.extra_metadata, and (eventually)
+    MessageEvent rows linked via metadata.order_id. We surface what we know.
+    """
+    meta = order.extra_metadata or {}
+    events: List[Dict[str, Any]] = []
+
+    created_at = _read_created_at(order, fallback=datetime.now(timezone.utc))
+    is_ai = (
+        (getattr(order, "source", None) == "whatsapp")
+        or (meta.get("source") in ("ai_sales_agent", "ai_sales", "ai"))
+    )
+    creator = "أنشأه الذكاء" if is_ai else "أُنشئ من المتجر"
+    events.append({
+        "key":        "created",
+        "label":      f"تم إنشاء الطلب — {creator} ({source_label})",
+        "at":         created_at.isoformat(),
+        "icon":       "package",
+    })
+
+    if order.checkout_url:
+        events.append({
+            "key":   "payment_link_attached",
+            "label": "تم إنشاء رابط الدفع للطلب",
+            "at":    created_at.isoformat(),
+            "icon":  "link",
+        })
+
+    # Each payment reminder push appends a record to extra_metadata.payment_reminders.
+    for reminder in (meta.get("payment_reminders") or []):
+        events.append({
+            "key":   "payment_reminder_sent",
+            "label": "تم إرسال تذكير دفع للعميل",
+            "at":    reminder.get("sent_at") or "",
+            "icon":  "bell",
+        })
+
+    # Last status change tracked by sync layer.
+    if meta.get("status_changed_at"):
+        events.append({
+            "key":   "status_updated",
+            "label": f"آخر تحديث للحالة: {_parse_corrupt_status(str(order.status or ''))}",
+            "at":    str(meta.get("status_changed_at")),
+            "icon":  "refresh",
+        })
+
+    if has_open_conv:
+        events.append({
+            "key":   "conversation_open",
+            "label": "للعميل محادثة واتساب مفتوحة",
+            "at":    "",
+            "icon":  "message",
+        })
+
+    # Deduplicate exact (key, at) pairs and sort by timestamp so the UI
+    # renders a clean chronological list.
+    seen: set[tuple[str, str]] = set()
+    unique: List[Dict[str, Any]] = []
+    for ev in events:
+        k = (ev["key"], ev["at"])
+        if k in seen:
+            continue
+        seen.add(k)
+        unique.append(ev)
+    unique.sort(key=lambda e: e.get("at") or "")
+    return unique
+
+
+def _build_payment_reminder_text(
+    *,
+    customer_name: Optional[str],
+    order_number: str,
+    payment_url: Optional[str],
+    phone: Optional[str] = None,  # noqa: ARG001 — kept for forward signature
+) -> str:
+    """
+    Friendly Arabic reminder body. Always includes the order number; only
+    references the payment link when the merchant actually has one. Kept
+    short so it fits cleanly in WhatsApp's free-text body.
+    """
+    name = (customer_name or "عميلنا الكريم").strip() or "عميلنا الكريم"
+    if name == "—":
+        name = "عميلنا الكريم"
+
+    lines = [
+        f"مرحباً {name} 👋",
+        f"تذكير بطلبك رقم {order_number}.",
+    ]
+    if payment_url:
+        lines.append(f"يمكنك إتمام الدفع من هنا: {payment_url}")
+    else:
+        lines.append("سعداء بخدمتك — متى ما رغبت بإتمام طلبك تواصل معنا 🌟")
+    lines.append("شكراً لاختيارك متجرنا 🙏")
+    return "\n".join(lines)
+
+
 def _serialise_order(
     order: Order,
     *,
     customer_lookup: Dict[str, str],
     now: datetime,
     detailed: bool = False,
+    vip_phones: Optional[set[str]] = None,
+    unread_phones: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """
     Render an order for the dashboard. ``detailed=True`` adds line-item
@@ -354,6 +591,18 @@ def _serialise_order(
         (order.extra_metadata or {}).get("source") in ("ai_sales_agent", "ai_sales", "ai")
     )
 
+    is_vip_customer = bool(vip_phones    and phone and _is_vip(vip_phones, phone))
+    has_open_conv   = bool(unread_phones and phone and _has_open_conversation(unread_phones, phone))
+
+    needs_action = _compute_needs_action(
+        status=status,
+        source_key=source_key,
+        payment_link=order.checkout_url,
+        is_vip_customer=is_vip_customer,
+        has_open_conv=has_open_conv,
+        is_ai_created=is_ai_created,
+    )
+
     payload: Dict[str, Any] = {
         # `id` is kept as the human-visible order number so existing
         # frontend key/search/filter code shows the platform reference
@@ -377,6 +626,9 @@ def _serialise_order(
         "paymentLink":   order.checkout_url,
         "createdAt":     created_at.isoformat(),
         "is_ai_created": is_ai_created,
+        "is_vip":        is_vip_customer,
+        "has_open_conversation": has_open_conv,
+        "needs_action":  needs_action,
     }
 
     if detailed:
@@ -400,6 +652,23 @@ def _serialise_order(
         }
         payload["payment_method"] = (order.extra_metadata or {}).get("payment_method")
         payload["notes"]          = (order.extra_metadata or {}).get("notes")
+        payload["timeline"]       = _build_timeline(
+            order, has_open_conv=has_open_conv, source_label=source_label,
+        )
+
+        # Pre-built draft of the payment-reminder text the merchant can send
+        # with one tap. The frontend uses this both for the in-Nahla send
+        # and as the prefilled body if it falls back to the conversation
+        # composer or wa.me.
+        if status == "pending":
+            payload["payment_reminder_draft"] = _build_payment_reminder_text(
+                customer_name=display_name,
+                order_number=order_number,
+                payment_url=order.checkout_url,
+                phone=phone,
+            )
+        else:
+            payload["payment_reminder_draft"] = None
 
     return payload
 
@@ -418,6 +687,8 @@ async def list_orders(request: Request, db: Session = Depends(get_db)):
     )
 
     customer_lookup = _build_customer_lookup(db, tenant_id)
+    vip_phones      = _build_vip_phone_set(db, tenant_id)
+    unread_phones   = _build_unread_phone_set(db, tenant_id)
     now             = datetime.now(timezone.utc)
     today           = now.date()
 
@@ -427,13 +698,22 @@ async def list_orders(request: Request, db: Session = Depends(get_db)):
     today_revenue   = 0.0
     whatsapp_today_count   = 0
     whatsapp_today_revenue = 0.0
+    needs_action_count     = 0
 
     for order in rows:
-        item = _serialise_order(order, customer_lookup=customer_lookup, now=now)
+        item = _serialise_order(
+            order,
+            customer_lookup=customer_lookup,
+            now=now,
+            vip_phones=vip_phones,
+            unread_phones=unread_phones,
+        )
         orders.append(item)
 
         if item["status"] == "pending":
             pending_count += 1
+        if item["needs_action"]:
+            needs_action_count += 1
 
         try:
             row_date = datetime.fromisoformat(item["createdAt"]).date()
@@ -458,6 +738,9 @@ async def list_orders(request: Request, db: Session = Depends(get_db)):
             # WhatsApp + AI-driven sales at a glance.
             "whatsapp_orders_today":   whatsapp_today_count,
             "whatsapp_revenue_today":  round(whatsapp_today_revenue, 2),
+            # Operational KPI: how many of the listed orders have at least
+            # one open action (awaiting payment, no link, VIP, etc).
+            "orders_needing_action":   needs_action_count,
         },
         "orders": orders,
     }
@@ -498,11 +781,179 @@ async def get_order_detail(order_id: str, request: Request, db: Session = Depend
         raise HTTPException(status_code=404, detail="order_not_found")
 
     customer_lookup = _build_customer_lookup(db, tenant_id)
+    vip_phones      = _build_vip_phone_set(db, tenant_id)
+    unread_phones   = _build_unread_phone_set(db, tenant_id)
     return {
         "order": _serialise_order(
             order,
             customer_lookup=customer_lookup,
             now=datetime.now(timezone.utc),
             detailed=True,
+            vip_phones=vip_phones,
+            unread_phones=unread_phones,
         ),
+    }
+
+
+# ── Payment reminder ───────────────────────────────────────────────────────
+
+class PaymentReminderIn(BaseModel):
+    # Optional: merchant-edited message overriding the default draft.
+    message: Optional[str] = None
+
+
+@router.post("/{order_id}/send-payment-reminder")
+async def send_payment_reminder(
+    order_id: str,
+    body: PaymentReminderIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Send a WhatsApp payment-reminder text for a pending order.
+
+    Uses the same merchant-initiated send path as POST /conversations/reply
+    (no new direct provider_send_message call) so:
+      • the 24-hour service-window guard is enforced consistently,
+      • a MessageEvent row is logged for the conversation history,
+      • the unified automation/engine guardrail is preserved.
+
+    Always succeeds in returning the prepared draft + a /conversations
+    deep-link so the merchant can send manually if the WhatsApp window is
+    closed (i.e. the customer hasn't messaged us in the last 24h).
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    status = _classify_status(order.status)
+    if status not in {"pending", "failed"}:
+        raise HTTPException(
+            status_code=409,
+            detail="order_not_eligible_for_payment_reminder",
+        )
+
+    customer_info = order.customer_info or {}
+    phone = (customer_info.get("phone") or customer_info.get("mobile") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=409, detail="customer_phone_missing")
+
+    customer_lookup = _build_customer_lookup(db, tenant_id)
+    customer_name   = _resolve_customer_display(order, customer_lookup)
+    order_number    = _resolve_order_number(order)
+
+    text = (body.message or "").strip() or _build_payment_reminder_text(
+        customer_name=customer_name,
+        order_number=order_number,
+        payment_url=order.checkout_url,
+        phone=phone,
+    )
+
+    conversation_url = f"/conversations?phone={phone}"
+
+    # Try to send through the existing merchant-reply path. We import lazily
+    # because conversations.py also imports from us at startup in some test
+    # configurations.
+    try:
+        from core.wa_usage import has_open_service_window  # noqa: PLC0415
+        from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+        from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+        from routers.whatsapp_webhook import _send_whatsapp_message  # noqa: PLC0415
+    except Exception as exc:
+        logger.error("[orders.reminder] dependency import failed: %s", exc)
+        return {
+            "sent":             False,
+            "reason":            "dependency_unavailable",
+            "message":           text,
+            "conversation_url":  conversation_url,
+        }
+
+    customer_phone = normalize_phone(phone) or phone
+
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(
+            WhatsAppConnection.tenant_id       == tenant_id,
+            WhatsAppConnection.status          == "connected",
+            WhatsAppConnection.sending_enabled == True,  # noqa: E712
+        )
+        .first()
+    )
+    if not wa_conn or not wa_conn.phone_number_id:
+        return {
+            "sent":             False,
+            "reason":            "whatsapp_not_connected",
+            "message":           text,
+            "conversation_url":  conversation_url,
+        }
+
+    if not has_open_service_window(db, tenant_id, customer_phone):
+        return {
+            "sent":             False,
+            "reason":            "service_window_closed",
+            "message":           text,
+            "conversation_url":  conversation_url,
+        }
+
+    convo = _get_or_create_conversation(db, tenant_id, customer_phone, customer_name)
+
+    try:
+        await _send_whatsapp_message(
+            phone_id=wa_conn.phone_number_id,
+            to=customer_phone,
+            text=text,
+            _tenant_id=tenant_id,
+            _db=db,
+        )
+    except Exception as exc:
+        logger.exception(
+            "[orders.reminder] tenant=%s order=%s send failed", tenant_id, order.id,
+        )
+        return {
+            "sent":             False,
+            "reason":            "send_failed",
+            "error":             str(exc)[:200],
+            "message":           text,
+            "conversation_url":  conversation_url,
+        }
+
+    sent_at = datetime.now(timezone.utc).isoformat()
+    db.add(MessageEvent(
+        conversation_id=convo.id,
+        tenant_id=tenant_id,
+        direction="outbound",
+        body=text,
+        event_type="payment_reminder",
+        extra_metadata={
+            "customer_phone": customer_phone,
+            "order_id":       order.id,
+            "order_number":   order_number,
+            "is_ai":          False,
+            "via":            "orders_dashboard",
+        },
+    ))
+
+    # Persist on the order so the timeline has a permanent breadcrumb.
+    meta = dict(order.extra_metadata or {})
+    reminders = list(meta.get("payment_reminders") or [])
+    reminders.append({"sent_at": sent_at, "channel": "whatsapp"})
+    meta["payment_reminders"]    = reminders
+    meta["last_reminder_at"]     = sent_at
+    order.extra_metadata         = meta
+
+    convo.status               = "active"
+    convo.is_human_handoff     = False
+    convo.paused_by_human      = False
+    db.add(convo)
+    db.add(order)
+    db.commit()
+
+    return {
+        "sent":             True,
+        "message":          text,
+        "conversation_url": conversation_url,
+        "sent_at":          sent_at,
     }

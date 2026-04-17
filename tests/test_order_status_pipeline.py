@@ -56,8 +56,11 @@ from routers.orders import (  # noqa: E402
     CANCELLED_STATUSES,
     FAILED_STATUSES,
     SOURCE_LABELS_AR,
+    _build_payment_reminder_text,
     _build_store_url,
+    _build_timeline,
     _classify_status,
+    _compute_needs_action,
     _lookup_order,
     _parse_corrupt_status,
     _read_created_at,
@@ -776,3 +779,253 @@ class TestLookupOrder:
             assert _lookup_order(db, tenant_id, "no-such-thing") is None
         finally:
             db.close(); engine.dispose()
+
+
+# ── H. Operational layer (needs_action, timeline, reminder draft) ────────
+
+class TestComputeNeedsAction:
+    """The needs_action chip-list must reflect concrete operational gaps."""
+
+    def test_pending_with_link_is_awaiting_payment_only(self):
+        reasons = _compute_needs_action(
+            status="pending", source_key="salla", payment_link="https://pay/x",
+            is_vip_customer=False, has_open_conv=False, is_ai_created=False,
+        )
+        keys = [r["key"] for r in reasons]
+        assert "awaiting_payment" in keys
+        assert "no_payment_link" not in keys
+
+    def test_pending_without_link_adds_no_payment_link(self):
+        reasons = _compute_needs_action(
+            status="pending", source_key="salla", payment_link=None,
+            is_vip_customer=False, has_open_conv=False, is_ai_created=False,
+        )
+        keys = [r["key"] for r in reasons]
+        assert "awaiting_payment" in keys
+        assert "no_payment_link" in keys
+
+    def test_paid_order_has_no_action(self):
+        reasons = _compute_needs_action(
+            status="paid", source_key="salla", payment_link="x",
+            is_vip_customer=False, has_open_conv=False, is_ai_created=False,
+        )
+        assert reasons == []
+
+    def test_vip_always_chips_in(self):
+        reasons = _compute_needs_action(
+            status="paid", source_key="salla", payment_link="x",
+            is_vip_customer=True, has_open_conv=False, is_ai_created=False,
+        )
+        assert any(r["key"] == "vip" for r in reasons)
+        assert all(r["level"] in {"amber", "red", "blue", "purple"} for r in reasons)
+
+    def test_open_conversation_chips_in(self):
+        reasons = _compute_needs_action(
+            status="paid", source_key="salla", payment_link="x",
+            is_vip_customer=False, has_open_conv=True, is_ai_created=False,
+        )
+        assert any(r["key"] == "open_conversation" for r in reasons)
+
+    def test_whatsapp_ai_order_without_followup_flagged(self):
+        reasons = _compute_needs_action(
+            status="paid", source_key="whatsapp", payment_link="x",
+            is_vip_customer=False, has_open_conv=False, is_ai_created=True,
+        )
+        assert any(r["key"] == "whatsapp_unfollowed" for r in reasons)
+
+    def test_whatsapp_ai_order_with_open_conv_not_flagged(self):
+        reasons = _compute_needs_action(
+            status="paid", source_key="whatsapp", payment_link="x",
+            is_vip_customer=False, has_open_conv=True, is_ai_created=True,
+        )
+        assert all(r["key"] != "whatsapp_unfollowed" for r in reasons)
+
+
+class TestPaymentReminderDraft:
+
+    def test_draft_includes_order_number_and_link(self):
+        text = _build_payment_reminder_text(
+            customer_name="نشمي",
+            order_number="#1585297702",
+            payment_url="https://pay.example/abc",
+        )
+        assert "نشمي" in text
+        assert "#1585297702" in text
+        assert "https://pay.example/abc" in text
+
+    def test_draft_falls_back_when_no_link(self):
+        text = _build_payment_reminder_text(
+            customer_name="نشمي",
+            order_number="#1",
+            payment_url=None,
+        )
+        # Must NOT mention an empty link; should still be a friendly message.
+        assert "https://" not in text
+        assert "نشمي" in text
+
+    def test_dash_customer_name_falls_back_to_polite_address(self):
+        text = _build_payment_reminder_text(
+            customer_name="—",
+            order_number="#1",
+            payment_url="https://x",
+        )
+        assert "عميلنا الكريم" in text
+
+
+class TestBuildTimeline:
+
+    def _order(self, **overrides):
+        defaults = dict(
+            id=11, tenant_id=1,
+            external_id="566146469",
+            external_order_number="1585297702",
+            status="pending_payment",
+            total="174",
+            customer_info={"phone": "+966555906901"},
+            line_items=[],
+            source="salla",
+            extra_metadata={"created_at": "2026-04-15T12:00:00+00:00"},
+        )
+        defaults.update(overrides)
+        return Order(**defaults)
+
+    def test_timeline_always_has_creation_event(self):
+        ev = _build_timeline(self._order(), has_open_conv=False, source_label="سلة")
+        keys = [e["key"] for e in ev]
+        assert "created" in keys
+        assert "أُنشئ من المتجر" in next(e for e in ev if e["key"] == "created")["label"]
+
+    def test_timeline_marks_ai_created_for_whatsapp(self):
+        ev = _build_timeline(
+            self._order(source="whatsapp"),
+            has_open_conv=False, source_label="واتساب",
+        )
+        creation = next(e for e in ev if e["key"] == "created")
+        assert "أنشأه الذكاء" in creation["label"]
+
+    def test_timeline_includes_payment_link_event_when_checkout_url_present(self):
+        order = self._order()
+        order.checkout_url = "https://pay/x"
+        ev = _build_timeline(order, has_open_conv=False, source_label="سلة")
+        assert any(e["key"] == "payment_link_attached" for e in ev)
+
+    def test_timeline_includes_payment_reminder_history(self):
+        order = self._order(
+            extra_metadata={
+                "created_at": "2026-04-15T12:00:00+00:00",
+                "payment_reminders": [
+                    {"sent_at": "2026-04-16T09:00:00+00:00", "channel": "whatsapp"},
+                    {"sent_at": "2026-04-16T18:00:00+00:00", "channel": "whatsapp"},
+                ],
+            },
+        )
+        ev = _build_timeline(order, has_open_conv=False, source_label="سلة")
+        reminder_events = [e for e in ev if e["key"] == "payment_reminder_sent"]
+        assert len(reminder_events) == 2
+
+    def test_timeline_includes_open_conversation_marker(self):
+        ev = _build_timeline(self._order(), has_open_conv=True, source_label="سلة")
+        assert any(e["key"] == "conversation_open" for e in ev)
+
+    def test_timeline_is_sorted_by_at(self):
+        order = self._order(
+            extra_metadata={
+                "created_at": "2026-04-15T12:00:00+00:00",
+                "payment_reminders": [{"sent_at": "2026-04-16T09:00:00+00:00"}],
+                "status_changed_at": "2026-04-17T09:00:00+00:00",
+            },
+        )
+        ev = _build_timeline(order, has_open_conv=False, source_label="سلة")
+        ats = [e["at"] for e in ev if e["at"]]
+        assert ats == sorted(ats)
+
+
+class TestSerialiseOrderEmitsOperationalFields:
+    """Both list and detail payloads must expose operational fields."""
+
+    def _order(self, **overrides):
+        defaults = dict(
+            id=11, tenant_id=1,
+            external_id="566146469",
+            external_order_number="1585297702",
+            status="pending_payment",
+            total="174",
+            customer_name="نشمي",
+            customer_info={"name": "نشمي", "phone": "+966555906901"},
+            line_items=[],
+            source="salla",
+            extra_metadata={"created_at": "2026-04-15T12:00:00+00:00"},
+        )
+        defaults.update(overrides)
+        return Order(**defaults)
+
+    def test_list_payload_includes_needs_action(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=False,
+        )
+        # pending order with no checkout_url → at least both pending+no_link.
+        keys = [r["key"] for r in payload["needs_action"]]
+        assert "awaiting_payment" in keys
+        assert "no_payment_link" in keys
+
+    def test_list_payload_marks_vip_when_phone_in_set(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=False,
+            vip_phones={"966555906901"},
+        )
+        assert payload["is_vip"] is True
+        assert any(r["key"] == "vip" for r in payload["needs_action"])
+
+    def test_list_payload_marks_open_conversation(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=False,
+            unread_phones={"966555906901"},
+        )
+        assert payload["has_open_conversation"] is True
+        assert any(r["key"] == "open_conversation" for r in payload["needs_action"])
+
+    def test_detail_payload_includes_timeline_and_draft(self):
+        payload = _serialise_order(
+            self._order(),
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert "timeline" in payload
+        assert any(e["key"] == "created" for e in payload["timeline"])
+        # pending → draft must be filled.
+        assert payload["payment_reminder_draft"]
+        assert "نشمي" in payload["payment_reminder_draft"]
+        assert "#1585297702" in payload["payment_reminder_draft"]
+
+    def test_detail_payload_no_draft_for_paid_orders(self):
+        order = self._order(status="paid")
+        payload = _serialise_order(
+            order,
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=True,
+        )
+        assert payload["payment_reminder_draft"] is None
+        # Paid orders without VIP / conversation → no needs_action.
+        assert payload["needs_action"] == []
+
+    def test_paid_order_with_no_extra_signals_has_empty_needs_action(self):
+        order = self._order(status="paid")
+        order.checkout_url = "https://pay/x"
+        payload = _serialise_order(
+            order,
+            customer_lookup={},
+            now=datetime.now(timezone.utc),
+            detailed=False,
+        )
+        assert payload["needs_action"] == []

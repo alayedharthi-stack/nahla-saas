@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Bot, Link2, Search, Filter, Download, Store, MessageCircle, ShoppingBag } from 'lucide-react'
+import { AlertTriangle, Bot, Crown, Link2, Search, Filter, Download, Store, MessageCircle, ShoppingBag } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { ShoppingCart, Clock, CheckCircle, MessageSquare } from 'lucide-react'
-import { featureRealityApi, type DashboardOrder, type OrderSourceKey, type OrdersDashboard } from '../api/featureReality'
+import { featureRealityApi, type DashboardOrder, type NeedsActionLevel, type OrderSourceKey, type OrdersDashboard } from '../api/featureReality'
 
 type OrderStatus = 'paid' | 'pending' | 'failed' | 'cancelled'
 
@@ -18,19 +18,28 @@ const emptyData: OrdersDashboard = {
     completed_today: 0,
     whatsapp_orders_today: 0,
     whatsapp_revenue_today: 0,
+    orders_needing_action: 0,
   },
   orders: [],
 }
 
 const TABS = [
-  { key: 'all',        label: 'الكل' },
-  { key: 'store',      label: 'من المتجر' },
-  { key: 'whatsapp',   label: 'من واتساب' },
-  { key: 'pending',    label: 'بانتظار الدفع' },
-  { key: 'paid',       label: 'مدفوع' },
-  { key: 'cancelled',  label: 'ملغي' },
+  { key: 'all',          label: 'الكل' },
+  { key: 'needs_action', label: 'يحتاج متابعة' },
+  { key: 'store',        label: 'من المتجر' },
+  { key: 'whatsapp',     label: 'من واتساب' },
+  { key: 'pending',      label: 'بانتظار الدفع' },
+  { key: 'paid',         label: 'مدفوع' },
+  { key: 'cancelled',    label: 'ملغي' },
 ] as const
 type TabKey = typeof TABS[number]['key']
+
+const NEEDS_ACTION_CHIP: Record<NeedsActionLevel, string> = {
+  amber:  'bg-amber-50  text-amber-700  border-amber-200',
+  red:    'bg-red-50    text-red-700    border-red-200',
+  blue:   'bg-blue-50   text-blue-700   border-blue-200',
+  purple: 'bg-purple-50 text-purple-700 border-purple-200',
+}
 
 const statusVariant = (s: OrderStatus) =>
   s === 'paid' ? 'green' : s === 'pending' ? 'amber' : s === 'failed' ? 'red' : 'slate'
@@ -89,11 +98,12 @@ export default function Orders() {
   }, [])
 
   const filtered = data.orders.filter((o: DashboardOrder) => {
-    if (tab === 'whatsapp'  && o.source !== 'whatsapp')                  return false
-    if (tab === 'store'     && (o.source === 'whatsapp' || o.source === 'manual')) return false
-    if (tab === 'pending'   && o.status !== 'pending')                   return false
-    if (tab === 'paid'      && o.status !== 'paid')                      return false
-    if (tab === 'cancelled' && o.status !== 'cancelled')                 return false
+    if (tab === 'needs_action' && (o.needs_action?.length ?? 0) === 0)      return false
+    if (tab === 'whatsapp'     && o.source !== 'whatsapp')                  return false
+    if (tab === 'store'        && (o.source === 'whatsapp' || o.source === 'manual')) return false
+    if (tab === 'pending'      && o.status !== 'pending')                   return false
+    if (tab === 'paid'         && o.status !== 'paid')                      return false
+    if (tab === 'cancelled'    && o.status !== 'cancelled')                 return false
     const needle = search.toLowerCase()
     if (needle) {
       const haystack = [
@@ -123,14 +133,14 @@ export default function Orders() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="إجمالي الطلبات"    value={String(data.summary.total_orders)}         icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
-        <StatCard label="بانتظار الدفع"     value={String(data.summary.pending_orders)}        icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
-        <StatCard label="مكتملة اليوم"      value={String(data.summary.completed_today)}        icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
-        <StatCard label="إيرادات اليوم"     value={`${data.summary.today_revenue_sar.toLocaleString('ar-SA')} ر.س`}   icon={ShoppingCart} iconColor="text-slate-600"   iconBg="bg-slate-50" />
+        <StatCard label="إجمالي الطلبات"      value={String(data.summary.total_orders)}                                    icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
+        <StatCard label="يحتاج متابعة الآن"   value={String(data.summary.orders_needing_action)}                            icon={AlertTriangle} iconColor="text-red-600"     iconBg="bg-red-50" />
+        <StatCard label="بانتظار الدفع"        value={String(data.summary.pending_orders)}                                  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+        <StatCard label="مكتملة اليوم"         value={String(data.summary.completed_today)}                                  icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
       </div>
 
       {/* Nahla-specific KPIs */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <StatCard
           label="طلبات من واتساب اليوم"
           value={String(data.summary.whatsapp_orders_today)}
@@ -144,6 +154,13 @@ export default function Orders() {
           icon={Bot}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
+        />
+        <StatCard
+          label="إيرادات اليوم"
+          value={`${data.summary.today_revenue_sar.toLocaleString('ar-SA')} ر.س`}
+          icon={ShoppingCart}
+          iconColor="text-slate-600"
+          iconBg="bg-slate-50"
         />
       </div>
 
@@ -205,22 +222,50 @@ export default function Orders() {
                 return (
                   <tr key={`${o.id}-${o.internal_id ?? ''}`} className="hover:bg-slate-50 transition-colors">
                     <td className="px-5 py-3.5 whitespace-nowrap">
-                      <Link
-                        to={detailHref}
-                        className="text-xs font-mono font-medium text-brand-600 hover:text-brand-700 hover:underline"
-                        dir="ltr"
-                      >
-                        {o.order_number || o.id}
-                      </Link>
-                      {o.is_ai_created && (
-                        <span className="ms-1 inline-flex items-center gap-0.5 text-[10px] text-brand-600">
-                          <Bot className="w-2.5 h-2.5" />
-                        </span>
+                      <div className="flex items-center gap-1.5">
+                        <Link
+                          to={detailHref}
+                          className="text-xs font-mono font-medium text-brand-600 hover:text-brand-700 hover:underline"
+                          dir="ltr"
+                        >
+                          {o.order_number || o.id}
+                        </Link>
+                        {o.is_ai_created && (
+                          <span className="inline-flex items-center text-brand-600" title="أنشأه الذكاء">
+                            <Bot className="w-3 h-3" />
+                          </span>
+                        )}
+                        {(o.needs_action?.length ?? 0) > 0 && (
+                          <span
+                            className="inline-flex items-center text-amber-600"
+                            title="يحتاج إجراء"
+                          >
+                            <AlertTriangle className="w-3 h-3" />
+                          </span>
+                        )}
+                      </div>
+                      {(o.needs_action?.length ?? 0) > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {(o.needs_action || []).slice(0, 2).map((a) => (
+                            <span
+                              key={a.key}
+                              className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-medium ${NEEDS_ACTION_CHIP[a.level]}`}
+                            >
+                              {a.label}
+                            </span>
+                          ))}
+                          {(o.needs_action?.length ?? 0) > 2 && (
+                            <span className="text-[10px] text-slate-400">+{(o.needs_action?.length ?? 0) - 2}</span>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-5 py-3.5">
                       <Link to={detailHref} className="block hover:underline">
-                        <p className="text-xs font-medium text-slate-900">{o.customer_name || o.customer || o.phone || '—'}</p>
+                        <p className="text-xs font-medium text-slate-900 inline-flex items-center gap-1">
+                          {o.customer_name || o.customer || o.phone || '—'}
+                          {o.is_vip && <Crown className="w-3 h-3 text-purple-500" aria-label="VIP" />}
+                        </p>
                         <p className="text-xs text-slate-400" dir="ltr">{o.phone}</p>
                       </Link>
                     </td>
