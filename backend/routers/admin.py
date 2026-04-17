@@ -912,6 +912,227 @@ async def get_tenant_users(
     }
 
 
+# ─── User ↔ Tenant binding management ─────────────────────────────────────────
+# These exist because the previous /auth/login behaviour invented tenant
+# assignments on the fly, leaving the platform with multiple users orphaned
+# from their real merchant tenant. See backend/routers/auth.py for the
+# refusal logic that now blocks unassigned logins.
+
+class _AssignTenantBody(BaseModel):
+    tenant_id: int = Field(..., gt=0)
+    move_existing_data: bool = Field(
+        False,
+        description=(
+            "If True and the user already has a tenant_id, also reassign "
+            "the user row only — does NOT migrate WA conn or messages. "
+            "Use the dedicated reassignment tools for data migration."
+        ),
+    )
+
+
+@router.get("/admin/users/lookup")
+async def admin_users_lookup(
+    email: Optional[str] = Query(None),
+    user_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Look up a user by email (case-insensitive) or numeric id and surface
+    their tenant binding plus the tenant's WhatsApp connection summary.
+    Used to diagnose "I see/don't see conversations" complaints.
+    """
+    if not email and not user_id:
+        raise HTTPException(status_code=400, detail="Provide email or user_id")
+
+    q = db.query(User)
+    if user_id:
+        q = q.filter(User.id == user_id)
+    elif email:
+        q = q.filter(func.lower(User.email) == email.strip().lower())
+
+    user = q.first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    tenant = (
+        db.query(Tenant).filter(Tenant.id == user.tenant_id).first()
+        if user.tenant_id else None
+    )
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == user.tenant_id)
+        .first()
+        if user.tenant_id else None
+    )
+
+    return {
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "is_active": bool(user.is_active),
+            "tenant_id": user.tenant_id,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        },
+        "tenant": (
+            {
+                "id": tenant.id,
+                "name": tenant.name,
+                "is_platform_tenant": bool(getattr(tenant, "is_platform_tenant", False)),
+                "is_active": bool(tenant.is_active),
+            } if tenant else None
+        ),
+        "whatsapp_connection": (
+            {
+                "status": wa_conn.status,
+                "phone_number_id": wa_conn.phone_number_id,
+                "phone_number": wa_conn.phone_number,
+                "business_display_name": wa_conn.business_display_name,
+                "webhook_verified": bool(wa_conn.webhook_verified),
+                "sending_enabled": bool(wa_conn.sending_enabled),
+            } if wa_conn else None
+        ),
+    }
+
+
+@router.post("/admin/users/{user_id}/assign-tenant")
+async def admin_users_assign_tenant(
+    user_id: int,
+    body: _AssignTenantBody,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Bind a user account to a specific tenant. Idempotent: setting the same
+    tenant is a no-op. Refuses to silently overwrite an existing different
+    binding unless `move_existing_data=true` (a brake against accidental
+    cross-tenant moves).
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    tenant = db.query(Tenant).filter(Tenant.id == body.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    previous = user.tenant_id
+    if previous == body.tenant_id:
+        return {"status": "noop", "user_id": user_id, "tenant_id": body.tenant_id}
+
+    if previous and not body.move_existing_data:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"User already bound to tenant_id={previous}. "
+                "Pass move_existing_data=true to acknowledge and overwrite."
+            ),
+        )
+
+    user.tenant_id = body.tenant_id
+    db.add(user)
+    db.commit()
+
+    audit(
+        "admin.user.assign_tenant",
+        sub=user.email,
+        from_tenant=previous,
+        to_tenant=body.tenant_id,
+    )
+    logger.warning(
+        "[admin] assign-tenant user_id=%s email=%s from=%s to=%s",
+        user_id, user.email, previous, body.tenant_id,
+    )
+    return {
+        "status": "assigned",
+        "user_id": user_id,
+        "email": user.email,
+        "previous_tenant_id": previous,
+        "tenant_id": body.tenant_id,
+    }
+
+
+# ─── WhatsApp permanent token injection ───────────────────────────────────────
+# Lets the operator paste a System User permanent token into a tenant's
+# WhatsAppConnection so we stop relying on the 60-day OAuth user token that
+# embedded signup persists by default.
+
+class _SetWaTokenBody(BaseModel):
+    access_token: str = Field(..., min_length=20)
+    token_type: str = Field("permanent_system_user", max_length=64)
+    note: Optional[str] = Field(None, max_length=500)
+
+
+@router.post("/admin/whatsapp/{tenant_id}/set-token")
+async def admin_whatsapp_set_token(
+    tenant_id: int,
+    body: _SetWaTokenBody,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Replace the stored Meta access_token for a tenant with an explicitly
+    provided one (typically a System User permanent token from Business
+    Manager → System Users → Generate New Token, scoped to whatsapp_business_*
+    permissions on the WABA).
+
+    Side effects:
+      - Sets `token_type` to the provided value (default 'permanent_system_user')
+      - Sets `token_expires_at = NULL` (permanent tokens don't expire)
+      - Clears any `oauth_session_status=invalid` / `needs_reauth` flags in
+        extra_metadata so the dashboard banner disappears.
+      - Audited.
+    """
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == tenant_id)
+        .first()
+    )
+    if not wa_conn:
+        raise HTTPException(status_code=404, detail="No WhatsAppConnection for tenant")
+
+    old_tail = (wa_conn.access_token or "")[-6:] if wa_conn.access_token else None
+    wa_conn.access_token = body.access_token.strip()
+    wa_conn.token_type = body.token_type
+    wa_conn.token_expires_at = None
+
+    meta = dict(wa_conn.extra_metadata or {})
+    meta["token_status"] = "permanent"
+    meta["token_health"] = "healthy"
+    meta["active_graph_token_source"] = "permanent_system_user"
+    if body.note:
+        meta["last_token_set_note"] = body.note
+    meta["last_token_set_at"] = datetime.now(timezone.utc).isoformat()
+    if meta.get("oauth_session_status") in {"expired", "invalid", "missing"}:
+        meta["oauth_session_status"] = "replaced_with_permanent"
+    meta["oauth_session_needs_reauth"] = False
+    wa_conn.extra_metadata = meta
+    flag_modified(wa_conn, "extra_metadata")
+
+    db.add(wa_conn)
+    db.commit()
+
+    audit(
+        "admin.whatsapp.set_token",
+        tenant_id=tenant_id,
+        from_token_tail=old_tail,
+        to_token_tail=body.access_token[-6:],
+        token_type=body.token_type,
+    )
+    logger.warning(
+        "[admin] WhatsApp token replaced tenant_id=%s old_tail=%s new_tail=%s type=%s",
+        tenant_id, old_tail, body.access_token[-6:], body.token_type,
+    )
+    return {
+        "status": "ok",
+        "tenant_id": tenant_id,
+        "token_type": body.token_type,
+        "token_tail": body.access_token[-6:],
+        "previous_token_tail": old_tail,
+    }
+
+
 @router.get("/admin/billing/overview")
 async def admin_billing_overview(
     db: Session = Depends(get_db),

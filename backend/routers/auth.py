@@ -113,46 +113,34 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
             if verify_password(body.password, user.password_hash):
                 role = user.role or "merchant"
 
-                # Use the tenant already assigned to this user — never cross-assign tenants
+                # Use the tenant already assigned to this user. We REFUSE to
+                # invent or "snap" a tenant on the fly here — the previous
+                # behaviour silently linked any user with `tenant_id=NULL` to
+                # whichever tenant happened to own a WhatsAppConnection (which
+                # ended up being tenant=1 in production), causing the
+                # "conversations sometimes appear, sometimes vanish"
+                # symptom because the same physical owner had multiple
+                # accounts each landing on a different tenant after the
+                # first login. Tenant assignment is a deliberate operation,
+                # not a side-effect of `/auth/login`.
                 tenant_id = user.tenant_id
 
                 if not tenant_id:
-                    from models import WhatsAppConnection, Integration  # noqa: PLC0415
-                    recovered = None
-
-                    # 1. Look for an existing tenant assigned to this user by email match
-                    recovered = db.query(Tenant).filter(Tenant.name == email).first()
-
-                    # 2. If not found, check if there's a WhatsAppConnection under tenant_id=1
-                    #    (data stored before tenant_id was required falls back to 1)
-                    if not recovered:
-                        wa = db.query(WhatsAppConnection).filter(
-                            WhatsAppConnection.tenant_id == 1,
-                        ).first()
-                        if wa:
-                            recovered = db.query(Tenant).filter(Tenant.id == 1).first()
-
-                    # 3. Check Integration table under tenant_id=1
-                    if not recovered:
-                        integ = db.query(Integration).filter(
-                            Integration.tenant_id == 1,
-                        ).first()
-                        if integ:
-                            recovered = db.query(Tenant).filter(Tenant.id == 1).first()
-
-                    # 4. Still nothing — create a fresh tenant for this user
-                    if not recovered:
-                        slug_base = email.split("@")[0].replace(".", "-")[:40]
-                        recovered = Tenant(name=email, slug=slug_base)
-                        db.add(recovered)
-                        db.flush()
-
-                    tenant_id = recovered.id
-                    user.tenant_id = tenant_id
-                    db.commit()
+                    audit(
+                        "login_blocked_unassigned_tenant",
+                        sub=user.email, role=role, ip=client_ip,
+                    )
                     logger.warning(
-                        "[auth/login] AUTO-ASSIGNED tenant_id=%s to user=%s (was null)",
-                        tenant_id, email,
+                        "[auth/login] BLOCKED — user=%s has no tenant_id; "
+                        "use POST /admin/users/{user_id}/assign-tenant first.",
+                        email,
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "حسابك غير مربوط بأي متجر. الرجاء التواصل مع "
+                            "الدعم لربط حسابك بالمتجر الصحيح."
+                        ),
                     )
 
                 token = create_token(
