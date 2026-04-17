@@ -122,6 +122,8 @@ export interface OrdersDashboard {
   orders: DashboardOrder[]
 }
 
+export type CouponOrigin = 'manual' | 'automation' | 'promotion' | 'vip' | 'widget'
+
 export interface DashboardCoupon {
   id: string
   code: string
@@ -130,14 +132,42 @@ export interface DashboardCoupon {
   usages: number
   limit: number
   expires: string
+  /** Legacy field kept for backward compat. Prefer `origin`. */
   category: 'standard' | 'vip' | 'auto'
+  /** What generated this code — drives the "🤖 AI" vs "✋ Manual" badge. */
+  origin?: CouponOrigin
+  /** When `origin === 'automation'` — which automation slug created it. */
+  automation_type?: string | null
+  /** When `origin === 'promotion'` — which promotion materialised it. */
+  promotion_id?: number | null
   active: boolean
 }
 
+export interface CouponRule {
+  id:               string
+  label:            string
+  enabled:          boolean
+  description?:     string | null
+  /** 'percentage' or 'fixed'. */
+  discount_type?:   'percentage' | 'fixed'
+  discount_value?:  number
+  /** How many days the auto-generated coupon stays valid. */
+  validity_days?:   number
+  /** Minimum cart subtotal that triggers the rule. */
+  min_order_amount?: number | null
+  /** How many times each generated coupon can be redeemed (null = unlimited). */
+  max_uses?:        number | null
+}
+
 export interface CouponsDashboard {
-  rules: Array<{ id: string; label: string; enabled: boolean }>
+  rules: CouponRule[]
   vip_tiers: Array<{ tier: string; threshold: string; discount: string }>
   coupons: DashboardCoupon[]
+}
+
+export interface CouponDashboardSettings {
+  rules: CouponRule[]
+  vip_tiers: Array<{ tier: string; threshold: string; discount: string }>
 }
 
 export interface DashboardConversation {
@@ -157,11 +187,6 @@ export interface DashboardMessage {
   body: string
   time: string
   isAI?: boolean
-}
-
-export interface CouponDashboardSettings {
-  rules: Array<{ id: string; label: string; enabled: boolean }>
-  vip_tiers: Array<{ tier: string; threshold: string; discount: string }>
 }
 
 export const featureRealityApi = {

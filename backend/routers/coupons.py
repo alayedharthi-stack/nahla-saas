@@ -17,17 +17,101 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from core.database import get_db
 from core.tenant import DEFAULT_AI, get_or_create_settings, get_or_create_tenant, merge_defaults, resolve_tenant_id
-from models import Coupon, CustomerProfile
+from models import Coupon
 
 router = APIRouter(prefix="/coupons", tags=["Coupons"])
 
-DEFAULT_COUPON_RULES = [
-    {"id": "r1", "label": "إرسال كوبون تلقائي بعد ترك العربة (أكثر من 30 دقيقة)", "enabled": True},
-    {"id": "r2", "label": "كوبون VIP للعملاء الذين لديهم أكثر من 5 طلبات", "enabled": True},
-    {"id": "r3", "label": "خصم عيد الميلاد (10% في يوم ميلاد العميل)", "enabled": False},
-    {"id": "r4", "label": "خصم التجميع — اشتر 3 واحصل على خصم 10%", "enabled": True},
-    {"id": "r5", "label": "خصم أول شراء — 15% على أول طلب", "enabled": False},
+DEFAULT_COUPON_RULES: List[Dict[str, Any]] = [
+    {
+        "id":               "abandoned_cart",
+        "label":            "كوبون استرجاع السلة المتروكة",
+        "description":      "يُولِّد الطيار الآلي كوداً للعميل الذي ترك السلة لأكثر من 30 دقيقة",
+        "enabled":          True,
+        "discount_type":    "percentage",
+        "discount_value":   10,
+        "validity_days":    1,
+        "min_order_amount": 0,
+        "max_uses":         1,
+    },
+    {
+        "id":               "vip_customers",
+        "label":            "مكافأة العملاء VIP",
+        "description":      "كود حصري للعملاء الذين أنفقوا فوق حد VIP أو أكملوا 5 طلبات",
+        "enabled":          True,
+        "discount_type":    "percentage",
+        "discount_value":   20,
+        "validity_days":    7,
+        "min_order_amount": 0,
+        "max_uses":         1,
+    },
+    {
+        "id":               "customer_winback",
+        "label":            "استرجاع العملاء الخاملين",
+        "description":      "يُرسل عرضاً للعملاء الذين لم يشتروا منذ 60 يوماً أو أكثر",
+        "enabled":          True,
+        "discount_type":    "percentage",
+        "discount_value":   25,
+        "validity_days":    3,
+        "min_order_amount": 0,
+        "max_uses":         1,
+    },
+    {
+        "id":               "birthday",
+        "label":            "هدية يوم الميلاد",
+        "description":      "كود تلقائي يوم ميلاد العميل (إن توفّر تاريخ الميلاد)",
+        "enabled":          False,
+        "discount_type":    "percentage",
+        "discount_value":   10,
+        "validity_days":    7,
+        "min_order_amount": 0,
+        "max_uses":         1,
+    },
+    {
+        "id":               "repeat_purchase",
+        "label":            "تحفيز الشراء المتكرر",
+        "description":      "كود يُرسل بعد أول طلب لتشجيع الطلب الثاني خلال أيام قليلة",
+        "enabled":          True,
+        "discount_type":    "percentage",
+        "discount_value":   10,
+        "validity_days":    5,
+        "min_order_amount": 0,
+        "max_uses":         1,
+    },
+    {
+        "id":               "first_purchase",
+        "label":            "خصم أول شراء",
+        "description":      "ترحيب بالعملاء الجدد بكود لأول طلب",
+        "enabled":          False,
+        "discount_type":    "percentage",
+        "discount_value":   15,
+        "validity_days":    1,
+        "min_order_amount": 0,
+        "max_uses":         1,
+    },
 ]
+
+# Legacy rule ids (`r1`..`r5`) → semantic ids. When we read settings stored
+# by older builds we silently rewrite them so the new editable form binds
+# to the right defaults.
+_LEGACY_RULE_ID_MAP = {
+    "r1": "abandoned_cart",
+    "r2": "vip_customers",
+    "r3": "birthday",
+    "r4": "repeat_purchase",
+    "r5": "first_purchase",
+}
+
+# Slug → rule id used by the automation engine when picking which rule's
+# discount/validity overrides apply to a given automation. Public so the
+# automation engine can import it without duplicating the map.
+AUTOMATION_TO_RULE_ID: Dict[str, str] = {
+    "abandoned_cart":         "abandoned_cart",
+    "customer_winback":       "customer_winback",
+    "vip_upgrade":            "vip_customers",
+    "predictive_reorder":     "repeat_purchase",
+    "back_in_stock":          "first_purchase",
+}
+
 
 DEFAULT_VIP_TIERS = [
     {"tier": "فضي", "threshold": "+3 طلبات", "discount": "10%"},
@@ -40,6 +124,14 @@ class CouponRuleIn(BaseModel):
     id: str
     label: str
     enabled: bool
+    description: Optional[str] = None
+    # Rich parameters — nullable so older payloads (only id/label/enabled)
+    # still validate. Validation is enforced in `_normalise_rule` below.
+    discount_type:    Optional[str]   = None
+    discount_value:   Optional[float] = None
+    validity_days:    Optional[int]   = None
+    min_order_amount: Optional[float] = None
+    max_uses:         Optional[int]   = None
 
 
 class VipTierIn(BaseModel):
@@ -75,13 +167,118 @@ class CouponDashboardSettingsIn(BaseModel):
     vip_tiers: List[VipTierIn]
 
 
+_ALLOWED_DISCOUNT_TYPES = {"percentage", "fixed"}
+
+
+def _normalise_rule(rule: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Bring a rule dict (from storage or from the wire) into the canonical
+    rich shape so the dashboard can always assume every field is present.
+
+    Handles three back-compat scenarios:
+      • Legacy id (`r1`..`r5`)  → mapped to semantic id.
+      • Legacy shape (only id/label/enabled) → defaults filled in from
+        the matching DEFAULT_COUPON_RULES entry, otherwise from a safe
+        baseline (10% / 1-day validity).
+      • Stale fields (string discount_value, etc.) → coerced.
+    """
+    raw_id = str(rule.get("id") or "").strip()
+    rid    = _LEGACY_RULE_ID_MAP.get(raw_id, raw_id) or "custom_rule"
+
+    default = next((r for r in DEFAULT_COUPON_RULES if r["id"] == rid), None)
+    base = dict(default) if default else {
+        "id":               rid,
+        "label":            rule.get("label") or rid,
+        "description":      "",
+        "enabled":          False,
+        "discount_type":    "percentage",
+        "discount_value":   10,
+        "validity_days":    1,
+        "min_order_amount": 0,
+        "max_uses":         1,
+    }
+    base["id"]          = rid
+    base["label"]       = str(rule.get("label") or base["label"])
+    base["description"] = str(rule.get("description") or base.get("description") or "")
+    base["enabled"]     = bool(rule.get("enabled", base["enabled"]))
+
+    dt = str(rule.get("discount_type") or base["discount_type"]).lower()
+    if dt not in _ALLOWED_DISCOUNT_TYPES:
+        dt = "percentage"
+    base["discount_type"] = dt
+
+    def _num(key: str, default_val: Any) -> float:
+        v = rule.get(key, base.get(key, default_val))
+        if v is None:
+            return float(default_val) if default_val is not None else 0.0
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return float(default_val) if default_val is not None else 0.0
+
+    base["discount_value"]   = round(_num("discount_value", 10), 2)
+    base["min_order_amount"] = round(_num("min_order_amount", 0), 2)
+    base["validity_days"]    = max(1, int(_num("validity_days", 1)))
+    max_uses_raw = rule.get("max_uses", base.get("max_uses"))
+    if max_uses_raw in (None, "", 0):
+        base["max_uses"] = None
+    else:
+        try:
+            base["max_uses"] = max(1, int(max_uses_raw))
+        except (ValueError, TypeError):
+            base["max_uses"] = 1
+
+    if dt == "percentage":
+        base["discount_value"] = max(0, min(100, base["discount_value"]))
+    return base
+
+
+def _normalise_rules(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: Dict[str, Dict[str, Any]] = {}
+    for r in rules or []:
+        normalised = _normalise_rule(r)
+        seen[normalised["id"]] = normalised
+    # Always guarantee the catalogue of default rules exists so the merchant
+    # never sees a half-empty list — they may have only configured one rule
+    # historically, but the others should still be visible (disabled).
+    for default in DEFAULT_COUPON_RULES:
+        if default["id"] not in seen:
+            seen[default["id"]] = dict(default)
+    return list(seen.values())
+
+
+def get_rule_for_automation(
+    settings,
+    automation_type: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Public helper used by the automation engine to fetch the merchant-set
+    overrides for a given automation. Returns None if the automation isn't
+    mapped to a rule, the rule isn't found, or the rule is disabled.
+    """
+    rule_id = AUTOMATION_TO_RULE_ID.get(str(automation_type or ""))
+    if not rule_id:
+        return None
+    meta = (settings.extra_metadata or {}) if settings is not None else {}
+    rules = (meta.get("coupons_dashboard") or {}).get("rules") or []
+    for r in rules:
+        if str(r.get("id") or "") == rule_id and bool(r.get("enabled", True)):
+            return _normalise_rule(r)
+    return None
+
+
 def _ensure_coupon_dashboard_config(settings) -> Dict[str, Any]:
     meta = dict(settings.extra_metadata or {})
     coupon_dash = dict(meta.get("coupons_dashboard") or {})
     changed = False
     if "rules" not in coupon_dash:
-        coupon_dash["rules"] = DEFAULT_COUPON_RULES
+        coupon_dash["rules"] = [dict(r) for r in DEFAULT_COUPON_RULES]
         changed = True
+    else:
+        normalised = _normalise_rules(coupon_dash["rules"])
+        if normalised != coupon_dash["rules"]:
+            coupon_dash["rules"] = normalised
+            changed = True
     if "vip_tiers" not in coupon_dash:
         coupon_dash["vip_tiers"] = DEFAULT_VIP_TIERS
         changed = True
@@ -119,7 +316,31 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
         if expires and getattr(expires, "tzinfo", None) is None:
             expires = expires.replace(tzinfo=timezone.utc)
         active = expires is None or expires > now
-        category = str(meta.get("category") or ("vip" if meta.get("vip") else ("auto" if meta.get("source") in {"automation", "widget"} else "standard")))
+
+        # Origin classification — what *generated* this code? Used by the
+        # dashboard to render the "🤖 Autopilot" vs "✋ Manual" badges so
+        # the merchant immediately understands which incentives the AI is
+        # running and which are one-off manual codes they entered.
+        meta_source = str(meta.get("source") or "").lower()
+        if meta_source == "promotion":
+            origin = "promotion"
+        elif meta_source == "automation":
+            origin = "automation"
+        elif meta_source == "widget":
+            origin = "widget"
+        elif meta.get("vip") or str(meta.get("category") or "").lower() == "vip":
+            origin = "vip"
+        elif meta.get("auto_generated") is True:
+            origin = "automation"
+        else:
+            origin = "manual"
+
+        # Legacy `category` field — kept for backward-compat with old
+        # frontend builds. New UI prefers `origin`.
+        category = str(meta.get("category") or (
+            "vip" if origin == "vip"
+            else ("auto" if origin in {"automation", "promotion", "widget"} else "standard")
+        ))
         active_override = meta.get("active")
         if isinstance(active_override, bool):
             active = active_override
@@ -133,23 +354,18 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
             "limit": int(meta.get("usage_limit", 0) or 0),
             "expires": expires.isoformat() if expires else "",
             "category": category,
+            "origin": origin,
+            "automation_type": meta.get("automation_type") or None,
+            "promotion_id":    meta.get("promotion_id") or None,
             "active": active,
         })
 
-    vip_count = db.query(CustomerProfile).filter(
-        CustomerProfile.tenant_id == tenant_id,
-        CustomerProfile.customer_status == "vip",
-    ).count()
-
-    rules = list(coupon_dash.get("rules") or DEFAULT_COUPON_RULES)
-    if rules:
-        for rule in rules:
-            if rule["id"] == "vip_customers":
-                rule["enabled"] = vip_count > 0
-            elif rule["id"] == "active_coupons":
-                rule["enabled"] = any(c["active"] for c in coupons)
-            elif rule["id"] == "coupon_rules":
-                rule["enabled"] = bool((ai_settings.get("coupon_rules") or "").strip()) or bool(rule.get("enabled"))
+    # The merchant's manual on/off is now the source of truth. The previous
+    # behaviour silently flipped `enabled` based on system state (vip_count,
+    # active coupons, …), which fought the merchant's edits — now that rules
+    # are fully editable from the dashboard we respect the stored value as-is.
+    rules = _normalise_rules(list(coupon_dash.get("rules") or DEFAULT_COUPON_RULES))
+    _ = ai_settings  # kept for future merchant-instruction integration
 
     return {
         "rules": rules,
@@ -169,7 +385,7 @@ async def save_coupon_dashboard_settings(
     settings = get_or_create_settings(db, tenant_id)
     meta = dict(settings.extra_metadata or {})
     meta["coupons_dashboard"] = {
-        "rules": [r.dict() for r in body.rules],
+        "rules": _normalise_rules([r.dict() for r in body.rules]),
         "vip_tiers": [t.dict() for t in body.vip_tiers],
     }
     settings.extra_metadata = meta

@@ -638,8 +638,12 @@ async def _execute_action(
     # it into the named-slot resolver below as `discount_code` / `vip_coupon`.
     # Any failure here is non-fatal — we log a structured event and let the
     # template render with an empty coupon slot rather than block the send.
+    # Pass the automation_type alongside config so the rule lookup can
+    # find the matching merchant-edited rule from the Coupons page.
+    _config_with_type = dict(config or {})
+    _config_with_type.setdefault("automation_type", getattr(automation, "automation_type", None))
     coupon_extras = await _resolve_auto_coupon(
-        db, tenant_id=tenant_id, customer=customer, config=config,
+        db, tenant_id=tenant_id, customer=customer, config=_config_with_type,
         active_step=_active_step_for_event(event, config),
     )
 
@@ -977,13 +981,40 @@ async def _resolve_auto_coupon(
         or "active"
     )
 
+    # Honour the merchant-edited rule (discount value + validity window) from
+    # the new editable Coupons page when an automation_type maps to a rule.
+    rule_override_discount: Optional[int] = None
+    rule_override_validity: Optional[int] = None
+    automation_type = str(config.get("automation_type") or "") or str(active_step.get("automation_type") or "")
+    if automation_type:
+        try:
+            from core.tenant import get_or_create_settings  # noqa: PLC0415
+            from routers.coupons import get_rule_for_automation  # noqa: PLC0415
+
+            ts = get_or_create_settings(db, tenant_id)
+            rule = get_rule_for_automation(ts, automation_type)
+            if rule:
+                if rule.get("discount_type") == "percentage":
+                    raw_pct = rule.get("discount_value")
+                    if raw_pct is not None:
+                        rule_override_discount = int(round(float(raw_pct)))
+                vd = rule.get("validity_days")
+                if isinstance(vd, (int, float)) and int(vd) > 0:
+                    rule_override_validity = int(vd)
+        except Exception as _exc:  # pragma: no cover — defensive only
+            logger.debug("[AutoEngine] rule lookup skipped: %s", _exc)
+
     try:
         from services.coupon_generator import CouponGeneratorService  # noqa: PLC0415
 
         svc = CouponGeneratorService(db, tenant_id)
         coupon = svc.pick_coupon_for_segment(segment)
         if coupon is None:
-            coupon = await svc.create_on_demand(segment)
+            coupon = await svc.create_on_demand(
+                segment,
+                requested_discount_pct=rule_override_discount,
+                validity_days_override=rule_override_validity,
+            )
     except Exception as exc:
         logger.warning(
             "[AutoEngine] auto_coupon resolution failed tenant=%s segment=%s: %s",

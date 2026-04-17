@@ -518,9 +518,25 @@ function AITab({
             <textarea className="input min-h-[100px] resize-y" value={data.owner_instructions} onChange={e => onChange({ owner_instructions: e.target.value })} placeholder={t(tr => tr.settings.ai.storePolicyPh)} />
           </Field>
           <Field
-            label={t(tr => tr.meta.code === 'ar' ? 'قواعد تقديم الكوبونات' : 'Coupon Rules')}
-            hint={t(tr => tr.meta.code === 'ar' ? 'متى تعرض نحلة خصماً على العميل' : 'When Nahlah should offer a discount')}
+            label={t(tr => tr.meta.code === 'ar' ? 'تعليمات الذكاء حول الخصومات في المحادثة' : 'AI Discount Conversation Hints')}
+            hint={t(tr => tr.meta.code === 'ar' ? 'متى يقترح الذكاء خصماً للعميل أثناء المحادثة' : 'When the AI should mention a discount inside the chat')}
           >
+            <div className="rounded-lg border border-amber-200/70 bg-amber-50/60 px-3 py-2.5 mb-2">
+              <p className="text-[11px] text-amber-900 leading-relaxed">
+                {t(tr => tr.meta.code === 'ar'
+                  ? 'هذا الحقل خاص فقط بنبرة الحديث داخل المحادثة. أما إدارة قواعد توليد الكوبونات الفعلية (نسبة الخصم، الصلاحية، الشروط)، فهي في صفحة'
+                  : 'This field controls only the chat tone. Actual coupon generation rules (discount value, validity, conditions) live on'
+                )}{' '}
+                <a href="/coupons" className="text-amber-900 underline font-semibold">
+                  {t(tr => tr.meta.code === 'ar' ? 'الكوبونات' : 'Coupons')}
+                </a>
+                {' '}—{' '}
+                {t(tr => tr.meta.code === 'ar' ? 'وقواعد العروض التلقائية في' : 'and automatic promotion rules on')}{' '}
+                <a href="/promotions" className="text-amber-900 underline font-semibold">
+                  {t(tr => tr.meta.code === 'ar' ? 'العروض' : 'Promotions')}
+                </a>.
+              </p>
+            </div>
             <textarea className="input min-h-[80px] resize-y" value={data.coupon_rules} onChange={e => onChange({ coupon_rules: e.target.value })} />
           </Field>
           <Field

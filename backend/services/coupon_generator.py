@@ -525,8 +525,15 @@ class CouponGeneratorService:
         self,
         segment: str,
         requested_discount_pct: Optional[int] = None,
+        *,
+        validity_days_override: Optional[int] = None,
     ) -> Optional[Coupon]:
-        """Create a single coupon on-demand when the pool is empty."""
+        """Create a single coupon on-demand when the pool is empty.
+
+        ``validity_days_override`` lets callers (typically the automation
+        engine forwarding a merchant-edited rule from /coupons) override the
+        default expiry without changing the segment's catalogue defaults.
+        """
         canonical_segment = _canonical_segment(segment)
         limits = _get_merchant_limits(self.db, self.tenant_id)
         defaults = SEGMENT_DEFAULTS.get(canonical_segment, SEGMENT_DEFAULTS["active"])
@@ -535,6 +542,8 @@ class CouponGeneratorService:
             base_discount = requested_discount_pct
         discount = _clamp(base_discount, limits["min_discount"], limits["max_discount"])
         expiry_days = defaults["expiry_days"]
+        if isinstance(validity_days_override, int) and validity_days_override > 0:
+            expiry_days = validity_days_override
 
         reserved_codes = self._reserved_codes()
         adapter = self._get_adapter()

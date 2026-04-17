@@ -12,9 +12,12 @@ import {
   Truck,
   Target,
   Coins,
+  Bot,
   X,
 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
+import AiBanner from '../components/ui/AiBanner'
 import PageHeader from '../components/ui/PageHeader'
 import {
   promotionsApi,
@@ -25,6 +28,12 @@ import {
   type PromotionType,
   type PromotionsSummary,
 } from '../api/promotions'
+import {
+  automationsApi,
+  AUTOMATION_META,
+  type AutomationRecord,
+  type EngineKey,
+} from '../api/automations'
 
 // ── Display helpers ───────────────────────────────────────────────────────────
 
@@ -331,11 +340,58 @@ function CreatePromotionModal({ open, onClose, onCreated }: CreateModalProps) {
   )
 }
 
+// ── Engine display ───────────────────────────────────────────────────────────
+//
+// Maps each Autopilot engine to a colour + label. Used by the
+// "تستخدم في …" badge so the merchant sees which engine of the
+// brain is consuming this promotion.
+
+const ENGINE_META: Record<EngineKey, { label: string; variant: 'green' | 'blue' | 'purple' | 'amber' }> = {
+  recovery:     { label: 'محرك الاسترجاع', variant: 'green'  },
+  growth:       { label: 'محرك النمو',     variant: 'blue'   },
+  experience:   { label: 'محرك التجربة',   variant: 'purple' },
+  intelligence: { label: 'محرك الذكاء',    variant: 'amber'  },
+}
+
+interface PromotionUsage {
+  automation_id:   number
+  automation_type: string
+  automation_name: string
+  engine:          EngineKey
+  enabled:         boolean
+}
+
+/**
+ * Walk every automation and return the ones whose `config.promotion_id`
+ * (top-level or per-step) matches the given promotion. The merchant
+ * sees this on each card as "يُستخدم في حملة X (محرك Y)".
+ */
+function usagesForPromotion(promotionId: number, automations: AutomationRecord[]): PromotionUsage[] {
+  const out: PromotionUsage[] = []
+  for (const a of automations) {
+    const cfg = (a.config || {}) as Record<string, unknown>
+    const direct = cfg.promotion_id === promotionId
+    const steps  = Array.isArray(cfg.steps) ? (cfg.steps as Array<Record<string, unknown>>) : []
+    const stepHit = steps.some(s => s.promotion_id === promotionId)
+    if (direct || stepHit) {
+      out.push({
+        automation_id:   a.id,
+        automation_type: a.automation_type,
+        automation_name: a.name || AUTOMATION_META[a.automation_type]?.label || a.automation_type,
+        engine:          a.engine,
+        enabled:         a.enabled,
+      })
+    }
+  }
+  return out
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Promotions() {
   const [promotions, setPromotions] = useState<Promotion[]>([])
   const [summary, setSummary] = useState<PromotionsSummary | null>(null)
+  const [automations, setAutomations] = useState<AutomationRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<typeof STATUS_FILTERS[number]['key']>('all')
@@ -345,12 +401,14 @@ export default function Promotions() {
     setLoading(true)
     setError(null)
     try {
-      const [list, sum] = await Promise.all([
+      const [list, sum, autos] = await Promise.all([
         promotionsApi.list(),
         promotionsApi.summary(),
+        automationsApi.list().catch(() => ({ automations: [], autopilot_enabled: false })),
       ])
       setPromotions(list.promotions)
       setSummary(sum)
+      setAutomations(autos.automations || [])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تعذّر تحميل العروض')
     } finally {
@@ -396,13 +454,25 @@ export default function Promotions() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="العروض"
-        subtitle="قواعد خصم تلقائية بدون كود — تُولّد كوبوناً شخصياً للعميل عند تشغيل أتمتة أو حملة"
+        title="العروض الذكية"
+        subtitle="تعريفات الحوافز التي يستخدمها الطيار الآلي عند إطلاق الحملات — أنت تضع الإطار، نحلة تختار التوقيت والعميل"
         action={
           <button className="btn-primary text-sm" onClick={() => setCreateOpen(true)}>
             <Plus className="w-4 h-4" /> عرض جديد
           </button>
         }
+      />
+
+      {/* AI banner — sets the tone */}
+      <AiBanner
+        title="العروض هي وقود الطيار الآلي للحملات"
+        body="عرّف العرض هنا (نوع، نسبة، شروط، نافذة زمنية)، ثم اربطه بأتمتة في الطيار الآلي. عند إطلاق الحملة، يولّد الطيار الآلي كوداً شخصياً (NHxxx) لكل عميل يحقّق الشروط ويرسله عبر واتساب."
+        bullets={[
+          'العرض = قاعدة، ليس كوداً فردياً',
+          'الطيار الآلي يختار التوقيت والعميل المناسب',
+          'كل تفعيل يُسجَّل ككود شخصي قابل للتتبع',
+          'يدعم: نسبة، مبلغ ثابت، شحن مجاني، اشترِ X واحصل على Y',
+        ]}
       />
 
       {/* KPI strip */}
@@ -456,6 +526,7 @@ export default function Promotions() {
             const status = PROMOTION_STATUS_META[promo.effective_status]
             const Icon = TYPE_ICON[promo.promotion_type]
             const conditions = describeConditions(promo)
+            const usages = usagesForPromotion(promo.id, automations)
             return (
               <div key={promo.id} className="card p-4 flex flex-col">
                 <div className="flex items-start justify-between gap-2 mb-2">
@@ -487,6 +558,42 @@ export default function Promotions() {
                   {promo.starts_at && (<span>من {formatDate(promo.starts_at)}</span>)}
                   {promo.ends_at && (<span>حتى {formatDate(promo.ends_at)}</span>)}
                 </div>
+
+                {/* "Used by" — connects this promotion to the Autopilot brain */}
+                {usages.length > 0 ? (
+                  <div className="rounded-lg bg-amber-50/60 border border-amber-200/70 px-2.5 py-2 mb-3">
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <Bot className="w-3 h-3 text-amber-600" />
+                      <span className="text-[10px] font-semibold text-amber-800 uppercase tracking-wide">
+                        يستخدمه الطيار الآلي
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {usages.map(u => {
+                        const em = ENGINE_META[u.engine]
+                        return (
+                          <Link
+                            key={u.automation_id}
+                            to="/smart-automations"
+                            title={`فتح الأتمتة في الطيار الآلي${u.enabled ? '' : ' (متوقفة)'}`}
+                            className="inline-flex items-center gap-1 hover:opacity-80"
+                          >
+                            <Badge label={`${u.automation_name} · ${em.label}`} variant={em.variant} />
+                          </Link>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-lg bg-slate-50 border border-slate-200/60 px-2.5 py-2 mb-3">
+                    <p className="text-[11px] text-slate-500">
+                      <span className="font-semibold">غير مرتبط بأي حملة بعد.</span>{' '}
+                      اربطه من{' '}
+                      <Link to="/smart-automations" className="text-brand-600 hover:underline">الطيار الآلي</Link>
+                      {' '}ليبدأ توليد الأكواد تلقائياً.
+                    </p>
+                  </div>
+                )}
 
                 <div className="flex items-center justify-between mt-auto pt-3 border-t border-slate-100">
                   <span className="text-[11px] text-slate-500">
