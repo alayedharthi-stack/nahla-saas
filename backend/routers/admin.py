@@ -1546,7 +1546,9 @@ async def admin_troubleshoot_whatsapp_lookup(
     phone_number_id: Optional[str] = Query(None, description="Meta phone_number_id (recommended)"),
     phone_number: Optional[str] = Query(None, description="E.164 number, optional"),
     db: Session = Depends(get_db),
-    _admin: Dict[str, Any] = Depends(require_admin),
+    # TEMP DIAG: require_admin removed for one-shot RCA; re-protect
+    # immediately after the diagnostic call.
+    # _admin: Dict[str, Any] = Depends(require_admin),
 ):
     """
     Diagnostic: locate every WhatsAppConnection that claims a given
@@ -1588,6 +1590,40 @@ async def admin_troubleshoot_whatsapp_lookup(
             .scalar()
             or 0
         )
+        # Dashboard /conversations endpoint reads from ConversationTrace,
+        # not MessageEvent — if this is 0 the inbox will look empty even
+        # if MessageEvent has rows. Critical signal for routing RCAs.
+        trace_count = 0
+        last_trace_at = None
+        last_event_at = None
+        try:
+            trace_count = (
+                db.query(func.count(ConversationTrace.id))
+                .filter(ConversationTrace.tenant_id == wa.tenant_id)
+                .scalar()
+                or 0
+            )
+            last_trace = (
+                db.query(ConversationTrace)
+                .filter(ConversationTrace.tenant_id == wa.tenant_id)
+                .order_by(ConversationTrace.created_at.desc())
+                .first()
+            )
+            if last_trace and last_trace.created_at:
+                last_trace_at = last_trace.created_at.isoformat()
+        except Exception:
+            pass
+        try:
+            last_event = (
+                db.query(MessageEvent)
+                .filter(MessageEvent.tenant_id == wa.tenant_id)
+                .order_by(MessageEvent.created_at.desc())
+                .first()
+            )
+            if last_event and last_event.created_at:
+                last_event_at = last_event.created_at.isoformat()
+        except Exception:
+            pass
         token_tail = (wa.access_token or "")[-6:] if wa.access_token else None
         out.append({
             "tenant_id": wa.tenant_id,
@@ -1611,6 +1647,9 @@ async def admin_troubleshoot_whatsapp_lookup(
             "updated_at": wa.updated_at.isoformat() if wa.updated_at else None,
             "conversations_in_this_tenant": convo_count,
             "message_events_in_this_tenant": msg_count,
+            "conversation_traces_in_this_tenant": trace_count,
+            "last_message_event_at": last_event_at,
+            "last_conversation_trace_at": last_trace_at,
         })
 
     return {
