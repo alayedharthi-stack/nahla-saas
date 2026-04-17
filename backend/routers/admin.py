@@ -1470,17 +1470,11 @@ async def admin_troubleshoot_tenant(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# ⚠️  TEMP DIAGNOSTIC — `require_admin` intentionally removed for ONE
-# endpoint while we troubleshoot the WhatsApp connection of tenant=1.
-# RESTORE the dependency line below as soon as the JSON snapshot has
-# been captured. Tracked by user request on 2026-04-16.
-# ─────────────────────────────────────────────────────────────────────────
 @router.get("/admin/troubleshooting/tenants/{tenant_id}/whatsapp")
 async def admin_troubleshoot_whatsapp(
     tenant_id: int,
     db: Session = Depends(get_db),
-    # _admin: Dict[str, Any] = Depends(require_admin),  # TEMP — restore me
+    _admin: Dict[str, Any] = Depends(require_admin),
 ):
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:

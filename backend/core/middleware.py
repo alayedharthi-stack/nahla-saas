@@ -41,8 +41,6 @@ JWT_PUBLIC_PREFIXES = (
     "/merchant/widgets/",               # all widget JS/JSON endpoints
     "/salla-auto.js",                   # short alias (configured in Salla Partner Portal)
     "/static/salla-auto.js",            # legacy path (configured in Salla Partner Portal)
-    # ⚠️ TEMP DIAGNOSTIC — see backend/routers/admin.py header. RESTORE.
-    "/admin/troubleshooting/tenants/1/whatsapp",
 )
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
 
