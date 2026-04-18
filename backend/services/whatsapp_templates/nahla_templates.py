@@ -48,7 +48,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["recovery", "cart"],
         "smart_trigger":  "cart_abandoned",
         "smart_label":    "يُرسل تلقائياً: عند ترك السلة",
-        "slots":          ["customer_name", "store_name", "checkout_url"],
+        "slots":          ["customer_name", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -57,13 +57,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "لاحظنا أنك أضفت منتجات إلى سلتك في متجر {{2}} لكن لم تكمل الطلب بعد.\n\n"
                     "سلتك محفوظة وتنتظرك — أكمل طلبك الآن قبل نفاد المخزون!"
                 ),
-                "example": {"body_text": [["أحمد", "متجر الأناقة", "https://example.com/cart"]]},
+                "example": {"body_text": [["أحمد", "متجر الأناقة"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "أكمل طلبك 🛒", "url": "{{3}}"},
+                    {
+                        "type": "URL", "text": "أكمل طلبك 🛒",
+                        "url": "https://example.com/cart/{{1}}",
+                        "example": ["https://example.com/cart/abc123"],
+                    },
                 ],
             },
         ],
@@ -80,7 +84,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["recovery", "cart"],
         "smart_trigger":  "cart_abandoned",
         "smart_label":    "يُرسل تلقائياً: متابعة السلة المتروكة",
-        "slots":          ["customer_name", "store_name", "checkout_url"],
+        "slots":          ["customer_name", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -90,13 +94,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "إذا واجهتَ أي صعوبة في الدفع أو الشحن، ردّ على هذه الرسالة وسنساعدك فوراً.\n\n"
                     "أو أكمل طلبك مباشرةً من هنا:"
                 ),
-                "example": {"body_text": [["سارة", "متجر الجمال", "https://example.com/cart"]]},
+                "example": {"body_text": [["سارة", "متجر الجمال"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "إتمام الطلب", "url": "{{3}}"},
+                    {
+                        "type": "URL", "text": "إتمام الطلب",
+                        "url": "https://example.com/cart/{{1}}",
+                        "example": ["https://example.com/cart/abc123"],
+                    },
                 ],
             },
         ],
@@ -113,7 +121,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["recovery", "discounts"],
         "smart_trigger":  "customer_inactive",
         "smart_label":    "يُرسل تلقائياً: العميل غير نشط 30 يوم",
-        "slots":          ["customer_name", "store_name", "discount_code", "store_url"],
+        "slots":          ["customer_name", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -122,14 +130,18 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "مضى وقت منذ آخر زيارة لمتجر {{2}}!\n\n"
                     "جهّزنا لك كود خصم حصري للعودة — انسخه بلمسة واحدة:"
                 ),
-                "example": {"body_text": [["خالد", "متجر التقنية", "BACK20", "https://example.com"]]},
+                "example": {"body_text": [["خالد", "متجر التقنية"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
                     {"type": "COPY_CODE", "example": ["BACK20"]},
-                    {"type": "URL", "text": "تسوق الآن 🛍️", "url": "{{4}}"},
+                    {
+                        "type": "URL", "text": "تسوق الآن 🛍️",
+                        "url": "https://example.com/",
+                        "example": ["https://example.com/"],
+                    },
                 ],
             },
         ],
@@ -146,7 +158,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["orders"],
         "smart_trigger":  "order_confirmed",
         "smart_label":    "يُرسل تلقائياً: عند تأكيد الطلب",
-        "slots":          ["customer_name", "order_id", "store_name", "tracking_url"],
+        "slots":          ["customer_name", "order_id", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -155,13 +167,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "طلبك رقم #{{2}} من متجر {{3}} تم استلامه بنجاح وهو الآن قيد المعالجة.\n\n"
                     "سنُرسل لك تحديثاً فور شحن طلبك."
                 ),
-                "example": {"body_text": [["أميرة", "12345", "متجر الأزياء", "https://track.example.com"]]},
+                "example": {"body_text": [["أميرة", "12345", "متجر الأزياء"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "تتبع طلبي 📦", "url": "{{4}}"},
+                    {
+                        "type": "URL", "text": "تتبع طلبي 📦",
+                        "url": "https://example.com/track/{{1}}",
+                        "example": ["https://example.com/track/12345"],
+                    },
                 ],
             },
         ],
@@ -178,7 +194,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["shipping", "orders"],
         "smart_trigger":  "order_shipped",
         "smart_label":    "يُرسل تلقائياً: عند شحن الطلب",
-        "slots":          ["customer_name", "order_id", "tracking_url"],
+        "slots":          ["customer_name", "order_id"],
         "components": [
             {
                 "type": "BODY",
@@ -187,13 +203,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "طلبك رقم #{{2}} تم شحنه وهو في طريقه إليك!\n\n"
                     "يمكنك متابعة حالة الشحن لحظةً بلحظة من هنا:"
                 ),
-                "example": {"body_text": [["محمد", "12345", "https://track.example.com"]]},
+                "example": {"body_text": [["محمد", "12345"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "تتبع الشحنة 🗺️", "url": "{{3}}"},
+                    {
+                        "type": "URL", "text": "تتبع الشحنة 🗺️",
+                        "url": "https://example.com/track/{{1}}",
+                        "example": ["https://example.com/track/12345"],
+                    },
                 ],
             },
         ],
@@ -210,7 +230,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["shipping", "orders"],
         "smart_trigger":  "order_delivered",
         "smart_label":    "يُرسل تلقائياً: عند تسليم الطلب",
-        "slots":          ["customer_name", "store_name", "review_url"],
+        "slots":          ["customer_name", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -219,13 +239,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "نأمل أن يكون طلبك من {{2}} قد وصل بحالة ممتازة!\n\n"
                     "رأيك يهمّنا — شاركنا تقييمك وساعد عملاء آخرين على اتخاذ قراراتهم:"
                 ),
-                "example": {"body_text": [["ليلى", "متجر المنزل", "https://review.example.com"]]},
+                "example": {"body_text": [["ليلى", "متجر المنزل"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "اترك تقييمك ⭐", "url": "{{3}}"},
+                    {
+                        "type": "URL", "text": "اترك تقييمك ⭐",
+                        "url": "https://example.com/review/{{1}}",
+                        "example": ["https://example.com/review/order123"],
+                    },
                 ],
             },
         ],
@@ -242,7 +266,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["marketing"],
         "smart_trigger":  "order_delivered",
         "smart_label":    "يُرسل تلقائياً: 3 أيام بعد التسليم",
-        "slots":          ["customer_name", "product_name", "review_url"],
+        "slots":          ["customer_name", "product_name"],
         "components": [
             {
                 "type": "BODY",
@@ -251,13 +275,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "مرحباً {{1}}، نأمل أن تكون راضياً تماماً عن منتجك!\n\n"
                     "تقييمك يساعد آلاف العملاء على اتخاذ قرارات أفضل:"
                 ),
-                "example": {"body_text": [["عبدالله", "سماعات لاسلكية", "https://review.example.com"]]},
+                "example": {"body_text": [["عبدالله", "سماعات لاسلكية"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "قيّم المنتج ⭐", "url": "{{3}}"},
+                    {
+                        "type": "URL", "text": "قيّم المنتج ⭐",
+                        "url": "https://example.com/review/{{1}}",
+                        "example": ["https://example.com/review/product123"],
+                    },
                 ],
             },
         ],
@@ -274,7 +302,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["marketing", "discounts"],
         "smart_trigger":  None,
         "smart_label":    "يُرسل يدوياً أو عبر الحملات",
-        "slots":          ["customer_name", "store_name", "discount_code", "store_url"],
+        "slots":          ["customer_name", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -283,14 +311,18 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "متجر {{2}} يُقدم لك خصماً حصرياً لفترة محدودة.\n\n"
                     "انسخ الكود بلمسة واحدة واستمتع بالتوفير:"
                 ),
-                "example": {"body_text": [["فاطمة", "متجر الإلكترونيات", "SAVE25", "https://example.com"]]},
+                "example": {"body_text": [["فاطمة", "متجر الإلكترونيات"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
                     {"type": "COPY_CODE", "example": ["SAVE25"]},
-                    {"type": "URL", "text": "تسوق الآن 🛍️", "url": "{{4}}"},
+                    {
+                        "type": "URL", "text": "تسوق الآن 🛍️",
+                        "url": "https://example.com/",
+                        "example": ["https://example.com/"],
+                    },
                 ],
             },
         ],
@@ -307,7 +339,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["welcome", "marketing"],
         "smart_trigger":  "new_customer",
         "smart_label":    "يُرسل تلقائياً: عند انضمام عميل جديد",
-        "slots":          ["customer_name", "store_name", "store_url"],
+        "slots":          ["customer_name", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -316,13 +348,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "يسعدنا انضمامك إلى عائلة متجر {{2}}!\n\n"
                     "نحن هنا لخدمتك على مدار الساعة — تصفّح منتجاتنا واكتشف ما يناسبك:"
                 ),
-                "example": {"body_text": [["ريم", "متجر الأزياء العصرية", "https://example.com"]]},
+                "example": {"body_text": [["ريم", "متجر الأزياء العصرية"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "تصفح المتجر 🏪", "url": "{{3}}"},
+                    {
+                        "type": "URL", "text": "تصفح المتجر 🏪",
+                        "url": "https://example.com/",
+                        "example": ["https://example.com/"],
+                    },
                 ],
             },
         ],
@@ -372,7 +408,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["orders"],
         "smart_trigger":  "order_confirmed",
         "smart_label":    "يُرسل تلقائياً: عند تأكيد الطلب",
-        "slots":          ["customer_name", "order_id", "order_total", "tracking_url"],
+        "slots":          ["customer_name", "order_id", "order_total"],
         "components": [
             {
                 "type": "BODY",
@@ -381,13 +417,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "مرحباً {{1}}، تم استلام طلبك رقم #{{2}} بقيمة {{3}} ريال.\n\n"
                     "سنبدأ تجهيزه فوراً وسترسل لك تحديثات الشحن قريباً."
                 ),
-                "example": {"body_text": [["بندر", "98765", "450", "https://track.example.com"]]},
+                "example": {"body_text": [["بندر", "98765", "450"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "تفاصيل الطلب 📋", "url": "{{4}}"},
+                    {
+                        "type": "URL", "text": "تفاصيل الطلب 📋",
+                        "url": "https://example.com/orders/{{1}}",
+                        "example": ["https://example.com/orders/98765"],
+                    },
                 ],
             },
         ],
@@ -437,7 +477,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["orders", "recovery"],
         "smart_trigger":  "order_payment_pending",
         "smart_label":    "يُرسل تلقائياً: عند تأخر الدفع",
-        "slots":          ["customer_name", "order_id", "payment_url"],
+        "slots":          ["customer_name", "order_id"],
         "components": [
             {
                 "type": "BODY",
@@ -446,13 +486,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "طلبك رقم #{{2}} لا يزال بانتظار إكمال الدفع.\n\n"
                     "أكمل الدفع الآن لضمان توفر المنتجات لك:"
                 ),
-                "example": {"body_text": [["حسن", "33456", "https://pay.example.com"]]},
+                "example": {"body_text": [["حسن", "33456"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "إكمال الدفع 💳", "url": "{{3}}"},
+                    {
+                        "type": "URL", "text": "إكمال الدفع 💳",
+                        "url": "https://example.com/pay/{{1}}",
+                        "example": ["https://example.com/pay/33456"],
+                    },
                 ],
             },
         ],
@@ -469,7 +513,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["marketing", "discounts"],
         "smart_trigger":  "vip_customer_upgrade",
         "smart_label":    "يُرسل تلقائياً: عند ترقية العميل لـ VIP",
-        "slots":          ["customer_name", "store_name", "vip_coupon", "store_url"],
+        "slots":          ["customer_name", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -478,14 +522,18 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "شكراً لولائك لمتجر {{2}}!\n\n"
                     "هذا كود خاص جداً — مخصص لك وحدك — انسخه واستمتع بخصمك الحصري:"
                 ),
-                "example": {"body_text": [["وليد", "متجر الساعات", "VIP30", "https://example.com"]]},
+                "example": {"body_text": [["وليد", "متجر الساعات"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
                     {"type": "COPY_CODE", "example": ["VIP30"]},
-                    {"type": "URL", "text": "تسوق الآن 👑", "url": "{{4}}"},
+                    {
+                        "type": "URL", "text": "تسوق الآن 👑",
+                        "url": "https://example.com/",
+                        "example": ["https://example.com/"],
+                    },
                 ],
             },
         ],
@@ -502,7 +550,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["marketing"],
         "smart_trigger":  "new_product_alert",
         "smart_label":    "يُرسل تلقائياً: عند إضافة منتجات جديدة",
-        "slots":          ["customer_name", "store_name", "store_url"],
+        "slots":          ["customer_name", "store_name"],
         "components": [
             {
                 "type": "BODY",
@@ -511,13 +559,17 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                     "متجر {{2}} يُطلق مجموعة جديدة تم اختيارها بعناية!\n\n"
                     "كن أول من يكتشف الوصولات الجديدة:"
                 ),
-                "example": {"body_text": [["دانة", "متجر الأزياء", "https://example.com/new"]]},
+                "example": {"body_text": [["دانة", "متجر الأزياء"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "URL", "text": "اكتشف الجديد 🆕", "url": "{{3}}"},
+                    {
+                        "type": "URL", "text": "اكتشف الجديد 🆕",
+                        "url": "https://example.com/new/",
+                        "example": ["https://example.com/new/"],
+                    },
                 ],
             },
         ],

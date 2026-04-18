@@ -832,8 +832,16 @@ function EditModal({
                   <input className="input text-sm" placeholder="نص الزر"
                     value={btn.text} onChange={e => updateBtn(i, { text: e.target.value })} />
                   {btn.type === 'URL' && (
-                    <input className="input text-sm" placeholder="https://..." dir="ltr"
-                      value={btn.url ?? ''} onChange={e => updateBtn(i, { url: e.target.value })} />
+                    <>
+                      <input className="input text-sm" placeholder="https://example.com/page/{{1}}" dir="ltr"
+                        value={btn.url ?? ''} onChange={e => updateBtn(i, { url: e.target.value })} />
+                      {btn.url && /^\{\{\d+\}\}$/.test(btn.url.trim()) && (
+                        <p className="text-[11px] text-amber-600 flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" />
+                          الرابط يجب أن يبدأ بـ https:// — مثال: https://yourstore.com/cart/{'{{1}}'}
+                        </p>
+                      )}
+                    </>
                   )}
                   {btn.type === 'COPY_CODE' && (
                     <input className="input text-sm font-mono" placeholder="PROMO2025" dir="ltr"
