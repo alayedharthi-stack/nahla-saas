@@ -934,7 +934,9 @@ function NahlaLibraryModal({ onClose, onImported }: {
       const res = await templatesApi.importNahlaTemplate(key)
       setImported(prev => new Set(prev).add(key))
       onImported(res.template)
-    } catch { /* ignore */ } finally {
+    } catch {
+      /* ignore */
+    } finally {
       setImporting(null)
     }
   }

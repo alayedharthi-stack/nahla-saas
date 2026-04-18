@@ -1876,7 +1876,7 @@ async def import_nahla_template(
     - التاجر يعدّله من لوحة التحكم
     - ثم يرسله لـ Meta للموافقة
     """
-    import secrets as _sec  # noqa: PLC0415
+    import copy as _copy, re as _re, secrets as _sec  # noqa: PLC0415
     from services.whatsapp_templates.nahla_templates import get_template_by_key  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
@@ -1888,11 +1888,58 @@ async def import_nahla_template(
             detail=f"القالب '{body.template_key}' غير موجود في مكتبة نحلة",
         )
 
+    # ── اكتشاف رابط المتجر الحقيقي للتاجر ──────────────────────────
+    # نأخذه من TenantSettings.store.store_url أو Integration.config
+    from models import Integration  # noqa: PLC0415
+    store_url = ""
+    try:
+        settings = get_or_create_settings(db, tenant_id)
+        store_cfg = merge_defaults(settings.store_settings, DEFAULT_STORE)
+        store_url = str(store_cfg.get("store_url", "") or "").rstrip("/")
+    except Exception:
+        pass
+
+    if not store_url:
+        try:
+            integration = db.query(Integration).filter(
+                Integration.tenant_id == tenant_id,
+                Integration.provider  == "salla",
+            ).first()
+            if integration:
+                cfg = integration.config or {}
+                store_url = str(cfg.get("store_url", "") or cfg.get("domain", "") or "").rstrip("/")
+        except Exception:
+            pass
+
+    # ── نسخ عميق للمكونات وحقن رابط المتجر ────────────────────────
+    # نستبدل example.com برابط المتجر الفعلي في أزرار URL
+    components = _copy.deepcopy(tpl_def["components"])
+    if store_url:
+        for comp in components:
+            if comp.get("type") == "BUTTONS":
+                for btn in comp.get("buttons", []):
+                    if btn.get("type") == "URL":
+                        old_url = btn.get("url", "")
+                        new_url = old_url.replace("https://example.com", store_url)
+                        btn["url"] = new_url
+                        if btn.get("example"):
+                            btn["example"] = [
+                                ex.replace("https://example.com", store_url)
+                                for ex in btn["example"]
+                            ]
+        logger.info(
+            "[NahlaImport] Replaced example.com with store_url=%s for tenant=%s template=%s",
+            store_url, tenant_id, body.template_key,
+        )
+    else:
+        logger.info(
+            "[NahlaImport] No store_url found for tenant=%s — keeping example.com placeholder",
+            tenant_id,
+        )
+
     # اسم فريد: nahla_{key}_{rand4}
     rand_suffix = _sec.token_hex(2)
     template_name = body.custom_name or f"nahla_{body.template_key}_{rand_suffix}"
-    # تنظيف الاسم ليكون متوافقاً مع Meta (أحرف صغيرة، أرقام، شرطة سفلية فقط)
-    import re as _re  # noqa: PLC0415
     template_name = _re.sub(r"[^a-z0-9_]", "_", template_name.lower())[:60]
 
     # تحقق من عدم تكرار الاسم
@@ -1911,7 +1958,7 @@ async def import_nahla_template(
         language         = body.language,
         category         = tpl_def["category"],
         status           = "DRAFT",
-        components       = tpl_def["components"],
+        components       = components,           # ← المكونات مع الرابط المحدّث
         source           = "nahla_library",
         objective        = tpl_def.get("smart_trigger"),
         created_at       = now,
@@ -1927,8 +1974,14 @@ async def import_nahla_template(
         body.template_key, template_name, tenant_id,
     )
 
+    url_note = (
+        f"رابط المتجر ({store_url}) تم حقنه تلقائياً في أزرار القالب."
+        if store_url else
+        "تنبيه: لم يُعثر على رابط المتجر — يرجى تعديل https://example.com في الزر برابطك الفعلي."
+    )
     return {
         "success":  True,
-        "message":  f"تم استيراد القالب '{tpl_def['name_ar']}' كمسودة — يمكنك تعديله والإرسال لـ Meta",
+        "message":  f"تم استيراد القالب '{tpl_def['name_ar']}' كمسودة. {url_note}",
         "template": _tpl_to_dict(new_tpl),
+        "store_url_injected": bool(store_url),
     }
