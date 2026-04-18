@@ -864,7 +864,11 @@ async def _submit_template_to_meta(
     # Ensure all components have the Meta-required `example` fields before
     # submitting. This prevents code-100 "missing example" rejections for
     # templates that were created/edited without explicit example values.
-    components = _ensure_meta_examples(components)
+    try:
+        components = _ensure_meta_examples(components)
+    except Exception as exc:
+        logger.error("[template/submit] _ensure_meta_examples failed tenant=%s name=%s: %s", tenant_id, name, exc)
+        raise ValueError(f"خطأ في معالجة مكونات القالب: {exc}") from exc
 
     payload = {
         "name": name,
@@ -872,6 +876,10 @@ async def _submit_template_to_meta(
         "category": category,
         "components": components,
     }
+    logger.info(
+        "[template/submit] → Meta tenant=%s waba=%s name=%s components_count=%d",
+        tenant_id, waba_id, name, len(components),
+    )
     try:
         result, _token_ctx = await provider_submit_template(
             db,
@@ -887,6 +895,11 @@ async def _submit_template_to_meta(
             tenant_id, name, exc,
         )
         raise ValueError(f"خطأ في الاتصال بـ Meta: {exc}") from exc
+
+    logger.info(
+        "[template/submit] ← Meta response tenant=%s name=%s result_keys=%s",
+        tenant_id, name, list(result.keys()) if isinstance(result, dict) else type(result).__name__,
+    )
 
     # provider_post_with_context does NOT raise on 4xx — check manually
     if "error" in result:
@@ -907,6 +920,7 @@ async def _submit_template_to_meta(
         )
         raise ValueError("لم تُعيد Meta معرّف القالب — القالب قد لا يكون معتمداً للإرسال")
 
+    logger.info("[template/submit] ✓ accepted tenant=%s name=%s meta_id=%s", tenant_id, name, meta_id)
     return meta_id
 
 

@@ -82,8 +82,8 @@ function WaPreview({
 // ── Template row ──────────────────────────────────────────────────────────────
 
 function TemplateRow({
-  tpl, onPreview, onDelete, onSubmit, onEdit,
-}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void; onEdit: () => void }) {
+  tpl, onPreview, onDelete, onSubmit, onEdit, isSubmitting,
+}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void; onEdit: () => void; isSubmitting?: boolean }) {
   const vars = countVars(tpl)
   const sm = (STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'
   const isDefault = isDefaultTemplate(tpl.name)
@@ -178,11 +178,19 @@ function TemplateRow({
           {tpl.submittable && (
             <button
               onClick={onSubmit}
-              className="flex items-center gap-1 text-brand-500 hover:text-brand-700 transition-colors text-[11px] font-medium bg-brand-50 hover:bg-brand-100 px-2 py-1 rounded-lg"
-              title="إرسال إلى Meta للمراجعة"
+              disabled={isSubmitting}
+              className={`flex items-center gap-1 transition-colors text-[11px] font-medium px-2 py-1 rounded-lg ${
+                isSubmitting
+                  ? 'text-slate-400 bg-slate-100 cursor-not-allowed'
+                  : 'text-brand-500 hover:text-brand-700 bg-brand-50 hover:bg-brand-100'
+              }`}
+              title={isSubmitting ? 'جارٍ الإرسال…' : 'إرسال إلى Meta للمراجعة'}
             >
-              <Send className="w-3 h-3" />
-              إرسال لـ Meta
+              {isSubmitting
+                ? <RefreshCw className="w-3 h-3 animate-spin" />
+                : <Send className="w-3 h-3" />
+              }
+              {isSubmitting ? 'جارٍ الإرسال…' : 'إرسال لـ Meta'}
             </button>
           )}
           {tpl.status !== 'APPROVED' && (
@@ -1176,6 +1184,7 @@ export default function Templates() {
   const [preview, setPreview] = useState<WhatsAppTemplateRecord | null>(null)
   const [editTemplate, setEditTemplate] = useState<WhatsAppTemplateRecord | null>(null)
   const [submitError, setSubmitError] = useState<{id: number; msg: string} | null>(null)
+  const [submitting, setSubmitting] = useState<number | null>(null)
   const { t } = useLanguage()
 
   const loadTemplates = useCallback(() => {
@@ -1206,15 +1215,18 @@ export default function Templates() {
   }
 
   const handleSubmitTemplate = async (id: number) => {
+    if (submitting !== null) return
     setSubmitError(null)
+    setSubmitting(id)
     try {
       const res = await templatesApi.submit(id)
       setTemplates(ts => ts.map(t => (t.id === id ? res.template : t)))
     } catch (e: any) {
       const msg = e?.detail ?? e?.message ?? 'فشل إرسال القالب — تحقق من ربط واتساب'
       setSubmitError({ id, msg })
-      // Auto-clear after 8 seconds
-      setTimeout(() => setSubmitError(s => s?.id === id ? null : s), 8000)
+      setTimeout(() => setSubmitError(s => s?.id === id ? null : s), 10000)
+    } finally {
+      setSubmitting(null)
     }
   }
 
@@ -1375,6 +1387,7 @@ export default function Templates() {
                     onDelete={() => handleDelete(tpl.id)}
                     onSubmit={() => handleSubmitTemplate(tpl.id)}
                     onEdit={() => setEditTemplate(tpl)}
+                    isSubmitting={submitting === tpl.id}
                   />
                 ))}
               </tbody>
