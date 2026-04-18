@@ -26,6 +26,11 @@ passlib[bcrypt]==1.7.4             # password hashing (available for future use)
 stripe==9.12.0             # Stripe subscription billing
 bcrypt==4.1.3              # Direct bcrypt (replaces passlib for Python 3.11 compat)
 
+# ── Phone number normalization ────────────────────────────────────────────────
+# Python port of Google's libphonenumber — used for E.164 normalization
+# and international phone validation across all tenants/countries.
+phonenumbers>=8.13.0
+
 # ── AI / Claude (used by ai-orchestrator) ────────────────────────────────────
 # The orchestrator calls the Anthropic Messages API directly via httpx —
 # no extra SDK needed. anthropic SDK is listed here for optional local use.

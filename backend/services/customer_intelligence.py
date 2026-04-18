@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from models import Customer, CustomerProfile, Order
 from observability.event_logger import log_event
 from services.offer_decision_flags import DecisionMode, tenant_decision_mode
+from utils.phone_utils import normalize_to_e164, normalize_phone_compat
 
 logger = logging.getLogger("nahla.customer_intelligence")
 
@@ -130,30 +131,16 @@ def normalize_name(raw: Any) -> str:
 
 
 def normalize_phone(raw: Any) -> str:
-    text = str(raw or "").strip()
-    digits = _PHONE_DIGITS_RE.sub("", text)
-    if not digits:
-        return ""
+    """
+    Normalize a phone number to E.164 format.
+    Returns E.164 string on success, '' (falsy) on failure.
 
-    if digits.startswith("00"):
-        digits = digits[2:]
-
-    if digits.startswith("966"):
-        digits = digits[3:]
-
-    if digits.startswith("0") and len(digits) == 10:
-        digits = digits[1:]
-
-    if len(digits) == 9 and digits.startswith("5"):
-        return f"+966{digits}"
-
-    if text.startswith("+") and len(digits) >= 8:
-        return f"+{digits}"
-
-    if len(digits) >= 8:
-        return f"+{digits}"
-
-    return ""
+    Delegates to utils.phone_utils.normalize_to_e164 which uses
+    Google's libphonenumber for international support.
+    Backward-compatible: callers using `if not normalize_phone(x):`
+    continue to work unchanged.
+    """
+    return normalize_phone_compat(raw)
 
 
 def extract_order_datetime(raw: Any) -> Optional[datetime]:
@@ -475,25 +462,41 @@ class CustomerIntelligenceService:
         *,
         exclude_customer_id: Optional[int] = None,
     ) -> Optional[Customer]:
-        normalized = normalize_phone(raw_phone)
-        if not normalized:
+        """
+        Find a tenant-scoped customer by phone number.
+
+        Lookup order:
+        1. normalized_phone column (indexed, E.164) — fast and reliable.
+        2. normalized phone compared against Customer.phone (legacy rows
+           pre-dating migration 0032 that don't have normalized_phone set).
+        Never crosses tenant boundaries.
+        """
+        e164 = normalize_to_e164(str(raw_phone or "").strip())
+        if not e164:
             return None
 
-        exact = (
+        # Priority 1: normalized_phone column (migration 0032+)
+        by_norm = (
             self.db.query(Customer)
             .filter(
                 Customer.tenant_id == self.tenant_id,
-                Customer.phone == normalized,
+                Customer.normalized_phone == e164,
             )
             .first()
         )
-        if exact and exact.id != exclude_customer_id:
-            return exact
+        if by_norm and by_norm.id != exclude_customer_id:
+            return by_norm
 
+        # Priority 2: legacy rows — compare normalized forms of Customer.phone
         for customer in self._query_customers():
             if exclude_customer_id is not None and customer.id == exclude_customer_id:
                 continue
-            if normalize_phone(customer.phone) == normalized:
+            if customer.id == (by_norm.id if by_norm else None):
+                continue
+            cust_e164 = normalize_to_e164(customer.phone)
+            if cust_e164 and cust_e164 == e164:
+                # Repair: populate normalized_phone for next time
+                customer.normalized_phone = e164
                 return customer
         return None
 
@@ -566,12 +569,16 @@ class CustomerIntelligenceService:
         if not any([normalized_phone, clean_name, clean_email, external_id]):
             return None
 
-        now = ensure_utc(seen_at) or utcnow()
+        now     = ensure_utc(seen_at) or utcnow()
+        e164    = normalize_to_e164(str(phone or "").strip()) if phone else None
+        # normalized_phone supersedes the old normalize_phone() result
+        if e164:
+            normalized_phone = e164
 
         # ── Identity resolution ───────────────────────────────────────────────
         customer = self._find_customer_by_external_id(external_id)
-        if customer is None and normalized_phone:
-            customer = self.find_customer_by_phone(normalized_phone)
+        if customer is None and e164:
+            customer = self.find_customer_by_phone(e164)
         if customer is None and clean_name:
             normalized_name = normalize_name(clean_name)
             for row in self._query_customers():
@@ -600,9 +607,12 @@ class CustomerIntelligenceService:
 
         if customer is None:
             # ── CREATE ────────────────────────────────────────────────────────
+            # Store raw phone for display; normalized_phone (E.164) for identity.
+            raw_phone_display = str(phone or "").strip() or None
             customer = Customer(
                 tenant_id           = self.tenant_id,
-                phone               = normalized_phone or None,
+                phone               = raw_phone_display,
+                normalized_phone    = e164,
                 name                = clean_name or None,
                 email               = clean_email,
                 extra_metadata      = metadata or None,
@@ -614,30 +624,31 @@ class CustomerIntelligenceService:
             self.db.add(customer)
             self.db.flush()
             logger.debug(
-                "[CIS] customer CREATED | tenant=%s phone=%s salla_id=%s channel=%s",
-                self.tenant_id, normalized_phone, external_id, channel,
+                "[CIS] customer CREATED | tenant=%s e164=%s salla_id=%s channel=%s",
+                self.tenant_id, e164, external_id, channel,
             )
         else:
             # ── UPDATE ────────────────────────────────────────────────────────
-            if normalized_phone:
-                customer.phone = normalized_phone
+            if phone:
+                # Always overwrite phone with raw display value
+                customer.phone = str(phone).strip() or customer.phone
+            if e164:
+                # Always keep normalized_phone up-to-date (E.164)
+                customer.normalized_phone = e164
             if clean_name:
                 customer.name = clean_name
             if clean_email:
                 customer.email = clean_email
             customer.extra_metadata = metadata or None
-            # Promote salla_customer_id to first-class column if not set yet
             if external_id and not customer.salla_customer_id:
                 customer.salla_customer_id = str(external_id).strip()
-            # Update last_interaction_at for WA inbound events
             if channel == "whatsapp_inbound":
                 customer.last_interaction_at = now
-            # Set first_seen_at only if missing (never move it later)
             if not customer.first_seen_at:
                 customer.first_seen_at = now
             logger.debug(
-                "[CIS] customer UPDATED | tenant=%s id=%s phone=%s channel=%s",
-                self.tenant_id, customer.id, normalized_phone, channel,
+                "[CIS] customer UPDATED | tenant=%s id=%s e164=%s channel=%s",
+                self.tenant_id, customer.id, e164, channel,
             )
 
         self.ensure_profile(customer, seen_at=seen_at)

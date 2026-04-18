@@ -52,6 +52,7 @@ from services.customer_intelligence import (  # noqa: E402
     extract_order_datetime as intelligence_extract_order_datetime,
     normalize_phone as intelligence_normalize_phone,
 )
+from utils.phone_utils import normalize_to_e164 as _normalize_to_e164  # noqa: E402
 
 logger = logging.getLogger("nahla-backend")
 
@@ -61,7 +62,13 @@ logger = logging.getLogger("nahla-backend")
 import re as _re
 
 def _normalize_phone(raw_phone) -> str:
+    """Returns E.164 or '' — backward-compat wrapper."""
     return intelligence_normalize_phone(raw_phone)
+
+
+def _e164(raw_phone) -> Optional[str]:
+    """Returns E.164 or None — used for normalized_phone column."""
+    return _normalize_to_e164(str(raw_phone or "").strip())
 
 
 def _extract_order_datetime(raw: Any) -> Optional[datetime]:
@@ -766,8 +773,10 @@ class StoreSyncService:
             name = (raw.get("first_name", "") + " " + raw.get("last_name", "")).strip()
             if not name:
                 name = raw.get("name", "")
-            email = raw.get("email", "")
-            phone = _normalize_phone(raw.get("mobile", raw.get("phone", "")))
+            email           = raw.get("email", "")
+            raw_phone_str   = raw.get("mobile", raw.get("phone", ""))
+            phone           = _normalize_phone(raw_phone_str)   # E.164 (display)
+            norm_phone      = _e164(raw_phone_str)               # E.164 or None
 
             # 1. Try by salla_customer_id column (indexed, migration 0031)
             existing = (
@@ -793,7 +802,17 @@ class StoreSyncService:
                     # Repair: promote to first-class column
                     existing.salla_customer_id = ext_id
 
-            # 3. Fallback: normalized phone — always tenant-scoped
+            # 3. Fallback: normalized_phone column — always tenant-scoped
+            if not existing and norm_phone:
+                existing = (
+                    self.db.query(Customer)
+                    .filter(
+                        Customer.tenant_id       == self.tenant_id,
+                        Customer.normalized_phone == norm_phone,
+                    )
+                    .first()
+                )
+            # 4. Last resort: raw phone fallback (legacy rows pre-0032)
             if not existing and phone:
                 existing = (
                     self.db.query(Customer)
@@ -818,7 +837,8 @@ class StoreSyncService:
                     existing.email = email
                 if phone:
                     existing.phone = phone
-                # Ensure first-class salla_customer_id is always populated
+                if norm_phone:
+                    existing.normalized_phone = norm_phone
                 if ext_id and not existing.salla_customer_id:
                     existing.salla_customer_id = ext_id
                 if not existing.acquisition_channel:
@@ -832,6 +852,7 @@ class StoreSyncService:
                     name                = name or None,
                     email               = email or None,
                     phone               = phone or None,
+                    normalized_phone    = norm_phone,
                     extra_metadata      = meta,
                     salla_customer_id   = ext_id or None,
                     acquisition_channel = "salla_sync",
