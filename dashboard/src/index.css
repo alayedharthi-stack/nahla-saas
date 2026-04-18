@@ -125,4 +125,13 @@
   .label {
     @apply block text-sm font-medium text-slate-700 mb-1;
   }
+
+  /* ── Scrollbar utilities ─────────────────────────────────────────────────── */
+  .scrollbar-none {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
 }
