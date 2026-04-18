@@ -44,31 +44,31 @@ interface NavItem {
 }
 
 interface NavGroup {
-  groupLabel: string
+  groupLabel: (tr: Translations) => string
   items: NavItem[]
 }
 
 // ── Admin-only navigation (platform owner) ────────────────────────────────────
 const ADMIN_NAV_GROUPS: NavGroup[] = [
   {
-    groupLabel: 'المنصة',
+    groupLabel: tr => tr.nav.groups.adminPlatform,
     items: [
-      { to: '/admin',                 icon: Crown,         label: _tr => 'لوحة التحكم'          },
-      { to: '/admin/tenants',         icon: Store,         label: _tr => 'المتاجر'              },
-      { to: '/admin/revenue',         icon: TrendingUp,    label: _tr => 'الإيرادات'            },
-      { to: '/admin/ai-usage',        icon: BrainCircuit,  label: _tr => 'استخدام الذكاء'       },
-      { to: '/admin/features',        icon: Flag,          label: _tr => 'الميزات التجريبية'    },
-      { to: '/admin/troubleshooting', icon: Puzzle,        label: _tr => 'تشخيص المشاكل'       },
-      { to: '/admin/coexistence',     icon: Smartphone,    label: _tr => 'طلبات الجوال + AI'   },
-      { to: '/admin/team',            icon: Layers,        label: _tr => 'الفريق'               },
-      { to: '/admin/system',          icon: Activity,      label: _tr => 'حالة النظام'          },
-      { to: '/admin/tools',           icon: Wrench,        label: _tr => 'أدوات التنظيف'        },
+      { to: '/admin',                  icon: Crown,        label: tr => tr.nav.adminItems.dashboard       },
+      { to: '/admin/tenants',          icon: Store,        label: tr => tr.nav.adminItems.tenants         },
+      { to: '/admin/revenue',          icon: TrendingUp,   label: tr => tr.nav.adminItems.revenue         },
+      { to: '/admin/ai-usage',         icon: BrainCircuit, label: tr => tr.nav.adminItems.aiUsage         },
+      { to: '/admin/features',         icon: Flag,         label: tr => tr.nav.adminItems.features        },
+      { to: '/admin/troubleshooting',  icon: Puzzle,       label: tr => tr.nav.adminItems.troubleshooting },
+      { to: '/admin/coexistence',      icon: Smartphone,   label: tr => tr.nav.adminItems.coexistence     },
+      { to: '/admin/team',             icon: Layers,       label: tr => tr.nav.adminItems.team            },
+      { to: '/admin/system',           icon: Activity,     label: tr => tr.nav.adminItems.system          },
+      { to: '/admin/tools',            icon: Wrench,       label: tr => tr.nav.adminItems.tools           },
     ],
   },
   {
-    groupLabel: 'الإعدادات',
+    groupLabel: tr => tr.nav.groups.adminSettings,
     items: [
-      { to: '/settings', icon: Settings, label: _tr => 'الإعدادات' },
+      { to: '/settings', icon: Settings, label: tr => tr.nav.adminItems.settings },
     ],
   },
 ]
@@ -76,39 +76,39 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
 // ── Merchant navigation ────────────────────────────────────────────────────────
 const MERCHANT_NAV_GROUPS: NavGroup[] = [
   {
-    groupLabel: 'الرئيسية',
+    groupLabel: tr => tr.nav.groups.main,
     items: [
-      { to: '/overview',          icon: LayoutDashboard, label: tr  => tr.nav.items.overview      },
-      { to: '/conversations',     icon: MessageSquare,   label: tr  => tr.nav.items.conversations },
-      { to: '/orders',            icon: ShoppingCart,    label: tr  => tr.nav.items.orders        },
-      { to: '/customers',        icon: Users,           label: _tr => 'العملاء'                  },
-      { to: '/smart-automations', icon: Bot,             label: _tr => 'الطيار الآلي',  isAI: true },
-      { to: '/promotions',        icon: Gift,            label: _tr => 'العروض',         isAI: true },
-      { to: '/coupons',           icon: Tag,             label: tr  => tr.nav.items.coupons,    isAI: true },
-      { to: '/campaigns',         icon: Megaphone,       label: tr  => tr.nav.items.campaigns     },
-      { to: '/templates',         icon: FileText,        label: tr  => tr.nav.items.templates     },
+      { to: '/overview',               icon: LayoutDashboard, label: tr => tr.nav.items.overview         },
+      { to: '/conversations',          icon: MessageSquare,   label: tr => tr.nav.items.conversations    },
+      { to: '/orders',                 icon: ShoppingCart,    label: tr => tr.nav.items.orders           },
+      { to: '/customers',              icon: Users,           label: tr => tr.nav.items.customers        },
+      { to: '/smart-automations',      icon: Bot,             label: tr => tr.nav.items.autopilot,  isAI: true },
+      { to: '/promotions',             icon: Gift,            label: tr => tr.nav.items.promotions,  isAI: true },
+      { to: '/coupons',                icon: Tag,             label: tr => tr.nav.items.coupons,     isAI: true },
+      { to: '/campaigns',              icon: Megaphone,       label: tr => tr.nav.items.campaigns        },
+      { to: '/templates',              icon: FileText,        label: tr => tr.nav.items.templates        },
     ],
   },
   {
-    groupLabel: 'الذكاء الاصطناعي',
+    groupLabel: tr => tr.nav.groups.ai,
     items: [
-      { to: '/intelligence',  icon: Brain,        label: tr  => tr.nav.items.intelligence, isAI: true },
-      { to: '/analytics',     icon: BarChart2,    label: tr  => tr.nav.items.analyticsAI,  isAI: true },
-      { to: '/ai-sales-logs', icon: BrainCircuit, label: _tr => 'وكيل المبيعات',           isAI: true },
-      { to: '/handoff-queue', icon: UserCheck,    label: _tr => 'طابور التحويل'            },
+      { to: '/intelligence',  icon: Brain,        label: tr => tr.nav.items.intelligence, isAI: true },
+      { to: '/analytics',     icon: BarChart2,    label: tr => tr.nav.items.analyticsAI,  isAI: true },
+      { to: '/ai-sales-logs', icon: BrainCircuit, label: tr => tr.nav.items.salesAgent,   isAI: true },
+      { to: '/handoff-queue', icon: UserCheck,    label: tr => tr.nav.items.handoffQueue             },
     ],
   },
   {
-    groupLabel: 'المتجر',
+    groupLabel: tr => tr.nav.groups.store,
     items: [
-      { to: '/integrations',      icon: Plug,          label: tr  => tr.nav.items.integrations },
-      { to: '/store-integration', icon: Store,          label: _tr => 'ربط المتجر'             },
-      { to: '/whatsapp-connect',          icon: MessageCircle,  label: _tr => 'ربط واتساب'                     },
-      { to: '/help/whatsapp-manual-setup', icon: HelpCircle,   label: _tr => 'دليل الربط اليدوي'              },
-      { to: '/widgets',                   icon: TrendingUp,     label: _tr => 'أدوات زيادة المبيعات'           },
-      { to: '/system-status',             icon: Activity,       label: _tr => 'حالة النظام'                    },
-      { to: '/billing',                   icon: CreditCard,     label: _tr => 'الاشتراك والفوترة'              },
-      { to: '/settings',                  icon: Settings,       label: tr  => tr.nav.items.settings            },
+      { to: '/integrations',               icon: Plug,         label: tr => tr.nav.items.integrations     },
+      { to: '/store-integration',          icon: Store,        label: tr => tr.nav.items.storeIntegration },
+      { to: '/whatsapp-connect',           icon: MessageCircle,label: tr => tr.nav.items.whatsappConnect  },
+      { to: '/help/whatsapp-manual-setup', icon: HelpCircle,   label: tr => tr.nav.items.manualSetup      },
+      { to: '/widgets',                    icon: TrendingUp,   label: tr => tr.nav.items.widgets          },
+      { to: '/system-status',              icon: Activity,     label: tr => tr.nav.items.systemStatus     },
+      { to: '/billing',                    icon: CreditCard,   label: tr => tr.nav.items.billing          },
+      { to: '/settings',                   icon: Settings,     label: tr => tr.nav.items.settings         },
     ],
   },
 ]
@@ -177,7 +177,7 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
               </span>
             </div>
             <p className={`text-xs mt-0.5 ${adminMode ? 'text-amber-500/70' : 'text-slate-500'}`}>
-              {adminMode ? 'لوحة المالك' : t(tr => tr.nav.logoTagline)}
+              {adminMode ? t(tr => tr.nav.adminTagline) : t(tr => tr.nav.logoTagline)}
             </p>
           </div>
           <button className="lg:hidden text-slate-400 hover:text-white transition-colors ms-auto" onClick={onClose}>
@@ -190,7 +190,7 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
           {navGroups.map((group, gi) => (
             <div key={gi}>
               <p className={`px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-widest ${adminMode ? 'text-amber-500/60' : 'text-slate-500'}`}>
-                {group.groupLabel}
+                {t(group.groupLabel)}
               </p>
               <div className="space-y-0.5">
                 {group.items.map(({ to, icon: Icon, label, isAI }) => (
@@ -245,7 +245,7 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
               </p>
               <div className="flex items-center gap-1.5 mt-0.5">
                 <p className={`text-xs truncate ${adminMode ? 'text-amber-500/60' : 'text-slate-500'}`}>
-                  {adminMode ? 'مالك المنصة' : t(tr => tr.nav.storeBadge.plan)}
+                  {adminMode ? t(tr => tr.nav.adminOwner) : t(tr => tr.nav.storeBadge.plan)}
                 </p>
                 {/* AI badge — always visible */}
                 <span className="inline-flex items-center px-1 py-px rounded bg-amber-500/15 border border-amber-500/40 shadow-[0_0_6px_rgba(245,158,11,0.25)]">

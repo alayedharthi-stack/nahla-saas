@@ -13,25 +13,53 @@ export interface Translations {
   /** Sidebar navigation */
   nav: {
     groups: {
-      main:  string
-      ai:    string
-      store: string
+      main:          string
+      ai:            string
+      store:         string
+      adminPlatform: string
+      adminSettings: string
     }
     items: {
-      overview:      string
-      conversations: string
-      orders:        string
-      coupons:       string
-      campaigns:     string
-      templates:     string
-      automations:   string
-      intelligence:  string
-      analyticsAI:   string
-      integrations:  string
-      settings:      string
+      overview:         string
+      conversations:    string
+      orders:           string
+      customers:        string
+      autopilot:        string
+      promotions:       string
+      coupons:          string
+      campaigns:        string
+      templates:        string
+      automations:      string
+      intelligence:     string
+      analyticsAI:      string
+      salesAgent:       string
+      handoffQueue:     string
+      integrations:     string
+      storeIntegration: string
+      whatsappConnect:  string
+      manualSetup:      string
+      widgets:          string
+      systemStatus:     string
+      billing:          string
+      settings:         string
     }
-    storeBadge: { plan: string }
-    logoTagline: string
+    adminItems: {
+      dashboard:       string
+      tenants:         string
+      revenue:         string
+      aiUsage:         string
+      features:        string
+      troubleshooting: string
+      coexistence:     string
+      team:            string
+      system:          string
+      tools:           string
+      settings:        string
+    }
+    adminTagline:  string
+    adminOwner:    string
+    storeBadge:    { plan: string }
+    logoTagline:   string
   }
 
   /** Topbar */
@@ -41,19 +69,53 @@ export interface Translations {
     admin:             string
   }
 
+  /** User role labels */
+  roles: {
+    platformOwner: string
+    owner:         string
+    staff:         string
+    merchant:      string
+    support:       string
+    defaultOwner:  string
+    defaultMerchant: string
+  }
+
   /** Page titles & subtitles */
   pages: {
-    overview:      { title: string; subtitle: string }
-    conversations: { title: string; subtitle: string }
-    orders:        { title: string; subtitle: string }
-    coupons:       { title: string; subtitle: string }
-    campaigns:     { title: string; subtitle: string }
-    templates:     { title: string; subtitle: string }
-    automations:   { title: string; subtitle: string }
-    intelligence:  { title: string; subtitle: string }
-    analytics:     { title: string; subtitle: string }
-    integrations:  { title: string; subtitle: string }
-    settings:      { title: string; subtitle: string }
+    overview:         { title: string; subtitle: string }
+    conversations:    { title: string; subtitle: string }
+    orders:           { title: string; subtitle: string }
+    customers:        { title: string; subtitle: string }
+    coupons:          { title: string; subtitle: string }
+    promotions:       { title: string; subtitle: string }
+    campaigns:        { title: string; subtitle: string }
+    templates:        { title: string; subtitle: string }
+    automations:      { title: string; subtitle: string }
+    smartAutomations: { title: string; subtitle: string }
+    intelligence:     { title: string; subtitle: string }
+    analytics:        { title: string; subtitle: string }
+    integrations:     { title: string; subtitle: string }
+    settings:         { title: string; subtitle: string }
+    billing:          { title: string; subtitle: string }
+    widgets:          { title: string; subtitle: string }
+    systemStatus:     { title: string; subtitle: string }
+    storeIntegration: { title: string; subtitle: string }
+    whatsappConnect:  { title: string; subtitle: string }
+  }
+
+  /** Admin-only page titles */
+  adminPages: {
+    dashboard:       { title: string; subtitle: string }
+    tenants:         { title: string; subtitle: string }
+    merchants:       { title: string; subtitle: string }
+    revenue:         { title: string; subtitle: string }
+    aiUsage:         { title: string; subtitle: string }
+    features:        { title: string; subtitle: string }
+    troubleshooting: { title: string; subtitle: string }
+    team:            { title: string; subtitle: string }
+    system:          { title: string; subtitle: string }
+    coexistence:     { title: string; subtitle: string }
+    tools:           { title: string; subtitle: string }
   }
 
   /** Common reusable action labels */
@@ -342,6 +404,58 @@ export interface Translations {
       support:       string
       whiteLabel:    string
     }
+  }
+
+  /** WhatsApp Templates page strings */
+  templatesMgmt: {
+    filterAll:         string
+    filterApproved:    string
+    filterPending:     string
+    filterRejected:    string
+    filterBlocked:     string
+    filterPaused:      string
+    colName:           string
+    colLang:           string
+    colCategory:       string
+    colStatus:         string
+    colVariables:      string
+    colUpdated:        string
+    statApproved:      string
+    statPending:       string
+    statDraft:         string
+    submitBtn:         string
+    submittingBtn:     string
+    saveDraft:         string
+    savingDraft:       string
+    libraryBtn:        string
+    pendingNote:       string
+    draftNote:         string
+    importNote:        string
+    statusApproved:    string
+    statusPending:     string
+    statusRejected:    string
+    statusDraft:       string
+    statusBlocked:     string
+    statusPaused:      string
+    categoryMarketing: string
+    categoryUtility:   string
+    categoryAuth:      string
+    varCount:          string
+    compatible:        string
+    awaitingMeta:      string
+    needsReview:       string
+    defaultBadge:      string
+    noTemplates:       string
+    createFirst:       string
+    loadingTemplates:  string
+    metaPolicy:        string
+    metaPolicyText:    string
+    tooltipPreview:    string
+    tooltipEdit:       string
+    tooltipDelete:     string
+    disabled:          string
+    archived:          string
+    limitExceeded:     string
   }
 
   /** Merchants (admin) page */

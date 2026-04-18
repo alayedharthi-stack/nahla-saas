@@ -10,27 +10,37 @@ import type { Translations } from '../../i18n/types'
 type MetaSelector = (tr: Translations) => { title: string; subtitle: string }
 
 const PAGE_META: Record<string, MetaSelector> = {
-  '/overview':           tr => tr.pages.overview,
-  '/conversations':      tr => tr.pages.conversations,
-  '/orders':             tr => tr.pages.orders,
-  '/customers':          _tr => ({ title: 'العملاء', subtitle: 'إدارة وتصنيف العملاء' }),
-  '/coupons':            _tr => ({ title: 'الكوبونات الذكية',  subtitle: 'قواعد توليد الكوبونات التي يُديرها الطيار الآلي — أنت تحدّد الإطار، نحلة تُولّد الأكواد وترسلها' }),
-  '/promotions':         _tr => ({ title: 'العروض الذكية',     subtitle: 'تعريفات الحوافز التي يستخدمها الطيار الآلي عند إطلاق الحملات — أنت تضع الإطار، نحلة تختار التوقيت والعميل' }),
-  '/campaigns':          tr => tr.pages.campaigns,
-  '/integrations':       tr => tr.pages.integrations,
-  '/analytics':          tr => tr.pages.analytics,
-  '/settings':           tr => tr.pages.settings,
-  '/smart-automations':  _tr => ({ title: 'الطيار الآلي', subtitle: 'إدارة الأتمتة الذكية' }),
-  '/billing':            _tr => ({ title: 'الاشتراك والفوترة', subtitle: 'إدارة خطة نحلة' }),
-  '/admin':              _tr => ({ title: 'لوحة المنصة', subtitle: 'نظرة عامة على أداء المنصة' }),
-  '/admin/tenants':      _tr => ({ title: 'المتاجر', subtitle: 'إدارة الـ tenants وحالتها' }),
-  '/admin/merchants':    _tr => ({ title: 'وصول التجار', subtitle: 'إدارة الوصول والدعم والتمثيل' }),
-  '/admin/revenue':      _tr => ({ title: 'الإيرادات', subtitle: 'ملخص مالي على مستوى المنصة' }),
-  '/admin/ai-usage':     _tr => ({ title: 'استخدام AI', subtitle: 'تكلفة ومزودات الاستخدام التقديرية' }),
-  '/admin/features':     _tr => ({ title: 'Feature Flags', subtitle: 'تحكم مركزي في خصائص المنصة' }),
-  '/admin/troubleshooting': _tr => ({ title: 'Troubleshooting', subtitle: 'فحص سريع لمشكلات المتاجر' }),
-  '/admin/team':         _tr => ({ title: 'الفريق', subtitle: 'سياسة الأدوار التشغيلية للمنصة' }),
-  '/admin/system':       _tr => ({ title: 'حالة النظام', subtitle: 'الصحة العامة والتبعيات والأحداث' }),
+  '/overview':                  tr => tr.pages.overview,
+  '/conversations':             tr => tr.pages.conversations,
+  '/orders':                    tr => tr.pages.orders,
+  '/customers':                 tr => tr.pages.customers,
+  '/coupons':                   tr => tr.pages.coupons,
+  '/promotions':                tr => tr.pages.promotions,
+  '/campaigns':                 tr => tr.pages.campaigns,
+  '/templates':                 tr => tr.pages.templates,
+  '/integrations':              tr => tr.pages.integrations,
+  '/analytics':                 tr => tr.pages.analytics,
+  '/settings':                  tr => tr.pages.settings,
+  '/smart-automations':         tr => tr.pages.smartAutomations,
+  '/billing':                   tr => tr.pages.billing,
+  '/widgets':                   tr => tr.pages.widgets,
+  '/system-status':             tr => tr.pages.systemStatus,
+  '/store-integration':         tr => tr.pages.storeIntegration,
+  '/whatsapp-connect':          tr => tr.pages.whatsappConnect,
+  '/help/whatsapp-manual-setup': tr => ({ title: tr.nav.items.manualSetup, subtitle: '' }),
+  '/ai-sales-logs':             tr => ({ title: tr.nav.items.salesAgent,   subtitle: '' }),
+  '/handoff-queue':             tr => ({ title: tr.nav.items.handoffQueue, subtitle: '' }),
+  '/admin':                     tr => tr.adminPages.dashboard,
+  '/admin/tenants':             tr => tr.adminPages.tenants,
+  '/admin/merchants':           tr => tr.adminPages.merchants,
+  '/admin/revenue':             tr => tr.adminPages.revenue,
+  '/admin/ai-usage':            tr => tr.adminPages.aiUsage,
+  '/admin/features':            tr => tr.adminPages.features,
+  '/admin/troubleshooting':     tr => tr.adminPages.troubleshooting,
+  '/admin/team':                tr => tr.adminPages.team,
+  '/admin/system':              tr => tr.adminPages.system,
+  '/admin/coexistence':         tr => tr.adminPages.coexistence,
+  '/admin/tools':               tr => tr.adminPages.tools,
 }
 
 export default function Layout() {
@@ -38,7 +48,7 @@ export default function Layout() {
   const { t } = useLanguage()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
-  const metaSelector = PAGE_META[pathname] ?? (() => ({ title: 'نحلة', subtitle: '' }))
+  const metaSelector = PAGE_META[pathname] ?? ((_tr: Translations) => ({ title: 'Nahla', subtitle: '' }))
   const meta = t(metaSelector)
 
   return (

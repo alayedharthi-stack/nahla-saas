@@ -28,14 +28,13 @@ interface AccessRequest {
   requested_at: string
 }
 
-function _displayName(email: string, storeName: string, role: string): string {
+function _displayName(email: string, storeName: string): string {
   if (storeName) return storeName
   if (email) {
     const local = email.split('@')[0].replace(/[-_.]/g, ' ')
     return local.charAt(0).toUpperCase() + local.slice(1)
   }
-  if (role === 'admin' || role === 'owner') return 'المالك'
-  return 'التاجر'
+  return ''
 }
 
 function _avatarLetter(name: string): string {
@@ -148,16 +147,21 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const impersonating = isImpersonating()
   const impersonInfo  = getImpersonation()
 
-  const displayName  = _displayName(email, storeName, role)
+  const rawName      = _displayName(email, storeName)
+  const displayName  = rawName || (
+    (role === 'admin' || role === 'owner')
+      ? t(tr => tr.roles.defaultOwner)
+      : t(tr => tr.roles.defaultMerchant)
+  )
   const avatarLetter = _avatarLetter(displayName)
   const avatarColor  = _avatarColor(role)
 
   const roleLabel = (() => {
-    if (impersonating)                                        return 'دعم فني — وصول مؤقت'
-    if (role === 'admin' || role === 'super_admin')           return 'مالك المنصة'
-    if (role === 'owner')                                     return 'مالك'
-    if (role === 'staff')                                     return 'موظف'
-    return 'تاجر'
+    if (impersonating)                                        return t(tr => tr.roles.support)
+    if (role === 'admin' || role === 'super_admin')           return t(tr => tr.roles.platformOwner)
+    if (role === 'owner')                                     return t(tr => tr.roles.owner)
+    if (role === 'staff')                                     return t(tr => tr.roles.staff)
+    return t(tr => tr.roles.merchant)
   })()
 
   const { requests, responding, respond, approved } = useAccessRequests(role)

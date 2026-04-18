@@ -84,11 +84,35 @@ function WaPreview({
 function TemplateRow({
   tpl, onPreview, onDelete, onSubmit, onEdit, isSubmitting,
 }: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void; onEdit: () => void; isSubmitting?: boolean }) {
+  const { t } = useLanguage()
   const vars = countVars(tpl)
   const sm = (STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'
   const isDefault = isDefaultTemplate(tpl.name)
   const meta = DEFAULT_TEMPLATE_META[tpl.name]
   const compatibility = tpl.compatibility
+
+  const statusLabel = (() => {
+    switch (tpl.status) {
+      case 'DRAFT':          return t(tr => tr.templatesMgmt.statusDraft)
+      case 'APPROVED':       return t(tr => tr.templatesMgmt.statusApproved)
+      case 'PENDING':        return t(tr => tr.templatesMgmt.statusPending)
+      case 'REJECTED':       return t(tr => tr.templatesMgmt.statusRejected)
+      case 'PAUSED':         return t(tr => tr.templatesMgmt.statusPaused)
+      case 'DISABLED':       return t(tr => tr.templatesMgmt.disabled)
+      case 'ARCHIVED':       return t(tr => tr.templatesMgmt.archived)
+      case 'LIMIT_EXCEEDED': return t(tr => tr.templatesMgmt.limitExceeded)
+      default:               return tpl.status
+    }
+  })()
+
+  const categoryLabel = (() => {
+    switch (tpl.category) {
+      case 'MARKETING':      return t(tr => tr.templatesMgmt.categoryMarketing)
+      case 'UTILITY':        return t(tr => tr.templatesMgmt.categoryUtility)
+      case 'AUTHENTICATION': return t(tr => tr.templatesMgmt.categoryAuth)
+      default:               return tpl.category
+    }
+  })()
 
   return (
     <tr className={`hover:bg-slate-50 transition-colors ${isDefault ? 'bg-brand-50/30' : ''}`}>
@@ -98,7 +122,7 @@ function TemplateRow({
           {isDefault && (
             <span className="inline-flex items-center gap-1 text-[10px] bg-brand-100 text-brand-700 border border-brand-200 px-1.5 py-0.5 rounded-full font-medium">
               <Star className="w-2.5 h-2.5" />
-              افتراضي
+              {t(tr => tr.templatesMgmt.defaultBadge)}
             </span>
           )}
         </div>
@@ -115,12 +139,12 @@ function TemplateRow({
       <td className="px-5 py-3.5 text-xs text-slate-600">{LANGUAGE_LABELS[tpl.language] ?? tpl.language}</td>
       <td className="px-5 py-3.5">
         <Badge
-          label={CATEGORY_LABELS[tpl.category as TemplateCategory] ?? tpl.category}
+          label={categoryLabel}
           variant={tpl.category === 'MARKETING' ? 'amber' : tpl.category === 'UTILITY' ? 'blue' : 'purple'}
         />
       </td>
       <td className="px-5 py-3.5">
-        <Badge label={STATUS_LABELS[tpl.status] ?? tpl.status} variant={sm} dot />
+        <Badge label={statusLabel} variant={sm} dot />
         {tpl.status === 'REJECTED' && tpl.rejection_reason && (
           <p className="text-[10px] text-red-500 mt-0.5 max-w-xs truncate">{tpl.rejection_reason}</p>
         )}
@@ -132,7 +156,7 @@ function TemplateRow({
         <div className="flex flex-col items-start gap-1">
           {vars > 0 ? (
             <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
-              {vars} متغير
+              {vars} {t(tr => tr.templatesMgmt.varCount)}
             </span>
           ) : (
             <span className="text-xs text-slate-300">—</span>
@@ -146,10 +170,10 @@ function TemplateRow({
                 : 'bg-slate-100 text-slate-600'
             }`}>
               {compatibility.compatibility === 'compatible'
-                ? 'متوافق'
+                ? t(tr => tr.templatesMgmt.compatible)
                 : compatibility.compatibility === 'pending_meta'
-                ? 'بانتظار اعتماد Meta'
-                : 'يحتاج مراجعة'}
+                ? t(tr => tr.templatesMgmt.awaitingMeta)
+                : t(tr => tr.templatesMgmt.needsReview)}
             </span>
           )}
         </div>
@@ -162,7 +186,7 @@ function TemplateRow({
           <button
             onClick={onPreview}
             className="text-slate-400 hover:text-brand-500 transition-colors"
-            title="معاينة"
+            title={t(tr => tr.templatesMgmt.tooltipPreview)}
           >
             <Eye className="w-4 h-4" />
           </button>
@@ -170,7 +194,7 @@ function TemplateRow({
             <button
               onClick={onEdit}
               className="text-slate-400 hover:text-amber-500 transition-colors"
-              title="تعديل"
+              title={t(tr => tr.templatesMgmt.tooltipEdit)}
             >
               <Pencil className="w-4 h-4" />
             </button>
@@ -184,20 +208,20 @@ function TemplateRow({
                   ? 'text-slate-400 bg-slate-100 cursor-not-allowed'
                   : 'text-brand-500 hover:text-brand-700 bg-brand-50 hover:bg-brand-100'
               }`}
-              title={isSubmitting ? 'جارٍ الإرسال…' : 'إرسال إلى Meta للمراجعة'}
+              title={isSubmitting ? t(tr => tr.templatesMgmt.submittingBtn) : t(tr => tr.templatesMgmt.submitBtn)}
             >
               {isSubmitting
                 ? <RefreshCw className="w-3 h-3 animate-spin" />
                 : <Send className="w-3 h-3" />
               }
-              {isSubmitting ? 'جارٍ الإرسال…' : 'إرسال لـ Meta'}
+              {isSubmitting ? t(tr => tr.templatesMgmt.submittingBtn) : t(tr => tr.templatesMgmt.submitBtn)}
             </button>
           )}
           {tpl.status !== 'APPROVED' && (
             <button
               onClick={onDelete}
               className="text-slate-300 hover:text-red-500 transition-colors"
-              title="حذف"
+              title={t(tr => tr.templatesMgmt.tooltipDelete)}
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -391,6 +415,7 @@ const INIT_WIZARD: WizardState = {
 }
 
 function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (t: WhatsAppTemplateRecord) => void }) {
+  const { t } = useLanguage()
   const [wiz, setWiz] = useState<WizardState>(INIT_WIZARD)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -706,7 +731,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
           ) : (
             <button onClick={handleSubmit} disabled={saving} className="btn-primary text-sm">
               {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-              {saving ? 'جارٍ الحفظ…' : 'حفظ كمسودة'}
+              {saving ? t(tr => tr.templatesMgmt.savingDraft) : t(tr => tr.templatesMgmt.saveDraft)}
             </button>
           )}
         </div>
@@ -1160,17 +1185,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
   )
 }
 
-const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
-  { key: 'all',      label: 'الكل' },
-  { key: 'DRAFT',    label: 'مسودات' },
-  { key: 'APPROVED', label: 'معتمدة' },
-  { key: 'PENDING',  label: 'قيد المراجعة' },
-  { key: 'REJECTED', label: 'مرفوضة' },
-  { key: 'DISABLED', label: 'معطّلة' },
-  { key: 'PAUSED',   label: 'موقوفة مؤقتًا' },
-]
-
-const TABLE_HEADERS = ['اسم القالب', 'اللغة', 'الفئة', 'الحالة', 'المتغيرات', 'آخر تحديث', '']
+// Filter tabs and table headers are built inside the component using t()
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
@@ -1186,6 +1201,26 @@ export default function Templates() {
   const [submitError, setSubmitError] = useState<{id: number; msg: string} | null>(null)
   const [submitting, setSubmitting] = useState<number | null>(null)
   const { t } = useLanguage()
+
+  const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
+    { key: 'all',      label: t(tr => tr.templatesMgmt.filterAll)      },
+    { key: 'DRAFT',    label: t(tr => tr.templatesMgmt.statDraft)      },
+    { key: 'APPROVED', label: t(tr => tr.templatesMgmt.filterApproved) },
+    { key: 'PENDING',  label: t(tr => tr.templatesMgmt.filterPending)  },
+    { key: 'REJECTED', label: t(tr => tr.templatesMgmt.filterRejected) },
+    { key: 'DISABLED', label: t(tr => tr.templatesMgmt.disabled)       },
+    { key: 'PAUSED',   label: t(tr => tr.templatesMgmt.filterPaused)   },
+  ]
+
+  const TABLE_HEADERS = [
+    t(tr => tr.templatesMgmt.colName),
+    t(tr => tr.templatesMgmt.colLang),
+    t(tr => tr.templatesMgmt.colCategory),
+    t(tr => tr.templatesMgmt.colStatus),
+    t(tr => tr.templatesMgmt.colVariables),
+    t(tr => tr.templatesMgmt.colUpdated),
+    '',
+  ]
 
   const loadTemplates = useCallback(() => {
     setLoading(true)
@@ -1289,7 +1324,7 @@ export default function Templates() {
               className="btn-secondary text-sm border-amber-300 text-amber-700 hover:bg-amber-50"
             >
               <BookOpen className="w-4 h-4" />
-              مكتبة نحلة
+              {t(tr => tr.templatesMgmt.libraryBtn)}
             </button>
             <button
               onClick={handleSync}
@@ -1308,18 +1343,17 @@ export default function Templates() {
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4">
-        <StatCard label="مسودات"         value={String(counts.draft)}    change={0}  icon={Type}         iconColor="text-slate-600"    iconBg="bg-slate-100" />
-        <StatCard label="معتمدة"         value={String(counts.approved)} change={0}  icon={CheckCircle}  iconColor="text-emerald-600" iconBg="bg-emerald-50" />
-        <StatCard label="قيد المراجعة"  value={String(counts.pending)}  change={0}  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+        <StatCard label={t(tr => tr.templatesMgmt.statDraft)}    value={String(counts.draft)}    change={0}  icon={Type}         iconColor="text-slate-600"    iconBg="bg-slate-100" />
+        <StatCard label={t(tr => tr.templatesMgmt.statApproved)} value={String(counts.approved)} change={0}  icon={CheckCircle}  iconColor="text-emerald-600" iconBg="bg-emerald-50" />
+        <StatCard label={t(tr => tr.templatesMgmt.statPending)}  value={String(counts.pending)}  change={0}  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
       </div>
 
       {/* Compliance notice */}
       <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
         <MessageSquare className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
         <p className="text-xs text-blue-800">
-          <span className="font-semibold">سياسة Meta: </span>
-          جميع القوالب تخضع لمراجعة Meta قبل الاستخدام. لا يمكن استخدام أي قالب في حملة قبل الحصول على حالة
-          <strong> APPROVED</strong>. مدة المراجعة عادةً 24–48 ساعة.
+          <span className="font-semibold">{t(tr => tr.templatesMgmt.metaPolicy)} </span>
+          {t(tr => tr.templatesMgmt.metaPolicyText)}
         </p>
       </div>
 
@@ -1354,15 +1388,15 @@ export default function Templates() {
 
         {loading ? (
           <div className="py-16 text-center text-sm text-slate-400 flex items-center justify-center gap-2">
-            <RefreshCw className="w-4 h-4 animate-spin" /> جارٍ التحميل…
+            <RefreshCw className="w-4 h-4 animate-spin" /> {t(tr => tr.templatesMgmt.loadingTemplates)}
           </div>
         ) : filtered.length === 0 ? (
           <div className="py-16 text-center space-y-3">
             <MessageSquare className="w-10 h-10 text-slate-200 mx-auto" />
-            <p className="text-sm text-slate-400">لا توجد قوالب في هذه الفئة.</p>
+            <p className="text-sm text-slate-400">{t(tr => tr.templatesMgmt.noTemplates)}</p>
             {filterTab === 'all' && (
               <button onClick={() => setShowCreate(true)} className="btn-primary text-sm mx-auto">
-                <Plus className="w-4 h-4" /> أنشئ قالبك الأول
+                <Plus className="w-4 h-4" /> {t(tr => tr.templatesMgmt.createFirst)}
               </button>
             )}
           </div>
