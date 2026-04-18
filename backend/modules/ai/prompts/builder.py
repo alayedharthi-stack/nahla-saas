@@ -127,11 +127,20 @@ def build_system_prompt(ctx: Dict[str, Any]) -> str:
             prod_lines.append(f"  [{p['id']}] {p['title']} | SAR {p['price_sar']}{star}")
         sections.append("\n".join(prod_lines))
     else:
-        sections.append("AVAILABLE PRODUCTS:\n  (No products loaded yet.)")
+        sections.append(
+            "AVAILABLE PRODUCTS:\n"
+            "  (No products synced yet — the store catalogue is empty.)\n"
+            "  STRICT RULE: Do NOT mention, offer, or reference any coupons or "
+            "discounts when no products are available. Apologise briefly and tell "
+            "the customer the store will reach out to them soon."
+        )
 
-    # ── 8. Coupons ────────────────────────────────────────────────────────────
+    # ── 8. Coupons — only expose when the product catalogue is non-empty ──────
+    # Showing coupons without a catalogue causes the model to use discount codes
+    # as a "consolation prize" when it cannot answer product questions, which is
+    # confusing and commercially harmful.
     coupons = ctx.get("coupons", [])
-    if coupons:
+    if coupons and products:   # guard: both must be present
         coupon_lines = ["ACTIVE COUPONS:"]
         for c in coupons:
             coupon_lines.append(
@@ -184,6 +193,8 @@ def build_system_prompt(ctx: Dict[str, Any]) -> str:
         "  • لا تستخدم تنسيق markdown مثل ** أو * — واتساب لا يدعمها بشكل صحيح.\n"
         "  • عند اقتراح منتج، اذكر رقم المنتج بين قوسين، مثل [42].\n"
         "  • عند اقتراح كوبون، اذكر الكود بوضوح.\n"
+        "  • إذا كانت قائمة المنتجات فارغة أو غير موجودة، اعتذر للعميل بأدب "
+        "وأخبره أن المتجر سيتواصل معه قريباً — لا تقترح كوبونات أو خصومات بدون منتجات.\n"
         "  • لا تضف أي تذييل أو إفصاح عن الذكاء الاصطناعي.\n"
         "  • استخدم أدوات الإجراءات لاقتراح المنتجات والكوبونات والطلبات.\n"
         "  • عند جمع عنوان الشحن في السعودية، اطلب: رقم المبنى، اسم الشارع، الحي، "

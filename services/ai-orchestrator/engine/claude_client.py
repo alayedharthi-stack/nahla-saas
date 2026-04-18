@@ -69,7 +69,11 @@ _TOOLS: List[Dict] = [
         "description": (
             "Propose a discount for the customer. "
             "The discount percentage must fit within the store's coupon policy. "
-            "Only suggest a coupon if the customer shows price sensitivity or hesitation."
+            "Only suggest a coupon if ALL of the following conditions are met: "
+            "(1) actual products are listed in the AVAILABLE PRODUCTS section of your context, "
+            "(2) the customer shows clear price sensitivity or hesitation about a specific product. "
+            "NEVER suggest a coupon when the product catalogue is empty or unavailable — "
+            "there is nothing to apply a discount to."
         ),
         "input_schema": {
             "type": "object",

@@ -121,15 +121,51 @@ class CatalogContextBuilder:
         self.db        = db
         self.tenant_id = tenant_id
 
-    def search_products(self, query: str, limit: int = 5) -> List[Dict]:
-        """Full-text keyword search over synced products."""
-        q = f"%{query.lower()}%"
+    def search_products(self, query: str, limit: int = 10) -> List[Dict]:
+        """
+        Search synced products by keyword.
+
+        Strategy (priority order):
+          1. PostgreSQL full-text search on title + description (supports Arabic)
+          2. ILIKE fallback on title for very short queries or FTS failures
+        Only returns in-stock products first; out-of-stock follow if needed.
+        """
+        from sqlalchemy import text as sa_text  # noqa: PLC0415
+        q_clean = query.strip()
+        if not q_clean:
+            return []
+
+        # -- Full-text search (tsvector, works with Arabic tokens) ------------
+        try:
+            fts_sql = sa_text("""
+                SELECT id FROM products
+                WHERE tenant_id = :tid
+                  AND to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
+                      @@ plainto_tsquery('simple', :q)
+                ORDER BY in_stock DESC, id
+                LIMIT :lim
+            """)
+            result = self.db.execute(fts_sql, {"tid": self.tenant_id, "q": q_clean, "lim": limit})
+            ids = [row[0] for row in result]
+            if ids:
+                rows = (
+                    self.db.query(Product)
+                    .filter(Product.id.in_(ids))
+                    .all()
+                )
+                return [self._format(p) for p in rows]
+        except Exception:
+            pass  # fall through to ILIKE
+
+        # -- ILIKE fallback ---------------------------------------------------
+        q_like = f"%{q_clean.lower()}%"
         rows = (
             self.db.query(Product)
             .filter(
                 Product.tenant_id == self.tenant_id,
-                Product.title.ilike(q),
+                Product.title.ilike(q_like),
             )
+            .order_by(Product.in_stock.desc())
             .limit(limit)
             .all()
         )
@@ -143,10 +179,12 @@ class CatalogContextBuilder:
         )
         return self._format(p) if p else None
 
-    def get_top_products(self, limit: int = 10) -> List[Dict]:
+    def get_top_products(self, limit: int = 25) -> List[Dict]:
+        """Return top products, prioritising in-stock items."""
         rows = (
             self.db.query(Product)
             .filter_by(tenant_id=self.tenant_id)
+            .order_by(Product.in_stock.desc(), Product.id)
             .limit(limit)
             .all()
         )
@@ -190,11 +228,21 @@ class CatalogContextBuilder:
         """Return a formatted text block for the AI prompt."""
         if query:
             products = self.search_products(query)
+            # Keyword search matched nothing — show top products so the AI
+            # always has catalogue context regardless of the query term.
+            if not products:
+                products = self.get_top_products(25)
         else:
-            products = self.get_top_products(10)
+            products = self.get_top_products(25)
 
         if not products:
-            return "لا توجد منتجات متاحة حالياً في قاعدة البيانات."
+            # Explicit instruction to the model — do NOT reveal coupons or
+            # offer any discount when there is nothing to sell.
+            return (
+                "لا توجد منتجات مزامنة حالياً في قاعدة البيانات.\n"
+                "تعليمات صارمة: لا تذكر أي كوبونات أو عروض للعميل.\n"
+                "اعتذر بأدب وأخبر العميل أن المتجر سيتواصل معه قريباً."
+            )
 
         lines = ["### المنتجات المتاحة (من البيانات الفعلية للمتجر):"]
         for p in products:
@@ -479,12 +527,15 @@ def build_ai_context(
                 + (f"- للتواصل: {profile['contact_phone']}\n" if profile.get("contact_phone") else "")
             )
 
-    # 2. Catalog
+    # 2. Catalog — track whether real products exist
+    catalog_has_products = False
     if "catalog" in include:
         catalog_builder = CatalogContextBuilder(db, tenant_id)
         block = catalog_builder.build_context_block(product_query)
         if block:
             parts.append(block)
+            # A block without the "no products" sentinel means real rows were found
+            catalog_has_products = "تعليمات صارمة" not in block
 
     # 3. Shipping
     if "shipping" in include:
@@ -493,8 +544,11 @@ def build_ai_context(
         if block:
             parts.append(block)
 
-    # 4. Coupons
-    if "coupons" in include:
+    # 4. Coupons — ONLY when products are available.
+    # Without products there is nothing to apply a discount to; exposing the
+    # coupon list without a matching catalogue causes the AI to use the codes
+    # as a "consolation prize", which is confusing and undesirable.
+    if "coupons" in include and catalog_has_products:
         coupon_builder = CouponContextBuilder(db, tenant_id)
         block = coupon_builder.build_context_block()
         if block:

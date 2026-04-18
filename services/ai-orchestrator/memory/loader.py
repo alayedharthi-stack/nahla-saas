@@ -116,9 +116,13 @@ def load_customer_memory(
             .all()
         )
 
-        # ── Store products ────────────────────────────────────────────────────
+        # ── Store products — in-stock first, then by affinity ─────────────────
         all_products: List[Product] = (
-            db.query(Product).filter(Product.tenant_id == tenant_id).limit(50).all()
+            db.query(Product)
+            .filter(Product.tenant_id == tenant_id)
+            .order_by(Product.in_stock.desc(), Product.id)
+            .limit(50)
+            .all()
         )
 
         # Annotate each product with this customer's affinity score
@@ -129,13 +133,17 @@ def load_customer_memory(
                 "title": p.title,
                 "price_sar": p.price,
                 "sku": p.sku,
+                "in_stock": p.in_stock,
                 "affinity_score": affinity_map.get(p.id, 0.0),
                 "tags": p.recommendation_tags or [],
             }
             for p in all_products
         ]
-        # Sort: high-affinity products first
-        product_lines.sort(key=lambda x: x["affinity_score"], reverse=True)
+        # Sort: high-affinity products first, then in-stock
+        product_lines.sort(
+            key=lambda x: (x["affinity_score"], 1 if x.get("in_stock") else 0),
+            reverse=True,
+        )
 
         # ── Active coupons ────────────────────────────────────────────────────
         coupons: List[Coupon] = (
@@ -212,7 +220,10 @@ def load_customer_memory(
             # Products and catalog
             "products": product_lines[:30],   # top 30 after affinity sort
             "high_affinity_product_ids": affinity_product_ids[:5],
-            "coupons": coupon_lines,
+            # Coupons are only passed to the prompt when products exist.
+            # Without a catalogue the model uses coupons as a "consolation
+            # prize" — confusing and commercially harmful.
+            "coupons": coupon_lines if product_lines else [],
             # Recent order context
             "recent_orders": [
                 {
