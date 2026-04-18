@@ -217,9 +217,11 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # ══════════════════════════════════════════════════════════════
     # STEP 3 — Derive identity (fallback if introspect gave no email)
     # ══════════════════════════════════════════════════════════════
+    email_is_derived = False
     if not owner_email and merchant_id_str:
-        safe_name   = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
-        owner_email = f"{safe_name or 'store'}-{merchant_id_str}@salla-merchant.nahlah.ai"
+        safe_name    = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
+        owner_email  = f"{safe_name or 'store'}-{merchant_id_str}@salla-merchant.nahlah.ai"
+        email_is_derived = True   # derived — cannot trust user-email lookup
         logger.info(
             "[SallaLogin] ℹ️  STEP 3 — No email from Salla, using derived: %s",
             owner_email,
@@ -245,10 +247,17 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # STEP 4 — Find or create isolated Tenant + User
     # ══════════════════════════════════════════════════════════════
     try:
-        existing_user = db.query(User).filter(User.email == owner_email).first()
+        # When Salla provides no real email and we derived one ourselves
+        # (e.g. store-22825873@salla-merchant.nahlah.ai), we CANNOT trust a
+        # user-email lookup: a ghost user with the same derived email may exist
+        # in a wrong tenant from a previous failed login attempt.
+        # In that case, skip directly to the store_id-based Integration lookup.
+        existing_user = None
+        if not email_is_derived:
+            existing_user = db.query(User).filter(User.email == owner_email).first()
 
         if existing_user:
-            # ── Returning merchant ────────────────────────────────────────────
+            # ── Returning merchant (real Salla email matched) ─────────────────
             tenant_id = existing_user.tenant_id
             role      = existing_user.role or "merchant"
             is_new    = False
