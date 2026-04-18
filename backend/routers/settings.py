@@ -24,6 +24,7 @@ from core.tenant import (
     DEFAULT_WHATSAPP,
     get_or_create_settings,
     merge_defaults,
+    merge_ai_defaults,
     resolve_tenant_id,
 )
 from services.whatsapp_platform.token_manager import get_token_context
@@ -118,7 +119,7 @@ async def get_settings(request: Request, db: Session = Depends(get_db)):
     store = merge_defaults(settings.store_settings,    DEFAULT_STORE)
     return {
         "whatsapp":      apply_masks(wa,    "whatsapp"),
-        "ai":            merge_defaults(settings.ai_settings,           DEFAULT_AI),
+        "ai":            merge_ai_defaults(settings.ai_settings),
         "store":         apply_masks(store, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
     }
@@ -142,7 +143,7 @@ async def update_settings(
         settings.whatsapp_settings = current
 
     if body.ai is not None:
-        current = merge_defaults(settings.ai_settings, DEFAULT_AI)
+        current = merge_ai_defaults(settings.ai_settings)
         current.update(body.ai.model_dump())
         settings.ai_settings = current
 
@@ -165,7 +166,7 @@ async def update_settings(
     store_saved = merge_defaults(settings.store_settings,    DEFAULT_STORE)
     return {
         "whatsapp":      apply_masks(wa_saved,    "whatsapp"),
-        "ai":            merge_defaults(settings.ai_settings,           DEFAULT_AI),
+        "ai":            merge_ai_defaults(settings.ai_settings),
         "store":         apply_masks(store_saved, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
     }
