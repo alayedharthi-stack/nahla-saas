@@ -758,14 +758,16 @@ async def _submit_template_to_meta(
     category: str,
     components: List[Dict[str, Any]],
 ) -> Optional[str]:
-    """Submit a new template using the active WhatsApp provider."""
+    """Submit a new template using the active WhatsApp provider.
+    Raises ValueError with the actual Meta error message on failure.
+    """
+    payload = {
+        "name": name,
+        "language": language,
+        "category": category,
+        "components": components,
+    }
     try:
-        payload = {
-            "name": name,
-            "language": language,
-            "category": category,
-            "components": components,
-        }
         result, _token_ctx = await provider_submit_template(
             db,
             conn,
@@ -774,9 +776,33 @@ async def _submit_template_to_meta(
             payload=payload,
             prefer_platform=bool(conn and getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT),
         )
-        return str(result.get("id") or result.get("external_id") or "")
-    except Exception:
-        return None
+    except Exception as exc:
+        logger.error(
+            "[template/submit] provider exception tenant=%s name=%s: %s",
+            tenant_id, name, exc,
+        )
+        raise ValueError(f"خطأ في الاتصال بـ Meta: {exc}") from exc
+
+    # provider_post_with_context does NOT raise on 4xx — check manually
+    if "error" in result:
+        meta_err = result["error"]
+        msg = meta_err.get("error_user_msg") or meta_err.get("message", "خطأ غير معروف من Meta")
+        code = meta_err.get("code", "")
+        logger.error(
+            "[template/submit] Meta rejected tenant=%s name=%s code=%s msg=%s payload=%s",
+            tenant_id, name, code, msg, payload,
+        )
+        raise ValueError(f"Meta رفضت القالب (code {code}): {msg}")
+
+    meta_id = str(result.get("id") or result.get("external_id") or "")
+    if not meta_id:
+        logger.error(
+            "[template/submit] Meta returned no id tenant=%s name=%s result=%s",
+            tenant_id, name, result,
+        )
+        raise ValueError("لم تُعيد Meta معرّف القالب — القالب قد لا يكون معتمداً للإرسال")
+
+    return meta_id
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -1390,16 +1416,19 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
             detail="بيانات WhatsApp Business غير مُعدَّة. أكمل ربط واتساب أولاً (الإعدادات ← واتساب).",
         )
 
-    meta_id = await _submit_template_to_meta(
-        db=db,
-        conn=wa_conn,
-        tenant_id=tenant_id,
-        waba_id=waba_id,
-        name=tpl.name,
-        language=tpl.language,
-        category=tpl.category,
-        components=tpl.components or [],
-    )
+    try:
+        meta_id = await _submit_template_to_meta(
+            db=db,
+            conn=wa_conn,
+            tenant_id=tenant_id,
+            waba_id=waba_id,
+            name=tpl.name,
+            language=tpl.language,
+            category=tpl.category,
+            components=tpl.components or [],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not meta_id:
         raise HTTPException(status_code=502, detail="فشل إرسال القالب إلى Meta. تحقق من بيانات الاعتماد وحاول مرة أخرى.")
 
