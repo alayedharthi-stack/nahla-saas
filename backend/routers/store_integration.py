@@ -49,12 +49,30 @@ async def get_store_integration_settings(request: Request, db: Session = Depends
     if not integration:
         return {"configured": False, "platform": None, "store_id": "", "enabled": False}
     cfg = integration.config or {}
+
+    # Surface the most recent sync error (if any) so the UI can show a fix banner
+    sync_error: str | None = None
+    try:
+        from models import StoreSyncJob  # noqa: PLC0415
+        last_job = (
+            db.query(StoreSyncJob)
+            .filter_by(tenant_id=tenant_id)
+            .order_by(StoreSyncJob.id.desc())
+            .first()
+        )
+        if last_job and last_job.status == "error" and last_job.error_message:
+            sync_error = last_job.error_message
+    except Exception:
+        pass
+
     return {
-        "configured": True,
-        "platform":   integration.provider,
-        "store_id":   integration.external_store_id or cfg.get("store_id", ""),
-        "api_key_hint": ("***" + cfg.get("api_key", "")[-4:]) if cfg.get("api_key") else "",
-        "enabled":    integration.enabled,
+        "configured":      True,
+        "platform":        integration.provider,
+        "store_id":        integration.external_store_id or cfg.get("store_id", ""),
+        "api_key_hint":    ("***" + cfg.get("api_key", "")[-4:]) if cfg.get("api_key") else "",
+        "enabled":         integration.enabled,
+        "sync_error":      sync_error,
+        "no_auto_refresh": bool(cfg.get("no_auto_refresh")),
     }
 
 
@@ -73,8 +91,16 @@ async def put_store_integration_settings(
     ).first()
     if integration:
         merged_config = dict(integration.config or {})
+        if body.api_key:
+            merged_config["api_key"] = body.api_key
+            # New key provided — clear any stale reauth / no-refresh flags
+            merged_config.pop("needs_reauth",           None)
+            merged_config.pop("needs_reauth_at",        None)
+            merged_config.pop("needs_reauth_reason",    None)
+            merged_config.pop("no_auto_refresh",        None)
+            merged_config.pop("no_auto_refresh_reason", None)
+            merged_config.pop("no_auto_refresh_at",     None)
         merged_config.update({
-            "api_key":       body.api_key,
             "store_id":      body.store_id,
             "webhook_secret": body.webhook_secret,
         })

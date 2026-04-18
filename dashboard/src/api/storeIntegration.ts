@@ -4,6 +4,8 @@ export interface StoreIntegrationStatus {
   store_id: string
   api_key_hint: string
   enabled: boolean
+  sync_error?: string | null
+  no_auto_refresh?: boolean
 }
 
 export interface StoreIntegrationInput {

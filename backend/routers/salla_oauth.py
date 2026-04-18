@@ -1747,15 +1747,14 @@ async def salla_reconnect(
     db: Session = Depends(get_db),
 ):
     """
-    Smart reconnect endpoint.
+    Smart reconnect — tries every available path in priority order:
 
-    1. Looks up the tenant's Salla integration.
-    2. If a refresh_token exists → attempts to exchange it for a new access_token.
-       On success → updates the DB and returns { action: "refreshed" }.
-    3. If refresh fails or no refresh_token → returns { action: "oauth_required",
-       url: "<Salla OAuth URL>" } so the frontend can redirect the user.
+    1. Silent refresh  — use refresh_token if present.
+    2. Reactivate      — if no refresh_token but api_key exists, re-enable the
+                         integration as-is (manual/long-lived token mode).
+    3. OAuth redirect  — last resort, returns the Salla OAuth URL.
 
-    Always returns 200; the caller decides what to do based on `action`.
+    Always returns HTTP 200; caller inspects `action` to decide next step.
     """
     tenant_id = resolve_tenant_id(request)
     audit("salla_reconnect_attempt", tenant_id=tenant_id)
@@ -1766,11 +1765,12 @@ async def salla_reconnect(
     ).first()
 
     cfg           = dict(intg.config or {}) if intg else {}
+    api_key       = cfg.get("api_key", "")
     refresh_token = cfg.get("refresh_token", "")
     client_id     = SALLA_CLIENT_ID     or ""
     client_secret = SALLA_CLIENT_SECRET or ""
 
-    # ── Step 1: try silent token refresh ─────────────────────────────────────
+    # ── Path 1: silent token refresh via refresh_token ────────────────────────
     if refresh_token and client_id and client_secret:
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -1792,10 +1792,12 @@ async def salla_reconnect(
                 new_access  = data.get("access_token", "")
                 new_refresh = data.get("refresh_token", refresh_token)
                 if new_access and intg:
-                    cfg["api_key"]           = new_access
-                    cfg["refresh_token"]     = new_refresh
+                    cfg["api_key"]            = new_access
+                    cfg["refresh_token"]      = new_refresh
                     cfg["last_token_refresh"] = datetime.now(timezone.utc).isoformat()
-                    cfg.pop("needs_reauth", None)
+                    cfg.pop("needs_reauth",        None)
+                    cfg.pop("no_auto_refresh",     None)
+                    cfg.pop("no_auto_refresh_reason", None)
                     intg.config  = cfg
                     intg.enabled = True
                     db.commit()
@@ -1804,14 +1806,39 @@ async def salla_reconnect(
                         "action":  "refreshed",
                         "message": "تم تجديد التوكن بنجاح — الربط فعّال الآن",
                     }
+            # If invalid_grant, fall through to Path 2 (keep existing api_key)
             logger.warning(
-                "[SallaReconnect] Refresh failed %d | tenant=%s — falling back to OAuth",
-                resp.status_code, tenant_id,
+                "[SallaReconnect] Refresh failed %d | tenant=%s body=%s",
+                resp.status_code, tenant_id, resp.text[:200],
             )
         except Exception as exc:
             logger.warning("[SallaReconnect] Refresh error | tenant=%s: %s", tenant_id, exc)
 
-    # ── Step 2: OAuth re-authorization required ───────────────────────────────
+    # ── Path 2: re-activate existing api_key (no refresh_token needed) ────────
+    # Works when Salla app is under review / refresh_token was revoked but the
+    # access_token (api_key) is still valid or was manually entered.
+    if api_key and intg:
+        cfg.pop("needs_reauth",           None)
+        cfg.pop("needs_reauth_at",        None)
+        cfg.pop("needs_reauth_reason",    None)
+        cfg.pop("refresh_token",          None)   # remove the revoked token
+        cfg["no_auto_refresh"]        = True
+        cfg["no_auto_refresh_reason"] = "manual_mode"
+        cfg["reactivated_at"]         = datetime.now(timezone.utc).isoformat()
+        intg.config  = cfg
+        intg.enabled = True
+        db.commit()
+        logger.info(
+            "[SallaReconnect] Re-activated with existing api_key (manual mode) | tenant=%s",
+            tenant_id,
+        )
+        return {
+            "action":  "reactivated",
+            "message": "تم تفعيل الاتصال بالمفتاح الحالي — الربط نشط الآن",
+            "note":    "يعمل في وضع المفتاح الدائم. لتجديد المفتاح ادخل Access Token جديد من لوحة سلة.",
+        }
+
+    # ── Path 3: no token at all — OAuth required ──────────────────────────────
     if not SALLA_CLIENT_ID:
         raise HTTPException(status_code=503, detail="SALLA_CLIENT_ID not configured")
 
@@ -1824,9 +1851,9 @@ async def salla_reconnect(
         "state":         state,
     })
     oauth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
-    logger.info("[SallaReconnect] OAuth required | tenant=%s", tenant_id)
+    logger.info("[SallaReconnect] No token found — OAuth required | tenant=%s", tenant_id)
     return {
         "action":  "oauth_required",
         "url":     oauth_url,
-        "message": "يلزم إعادة التفويض — سيتم توجيهك لصفحة سلة",
+        "message": "يلزم ربط المتجر أولاً عبر OAuth أو بإدخال مفتاح API يدوياً",
     }

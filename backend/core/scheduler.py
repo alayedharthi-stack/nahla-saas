@@ -286,19 +286,28 @@ async def _refresh_all_salla_tokens() -> None:
                                 skipped += 1
                         else:
                             resp_text = resp.text[:300]
-                            # invalid_grant = permanently revoked — mark and stop retrying
                             if resp.status_code == 400 and "invalid_grant" in resp_text:
-                                logger.error(
-                                    "[Salla Token Refresh] INVALID_GRANT — token permanently revoked | "
-                                    "tenant=%s store=%s — marking needs_reauth",
+                                # Refresh token revoked by Salla (app under review / reinstalled).
+                                # Keep the integration ENABLED so the existing access_token
+                                # continues to work for API calls.  Only remove the revoked
+                                # refresh_token so we stop retrying and wasting requests.
+                                logger.warning(
+                                    "[Salla Token Refresh] INVALID_GRANT — refresh_token revoked | "
+                                    "tenant=%s store=%s — removing refresh_token, keeping api_key active",
                                     intg.tenant_id, cfg.get("store_id", "?"),
                                 )
-                                cfg["needs_reauth"] = True
-                                cfg["needs_reauth_at"] = datetime.now(timezone.utc).isoformat()
-                                cfg["needs_reauth_reason"] = "invalid_grant"
-                                intg.config = cfg
-                                intg.enabled = False
+                                cfg.pop("refresh_token", None)
+                                cfg["no_auto_refresh"]        = True
+                                cfg["no_auto_refresh_reason"] = "invalid_grant"
+                                cfg["no_auto_refresh_at"]     = datetime.now(timezone.utc).isoformat()
+                                # Clear any stale reauth flags so the UI doesn't show a blocker
+                                cfg.pop("needs_reauth", None)
+                                cfg.pop("needs_reauth_at", None)
+                                cfg.pop("needs_reauth_reason", None)
+                                intg.config  = cfg
+                                intg.enabled = True   # keep active with existing access_token
                                 db.commit()
+                                skipped += 1
                             else:
                                 failed += 1
                                 logger.warning(

@@ -214,27 +214,32 @@ export default function Integrations() {
       .finally(() => setZidLoading(false))
   }, [])
 
+  function reloadSallaStatus() {
+    setSallaLoading(true)
+    apiCall<any>('/salla/whoami')
+      .then(d => {
+        const si = d?.salla_integration ?? {}
+        setSallaStatus({
+          connected:    si.connected === true,
+          store_id:     si.store_id,
+          store_name:   si.store_name,
+          needs_reauth: si.needs_reauth === true,
+        })
+      })
+      .catch(() => {})
+      .finally(() => setSallaLoading(false))
+  }
+
   async function handleReconnectSalla() {
     setReconnecting(true)
     setReconnectMsg(null)
     try {
-      const data = await apiCall<{ action: string; url?: string; message: string }>('/api/salla/reconnect', { method: 'POST' })
-      if (data.action === 'refreshed') {
+      const data = await apiCall<{ action: string; url?: string; message: string; note?: string }>(
+        '/api/salla/reconnect', { method: 'POST' }
+      )
+      if (data.action === 'refreshed' || data.action === 'reactivated') {
         setReconnectMsg({ type: 'success', text: data.message })
-        // Reload Salla status
-        setSallaLoading(true)
-        apiCall<any>('/salla/whoami')
-          .then(d => {
-            const si = d?.salla_integration ?? {}
-            setSallaStatus({
-              connected:    si.connected === true,
-              store_id:     si.store_id,
-              store_name:   si.store_name,
-              needs_reauth: si.needs_reauth === true,
-            })
-          })
-          .catch(() => {})
-          .finally(() => setSallaLoading(false))
+        reloadSallaStatus()
       } else if (data.action === 'oauth_required' && data.url) {
         window.location.href = data.url
       }

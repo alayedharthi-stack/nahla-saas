@@ -125,6 +125,26 @@ export default function StoreIntegration() {
     }
   }
 
+  async function handleFixConnection() {
+    setOauthLoading(true)
+    setOauthMessage(null)
+    try {
+      const data = await apiCall<{ action: string; url?: string; message: string }>(
+        '/api/salla/reconnect', { method: 'POST' }
+      )
+      if (data.action === 'refreshed' || data.action === 'reactivated') {
+        setOauthMessage({ type: 'success', text: `✓ ${data.message}` })
+        await loadSettings()
+      } else if (data.action === 'oauth_required' && data.url) {
+        window.location.href = data.url
+      }
+    } catch {
+      setOauthMessage({ type: 'error', text: 'تعذّر استعادة الاتصال — تحقق من الاتصال بالخادم.' })
+    } finally {
+      setOauthLoading(false)
+    }
+  }
+
   async function handleDisable() {
     if (!confirm('هل أنت متأكد من إيقاف تشغيل ربط المتجر؟')) return
     try {
@@ -187,6 +207,31 @@ export default function StoreIntegration() {
           )}
         </div>
       </div>
+
+      {/* Sync error / fix-connection banner */}
+      {status?.sync_error && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 flex items-start gap-3">
+          <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-amber-800">فشلت المزامنة الأخيرة</p>
+            <p className="text-xs text-amber-700 mt-0.5 font-mono break-all">{status.sync_error}</p>
+            {(status.sync_error.includes('invalid_grant') || status.sync_error.includes('revoked')) && (
+              <p className="text-xs text-amber-600 mt-1.5">
+                انتهت صلاحية رمز التحديث (refresh_token). اضغط «استعادة الاتصال» لتفعيل الربط بالمفتاح الحالي،
+                أو أدخل مفتاح API جديداً من لوحة تحكم سلة.
+              </p>
+            )}
+          </div>
+          <button
+            onClick={handleFixConnection}
+            disabled={oauthLoading}
+            className="shrink-0 rounded-lg bg-amber-600 px-4 py-2 text-xs font-bold text-white hover:bg-amber-500 transition-colors disabled:opacity-60 flex items-center gap-1.5"
+          >
+            {oauthLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            استعادة الاتصال
+          </button>
+        </div>
+      )}
 
       {/* Settings Form */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-5">
