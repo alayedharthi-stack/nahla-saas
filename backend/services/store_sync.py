@@ -1144,10 +1144,14 @@ class StoreSyncService:
                     "order_created",
                     customer_id=customer.id if customer else None,
                     payload={
-                        "external_id": ext_id,
-                        "order_id": order_row.id,
-                        "status": normalised.get("status"),
-                        "total": normalised.get("total"),
+                        "external_id":           ext_id,
+                        "order_id":              order_row.id,
+                        "status":                normalised.get("status"),
+                        "total":                 normalised.get("total"),
+                        "order_number":          normalised.get("external_order_number") or ext_id,
+                        "external_order_number": normalised.get("external_order_number"),
+                        "checkout_url":          normalised.get("checkout_url") or "",
+                        "payment_url":           normalised.get("checkout_url") or "",
                     },
                     commit=True,
                 )
@@ -1160,6 +1164,69 @@ class StoreSyncService:
                     "[StoreSync] emit order_created failed tenant=%s order=%s: %s",
                     self.tenant_id, order_row.id, exc,
                 )
+
+        # Emit order_shipped when the order transitions into a shipped/in-transit
+        # status so that the shipping_update automation can fire and send a
+        # tracking-link message to the customer.
+        _SHIPPED_STATUSES = {"shipped", "in_transit", "out_for_delivery", "delivering"}
+        prev_status = None
+        if order_row is not None and not is_new:
+            # The status has already been overwritten on the row — check
+            # extra_metadata for the previously recorded status.
+            prev_status = (order_row.extra_metadata or {}).get("prev_status")
+        if (
+            normalised.get("status") in _SHIPPED_STATUSES
+            and prev_status not in _SHIPPED_STATUSES
+            and customer
+        ):
+            try:
+                from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                # Build tracking URL: Salla sometimes sends it as shipping.tracking_link
+                # in the raw payload; fall back to checkout_url for direct pay link.
+                raw_payload = payload if isinstance(payload, dict) else {}
+                shipping_info = raw_payload.get("shipping") or {}
+                tracking_url = (
+                    shipping_info.get("tracking_link")
+                    or raw_payload.get("tracking_url")
+                    or raw_payload.get("tracking_link")
+                    or ""
+                )
+                emit_automation_event(
+                    self.db,
+                    self.tenant_id,
+                    "order_shipped",
+                    customer_id=customer.id,
+                    payload={
+                        "external_id":           ext_id,
+                        "order_id":              order_row.id,
+                        "order_number":          normalised.get("external_order_number") or ext_id,
+                        "external_order_number": normalised.get("external_order_number"),
+                        "status":                normalised.get("status"),
+                        "total":                 normalised.get("total"),
+                        "tracking_url":          tracking_url,
+                        "checkout_url":          normalised.get("checkout_url") or "",
+                    },
+                    commit=True,
+                )
+                logger.info(
+                    "[StoreSync] order_shipped event emitted tenant=%s order=%s tracking=%s",
+                    self.tenant_id, ext_id, bool(tracking_url),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "[StoreSync] emit order_shipped failed tenant=%s order=%s: %s",
+                    self.tenant_id, order_row.id if order_row else ext_id, exc,
+                )
+
+        # Record current status in metadata so we can detect future transitions.
+        if order_row is not None:
+            meta = dict(order_row.extra_metadata or {})
+            meta["prev_status"] = normalised.get("status")
+            order_row.extra_metadata = meta
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
 
             # Close the offer-decision attribution loop. We do this on every
             # *new* order — not only on `order_paid` — because Salla orders

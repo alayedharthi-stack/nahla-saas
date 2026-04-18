@@ -100,11 +100,14 @@ async def track_storefront_event(
                 event_type=AutomationTrigger.CART_ABANDONED.value,
                 customer_id=customer.id if customer else None,
                 payload={
-                    "source":     "storefront_snippet",
-                    "cart_total": payload.get("cart_total"),
-                    "items":      payload.get("items"),
-                    "phone":      customer_phone,
-                    "url":        body.url,
+                    "source":       "storefront_snippet",
+                    "cart_total":   payload.get("cart_total"),
+                    "items":        payload.get("items"),
+                    "phone":        customer_phone,
+                    "url":          body.url,
+                    # checkout_url is what _resolve_slot_value reads for URL
+                    # buttons; use the page URL the customer was on (their cart).
+                    "checkout_url": body.url or payload.get("checkout_url") or "",
                 },
                 processed=False,
             )

@@ -663,6 +663,51 @@ async def _execute_action(
     if body_params:
         components.append({"type": "body", "parameters": body_params})
 
+    # ── URL button parameters ────────────────────────────────────────────────
+    # WhatsApp templates whose URL buttons contain {{1}} need a separate
+    # "button" component in the API call carrying the variable suffix.
+    # We scan the approved template's stored components and resolve the suffix
+    # from whichever URL slot (checkout, tracking, payment) is populated in the
+    # event payload.
+    _URL_SLOT_PRECEDENCE = (
+        "checkout_url", "tracking_url", "payment_url",
+        "product_url", "reorder_url", "store_url",
+    )
+    _customer_name_for_btn = customer.name or ""
+    _store_name_for_btn    = _resolve_store_name(db, tenant_id)
+    _payload_for_btn: Dict[str, Any] = dict(event.payload or {})
+    for comp in (template.components or []):
+        if str(comp.get("type", "")).upper() != "BUTTONS":
+            continue
+        for btn_idx, btn in enumerate(comp.get("buttons", [])):
+            if str(btn.get("type", "")).upper() != "URL":
+                continue
+            btn_url_tpl: str = btn.get("url", "")
+            if "{{1}}" not in btn_url_tpl:
+                continue
+            # Try URL slots in priority order; use first non-empty result.
+            btn_suffix = ""
+            for url_slot in _URL_SLOT_PRECEDENCE:
+                resolved = _resolve_slot_value(
+                    slot=url_slot,
+                    customer_name=_customer_name_for_btn,
+                    store_name=_store_name_for_btn,
+                    payload=_payload_for_btn,
+                    config=config,
+                    coupon_extras=coupon_extras,
+                )
+                if resolved:
+                    btn_suffix = _extract_button_url_suffix(btn_url_tpl, resolved)
+                    if btn_suffix:
+                        break
+            if btn_suffix:
+                components.append({
+                    "type":       "button",
+                    "sub_type":   "url",
+                    "index":      str(btn_idx),
+                    "parameters": [{"type": "text", "text": btn_suffix}],
+                })
+
     send_payload: Dict[str, Any] = {
         "messaging_product": "whatsapp",
         "to": to_phone,
@@ -834,6 +879,15 @@ def _resolve_slot_value(
             or payload.get("checkout_url")
             or ""
         )
+    if slot == "tracking_url":
+        return str(
+            payload.get("tracking_url")
+            or payload.get("tracking_link")
+            or payload.get("shipping_tracking_url")
+            or ""
+        )
+    if slot in ("order_total", "total"):
+        return str(payload.get("total") or payload.get("order_total") or payload.get("cart_total") or "")
     if slot == "reorder_url":
         url = (
             payload.get("reorder_url")
@@ -1243,6 +1297,39 @@ def _resolve_store_name(db: Session, tenant_id: int) -> str:
     except Exception as exc:
         logger.debug("[AutoEngine] store_name resolution failed tenant=%s: %s", tenant_id, exc)
     return "متجرنا"
+
+
+def _extract_button_url_suffix(button_url_template: str, full_url: str) -> str:
+    """
+    Given a template button URL like 'https://store.com/cart/{{1}}'
+    and a resolved full URL like 'https://store.com/cart?token=abc',
+    extract the variable suffix to send as the button parameter.
+
+    Meta requires only the dynamic suffix, not the full URL.
+    E.g. template 'https://store.com/{{1}}' + full 'https://store.com/cart?t=abc'
+    → suffix 'cart?t=abc'.
+
+    If domains differ (e.g. a third-party tracking URL), falls back to
+    the path+query portion of the full URL so at least something is passed.
+    """
+    if not full_url:
+        return ""
+    placeholder = "{{1}}"
+    pos = button_url_template.find(placeholder)
+    if pos < 0:
+        return ""
+    base = button_url_template[:pos]  # everything before the variable
+    if full_url.startswith(base):
+        return full_url[len(base):]
+    # Domain mismatch — return path + query so the button is still usable.
+    try:
+        from urllib.parse import urlparse  # noqa: PLC0415
+        parsed = urlparse(full_url)
+        path_part = parsed.path.lstrip("/")
+        query_part = f"?{parsed.query}" if parsed.query else ""
+        return f"{path_part}{query_part}"
+    except Exception:
+        return full_url
 
 
 def _write_execution(
