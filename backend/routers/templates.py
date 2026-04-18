@@ -861,6 +861,30 @@ async def _submit_template_to_meta(
     """Submit a new template using the active WhatsApp provider.
     Raises ValueError with the actual Meta error message on failure.
     """
+    import copy as _copy  # noqa: PLC0415
+    components = _copy.deepcopy(components)
+
+    # Meta rejects FOOTER text that contains emojis or newlines.
+    # Strip them automatically before submission so merchants don't have to
+    # worry about this — BODY / button text may still keep emojis.
+    import re as _re  # noqa: PLC0415
+    _EMOJI_RE = _re.compile(
+        "["
+        "\U0001F000-\U0001FFFF"  # All supplementary emoji blocks
+        "\U00002300-\U000027BF"  # Misc symbols, dingbats
+        "\U0000200D"             # Zero-width joiner
+        "\U0000FE0F"             # Variation selector-16 (emoji modifier)
+        "]+",
+        flags=_re.UNICODE,
+    )
+    for comp in components:
+        if str(comp.get("type", "")).upper() == "FOOTER":
+            raw = comp.get("text") or ""
+            cleaned = _EMOJI_RE.sub("", raw).strip()
+            if cleaned != raw:
+                logger.info("[template/submit] stripped emojis from FOOTER: %r → %r", raw, cleaned)
+            comp["text"] = cleaned
+
     # Ensure all components have the Meta-required `example` fields before
     # submitting. This prevents code-100 "missing example" rejections for
     # templates that were created/edited without explicit example values.

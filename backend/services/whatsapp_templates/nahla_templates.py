@@ -59,7 +59,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["أحمد", "متجر الأناقة"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -96,7 +96,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["سارة", "متجر الجمال"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -132,7 +132,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["خالد", "متجر التقنية"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -169,7 +169,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["أميرة", "12345", "متجر الأزياء"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -205,7 +205,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["محمد", "12345"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -241,7 +241,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["ليلى", "متجر المنزل"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -277,7 +277,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["عبدالله", "سماعات لاسلكية"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -313,7 +313,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["فاطمة", "متجر الإلكترونيات"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -350,7 +350,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["ريم", "متجر الأزياء العصرية"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -386,7 +386,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["نورة", "حقيبة جلدية بنية"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -419,7 +419,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["بندر", "98765", "450"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -455,7 +455,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["سلطان", "55123", "متجر الرياضة"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -488,7 +488,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["حسن", "33456"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -524,7 +524,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["وليد", "متجر الساعات"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
@@ -561,7 +561,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 ),
                 "example": {"body_text": [["دانة", "متجر الأزياء"]]},
             },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك 🐝"},
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
