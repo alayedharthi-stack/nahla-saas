@@ -215,10 +215,23 @@ async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None
                 if not phone_number_id:
                     logger.warning("[Webhook360] Missing phone_number_id field=%s", field)
                     continue
-                wa_conn = db.query(WhatsAppConnection).filter_by(phone_number_id=phone_number_id).first()
-                if not wa_conn:
+                wa_conns = (
+                    db.query(WhatsAppConnection)
+                    .filter_by(phone_number_id=phone_number_id)
+                    .all()
+                )
+                if not wa_conns:
                     logger.warning("[Webhook360] Unknown phone_number_id=%s field=%s", phone_number_id, field)
                     continue
+                if len(wa_conns) > 1:
+                    tenant_ids = [c.tenant_id for c in wa_conns]
+                    logger.error(
+                        "[Webhook360] Ambiguous phone_number_id=%s matches tenants=%s — "
+                        "message dropped to prevent cross-tenant data leak",
+                        phone_number_id, tenant_ids,
+                    )
+                    continue
+                wa_conn = wa_conns[0]
                 if wa_provider(wa_conn) != WHATSAPP_PROVIDER_360DIALOG:
                     logger.warning("[Webhook360] phone_number_id=%s is not dialog360 provider", phone_number_id)
                     continue
