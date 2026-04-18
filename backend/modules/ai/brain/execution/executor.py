@@ -17,6 +17,7 @@ from typing import Dict, Type, Any
 from ..types import ActionResult, BrainContext, Decision
 from ..decision.actions import (
     ACTION_CLARIFY,
+    ACTION_FAQ_REPLY,
     ACTION_GREET,
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
@@ -105,11 +106,13 @@ class DefaultActionExecutor:
     """Implements ActionExecutor protocol."""
 
     def __init__(self) -> None:
+        from .faq import FAQReplyHandler
         from .search import ProductSearchHandler
         from .orders import DraftOrderHandler, TrackOrderHandler
 
         self._handlers: Dict[str, Any] = {
             ACTION_GREET:               _GreetHandler(),
+            ACTION_FAQ_REPLY:           FAQReplyHandler(),
             ACTION_SEARCH_PRODUCTS:     ProductSearchHandler(),
             ACTION_PROPOSE_DRAFT_ORDER: DraftOrderHandler(),
             ACTION_SEND_PAYMENT_LINK:   _SendPaymentLinkHandler(),

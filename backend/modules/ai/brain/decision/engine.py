@@ -10,12 +10,13 @@ Rule priority (first match wins):
   1. Human handoff request → ACTION_HANDOFF
   2. Resend payment link (customer in checkout stage) → ACTION_SEND_PAYMENT_LINK
   3. Track order → ACTION_TRACK_ORDER
-  4. Greeting / first turn → ACTION_GREET (then fallthrough)
-  5. Buy / start order → ACTION_PROPOSE_DRAFT_ORDER (if product in focus)
-  6. Buy / start order → ACTION_SEARCH_PRODUCTS (no product selected)
-  7. Ask about product or price → ACTION_SEARCH_PRODUCTS
-  8. Hesitation with product in focus and coupons available → ACTION_SUGGEST_COUPON
-  9. Fallback → ACTION_LLM_REPLY
+  4. Simple FAQ (identity / shipping / store / contact) → ACTION_FAQ_REPLY
+  5. Greeting / first-turn general help → ACTION_GREET
+  6. Buy / start order → ACTION_PROPOSE_DRAFT_ORDER (if product in focus)
+  7. Buy / start order → ACTION_SEARCH_PRODUCTS (no product selected)
+  8. Ask about product or price → ACTION_SEARCH_PRODUCTS
+  9. Hesitation with product in focus and coupons available → ACTION_SUGGEST_COUPON
+ 10. Fallback → ACTION_LLM_REPLY
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ import logging
 from ..types import BrainContext, Decision
 from .actions import (
     ACTION_CLARIFY,
+    ACTION_FAQ_REPLY,
     ACTION_GREET,
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
@@ -35,14 +37,19 @@ from .actions import (
     ACTION_TRACK_ORDER,
 )
 from ..types import (
+    INTENT_ASK_OWNER_CONTACT,
     INTENT_GREETING,
     INTENT_ASK_PRODUCT,
     INTENT_ASK_PRICE,
+    INTENT_ASK_SHIPPING,
+    INTENT_ASK_STORE_INFO,
     INTENT_START_ORDER,
     INTENT_PAY_NOW,
     INTENT_HESITATION,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
+    INTENT_GENERAL,
+    INTENT_WHO_ARE_YOU,
 )
 from ..state.stages import STAGE_CHECKOUT, STAGE_ORDERING
 
@@ -56,6 +63,26 @@ class DefaultDecisionEngine:
         intent = ctx.intent
         state  = ctx.state
         facts  = ctx.facts
+        checkout_slots = {
+            "customer_first_name",
+            "customer_last_name",
+            "customer_name",
+            "full_name",
+            "city",
+            "short_address_code",
+            "google_maps_url",
+            "location_url",
+            "address",
+            "address_line",
+            "street",
+            "district",
+            "postal_code",
+            "zip_code",
+            "building_number",
+            "additional_number",
+            "latitude",
+            "longitude",
+        }
 
         # ── 1. Handoff ────────────────────────────────────────────────────
         if intent.name == INTENT_TALK_HUMAN:
@@ -83,18 +110,60 @@ class DefaultDecisionEngine:
                 reason="customer asked for order status",
             )
 
-        # ── 4. Greeting (first turn or explicit greeting) ─────────────────
-        if intent.name == INTENT_GREETING or not state.greeted:
-            # After greeting, if there's a product query in the slots we also
-            # want to search — record that as a secondary hint in args
-            product_query = intent.slots.get("product_query", "")
+        # ── 3.5 Continue order preparation while collecting checkout details ──
+        if (
+            state.stage == STAGE_ORDERING
+            and state.current_product_focus
+            and not state.checkout_url
+            and (
+                intent.name in (INTENT_START_ORDER, INTENT_GENERAL)
+                or any(slot in intent.slots for slot in checkout_slots)
+            )
+        ):
             return Decision(
-                action=ACTION_GREET,
-                args={"product_query": product_query},
-                reason="first contact or explicit greeting",
+                action=ACTION_PROPOSE_DRAFT_ORDER,
+                args={"product": state.current_product_focus},
+                reason="continue collecting checkout details for current product",
+                confidence=0.88,
             )
 
-        # ── 5. Start order — product in focus ──────────────────────────────
+        # ── 4. Simple FAQ / identity / shipping / contact ──────────────────
+        if intent.name == INTENT_WHO_ARE_YOU:
+            return Decision(
+                action=ACTION_FAQ_REPLY,
+                args={"topic": "identity"},
+                reason="customer asked who the assistant is",
+            )
+
+        if intent.name == INTENT_ASK_SHIPPING:
+            return Decision(
+                action=ACTION_FAQ_REPLY,
+                args={"topic": "shipping"},
+                reason="customer asked about shipping / delivery",
+            )
+
+        if intent.name == INTENT_ASK_STORE_INFO:
+            return Decision(
+                action=ACTION_FAQ_REPLY,
+                args={"topic": "store_info"},
+                reason="customer asked for store info / link / location",
+            )
+
+        if intent.name == INTENT_ASK_OWNER_CONTACT:
+            return Decision(
+                action=ACTION_FAQ_REPLY,
+                args={"topic": "owner_contact"},
+                reason="customer asked for contact details",
+            )
+
+        # ── 5. Greeting (explicit greeting or first-turn generic help) ─────
+        if intent.name == INTENT_GREETING or (not state.greeted and intent.name == INTENT_GENERAL):
+            return Decision(
+                action=ACTION_GREET,
+                reason="explicit greeting or first-turn general help",
+            )
+
+        # ── 6. Start order — product in focus ──────────────────────────────
         if intent.name == INTENT_START_ORDER:
             if state.current_product_focus and facts.has_products:
                 # Only propose order if store can actually fulfil it
@@ -128,7 +197,7 @@ class DefaultDecisionEngine:
                     confidence=0.80,
                 )
 
-        # ── 6. Ask about product or price ─────────────────────────────────
+        # ── 7. Ask about product or price ─────────────────────────────────
         if intent.name in (INTENT_ASK_PRODUCT, INTENT_ASK_PRICE):
             if facts.has_products:
                 query = (
@@ -148,7 +217,7 @@ class DefaultDecisionEngine:
                     reason="no products in catalog — LLM apologises",
                 )
 
-        # ── 7. Hesitation with product focus & coupons ───────────────────
+        # ── 8. Hesitation with product focus & coupons ───────────────────
         if intent.name == INTENT_HESITATION:
             if state.current_product_focus and facts.has_coupons and facts.has_products:
                 return Decision(
@@ -158,7 +227,7 @@ class DefaultDecisionEngine:
                     confidence=0.75,
                 )
 
-        # ── 8. Fallback: LLM ─────────────────────────────────────────────
+        # ── 9. Fallback: LLM ─────────────────────────────────────────────
         return Decision(
             action=ACTION_LLM_REPLY,
             reason=f"no rule matched for intent={intent.name} — LLM fallback",

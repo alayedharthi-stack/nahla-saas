@@ -65,6 +65,7 @@ class ProductSearchHandler:
             after_search = decision.args.get("after_search", "")
             # Flag narrow when many products found and no specific match was requested
             suggest_narrow = len(products) > 3 and not after_search
+            selected_product = products[0] if len(products) == 1 else None
 
             return ActionResult(
                 success=True,
@@ -75,6 +76,7 @@ class ProductSearchHandler:
                     "query":         query,
                     "suggest_narrow": suggest_narrow,
                     "after_search":   after_search,
+                    "product":        selected_product,
                 },
             )
 

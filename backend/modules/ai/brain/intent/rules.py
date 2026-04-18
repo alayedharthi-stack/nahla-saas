@@ -20,7 +20,9 @@ from typing import Dict, List, Optional, Tuple
 from ..types import (
     INTENT_ASK_PRICE,
     INTENT_ASK_PRODUCT,
+    INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_SHIPPING,
+    INTENT_ASK_STORE_INFO,
     INTENT_GENERAL,
     INTENT_GREETING,
     INTENT_HESITATION,
@@ -28,6 +30,7 @@ from ..types import (
     INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
+    INTENT_WHO_ARE_YOU,
     Intent,
 )
 
@@ -51,14 +54,22 @@ def _register(rs: RuleSet) -> None:
     _RULES.append((rs, _compile(rs.patterns)))
 
 
+# ── Identity / who are you ───────────────────────────────────────────────────
+_register(RuleSet(
+    intent=INTENT_WHO_ARE_YOU,
+    patterns=[
+        r"^(من أنت|من انت|من أنتِ|انت مين|انتي مين|مين أنت|وش أنت|وش انت|ايش انت|ايش أنت)",
+        r"(عرفني بنفسك|عرفني عليك|وش تسوي|وش تقدر تسوي|مين انتي)",
+    ],
+    confidence=0.98,
+))
+
 # ── Greeting ─────────────────────────────────────────────────────────────────
 _register(RuleSet(
     intent=INTENT_GREETING,
     patterns=[
         r"^(السلام عليكم|وعليكم السلام|مرحبا?ً?|أهلاً?|هلا|صباح الخير|مساء الخير|كيف حالك|هاي|هلو|hello|hi\b|hey\b)",
         r"^(أهلين|يا هلا|هلأ|هلأً|أهلا وسهلا)",
-        # Identity questions → treat as greeting so the bot introduces itself fast
-        r"^(من أنت|من انت|من أنتِ|انت مين|انتي مين|مين أنت|تعرفك|عرفني بنفسك|وش أنت|وش انت|ايش انت|ايش أنت)",
     ],
     confidence=0.95,
 ))
@@ -124,6 +135,28 @@ _register(RuleSet(
         r"(shipping|delivery|when will|how long)",
     ],
     confidence=0.88,
+))
+
+# ── Store info / location / link ─────────────────────────────────────────────
+_register(RuleSet(
+    intent=INTENT_ASK_STORE_INFO,
+    patterns=[
+        r"(وين المتجر|أين المتجر|وين موقعكم|موقعكم|رابط المتجر|رابط الموقع|عن المتجر|تعريف المتجر)",
+        r"(عندكم موقع|من وين أطلب|وين ألقى المتجر|لوكيشن المتجر|عنوان المتجر)",
+        r"(store link|store url|where is your store|about the store)",
+    ],
+    confidence=0.92,
+))
+
+# ── Owner / support contact details ──────────────────────────────────────────
+_register(RuleSet(
+    intent=INTENT_ASK_OWNER_CONTACT,
+    patterns=[
+        r"(رقمكم|رقم التواصل|رقم خدمة العملاء|كيف أتواصل|كيف اتواصل|وسيلة التواصل|رقم الواتساب)",
+        r"(تواصل المالك|التواصل مع المالك|أبغى رقمكم|أرسل رقمكم|ابغى اكلمكم)",
+        r"(contact number|contact info|customer service number|whatsapp number)",
+    ],
+    confidence=0.92,
 ))
 
 # ── Hesitation ────────────────────────────────────────────────────────────────

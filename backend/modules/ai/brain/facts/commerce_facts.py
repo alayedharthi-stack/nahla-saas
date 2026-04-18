@@ -49,15 +49,17 @@ class DefaultFactsLoader:
             .filter(Integration.tenant_id == tenant_id)
             .first()
         )
+        integration_cfg = (integration.config or {}) if integration else {}
         facts.has_active_integration = bool(
-            integration and integration.access_token
+            integration
+            and integration.enabled
+            and (integration_cfg.get("api_key") or integration_cfg.get("access_token"))
         )
         if integration:
-            platform = (integration.config or {}).get("platform", "")
+            platform = integration_cfg.get("platform", "")
             if not platform:
                 # Infer from integration type
-                ig_type = getattr(integration, "integration_type", "") or ""
-                platform = ig_type.lower() if ig_type else "unknown"
+                platform = getattr(integration, "provider", "") or "unknown"
             facts.integration_platform = platform or "unknown"
 
         # ── 2. Products ───────────────────────────────────────────────────
@@ -132,9 +134,29 @@ class DefaultFactsLoader:
         )
         if snapshot:
             facts.snapshot_fresh = True
-            raw = snapshot.data or {}
-            facts.store_name = raw.get("store_name", "")
-            facts.store_url  = raw.get("store_url", "")
+            profile = snapshot.store_profile or {}
+            shipping = snapshot.shipping_summary or {}
+            policy = snapshot.policy_summary or {}
+
+            facts.store_name = profile.get("store_name", "") or ""
+            facts.store_url = profile.get("store_url", "") or ""
+            facts.store_description = profile.get("description", "") or ""
+            facts.store_contact_phone = profile.get("contact_phone", "") or ""
+            facts.store_contact_email = profile.get("contact_email", "") or ""
+
+            raw_shipping_methods = shipping.get("methods", []) or []
+            if isinstance(raw_shipping_methods, list):
+                facts.shipping_methods = list(raw_shipping_methods)
+            elif raw_shipping_methods:
+                facts.shipping_methods = [str(raw_shipping_methods)]
+            facts.shipping_notes = shipping.get("notes", "") or ""
+            facts.shipping_policy = policy.get("shipping_policy", "") or ""
+            facts.support_hours = policy.get("support_hours", "") or ""
+            raw_payment_methods = policy.get("payment_methods", []) or []
+            if isinstance(raw_payment_methods, list):
+                facts.payment_methods = list(raw_payment_methods)
+            elif raw_payment_methods:
+                facts.payment_methods = [str(raw_payment_methods)]
 
         # ── 5. Working hours (Phase 2) ─────────────────────────────────────
         try:

@@ -46,7 +46,7 @@
 |---|-------|-------|-------|
 | 1 | **Message Intake** | استقبال الرسالة وتوجيهها للـ Brain | `routers/whatsapp_webhook.py` |
 | 2 | **Intent Engine** | تصنيف نية العميل (rules + LLM) | `brain/intent/` |
-| 3 | **Slot / Entity Extraction** | استخراج المنتج والسعر والكمية | `brain/intent/slot_extractor.py` |
+| 3 | **Slot / Entity Extraction** | استخراج المنتج والسعر والكمية وحقول checkout | `brain/intent/slot_extractor.py` |
 | 4 | **Conversation State Engine** | تتبع مرحلة المحادثة وتاريخها | `brain/state/` |
 | 5 | **Commerce Facts Engine** | تحميل بيانات المتجر الحقيقية | `brain/facts/` |
 | 6 | **Customer Profile / Signals** | ملف العميل وعلاماته السلوكية | `brain/memory/` + DB |
@@ -66,18 +66,18 @@
 |-------|--------|----------|---------------|----------------|
 | Message Intake | `phase1_done` | high | توجيه per-tenant، feature flag، COD interception | — |
 | Intent Engine (rules) | `phase1_done` | high | 8 intents: greeting/ask_product/ask_price/start_order/pay_now/shipping/hesitation/handoff/track | تغطية أشمل للجمل العربية المركّبة |
-| Slot Extraction (LLM) | `basic` | low | يستدعي Haiku عند confidence < 0.85، يستخرج product_query/price_range/quantity | لم يُختبر على رسائل حقيقية، لا fallback ذكي |
+| Slot Extraction (LLM) | `basic` | medium | يستدعي Haiku عند confidence < 0.85، ويستخرج product_query/price_range/quantity + city/name/short_address_code/google_maps_url | ما زال يحتاج قياساً على رسائل عربية حقيقية وتحسيناً لبعض العبارات المركّبة |
 | Intent Classifier (hybrid) | `phase1_done` | medium | rules أولاً → LLM للـ slots عند الحاجة | لا يُعيد تصحيح النتيجة عند تعارض rules/LLM |
-| State Engine | `phase2_done` | medium | 7 stages، يُحمّل/يحفظ عبر Customer→Conversation، transitions منطقية | لا يُخزّن intent history per turn، streak detection مبسّط |
+| State Engine | `phase2_done` | medium | 7 stages، يُحمّل/يحفظ عبر Customer→Conversation، transitions منطقية، ويخزّن `order_prep` المنظم | لا يُخزّن intent history per turn، streak detection مبسّط |
 | Commerce Facts | `phase2_done` | medium | has_products/in_stock_count/orderable/top_products[5]/coupon_eligibility/platform/working_hours | لا يُحمّل منتجات مطابقة للـ query الحالية مسبقاً |
 | Customer Signals | `basic` | low | ProductAffinity bump بعد search/order، PriceSensitivity nudge عند hesitation | لا يُقرأ في القرار بعد، ملف العميل لا يُحقن في Composer |
 | Policy Engine | `phase2_done` | medium | coupon cap 24h، working_hours للـ handoff فقط، price_range gate، auto-escalate | لا block list للعملاء، لا frequency cap للطلبات، لا قواعد merchant-configurable |
 | Decision Engine | `phase2_done` | medium | 8+ قواعد حتمية، clarify عند غياب product_query، orderable check | لا confidence scoring مقارن، لا multi-signal weighting |
 | Execution — Search | `phase1_done` | high | CatalogContextBuilder + Arabic FTS + fallback to top products، narrow flag عند > 3 نتائج | — |
-| Execution — Orders | `phase1_done` | medium | create_draft_order عبر Salla adapter، intent_only fallback عند غياب adapter | TrackOrderHandler لا يطابق order_id محدد |
+| Execution — Orders | `phase2_done` | medium | تجهيز طلب stateful: يجمع الاسم/المدينة/الرمز المختصر أو رابط الخرائط، ثم ينشئ draft order حقيقياً | ما يزال Google Maps → short code بحاجة تحسين أعمق عند غياب SPL API |
 | Execution — Other | `phase1_done` | medium | greet/handoff/clarify/narrow/suggest_coupon/payment_link كلها مبنية | suggest_coupon يختار أول كوبون فقط |
 | Response Composer | `phase1_done` | medium | قوالب عربية لكل action، narrow_choices، LLM fallback للـ general | لا dedup guard، لا variations للقوالب المتكررة |
-| Suggestion Engine | `not_started` | — | — | لم يُبنَ. لا next_best_action بعد. |
+| Suggestion Engine | `phase2_done` | medium | ينتج `suggested_next_step` وfollow-up question بعد كل action | يحتاج نضجاً أكبر في checkout/handoff وبعض المسارات الغامضة |
 | Memory — Trace | `phase2_done` | high | ConversationTrace بعد كل turn مع كل تفاصيل القرار | — |
 | Memory — Affinity | `phase2_done` | medium | ProductAffinity rows تُكتب بعد search/order | لا تُقرأ في القرار أو الـ Composer بعد |
 | Memory — Summary | `phase2_done` | medium | ConversationHistorySummary كل 5 turns عبر Haiku | لا تُحقن في LLM fallback context بعد |
@@ -137,6 +137,20 @@
 - تحسين TrackOrderHandler ليطابق order_id محدد
 - بناء Suggestion Engine أولي (next_best_action بعد كل turn)
 
+### Phase 3.5 — Structured Checkout + Address Resolution 🚧
+
+**ما دخل ضمنها الآن:**
+- `OrderPreparationState` داخل `MerchantConversationState`
+- جمع checkout fields خطوة بخطوة: الاسم الأول، اسم العائلة، المدينة
+- قبول `short_address_code` أو `Google Maps URL` كمدخل عنوان
+- resolver فعلي يدعم SPL National Address API عند توفر `SPL_NATIONAL_ADDRESS_API_KEY`
+- fallback منظم: إذا لم تتوفر كل البيانات، يسأل الذكاء سؤالاً واحداً واضحاً بدلاً من إنشاء طلب ناقص
+
+**ما بقي منها:**
+- تحسين Google Maps → short address/code extraction
+- رفع مفتاح SPL في البيئة الإنتاجية/التجريبية لتفعيل auto-fill الكامل
+- دعم multi-item basket وحقول عنوان أكثر ثراءً لاحقاً
+
 ### Phase 4 — Memory + Learning (مستقبلية)
 
 **ما سيدخل ضمنها:**
@@ -187,6 +201,15 @@
 **Policy fix:**
 - صُحِّح Working Hours gate: لا يُوقف الطلبات، يُوقف الـ handoff فقط (المتجر أونلاين لا يحتاج أحداً حاضراً)
 
+**Structured checkout / order prep:**
+- إضافة `OrderPreparationState` لحفظ بيانات تجهيز الطلب داخل state
+- تحديث `slot_extractor.py` لاستخراج `city`, `customer_name`, `short_address_code`, `google_maps_url` وبعض حقول العنوان
+- تنفيذ `services/address_resolution.py` لدعم SPL National Address API + تحليل deterministic للرمز المختصر وروابط الخرائط والإحداثيات
+- تحويل `DraftOrderHandler` من "أنشئ طلباً ناقصاً فوراً" إلى مسار stateful يجمع البيانات الناقصة ثم ينشئ draft order
+- قبول `city + short address code` كحد أدنى عملي، مع ملء الحقول تلقائياً إذا كانت SPL API مفعلة
+- دعم Google Maps link كمدخل عنوان بديل يُستخدم في التحضير والـ notes مع محاولة geocode عند توفر المفتاح
+- إضافة اختبارات تغطي order preparation وaddress signal extraction
+
 ---
 
 ## 6. Known Problems / Open Gaps
@@ -202,6 +225,7 @@
 - [ ] **ProductAffinity لا تُقرأ** — تُكتب بعد كل search/order لكن لم تُستخدم في الترتيب أو القرار بعد.
 - [ ] **TrackOrderHandler يُعيد أحدث طلب** — لا يُطابق رقم طلب محدد إذا ذكره العميل.
 - [ ] **suggest_coupon يختار أول كوبون** — لا ينتقي الكوبون الأذكى (مناسب للسعر، للعميل، للمنتج).
+- [ ] **Google Maps → short address ما زال محدوداً** — المسار الحالي يستفيد من الرابط/الإحداثيات، لكن الاستخراج الكامل للرمز المختصر يحتاج SPL API مفعلة وتحسين parsing إضافي.
 
 ### P2 — تحسينات مرغوبة
 
@@ -225,12 +249,13 @@
 
 1. **حقن Brain state في LLM fallback** — أهم شيء لأن `ACTION_LLM_REPLY` هو catch-all لكل ما لم يُمسك بقاعدة. يجب أن يعرف LLM ما الـ stage والـ product_focus والـ policy_reason.
 2. **حقن ConversationHistorySummary في LLM context** — يُعطي LLM ذاكرة حقيقية عن العميل.
-3. **Suggestion Engine أولي** — بعد كل action، يُنتج `next_action_hint` يُضمّن في الرد (e.g. بعد عرض منتج → "هل تودّ الطلب مباشرة؟").
-4. **Template dedup + variations** — لا تكرار وإضافة 3 صياغات لكل قالب.
-5. **قراءة ProductAffinity في DecisionEngine** — ترتيب نتائج البحث بحسب affinity score.
-6. **تحسين auto-escalate** — تتبع streak حقيقي للـ GENERAL intents عبر history.
-7. **Analytics / Outcome Tracking** — webhook من Salla عند تأكيد الطلب → تحديث ConversationTrace.
-8. **Merchant-configurable policy** — إعدادات من Dashboard: ساعات العمل، coupon frequency cap، max_order_value.
+3. **تفعيل SPL address resolution في البيئة** — حتى يصبح `short_address_code` و`Google Maps` auto-fill فعلياً في المتجر التجريبي/الإنتاجي.
+4. **تحسين Google Maps parsing** — دعم أوسع لروابط الخرائط واستخراج short code/structured address بدقة أعلى.
+5. **Template dedup + variations** — لا تكرار وإضافة 3 صياغات لكل قالب.
+6. **قراءة ProductAffinity في DecisionEngine** — ترتيب نتائج البحث بحسب affinity score.
+7. **تحسين auto-escalate** — تتبع streak حقيقي للـ GENERAL intents عبر history.
+8. **Analytics / Outcome Tracking** — webhook من Salla عند تأكيد الطلب → تحديث ConversationTrace.
+9. **Merchant-configurable policy** — إعدادات من Dashboard: ساعات العمل، coupon frequency cap، max_order_value.
 
 ---
 
@@ -248,6 +273,8 @@
 ### الأفعال الحقيقية
 - [ ] يبحث في الكتالوج الحقيقي بالعربية
 - [ ] يُنشئ draft order في Salla عند الطلب
+- [ ] يجمع الاسم والمدينة والرمز الوطني المختصر أو رابط الخرائط بدون فوضى
+- [ ] يملأ العنوان تلقائياً من short address / geocode عند توفر التكامل
 - [ ] يُرسل payment link حقيقي
 - [ ] يُعيد رابط الدفع عند طلبه ثانيةً
 - [ ] يُتابع حالة طلب حقيقي

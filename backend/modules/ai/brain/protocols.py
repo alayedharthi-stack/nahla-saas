@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Protocol, runtime_checkable
 from .types import (
     ActionResult,
     BrainContext,
+    SuggestionSnapshot,
     CommerceFacts,
     Decision,
     Intent,
@@ -75,6 +76,17 @@ class PolicyGate(Protocol):
 class ActionExecutor(Protocol):
     """Execute the approved Decision and return structured results."""
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult: ...
+
+
+@runtime_checkable
+class SuggestionEngine(Protocol):
+    """Recommend the next best step after decision/execution."""
+    def suggest(
+        self,
+        ctx: BrainContext,
+        decision: Decision,
+        result: ActionResult,
+    ) -> SuggestionSnapshot: ...
 
 
 @runtime_checkable

@@ -18,11 +18,14 @@ from typing import Any, Dict, List, Optional
 # ─────────────────────────────────────────────────────────────────────────────
 
 INTENT_GREETING      = "greeting"
+INTENT_WHO_ARE_YOU   = "who_are_you"
 INTENT_ASK_PRODUCT   = "ask_product"
 INTENT_ASK_PRICE     = "ask_price"
 INTENT_START_ORDER   = "start_order"
 INTENT_PAY_NOW       = "pay_now"
 INTENT_ASK_SHIPPING  = "ask_shipping"
+INTENT_ASK_STORE_INFO = "ask_store_info"
+INTENT_ASK_OWNER_CONTACT = "ask_owner_contact"
 INTENT_HESITATION    = "hesitation"
 INTENT_TALK_HUMAN    = "talk_to_human"
 INTENT_TRACK_ORDER   = "track_order"
@@ -45,6 +48,76 @@ class Intent:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
+class OrderPreparationState:
+    """Structured checkout-preparation state persisted inside the conversation."""
+    quantity: int = 1
+    customer_first_name: str = ""
+    customer_last_name: str = ""
+    customer_email: str = ""
+    city: str = ""
+    short_address_code: str = ""
+    google_maps_url: str = ""
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    building_number: str = ""
+    additional_number: str = ""
+    street: str = ""
+    district: str = ""
+    postal_code: str = ""
+    address_line: str = ""
+    resolution_source: str = ""
+    missing_fields: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "quantity": self.quantity,
+            "customer_first_name": self.customer_first_name,
+            "customer_last_name": self.customer_last_name,
+            "customer_email": self.customer_email,
+            "city": self.city,
+            "short_address_code": self.short_address_code,
+            "google_maps_url": self.google_maps_url,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "building_number": self.building_number,
+            "additional_number": self.additional_number,
+            "street": self.street,
+            "district": self.district,
+            "postal_code": self.postal_code,
+            "address_line": self.address_line,
+            "resolution_source": self.resolution_source,
+            "missing_fields": list(self.missing_fields or []),
+        }
+
+    @staticmethod
+    def from_dict(d: Optional[Dict[str, Any]]) -> "OrderPreparationState":
+        raw = d or {}
+        return OrderPreparationState(
+            quantity=_as_positive_int(raw.get("quantity"), default=1),
+            customer_first_name=str(raw.get("customer_first_name", "") or ""),
+            customer_last_name=str(raw.get("customer_last_name", "") or ""),
+            customer_email=str(raw.get("customer_email", "") or ""),
+            city=str(raw.get("city", "") or ""),
+            short_address_code=str(raw.get("short_address_code", "") or ""),
+            google_maps_url=str(raw.get("google_maps_url", "") or ""),
+            latitude=_as_optional_float(raw.get("latitude")),
+            longitude=_as_optional_float(raw.get("longitude")),
+            building_number=str(raw.get("building_number", "") or ""),
+            additional_number=str(raw.get("additional_number", "") or ""),
+            street=str(raw.get("street", "") or ""),
+            district=str(raw.get("district", "") or ""),
+            postal_code=str(raw.get("postal_code", "") or ""),
+            address_line=str(raw.get("address_line", "") or ""),
+            resolution_source=str(raw.get("resolution_source", "") or ""),
+            missing_fields=[
+                str(item).strip()
+                for item in (raw.get("missing_fields") or [])
+                if str(item).strip()
+            ],
+        )
+
+
+@dataclass
 class MerchantConversationState:
     """
     Persistent state of a merchant-customer conversation.
@@ -56,6 +129,11 @@ class MerchantConversationState:
     current_product_focus: Optional[Dict[str, Any]] = None   # {id, title, price, external_id}
     draft_order_id: Optional[str] = None
     checkout_url: Optional[str] = None
+    customer_goal: str = ""
+    last_question_asked: str = ""
+    last_question_answered: bool = True
+    recommended_next_step: str = ""
+    order_prep: OrderPreparationState = field(default_factory=OrderPreparationState)
     turn: int = 0
     updated_at: str = ""
 
@@ -67,6 +145,11 @@ class MerchantConversationState:
             "current_product_focus": self.current_product_focus,
             "draft_order_id": self.draft_order_id,
             "checkout_url": self.checkout_url,
+            "customer_goal": self.customer_goal,
+            "last_question_asked": self.last_question_asked,
+            "last_question_answered": self.last_question_answered,
+            "recommended_next_step": self.recommended_next_step,
+            "order_prep": self.order_prep.to_dict(),
             "turn": self.turn,
             "updated_at": self.updated_at,
         }
@@ -80,9 +163,31 @@ class MerchantConversationState:
             current_product_focus=d.get("current_product_focus"),
             draft_order_id=d.get("draft_order_id"),
             checkout_url=d.get("checkout_url"),
+            customer_goal=d.get("customer_goal", ""),
+            last_question_asked=d.get("last_question_asked", ""),
+            last_question_answered=bool(d.get("last_question_answered", True)),
+            recommended_next_step=d.get("recommended_next_step", ""),
+            order_prep=OrderPreparationState.from_dict(d.get("order_prep")),
             turn=int(d.get("turn", 0)),
             updated_at=d.get("updated_at", ""),
         )
+
+
+def _as_optional_float(value: Any) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _as_positive_int(value: Any, default: int = 1) -> int:
+    try:
+        parsed = int(value or default)
+        return max(parsed, 1)
+    except Exception:
+        return default
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +211,9 @@ class CommerceFacts:
     blocked_categories: List[str] = field(default_factory=list)
     store_name: str = ""
     store_url: str = ""
+    store_description: str = ""
+    store_contact_phone: str = ""
+    store_contact_email: str = ""
 
     # ── Phase 2 ───────────────────────────────────────────────────────────────
     # Number of products actually in stock (not just synced)
@@ -120,6 +228,53 @@ class CommerceFacts:
     integration_platform: str = "unknown"
     # Whether the store is within configured working hours (None = no config = always open)
     within_working_hours: Optional[bool] = None
+    shipping_methods: List[str] = field(default_factory=list)
+    shipping_notes: str = ""
+    shipping_policy: str = ""
+    support_hours: str = ""
+    payment_methods: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SuggestionSnapshot:
+    """
+    Lightweight post-decision recommendation for the next best conversational move.
+
+    It is computed by the SuggestionEngine and used by:
+      - Composer: to attach a natural CTA when useful
+      - Logs / traces: to explain why the brain moved the customer forward
+      - LLM fallback: to inject `recommended_next_step` without patch prompts
+    """
+    suggested_next_step: str = ""
+    close_to_purchase: bool = False
+    needs_follow_up_question: bool = False
+    follow_up_question: str = ""
+    coupon_logic_considered: bool = False
+    discount_ok_now: bool = False
+    route_to_checkout: bool = False
+
+
+@dataclass
+class BrainReplyState:
+    """
+    Explicit structured state injected into every MerchantBrain LLM call.
+
+    The LLM sees this as the current world model for the conversation instead of
+    inferring it from a long system prompt full of exceptions.
+    """
+    store_name: str = ""
+    tone: str = "neutral"
+    stage: str = "discovery"
+    customer_goal: str = ""
+    selected_product: Optional[Dict[str, Any]] = None
+    price_sensitivity: str = "moderate"
+    known_facts: Dict[str, Any] = field(default_factory=dict)
+    last_question_asked: str = ""
+    last_question_answered: bool = True
+    recommended_next_step: str = ""
+    coupon_policy: Dict[str, Any] = field(default_factory=dict)
+    recent_turns: List[str] = field(default_factory=list)
+    policy_reason: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -143,6 +298,8 @@ class BrainContext:
     profile: Dict[str, Any] = field(default_factory=dict)          # from memory loader
     customer_id: Optional[int] = None
     conversation_id: Optional[int] = None
+    suggestion: Optional[SuggestionSnapshot] = None
+    reply_state: Optional[BrainReplyState] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

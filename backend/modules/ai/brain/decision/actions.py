@@ -6,6 +6,7 @@ ActionExecutor understands.
 
 Phase 1 actions (all implemented):
   greet                 — send a greeting reply
+  faq_reply             — answer a simple store / shipping / identity question
   search_products       — look up products matching a query and return results
   propose_draft_order   — create a Salla/Zid draft order and return a checkout URL
   send_payment_link     — resend an existing payment / checkout link
@@ -23,6 +24,7 @@ Adding a new action in Phase 2+:
 
 # ── Phase 1 action constants ──────────────────────────────────────────────────
 ACTION_GREET               = "greet"
+ACTION_FAQ_REPLY           = "faq_reply"
 ACTION_SEARCH_PRODUCTS     = "search_products"
 ACTION_PROPOSE_DRAFT_ORDER = "propose_draft_order"
 ACTION_SEND_PAYMENT_LINK   = "send_payment_link"
@@ -39,6 +41,7 @@ ACTION_NARROW              = "narrow_choices"
 
 ALL_ACTIONS = [
     ACTION_GREET,
+    ACTION_FAQ_REPLY,
     ACTION_SEARCH_PRODUCTS,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_SEND_PAYMENT_LINK,

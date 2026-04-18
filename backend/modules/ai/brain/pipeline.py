@@ -9,8 +9,9 @@ Turn processing flow:
           → DecisionEngine.decide
           → PolicyGate.gate
           → ActionExecutor.execute
-          → StateStore.transition + save
+          → projected Brain state + SuggestionEngine
           → Composer.compose
+          → StateStore.save
           → MemoryUpdater.update
           → reply string
 
@@ -26,11 +27,14 @@ from typing import Any, Dict, List, Optional
 
 from .types import (
     ActionResult,
+    BrainReplyState,
     BrainContext,
     CommerceFacts,
     Decision,
     Intent,
     MerchantConversationState,
+    OrderPreparationState,
+    SuggestionSnapshot,
     INTENT_GENERAL,
 )
 from .protocols import (
@@ -40,6 +44,7 @@ from .protocols import (
     DecisionMaker,
     PolicyGate,
     ActionExecutor,
+    SuggestionEngine,
     Composer,
     MemoryUpdater,
 )
@@ -62,6 +67,7 @@ class MerchantBrain:
         executor: ActionExecutor,
         composer: Composer,
         memory_updater: MemoryUpdater,
+        suggestion_engine: Optional[SuggestionEngine] = None,
     ) -> None:
         self._classifier     = classifier
         self._state_store    = state_store
@@ -71,6 +77,10 @@ class MerchantBrain:
         self._executor       = executor
         self._composer       = composer
         self._memory_updater = memory_updater
+        if suggestion_engine is None:
+            from .suggestion.engine import DefaultSuggestionEngine
+            suggestion_engine = DefaultSuggestionEngine()
+        self._suggestion_engine = suggestion_engine
 
     async def process(
         self,
@@ -119,26 +129,54 @@ class MerchantBrain:
         # ── 5. Execute ────────────────────────────────────────────────────
         result: ActionResult = await self._executor.execute(decision, ctx)
 
-        # ── 6. Compose reply ──────────────────────────────────────────────
-        reply: str = await self._composer.compose(decision, result, ctx)
-
-        # ── 7. Transition + persist state ─────────────────────────────────
+        # ── 6. Project next state + suggestion snapshot ───────────────────
         new_state = self._state_store.transition(state, intent, decision)
         if result.data.get("checkout_url"):
             new_state.checkout_url  = result.data["checkout_url"]
+            new_state.stage = "checkout"
         if result.data.get("order_id"):
             new_state.draft_order_id = str(result.data["order_id"])
-        if result.data.get("product") and not new_state.current_product_focus:
+        if result.data.get("product") and (
+            decision.action == "search_products" or not new_state.current_product_focus
+        ):
             new_state.current_product_focus = result.data["product"]
+        if result.data.get("order_prep"):
+            new_state.order_prep = OrderPreparationState.from_dict(result.data.get("order_prep"))
 
+        new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)
+        ctx.state = new_state
+        suggestion = self._suggestion_engine.suggest(ctx, decision, result)
+        new_state.recommended_next_step = suggestion.suggested_next_step
+        ctx.suggestion = suggestion
+        ctx.reply_state = _build_reply_state(
+            ctx=ctx,
+            previous_state=state,
+            current_state=new_state,
+            suggestion=suggestion,
+            decision=decision,
+        )
+
+        # ── 7. Compose reply ──────────────────────────────────────────────
+        reply: str = await self._composer.compose(decision, result, ctx)
+
+        asked_now = _infer_last_question(decision, result, suggestion)
+        if asked_now:
+            new_state.last_question_asked = asked_now
+            new_state.last_question_answered = False
+        else:
+            new_state.last_question_asked = state.last_question_asked
+            new_state.last_question_answered = True if state.last_question_asked else state.last_question_answered
+
+        # ── 8. Persist state ───────────────────────────────────────────────
         self._state_store.save(db, tenant_id, customer_phone, new_state)
 
-        # ── 8. Persist trace ──────────────────────────────────────────────
+        # ── 9. Persist trace ──────────────────────────────────────────────
         latency_ms = int((time.monotonic() - t0) * 1000)
-        ctx.state  = new_state
+        ctx.state = new_state
+        result.data.setdefault("chosen_path", _resolve_chosen_path(decision, result))
         self._memory_updater.update(db, ctx, decision, result, reply, stage_before, latency_ms)
 
-        # ── 9. Structured turn trace (searchable in Railway logs) ─────────
+        # ── 10. Structured turn trace (searchable in Railway logs) ────────
         try:
             logger.info(
                 "[BrainTurn] %s",
@@ -148,7 +186,7 @@ class MerchantBrain:
                     "turn":          new_state.turn,
                     "message_len":   len(message),
                     # Intent layer
-                    "intent":        intent.name,
+                    "detected_intent": intent.name,
                     "confidence":    round(intent.confidence, 2),
                     "slots":         intent.slots,
                     "method":        intent.extraction_method,
@@ -158,6 +196,7 @@ class MerchantBrain:
                     "greeted":       new_state.greeted,
                     "product_focus": (new_state.current_product_focus or {}).get("title"),
                     "draft_order":   new_state.draft_order_id,
+                    "order_prep_missing": list(getattr(new_state.order_prep, "missing_fields", []) or []),
                     # Commerce facts snapshot
                     "facts": {
                         "products":      facts.product_count,
@@ -169,13 +208,20 @@ class MerchantBrain:
                         "store":         facts.store_name,
                     },
                     # Decision layer
-                    "action":           decision.action,
-                    "reason":           decision.reason,
-                    "policy_modified":  decision.reason != reason_before_policy,
+                    "action":             decision.action,
+                    "chosen_path":        result.data.get("chosen_path"),
+                    "reason":             decision.reason,
+                    "policy_modified":    decision.reason != reason_before_policy,
+                    "whether_coupon_logic_considered": suggestion.coupon_logic_considered,
+                    "suggested_next_step": suggestion.suggested_next_step,
+                    "customer_goal":      new_state.customer_goal,
+                    "selected_product":   (new_state.current_product_focus or {}).get("title"),
+                    "checkout_city":      getattr(new_state.order_prep, "city", ""),
+                    "short_address_code": getattr(new_state.order_prep, "short_address_code", ""),
                     # Execution + response
                     "exec_success":     result.success,
                     "exec_error":       result.error,
-                    "response_mode":    "llm" if decision.action == "llm_reply" else "template",
+                    "response_mode":    "llm" if result.data.get("chosen_path", "").startswith("llm") else "template",
                     "reply_len":        len(reply),
                     "latency_ms":       latency_ms,
                 }, ensure_ascii=False),
@@ -184,6 +230,120 @@ class MerchantBrain:
             pass   # trace logging must never break the reply path
 
         return reply
+
+
+# ── Brain state helpers ────────────────────────────────────────────────────────
+
+def _infer_customer_goal(intent: Intent, decision: Decision, previous_goal: str = "") -> str:
+    mapping = {
+        "who_are_you": "understand_assistant_role",
+        "greeting": "start_conversation",
+        "ask_product": "discover_products",
+        "ask_price": "evaluate_price",
+        "start_order": "start_purchase",
+        "pay_now": "complete_purchase",
+        "ask_shipping": "understand_shipping",
+        "ask_store_info": "understand_store_info",
+        "ask_owner_contact": "contact_store",
+        "track_order": "track_order",
+        "talk_to_human": "reach_human_support",
+        "hesitation": "resolve_purchase_hesitation",
+    }
+    if decision.action == "send_payment_link":
+        return "complete_purchase"
+    if decision.action == "handoff_to_human":
+        return "reach_human_support"
+    return mapping.get(intent.name, previous_goal or "general_help")
+
+
+def _infer_last_question(
+    decision: Decision,
+    result: ActionResult,
+    suggestion: SuggestionSnapshot,
+) -> str:
+    if decision.action == "clarify":
+        return str(result.data.get("question") or "").strip()
+    if suggestion.needs_follow_up_question:
+        return str(suggestion.follow_up_question or "").strip()
+    return ""
+
+
+def _resolve_chosen_path(decision: Decision, result: ActionResult) -> str:
+    chosen = str(result.data.get("chosen_path") or "").strip()
+    if chosen:
+        return chosen
+    if decision.action == "llm_reply":
+        return "llm"
+    if decision.action in {"greet", "faq_reply", "clarify", "narrow_choices"}:
+        return "rule"
+    return "action"
+
+
+def _build_reply_state(
+    *,
+    ctx: BrainContext,
+    previous_state: MerchantConversationState,
+    current_state: MerchantConversationState,
+    suggestion: SuggestionSnapshot,
+    decision: Decision,
+) -> BrainReplyState:
+    recent_turns = []
+    for turn in (ctx.history or [])[-4:]:
+        body = str(turn.get("body") or "").strip()
+        if not body:
+            continue
+        role = "customer" if turn.get("direction") == "in" else "assistant"
+        recent_turns.append(f"{role}: {body}")
+
+    sensitivity_score = float(ctx.profile.get("price_sensitivity_score") or 0.5)
+    selected_product = current_state.current_product_focus or None
+
+    known_facts = {
+        "store_name": ctx.facts.store_name,
+        "store_url": ctx.facts.store_url,
+        "has_products": ctx.facts.has_products,
+        "product_count": ctx.facts.product_count,
+        "in_stock_count": ctx.facts.in_stock_count,
+        "orderable": ctx.facts.orderable,
+        "shipping_policy": ctx.facts.shipping_policy,
+        "shipping_methods": ctx.facts.shipping_methods,
+        "shipping_notes": ctx.facts.shipping_notes,
+        "support_hours": ctx.facts.support_hours,
+        "contact_phone": ctx.facts.store_contact_phone,
+        "contact_email": ctx.facts.store_contact_email,
+        "checkout_preparation": current_state.order_prep.to_dict(),
+    }
+
+    return BrainReplyState(
+        store_name=ctx.facts.store_name,
+        tone=str(ctx.profile.get("communication_style") or "neutral"),
+        stage=current_state.stage,
+        customer_goal=current_state.customer_goal,
+        selected_product=selected_product,
+        price_sensitivity=_price_sensitivity_label(sensitivity_score),
+        known_facts=known_facts,
+        last_question_asked=previous_state.last_question_asked,
+        last_question_answered=previous_state.last_question_answered,
+        recommended_next_step=suggestion.suggested_next_step or current_state.recommended_next_step,
+        coupon_policy={
+            "has_coupons": ctx.facts.has_coupons,
+            "eligible_code": ctx.facts.coupon_eligibility,
+            "discount_ok_now": suggestion.discount_ok_now,
+            "coupon_logic_considered": suggestion.coupon_logic_considered,
+        },
+        recent_turns=recent_turns,
+        policy_reason=str(decision.args.get("policy_reason") or ""),
+    )
+
+
+def _price_sensitivity_label(score: float) -> str:
+    if score < 0.25:
+        return "منخفضة"
+    if score < 0.5:
+        return "متوسطة"
+    if score < 0.75:
+        return "مرتفعة"
+    return "مرتفعة جداً"
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
@@ -198,6 +358,7 @@ def build_default_brain() -> MerchantBrain:
     from .execution.executor import DefaultActionExecutor
     from .compose.responder  import DefaultComposer
     from .memory.updater     import DefaultMemoryUpdater
+    from .suggestion.engine  import DefaultSuggestionEngine
 
     return MerchantBrain(
         classifier     = DefaultIntentClassifier(),
@@ -208,6 +369,7 @@ def build_default_brain() -> MerchantBrain:
         executor       = DefaultActionExecutor(),
         composer       = DefaultComposer(),
         memory_updater = DefaultMemoryUpdater(),
+        suggestion_engine = DefaultSuggestionEngine(),
     )
 
 

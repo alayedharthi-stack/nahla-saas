@@ -37,13 +37,20 @@ class OrderInput(BaseModel):
     customer_name: str
     customer_phone: str
     customer_email: Optional[str] = None
+    customer_first_name: str = ""
+    customer_last_name: str = ""
     # Saudi national address fields
     building_number: str = ""
+    additional_number: str = ""
     street: str = ""
     district: str = ""
     postal_code: str = ""
     city: str = ""
     address: str = ""
+    short_address_code: str = ""
+    google_maps_url: str = ""
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     payment_method: str = "cod"
     items: List[OrderItemInput]
     notes: Optional[str] = None

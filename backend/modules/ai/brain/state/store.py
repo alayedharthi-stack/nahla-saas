@@ -39,6 +39,7 @@ from ..types import (
     Decision,
     Intent,
     MerchantConversationState,
+    OrderPreparationState,
 )
 from .stages import (
     STAGE_CHECKOUT,
@@ -202,6 +203,11 @@ class DefaultStateStore:
             current_product_focus=state.current_product_focus,
             draft_order_id=state.draft_order_id,
             checkout_url=state.checkout_url,
+            customer_goal=state.customer_goal,
+            last_question_asked=state.last_question_asked,
+            last_question_answered=state.last_question_answered,
+            recommended_next_step=state.recommended_next_step,
+            order_prep=OrderPreparationState.from_dict(state.order_prep.to_dict()),
             turn=state.turn + 1,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )

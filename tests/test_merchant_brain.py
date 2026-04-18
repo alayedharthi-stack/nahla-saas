@@ -31,12 +31,14 @@ for p in [str(REPO_ROOT), str(BACKEND_DIR)]:
 
 # ── Import brain modules ───────────────────────────────────────────────────────
 from modules.ai.brain.types import (
-    INTENT_GREETING, INTENT_ASK_PRODUCT, INTENT_START_ORDER, INTENT_GENERAL,
+    INTENT_GREETING, INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PRODUCT,
+    INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO, INTENT_START_ORDER,
+    INTENT_GENERAL, INTENT_WHO_ARE_YOU,
     BrainContext, CommerceFacts, Decision, ActionResult, Intent,
-    MerchantConversationState,
+    MerchantConversationState, OrderPreparationState,
 )
 from modules.ai.brain.decision.actions import (
-    ACTION_GREET, ACTION_SEARCH_PRODUCTS, ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_FAQ_REPLY, ACTION_GREET, ACTION_SEARCH_PRODUCTS, ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_LLM_REPLY,
 )
 
@@ -55,6 +57,12 @@ def _make_facts(has_products: bool = True, has_coupons: bool = False) -> Commerc
         has_coupons=has_coupons,
         snapshot_fresh=True,
         store_name="متجر تجريبي",
+        store_url="https://store.example.com",
+        store_description="متجر عسل فاخر ومنتجات طبيعية",
+        store_contact_phone="+966500000001",
+        shipping_policy="الشحن خلال 2-4 أيام عمل",
+        support_hours="9am-10pm",
+        shipping_methods=["سمسا", "ارامكس"],
         integration_platform="salla",
     )
 
@@ -64,7 +72,7 @@ def _make_state(**kw) -> MerchantConversationState:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,6 +92,24 @@ class TestIntentRules:
         result = match("مرحبا")
         assert result is not None
         assert result.name == INTENT_GREETING
+
+    def test_identity_question(self):
+        from modules.ai.brain.intent.rules import match
+        result = match("من أنت")
+        assert result is not None
+        assert result.name == INTENT_WHO_ARE_YOU
+
+    def test_store_info_question(self):
+        from modules.ai.brain.intent.rules import match
+        result = match("وين موقعكم")
+        assert result is not None
+        assert result.name == INTENT_ASK_STORE_INFO
+
+    def test_owner_contact_question(self):
+        from modules.ai.brain.intent.rules import match
+        result = match("أبغى رقم التواصل")
+        assert result is not None
+        assert result.name == INTENT_ASK_OWNER_CONTACT
 
     def test_ask_product(self):
         from modules.ai.brain.intent.rules import match
@@ -126,12 +152,12 @@ class TestDecisionEngine:
         d = eng.decide(ctx)
         assert d.action == ACTION_GREET
 
-    def test_first_turn_always_greets(self):
+    def test_first_turn_product_question_does_not_force_greeting(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         ctx = self._ctx(INTENT_ASK_PRODUCT, _make_state(greeted=False), _make_facts())
         d = eng.decide(ctx)
-        assert d.action == ACTION_GREET
+        assert d.action == ACTION_SEARCH_PRODUCTS
 
     def test_ask_product_after_greeting(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
@@ -139,6 +165,22 @@ class TestDecisionEngine:
         ctx = self._ctx(INTENT_ASK_PRODUCT, _make_state(greeted=True), _make_facts())
         d = eng.decide(ctx)
         assert d.action == ACTION_SEARCH_PRODUCTS
+
+    def test_identity_goes_to_faq(self):
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        eng = DefaultDecisionEngine()
+        ctx = self._ctx(INTENT_WHO_ARE_YOU, _make_state(greeted=False), _make_facts())
+        d = eng.decide(ctx)
+        assert d.action == ACTION_FAQ_REPLY
+        assert d.args["topic"] == "identity"
+
+    def test_shipping_goes_to_faq(self):
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        eng = DefaultDecisionEngine()
+        ctx = self._ctx(INTENT_ASK_SHIPPING, _make_state(greeted=True), _make_facts())
+        d = eng.decide(ctx)
+        assert d.action == ACTION_FAQ_REPLY
+        assert d.args["topic"] == "shipping"
 
     def test_start_order_with_focus(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
@@ -148,6 +190,31 @@ class TestDecisionEngine:
             current_product_focus={"id": 1, "external_id": "ext-1", "title": "منتج تجريبي"},
         )
         ctx = self._ctx(INTENT_START_ORDER, state, _make_facts())
+        d = eng.decide(ctx)
+        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+
+    def test_continue_order_preparation_with_checkout_slots(self):
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        eng = DefaultDecisionEngine()
+        state = _make_state(
+            greeted=True,
+            stage="ordering",
+            current_product_focus={"id": 1, "external_id": "ext-1", "title": "منتج تجريبي"},
+            order_prep=OrderPreparationState(customer_first_name="محمد"),
+        )
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000001",
+            message="الرياض وكودي ABCD1234",
+            intent=Intent(
+                name=INTENT_GENERAL,
+                confidence=0.72,
+                raw_message="الرياض وكودي ABCD1234",
+                slots={"city": "الرياض", "short_address_code": "ABCD1234"},
+            ),
+            state=state,
+            facts=_make_facts(),
+        )
         d = eng.decide(ctx)
         assert d.action == ACTION_PROPOSE_DRAFT_ORDER
 
@@ -205,6 +272,26 @@ class TestComposerTemplates:
         text = order_intent_captured(product={"title": "كيبورد لوجيتك"})
         assert "كيبورد لوجيتك" in text
 
+    def test_collect_order_details(self):
+        from modules.ai.brain.compose.templates import collect_order_details
+        text = collect_order_details(
+            product={"title": "كيبورد لوجيتك"},
+            question="ما اسمك الأول لإكمال الطلب؟",
+            missing_fields=["customer_first_name"],
+        )
+        assert "كيبورد لوجيتك" in text
+        assert "اسمك الأول" in text
+
+    def test_faq_shipping_template(self):
+        from modules.ai.brain.compose.templates import faq_shipping
+        text = faq_shipping(
+            shipping_policy="الشحن خلال 2-4 أيام عمل",
+            shipping_methods=["سمسا"],
+            support_hours="9am-10pm",
+        )
+        assert "الشحن" in text
+        assert "سمسا" in text
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Executor dispatching
@@ -241,6 +328,15 @@ class TestExecutor:
         assert result.success
         assert result.data.get("type") == "handoff"
 
+    def test_faq_action(self):
+        from modules.ai.brain.execution.executor import DefaultActionExecutor
+        executor = DefaultActionExecutor()
+        ctx = self._ctx()
+        result = _run(executor.execute(Decision(action=ACTION_FAQ_REPLY, args={"topic": "shipping"}), ctx))
+        assert result.success
+        assert result.data.get("type") == "faq"
+        assert result.data.get("topic") == "shipping"
+
     def test_unknown_action_falls_back_to_llm(self):
         from modules.ai.brain.execution.executor import DefaultActionExecutor
         executor = DefaultActionExecutor()
@@ -248,6 +344,152 @@ class TestExecutor:
         result = _run(executor.execute(Decision(action="unknown_action_xyz"), ctx))
         assert result.success
         assert result.data.get("type") == "llm_fallback"
+
+
+class TestOrderPreparation:
+    def _ctx(self, *, message: str, slots: Dict[str, Any] | None = None, state: MerchantConversationState | None = None) -> BrainContext:
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000001",
+            message=message,
+            intent=Intent(
+                name=INTENT_START_ORDER if "أطلب" in message else INTENT_GENERAL,
+                confidence=0.90,
+                raw_message=message,
+                slots=slots or {},
+            ),
+            state=state or _make_state(
+                greeted=True,
+                current_product_focus={"id": 1, "external_id": "101", "title": "عسل سدر"},
+            ),
+            facts=_make_facts(),
+            profile={},
+        )
+        ctx._db = MagicMock()  # type: ignore[attr-defined]
+        return ctx
+
+    def test_draft_order_collects_missing_fields_first(self):
+        from modules.ai.brain.execution.orders import DraftOrderHandler
+
+        handler = DraftOrderHandler()
+        ctx = self._ctx(message="أبغى أطلب")
+        result = _run(handler.handle(
+            Decision(
+                action=ACTION_PROPOSE_DRAFT_ORDER,
+                args={"product": {"id": 1, "external_id": "101", "title": "عسل سدر"}},
+            ),
+            ctx,
+        ))
+
+        assert result.success
+        assert result.data["needs_collection"] is True
+        assert "customer_first_name" in result.data["missing_fields"]
+        assert result.data["question"]
+
+    def test_draft_order_uses_short_code_and_creates_order(self):
+        from modules.ai.brain.execution.orders import DraftOrderHandler
+        from store_integration.models import NormalizedOrder
+
+        handler = DraftOrderHandler()
+        state = _make_state(
+            greeted=True,
+            current_product_focus={"id": 1, "external_id": "101", "title": "عسل سدر"},
+            order_prep=OrderPreparationState(
+                customer_first_name="محمد",
+                customer_last_name="العتيبي",
+                city="الرياض",
+                short_address_code="ABCD1234",
+                quantity=2,
+            ),
+        )
+        ctx = self._ctx(message="كمل الطلب", state=state)
+
+        with patch(
+            "store_integration.order_service.create_draft_order",
+            new=AsyncMock(return_value=NormalizedOrder(
+                id="123",
+                reference_id="ORD-123",
+                status="draft",
+                total=240.0,
+                currency="SAR",
+                payment_link="https://pay.example.com/order/123",
+                customer_name="محمد العتيبي",
+                customer_phone="+966500000001",
+            )),
+        ) as mock_create, patch(
+            "modules.ai.brain.execution.orders.resolve_short_address",
+            new=AsyncMock(return_value=None),
+        ):
+            result = _run(handler.handle(
+                Decision(
+                    action=ACTION_PROPOSE_DRAFT_ORDER,
+                    args={"product": {"id": 1, "external_id": "101", "title": "عسل سدر"}},
+                ),
+                ctx,
+            ))
+
+        assert result.success
+        assert result.data["checkout_url"] == "https://pay.example.com/order/123"
+        assert result.data["order_prep"]["short_address_code"] == "ABCD1234"
+        _, order_input = mock_create.await_args.args
+        assert order_input.short_address_code == "ABCD1234"
+        assert order_input.items[0].quantity == 2
+
+    def test_extract_address_signals_from_google_maps(self):
+        from services.address_resolution import extract_address_signals
+
+        signals = extract_address_signals(
+            "هذا موقعي https://maps.google.com/?q=24.7136,46.6753 وكودي abcd1234"
+        )
+        assert signals["short_address_code"] == "ABCD1234"
+        assert "maps.google.com" in signals["google_maps_url"]
+        assert signals["latitude"] == pytest.approx(24.7136)
+        assert signals["longitude"] == pytest.approx(46.6753)
+
+
+class TestThinLLMComposer:
+    def test_llm_compose_uses_brain_reply_state(self):
+        from modules.ai.brain.compose.responder import DefaultComposer
+        from modules.ai.brain.types import BrainReplyState, SuggestionSnapshot
+        from modules.ai.orchestrator.types import AIReplyPayload
+
+        composer = DefaultComposer()
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000001",
+            message="رسالة غامضة",
+            intent=Intent(name=INTENT_GENERAL, confidence=0.55, raw_message="رسالة غامضة"),
+            state=_make_state(greeted=True, stage="exploring"),
+            facts=_make_facts(),
+            profile={"preferred_language": "ar", "communication_style": "neutral"},
+        )
+        ctx.reply_state = BrainReplyState(
+            store_name="متجر تجريبي",
+            tone="neutral",
+            stage="exploring",
+            customer_goal="discover_products",
+            known_facts={"store_name": "متجر تجريبي"},
+            recommended_next_step="clarify_need",
+        )
+        ctx.suggestion = SuggestionSnapshot(suggested_next_step="clarify_need")
+        result = ActionResult(success=True, data={"type": "llm_fallback"})
+
+        with patch(
+            "modules.ai.orchestrator.adapter.generate_ai_reply",
+            return_value=AIReplyPayload(
+                reply_text="رد ذكي قصير",
+                provider_used="anthropic",
+                metadata={"model": "claude-test"},
+            ),
+        ) as mock_generate:
+            reply = _run(composer.compose(Decision(action=ACTION_LLM_REPLY), result, ctx))
+
+        assert reply == "رد ذكي قصير"
+        kwargs = mock_generate.call_args.kwargs
+        assert kwargs["context_metadata"]["brain_state"]["stage"] == "exploring"
+        assert kwargs["context_metadata"]["brain_state"]["recommended_next_step"] == "clarify_need"
+        assert kwargs["prompt_overrides"]["__full_system_prompt"]
+        assert result.data["chosen_path"] == "llm"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
