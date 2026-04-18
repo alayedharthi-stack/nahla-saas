@@ -476,9 +476,11 @@ async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
                             from core.automation_engine import emit_automation_event  # noqa: PLC0415
                             from models import Customer  # noqa: PLC0415
                             _ci = order.customer_info or {}
-                            _phone = _ci.get("mobile") or _ci.get("phone")
+                            _raw_phone = _ci.get("mobile") or _ci.get("phone")
                             _cust = None
-                            if _phone:
+                            if _raw_phone:
+                                from services.customer_intelligence import normalize_phone as _np  # noqa: PLC0415
+                                _phone = _np(_raw_phone) or _raw_phone
                                 _cust = db.query(Customer).filter(
                                     Customer.tenant_id == tenant_id,
                                     Customer.phone == _phone,

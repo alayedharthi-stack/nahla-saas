@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import sqlalchemy as sa
 from sqlalchemy import (
     Boolean,
     Column,
@@ -390,6 +391,24 @@ class ShippingFee(Base):
 
 class Customer(Base):
     __tablename__ = 'customers'
+    __table_args__ = (
+        # Partial unique index: one customer per (tenant, phone) when phone is set.
+        # Enforced at DB level — application must use upsert patterns.
+        # Created by migration 0031; declared here for SQLAlchemy reflection.
+        Index(
+            'ix_customers_tenant_phone_partial',
+            'tenant_id', 'phone',
+            unique=True,
+            postgresql_where=sa.text("phone IS NOT NULL AND phone != ''"),
+        ),
+        # Partial unique index: one Salla customer per (tenant, salla_customer_id).
+        Index(
+            'ix_customers_tenant_salla_id',
+            'tenant_id', 'salla_customer_id',
+            unique=True,
+            postgresql_where=sa.text("salla_customer_id IS NOT NULL AND salla_customer_id != ''"),
+        ),
+    )
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=True)
     email = Column(String, nullable=True)
@@ -398,6 +417,24 @@ class Customer(Base):
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant')
     addresses = relationship('CustomerAddress', back_populates='customer')
+
+    # ── Migration 0031: first-class columns promoted from JSONB ──────────────
+    # salla_customer_id: the customer's ID inside their Salla store.
+    # Scoped per tenant — same Salla customer ID can appear in multiple tenants
+    # (different merchants) with no conflict.
+    salla_customer_id = Column(String, nullable=True, index=True)
+
+    # acquisition_channel: the first channel that created this customer record.
+    # Values: 'salla_sync' | 'whatsapp_inbound' | 'order' | 'manual'
+    # Set on INSERT only; never updated (use last_interaction_at for recency).
+    acquisition_channel = Column(String, nullable=True, index=True)
+
+    # first_seen_at: timestamp of the customer's first appearance in the system.
+    first_seen_at = Column(DateTime(timezone=True), nullable=True)
+
+    # last_interaction_at: updated on every inbound WhatsApp message.
+    # Allows recency queries without scanning message_events.
+    last_interaction_at = Column(DateTime(timezone=True), nullable=True)
 
 class CustomerAddress(Base):
     __tablename__ = 'customer_addresses'

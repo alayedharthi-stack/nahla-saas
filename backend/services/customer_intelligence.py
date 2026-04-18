@@ -436,14 +436,36 @@ class CustomerIntelligenceService:
         )
 
     def _find_customer_by_external_id(self, external_id: Optional[str]) -> Optional[Customer]:
+        """
+        Find a tenant-scoped customer by their Salla external ID.
+        Priority 1: check the first-class salla_customer_id column (indexed, fast).
+        Priority 2: JSONB metadata fallback for rows pre-dating migration 0031.
+        Always scoped by tenant_id — never cross-tenant.
+        """
         if not external_id:
             return None
         target = str(external_id).strip()
         if not target:
             return None
+
+        # Fast path: first-class column (migration 0031+)
+        by_column = (
+            self.db.query(Customer)
+            .filter(
+                Customer.tenant_id == self.tenant_id,
+                Customer.salla_customer_id == target,
+            )
+            .first()
+        )
+        if by_column:
+            return by_column
+
+        # Legacy path: JSONB metadata (pre-0031 rows)
         for customer in self._query_customers():
             meta = customer.extra_metadata or {}
             if str(meta.get("salla_id") or meta.get("external_id") or "").strip() == target:
+                # Repair: promote to first-class column so next lookup is fast
+                customer.salla_customer_id = target
                 return customer
         return None
 
@@ -525,17 +547,31 @@ class CustomerIntelligenceService:
         extra_metadata: Optional[Dict[str, Any]] = None,
         seen_at: Optional[datetime] = None,
     ) -> Optional[Customer]:
+        """
+        Find-or-create a customer scoped to self.tenant_id.
+
+        Identity resolution order (all tenant-scoped):
+          1. salla_customer_id / external_id column (indexed, fast)
+          2. normalized phone number
+          3. normalized name (fuzzy fallback only)
+
+        On creation: sets acquisition_channel, salla_customer_id, first_seen_at.
+        On update: syncs salla_customer_id, updates last_interaction_at for WA.
+        Never creates a customer across tenants.
+        """
         normalized_phone = normalize_phone(phone)
-        clean_name = str(name or "").strip()
-        clean_email = str(email or "").strip() or None
+        clean_name       = str(name or "").strip()
+        clean_email      = str(email or "").strip() or None
 
         if not any([normalized_phone, clean_name, clean_email, external_id]):
             return None
 
+        now = ensure_utc(seen_at) or utcnow()
+
+        # ── Identity resolution ───────────────────────────────────────────────
         customer = self._find_customer_by_external_id(external_id)
         if customer is None and normalized_phone:
             customer = self.find_customer_by_phone(normalized_phone)
-
         if customer is None and clean_name:
             normalized_name = normalize_name(clean_name)
             for row in self._query_customers():
@@ -543,6 +579,7 @@ class CustomerIntelligenceService:
                     customer = row
                     break
 
+        # ── JSONB metadata (legacy compatibility) ─────────────────────────────
         metadata = dict(customer.extra_metadata or {}) if customer else {}
         metadata.update(extra_metadata or {})
         if external_id:
@@ -550,17 +587,38 @@ class CustomerIntelligenceService:
         if source:
             metadata["source"] = source
 
+        # ── Determine acquisition_channel from source string ──────────────────
+        _channel_map = {
+            "salla_sync":       "salla_sync",
+            "customer_webhook": "salla_sync",
+            "order_sync":       "order",
+            "order_webhook":    "order",
+            "whatsapp_inbound": "whatsapp_inbound",
+            "whatsapp_lead":    "whatsapp_inbound",
+        }
+        channel = _channel_map.get(source or "", source or None)
+
         if customer is None:
+            # ── CREATE ────────────────────────────────────────────────────────
             customer = Customer(
-                tenant_id=self.tenant_id,
-                phone=normalized_phone or None,
-                name=clean_name or None,
-                email=clean_email,
-                extra_metadata=metadata or None,
+                tenant_id           = self.tenant_id,
+                phone               = normalized_phone or None,
+                name                = clean_name or None,
+                email               = clean_email,
+                extra_metadata      = metadata or None,
+                salla_customer_id   = str(external_id).strip() if external_id else None,
+                acquisition_channel = channel,
+                first_seen_at       = now,
+                last_interaction_at = now if channel == "whatsapp_inbound" else None,
             )
             self.db.add(customer)
             self.db.flush()
+            logger.debug(
+                "[CIS] customer CREATED | tenant=%s phone=%s salla_id=%s channel=%s",
+                self.tenant_id, normalized_phone, external_id, channel,
+            )
         else:
+            # ── UPDATE ────────────────────────────────────────────────────────
             if normalized_phone:
                 customer.phone = normalized_phone
             if clean_name:
@@ -568,6 +626,19 @@ class CustomerIntelligenceService:
             if clean_email:
                 customer.email = clean_email
             customer.extra_metadata = metadata or None
+            # Promote salla_customer_id to first-class column if not set yet
+            if external_id and not customer.salla_customer_id:
+                customer.salla_customer_id = str(external_id).strip()
+            # Update last_interaction_at for WA inbound events
+            if channel == "whatsapp_inbound":
+                customer.last_interaction_at = now
+            # Set first_seen_at only if missing (never move it later)
+            if not customer.first_seen_at:
+                customer.first_seen_at = now
+            logger.debug(
+                "[CIS] customer UPDATED | tenant=%s id=%s phone=%s channel=%s",
+                self.tenant_id, customer.id, normalized_phone, channel,
+            )
 
         self.ensure_profile(customer, seen_at=seen_at)
         return customer

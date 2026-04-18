@@ -769,29 +769,47 @@ class StoreSyncService:
             email = raw.get("email", "")
             phone = _normalize_phone(raw.get("mobile", raw.get("phone", "")))
 
-            # 1. Try by salla_id first
+            # 1. Try by salla_customer_id column (indexed, migration 0031)
             existing = (
                 self.db.query(Customer)
                 .filter(
-                    Customer.tenant_id == self.tenant_id,
-                    Customer.extra_metadata["salla_id"].astext == ext_id,
+                    Customer.tenant_id       == self.tenant_id,
+                    Customer.salla_customer_id == ext_id,
                 )
                 .first()
-            )
+            ) if ext_id else None
 
-            # 2. If not found by salla_id, try by normalized phone to avoid duplicates
+            # 2. Fallback: legacy JSONB salla_id (pre-0031 rows not yet repaired)
+            if not existing and ext_id:
+                existing = (
+                    self.db.query(Customer)
+                    .filter(
+                        Customer.tenant_id == self.tenant_id,
+                        Customer.extra_metadata["salla_id"].astext == ext_id,
+                    )
+                    .first()
+                )
+                if existing:
+                    # Repair: promote to first-class column
+                    existing.salla_customer_id = ext_id
+
+            # 3. Fallback: normalized phone — always tenant-scoped
             if not existing and phone:
                 existing = (
                     self.db.query(Customer)
                     .filter(
                         Customer.tenant_id == self.tenant_id,
-                        Customer.phone == phone,
+                        Customer.phone     == phone,
                     )
                     .first()
                 )
 
-            meta = {"salla_id": ext_id, "source": "salla",
-                    "city": raw.get("city", ""), "country": raw.get("country", "SA")}
+            meta = {
+                "salla_id": ext_id,
+                "source":   "salla_sync",
+                "city":     raw.get("city", ""),
+                "country":  raw.get("country", "SA"),
+            }
 
             if existing:
                 if name:
@@ -800,15 +818,24 @@ class StoreSyncService:
                     existing.email = email
                 if phone:
                     existing.phone = phone
+                # Ensure first-class salla_customer_id is always populated
+                if ext_id and not existing.salla_customer_id:
+                    existing.salla_customer_id = ext_id
+                if not existing.acquisition_channel:
+                    existing.acquisition_channel = "salla_sync"
                 existing.extra_metadata = {**(existing.extra_metadata or {}), **meta}
                 updated += 1
             else:
+                from datetime import timezone as _tz  # noqa: PLC0415
                 self.db.add(Customer(
-                    tenant_id=self.tenant_id,
-                    name=name or None,
-                    email=email or None,
-                    phone=phone or None,
-                    extra_metadata=meta,
+                    tenant_id           = self.tenant_id,
+                    name                = name or None,
+                    email               = email or None,
+                    phone               = phone or None,
+                    extra_metadata      = meta,
+                    salla_customer_id   = ext_id or None,
+                    acquisition_channel = "salla_sync",
+                    first_seen_at       = datetime.now(_tz.utc),
                 ))
                 created += 1
         self.db.flush()
