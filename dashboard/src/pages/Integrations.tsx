@@ -57,6 +57,8 @@ interface CardProps {
   syncLabel?: string
   syncValue?: string
   onConnect?: () => void
+  onReconnect?: () => void
+  reconnecting?: boolean
   onDisconnect?: () => void
   externalHref?: string
   externalLabel?: string
@@ -66,7 +68,7 @@ interface CardProps {
 function IntegrationCard({
   logo, name, description, connected, loading,
   accountLabel, accountValue, syncLabel, syncValue,
-  onConnect, onDisconnect, externalHref, externalLabel, hideExternal,
+  onConnect, onReconnect, reconnecting, onDisconnect, externalHref, externalLabel, hideExternal,
 }: CardProps) {
   const [syncing, setSyncing] = useState(false)
 
@@ -119,6 +121,18 @@ function IntegrationCard({
               <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
               {syncing ? 'جارٍ…' : 'مزامنة'}
             </button>
+            {onReconnect && (
+              <button
+                onClick={onReconnect}
+                disabled={reconnecting}
+                className="btn-secondary text-xs py-1.5 text-amber-600 border-amber-200 hover:bg-amber-50"
+              >
+                {reconnecting
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <RefreshCw className="w-3.5 h-3.5" />}
+                إعادة الربط
+              </button>
+            )}
             {onDisconnect && (
               <button onClick={onDisconnect} className="btn-ghost text-xs py-1.5 text-red-500 hover:bg-red-50">
                 فصل الاتصال
@@ -126,8 +140,11 @@ function IntegrationCard({
             )}
           </>
         ) : (
-          <button onClick={onConnect} className="btn-primary text-xs py-1.5">
-            <Plug className="w-3.5 h-3.5" /> ربط {name}
+          <button onClick={onConnect} disabled={reconnecting} className="btn-primary text-xs py-1.5">
+            {reconnecting
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Plug className="w-3.5 h-3.5" />}
+            {reconnecting ? 'جارٍ الربط…' : `ربط ${name}`}
           </button>
         ))}
 
@@ -147,6 +164,8 @@ function IntegrationCard({
 export default function Integrations() {
   const navigate = useNavigate()
   const [copied,  setCopied]  = useState<string | null>(null)
+  const [reconnecting, setReconnecting] = useState(false)
+  const [reconnectMsg, setReconnectMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const [sallaStatus, setSallaStatus] = useState<SallaStatus>({ connected: false })
   const [waStatus,    setWaStatus]    = useState<WaStatus>({ connected: false })
@@ -195,6 +214,37 @@ export default function Integrations() {
       .finally(() => setZidLoading(false))
   }, [])
 
+  async function handleReconnectSalla() {
+    setReconnecting(true)
+    setReconnectMsg(null)
+    try {
+      const data = await apiCall<{ action: string; url?: string; message: string }>('/api/salla/reconnect', { method: 'POST' })
+      if (data.action === 'refreshed') {
+        setReconnectMsg({ type: 'success', text: data.message })
+        // Reload Salla status
+        setSallaLoading(true)
+        apiCall<any>('/salla/whoami')
+          .then(d => {
+            const si = d?.salla_integration ?? {}
+            setSallaStatus({
+              connected:    si.connected === true,
+              store_id:     si.store_id,
+              store_name:   si.store_name,
+              needs_reauth: si.needs_reauth === true,
+            })
+          })
+          .catch(() => {})
+          .finally(() => setSallaLoading(false))
+      } else if (data.action === 'oauth_required' && data.url) {
+        window.location.href = data.url
+      }
+    } catch {
+      setReconnectMsg({ type: 'error', text: 'تعذّر إعادة الربط — تحقق من الاتصال وحاول مجدداً' })
+    } finally {
+      setReconnecting(false)
+    }
+  }
+
   const handleCopy = (url: string, label: string) => {
     navigator.clipboard.writeText(url)
     setCopied(label)
@@ -242,6 +292,21 @@ export default function Integrations() {
         </div>
       </div>
 
+      {/* Reconnect feedback */}
+      {reconnectMsg && (
+        <div className={`rounded-xl border px-5 py-3 flex items-center gap-3 ${
+          reconnectMsg.type === 'success'
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+            : 'border-red-200 bg-red-50 text-red-800'
+        }`}>
+          {reconnectMsg.type === 'success'
+            ? <CheckCircle className="w-4 h-4 shrink-0" />
+            : <XCircle className="w-4 h-4 shrink-0" />}
+          <p className="text-sm font-medium">{reconnectMsg.text}</p>
+          <button onClick={() => setReconnectMsg(null)} className="mr-auto text-xs opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
+
       {/* Salla needs-reauth urgent banner */}
       {!sallaLoading && sallaStatus.needs_reauth && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-4 flex items-start gap-3">
@@ -249,17 +314,29 @@ export default function Integrations() {
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-red-800">انتهت صلاحية ربط سلة — مطلوب إعادة الربط</p>
             <p className="text-xs text-red-600 mt-0.5">
-              انتهت صلاحية توكن سلة بشكل نهائي ولا يمكن تجديده تلقائياً. افتح تطبيق سلة وأعِد تثبيت تطبيق نحلة لاستعادة الربط.
+              انتهت صلاحية توكن سلة. سيحاول النظام تجديده تلقائياً، أو يمكنك إعادة الربط يدوياً من سلة.
             </p>
           </div>
-          <a
-            href="https://s.salla.sa/apps/nahla"
-            target="_blank"
-            rel="noreferrer"
-            className="shrink-0 rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-500 transition-colors"
-          >
-            فتح سلة وإعادة الربط
-          </a>
+          <div className="flex gap-2 shrink-0">
+            <button
+              onClick={handleReconnectSalla}
+              disabled={reconnecting}
+              className="rounded-lg bg-amber-600 px-4 py-2 text-xs font-bold text-white hover:bg-amber-500 transition-colors disabled:opacity-60 flex items-center gap-1.5"
+            >
+              {reconnecting
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <RefreshCw className="w-3.5 h-3.5" />}
+              إعادة الربط
+            </button>
+            <a
+              href="https://s.salla.sa/apps/nahla"
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-lg bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-500 transition-colors"
+            >
+              فتح سلة
+            </a>
+          </div>
         </div>
       )}
 
@@ -275,7 +352,9 @@ export default function Integrations() {
           accountValue={sallaStatus.store_name && sallaStatus.store_name !== 'not_connected' ? sallaStatus.store_name : sallaStatus.store_id}
           syncLabel="رقم المتجر"
           syncValue={sallaStatus.store_id && sallaStatus.store_id !== 'not_connected' ? sallaStatus.store_id : '—'}
-          onConnect={() => navigate('/store-integration')}
+          onConnect={handleReconnectSalla}
+          onReconnect={handleReconnectSalla}
+          reconnecting={reconnecting}
           externalHref="https://salla.sa/dashboard"
           externalLabel="فتح في Salla"
         />

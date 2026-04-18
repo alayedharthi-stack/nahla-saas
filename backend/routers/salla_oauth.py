@@ -1739,3 +1739,94 @@ async def test_salla_coupon(
     except Exception as exc:
         logger.error("Salla coupon error tenant=%s: %s", tenant_id, exc)
         raise HTTPException(status_code=502, detail=f"Salla API error: {exc}")
+
+
+@router.post("/api/salla/reconnect")
+async def salla_reconnect(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Smart reconnect endpoint.
+
+    1. Looks up the tenant's Salla integration.
+    2. If a refresh_token exists → attempts to exchange it for a new access_token.
+       On success → updates the DB and returns { action: "refreshed" }.
+    3. If refresh fails or no refresh_token → returns { action: "oauth_required",
+       url: "<Salla OAuth URL>" } so the frontend can redirect the user.
+
+    Always returns 200; the caller decides what to do based on `action`.
+    """
+    tenant_id = resolve_tenant_id(request)
+    audit("salla_reconnect_attempt", tenant_id=tenant_id)
+
+    intg = db.query(Integration).filter(
+        Integration.tenant_id == tenant_id,
+        Integration.provider  == "salla",
+    ).first()
+
+    cfg           = dict(intg.config or {}) if intg else {}
+    refresh_token = cfg.get("refresh_token", "")
+    client_id     = SALLA_CLIENT_ID     or ""
+    client_secret = SALLA_CLIENT_SECRET or ""
+
+    # ── Step 1: try silent token refresh ─────────────────────────────────────
+    if refresh_token and client_id and client_secret:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    "https://accounts.salla.sa/oauth2/token",
+                    data={
+                        "grant_type":    "refresh_token",
+                        "client_id":     client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": refresh_token,
+                    },
+                    headers={
+                        "Accept":       "application/json",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+            if resp.status_code == 200:
+                data = resp.json()
+                new_access  = data.get("access_token", "")
+                new_refresh = data.get("refresh_token", refresh_token)
+                if new_access and intg:
+                    cfg["api_key"]           = new_access
+                    cfg["refresh_token"]     = new_refresh
+                    cfg["last_token_refresh"] = datetime.now(timezone.utc).isoformat()
+                    cfg.pop("needs_reauth", None)
+                    intg.config  = cfg
+                    intg.enabled = True
+                    db.commit()
+                    logger.info("[SallaReconnect] Token refreshed silently | tenant=%s", tenant_id)
+                    return {
+                        "action":  "refreshed",
+                        "message": "تم تجديد التوكن بنجاح — الربط فعّال الآن",
+                    }
+            logger.warning(
+                "[SallaReconnect] Refresh failed %d | tenant=%s — falling back to OAuth",
+                resp.status_code, tenant_id,
+            )
+        except Exception as exc:
+            logger.warning("[SallaReconnect] Refresh error | tenant=%s: %s", tenant_id, exc)
+
+    # ── Step 2: OAuth re-authorization required ───────────────────────────────
+    if not SALLA_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="SALLA_CLIENT_ID not configured")
+
+    state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}"
+    params = urllib.parse.urlencode({
+        "client_id":     SALLA_CLIENT_ID,
+        "redirect_uri":  SALLA_REDIRECT_URI,
+        "response_type": "code",
+        "scope":         "offline_access",
+        "state":         state,
+    })
+    oauth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
+    logger.info("[SallaReconnect] OAuth required | tenant=%s", tenant_id)
+    return {
+        "action":  "oauth_required",
+        "url":     oauth_url,
+        "message": "يلزم إعادة التفويض — سيتم توجيهك لصفحة سلة",
+    }
