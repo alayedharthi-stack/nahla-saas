@@ -259,9 +259,14 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             )
         else:
             # ── Check by store_id to avoid duplicate tenant creation ──────────
+            # Salla may return either the store.id or the merchant account.id
+            # depending on the SDK version / introspect endpoint response shape.
+            # Both IDs must resolve to the same tenant.
+            #
             # Priority 1: match by external_store_id column (indexed, fast)
-            # Priority 2: match by config->>'store_id' JSONB field (legacy rows
-            #             that were saved before external_store_id was populated)
+            # Priority 2: match by config->>'store_id' JSONB field (legacy rows)
+            # Priority 3: match by config->>'salla_merchant_id_alt' (alternate ID
+            #             — stored when we know both IDs point to the same tenant)
             existing_integration = None
             if merchant_id_str:
                 existing_integration = db.query(Integration).filter(
@@ -270,8 +275,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 ).first()
 
                 if not existing_integration:
-                    # Fallback: config JSONB lookup for legacy rows
-                    from sqlalchemy import cast, String, func  # noqa: PLC0415
+                    # Fallback 1: config JSONB store_id field
                     existing_integration = db.query(Integration).filter(
                         Integration.provider == "salla",
                         Integration.config["store_id"].as_string() == str(merchant_id_str),
@@ -283,6 +287,20 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                             "[SallaLogin]    Repaired external_store_id for integration id=%s "
                             "tenant=%s store=%s",
                             existing_integration.id, existing_integration.tenant_id, merchant_id_str,
+                        )
+
+                if not existing_integration:
+                    # Fallback 2: alternate merchant ID field
+                    # (Salla sometimes returns store.id, sometimes merchant account.id)
+                    existing_integration = db.query(Integration).filter(
+                        Integration.provider == "salla",
+                        Integration.config["salla_merchant_id_alt"].as_string() == str(merchant_id_str),
+                    ).first()
+                    if existing_integration:
+                        logger.info(
+                            "[SallaLogin]    Matched via salla_merchant_id_alt=%s "
+                            "tenant=%s integration=%s",
+                            merchant_id_str, existing_integration.tenant_id, existing_integration.id,
                         )
 
             if existing_integration:
