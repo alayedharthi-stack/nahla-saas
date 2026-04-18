@@ -138,7 +138,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "أهلًا بك في متجرنا"},
-            {"type": "BODY", "text": "مرحباً {{1}}، يسعدنا وجودك معنا. اكتشف أفضل العروض والمنتجات الجديدة من {{2}}."},
+            {"type": "BODY", "text": "مرحباً {{1}}، يسعدنا وجودك معنا. اكتشف أفضل العروض والمنتجات الجديدة من {{2}}.",
+             "example": {"body_text": [["أحمد", "متجر الأناقة"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -149,9 +150,14 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن قبل نفاد الكمية:\n{{2}}"},
+            {"type": "BODY", "text": "مرحباً {{1}}،\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن من متجر {{2}} قبل نفاد الكمية.",
+             "example": {"body_text": [["أحمد", "متجر الأناقة"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-            {"type": "BUTTONS", "buttons": [{"type": "URL", "text": "أكمل الطلب", "url": "{{2}}"}]},
+            {"type": "BUTTONS", "buttons": [
+                {"type": "URL", "text": "أكمل الطلب 🛒",
+                 "url": "https://example.com/cart/{{1}}",
+                 "example": ["https://example.com/cart/abc123"]},
+            ]},
         ],
     },
     {
@@ -161,7 +167,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "عرض خاص لك 🎁"},
-            {"type": "BODY",   "text": "أهلاً {{1}}،\nاحصل على خصم {{2}} باستخدام كود: *{{3}}*\nالعرض ينتهي قريباً — لا تفوّته!"},
+            {"type": "BODY", "text": "أهلاً {{1}}،\nاحصل على خصم {{2}} باستخدام كود: *{{3}}*\nالعرض ينتهي قريباً — لا تفوّته!",
+             "example": {"body_text": [["أحمد", "20%", "SAVE20"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -172,7 +179,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "وصل جديد! ✨"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nيسعدنا إعلامك بوصول منتجات جديدة في متجر {{2}}.\nاكتشف أحدث التشكيلة الآن وكن أول من يحصل عليها."},
+            {"type": "BODY", "text": "مرحباً {{1}}،\nيسعدنا إعلامك بوصول منتجات جديدة في متجر {{2}}.\nاكتشف أحدث التشكيلة الآن وكن أول من يحصل عليها.",
+             "example": {"body_text": [["أحمد", "متجر الأناقة"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -183,7 +191,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "اخترنا لك هذه التوصية"},
-            {"type": "BODY", "text": "مرحباً {{1}}، بناءً على اهتماماتك ننصحك بتجربة {{2}} من متجر {{3}}."},
+            {"type": "BODY", "text": "مرحباً {{1}}، بناءً على اهتماماتك ننصحك بتجربة {{2}} من متجر {{3}}.",
+             "example": {"body_text": [["أحمد", "عطر الورد", "متجر الأناقة"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -194,7 +203,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "👑 عرض VIP حصري"},
-            {"type": "BODY",   "text": "{{1}}، أنت من عملائنا المميزين!\nبصفتك عضواً VIP لديك خصم حصري {{2}} على مشترياتك القادمة.\nاستخدم الكود: *{{3}}*"},
+            {"type": "BODY", "text": "{{1}}، أنت من عملائنا المميزين!\nبصفتك عضواً VIP لديك خصم حصري {{2}} على مشترياتك القادمة.\nاستخدم الكود: *{{3}}*",
+             "example": {"body_text": [["أحمد", "30%", "VIP30"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -205,7 +215,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "تأكيد الطلب ✅"},
-            {"type": "BODY",   "text": "شكراً {{1}}!\nتم استلام طلبك رقم *{{2}}* بنجاح.\nسيتم التواصل معك قريباً لتأكيد موعد التوصيل."},
+            {"type": "BODY", "text": "شكراً {{1}}!\nتم استلام طلبك رقم *{{2}}* بنجاح.\nسيتم التواصل معك قريباً لتأكيد موعد التوصيل.",
+             "example": {"body_text": [["أحمد", "ORD-12345"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -216,7 +227,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "اشتقنا إليك! 💙"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nلم نرك منذ فترة ونحن نفتقدك!\nعُد إلينا مع خصم خاص {{2}} على طلبك القادم.\nالكود: *{{3}}*"},
+            {"type": "BODY", "text": "مرحباً {{1}}،\nلم نرك منذ فترة ونحن نفتقدك!\nعُد إلينا مع خصم خاص {{2}} على طلبك القادم.\nالكود: *{{3}}*",
+             "example": {"body_text": [["أحمد", "15%", "BACK15"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -226,7 +238,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "category": "UTILITY",
         "status": "APPROVED",
         "components": [
-            {"type": "BODY",   "text": "مرحباً {{1}} 🐝\n\nاستلمنا طلبك بنجاح 🍯\n\nالمنتج: {{2}}\nالمبلغ: {{3}} ريال\n\nطريقة الدفع: الدفع عند الاستلام\n\nيرجى تأكيد الطلب بالضغط على الزر أدناه."},
+            {"type": "BODY", "text": "مرحباً {{1}} 🐝\n\nاستلمنا طلبك بنجاح 🍯\n\nالمنتج: {{2}}\nالمبلغ: {{3}} ريال\n\nطريقة الدفع: الدفع عند الاستلام\n\nيرجى تأكيد الطلب بالضغط على الزر أدناه.",
+             "example": {"body_text": [["أحمد", "حقيبة جلدية", "250"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
             {"type": "BUTTONS", "buttons": [
                 {"type": "QUICK_REPLY", "text": "تأكيد الطلب ✅"},
@@ -240,7 +253,8 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "category": "MARKETING",
         "status": "APPROVED",
         "components": [
-            {"type": "BODY",   "text": "مرحباً {{1}} 🐝\n\nنتوقع أن {{2}} لديك قد أوشك على النفاد 🍯\n\nاطلب عبوة جديدة الآن:\n\n{{3}}"},
+            {"type": "BODY", "text": "مرحباً {{1}} 🐝\n\nنتوقع أن {{2}} لديك قد أوشك على النفاد 🍯\n\nاطلب عبوة جديدة الآن:\n\n{{3}}",
+             "example": {"body_text": [["أحمد", "كريم البشرة", "https://example.com/products/cream"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
@@ -408,6 +422,10 @@ class TemplateComponentIn(BaseModel):
     format: Optional[str] = None
     text: Optional[str] = None
     buttons: Optional[List[Dict[str, Any]]] = None
+    # Meta requires `example` in BODY (body_text) and URL buttons when
+    # template variables {{N}} are present. We preserve this field so
+    # merchant edits do not accidentally strip it.
+    example: Optional[Any] = None
 
 
 class CreateTemplateIn(BaseModel):
@@ -747,6 +765,56 @@ def _compute_template_compatibility(
     }
 
 
+def _ensure_meta_examples(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Auto-inject Meta-required ``example`` fields into template components
+    before submission.
+
+    Meta error code-100 "Missing required field(s) example" fires when:
+    - A BODY component contains {{N}} variables but has no ``example.body_text``
+    - A URL button contains {{1}} but has no ``example`` list
+
+    This helper adds sensible placeholder examples so Meta can validate the
+    template format. The values shown here are only for Meta's review — they
+    are never sent to real customers.
+    """
+    import re as _re, copy as _copy  # noqa: PLC0415
+
+    # Realistic-looking Arabic sample values that satisfy Meta reviewers.
+    _BODY_SAMPLES = ["أحمد", "متجر الأناقة", "ORDER-2025", "25%", "SAVE25", "مدينة الرياض"]
+
+    result = []
+    for raw_comp in components:
+        comp = _copy.deepcopy(raw_comp)
+        comp_type = str(comp.get("type", "")).upper()
+
+        if comp_type == "BODY":
+            text = comp.get("text") or ""
+            variables = _re.findall(r"\{\{\d+\}\}", text)
+            if variables and "example" not in comp:
+                samples = _BODY_SAMPLES[:len(variables)]
+                # Pad if template has more variables than our sample list
+                while len(samples) < len(variables):
+                    samples.append(f"قيمة{len(samples) + 1}")
+                comp["example"] = {"body_text": [samples]}
+
+        elif comp_type == "BUTTONS":
+            new_buttons = []
+            for btn in (comp.get("buttons") or []):
+                btn = _copy.deepcopy(btn)
+                if str(btn.get("type", "")).upper() == "URL":
+                    url_tpl = btn.get("url", "")
+                    if "{{1}}" in url_tpl and "example" not in btn:
+                        # Build a concrete example URL that satisfies Meta
+                        example_url = url_tpl.replace("{{1}}", "example-page-123")
+                        btn["example"] = [example_url]
+                new_buttons.append(btn)
+            comp["buttons"] = new_buttons
+
+        result.append(comp)
+    return result
+
+
 async def _submit_template_to_meta(
     *,
     db: Session,
@@ -761,6 +829,11 @@ async def _submit_template_to_meta(
     """Submit a new template using the active WhatsApp provider.
     Raises ValueError with the actual Meta error message on failure.
     """
+    # Ensure all components have the Meta-required `example` fields before
+    # submitting. This prevents code-100 "missing example" rejections for
+    # templates that were created/edited without explicit example values.
+    components = _ensure_meta_examples(components)
+
     payload = {
         "name": name,
         "language": language,
@@ -936,6 +1009,28 @@ async def update_template(
         )
 
     new_components = [c.model_dump(exclude_none=True) for c in body.components] if body.components is not None else (tpl.components or [])
+
+    # Preserve Meta `example` fields from the existing stored components so a
+    # merchant edit through the dashboard never accidentally strips them.
+    # (`example` is required by Meta for BODY vars and URL button vars, but is
+    #  not displayed in the edit UI — so the frontend never sends it back.)
+    if body.components is not None:
+        old_comps = tpl.components or []
+        for new_comp in new_components:
+            new_type = str(new_comp.get("type", "")).upper()
+            # Find matching component by type in the old list
+            for old_comp in old_comps:
+                if str(old_comp.get("type", "")).upper() == new_type:
+                    if "example" not in new_comp and "example" in old_comp:
+                        new_comp["example"] = old_comp["example"]
+                    # Also preserve button-level examples
+                    if new_type == "BUTTONS":
+                        old_btns = old_comp.get("buttons") or []
+                        for j, btn in enumerate(new_comp.get("buttons") or []):
+                            if j < len(old_btns) and "example" not in btn and "example" in old_btns[j]:
+                                btn["example"] = old_btns[j]["example"]
+                    break
+
     _validate_placeholder_integrity(
         old_components=tpl.components or [],
         new_components=new_components,
