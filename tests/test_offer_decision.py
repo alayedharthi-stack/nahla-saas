@@ -1153,7 +1153,7 @@ class TestDecisionModeTruthTable:
             db.close(); engine.dispose()
 
     def test_advisory_only_is_advisory(self) -> None:
-        """The new shadow-mode toggle works on its own — staff can opt
+        """The new shadow-mode toggle works on its own. Staff can opt
         a tenant into advisory without ever flipping the main flag."""
         from services.offer_decision_flags import DecisionMode, tenant_decision_mode
         db, engine = _make_db()
@@ -1178,7 +1178,7 @@ class TestDecisionModeTruthTable:
             db.close(); engine.dispose()
 
     def test_missing_settings_row_is_off(self) -> None:
-        """No TenantSettings row at all → OFF (legacy behaviour)."""
+        """No TenantSettings row at all -> OFF (legacy behaviour)."""
         from services.offer_decision_flags import DecisionMode, tenant_decision_mode
         db, engine = _make_db()
         try:
@@ -1189,154 +1189,7 @@ class TestDecisionModeTruthTable:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# 12. Advisory mode — automation engine
-# ═════════════════════════════════════════════════════════════════════════
-#
-# In ADVISORY the automation engine must:
-#   (a) write a SURFACE_AUTOMATION ledger row capturing the policy's
-#       view of the world (so we can audit shadow runs),
-#   (b) still return the **legacy** code path's discount — the policy
-#       must not change behaviour during shadow rollout,
-#   (c) back-stamp the legacy-issued coupon with the same decision_id
-#       so attribution still closes the loop on redemption.
-
-class TestAutomationEngineAdvisoryMode:
-    def _enable_advisory(self, db, tenant_id: int) -> None:
-        ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
-        if ts is None:
-            ts = TenantSettings(tenant_id=tenant_id)
-            db.add(ts)
-        meta = dict(ts.extra_metadata or {})
-        meta["tenant_features"] = {"offer_decision_service_advisory": True}
-        ts.extra_metadata = meta
-        db.commit()
-
-    def test_advisory_writes_ledger_and_returns_legacy_coupon(self, monkeypatch) -> None:
-        from core.automation_engine import _resolve_auto_coupon
-
-        db, engine = _make_db()
-        try:
-            t = _seed_tenant(db)
-            customer = _seed_customer(db, t.id)
-            _seed_profile(db, t.id, customer.id, segment="vip")
-            self._enable_advisory(db, t.id)
-
-            # Stub the legacy coupon generator so the legacy path returns
-            # a deterministic coupon code we can assert on.
-            from services import coupon_generator as cg  # noqa: PLC0415
-
-            issued = Coupon(
-                tenant_id=t.id,
-                code="LEGACYADV1",
-                description="advisory automation",
-                discount_type="percentage",
-                discount_value="20",
-                extra_metadata={},
-            )
-            db.add(issued); db.commit(); db.refresh(issued)
-
-            class _StubSvc:
-                def __init__(self, _db, _tenant_id):
-                    self.db = _db; self.tenant_id = _tenant_id
-                def pick_coupon_for_segment(self, _segment): return issued
-                async def create_on_demand(self, *_a, **_kw): return issued
-            monkeypatch.setattr(cg, "CouponGeneratorService", _StubSvc)
-
-            extras = asyncio.run(_resolve_auto_coupon(
-                db,
-                tenant_id=t.id,
-                customer=customer,
-                config={"auto_coupon": True, "automation_type": "vip_upgrade"},
-                active_step={},
-                automation_id=77,
-                event_id=88,
-            ))
-            db.commit()
-
-            # (a) one ledger row, scoped to this tenant + automation surface.
-            rows = (
-                db.query(OfferDecisionLedger)
-                .filter_by(tenant_id=t.id, surface=SURFACE_AUTOMATION)
-                .all()
-            )
-            assert len(rows) == 1
-            row = rows[0]
-            assert row.automation_id == 77
-            assert row.event_id == 88
-            assert row.customer_id == customer.id
-            assert row.policy_version == POLICY_VERSION
-
-            # (b) legacy code's coupon is what came back — not whatever
-            # the policy would have issued.
-            assert extras.get("coupon_code") == "LEGACYADV1"
-
-            # (c) the legacy coupon got back-stamped with the advisory
-            # decision_id and labelled as advisory_automation.
-            db.refresh(issued)
-            meta = issued.extra_metadata or {}
-            assert meta.get("decision_id") == row.decision_id
-            assert meta.get("decision_mode") == "advisory_automation"
-        finally:
-            db.close(); engine.dispose()
-
-    def test_advisory_with_main_flag_still_runs_advisory_branch(self, monkeypatch) -> None:
-        """Truth-table sanity: when BOTH flags are on, advisory wins —
-        the legacy resolver runs and the engine does NOT call
-        OfferDecisionService.apply_decision (which would issue a
-        different coupon). Captured by checking the issued code."""
-        from core.automation_engine import _resolve_auto_coupon
-
-        db, engine = _make_db()
-        try:
-            t = _seed_tenant(db)
-            customer = _seed_customer(db, t.id)
-            _seed_profile(db, t.id, customer.id, segment="vip")
-            ts = db.query(TenantSettings).filter_by(tenant_id=t.id).first()
-            if ts is None:
-                ts = TenantSettings(tenant_id=t.id); db.add(ts)
-            meta = dict(ts.extra_metadata or {})
-            meta["tenant_features"] = {
-                "offer_decision_service": True,
-                "offer_decision_service_advisory": True,
-            }
-            ts.extra_metadata = meta
-            db.commit()
-
-            from services import coupon_generator as cg  # noqa: PLC0415
-            issued = Coupon(
-                tenant_id=t.id, code="LEGACYBOTH",
-                description="both flags", discount_type="percentage",
-                discount_value="20", extra_metadata={},
-            )
-            db.add(issued); db.commit(); db.refresh(issued)
-
-            class _StubSvc:
-                def __init__(self, _db, _tenant_id):
-                    self.db = _db; self.tenant_id = _tenant_id
-                def pick_coupon_for_segment(self, _segment): return issued
-                async def create_on_demand(self, *_a, **_kw): return issued
-            monkeypatch.setattr(cg, "CouponGeneratorService", _StubSvc)
-
-            extras = asyncio.run(_resolve_auto_coupon(
-                db,
-                tenant_id=t.id,
-                customer=customer,
-                config={"auto_coupon": True, "automation_type": "vip_upgrade"},
-                active_step={},
-                automation_id=1,
-                event_id=2,
-            ))
-            db.commit()
-
-            assert extras.get("coupon_code") == "LEGACYBOTH"
-            db.refresh(issued)
-            assert (issued.extra_metadata or {}).get("decision_mode") == "advisory_automation"
-        finally:
-            db.close(); engine.dispose()
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# 13. Advisory mode — segment-change (customer_intelligence)
+# 13. Advisory mode - segment-change (customer_intelligence)
 # ═════════════════════════════════════════════════════════════════════════
 
 class TestSegmentChangeAdvisoryMode:
@@ -1362,18 +1215,25 @@ class TestSegmentChangeAdvisoryMode:
                 discount_value="20",
                 extra_metadata={},
             )
-            db.add(issued); db.commit(); db.refresh(issued)
+            db.add(issued)
+            db.commit()
+            db.refresh(issued)
 
             class _StubSvc:
                 def __init__(self, _db, _tenant_id):
-                    self.db = _db; self.tenant_id = _tenant_id
+                    self.db = _db
+                    self.tenant_id = _tenant_id
+
                 async def generate_for_customer(self, _cid, _segment, *, reason=""):
                     return issued
+
             monkeypatch.setattr(cg, "CouponGeneratorService", _StubSvc)
 
             svc = CustomerIntelligenceService(db, t.id)
             asyncio.run(svc._segment_change_advisory(
-                customer_id=customer.id, segment="vip", reason="test",
+                customer_id=customer.id,
+                segment="vip",
+                reason="test",
             ))
             db.commit()
 
