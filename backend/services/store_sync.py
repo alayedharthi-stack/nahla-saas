@@ -1355,7 +1355,7 @@ class StoreSyncService:
     # ── Status ─────────────────────────────────────────────────────────────────
 
     def get_status(self) -> Dict:
-        """Return current sync status for the dashboard."""
+        """Return current sync status + real-time dashboard KPIs."""
         snap = (
             self.db.query(StoreKnowledgeSnapshot)
             .filter_by(tenant_id=self.tenant_id)
@@ -1393,6 +1393,13 @@ class StoreSyncService:
             .filter_by(tenant_id=self.tenant_id, status="running")
             .first()
         )
+
+        # ── Real-time dashboard KPIs ──────────────────────────────────────────
+        # These are shown in the Overview page (revenue, orders, conversations).
+        # We reuse the same date-extraction logic as the orders router so the
+        # numbers match exactly what the merchant sees in /orders.
+        dashboard_kpis = self._compute_dashboard_kpis()
+
         return {
             "has_snapshot":           snap is not None,
             "product_count":          snap.product_count  if snap else 0,
@@ -1407,4 +1414,195 @@ class StoreSyncService:
             "last_job_status":        last_job.status     if last_job else None,
             "last_job_id":            last_job.id         if last_job else None,
             "last_job_error":         last_job.error_message if last_job else None,
+            **dashboard_kpis,
+        }
+
+    def _compute_dashboard_kpis(self) -> Dict:
+        """
+        Compute real-time KPIs for the Overview page.
+
+        Returns the same field names the frontend expects from /store-sync/status:
+          revenue_today, orders_today, conversations_today,
+          ai_rate, ai_revenue, ai_orders,
+          recent_orders, recent_conversations, revenue_chart
+        """
+        from models import Conversation, ConversationTrace  # noqa: PLC0415
+
+        now   = datetime.now(timezone.utc)
+        today = now.date()
+
+        # ── Helpers reused from the orders router ─────────────────────────────
+        PAID = frozenset({
+            "paid", "completed", "complete", "confirmed", "delivered",
+            "delivering", "shipped", "out_for_delivery", "fulfilled",
+        })
+        WA_SOURCES = frozenset({"whatsapp", "ai_sales_agent", "ai_sales", "ai"})
+
+        def _order_date(order: Order) -> datetime:
+            meta = getattr(order, "extra_metadata", None) or {}
+            for cand in [meta.get("created_at"), meta.get("updated_at"),
+                         getattr(order, "created_at", None), getattr(order, "updated_at", None)]:
+                if isinstance(cand, datetime):
+                    return cand if cand.tzinfo else cand.replace(tzinfo=timezone.utc)
+                if isinstance(cand, str) and cand:
+                    try:
+                        dt = datetime.fromisoformat(cand)
+                        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        continue
+            return now
+
+        def _order_amount(order: Order) -> float:
+            total = getattr(order, "total", None) or ""
+            try:
+                return float(str(total).replace(",", "").split()[0])
+            except Exception:
+                return 0.0
+
+        def _order_source(order: Order) -> str:
+            raw = (getattr(order, "source", None) or "").strip().lower()
+            if raw in WA_SOURCES:
+                return "whatsapp"
+            meta_src = ((order.extra_metadata or {}).get("source") or "").strip().lower()
+            if meta_src in WA_SOURCES:
+                return "whatsapp"
+            return raw or "salla"
+
+        def _order_status(order: Order) -> str:
+            raw = str(order.status or "").lower()
+            if raw in PAID:
+                return "paid"
+            return "pending"
+
+        # ── Query recent orders (last 200, same as orders router) ─────────────
+        orders = (
+            self.db.query(Order)
+            .filter(Order.tenant_id == self.tenant_id)
+            .order_by(Order.id.desc())
+            .limit(200)
+            .all()
+        )
+
+        # Per-day revenue for chart (last 7 days)
+        day_labels_ar = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"]
+        revenue_by_day: Dict[str, float] = {}
+        chart_days = []
+        for i in range(6, -1, -1):
+            d = (now - timedelta(days=i)).date()
+            label = day_labels_ar[d.weekday() if d.weekday() < 7 else 0]
+            key   = d.isoformat()
+            revenue_by_day[key] = 0.0
+            chart_days.append((key, label))
+
+        revenue_today   = 0.0
+        orders_today    = 0
+        ai_revenue      = 0.0
+        ai_orders       = 0
+        recent_orders_out: list = []
+
+        for order in orders:
+            amt    = _order_amount(order)
+            src    = _order_source(order)
+            status = _order_status(order)
+            odate  = _order_date(order)
+            odate_local = odate.date()
+
+            if odate_local == today:
+                revenue_today += amt
+                orders_today  += 1
+            if src == "whatsapp":
+                ai_revenue += amt
+                ai_orders  += 1
+            if odate_local.isoformat() in revenue_by_day:
+                revenue_by_day[odate_local.isoformat()] += amt
+
+            if len(recent_orders_out) < 5:
+                customer_info = order.customer_info or {}
+                customer_name = (
+                    getattr(order, "customer_name", None)
+                    or customer_info.get("name")
+                    or customer_info.get("phone")
+                    or "—"
+                )
+                order_num = (
+                    getattr(order, "external_order_number", None)
+                    or getattr(order, "external_id", None)
+                    or str(order.id)
+                )
+                recent_orders_out.append({
+                    "id":       f"#{order_num}",
+                    "customer": customer_name,
+                    "amount":   f"{amt:,.0f} ر.س",
+                    "status":   status,
+                    "source":   "AI" if src == "whatsapp" else "salla",
+                })
+
+        revenue_chart = [
+            {"day": label, "revenue": round(revenue_by_day.get(key, 0.0), 2)}
+            for key, label in chart_days
+        ]
+
+        # ── Conversations today via ConversationTrace ─────────────────────────
+        today_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        conversations_today = 0
+        recent_conversations_out: list = []
+        try:
+            today_traces = (
+                self.db.query(ConversationTrace)
+                .filter(
+                    ConversationTrace.tenant_id == self.tenant_id,
+                    ConversationTrace.created_at >= today_start,
+                )
+                .order_by(ConversationTrace.created_at.desc())
+                .all()
+            )
+            # Unique customer phones today
+            phones_today: set = set()
+            for tr in today_traces:
+                if tr.customer_phone:
+                    phones_today.add(tr.customer_phone)
+            conversations_today = len(phones_today)
+
+            # Recent conversations (last 5 unique phones)
+            seen_phones: set = set()
+            all_traces = (
+                self.db.query(ConversationTrace)
+                .filter(ConversationTrace.tenant_id == self.tenant_id)
+                .order_by(ConversationTrace.created_at.desc())
+                .limit(100)
+                .all()
+            )
+            for tr in all_traces:
+                phone = tr.customer_phone or ""
+                if not phone or phone in seen_phones:
+                    continue
+                seen_phones.add(phone)
+                recent_conversations_out.append({
+                    "id":       str(tr.session_id or tr.id),
+                    "customer": phone,
+                    "phone":    phone,
+                    "lastMsg":  tr.message or "",
+                    "time":     tr.created_at.isoformat() if tr.created_at else "",
+                    "isAI":     True,
+                    "status":   "active",
+                })
+                if len(recent_conversations_out) >= 5:
+                    break
+        except Exception as exc:
+            logger.debug("[StoreSync] conversations KPI failed: %s", exc)
+
+        # ── AI rate (% of messages handled by AI today) ───────────────────────
+        total_msgs   = len(today_traces) if 'today_traces' in dir() else 0
+        ai_rate      = round((total_msgs / max(total_msgs, 1)) * 100, 1) if total_msgs > 0 else 0.0
+
+        return {
+            "revenue_today":          round(revenue_today, 2),
+            "orders_today":           orders_today,
+            "conversations_today":    conversations_today,
+            "ai_rate":                ai_rate,
+            "ai_revenue":             round(ai_revenue, 2),
+            "ai_orders":              ai_orders,
+            "recent_orders":          recent_orders_out,
+            "recent_conversations":   recent_conversations_out,
+            "revenue_chart":          revenue_chart,
         }
