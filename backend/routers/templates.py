@@ -878,12 +878,25 @@ async def _submit_template_to_meta(
         flags=_re.UNICODE,
     )
     for comp in components:
-        if str(comp.get("type", "")).upper() == "FOOTER":
+        comp_type = str(comp.get("type", "")).upper()
+
+        if comp_type == "FOOTER":
             raw = comp.get("text") or ""
             cleaned = _EMOJI_RE.sub("", raw).strip()
             if cleaned != raw:
                 logger.info("[template/submit] stripped emojis from FOOTER: %r → %r", raw, cleaned)
             comp["text"] = cleaned
+
+        elif comp_type == "BUTTONS":
+            for btn in (comp.get("buttons") or []):
+                raw_text = btn.get("text") or ""
+                cleaned_text = _EMOJI_RE.sub("", raw_text).strip()
+                if cleaned_text != raw_text:
+                    logger.info(
+                        "[template/submit] stripped emojis from button text: %r → %r",
+                        raw_text, cleaned_text,
+                    )
+                btn["text"] = cleaned_text
 
     # Ensure all components have the Meta-required `example` fields before
     # submitting. This prevents code-100 "missing example" rejections for

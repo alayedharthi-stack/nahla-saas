@@ -64,7 +64,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "أكمل طلبك 🛒",
+                        "type": "URL", "text": "أكمل طلبك",
                         "url": "https://example.com/cart/{{1}}",
                         "example": ["https://example.com/cart/abc123"],
                     },
@@ -138,7 +138,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "buttons": [
                     {"type": "COPY_CODE", "example": ["BACK20"]},
                     {
-                        "type": "URL", "text": "تسوق الآن 🛍️",
+                        "type": "URL", "text": "تسوق الآن",
                         "url": "https://example.com/",
                         "example": ["https://example.com/"],
                     },
@@ -174,7 +174,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "تتبع طلبي 📦",
+                        "type": "URL", "text": "تتبع طلبي",
                         "url": "https://example.com/track/{{1}}",
                         "example": ["https://example.com/track/12345"],
                     },
@@ -210,7 +210,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "تتبع الشحنة 🗺️",
+                        "type": "URL", "text": "تتبع الشحنة",
                         "url": "https://example.com/track/{{1}}",
                         "example": ["https://example.com/track/12345"],
                     },
@@ -246,7 +246,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "اترك تقييمك ⭐",
+                        "type": "URL", "text": "اترك تقييمك",
                         "url": "https://example.com/review/{{1}}",
                         "example": ["https://example.com/review/order123"],
                     },
@@ -282,7 +282,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "قيّم المنتج ⭐",
+                        "type": "URL", "text": "قيّم المنتج",
                         "url": "https://example.com/review/{{1}}",
                         "example": ["https://example.com/review/product123"],
                     },
@@ -319,7 +319,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "buttons": [
                     {"type": "COPY_CODE", "example": ["SAVE25"]},
                     {
-                        "type": "URL", "text": "تسوق الآن 🛍️",
+                        "type": "URL", "text": "تسوق الآن",
                         "url": "https://example.com/",
                         "example": ["https://example.com/"],
                     },
@@ -355,7 +355,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "تصفح المتجر 🏪",
+                        "type": "URL", "text": "تصفح المتجر",
                         "url": "https://example.com/",
                         "example": ["https://example.com/"],
                     },
@@ -424,7 +424,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "تفاصيل الطلب 📋",
+                        "type": "URL", "text": "تفاصيل الطلب",
                         "url": "https://example.com/orders/{{1}}",
                         "example": ["https://example.com/orders/98765"],
                     },
@@ -459,8 +459,8 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
             {
                 "type": "BUTTONS",
                 "buttons": [
-                    {"type": "QUICK_REPLY", "text": "تأكيد الطلب ✅"},
-                    {"type": "QUICK_REPLY", "text": "إلغاء الطلب ❌"},
+                    {"type": "QUICK_REPLY", "text": "تأكيد الطلب"},
+                    {"type": "QUICK_REPLY", "text": "إلغاء الطلب"},
                 ],
             },
         ],
@@ -493,7 +493,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "إكمال الدفع 💳",
+                        "type": "URL", "text": "إكمال الدفع",
                         "url": "https://example.com/pay/{{1}}",
                         "example": ["https://example.com/pay/33456"],
                     },
@@ -530,7 +530,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "buttons": [
                     {"type": "COPY_CODE", "example": ["VIP30"]},
                     {
-                        "type": "URL", "text": "تسوق الآن 👑",
+                        "type": "URL", "text": "تسوق الآن",
                         "url": "https://example.com/",
                         "example": ["https://example.com/"],
                     },
@@ -566,7 +566,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        "type": "URL", "text": "اكتشف الجديد 🆕",
+                        "type": "URL", "text": "اكتشف الجديد",
                         "url": "https://example.com/new/",
                         "example": ["https://example.com/new/"],
                     },
