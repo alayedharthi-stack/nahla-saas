@@ -167,7 +167,7 @@ const QUICK_LINKS = [
     icon: Code2,
     label: 'أدوات زيادة المبيعات',
     desc: 'ويدجت واتساب العائم، ويدجتات المتجر التحويلية',
-    to: '/merchant-widgets',
+    to: '/widgets',
     color: 'text-rose-600 bg-rose-50 border-rose-200',
     iconColor: 'text-rose-600',
   },

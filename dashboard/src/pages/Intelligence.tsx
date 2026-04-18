@@ -7,12 +7,10 @@ import {
   Crown,
   Zap,
   Users,
-  ShoppingCart,
   CheckCircle,
-  ArrowLeft,
   Sparkles,
-  Target,
   Clock,
+  Save, Bot, Loader2, ToggleLeft, ToggleRight, Settings2,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -24,6 +22,7 @@ import {
   IntelligenceSuggestion,
   CustomerSegment,
 } from '../api/automations'
+import { settingsApi, type AISettings } from '../api/settings'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -104,11 +103,217 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
   )
 }
 
+// ── AI Settings Panel ─────────────────────────────────────────────────────────
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-700 mb-1">{label}</label>
+      {children}
+      {hint && <p className="text-xs text-slate-400 mt-1">{hint}</p>}
+    </div>
+  )
+}
+
+function Toggle({ label, hint, value, onChange }: { label: string; hint?: string; value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="flex items-start justify-between py-3 border-b border-slate-50 last:border-0">
+      <div>
+        <p className="text-sm text-slate-800">{label}</p>
+        {hint && <p className="text-xs text-slate-400 mt-0.5">{hint}</p>}
+      </div>
+      <button onClick={() => onChange(!value)} className="ms-4 shrink-0">
+        {value ? <ToggleRight className="w-6 h-6 text-brand-500" /> : <ToggleLeft className="w-6 h-6 text-slate-300" />}
+      </button>
+    </div>
+  )
+}
+
+function AISettingsPanel() {
+  const [ai, setAi]       = useState<AISettings | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving]   = useState(false)
+  const [saved, setSaved]     = useState(false)
+  const [error, setError]     = useState<string | null>(null)
+
+  useEffect(() => {
+    settingsApi.getAll()
+      .then(s => setAi(s.ai))
+      .catch(() => setError('تعذّر تحميل إعدادات الذكاء'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const patch = (p: Partial<AISettings>) => setAi(prev => prev ? { ...prev, ...p } : prev)
+
+  const handleSave = async () => {
+    if (!ai) return
+    setSaving(true); setError(null); setSaved(false)
+    try {
+      const res = await settingsApi.update({ ai })
+      setAi(res.ai)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 3000)
+    } catch {
+      setError('فشل الحفظ — حاول مجدداً')
+    } finally { setSaving(false) }
+  }
+
+  if (loading) return (
+    <div className="flex items-center justify-center py-16 gap-2 text-slate-400 text-sm">
+      <Loader2 className="w-4 h-4 animate-spin text-brand-500" /> جاري التحميل...
+    </div>
+  )
+
+  if (!ai) return (
+    <div className="card p-6 text-center text-sm text-red-500">
+      {error ?? 'تعذّر تحميل الإعدادات'}
+    </div>
+  )
+
+  return (
+    <div className="space-y-5">
+
+      {/* ── Personality ── */}
+      <div className="card">
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <Bot className="w-4 h-4 text-brand-500" />
+          <h2 className="text-sm font-semibold text-slate-900">شخصية المساعد</h2>
+          <p className="text-xs text-slate-400 mr-1">اسم نحلة ونبرتها وطريقة تواصلها</p>
+        </div>
+        <div className="p-5 grid sm:grid-cols-2 gap-4">
+          <Field label="اسم المساعد">
+            <input className="input" value={ai.assistant_name} onChange={e => patch({ assistant_name: e.target.value })} placeholder="نحلة" />
+          </Field>
+          <Field label="نبرة الرد">
+            <select className="input" value={ai.reply_tone} onChange={e => patch({ reply_tone: e.target.value as AISettings['reply_tone'] })}>
+              <option value="friendly">ودية وقريبة</option>
+              <option value="professional">احترافية ورسمية</option>
+              <option value="sales">مبيعات وإقناع</option>
+            </select>
+          </Field>
+          <Field label="طول الرد">
+            <select className="input" value={ai.reply_length} onChange={e => patch({ reply_length: e.target.value as AISettings['reply_length'] })}>
+              <option value="short">قصير ومختصر</option>
+              <option value="medium">متوسط</option>
+              <option value="detailed">تفصيلي وشامل</option>
+            </select>
+          </Field>
+          <Field label="لغة الردود">
+            <select className="input" value={ai.default_language} onChange={e => patch({ default_language: e.target.value as AISettings['default_language'] })}>
+              <option value="arabic">عربي فقط</option>
+              <option value="english">إنجليزي فقط</option>
+              <option value="bilingual">ثنائي اللغة</option>
+            </select>
+          </Field>
+          <div className="sm:col-span-2">
+            <Field label="دور ووصف المساعد" hint="يُقرأ بواسطة الذكاء الاصطناعي لفهم طبيعة المتجر وشخصيته">
+              <textarea
+                className="input min-h-[90px] resize-y"
+                value={ai.assistant_role}
+                onChange={e => patch({ assistant_role: e.target.value })}
+                placeholder="مثال: أنت مساعدة لمتجر ملابس رجالية فاخرة في الرياض. تُجيب بلهجة ودية ومحترفة وتساعد العملاء في اختيار المنتجات المناسبة..."
+              />
+            </Field>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Owner Instructions ── */}
+      <div className="card">
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <Settings2 className="w-4 h-4 text-brand-500" />
+          <h2 className="text-sm font-semibold text-slate-900">تعليمات المالك</h2>
+          <p className="text-xs text-slate-400 mr-1">قواعد وسياسات تُضاف لكل محادثة</p>
+        </div>
+        <div className="p-5 space-y-4">
+          <Field label="تعليمات عامة" hint="قواعد يجب أن تلتزم بها نحلة دائماً في كل محادثة">
+            <textarea
+              className="input min-h-[100px] resize-y"
+              value={ai.owner_instructions}
+              onChange={e => patch({ owner_instructions: e.target.value })}
+              placeholder="مثال: لا تعطِ وعوداً بالتوصيل قبل التأكد من المخزون. لا تذكر أسعار المنافسين. تعامل مع الشكاوى بأعلى مستوى من الاحترام..."
+            />
+          </Field>
+          <Field label="متى تقترح الخصومات؟" hint="كيف يتصرف الذكاء عند الحديث عن العروض والكوبونات">
+            <div className="rounded-lg border border-amber-200/70 bg-amber-50/60 px-3 py-2 mb-2 text-[11px] text-amber-800 leading-relaxed">
+              هذا الحقل يتحكم في نبرة المحادثة فقط. إدارة قواعد الكوبونات الفعلية (نسبة الخصم، الصلاحية) تتم من صفحة <a href="/coupons" className="underline font-semibold">الكوبونات</a>.
+            </div>
+            <textarea
+              className="input min-h-[80px] resize-y"
+              value={ai.coupon_rules}
+              onChange={e => patch({ coupon_rules: e.target.value })}
+              placeholder="مثال: اقترح خصماً فقط عند تردد العميل أو عند عدم الشراء لأكثر من 30 يوماً..."
+            />
+          </Field>
+          <Field label="قواعد التصعيد للإنسان" hint="متى تحوّل نحلة المحادثة للمالك أو فريق الدعم">
+            <textarea
+              className="input min-h-[80px] resize-y"
+              value={ai.escalation_rules}
+              onChange={e => patch({ escalation_rules: e.target.value })}
+              placeholder="مثال: حوّل المحادثة للمالك عند: شكاوى الجودة، الطلبات بأكثر من 500 ريال، العملاء الغاضبين..."
+            />
+          </Field>
+        </div>
+      </div>
+
+      {/* ── Discounts & Recommendations ── */}
+      <div className="card">
+        <div className="px-5 py-4 border-b border-slate-100">
+          <h2 className="text-sm font-semibold text-slate-900">الخصومات والتوصيات</h2>
+        </div>
+        <div className="p-5 space-y-4">
+          <Field label="الحد الأقصى للخصم المسموح به">
+            <select className="input" value={ai.allowed_discount_levels} onChange={e => patch({ allowed_discount_levels: e.target.value })}>
+              <option value="0">بدون خصم</option>
+              <option value="5">5%</option>
+              <option value="10">10%</option>
+              <option value="15">15%</option>
+              <option value="20">20%</option>
+              <option value="30">30%</option>
+            </select>
+          </Field>
+          <Toggle
+            label="تفعيل توصيات المنتجات"
+            hint="نحلة تقترح منتجات ذات صلة أثناء المحادثة"
+            value={ai.recommendations_enabled}
+            onChange={v => patch({ recommendations_enabled: v })}
+          />
+          <div className="p-3 bg-amber-50 rounded-lg border border-amber-200">
+            <p className="text-xs text-amber-700 flex items-start gap-2">
+              <Bot className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              التغييرات تُطبَّق فوراً على المحادثات الجديدة. المحادثات الجارية لا تتأثر.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Save bar ── */}
+      <div className="flex items-center gap-3 flex-wrap pb-2">
+        <button onClick={handleSave} disabled={saving} className="btn-primary text-sm">
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          {saving ? 'جاري الحفظ...' : 'حفظ الإعدادات'}
+        </button>
+        {saved && (
+          <span className="flex items-center gap-1.5 text-sm text-emerald-600">
+            <CheckCircle className="w-4 h-4" /> تم الحفظ بنجاح
+          </span>
+        )}
+        {error && (
+          <span className="flex items-center gap-1.5 text-sm text-red-600">
+            <AlertTriangle className="w-3.5 h-3.5" /> {error}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Intelligence() {
   useLanguage() // initialise RTL context
 
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings'>('dashboard')
   const [data, setData] = useState<IntelligenceDashboard | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -138,20 +343,55 @@ export default function Intelligence() {
     <div className="space-y-6">
       {/* ── Page Header ───────────────────────────────────────────────────── */}
       <PageHeader
-        title="نحلة الذكية"
-        subtitle="رؤى تنبؤية وتوصيات تسويقية مبنية على الذكاء الاصطناعي"
+        title="الذكاء الاصطناعي"
+        subtitle="إعدادات المساعد، الشخصية، ولوحة التحليلات الذكية"
         action={
-          <button
-            onClick={load}
-            disabled={loading}
-            className="btn-secondary text-sm flex items-center gap-2"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            تحديث
-          </button>
+          activeTab === 'dashboard' ? (
+            <button
+              onClick={load}
+              disabled={loading}
+              className="btn-secondary text-sm flex items-center gap-2"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              تحديث
+            </button>
+          ) : undefined
         }
       />
 
+      {/* ── Tabs ──────────────────────────────────────────────────────────── */}
+      <div className="border-b border-slate-200 -mx-3 px-3 md:-mx-6 md:px-6">
+        <div className="flex gap-1">
+          <button
+            onClick={() => setActiveTab('settings')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+              activeTab === 'settings'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <Bot className="w-4 h-4 shrink-0" />
+            إعدادات المساعد
+          </button>
+          <button
+            onClick={() => setActiveTab('dashboard')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+              activeTab === 'dashboard'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <Brain className="w-4 h-4 shrink-0" />
+            لوحة الذكاء
+          </button>
+        </div>
+      </div>
+
+      {/* ── AI Settings Tab ────────────────────────────────────────────────── */}
+      {activeTab === 'settings' && <AISettingsPanel />}
+
+      {/* ── Dashboard Tab ─────────────────────────────────────────────────── */}
+      {activeTab === 'dashboard' && (<>
       {/* ── States ────────────────────────────────────────────────────────── */}
       {loading && <LoadingState />}
       {!loading && error && <ErrorState onRetry={load} />}
@@ -501,6 +741,7 @@ export default function Intelligence() {
           )}
         </div>
       )}
+      </>)}
     </div>
   )
 }
