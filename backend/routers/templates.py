@@ -1031,10 +1031,12 @@ async def update_template(
                                 btn["example"] = old_btns[j]["example"]
                     break
 
-    _validate_placeholder_integrity(
-        old_components=tpl.components or [],
-        new_components=new_components,
-    )
+    # NOTE: placeholder integrity is intentionally NOT enforced here.
+    # A DRAFT template is fully editable — the merchant can add, remove, or
+    # rename variables as they see fit. The template gets reset to DRAFT and
+    # must go through Meta review again anyway, so there is no risk of sending
+    # a mismatch to real customers. The check is kept only for AI rewrites
+    # (where the model must not silently drop variables).
 
     if body.name is not None:
         tpl.name = body.name
