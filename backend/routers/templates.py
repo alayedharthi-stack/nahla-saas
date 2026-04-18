@@ -1788,3 +1788,111 @@ async def get_campaign_templates(request: Request, db: Session = Depends(get_db)
             "library": DEFAULT_TEMPLATE_LIBRARY.get(t.name),
         })
     return {"templates": result, "source": "db"}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# NAHLA TEMPLATE LIBRARY — مكتبة قوالب نحلة الرسمية
+# ══════════════════════════════════════════════════════════════════════
+
+@router.get("/templates/nahla-library")
+async def get_nahla_library(
+    category: Optional[str] = None,
+    tag:      Optional[str] = None,
+    search:   Optional[str] = None,
+):
+    """
+    استعراض مكتبة قوالب نحلة الرسمية.
+    لا تحتاج JWT — القوالب عامة ومتاحة لكل التجار.
+
+    Query params:
+      category: MARKETING | UTILITY | ALL (default)
+      tag:      marketing | orders | shipping | recovery | discounts | welcome | all
+      search:   نص البحث
+    """
+    from services.whatsapp_templates.nahla_templates import (  # noqa: PLC0415
+        filter_templates, template_preview, FILTER_TAGS, SMART_TRIGGER_MAP,
+    )
+    templates = filter_templates(category=category, tag=tag, search=search)
+    return {
+        "templates": [template_preview(t) for t in templates],
+        "total":     len(templates),
+        "filter_tags": FILTER_TAGS,
+        "smart_trigger_map": SMART_TRIGGER_MAP,
+    }
+
+
+class ImportNahlaTemplateIn(BaseModel):
+    template_key: str
+    language: str = "ar"
+    custom_name: Optional[str] = None
+
+
+@router.post("/templates/import-nahla-template")
+async def import_nahla_template(
+    body:    ImportNahlaTemplateIn,
+    request: Request,
+    db:      Session = Depends(get_db),
+):
+    """
+    استيراد قالب من مكتبة نحلة كمسودة قابلة للتعديل.
+
+    - ينشئ WhatsAppTemplate بحالة DRAFT
+    - التاجر يعدّله من لوحة التحكم
+    - ثم يرسله لـ Meta للموافقة
+    """
+    import secrets as _sec  # noqa: PLC0415
+    from services.whatsapp_templates.nahla_templates import get_template_by_key  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+
+    tpl_def = get_template_by_key(body.template_key)
+    if not tpl_def:
+        raise HTTPException(
+            status_code=404,
+            detail=f"القالب '{body.template_key}' غير موجود في مكتبة نحلة",
+        )
+
+    # اسم فريد: nahla_{key}_{rand4}
+    rand_suffix = _sec.token_hex(2)
+    template_name = body.custom_name or f"nahla_{body.template_key}_{rand_suffix}"
+    # تنظيف الاسم ليكون متوافقاً مع Meta (أحرف صغيرة، أرقام، شرطة سفلية فقط)
+    import re as _re  # noqa: PLC0415
+    template_name = _re.sub(r"[^a-z0-9_]", "_", template_name.lower())[:60]
+
+    # تحقق من عدم تكرار الاسم
+    existing = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.tenant_id == tenant_id,
+        WhatsAppTemplate.name      == template_name,
+    ).first()
+    if existing:
+        template_name = f"{template_name}_{_sec.token_hex(2)}"
+
+    now = datetime.now(timezone.utc)
+    new_tpl = WhatsAppTemplate(
+        tenant_id        = tenant_id,
+        meta_template_id = f"nahla_draft_{body.template_key}",
+        name             = template_name,
+        language         = body.language,
+        category         = tpl_def["category"],
+        status           = "DRAFT",
+        components       = tpl_def["components"],
+        source           = "nahla_library",
+        objective        = tpl_def.get("smart_trigger"),
+        created_at       = now,
+        updated_at       = now,
+        synced_at        = now,
+    )
+    db.add(new_tpl)
+    db.commit()
+    db.refresh(new_tpl)
+
+    logger.info(
+        "[nahla-library] Imported template key=%s → name=%s tenant=%s",
+        body.template_key, template_name, tenant_id,
+    )
+
+    return {
+        "success":  True,
+        "message":  f"تم استيراد القالب '{tpl_def['name_ar']}' كمسودة — يمكنك تعديله والإرسال لـ Meta",
+        "template": _tpl_to_dict(new_tpl),
+    }

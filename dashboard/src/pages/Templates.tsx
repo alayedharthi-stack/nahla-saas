@@ -3,6 +3,7 @@ import {
   Plus, RefreshCw, CheckCircle, Clock, XCircle, AlertCircle,
   Eye, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
   Type, Link2, Phone, Copy as CopyIcon, Zap, Star,
+  BookOpen, Download, Sparkles, Tag, Search, Bot, CheckCheck,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -11,7 +12,7 @@ import { useLanguage } from '../i18n/context'
 import {
   templatesApi, WhatsAppTemplateRecord, CreateTemplatePayload,
   TemplateStatus, TemplateCategory, TemplateComponent, TemplateButton,
-  TemplateVarMapRecord,
+  TemplateVarMapRecord, NahlaLibraryTemplate,
   getBody, getHeader, getFooter, getButtons,
   extractVars, renderBody, countVars,
   STATUS_COLORS, STATUS_LABELS, CATEGORY_LABELS, LANGUAGE_LABELS,
@@ -697,6 +698,273 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
 // ── Filter tabs ───────────────────────────────────────────────────────────────
 
+// ── Nahla Library Modal ───────────────────────────────────────────────────────
+
+const BUTTON_TYPE_ICON: Record<string, string> = {
+  URL:         '🔗',
+  COPY_CODE:   '📋',
+  QUICK_REPLY: '💬',
+  PHONE_NUMBER:'📞',
+}
+
+const TAG_LABELS: Record<string, string> = {
+  all:       'الكل',
+  marketing: 'التسويق',
+  orders:    'الطلبات',
+  shipping:  'الشحن',
+  recovery:  'الاسترجاع',
+  discounts: 'الخصومات',
+  welcome:   'الترحيب',
+}
+
+function NahlaLibraryModal({ onClose, onImported }: {
+  onClose: () => void
+  onImported: (tpl: WhatsAppTemplateRecord) => void
+}) {
+  const [templates, setTemplates]   = useState<NahlaLibraryTemplate[]>([])
+  const [loading, setLoading]       = useState(true)
+  const [activeTag, setActiveTag]   = useState('all')
+  const [search, setSearch]         = useState('')
+  const [importing, setImporting]   = useState<string | null>(null)
+  const [imported, setImported]     = useState<Set<string>>(new Set())
+  const [preview, setPreview]       = useState<NahlaLibraryTemplate | null>(null)
+
+  const load = useCallback(async (tag: string, q: string) => {
+    setLoading(true)
+    try {
+      const res = await templatesApi.nahlaLibrary({ tag: tag !== 'all' ? tag : undefined, search: q || undefined })
+      setTemplates(res.templates)
+    } catch {
+      setTemplates([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load(activeTag, search) }, [activeTag, search, load])
+
+  const handleImport = async (key: string) => {
+    setImporting(key)
+    try {
+      const res = await templatesApi.importNahlaTemplate(key)
+      setImported(prev => new Set(prev).add(key))
+      onImported(res.template)
+    } catch { /* ignore */ } finally {
+      setImporting(null)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center">
+              <BookOpen className="w-5 h-5 text-amber-600" />
+            </div>
+            <div>
+              <h2 className="font-bold text-slate-900 text-base">📚 مكتبة قوالب نحلة</h2>
+              <p className="text-xs text-slate-500">قوالب عربية جاهزة — استوردها وعدّلها وأرسلها لـ Meta</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+            <X className="w-4 h-4 text-slate-500" />
+          </button>
+        </div>
+
+        {/* Search + Filter */}
+        <div className="px-6 py-3 border-b border-slate-100 space-y-3">
+          <div className="relative">
+            <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder="ابحث عن قالب..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full pr-9 pl-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400"
+              dir="rtl"
+            />
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            {Object.entries(TAG_LABELS).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setActiveTag(key)}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  activeTag === key
+                    ? 'bg-amber-500 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex flex-1 overflow-hidden">
+          {/* Template grid */}
+          <div className="flex-1 overflow-y-auto p-4">
+            {loading ? (
+              <div className="flex items-center justify-center h-40">
+                <RefreshCw className="w-6 h-6 text-amber-500 animate-spin" />
+              </div>
+            ) : templates.length === 0 ? (
+              <p className="text-center text-slate-400 text-sm py-12">لا توجد قوالب مطابقة</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {templates.map(tpl => {
+                  const isImported = imported.has(tpl.key)
+                  const isImporting = importing === tpl.key
+                  return (
+                    <div
+                      key={tpl.key}
+                      onClick={() => setPreview(tpl)}
+                      className={`group relative border rounded-xl p-4 cursor-pointer transition-all hover:shadow-md hover:border-amber-300 ${
+                        preview?.key === tpl.key ? 'border-amber-400 bg-amber-50' : 'border-slate-200 bg-white'
+                      }`}
+                    >
+                      {/* Category badge */}
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <span className="font-semibold text-slate-900 text-sm leading-tight">{tpl.name_ar}</span>
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
+                          tpl.category === 'MARKETING'
+                            ? 'bg-purple-100 text-purple-700'
+                            : 'bg-blue-100 text-blue-700'
+                        }`}>
+                          {tpl.category === 'MARKETING' ? 'تسويق' : 'خدمة'}
+                        </span>
+                      </div>
+
+                      {/* Description */}
+                      {tpl.description_ar && (
+                        <p className="text-xs text-slate-500 mb-2 leading-relaxed line-clamp-2">{tpl.description_ar}</p>
+                      )}
+
+                      {/* Smart trigger */}
+                      {tpl.smart_label && (
+                        <div className="flex items-center gap-1 mb-3">
+                          <Bot className="w-3 h-3 text-emerald-600 shrink-0" />
+                          <span className="text-[10px] text-emerald-700 font-medium">{tpl.smart_label}</span>
+                        </div>
+                      )}
+
+                      {/* Buttons preview */}
+                      {tpl.buttons.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-3">
+                          {tpl.buttons.map((btn, i) => (
+                            <span key={i} className="inline-flex items-center gap-1 text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
+                              <span>{BUTTON_TYPE_ICON[btn.type] || '▶'}</span>
+                              <span>{btn.text || btn.type}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Import button */}
+                      <button
+                        onClick={e => { e.stopPropagation(); if (!isImported) handleImport(tpl.key) }}
+                        disabled={isImporting || isImported}
+                        className={`w-full py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                          isImported
+                            ? 'bg-emerald-100 text-emerald-700 cursor-default'
+                            : 'bg-amber-500 hover:bg-amber-600 text-white'
+                        }`}
+                      >
+                        {isImporting ? (
+                          <span className="flex items-center justify-center gap-1">
+                            <RefreshCw className="w-3 h-3 animate-spin" /> جاري الاستيراد...
+                          </span>
+                        ) : isImported ? (
+                          <span className="flex items-center justify-center gap-1">
+                            <CheckCheck className="w-3 h-3" /> تم الاستيراد — يمكنك التعديل
+                          </span>
+                        ) : (
+                          <span className="flex items-center justify-center gap-1">
+                            <Download className="w-3 h-3" /> استيراد وتخصيص
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Preview panel */}
+          {preview && (
+            <div className="w-72 border-r border-slate-100 bg-slate-50 p-4 overflow-y-auto hidden lg:block">
+              <p className="text-xs font-semibold text-slate-700 mb-3">معاينة الرسالة</p>
+              {/* WhatsApp bubble */}
+              <div className="bg-[#e5ddd5] rounded-xl p-3 mb-4">
+                <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm p-3 space-y-2" dir="rtl">
+                  <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">
+                    {preview.preview_body}
+                  </p>
+                  {preview.preview_footer && (
+                    <p className="text-[10px] text-slate-400">{preview.preview_footer}</p>
+                  )}
+                  {preview.buttons.length > 0 && (
+                    <div className="border-t border-slate-100 pt-2 space-y-1">
+                      {preview.buttons.map((btn, i) => (
+                        <div key={i} className="text-center text-xs text-blue-600 font-medium py-0.5 flex items-center justify-center gap-1">
+                          <span>{BUTTON_TYPE_ICON[btn.type]}</span>
+                          <span>{btn.type === 'COPY_CODE' ? 'انسخ الكود' : btn.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-[10px] text-slate-300 text-end">✓✓ الآن</p>
+                </div>
+              </div>
+
+              {/* Slots */}
+              {preview.slots.length > 0 && (
+                <div className="mb-4">
+                  <p className="text-[10px] font-semibold text-slate-500 uppercase mb-2">المتغيرات ({preview.slot_count})</p>
+                  <div className="space-y-1">
+                    {preview.slots.map((slot, i) => (
+                      <div key={slot} className="flex items-center gap-2 text-xs">
+                        <span className="w-6 h-6 rounded-full bg-amber-100 text-amber-700 font-bold flex items-center justify-center text-[10px]">{i+1}</span>
+                        <span className="text-slate-600 font-mono">{slot}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <button
+                onClick={() => handleImport(preview.key)}
+                disabled={importing === preview.key || imported.has(preview.key)}
+                className={`w-full py-2 rounded-xl text-xs font-bold transition-colors ${
+                  imported.has(preview.key)
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : 'bg-amber-500 hover:bg-amber-600 text-white'
+                }`}
+              >
+                {imported.has(preview.key) ? '✓ تم الاستيراد' : 'استيراد وتخصيص ←'}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-3 border-t border-slate-100 bg-slate-50 rounded-b-2xl">
+          <p className="text-[11px] text-slate-400 text-center">
+            بعد الاستيراد يصبح القالب مسودة قابلة للتعديل — عدّله ثم أرسله لـ Meta للموافقة ← استخدمه في حملاتك
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
   { key: 'all',      label: 'الكل' },
   { key: 'DRAFT',    label: 'مسودات' },
@@ -717,6 +985,7 @@ export default function Templates() {
   const [syncing, setSyncing] = useState(false)
   const [filterTab, setFilterTab] = useState<TemplateStatus | 'all'>('all')
   const [showCreate, setShowCreate] = useState(false)
+  const [showNahlaLibrary, setShowNahlaLibrary] = useState(false)
   const [preview, setPreview] = useState<WhatsAppTemplateRecord | null>(null)
   const { t } = useLanguage()
 
@@ -778,12 +1047,28 @@ export default function Templates() {
       {preview && (
         <PreviewModal tpl={preview} onClose={() => setPreview(null)} />
       )}
+      {showNahlaLibrary && (
+        <NahlaLibraryModal
+          onClose={() => setShowNahlaLibrary(false)}
+          onImported={tpl => {
+            setTemplates(ts => [tpl, ...ts])
+            // Keep modal open so merchant can import more
+          }}
+        />
+      )}
 
       <PageHeader
         title={t(tr => tr.pages.templates.title)}
         subtitle={t(tr => tr.pages.templates.subtitle)}
         action={
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowNahlaLibrary(true)}
+              className="btn-secondary text-sm border-amber-300 text-amber-700 hover:bg-amber-50"
+            >
+              <BookOpen className="w-4 h-4" />
+              مكتبة نحلة
+            </button>
             <button
               onClick={handleSync}
               disabled={syncing}

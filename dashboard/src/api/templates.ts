@@ -156,6 +156,44 @@ export const templatesApi = {
 
   library: () =>
     apiCall<{ templates: Array<{ template_name: string; library_key: string; label: string; objective: string; customer_statuses: string[]; rfm_segments: string[] }> }>('/templates/library'),
+
+  /** Nahla built-in template library */
+  nahlaLibrary: (params?: { category?: string; tag?: string; search?: string }) => {
+    const q = new URLSearchParams()
+    if (params?.category) q.set('category', params.category)
+    if (params?.tag)      q.set('tag',      params.tag)
+    if (params?.search)   q.set('search',   params.search)
+    const qs = q.toString() ? `?${q.toString()}` : ''
+    return apiCall<{
+      templates: NahlaLibraryTemplate[]
+      total: number
+      filter_tags: Record<string, string>
+      smart_trigger_map: Record<string, string[]>
+    }>(`/templates/nahla-library${qs}`)
+  },
+
+  importNahlaTemplate: (template_key: string, language = 'ar', custom_name?: string) =>
+    apiCall<{ success: boolean; message: string; template: WhatsAppTemplateRecord }>(
+      '/templates/import-nahla-template',
+      { method: 'POST', body: JSON.stringify({ template_key, language, custom_name }) },
+    ),
+}
+
+// ── Nahla Library Types ───────────────────────────────────────────────────────
+
+export interface NahlaLibraryTemplate {
+  key:           string
+  name_ar:       string
+  description_ar: string
+  category:      TemplateCategory
+  filter_tags:   string[]
+  smart_trigger: string | null
+  smart_label:   string | null
+  preview_body:  string
+  preview_footer: string
+  buttons:       TemplateButton[]
+  slot_count:    number
+  slots:         string[]
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
