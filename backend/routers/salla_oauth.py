@@ -258,11 +258,32 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 owner_email, tenant_id, role,
             )
         else:
-            # ── Check by store_id first to avoid duplicate tenant creation ────
-            existing_integration = db.query(Integration).filter(
-                Integration.provider == "salla",
-                Integration.external_store_id == str(merchant_id_str),
-            ).first() if merchant_id_str else None
+            # ── Check by store_id to avoid duplicate tenant creation ──────────
+            # Priority 1: match by external_store_id column (indexed, fast)
+            # Priority 2: match by config->>'store_id' JSONB field (legacy rows
+            #             that were saved before external_store_id was populated)
+            existing_integration = None
+            if merchant_id_str:
+                existing_integration = db.query(Integration).filter(
+                    Integration.provider == "salla",
+                    Integration.external_store_id == str(merchant_id_str),
+                ).first()
+
+                if not existing_integration:
+                    # Fallback: config JSONB lookup for legacy rows
+                    from sqlalchemy import cast, String, func  # noqa: PLC0415
+                    existing_integration = db.query(Integration).filter(
+                        Integration.provider == "salla",
+                        Integration.config["store_id"].as_string() == str(merchant_id_str),
+                    ).first()
+                    if existing_integration:
+                        # Repair the missing external_store_id for future lookups
+                        existing_integration.external_store_id = str(merchant_id_str)
+                        logger.info(
+                            "[SallaLogin]    Repaired external_store_id for integration id=%s "
+                            "tenant=%s store=%s",
+                            existing_integration.id, existing_integration.tenant_id, merchant_id_str,
+                        )
 
             if existing_integration:
                 tenant_id = existing_integration.tenant_id
@@ -1133,11 +1154,20 @@ async def salla_oauth_callback(
                     user_id=existing_user.id,
                 )
             else:
-                # Check by store_id to avoid duplicate tenant name error
-                existing_integ = db.query(Integration).filter(
-                    Integration.provider == "salla",
-                    Integration.external_store_id == str(salla_store_id),
-                ).first() if salla_store_id else None
+                # Check by store_id (both indexed column and legacy JSONB config)
+                existing_integ = None
+                if salla_store_id:
+                    existing_integ = db.query(Integration).filter(
+                        Integration.provider == "salla",
+                        Integration.external_store_id == str(salla_store_id),
+                    ).first()
+                    if not existing_integ:
+                        existing_integ = db.query(Integration).filter(
+                            Integration.provider == "salla",
+                            Integration.config["store_id"].as_string() == str(salla_store_id),
+                        ).first()
+                        if existing_integ:
+                            existing_integ.external_store_id = str(salla_store_id)
 
                 if existing_integ:
                     tenant_id = existing_integ.tenant_id
