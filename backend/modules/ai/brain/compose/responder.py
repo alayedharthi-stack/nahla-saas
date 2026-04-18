@@ -122,7 +122,15 @@ class DefaultComposer:
     # ── LLM delegation ───────────────────────────────────────────────────────
 
     async def _llm_compose(self, ctx: BrainContext) -> str:
-        """Delegate to the existing orchestration pipeline for ambiguous turns."""
+        """Delegate to the existing orchestration pipeline for ambiguous turns.
+
+        Hard timeout of 25 seconds — if the LLM provider is slow or down we
+        return a friendly fallback immediately rather than hanging the reply.
+        """
+        import asyncio  # noqa: PLC0415
+
+        _TIMEOUT = 25  # seconds
+
         try:
             _BACKEND = os.path.abspath(
                 os.path.join(os.path.dirname(__file__), "../../../../..")
@@ -132,13 +140,25 @@ class DefaultComposer:
 
             from modules.ai.orchestrator.adapter import generate_orchestrate_response  # noqa: PLC0415
 
-            result = await generate_orchestrate_response(
-                tenant_id=ctx.tenant_id,
-                customer_phone=ctx.customer_phone,
-                message=ctx.message,
-                conversation_id=ctx.conversation_id,
+            result = await asyncio.wait_for(
+                generate_orchestrate_response(
+                    tenant_id=ctx.tenant_id,
+                    customer_phone=ctx.customer_phone,
+                    message=ctx.message,
+                    conversation_id=ctx.conversation_id,
+                ),
+                timeout=_TIMEOUT,
             )
             return result.get("reply", "") or T.generic_fallback()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[Composer._llm_compose] LLM timed out after %ds | tenant=%s",
+                _TIMEOUT, ctx.tenant_id,
+            )
+            return (
+                "عذراً، تأخّر الرد قليلاً. "
+                "هل يمكنك إعادة سؤالك؟ أو يمكنني مساعدتك في البحث عن منتج أو إنشاء طلب."
+            )
         except Exception as exc:
             logger.error("[Composer._llm_compose] error: %s", exc)
             return T.generic_fallback()
