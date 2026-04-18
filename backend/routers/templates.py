@@ -1362,6 +1362,7 @@ async def generate_template(body: GenerateTemplateIn, request: Request, db: Sess
 @router.post("/templates/{template_id}/submit")
 async def submit_template_to_meta(template_id: int, request: Request, db: Session = Depends(get_db)):
     """Submit a DRAFT template to Meta for approval."""
+    from models import WhatsAppConnection  # noqa: PLC0415
     tenant_id = resolve_tenant_id(request)
     tpl = db.query(WhatsAppTemplate).filter(
         WhatsAppTemplate.id == template_id,
@@ -1372,17 +1373,23 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
     if tpl.status not in ("DRAFT", "REJECTED"):
         raise HTTPException(status_code=400, detail=f"لا يمكن إرسال قالب بحالة '{tpl.status}' إلى Meta")
 
+    # Resolve WABA ID: prefer WhatsAppConnection (live), fall back to settings
+    wa_conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id,
+    ).order_by(WhatsAppConnection.created_at.desc()).first()
+
     settings = get_or_create_settings(db, tenant_id)
     wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    waba_id = wa.get("whatsapp_business_account_id", "")
+    waba_id = (
+        (wa_conn.whatsapp_business_account_id if wa_conn else None)
+        or wa.get("whatsapp_business_account_id", "")
+    )
     if not waba_id:
         raise HTTPException(
             status_code=422,
-            detail="بيانات WhatsApp Business غير مُعدَّة. أضف WABA ID أو أكمل ربط واتساب أولاً.",
+            detail="بيانات WhatsApp Business غير مُعدَّة. أكمل ربط واتساب أولاً (الإعدادات ← واتساب).",
         )
 
-    from models import WhatsAppConnection  # noqa: PLC0415
-    wa_conn = db.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id == tenant_id).first()
     meta_id = await _submit_template_to_meta(
         db=db,
         conn=wa_conn,

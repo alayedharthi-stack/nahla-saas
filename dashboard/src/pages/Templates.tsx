@@ -4,6 +4,7 @@ import {
   Eye, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
   Type, Link2, Phone, Copy as CopyIcon, Zap, Star,
   BookOpen, Download, Sparkles, Tag, Search, Bot, CheckCheck,
+  Pencil, Send,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -81,8 +82,8 @@ function WaPreview({
 // ── Template row ──────────────────────────────────────────────────────────────
 
 function TemplateRow({
-  tpl, onPreview, onDelete, onSubmit,
-}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void }) {
+  tpl, onPreview, onDelete, onSubmit, onEdit,
+}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void; onEdit: () => void }) {
   const vars = countVars(tpl)
   const sm = (STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'
   const isDefault = isDefaultTemplate(tpl.name)
@@ -165,13 +166,23 @@ function TemplateRow({
           >
             <Eye className="w-4 h-4" />
           </button>
+          {tpl.status !== 'APPROVED' && (
+            <button
+              onClick={onEdit}
+              className="text-slate-400 hover:text-amber-500 transition-colors"
+              title="تعديل"
+            >
+              <Pencil className="w-4 h-4" />
+            </button>
+          )}
           {tpl.submittable && (
             <button
               onClick={onSubmit}
-              className="text-brand-500 hover:text-brand-700 transition-colors text-[11px] font-medium"
-              title="إرسال إلى Meta"
+              className="flex items-center gap-1 text-brand-500 hover:text-brand-700 transition-colors text-[11px] font-medium bg-brand-50 hover:bg-brand-100 px-2 py-1 rounded-lg"
+              title="إرسال إلى Meta للمراجعة"
             >
-              إرسال
+              <Send className="w-3 h-3" />
+              إرسال لـ Meta
             </button>
           )}
           {tpl.status !== 'APPROVED' && (
@@ -698,6 +709,172 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
 // ── Filter tabs ───────────────────────────────────────────────────────────────
 
+// ── Edit Template Modal ───────────────────────────────────────────────────────
+
+function EditModal({
+  tpl,
+  onClose,
+  onSaved,
+}: {
+  tpl: WhatsAppTemplateRecord
+  onClose: () => void
+  onSaved: (updated: WhatsAppTemplateRecord) => void
+}) {
+  const bodyComp   = tpl.components.find(c => c.type === 'BODY')
+  const headerComp = tpl.components.find(c => c.type === 'HEADER')
+  const footerComp = tpl.components.find(c => c.type === 'FOOTER')
+  const btnsComp   = tpl.components.find(c => c.type === 'BUTTONS')
+
+  const [headerText, setHeaderText] = useState(headerComp?.text ?? '')
+  const [bodyText,   setBodyText]   = useState(bodyComp?.text ?? '')
+  const [footerText, setFooterText] = useState(footerComp?.text ?? '')
+  const [buttons, setButtons]       = useState<TemplateButton[]>(btnsComp?.buttons ?? [])
+  const [saving, setSaving]         = useState(false)
+  const [error, setError]           = useState('')
+
+  const updateBtn = (i: number, patch: Partial<TemplateButton>) =>
+    setButtons(bs => bs.map((b, idx) => idx === i ? { ...b, ...patch } : b))
+
+  const buildComponents = (): TemplateComponent[] => {
+    const out: TemplateComponent[] = []
+    if (headerText.trim()) out.push({ type: 'HEADER', format: 'TEXT', text: headerText.trim() })
+    out.push({ type: 'BODY', text: bodyText.trim() })
+    if (footerText.trim()) out.push({ type: 'FOOTER', text: footerText.trim() })
+    if (buttons.length > 0) out.push({ type: 'BUTTONS', buttons })
+    return out
+  }
+
+  const handleSave = async () => {
+    if (!bodyText.trim()) { setError('نص الرسالة مطلوب'); return }
+    setSaving(true); setError('')
+    try {
+      const updated = await templatesApi.update(tpl.id, { components: buildComponents() })
+      onSaved(updated)
+      onClose()
+    } catch (e: any) {
+      setError(e?.message ?? 'حدث خطأ — تأكد من البيانات وحاول مجدداً')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const insertVar = (n: number) => setBodyText(t => t + `{{${n}}}`)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <Pencil className="w-4 h-4 text-brand-500" />
+            <h2 className="text-sm font-bold text-slate-900">تعديل القالب</h2>
+            <span className="text-[11px] text-slate-400 font-mono">{tpl.name}</span>
+          </div>
+          <button onClick={onClose}><X className="w-5 h-5 text-slate-400 hover:text-slate-600" /></button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          {/* Info notice */}
+          <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-xs text-amber-800">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
+            أي تعديل يُعيد القالب لحالة <strong>مسودة</strong> — ستحتاج لإرساله لـ Meta من جديد للموافقة.
+          </div>
+
+          {/* Header text */}
+          <div>
+            <label className="label text-xs">نص الرأس (اختياري)</label>
+            <input className="input text-sm" value={headerText}
+              onChange={e => setHeaderText(e.target.value)}
+              placeholder="عنوان الرسالة..." />
+          </div>
+
+          {/* Body */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="label mb-0 text-xs">نص الرسالة *</label>
+              <div className="flex gap-1">
+                {[1, 2, 3].map(n => (
+                  <button key={n} onClick={() => insertVar(n)}
+                    className="text-[11px] bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.5 rounded hover:bg-amber-100 font-mono">
+                    {`{{${n}}}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <textarea rows={6} className="input text-sm" value={bodyText}
+              onChange={e => setBodyText(e.target.value)}
+              placeholder="نص الرسالة..." />
+            <p className="text-xs text-slate-400 mt-1">{bodyText.length}/1024 حرف</p>
+          </div>
+
+          {/* Footer */}
+          <div>
+            <label className="label text-xs">نص التذييل (اختياري)</label>
+            <input className="input text-sm" value={footerText}
+              onChange={e => setFooterText(e.target.value)}
+              placeholder="مثال: نحلة — مساعد متجرك 🐝" />
+          </div>
+
+          {/* Buttons */}
+          {buttons.length > 0 && (
+            <div className="space-y-2">
+              <label className="label text-xs">الأزرار</label>
+              {buttons.map((btn, i) => (
+                <div key={i} className="border border-slate-200 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-slate-600">
+                      {btn.type === 'URL' ? '🔗 رابط' : btn.type === 'COPY_CODE' ? '📋 نسخ كود' : btn.type === 'PHONE_NUMBER' ? '📞 هاتف' : '💬 رد سريع'}
+                    </span>
+                    <button onClick={() => setButtons(bs => bs.filter((_, idx) => idx !== i))}
+                      className="text-slate-300 hover:text-red-500"><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                  <input className="input text-sm" placeholder="نص الزر"
+                    value={btn.text} onChange={e => updateBtn(i, { text: e.target.value })} />
+                  {btn.type === 'URL' && (
+                    <input className="input text-sm" placeholder="https://..." dir="ltr"
+                      value={btn.url ?? ''} onChange={e => updateBtn(i, { url: e.target.value })} />
+                  )}
+                  {btn.type === 'COPY_CODE' && (
+                    <input className="input text-sm font-mono" placeholder="PROMO2025" dir="ltr"
+                      value={btn.example?.[0] ?? ''} onChange={e => updateBtn(i, { example: [e.target.value] })} />
+                  )}
+                  {btn.type === 'PHONE_NUMBER' && (
+                    <input className="input text-sm" placeholder="+966..." dir="ltr"
+                      value={btn.phone_number ?? ''} onChange={e => updateBtn(i, { phone_number: e.target.value })} />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Live preview */}
+          <div>
+            <p className="text-xs text-slate-500 mb-2">معاينة</p>
+            <WaPreview
+              header={headerText}
+              body={bodyText}
+              footer={footerText}
+              buttons={buttons}
+            />
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100">
+          <button onClick={onClose} className="btn-ghost text-sm">إلغاء</button>
+          {error && <p className="text-xs text-red-500 flex-1 mx-4 text-center">{error}</p>}
+          <button onClick={handleSave} disabled={saving || !bodyText.trim()}
+            className="btn-primary text-sm disabled:opacity-40">
+            {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCheck className="w-4 h-4" />}
+            حفظ التعديلات
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Nahla Library Modal ───────────────────────────────────────────────────────
 
 const BUTTON_TYPE_ICON: Record<string, string> = {
@@ -987,6 +1164,8 @@ export default function Templates() {
   const [showCreate, setShowCreate] = useState(false)
   const [showNahlaLibrary, setShowNahlaLibrary] = useState(false)
   const [preview, setPreview] = useState<WhatsAppTemplateRecord | null>(null)
+  const [editTemplate, setEditTemplate] = useState<WhatsAppTemplateRecord | null>(null)
+  const [submitError, setSubmitError] = useState<{id: number; msg: string} | null>(null)
   const { t } = useLanguage()
 
   const loadTemplates = useCallback(() => {
@@ -1017,11 +1196,15 @@ export default function Templates() {
   }
 
   const handleSubmitTemplate = async (id: number) => {
+    setSubmitError(null)
     try {
       const res = await templatesApi.submit(id)
       setTemplates(ts => ts.map(t => (t.id === id ? res.template : t)))
-    } catch {
-      // ignore for now
+    } catch (e: any) {
+      const msg = e?.detail ?? e?.message ?? 'فشل إرسال القالب — تحقق من ربط واتساب'
+      setSubmitError({ id, msg })
+      // Auto-clear after 8 seconds
+      setTimeout(() => setSubmitError(s => s?.id === id ? null : s), 8000)
     }
   }
 
@@ -1047,14 +1230,31 @@ export default function Templates() {
       {preview && (
         <PreviewModal tpl={preview} onClose={() => setPreview(null)} />
       )}
+      {editTemplate && (
+        <EditModal
+          tpl={editTemplate}
+          onClose={() => setEditTemplate(null)}
+          onSaved={updated => setTemplates(ts => ts.map(t => t.id === updated.id ? updated : t))}
+        />
+      )}
       {showNahlaLibrary && (
         <NahlaLibraryModal
           onClose={() => setShowNahlaLibrary(false)}
           onImported={tpl => {
             setTemplates(ts => [tpl, ...ts])
-            // Keep modal open so merchant can import more
           }}
         />
+      )}
+
+      {/* Submit error toast */}
+      {submitError && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-red-600 text-white px-5 py-3 rounded-xl shadow-xl text-sm">
+          <XCircle className="w-4 h-4 shrink-0" />
+          <span>{submitError.msg}</span>
+          <button onClick={() => setSubmitError(null)} className="ml-2 opacity-70 hover:opacity-100">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
       )}
 
       <PageHeader
@@ -1164,6 +1364,7 @@ export default function Templates() {
                     onPreview={() => setPreview(tpl)}
                     onDelete={() => handleDelete(tpl.id)}
                     onSubmit={() => handleSubmitTemplate(tpl.id)}
+                    onEdit={() => setEditTemplate(tpl)}
                   />
                 ))}
               </tbody>
