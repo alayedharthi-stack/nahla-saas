@@ -289,11 +289,33 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 tenant_id = existing_integration.tenant_id
                 role      = "merchant"
                 is_new    = False
-                logger.info(
-                    "[SallaLogin] ✅ STEP 4 — TENANT FOUND (by store_id) | "
-                    "store_id=%s tenant_id=%s",
-                    merchant_id_str, tenant_id,
+
+                # ── KEY FIX: use the tenant's existing real user ──────────────
+                # Salla may send a privacy-masked email (e.g. xxx@email.partners).
+                # If the tenant already has a merchant user, log in as THAT user
+                # instead of creating a new orphan user with the masked email.
+                existing_tenant_user = (
+                    db.query(User)
+                    .filter(
+                        User.tenant_id == tenant_id,
+                        User.role == "merchant",
+                    )
+                    .order_by(User.id)   # oldest (most authoritative) first
+                    .first()
                 )
+                if existing_tenant_user:
+                    owner_email = existing_tenant_user.email
+                    logger.info(
+                        "[SallaLogin] ✅ STEP 4 — Using existing tenant user | "
+                        "store_id=%s tenant_id=%s user=%s",
+                        merchant_id_str, tenant_id, owner_email,
+                    )
+                else:
+                    logger.info(
+                        "[SallaLogin] ✅ STEP 4 — TENANT FOUND (by store_id, no user yet) | "
+                        "store_id=%s tenant_id=%s",
+                        merchant_id_str, tenant_id,
+                    )
             else:
                 # ── First-time merchant: create isolated Tenant + User ────────
                 # Use store_id suffix to ensure name uniqueness
