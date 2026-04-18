@@ -767,21 +767,28 @@ def _compute_template_compatibility(
 
 def _ensure_meta_examples(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Auto-inject Meta-required ``example`` fields into template components
-    before submission.
+    Guarantee Meta-required ``example`` fields are correct before submission.
 
-    Meta error code-100 "Missing required field(s) example" fires when:
-    - A BODY component contains {{N}} variables but has no ``example.body_text``
-    - A URL button contains {{1}} but has no ``example`` list
+    Meta error code-100 fires when:
+    - BODY has {{N}} variables but example.body_text is missing OR has the
+      wrong number of values (must equal the number of variables exactly)
+    - A URL button has {{1}} but no ``example`` list
 
-    This helper adds sensible placeholder examples so Meta can validate the
-    template format. The values shown here are only for Meta's review — they
-    are never sent to real customers.
+    Strategy: always rebuild body_text to exactly match variable count;
+    always ensure URL buttons with {{1}} have an example.
+    Values are for Meta review only — never sent to real customers.
     """
     import re as _re, copy as _copy  # noqa: PLC0415
 
-    # Realistic-looking Arabic sample values that satisfy Meta reviewers.
-    _BODY_SAMPLES = ["أحمد", "متجر الأناقة", "ORDER-2025", "25%", "SAVE25", "مدينة الرياض"]
+    # Ordered Arabic sample values used when generating examples.
+    _BODY_SAMPLES = [
+        "أحمد",            # {{1}} customer_name
+        "متجر الأناقة",    # {{2}} store_name
+        "ORDER-2025",      # {{3}} order_id / coupon
+        "25%",             # {{4}} discount
+        "SAVE25",          # {{5}} coupon_code
+        "250",             # {{6}} amount
+    ]
 
     result = []
     for raw_comp in components:
@@ -790,24 +797,49 @@ def _ensure_meta_examples(components: List[Dict[str, Any]]) -> List[Dict[str, An
 
         if comp_type == "BODY":
             text = comp.get("text") or ""
-            variables = _re.findall(r"\{\{\d+\}\}", text)
-            if variables and "example" not in comp:
-                samples = _BODY_SAMPLES[:len(variables)]
-                # Pad if template has more variables than our sample list
+            # Find all {{N}} placeholders and get unique sorted indices
+            variables = sorted(set(_re.findall(r"\{\{\d+\}\}", text)),
+                               key=lambda v: int(v.strip("{}")) if v.strip("{}").isdigit() else 0)
+            if variables:
+                # Build exactly len(variables) sample values
+                samples = list(_BODY_SAMPLES[:len(variables)])
                 while len(samples) < len(variables):
                     samples.append(f"قيمة{len(samples) + 1}")
-                comp["example"] = {"body_text": [samples]}
+
+                # Always overwrite to guarantee correct count.
+                # Preserve existing values if count matches — they may be
+                # merchant-customised and more likely to pass Meta review.
+                existing = comp.get("example", {})
+                existing_vals = (existing.get("body_text") or [[]])[0] if isinstance(existing, dict) else []
+                if len(existing_vals) == len(variables):
+                    # Count matches — keep the merchant's values
+                    comp["example"] = {"body_text": [list(existing_vals)]}
+                else:
+                    # Count mismatch or missing — regenerate with defaults
+                    comp["example"] = {"body_text": [samples]}
+            else:
+                # No variables in body — remove example to keep payload clean
+                comp.pop("example", None)
 
         elif comp_type == "BUTTONS":
             new_buttons = []
             for btn in (comp.get("buttons") or []):
                 btn = _copy.deepcopy(btn)
-                if str(btn.get("type", "")).upper() == "URL":
+                btn_type = str(btn.get("type", "")).upper()
+                if btn_type == "URL":
                     url_tpl = btn.get("url", "")
-                    if "{{1}}" in url_tpl and "example" not in btn:
-                        # Build a concrete example URL that satisfies Meta
-                        example_url = url_tpl.replace("{{1}}", "example-page-123")
-                        btn["example"] = [example_url]
+                    if "{{1}}" in url_tpl:
+                        # Always ensure example exists and is a valid URL
+                        existing_ex = btn.get("example")
+                        if (
+                            not existing_ex
+                            or not isinstance(existing_ex, list)
+                            or not existing_ex[0]
+                            or "{{" in str(existing_ex[0])
+                        ):
+                            # Build a concrete full URL example
+                            example_url = url_tpl.replace("{{1}}", "example-page-123")
+                            btn["example"] = [example_url]
                 new_buttons.append(btn)
             comp["buttons"] = new_buttons
 
@@ -1030,6 +1062,12 @@ async def update_template(
                             if j < len(old_btns) and "example" not in btn and "example" in old_btns[j]:
                                 btn["example"] = old_btns[j]["example"]
                     break
+
+    # After preserving old examples, normalise them so the count always matches
+    # the current variable count. Avoids a stale 2-value example being stored
+    # when the merchant reduced the body from 2 variables to 1, which causes
+    # Meta code-100 "missing example" on the next submission.
+    new_components = _ensure_meta_examples(new_components)
 
     # NOTE: placeholder integrity is intentionally NOT enforced here.
     # A DRAFT template is fully editable — the merchant can add, remove, or
