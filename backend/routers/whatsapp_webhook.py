@@ -28,7 +28,14 @@ from fastapi.responses import PlainTextResponse
 
 from models import MessageEvent, WhatsAppConnection
 
-from core.config import ANTHROPIC_API_KEY, CLAUDE_MODEL, ORCHESTRATOR_URL, WA_VERIFY_TOKEN
+from core.config import (
+    ANTHROPIC_API_KEY,
+    CLAUDE_MODEL,
+    MERCHANT_BRAIN_ENABLED,
+    MERCHANT_BRAIN_TENANT_IDS,
+    ORCHESTRATOR_URL,
+    WA_VERIFY_TOKEN,
+)
 from core.conversation_engine import (
     # Actions
     DETERMINISTIC_ACTIONS,
@@ -777,28 +784,69 @@ async def _handle_merchant_message(
         state.stage = "active"
         StateManager.save(db, state, tenant_id=tenant_id)
 
-        # Load store context for this merchant.
-        store_context_text = build_ai_context(db, tenant_id, customer_phone=to, product_query=text)
-
-        # Load recent conversation history for continuity
+        # Load recent conversation history for both paths
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
-        messages: list = []
-        for turn in history[-15:]:
-            role = "user" if turn.get("direction") == "inbound" else "assistant"
-            body = (turn.get("body") or "").strip()
-            if not body:
-                continue
-            if messages and messages[-1]["role"] == role:
-                messages[-1]["content"] += f"\n{body}"
-            else:
-                messages.append({"role": role, "content": body})
-        # Ensure last turn is current user message
-        if not messages or messages[-1]["role"] != "user":
-            messages.append({"role": "user", "content": text})
-        elif messages[-1]["content"] != text:
-            messages.append({"role": "user", "content": text})
 
-        system_prompt = f"""أنت مساعد ذكي لمتجر إلكتروني. مهمتك الرد على استفسارات العملاء بأسلوب ودي واحترافي باللغة العربية.
+        # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
+        # Active when: global flag is on OR this tenant is in the per-tenant list
+        _brain_active = MERCHANT_BRAIN_ENABLED or (tenant_id in MERCHANT_BRAIN_TENANT_IDS)
+        if _brain_active:
+            try:
+                from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
+                from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
+
+                profile = {}
+                try:
+                    svc = CustomerIntelligenceService(db, tenant_id)
+                    customer = svc.get_or_create_customer(phone=to)
+                    profile = {
+                        "name":  getattr(customer, "name", None) or "",
+                        "email": getattr(customer, "email", None) or "",
+                        "id":    getattr(customer, "id", None),
+                    }
+                except Exception:
+                    pass
+
+                brain = get_brain()
+                reply = await brain.process(
+                    db=db,
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    message=text,
+                    history=history,
+                    profile=profile,
+                    customer_id=profile.get("id"),
+                    conversation_id=convo.id,
+                )
+                logger.info("[Merchant/Brain] replied tenant=%s to=%s", tenant_id, to)
+            except Exception as brain_exc:
+                logger.error("[Merchant/Brain] Brain pipeline failed: %s — falling back to legacy", brain_exc)
+                MERCHANT_BRAIN_ENABLED_FALLBACK = True
+            else:
+                MERCHANT_BRAIN_ENABLED_FALLBACK = False
+        else:
+            MERCHANT_BRAIN_ENABLED_FALLBACK = True
+
+        # ── Legacy path (original generate_ai_reply) ──────────────────────────
+        if not _brain_active or MERCHANT_BRAIN_ENABLED_FALLBACK:
+            messages: list = []
+            for turn in history[-15:]:
+                role = "user" if turn.get("direction") == "inbound" else "assistant"
+                body = (turn.get("body") or "").strip()
+                if not body:
+                    continue
+                if messages and messages[-1]["role"] == role:
+                    messages[-1]["content"] += f"\n{body}"
+                else:
+                    messages.append({"role": role, "content": body})
+            if not messages or messages[-1]["role"] != "user":
+                messages.append({"role": "user", "content": text})
+            elif messages[-1]["content"] != text:
+                messages.append({"role": "user", "content": text})
+
+            store_context_text = build_ai_context(db, tenant_id, customer_phone=to, product_query=text)
+
+            system_prompt = f"""أنت مساعد ذكي لمتجر إلكتروني. مهمتك الرد على استفسارات العملاء بأسلوب ودي واحترافي باللغة العربية.
 
 استخدم المعلومات التالية للإجابة بدقة — لا تخترع معلومات خارجها:
 
@@ -810,29 +858,29 @@ async def _handle_merchant_message(
 - إذا لم تجد إجابة في البيانات المتاحة، قل للعميل أنك ستتحقق وتعود إليه
 - تحدث كموظف خدمة العملاء للمتجر مباشرةً"""
 
-        history_transcript = "\n".join(
-            f"{m['role']}: {m['content']}" for m in messages[:-1]
-        ).strip()
-        full_prompt = system_prompt
-        if history_transcript:
-            full_prompt += f"\n\nسجل المحادثة الأخيرة:\n{history_transcript}"
+            history_transcript = "\n".join(
+                f"{m['role']}: {m['content']}" for m in messages[:-1]
+            ).strip()
+            full_prompt = system_prompt
+            if history_transcript:
+                full_prompt += f"\n\nسجل المحادثة الأخيرة:\n{history_transcript}"
 
-        if not ANTHROPIC_API_KEY:
-            logger.error("[Merchant] No ANTHROPIC_API_KEY — using fallback reply")
-            reply = "وصلت رسالتك بنجاح. فريق المتجر أو المساعد الذكي سيراجع طلبك ويعود إليك قريبًا."
-        else:
-            payload = generate_ai_reply(
-                tenant_id=tenant_id,
-                customer_phone=to,
-                message=text,
-                store_name="",
-                channel="whatsapp",
-                locale="ar",
-                context_metadata={"store_context": store_context_text},
-                prompt_overrides={"__full_system_prompt": full_prompt},
-                provider_hint="anthropic",
-            )
-            reply = payload.reply_text.strip() or "كيف أقدر أساعدك؟"
+            if not ANTHROPIC_API_KEY:
+                logger.error("[Merchant] No ANTHROPIC_API_KEY — using fallback reply")
+                reply = "وصلت رسالتك بنجاح. فريق المتجر أو المساعد الذكي سيراجع طلبك ويعود إليك قريبًا."
+            else:
+                payload = generate_ai_reply(
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    message=text,
+                    store_name="",
+                    channel="whatsapp",
+                    locale="ar",
+                    context_metadata={"store_context": store_context_text},
+                    prompt_overrides={"__full_system_prompt": full_prompt},
+                    provider_hint="anthropic",
+                )
+                reply = payload.reply_text.strip() or "كيف أقدر أساعدك؟"
 
         # Save outbound reply after generation.
         StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)
@@ -843,13 +891,13 @@ async def _handle_merchant_message(
                 phone=to,
                 turn=max(int(getattr(state, "turn", 1) or 1), 1),
                 raw_message=text,
-                detected_intent="merchant_store_ai",
+                detected_intent="merchant_brain" if _brain_active else "merchant_store_ai",
                 confidence=1.0,
                 extracted_slots=[],
                 stage_before="merchant",
                 stage_after="merchant",
                 stage_transition=None,
-                decision="GENERATE_AI_REPLY",
+                decision="MERCHANT_BRAIN" if _brain_active else "GENERATE_AI_REPLY",
                 decision_reason="merchant_whatsapp_inbound",
                 ai_called=True,
                 response_text=reply,

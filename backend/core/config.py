@@ -144,6 +144,19 @@ ANTHROPIC_API_KEY = (
 )
 CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 
+# ── Merchant Brain (Phase 1 Commerce Decision Engine) ──────────────────────────
+# Global flag — activates Brain for ALL merchant tenants when true.
+MERCHANT_BRAIN_ENABLED = os.environ.get("MERCHANT_BRAIN_ENABLED", "false").lower() == "true"
+
+# Per-tenant opt-in — comma-separated tenant IDs (e.g. "1,5,12").
+# Allows enabling the Brain for specific stores without a global rollout.
+# A tenant listed here uses the Brain even when MERCHANT_BRAIN_ENABLED=false.
+MERCHANT_BRAIN_TENANT_IDS: set = {
+    int(x.strip())
+    for x in os.environ.get("MERCHANT_BRAIN_TENANT_IDS", "").split(",")
+    if x.strip().isdigit()
+}
+
 # ── CORS ───────────────────────────────────────────────────────────────────────
 # IMPORTANT:
 #   Never allow an environment override to DROP the canonical Nahla origins.
