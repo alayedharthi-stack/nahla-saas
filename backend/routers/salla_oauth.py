@@ -290,31 +290,39 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 role      = "merchant"
                 is_new    = False
 
-                # ── KEY FIX: use the tenant's existing real user ──────────────
-                # Salla may send a privacy-masked email (e.g. xxx@email.partners).
-                # If the tenant already has a merchant user, log in as THAT user
-                # instead of creating a new orphan user with the masked email.
-                existing_tenant_user = (
+                # ── Resolve the canonical user for THIS store ──────────────────
+                # Priority 1: email stored explicitly in integration config
+                #             (written once, never changes per store).
+                # Priority 2: email received from Salla API this session.
+                # This prevents randomly picking the oldest user in the tenant
+                # when multiple users exist (e.g. a friend's account was there).
+                stored_email = (
+                    (existing_integration.config or {}).get("salla_owner_email")
+                )
+                canonical_email = stored_email or owner_email
+
+                linked_user = (
                     db.query(User)
                     .filter(
                         User.tenant_id == tenant_id,
-                        User.role == "merchant",
+                        User.email     == canonical_email,
                     )
-                    .order_by(User.id)   # oldest (most authoritative) first
                     .first()
                 )
-                if existing_tenant_user:
-                    owner_email = existing_tenant_user.email
+                if linked_user:
+                    owner_email = linked_user.email
                     logger.info(
-                        "[SallaLogin] ✅ STEP 4 — Using existing tenant user | "
+                        "[SallaLogin] ✅ STEP 4 — Linked user found by store email | "
                         "store_id=%s tenant_id=%s user=%s",
                         merchant_id_str, tenant_id, owner_email,
                     )
                 else:
+                    # No user with this email yet — will be created below with owner_email
+                    owner_email = canonical_email
                     logger.info(
-                        "[SallaLogin] ✅ STEP 4 — TENANT FOUND (by store_id, no user yet) | "
-                        "store_id=%s tenant_id=%s",
-                        merchant_id_str, tenant_id,
+                        "[SallaLogin] ✅ STEP 4 — TENANT FOUND, creating user | "
+                        "store_id=%s tenant_id=%s email=%s",
+                        merchant_id_str, tenant_id, owner_email,
                     )
             else:
                 # ── First-time merchant: create isolated Tenant + User ────────
@@ -355,9 +363,10 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             if integration:
                 cfg = dict(integration.config or {})
                 cfg.update({
-                    "store_id":   merchant_id_str,
-                    "store_name": store_name,
-                    "last_seen":  now_iso,
+                    "store_id":          merchant_id_str,
+                    "store_name":        store_name,
+                    "last_seen":         now_iso,
+                    "salla_owner_email": owner_email,
                 })
                 integration.config = cfg
                 integration.external_store_id = merchant_id_str
@@ -383,6 +392,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                         "store_name":        store_name,
                         "salla_token_login": True,
                         "connected_at":      now_iso,
+                        "salla_owner_email": owner_email,
                     },
                     enabled = False,
                 ))
