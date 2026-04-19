@@ -216,10 +216,16 @@ export default function StoreIntegration() {
             <p className="text-sm font-semibold text-amber-800">فشلت المزامنة الأخيرة</p>
             <p className="text-xs text-amber-700 mt-0.5 font-mono break-all">{status.sync_error}</p>
             {(status.sync_error.includes('invalid_grant') || status.sync_error.includes('revoked')) && (
-              <p className="text-xs text-amber-600 mt-1.5">
-                انتهت صلاحية رمز التحديث (refresh_token). اضغط «استعادة الاتصال» لتفعيل الربط بالمفتاح الحالي،
-                أو أدخل مفتاح API جديداً من لوحة تحكم سلة.
-              </p>
+              <div className="mt-2 space-y-1.5 text-xs text-amber-700">
+                <p className="font-semibold text-amber-800">رمز التحديث (refresh_token) انتهت صلاحيته أو أُلغي من سلة.</p>
+                <p>الحل الأسرع: أدخل <span className="font-bold">Account Token</span> من شركاء سلة:</p>
+                <ol className="list-decimal list-inside space-y-0.5 text-amber-600 ms-1">
+                  <li>اذهب إلى <span className="font-mono font-semibold">partners.salla.sa</span> → API credentials</li>
+                  <li>اضغط «Reveal token once» ← انسخ <span className="font-semibold">Account token</span></li>
+                  <li>الصقه في حقل «مفتاح API» أدناه واضغط «حفظ الإعدادات»</li>
+                </ol>
+                <p className="text-amber-500">أو اضغط «استعادة الاتصال» لإعادة تفعيل المفتاح الحالي إن كان لا يزال صالحاً.</p>
+              </div>
             )}
           </div>
           <button
@@ -253,7 +259,7 @@ export default function StoreIntegration() {
         <div className="space-y-1.5">
           <label className="block text-xs font-medium text-slate-700">
             مفتاح API
-            <span className="text-slate-400 font-normal me-1"> (Access Token من لوحة تحكم سلة)</span>
+            <span className="text-slate-400 font-normal me-1"> (Account Token من Salla Partners)</span>
           </label>
           <div className="relative">
             <input
@@ -434,12 +440,19 @@ export default function StoreIntegration() {
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-5">
         <div className="flex items-start gap-3">
           <Store className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
-          <div className="space-y-1.5 text-xs text-blue-700">
-            <p className="font-semibold text-blue-900 text-sm">أو أدخل بيانات الاعتماد يدوياً</p>
-            <p>1. سجّل دخولك إلى لوحة تحكم سلة على <span className="font-mono">salla.sa</span></p>
-            <p>2. اذهب إلى التطبيقات ← تطبيقاتي ← أضف تطبيقاً أو استخدم Access Token من إعدادات API</p>
-            <p>3. انسخ الـ Access Token والصقه في حقل "مفتاح API" أعلاه</p>
-            <p>4. أدخل معرّف متجرك وهو الرقم في رابط لوحة التحكم</p>
+          <div className="space-y-2 text-xs text-blue-700">
+            <p className="font-semibold text-blue-900 text-sm">كيف تحصل على Account Token من Salla Partners؟</p>
+            <div className="space-y-1">
+              <p className="font-medium text-blue-800">الطريقة الموصى بها (Account Token — لا تنتهي صلاحيته):</p>
+              <p>1. اذهب إلى <span className="font-mono font-bold">partners.salla.sa</span> وسجّل دخولك</p>
+              <p>2. من القائمة اختر <span className="font-semibold">API credentials</span></p>
+              <p>3. اضغط <span className="font-semibold">Reveal token once</span> ثم انسخ <span className="font-semibold">Account token</span></p>
+              <p>4. الصقه في حقل «مفتاح API» أعلاه واضغط «حفظ الإعدادات»</p>
+            </div>
+            <div className="border-t border-blue-200 pt-2 space-y-1 text-blue-600">
+              <p className="font-medium text-blue-700">بديل: استخدام OAuth (يحتاج تجديداً دورياً):</p>
+              <p>اضغط «ربط المتجر عبر سلة (OAuth)» أعلاه — يصلح فقط عندما يكون التطبيق معتمداً في سلة.</p>
+            </div>
           </div>
         </div>
       </div>

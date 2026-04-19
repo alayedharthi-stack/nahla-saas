@@ -112,10 +112,13 @@ class SallaAdapter(BaseStoreAdapter):
             return False
 
     def _mark_needs_reauth(self, reason: str = "unknown") -> None:
-        """Persist needs_reauth=True in Integration.config and disable the integration.
+        """Remove the revoked refresh_token and stop future refresh attempts.
 
-        Called when Salla returns invalid_grant — stops all future retry attempts
-        until the merchant re-authorizes via Salla app or OAuth flow.
+        Keeps the integration ENABLED so the existing access_token (api_key) can
+        still be used for API calls.  Consistent with the scheduler's handling of
+        invalid_grant: only the refresh_token rotation is stopped, not the whole
+        integration.  The merchant can enter a fresh Account token from
+        Salla Partners → API credentials whenever they want to rotate it.
         """
         try:
             from database.session import SessionLocal  # noqa: PLC0415
@@ -128,20 +131,27 @@ class SallaAdapter(BaseStoreAdapter):
                 ).first()
                 if intg:
                     cfg = dict(intg.config or {})
-                    cfg["needs_reauth"] = True
-                    cfg["needs_reauth_at"] = datetime.now(timezone.utc).isoformat()
-                    cfg["needs_reauth_reason"] = reason
-                    intg.config = cfg
-                    intg.enabled = False
+                    # Remove the revoked token so we stop retrying
+                    cfg.pop("refresh_token", None)
+                    cfg["no_auto_refresh"]        = True
+                    cfg["no_auto_refresh_reason"] = reason
+                    cfg["no_auto_refresh_at"]     = datetime.now(timezone.utc).isoformat()
+                    # Clear any stale reauth flags so the UI doesn't show a blocker
+                    cfg.pop("needs_reauth", None)
+                    cfg.pop("needs_reauth_at", None)
+                    cfg.pop("needs_reauth_reason", None)
+                    intg.config  = cfg
+                    intg.enabled = True   # keep active — api_key may still work
                     _db.commit()
                     logger.warning(
-                        "[Salla] needs_reauth persisted | tenant=%s reason=%s",
+                        "[Salla] refresh_token revoked — removed, integration kept active | "
+                        "tenant=%s reason=%s",
                         self._tenant_id, reason,
                     )
             finally:
                 _db.close()
         except Exception as exc:
-            logger.warning("[Salla] Failed to persist needs_reauth: %s", exc)
+            logger.warning("[Salla] Failed to persist no_auto_refresh: %s", exc)
 
     def _persist_refreshed_tokens(self, access_token: str, refresh_token: str) -> None:
         """Save refreshed tokens back to the Integration row."""
