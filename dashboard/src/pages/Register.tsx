@@ -5,6 +5,7 @@ import { register } from '../auth'
 import { API_BASE } from '../api/client'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
+import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 
 export default function Register() {
   const navigate = useNavigate()
@@ -82,11 +83,12 @@ export default function Register() {
   }
 
   return (
-    <div
-      className="min-h-dvh flex items-center justify-center bg-slate-900 px-4 py-safe-top pb-safe-bottom"
-      dir={dir}
-    >
-      <div className="w-full max-w-sm">
+    <div className="bg-slate-900" dir={dir}>
+      {/* ── Existing registration form (unchanged layout) ────────────── */}
+      <div
+        className="min-h-dvh flex items-center justify-center px-4 py-safe-top pb-safe-bottom"
+      >
+        <div className="w-full max-w-sm">
         {/* Language toggle */}
         <div className="flex justify-end mb-4">
           <button
@@ -262,7 +264,11 @@ export default function Register() {
           </p>
           <LegalFooter variant="light" />
         </div>
+        </div>
       </div>
+
+      {/* ── New: collective sales-learning marketing section ─────────── */}
+      <SalesIntelligenceSection lang={lang} />
     </div>
   )
 }

@@ -173,7 +173,7 @@ const en: Translations = {
     noAccount:        'New store?',
     registerLink:     'Create a free account',
     invalidCreds:     'Incorrect email or password',
-    dev:              '100% Made in Saudi Arabia 🇸🇦',
+    dev:              '100% Saudi Team 🇸🇦',
     devRole:          'nahlah.ai',
   },
 
