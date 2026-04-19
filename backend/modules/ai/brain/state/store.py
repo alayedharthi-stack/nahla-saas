@@ -195,6 +195,7 @@ class DefaultStateStore:
             ACTION_CLARIFY,
             ACTION_NARROW,
         )
+        from ..types import INTENT_PICK_LIST_ITEM as _PICK  # noqa: PLC0415
 
         s = MerchantConversationState(
             stage=state.stage,
@@ -210,6 +211,8 @@ class DefaultStateStore:
             order_prep=OrderPreparationState.from_dict(state.order_prep.to_dict()),
             turn=state.turn + 1,
             updated_at=datetime.now(timezone.utc).isoformat(),
+            # Carry candidates forward so pipeline can clear them after pick
+            last_search_candidates=list(state.last_search_candidates or []),
         )
 
         action = decision.action

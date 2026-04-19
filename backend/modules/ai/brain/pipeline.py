@@ -36,6 +36,7 @@ from .types import (
     OrderPreparationState,
     SuggestionSnapshot,
     INTENT_GENERAL,
+    INTENT_PICK_LIST_ITEM,
 )
 from .protocols import (
     IntentClassifier,
@@ -92,7 +93,7 @@ class MerchantBrain:
         profile: Dict[str, Any],
         customer_id: Optional[int] = None,
         conversation_id: Optional[int] = None,
-    ) -> str:
+    ) -> Dict[str, Any]:
         t0 = time.monotonic()
 
         # ── 1. Intent ────────────────────────────────────────────────────
@@ -143,6 +144,13 @@ class MerchantBrain:
         if result.data.get("order_prep"):
             new_state.order_prep = OrderPreparationState.from_dict(result.data.get("order_prep"))
 
+        # ── 6b. Persist search candidates so user can pick by number ─────────
+        if result.data.get("pending_candidates"):
+            new_state.last_search_candidates = list(result.data["pending_candidates"])
+        elif intent.name == INTENT_PICK_LIST_ITEM:
+            # Clear candidates after a selection is made
+            new_state.last_search_candidates = []
+
         new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)
         ctx.state = new_state
         suggestion = self._suggestion_engine.suggest(ctx, decision, result)
@@ -175,6 +183,7 @@ class MerchantBrain:
         ctx.state = new_state
         result.data.setdefault("chosen_path", _resolve_chosen_path(decision, result))
         self._memory_updater.update(db, ctx, decision, result, reply, stage_before, latency_ms)
+        pending_buttons: List[Dict[str, Any]] = list(result.data.get("pending_buttons") or [])
 
         # ── 10. Structured turn trace (searchable in Railway logs) ────────
         try:
@@ -229,7 +238,7 @@ class MerchantBrain:
         except Exception:
             pass   # trace logging must never break the reply path
 
-        return reply
+        return {"reply": reply, "buttons": pending_buttons}
 
 
 # ── Brain state helpers ────────────────────────────────────────────────────────

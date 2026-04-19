@@ -50,6 +50,7 @@ from ..types import (
     INTENT_TRACK_ORDER,
     INTENT_GENERAL,
     INTENT_WHO_ARE_YOU,
+    INTENT_PICK_LIST_ITEM,
 )
 from ..state.stages import STAGE_CHECKOUT, STAGE_ORDERING
 
@@ -110,7 +111,30 @@ class DefaultDecisionEngine:
                 reason="customer asked for order status",
             )
 
-        # ── 3.5 Continue order preparation while collecting checkout details ──
+        # ── 3.5 Pick from numbered list ───────────────────────────────────────
+        if intent.name == INTENT_PICK_LIST_ITEM and state.last_search_candidates:
+            idx = int(intent.slots.get("list_index", 1))
+            idx = max(1, min(idx, len(state.last_search_candidates)))
+            product = state.last_search_candidates[idx - 1]
+            if product:
+                if facts.orderable:
+                    return Decision(
+                        action=ACTION_PROPOSE_DRAFT_ORDER,
+                        args={"product": product},
+                        reason=f"customer picked option {idx} from list — start order",
+                        confidence=0.95,
+                    )
+                else:
+                    # Store not orderable — confirm product focus, show details
+                    return Decision(
+                        action=ACTION_SEARCH_PRODUCTS,
+                        args={"query": product.get("title", ""),
+                              "selected_product": product},
+                        reason=f"customer picked option {idx} — not orderable, confirm product",
+                        confidence=0.90,
+                    )
+
+        # ── 3.7 Continue order preparation while collecting checkout details ──
         if (
             state.stage == STAGE_ORDERING
             and state.current_product_focus

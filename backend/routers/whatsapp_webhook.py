@@ -503,6 +503,15 @@ async def _dispatch_message(
                 except Exception as exc:
                     logger.error("[Webhook] COD button handler failed: %s", exc)
 
+                # Product-pick buttons from merchant brain — route to merchant AI
+                if btn_id.startswith("pick_") and not _is_platform_tenant(db, resolved_tenant_id):
+                    pick_num = btn_id.split("_", 1)[-1]  # "1", "2", "3"
+                    await _handle_merchant_message(
+                        phone_id=used_pid, to=sender, text=pick_num,
+                        tenant_id=resolved_tenant_id, db=db,
+                    )
+                    return
+
                 await _handle_button_reply(
                     btn_id=btn_id, phone_id=used_pid, to=sender,
                     tenant_id=resolved_tenant_id, db=db,
@@ -799,6 +808,7 @@ async def _handle_merchant_message(
 
         # Load recent conversation history for both paths
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
+        _brain_buttons: list = []  # populated by brain when product buttons should be sent
 
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
         # Active when: global flag is on OR this tenant is in the per-tenant list
@@ -821,7 +831,7 @@ async def _handle_merchant_message(
                     pass
 
                 brain = get_brain()
-                reply = await brain.process(
+                brain_result = await brain.process(
                     db=db,
                     tenant_id=tenant_id,
                     customer_phone=to,
@@ -831,7 +841,15 @@ async def _handle_merchant_message(
                     customer_id=profile.get("id"),
                     conversation_id=convo.id,
                 )
-                logger.info("[Merchant/Brain] replied tenant=%s to=%s", tenant_id, to)
+                # process() returns dict {"reply": str, "buttons": list}
+                if isinstance(brain_result, dict):
+                    reply   = brain_result.get("reply", "") or ""
+                    _brain_buttons = brain_result.get("buttons") or []
+                else:
+                    reply          = str(brain_result or "")
+                    _brain_buttons = []
+                logger.info("[Merchant/Brain] replied tenant=%s to=%s buttons=%d",
+                            tenant_id, to, len(_brain_buttons))
             except Exception as brain_exc:
                 logger.error("[Merchant/Brain] Brain pipeline failed: %s — falling back to legacy", brain_exc)
                 MERCHANT_BRAIN_ENABLED_FALLBACK = True
@@ -919,10 +937,18 @@ async def _handle_merchant_message(
         except Exception:
             pass
 
-        await _send_whatsapp_message(
-            phone_id=phone_id, to=to, text=reply,
-            _tenant_id=tenant_id, _db=db,
-        )
+        if _brain_buttons and reply:
+            await _send_interactive_reply(
+                phone_id=phone_id, to=to,
+                body_text=reply,
+                buttons=_brain_buttons,
+                _tenant_id=tenant_id, _db=db,
+            )
+        else:
+            await _send_whatsapp_message(
+                phone_id=phone_id, to=to, text=reply,
+                _tenant_id=tenant_id, _db=db,
+            )
         logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
 
     except Exception as exc:

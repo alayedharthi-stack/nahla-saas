@@ -102,7 +102,20 @@ class DefaultComposer:
                 return T.no_products()
             # If many results and no specific intent, present as narrow choices
             if data.get("suggest_narrow") and data.get("products"):
-                return T.narrow_choices(products=data["products"][:3])
+                candidates = data["products"][:3]
+                # Build WhatsApp interactive buttons (max 20 chars per title)
+                wa_buttons = []
+                for i, p in enumerate(candidates, 1):
+                    raw_title = str(p.get("title") or "")
+                    price_str = f" {p['price']} ر" if p.get("price") else ""
+                    title = (raw_title[:17] + price_str)[:20] if price_str else raw_title[:20]
+                    wa_buttons.append({
+                        "type": "reply",
+                        "reply": {"id": f"pick_{i}", "title": title or str(i)},
+                    })
+                result.data["pending_buttons"] = wa_buttons
+                result.data["pending_candidates"] = candidates
+                return T.narrow_choices(products=candidates)
             return T.product_results(
                 product_lines=data.get("product_lines", ""),
                 query=data.get("query", ""),

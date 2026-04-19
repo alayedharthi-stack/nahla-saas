@@ -27,6 +27,7 @@ from ..types import (
     INTENT_GREETING,
     INTENT_HESITATION,
     INTENT_PAY_NOW,
+    INTENT_PICK_LIST_ITEM,
     INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
@@ -192,11 +193,30 @@ _register(RuleSet(
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Pre-compiled pattern to detect a standalone digit (1-9 or Arabic ١-٩)
+_SINGLE_DIGIT = re.compile(r'^\s*([١٢٣٤٥٦٧٨٩1-9])\s*$', re.UNICODE)
+_ARABIC_DIGIT_MAP = {'١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5',
+                     '٦': '6', '٧': '7', '٨': '8', '٩': '9'}
+
+
 def match(message: str) -> Optional[Intent]:
     """
     Try all rule-sets against *message*.
     Returns the best-matching Intent or None when nothing fires.
     """
+    # ── Fast path: single digit → pick from last shown list ──────────────
+    m = _SINGLE_DIGIT.match(message)
+    if m:
+        digit = m.group(1)
+        latin = _ARABIC_DIGIT_MAP.get(digit, digit)
+        return Intent(
+            name=INTENT_PICK_LIST_ITEM,
+            confidence=0.97,
+            slots={"list_index": int(latin)},
+            raw_message=message,
+            extraction_method="rules",
+        )
+
     best: Optional[Tuple[float, Intent]] = None
 
     for ruleset, compiled in _RULES:

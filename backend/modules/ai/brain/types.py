@@ -26,10 +26,11 @@ INTENT_PAY_NOW       = "pay_now"
 INTENT_ASK_SHIPPING  = "ask_shipping"
 INTENT_ASK_STORE_INFO = "ask_store_info"
 INTENT_ASK_OWNER_CONTACT = "ask_owner_contact"
-INTENT_HESITATION    = "hesitation"
-INTENT_TALK_HUMAN    = "talk_to_human"
-INTENT_TRACK_ORDER   = "track_order"
-INTENT_GENERAL       = "general"
+INTENT_HESITATION       = "hesitation"
+INTENT_TALK_HUMAN       = "talk_to_human"
+INTENT_TRACK_ORDER      = "track_order"
+INTENT_GENERAL          = "general"
+INTENT_PICK_LIST_ITEM   = "pick_list_item"   # customer picks numbered option
 
 
 @dataclass
@@ -136,6 +137,8 @@ class MerchantConversationState:
     order_prep: OrderPreparationState = field(default_factory=OrderPreparationState)
     turn: int = 0
     updated_at: str = ""
+    # Last ≤3 products shown as numbered list — used to resolve numeric picks
+    last_search_candidates: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -152,6 +155,7 @@ class MerchantConversationState:
             "order_prep": self.order_prep.to_dict(),
             "turn": self.turn,
             "updated_at": self.updated_at,
+            "last_search_candidates": self.last_search_candidates,
         }
 
     @staticmethod
@@ -170,6 +174,7 @@ class MerchantConversationState:
             order_prep=OrderPreparationState.from_dict(d.get("order_prep")),
             turn=int(d.get("turn", 0)),
             updated_at=d.get("updated_at", ""),
+            last_search_candidates=list(d.get("last_search_candidates") or []),
         )
 
 
