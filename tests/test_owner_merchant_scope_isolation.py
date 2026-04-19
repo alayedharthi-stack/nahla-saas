@@ -174,3 +174,185 @@ class TestSupportImpersonationAllowed:
         ):
             user = require_merchant_scope(_make_request(), _creds())
         assert user["role"] == "admin"
+
+
+# ── Middleware: owner_merchant_scope_middleware ──────────────────────────────
+#
+# These tests pin the framework-level guard that runs after the JWT middleware.
+# Together with ``require_merchant_scope`` they are belt-and-suspenders: even
+# if a future route forgets the per-endpoint dependency, the middleware still
+# refuses owner traffic on merchant-scoped paths.
+
+import asyncio  # noqa: E402
+
+
+class _StubResponse:
+    """Minimal placeholder for the next() return value in middleware tests."""
+    def __init__(self) -> None:
+        self.status_code = 200
+        self.headers: dict = {}
+
+
+def _make_mw_request(path: str, payload: dict | None) -> SimpleNamespace:
+    state = SimpleNamespace()
+    if payload is not None:
+        state.jwt_payload = payload
+    return SimpleNamespace(
+        url=SimpleNamespace(path=path),
+        method="GET",
+        headers={},
+        client=SimpleNamespace(host="10.0.0.1"),
+        state=state,
+    )
+
+
+def _run_middleware(path: str, payload: dict | None):
+    from core.middleware import owner_merchant_scope_middleware
+
+    called = {"flag": False}
+
+    async def _next(_req):
+        called["flag"] = True
+        return _StubResponse()
+
+    response = asyncio.run(
+        owner_merchant_scope_middleware(_make_mw_request(path, payload), _next)
+    )
+    return response, called["flag"]
+
+
+class TestOwnerScopeMiddleware:
+    def test_no_payload_passes_through_for_public_paths(self):
+        response, called = _run_middleware("/health", payload=None)
+        assert called is True
+        assert response.status_code == 200
+
+    def test_merchant_token_passes_through_on_merchant_path(self):
+        response, called = _run_middleware(
+            "/orders",
+            payload={"role": "merchant", "tenant_id": 42, "sub": "m@x.sa"},
+        )
+        assert called is True
+        assert response.status_code == 200
+
+    def test_support_impersonation_passes_through_on_merchant_path(self):
+        response, called = _run_middleware(
+            "/conversations",
+            payload={
+                "role": "support_impersonation",
+                "tenant_id": 42,
+                "impersonation": True,
+                "sub": "m@x.sa",
+                "actor_sub": "support@nahla.ai",
+            },
+        )
+        assert called is True
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        "owner_path",
+        [
+            "/admin",
+            "/admin/stats",
+            "/admin/tenants/42/summary",
+            "/tenants/42",
+            "/whatsapp/admin/coexistence/activate",
+            "/system/health",
+            "/system/events",
+            "/auth/refresh",
+            "/health",
+        ],
+    )
+    def test_owner_passes_through_on_allowlisted_paths(self, owner_path: str):
+        response, called = _run_middleware(
+            owner_path,
+            payload={"role": "owner", "tenant_id": 1, "sub": "owner@nahla.ai"},
+        )
+        assert called is True
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize(
+        "merchant_path",
+        [
+            "/orders",
+            "/orders/123",
+            "/conversations",
+            "/customers",
+            "/coupons",
+            "/promotions",
+            "/campaigns",
+            "/templates/whatsapp",
+            "/automations",
+            "/intelligence/insights",
+            "/handoff/queue",
+            "/store-sync/status",
+            "/store-sync/knowledge",
+            "/store-integration/sync",
+            "/integrations/salla",
+            "/whatsapp/usage",
+            "/whatsapp/connection",
+            "/ai-sales/sessions",
+            "/analytics/overview",
+            "/offers/decisions",
+            "/billing/subscription",
+            "/settings/business",
+            "/merchant/support-access",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "owner_role",
+        ["admin", "owner", "super_admin", "platform_admin", "platform_owner"],
+    )
+    def test_owner_blocked_on_merchant_paths(
+        self, merchant_path: str, owner_role: str
+    ):
+        response, called = _run_middleware(
+            merchant_path,
+            payload={
+                "role": owner_role,
+                "tenant_id": 1,
+                "sub": "owner@nahla.ai",
+            },
+        )
+        # The route handler must NEVER be invoked for a denied request.
+        assert called is False
+        assert response.status_code == 403
+
+    def test_owner_blocked_path_emits_audit(self):
+        from unittest.mock import patch as _patch
+
+        async def _next(_req):
+            raise AssertionError("must not be called for denied request")
+
+        with _patch("core.middleware.audit") as audit_mock:
+            from core.middleware import owner_merchant_scope_middleware
+            response = asyncio.run(
+                owner_merchant_scope_middleware(
+                    _make_mw_request(
+                        "/whatsapp/usage",
+                        {"role": "owner", "tenant_id": 1, "sub": "owner@nahla.ai"},
+                    ),
+                    _next,
+                )
+            )
+        assert response.status_code == 403
+        audit_mock.assert_called_once()
+        event_name, kwargs = audit_mock.call_args.args[0], audit_mock.call_args.kwargs
+        assert event_name == "merchant_scope_denied_for_admin"
+        assert kwargs["path"] == "/whatsapp/usage"
+        assert kwargs["role"] == "owner"
+        assert kwargs["source"] == "middleware"
+
+    def test_admin_with_impersonation_flag_passes_on_merchant_path(self):
+        response, called = _run_middleware(
+            "/orders",
+            payload={
+                "role": "admin",
+                "tenant_id": 42,
+                "impersonation": True,
+                "sub": "owner@nahla.ai",
+                "actor_sub": "owner@nahla.ai",
+            },
+        )
+        assert called is True
+        assert response.status_code == 200

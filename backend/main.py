@@ -42,6 +42,7 @@ from core.middleware import (  # noqa: E402
     global_rate_limit_middleware,
     jwt_enforcement_middleware,
     multi_tenant_middleware,
+    owner_merchant_scope_middleware,
     request_logging_middleware,
     salla_iframe_middleware,
     support_session_middleware,
@@ -73,6 +74,11 @@ app.middleware("http")(request_logging_middleware)
 # support_session_middleware runs AFTER jwt_enforcement so jwt_payload is already set.
 # It rejects revoked support tokens and blocks sensitive paths.
 app.middleware("http")(support_session_middleware)
+# owner_merchant_scope_middleware runs AFTER jwt_enforcement, BEFORE the route
+# handler. It is the framework-level guard that refuses platform-admin tokens
+# on merchant-scoped endpoints — defense in depth on top of any per-endpoint
+# require_merchant_scope dependency.
+app.middleware("http")(owner_merchant_scope_middleware)
 app.middleware("http")(jwt_enforcement_middleware)
 app.middleware("http")(salla_iframe_middleware)
 

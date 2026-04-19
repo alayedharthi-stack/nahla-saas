@@ -14,7 +14,8 @@ import time as _time
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from core.auth import JWT_AVAILABLE, decode_token
+from core.auth import JWT_AVAILABLE, PLATFORM_ADMIN_ROLES, decode_token
+from core.audit import audit
 from core.config import API_SECRET_KEY
 
 logger = logging.getLogger("nahla-backend")
@@ -265,6 +266,102 @@ async def jwt_enforcement_middleware(request: Request, call_next):
 
     request.state.tenant_id = str(int(tid))
     return await call_next(request)
+
+
+# ── Owner ↔ merchant scope isolation middleware ────────────────────────────────
+
+# Authenticated paths a platform-admin token MAY call without explicitly
+# impersonating a specific merchant.
+#
+# Anything outside this allowlist is treated as a merchant-scoped endpoint:
+# admin/owner tokens reaching such an endpoint without an ``impersonation``
+# JWT claim are refused with HTTP 403, because admin tokens carry
+# ``tenant_id = 1`` by convention (see ``jwt_enforcement_middleware``) and
+# would otherwise leak that one tenant's data into the owner UI.
+#
+# Order rules:
+# * Keep the prefix as specific as possible — broad prefixes can accidentally
+#   expose protected merchant routes that happen to share a prefix.
+# * Public routes (``JWT_PUBLIC_PREFIXES``) are skipped automatically because
+#   the JWT middleware lets them through without a payload, so this middleware
+#   never reaches the role check for them.
+OWNER_ALLOWED_PREFIXES = (
+    "/admin",                # all owner/admin APIs (revenue, tenants, features, …)
+    "/tenants/",             # GET /tenants/{id} alias gated by require_admin
+    "/whatsapp/admin/",      # admin-only WhatsApp coexistence ops
+    "/system/health",        # platform health (admin dashboards)
+    "/system/events",        # platform event log (admin dashboards)
+    "/auth",                 # login/refresh/logout (also public, but be explicit)
+    "/health",               # health probes
+)
+
+_owner_scope_audit = logging.getLogger("nahla.tenant_isolation_audit")
+
+
+async def owner_merchant_scope_middleware(request: Request, call_next):
+    """
+    Defense-in-depth tenant-isolation guard for the platform-admin role.
+
+    Runs AFTER :func:`jwt_enforcement_middleware` so ``request.state.jwt_payload``
+    is already decoded and validated. Skips public paths automatically (no
+    payload attached), skips merchant tokens, skips support-impersonation
+    tokens (which have already chosen an explicit, audited tenant scope).
+
+    For every other request, if the role is in :data:`PLATFORM_ADMIN_ROLES`
+    and the path is NOT in :data:`OWNER_ALLOWED_PREFIXES`, the request is
+    refused with HTTP 403 and an audit event is emitted. This blocks the
+    entire class of "owner-token-with-tenant_id=1 leaks merchant data into
+    the owner UI" bugs at the framework level instead of relying on every
+    router to remember the per-endpoint dependency.
+    """
+    payload = getattr(request.state, "jwt_payload", None)
+    if not payload:
+        return await call_next(request)
+
+    role = str(payload.get("role") or "").strip()
+    if role not in PLATFORM_ADMIN_ROLES:
+        return await call_next(request)
+
+    if payload.get("impersonation"):
+        return await call_next(request)
+
+    path = request.url.path
+    if any(path.startswith(p) for p in OWNER_ALLOWED_PREFIXES):
+        return await call_next(request)
+
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
+    _owner_scope_audit.warning(
+        "MERCHANT_SCOPE_DENIED_FOR_ADMIN role=%s sub=%s tenant=%s path=%s ip=%s",
+        role, payload.get("sub"), payload.get("tenant_id"), path, client_ip,
+    )
+    try:
+        audit(
+            "merchant_scope_denied_for_admin",
+            path=path,
+            method=request.method,
+            role=role,
+            sub=payload.get("sub"),
+            tenant_id=payload.get("tenant_id"),
+            ip=client_ip,
+            source="middleware",
+        )
+    except Exception as _e:  # never fail the rejection on an audit error
+        logger.error("[owner_scope] audit emission failed: %s", _e)
+
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": (
+                "هذه الواجهة مخصصة لبيانات تاجر محدد. "
+                "حسابات المنصة لا تستطيع قراءة بيانات متجر مباشرة دون "
+                "تفعيل وضع الدعم/التشخيص لمتجر محدد."
+            ),
+            "code": "merchant_scope_required",
+        },
+        headers=_cors_error_headers(request),
+    )
 
 
 # ── Support-session middleware ─────────────────────────────────────────────────
