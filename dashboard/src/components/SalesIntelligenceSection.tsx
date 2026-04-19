@@ -194,11 +194,16 @@ export default function SalesIntelligenceSection({ lang }: Props) {
         {/* Header */}
         <div className="text-center mb-10 sm:mb-14">
           <span
-            className="inline-flex items-center px-3 py-1 rounded-full
+            className="inline-flex items-center gap-1.5 ps-1 pe-3 py-1 rounded-full
                        bg-amber-500/15 border border-amber-500/40
                        text-amber-300 text-xs font-semibold tracking-wide mb-4"
           >
-            <span className="me-1.5">🐝</span>
+            <img
+              src="/logo.png"
+              alt=""
+              aria-hidden="true"
+              className="w-5 h-5 object-contain drop-shadow"
+            />
             {c.badge}
           </span>
           <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-white leading-tight">
