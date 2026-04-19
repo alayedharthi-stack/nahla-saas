@@ -5,8 +5,8 @@
  * subscription, powered by the webhook_guardian backend worker.
  *
  * Health statuses:
- *   active       – verified + received event in last 15 min   (green)
- *   warning      – verified but no recent event               (yellow)
+ *   active       – verified and no actual failure signals     (green)
+ *   idle         – verified but no recent inbound event       (yellow)
  *   critical     – webhook_verified=false while connected      (red — CRITICAL)
  *   disconnected – status != connected                         (grey)
  */
@@ -20,7 +20,7 @@ import { apiCall } from '../api/client'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type HealthStatus = 'active' | 'warning' | 'critical' | 'disconnected'
+type HealthStatus = 'active' | 'idle' | 'critical' | 'disconnected'
 
 interface ConnectionHealth {
   tenant_id:                number
@@ -37,11 +37,12 @@ interface ConnectionHealth {
   last_error:               string | null
   connection_type:          string | null
   provider:                 string | null
+  health_reason?:           string | null
 }
 
 interface HealthSummary {
   active:       number
-  warning:      number
+  idle:         number
   critical:     number
   disconnected: number
   total:        number
@@ -83,7 +84,7 @@ function formatAgo(isoStr: string | null, minutes: number | null): string {
 
 const HEALTH_CONFIG: Record<HealthStatus, { label: string; cls: string; icon: React.ReactNode }> = {
   active:       { label: 'نشط',       cls: 'bg-emerald-100 text-emerald-700 border-emerald-200', icon: <CheckCircle2 className="w-3.5 h-3.5" /> },
-  warning:      { label: 'تحذير',     cls: 'bg-amber-100 text-amber-700 border-amber-200',       icon: <Clock className="w-3.5 h-3.5" /> },
+  idle:         { label: 'خامل',      cls: 'bg-amber-100 text-amber-700 border-amber-200',       icon: <Clock className="w-3.5 h-3.5" /> },
   critical:     { label: 'حرج',       cls: 'bg-red-100 text-red-700 border-red-200',             icon: <AlertTriangle className="w-3.5 h-3.5" /> },
   disconnected: { label: 'مفصول',     cls: 'bg-slate-100 text-slate-500 border-slate-200',       icon: <WifiOff className="w-3.5 h-3.5" /> },
 }
@@ -102,7 +103,7 @@ function HealthBadge({ status }: { status: HealthStatus }) {
 function EventBadge({ event, success }: { event: string; success: boolean }) {
   const base = 'text-[10px] px-1.5 py-0.5 rounded-full font-medium'
   if (!success) return <span className={`${base} bg-red-100 text-red-700`}>{event}</span>
-  if (event.includes('stalled'))  return <span className={`${base} bg-amber-100 text-amber-700`}>{event}</span>
+  if (event.includes('idle'))     return <span className={`${base} bg-amber-100 text-amber-700`}>{event}</span>
   if (event.includes('subscrib')) return <span className={`${base} bg-emerald-100 text-emerald-700`}>{event}</span>
   if (event.includes('critical')) return <span className={`${base} bg-red-100 text-red-700`}>{event}</span>
   return <span className={`${base} bg-slate-100 text-slate-600`}>{event}</span>
@@ -203,6 +204,11 @@ function ConnectionRow({
           {conn.last_error && (
             <div className="sm:col-span-2 mt-1 bg-red-50 border border-red-100 rounded-lg px-3 py-2 text-red-700">
               {conn.last_error}
+            </div>
+          )}
+          {conn.health_reason && (
+            <div className="sm:col-span-2 text-[11px] text-slate-400">
+              سبب الحالة: {conn.health_reason}
             </div>
           )}
         </div>
@@ -348,7 +354,7 @@ export default function AdminWebhookHealth() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
             { key: 'active' as HealthStatus,       label: 'نشط',       value: summary.active,       color: 'emerald' },
-            { key: 'warning' as HealthStatus,      label: 'تحذير',     value: summary.warning,      color: 'amber'   },
+            { key: 'idle' as HealthStatus,         label: 'خامل',      value: summary.idle,         color: 'amber'   },
             { key: 'critical' as HealthStatus,     label: 'حرج',       value: summary.critical,     color: 'red'     },
             { key: 'disconnected' as HealthStatus, label: 'مفصول',     value: summary.disconnected, color: 'slate'   },
           ].map(({ key, label, value, color }) => (

@@ -2054,15 +2054,26 @@ async def admin_resubscribe_webhook(
     if not conn.access_token:
         raise HTTPException(status_code=400, detail="Access Token غير متوفر — أعد الربط اليدوي أولاً")
 
-    from services.whatsapp_connection_service import subscribe_phone_webhook  # noqa: PLC0415
+    from core.webhook_guardian import _subscribe_phone  # noqa: PLC0415
+    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+    from services.whatsapp_platform.token_manager import get_token_context  # noqa: PLC0415
 
     waba_id  = conn.whatsapp_business_account_id
     phone_id = conn.phone_number_id
-    token    = conn.access_token
+    token_ctx = get_token_context(conn)
+    token    = token_ctx.token
 
-    success, err = subscribe_phone_webhook(
-        phone_id or "", token, tenant_id, waba_id=waba_id,
+    result = await _subscribe_phone(
+        phone_id,
+        waba_id,
+        token,
+        META_GRAPH_API_VERSION,
+        connection_type=conn.connection_type,
+        token_source=token_ctx.source,
+        tenant_id=tenant_id,
     )
+    success = result.success
+    err = result.error
     if success:
         conn.webhook_verified = True
         conn.updated_at       = datetime.now(timezone.utc)
@@ -2076,6 +2087,9 @@ async def admin_resubscribe_webhook(
         "tenant_id":       tenant_id,
         "phone_number_id": phone_id,
         "waba_id":         waba_id,
+        "subscribe_target": result.subscribe_target,
+        "token_source":     result.token_source,
+        "fallback_succeeded": result.fallback_succeeded,
         "error":           err,
         "note": (
             "تم الاشتراك بنجاح — يجب أن تصل الرسائل الآن." if success
@@ -2518,15 +2532,17 @@ async def admin_webhook_health(
     Return webhook health for every connected WhatsApp tenant.
 
     Health status values:
-        active      – webhook_verified=true AND received event in last 15 min
-        warning     – webhook_verified=true BUT last event >15 min ago (or never)
+        active      – verified and no actual webhook/Graph failure indicators
+        idle        – verified but no recent inbound event (silence only)
         critical    – webhook_verified=false while status=connected
         disconnected – status != connected
     """
     from datetime import timezone as _tz  # noqa: PLC0415
+    from core.webhook_guardian import _classify_connection_health, _health_reason  # noqa: PLC0415
 
     conns = db.query(WhatsAppConnection).order_by(WhatsAppConnection.id.asc()).all()
     now   = datetime.now(_tz.utc)
+    idle_cutoff = now - timedelta(minutes=15)
 
     rows = []
     for conn in conns:
@@ -2540,14 +2556,7 @@ async def admin_webhook_health(
         if last_recv:
             minutes_since_last = int((now - last_recv).total_seconds() / 60)
 
-        if conn.status != "connected":
-            health = "disconnected"
-        elif not conn.webhook_verified:
-            health = "critical"
-        elif last_recv is None or minutes_since_last > 15:
-            health = "warning"
-        else:
-            health = "active"
+        health = _classify_connection_health(conn, now, idle_cutoff)
 
         rows.append({
             "tenant_id":              conn.tenant_id,
@@ -2564,11 +2573,12 @@ async def admin_webhook_health(
             "last_error":             conn.last_error,
             "connection_type":        conn.connection_type,
             "provider":               conn.provider,
+            "health_reason":          _health_reason(conn, now, idle_cutoff),
         })
 
     summary = {
         "active":       sum(1 for r in rows if r["health"] == "active"),
-        "warning":      sum(1 for r in rows if r["health"] == "warning"),
+        "idle":         sum(1 for r in rows if r["health"] == "idle"),
         "critical":     sum(1 for r in rows if r["health"] == "critical"),
         "disconnected": sum(1 for r in rows if r["health"] == "disconnected"),
         "total":        len(rows),
@@ -2586,14 +2596,14 @@ async def admin_resubscribe_all_webhooks(
     Force-resubscribe every connected merchant WABA.
     Useful after a major deployment to ensure no merchant lost their webhook.
     """
-    from core.webhook_guardian import _subscribe_phone, _guardian_log  # noqa: PLC0415
+    from core.webhook_guardian import _subscribe_phone, _guardian_log, _format_guardian_detail  # noqa: PLC0415
     from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
     from datetime import timezone as _tz  # noqa: PLC0415
     from sqlalchemy import or_  # noqa: PLC0415
+    from services.whatsapp_platform.token_manager import get_token_context  # noqa: PLC0415
 
     conns = db.query(WhatsAppConnection).filter(
         WhatsAppConnection.status == "connected",
-        WhatsAppConnection.access_token.isnot(None),
         or_(
             WhatsAppConnection.phone_number_id.isnot(None),
             WhatsAppConnection.whatsapp_business_account_id.isnot(None),
@@ -2603,23 +2613,42 @@ async def admin_resubscribe_all_webhooks(
     results = {}
     for conn in conns:
         try:
-            ok = await _subscribe_phone(
+            token_ctx = get_token_context(conn)
+            result = await _subscribe_phone(
                 conn.phone_number_id,
                 conn.whatsapp_business_account_id,
-                conn.access_token,
+                token_ctx.token,
                 META_GRAPH_API_VERSION,
+                connection_type=conn.connection_type,
+                token_source=token_ctx.source,
+                tenant_id=conn.tenant_id,
             )
+            ok = result.success
             _guardian_log(
                 db, conn.tenant_id, conn.phone_number_id,
                 conn.whatsapp_business_account_id,
                 "webhook_resubscribed" if ok else "webhook_verification_failed",
                 success=ok,
-                detail=f"admin_resubscribe_all by {_admin.get('sub', 'admin')}",
+                detail=_format_guardian_detail(
+                    f"admin_resubscribe_all by {_admin.get('sub', 'admin')}",
+                    subscribe_target=result.subscribe_target,
+                    connection_type=result.connection_type,
+                    token_source=result.token_source,
+                    waba_id=result.waba_id,
+                    fallback_succeeded=result.fallback_succeeded,
+                    error=result.error,
+                ),
             )
             if ok:
                 conn.webhook_verified = True
                 conn.updated_at = datetime.now(_tz.utc)
-            results[conn.tenant_id] = {"ok": ok}
+            results[conn.tenant_id] = {
+                "ok": ok,
+                "subscribe_target": result.subscribe_target,
+                "token_source": result.token_source,
+                "fallback_succeeded": result.fallback_succeeded,
+                "error": result.error,
+            }
         except Exception as exc:
             results[conn.tenant_id] = {"ok": False, "error": str(exc)}
 
