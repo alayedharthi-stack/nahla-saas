@@ -340,202 +340,202 @@ async def _dispatch_message(
         logger.error("[Engine] Cannot open DB session for phone=%s", sender)
         return
 
-    # ── Resolve tenant from phone_number_id (must be exactly 1 match) ────────
-    wa_matches = (
-        db.query(WhatsAppConnection)
-        .filter(WhatsAppConnection.phone_number_id == phone_number_id)
-        .all()
-    )
-
-    if len(wa_matches) == 0:
-        logger.warning(
-            "[Webhook] DROPPED — no WhatsAppConnection for phone_number_id=%s from=%s",
-            phone_number_id, sender,
+    try:
+        # ── Resolve tenant from phone_number_id (must be exactly 1 match) ────────
+        wa_matches = (
+            db.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.phone_number_id == phone_number_id)
+            .all()
         )
-        # Log integrity event for observability
+
+        if len(wa_matches) == 0:
+            logger.warning(
+                "[Webhook] DROPPED — no WhatsAppConnection for phone_number_id=%s from=%s",
+                phone_number_id, sender,
+            )
+            # Log integrity event for observability
+            try:
+                from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
+                _lie(
+                    db, "tenant_resolved",
+                    phone_number_id=phone_number_id,
+                    action="webhook_dispatch",
+                    result="dropped_no_match",
+                    detail=f"No WhatsAppConnection for phone_number_id={phone_number_id}",
+                )
+                db.commit()
+            except Exception:
+                pass
+            return
+
+        if len(wa_matches) > 1:
+            # CRITICAL: ambiguous routing — phone_number_id is supposed to be globally unique.
+            # The unique partial index should prevent this, but we guard defensively.
+            tenant_ids = [c.tenant_id for c in wa_matches]
+            logger.critical(
+                "[Webhook] CRITICAL — AMBIGUOUS phone_number_id=%s matched %d tenants=%s — DROPPED",
+                phone_number_id, len(wa_matches), tenant_ids,
+            )
+            try:
+                from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
+                _lie(
+                    db, "duplicate_identity",
+                    phone_number_id=phone_number_id,
+                    action="webhook_dispatch",
+                    result="dropped_ambiguous",
+                    detail=f"phone_number_id={phone_number_id} matched {len(wa_matches)} tenants: {tenant_ids}",
+                )
+                db.commit()
+            except Exception:
+                pass
+            return
+
+        wa_conn = wa_matches[0]
+
+        # Log successful tenant resolution
         try:
             from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
             _lie(
                 db, "tenant_resolved",
+                tenant_id=wa_conn.tenant_id,
                 phone_number_id=phone_number_id,
                 action="webhook_dispatch",
-                result="dropped_no_match",
-                detail=f"No WhatsAppConnection for phone_number_id={phone_number_id}",
+                result="ok",
             )
-            db.commit()
         except Exception:
             pass
-        return
 
-    if len(wa_matches) > 1:
-        # CRITICAL: ambiguous routing — phone_number_id is supposed to be globally unique.
-        # The unique partial index should prevent this, but we guard defensively.
-        tenant_ids = [c.tenant_id for c in wa_matches]
-        logger.critical(
-            "[Webhook] CRITICAL — AMBIGUOUS phone_number_id=%s matched %d tenants=%s — DROPPED",
-            phone_number_id, len(wa_matches), tenant_ids,
+        used_pid           = wa_conn.phone_number_id
+        resolved_tenant_id = wa_conn.tenant_id
+        logger.info(
+            "[TRACE][2/6] TENANT_RESOLVED | phone_number_id=%s tenant_id=%s status=%s",
+            used_pid, resolved_tenant_id, wa_conn.status,
         )
+
+        # ── Stamp last_webhook_received_at for guardian activity tracking ─────────
         try:
-            from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
-            _lie(
-                db, "duplicate_identity",
-                phone_number_id=phone_number_id,
-                action="webhook_dispatch",
-                result="dropped_ambiguous",
-                detail=f"phone_number_id={phone_number_id} matched {len(wa_matches)} tenants: {tenant_ids}",
+            from datetime import timezone as _tz  # noqa: PLC0415
+            from datetime import datetime as _dt  # noqa: PLC0415
+            wa_conn.last_webhook_received_at = _dt.now(_tz.utc)
+            db.add(wa_conn)
+            db.flush()
+        except Exception as _stamp_exc:
+            logger.debug("[Webhook] Failed to stamp last_webhook_received_at: %s", _stamp_exc)
+
+        normalized_sender = normalize_phone(sender) or sender
+        contact_name = _extract_contact_name(value, sender)
+        _inbound_customer_id: int | None = None
+        try:
+            _lead = CustomerIntelligenceService(db, resolved_tenant_id).upsert_lead_customer(
+                phone=normalized_sender,
+                name=contact_name or normalized_sender,
+                source="whatsapp_inbound",
+                extra_metadata={
+                    "channel": "whatsapp",
+                    "phone_number_id": phone_number_id,
+                    "provider": wa_provider(wa_conn),
+                },
+                commit=True,
             )
-            db.commit()
-        except Exception:
-            pass
-        return
+            if _lead:
+                _inbound_customer_id = _lead.id
+            track_conversation(
+                db,
+                resolved_tenant_id,
+                normalized_sender,
+                source="inbound",
+                category="service",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Webhook] Failed to sync inbound customer lead | tenant=%s sender=%s err=%s",
+                resolved_tenant_id, normalized_sender, exc,
+            )
 
-    wa_conn = wa_matches[0]
+        # Emit automation event for inbound WhatsApp message (non-blocking)
+        try:
+            from core.automation_engine import emit_automation_event  # noqa: PLC0415
+            emit_automation_event(
+                db,
+                resolved_tenant_id,
+                "whatsapp_message_received",
+                customer_id=_inbound_customer_id,
+                payload={
+                    "phone": normalized_sender,
+                    "msg_type": msg_type,
+                    "phone_number_id": phone_number_id,
+                },
+                commit=True,
+            )
+        except Exception as exc:
+            logger.debug("[Webhook] emit whatsapp_message_received failed: %s", exc)
 
-    # Log successful tenant resolution
-    try:
-        from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
-        _lie(
-            db, "tenant_resolved",
-            tenant_id=wa_conn.tenant_id,
-            phone_number_id=phone_number_id,
-            action="webhook_dispatch",
-            result="ok",
-        )
-    except Exception:
-        pass
+        # ── Handle interactive button replies ──────────────────────────────────────
+        if msg_type == "interactive":
+            interactive = msg.get("interactive", {})
+            if interactive.get("type") == "button_reply":
+                br      = interactive.get("button_reply", {}) or {}
+                btn_id  = br.get("id", "")
+                btn_txt = br.get("title", "") or btn_id
 
-    used_pid           = wa_conn.phone_number_id
-    resolved_tenant_id = wa_conn.tenant_id
-    logger.info(
-        "[TRACE][2/6] TENANT_RESOLVED | phone_number_id=%s tenant_id=%s status=%s",
-        used_pid, resolved_tenant_id, wa_conn.status,
-    )
-
-    # ── Stamp last_webhook_received_at for guardian activity tracking ─────────
-    try:
-        from datetime import timezone as _tz  # noqa: PLC0415
-        from datetime import datetime as _dt  # noqa: PLC0415
-        wa_conn.last_webhook_received_at = _dt.now(_tz.utc)
-        db.add(wa_conn)
-        db.flush()
-    except Exception as _stamp_exc:
-        logger.debug("[Webhook] Failed to stamp last_webhook_received_at: %s", _stamp_exc)
-
-    normalized_sender = normalize_phone(sender) or sender
-    contact_name = _extract_contact_name(value, sender)
-    _inbound_customer_id: int | None = None
-    try:
-        _lead = CustomerIntelligenceService(db, resolved_tenant_id).upsert_lead_customer(
-            phone=normalized_sender,
-            name=contact_name or normalized_sender,
-            source="whatsapp_inbound",
-            extra_metadata={
-                "channel": "whatsapp",
-                "phone_number_id": phone_number_id,
-                "provider": wa_provider(wa_conn),
-            },
-            commit=True,
-        )
-        if _lead:
-            _inbound_customer_id = _lead.id
-        track_conversation(
-            db,
-            resolved_tenant_id,
-            normalized_sender,
-            source="inbound",
-            category="service",
-        )
-    except Exception as exc:
-        logger.warning(
-            "[Webhook] Failed to sync inbound customer lead | tenant=%s sender=%s err=%s",
-            resolved_tenant_id, normalized_sender, exc,
-        )
-
-    # Emit automation event for inbound WhatsApp message (non-blocking)
-    try:
-        from core.automation_engine import emit_automation_event  # noqa: PLC0415
-        emit_automation_event(
-            db,
-            resolved_tenant_id,
-            "whatsapp_message_received",
-            customer_id=_inbound_customer_id,
-            payload={
-                "phone": normalized_sender,
-                "msg_type": msg_type,
-                "phone_number_id": phone_number_id,
-            },
-            commit=True,
-        )
-    except Exception as exc:
-        logger.debug("[Webhook] emit whatsapp_message_received failed: %s", exc)
-
-    # ── Handle interactive button replies ──────────────────────────────────────
-    if msg_type == "interactive":
-        interactive = msg.get("interactive", {})
-        if interactive.get("type") == "button_reply":
-            br      = interactive.get("button_reply", {}) or {}
-            btn_id  = br.get("id", "")
-            btn_txt = br.get("title", "") or btn_id
-
-            # COD confirmation flow runs for every tenant (it's a merchant-
-            # facing template, not the Nahla SaaS sales bot). Try it FIRST so
-            # the platform-sales button handler doesn't accidentally swallow
-            # a "تأكيد الطلب" tap on a merchant tenant.
-            try:
-                from services.cod_confirmation import (  # noqa: PLC0415
-                    classify_cod_reply, handle_cod_reply,
-                )
-                if classify_cod_reply(btn_txt) is not None:
-                    decision, order = await handle_cod_reply(
-                        db,
-                        tenant_id=resolved_tenant_id,
-                        customer_phone=sender,
-                        text=btn_txt,
+                # COD confirmation flow runs for every tenant (it's a merchant-
+                # facing template, not the Nahla SaaS sales bot). Try it FIRST so
+                # the platform-sales button handler doesn't accidentally swallow
+                # a "تأكيد الطلب" tap on a merchant tenant.
+                try:
+                    from services.cod_confirmation import (  # noqa: PLC0415
+                        classify_cod_reply, handle_cod_reply,
                     )
-                    if order is not None:
-                        await _send_cod_followup_message(
-                            phone_id=used_pid, to=sender,
-                            decision=decision, order=order,
-                            _tenant_id=resolved_tenant_id, _db=db,
+                    if classify_cod_reply(btn_txt) is not None:
+                        decision, order = await handle_cod_reply(
+                            db,
+                            tenant_id=resolved_tenant_id,
+                            customer_phone=sender,
+                            text=btn_txt,
                         )
-                        return
-            except Exception as exc:
-                logger.error("[Webhook] COD button handler failed: %s", exc)
+                        if order is not None:
+                            await _send_cod_followup_message(
+                                phone_id=used_pid, to=sender,
+                                decision=decision, order=order,
+                                _tenant_id=resolved_tenant_id, _db=db,
+                            )
+                            return
+                except Exception as exc:
+                    logger.error("[Webhook] COD button handler failed: %s", exc)
 
-            await _handle_button_reply(
-                btn_id=btn_id, phone_id=used_pid, to=sender,
+                await _handle_button_reply(
+                    btn_id=btn_id, phone_id=used_pid, to=sender,
+                    tenant_id=resolved_tenant_id, db=db,
+                )
+            return
+
+        if msg_type != "text":
+            return
+
+        text = msg.get("text", {}).get("body", "").strip()
+        if not text:
+            return
+
+        # ── Merchant vs Platform routing ─────────────────────────────────────────
+        # We used to hard-code `PLATFORM_TENANT_ID = 1` here, which silently
+        # routed real merchants whose tenant happened to live at id=1 into
+        # the platform sales-bot flow (CTA "سجّل في نحلة" instead of the
+        # store's AI). The decision now lives in the data: a tenant is the
+        # platform workspace ONLY when `tenants.is_platform_tenant=True`.
+        # When no tenant has the flag, every inbound message defaults to
+        # merchant flow — which is the safe, expected behaviour for any
+        # production environment that hasn't explicitly enabled the
+        # platform-brain workspace.
+        if not _is_platform_tenant(db, resolved_tenant_id):
+            await _handle_merchant_message(
+                phone_id=used_pid, to=sender, text=text,
                 tenant_id=resolved_tenant_id, db=db,
             )
-        return
+            return
 
-    if msg_type != "text":
-        return
+        turn_log: Optional[TurnLog] = None
+        effective_tenant_id = resolved_tenant_id
 
-    text = msg.get("text", {}).get("body", "").strip()
-    if not text:
-        return
-
-    # ── Merchant vs Platform routing ─────────────────────────────────────────
-    # We used to hard-code `PLATFORM_TENANT_ID = 1` here, which silently
-    # routed real merchants whose tenant happened to live at id=1 into
-    # the platform sales-bot flow (CTA "سجّل في نحلة" instead of the
-    # store's AI). The decision now lives in the data: a tenant is the
-    # platform workspace ONLY when `tenants.is_platform_tenant=True`.
-    # When no tenant has the flag, every inbound message defaults to
-    # merchant flow — which is the safe, expected behaviour for any
-    # production environment that hasn't explicitly enabled the
-    # platform-brain workspace.
-    if not _is_platform_tenant(db, resolved_tenant_id):
-        await _handle_merchant_message(
-            phone_id=used_pid, to=sender, text=text,
-            tenant_id=resolved_tenant_id, db=db,
-        )
-        return
-
-    turn_log: Optional[TurnLog] = None
-    effective_tenant_id = resolved_tenant_id
-
-    try:
         # ── ① Load state — scoped to the correct merchant tenant ──────────────
         state = StateManager.load(db, phone=sender, tenant_id=effective_tenant_id)
         stage_before = state.stage
@@ -1037,6 +1037,7 @@ async def _post_wa(
     _store_name: str = "unknown",
     _db=None,
 ) -> None:
+    owns_db = False
     wa_conn = None
     if _tenant_id and _db:
         try:
@@ -1050,6 +1051,7 @@ async def _post_wa(
     if wa_conn is None and _db is None:
         try:
             _db = next(get_db(), None)
+            owns_db = _db is not None
         except Exception:
             _db = None
     if wa_conn is None and _db is not None:
@@ -1070,118 +1072,126 @@ async def _post_wa(
         except Exception:
             pass
 
-    # Lightweight in-process throttling to avoid accidental burst sends to the
-    # same recipient. This is not a queue, but it protects against runaway
-    # loops/retries within a single process.
-    from observability.rate_limiter import check_rate_limit  # noqa: PLC0415
-    recipient = str(payload.get("to") or "")
-    rate_key = f"wa-send:{_tenant_id or 'platform'}:{recipient}"
-    if not check_rate_limit(rate_key, max_count=6, window_seconds=10):
-        logger.warning(
-            "[WA] throttled burst send | tenant_id=%s to=%s phone_number_id=%s",
-            _tenant_id, recipient, phone_id,
-        )
-        return
-    if not check_rate_limit(rate_key, max_count=20, window_seconds=60):
-        logger.warning(
-            "[WA] throttled minute send | tenant_id=%s to=%s phone_number_id=%s",
-            _tenant_id, recipient, phone_id,
-        )
-        return
     try:
-        resp_data, ctx = await provider_send_message(
-            _db,
-            wa_conn,
-            tenant_id=_tenant_id,
-            operation="send_message",
-            phone_id=phone_id,
-            payload=payload,
-            prefer_platform=bool(wa_conn and getattr(wa_conn, "connection_type", None) == "direct"),
-            timeout=15,
-        )
-        token_tail = ctx.token[-6:] if ctx.token and len(ctx.token) >= 6 else "EMPTY"
-        logger.info(
-            "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_source=%s token_tail=%s to=%s",
-            _tenant_id, _store_name, phone_id, ctx.source, token_tail, payload.get("to", "?"),
-        )
-        logger.info(
-            "[SEND_DEBUG] provider response | tenant=%s phone_number_id=%s provider_payload=%s",
-            _tenant_id, phone_id, resp_data,
-        )
-        if "error" in (resp_data or {}):
-            err = (resp_data.get("error") or {}) if isinstance(resp_data, dict) else {}
-            err_code = err.get("code")
-            err_subcode = err.get("error_subcode")
-            logger.warning("[WA] provider send failed: %.200s", str(resp_data))
+        # Lightweight in-process throttling to avoid accidental burst sends to the
+        # same recipient. This is not a queue, but it protects against runaway
+        # loops/retries within a single process.
+        from observability.rate_limiter import check_rate_limit  # noqa: PLC0415
+        recipient = str(payload.get("to") or "")
+        rate_key = f"wa-send:{_tenant_id or 'platform'}:{recipient}"
+        if not check_rate_limit(rate_key, max_count=6, window_seconds=10):
+            logger.warning(
+                "[WA] throttled burst send | tenant_id=%s to=%s phone_number_id=%s",
+                _tenant_id, recipient, phone_id,
+            )
+            return
+        if not check_rate_limit(rate_key, max_count=20, window_seconds=60):
+            logger.warning(
+                "[WA] throttled minute send | tenant_id=%s to=%s phone_number_id=%s",
+                _tenant_id, recipient, phone_id,
+            )
+            return
 
-            # Self-heal: GraphMethodException (code=100, subcode=33) on
-            # /{phone_id}/messages typically means the phone has not been
-            # registered with the Cloud API under our app, OR the active
-            # token lacks `whatsapp_business_messaging` on this WABA.
-            # Attempt /register once per process for this phone_id and
-            # retry the send. If register also fails, we surface a clear
-            # diagnostic so the merchant can see "needs reauth".
-            if (
-                err_code == 100
-                and err_subcode == 33
-                and phone_id
-                and phone_id not in _AUTO_REREGISTERED_PHONE_IDS
-                and ctx
-                and ctx.token
-            ):
-                _AUTO_REREGISTERED_PHONE_IDS.add(phone_id)
-                logger.warning(
-                    "[WA] auto-register attempt — tenant=%s phone_id=%s "
-                    "token_source=%s (response was code=100/subcode=33; "
-                    "phone likely not registered or token lacks WABA scope)",
-                    _tenant_id, phone_id, ctx.source,
-                )
-                try:
-                    from services.whatsapp_connection_service import (  # noqa: PLC0415
-                        register_phone_number,
-                    )
-                    reg_ok, reg_err = register_phone_number(
-                        phone_id, ctx.token, _tenant_id or 0,
-                    )
-                except Exception as reg_exc:  # noqa: BLE001
-                    reg_ok, reg_err = False, str(reg_exc)
-                if reg_ok:
-                    logger.info(
-                        "[WA] auto-register OK — retrying send tenant=%s phone_id=%s",
-                        _tenant_id, phone_id,
+        try:
+            resp_data, ctx = await provider_send_message(
+                _db,
+                wa_conn,
+                tenant_id=_tenant_id,
+                operation="send_message",
+                phone_id=phone_id,
+                payload=payload,
+                prefer_platform=bool(wa_conn and getattr(wa_conn, "connection_type", None) == "direct"),
+                timeout=15,
+            )
+            token_tail = ctx.token[-6:] if ctx.token and len(ctx.token) >= 6 else "EMPTY"
+            logger.info(
+                "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_source=%s token_tail=%s to=%s",
+                _tenant_id, _store_name, phone_id, ctx.source, token_tail, payload.get("to", "?"),
+            )
+            logger.info(
+                "[SEND_DEBUG] provider response | tenant=%s phone_number_id=%s provider_payload=%s",
+                _tenant_id, phone_id, resp_data,
+            )
+            if "error" in (resp_data or {}):
+                err = (resp_data.get("error") or {}) if isinstance(resp_data, dict) else {}
+                err_code = err.get("code")
+                err_subcode = err.get("error_subcode")
+                logger.warning("[WA] provider send failed: %.200s", str(resp_data))
+
+                # Self-heal: GraphMethodException (code=100, subcode=33) on
+                # /{phone_id}/messages typically means the phone has not been
+                # registered with the Cloud API under our app, OR the active
+                # token lacks `whatsapp_business_messaging` on this WABA.
+                # Attempt /register once per process for this phone_id and
+                # retry the send. If register also fails, we surface a clear
+                # diagnostic so the merchant can see "needs reauth".
+                if (
+                    err_code == 100
+                    and err_subcode == 33
+                    and phone_id
+                    and phone_id not in _AUTO_REREGISTERED_PHONE_IDS
+                    and ctx
+                    and ctx.token
+                ):
+                    _AUTO_REREGISTERED_PHONE_IDS.add(phone_id)
+                    logger.warning(
+                        "[WA] auto-register attempt — tenant=%s phone_id=%s "
+                        "token_source=%s (response was code=100/subcode=33; "
+                        "phone likely not registered or token lacks WABA scope)",
+                        _tenant_id, phone_id, ctx.source,
                     )
                     try:
-                        retry_data, _retry_ctx = await provider_send_message(
-                            _db, wa_conn,
-                            tenant_id=_tenant_id,
-                            operation="send_message_retry",
-                            phone_id=phone_id,
-                            payload=payload,
-                            prefer_platform=bool(
-                                wa_conn
-                                and getattr(wa_conn, "connection_type", None) == "direct"
-                            ),
-                            timeout=15,
+                        from services.whatsapp_connection_service import (  # noqa: PLC0415
+                            register_phone_number,
                         )
+                        reg_ok, reg_err = register_phone_number(
+                            phone_id, ctx.token, _tenant_id or 0,
+                        )
+                    except Exception as reg_exc:  # noqa: BLE001
+                        reg_ok, reg_err = False, str(reg_exc)
+                    if reg_ok:
                         logger.info(
-                            "[SEND_DEBUG] retry-after-register | tenant=%s phone_id=%s "
-                            "result=%s",
+                            "[WA] auto-register OK — retrying send tenant=%s phone_id=%s",
                             _tenant_id, phone_id,
-                            "ok" if "error" not in (retry_data or {}) else "still_failed",
                         )
-                    except Exception as retry_exc:  # noqa: BLE001
+                        try:
+                            retry_data, _retry_ctx = await provider_send_message(
+                                _db, wa_conn,
+                                tenant_id=_tenant_id,
+                                operation="send_message_retry",
+                                phone_id=phone_id,
+                                payload=payload,
+                                prefer_platform=bool(
+                                    wa_conn
+                                    and getattr(wa_conn, "connection_type", None) == "direct"
+                                ),
+                                timeout=15,
+                            )
+                            logger.info(
+                                "[SEND_DEBUG] retry-after-register | tenant=%s phone_id=%s "
+                                "result=%s",
+                                _tenant_id, phone_id,
+                                "ok" if "error" not in (retry_data or {}) else "still_failed",
+                            )
+                        except Exception as retry_exc:  # noqa: BLE001
+                            logger.error(
+                                "[WA] retry-after-register failed: %s", retry_exc,
+                            )
+                    else:
                         logger.error(
-                            "[WA] retry-after-register failed: %s", retry_exc,
+                            "[WA] auto-register FAILED — tenant=%s phone_id=%s err=%r — "
+                            "merchant likely needs to re-authenticate WhatsApp from the "
+                            "dashboard (active token does not have permission for this WABA)",
+                            _tenant_id, phone_id, reg_err,
                         )
-                else:
-                    logger.error(
-                        "[WA] auto-register FAILED — tenant=%s phone_id=%s err=%r — "
-                        "merchant likely needs to re-authenticate WhatsApp from the "
-                        "dashboard (active token does not have permission for this WABA)",
-                        _tenant_id, phone_id, reg_err,
-                    )
-    except Exception as exc:
-        logger.error("[WA] post error: %s", exc)
+        except Exception as exc:
+            logger.error("[WA] post error: %s", exc)
+    finally:
+        if owns_db and _db is not None:
+            try:
+                _db.close()
+            except Exception:
+                pass
 
 
 async def _send_whatsapp_message(
@@ -1299,99 +1309,104 @@ async def _handle_button_reply(
     tenant_id: Optional[int] = None, db=None,
 ) -> None:
     """Handle interactive button taps — all deterministic, no Claude."""
+    owns_db = False
     if db is None:
         db = next(get_db(), None)
-    state = StateManager.load(db, phone=to, tenant_id=tenant_id) if db else None
+        owns_db = db is not None
+    try:
+        state = StateManager.load(db, phone=to, tenant_id=tenant_id) if db else None
 
-    if btn_id == "contact_founder":
-        await _send_whatsapp_message(
-            phone_id=phone_id, to=to,
-            text="زين! تقدر تتواصل مع المؤسس مباشرةً على واتساب 👇\nhttps://wa.me/966555906901",
-            _tenant_id=tenant_id, _db=db,
-        )
+        if btn_id == "contact_founder":
+            await _send_whatsapp_message(
+                phone_id=phone_id, to=to,
+                text="زين! تقدر تتواصل مع المؤسس مباشرةً على واتساب 👇\nhttps://wa.me/966555906901",
+                _tenant_id=tenant_id, _db=db,
+            )
 
-    elif btn_id == "menu_how":
-        await _send_interactive_reply(
-            phone_id=phone_id, to=to,
-            body_text=(
-                "نحلة ترد على عملاء متجرك في واتساب وتساعدهم يكملون طلباتهم لوحدها 🤖\n"
-                "24/7 — بدون ما تتدخل أنت.\n\nمتجرك على أي منصة؟"
-            ),
-            buttons=[
-                {"type": "reply", "reply": {"id": "store_salla", "title": "سلة 🛒"}},
-                {"type": "reply", "reply": {"id": "store_zid",   "title": "زد 🛒"}},
-                {"type": "reply", "reply": {"id": "store_other", "title": "منصة ثانية"}},
-            ],
-            _tenant_id=tenant_id, _db=db,
-        )
-        if state:
-            DeduplicationGuard.mark_asked(state, "ask_platform")
+        elif btn_id == "menu_how":
+            await _send_interactive_reply(
+                phone_id=phone_id, to=to,
+                body_text=(
+                    "نحلة ترد على عملاء متجرك في واتساب وتساعدهم يكملون طلباتهم لوحدها 🤖\n"
+                    "24/7 — بدون ما تتدخل أنت.\n\nمتجرك على أي منصة؟"
+                ),
+                buttons=[
+                    {"type": "reply", "reply": {"id": "store_salla", "title": "سلة 🛒"}},
+                    {"type": "reply", "reply": {"id": "store_zid",   "title": "زد 🛒"}},
+                    {"type": "reply", "reply": {"id": "store_other", "title": "منصة ثانية"}},
+                ],
+                _tenant_id=tenant_id, _db=db,
+            )
+            if state:
+                DeduplicationGuard.mark_asked(state, "ask_platform")
 
-    elif btn_id == "menu_price":
-        await _send_plans_message(phone_id=phone_id, to=to, db=db,
-                                  _tenant_id=tenant_id)
+        elif btn_id == "menu_price":
+            await _send_plans_message(phone_id=phone_id, to=to, db=db,
+                                      _tenant_id=tenant_id)
 
-    elif btn_id == "menu_trial":
-        await _send_trial_cta(phone_id=phone_id, to=to,
-                              _tenant_id=tenant_id, _db=db)
-        if state:
-            state.stage = "checkout"
-            state.purchase_score = 10
+        elif btn_id == "menu_trial":
+            await _send_trial_cta(phone_id=phone_id, to=to,
+                                  _tenant_id=tenant_id, _db=db)
+            if state:
+                state.stage = "checkout"
+                state.purchase_score = 10
 
-    elif btn_id in ("store_salla", "store_zid"):
-        platform = "سلة" if btn_id == "store_salla" else "زد"
-        if state:
-            state.slots.platform = platform
-            DeduplicationGuard.mark_asked(state, "ask_platform")
-        await _send_interactive_reply(
-            phone_id=phone_id, to=to,
-            body_text=f"ممتاز! نحلة تتكامل مع {platform} مباشرةً 🔗\nمتجرك كبير ولا صغير؟",
-            buttons=[
-                {"type": "reply", "reply": {"id": "store_small", "title": "صغير / ناشئ"}},
-                {"type": "reply", "reply": {"id": "store_big",   "title": "متوسط / كبير"}},
-            ],
-            _tenant_id=tenant_id, _db=db,
-        )
-        if state:
-            DeduplicationGuard.mark_asked(state, "ask_store_size")
+        elif btn_id in ("store_salla", "store_zid"):
+            platform = "سلة" if btn_id == "store_salla" else "زد"
+            if state:
+                state.slots.platform = platform
+                DeduplicationGuard.mark_asked(state, "ask_platform")
+            await _send_interactive_reply(
+                phone_id=phone_id, to=to,
+                body_text=f"ممتاز! نحلة تتكامل مع {platform} مباشرةً 🔗\nمتجرك كبير ولا صغير؟",
+                buttons=[
+                    {"type": "reply", "reply": {"id": "store_small", "title": "صغير / ناشئ"}},
+                    {"type": "reply", "reply": {"id": "store_big",   "title": "متوسط / كبير"}},
+                ],
+                _tenant_id=tenant_id, _db=db,
+            )
+            if state:
+                DeduplicationGuard.mark_asked(state, "ask_store_size")
 
-    elif btn_id == "store_other":
-        await _send_whatsapp_message(
-            phone_id=phone_id, to=to,
-            text="حالياً نحلة تدعم سلة وزد بشكل كامل.\nأي منصة تستخدم؟ نشوف إذا في حل 🤝",
-            _tenant_id=tenant_id, _db=db,
-        )
+        elif btn_id == "store_other":
+            await _send_whatsapp_message(
+                phone_id=phone_id, to=to,
+                text="حالياً نحلة تدعم سلة وزد بشكل كامل.\nأي منصة تستخدم؟ نشوف إذا في حل 🤝",
+                _tenant_id=tenant_id, _db=db,
+            )
 
-    elif btn_id in ("store_small", "store_big"):
-        size = "small" if btn_id == "store_small" else "large"
-        if state:
-            state.slots.store_size = size
-            state.stage = "recommendation"
-            state.recommended_plan = recommend_plan(state)
-            DeduplicationGuard.mark_asked(state, "ask_store_size")
-        plan_text = (
-            "باقة Starter — 899 ريال/شهر ✨" if size == "small"
-            else "باقة Pro أو Business 💎"
-        )
-        await _send_cta_url(
-            phone_id=phone_id, to=to,
-            body_text=f"الأنسب لمتجرك: {plan_text}\nجرّبها 14 يوم مجاناً — بدون بطاقة.",
-            btn_label="شوف الباقات وسجّل",
-            btn_url="https://app.nahlah.ai/billing",
-            _tenant_id=tenant_id, _db=db,
-        )
+        elif btn_id in ("store_small", "store_big"):
+            size = "small" if btn_id == "store_small" else "large"
+            if state:
+                state.slots.store_size = size
+                state.stage = "recommendation"
+                state.recommended_plan = recommend_plan(state)
+                DeduplicationGuard.mark_asked(state, "ask_store_size")
+            plan_text = (
+                "باقة Starter — 899 ريال/شهر ✨" if size == "small"
+                else "باقة Pro أو Business 💎"
+            )
+            await _send_cta_url(
+                phone_id=phone_id, to=to,
+                body_text=f"الأنسب لمتجرك: {plan_text}\nجرّبها 14 يوم مجاناً — بدون بطاقة.",
+                btn_label="شوف الباقات وسجّل",
+                btn_url="https://app.nahlah.ai/billing",
+                _tenant_id=tenant_id, _db=db,
+            )
 
-    else:
-        logger.debug("[Buttons] Unhandled id=%s", btn_id)
+        else:
+            logger.debug("[Buttons] Unhandled id=%s", btn_id)
 
-    # Persist state changes from button
-    if db and state:
-        try:
-            StateManager.save_message(db, to, f"[button:{btn_id}]", "inbound")
-            StateManager.save(db, state)
-        except Exception:
-            pass
-        try:
-            db.close()
-        except Exception:
-            pass
+        # Persist state changes from button
+        if db and state:
+            try:
+                StateManager.save_message(db, to, f"[button:{btn_id}]", "inbound")
+                StateManager.save(db, state)
+            except Exception:
+                pass
+    finally:
+        if owns_db and db:
+            try:
+                db.close()
+            except Exception:
+                pass

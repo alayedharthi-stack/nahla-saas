@@ -144,7 +144,7 @@ def _patch_send(monkeypatch, *, response: dict | None = None,
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ─────────────────────── 1. helpers forward tenant_id ───────────────────────

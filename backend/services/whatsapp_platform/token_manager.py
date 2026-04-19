@@ -206,7 +206,11 @@ def persist_token_context(
         oauth_session_message=ctx.oauth_session_message,
     )
     if conn is not None:
-        db.flush()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
     logger.info(
         "[WA token] op=%s tenant=%s source=%s token_status=%s token_expiry=%s oauth_session_status=%s",
         operation,

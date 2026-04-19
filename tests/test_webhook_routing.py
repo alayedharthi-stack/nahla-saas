@@ -274,3 +274,46 @@ def test_360dialog_smb_echoes_are_stored_without_dispatch(db):
     assert len(stored) == 1
     assert stored[0].direction == "outbound"
     assert stored[0].body == "رسالة من التاجر"
+
+
+def test_dispatch_message_closes_db_session_after_merchant_route(db):
+    """Merchant routing used to return before `_dispatch_message` reached any
+    cleanup block, leaking the SQLAlchemy session. That left transactions open
+    on `whatsapp_connections`, later blocking webhook delivery and even auth
+    requests behind a row lock."""
+    _tenant, conn = _seed(
+        db,
+        tenant_name="Merchant Route Tenant",
+        phone_number_id="PID_CLOSE",
+        waba_id="WABA_CLOSE",
+    )
+    import routers.whatsapp_webhook as wa_webhook  # noqa: PLC0415
+
+    close_calls = {"count": 0}
+    original_close = db.close
+
+    def tracked_close():
+        close_calls["count"] += 1
+        return original_close()
+
+    db.close = tracked_close
+    msg = {
+        "from": "966500000123",
+        "id": "wamid.close-check",
+        "type": "text",
+        "text": {"body": "مرحبا"},
+    }
+    value = {
+        "metadata": {"phone_number_id": "PID_CLOSE"},
+        "contacts": [{"wa_id": "966500000123", "profile": {"name": "Tester"}}],
+    }
+
+    with patch.object(wa_webhook, "get_db", return_value=iter([db])), patch.object(
+        wa_webhook, "_is_platform_tenant", return_value=False
+    ), patch.object(
+        wa_webhook, "_handle_merchant_message", new=AsyncMock()
+    ) as mock_merchant:
+        asyncio.run(wa_webhook._dispatch_message("PID_CLOSE", msg, value))
+
+    mock_merchant.assert_awaited_once()
+    assert close_calls["count"] == 1, "_dispatch_message leaked its DB session on merchant route"
