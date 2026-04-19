@@ -24,6 +24,7 @@ from models import StoreKnowledgeSnapshot, StoreSyncJob  # noqa: E402
 
 from core.database import get_db
 from core.tenant import resolve_tenant_id
+from core.auth import require_merchant_scope
 
 logger = logging.getLogger("nahla-backend")
 
@@ -56,6 +57,7 @@ async def trigger_full_sync(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    _scope: dict = Depends(require_merchant_scope),
 ):
     """
     Trigger a full store sync in the background.
@@ -97,7 +99,11 @@ async def trigger_full_sync(
 
 
 @router.get("/status")
-async def sync_status(request: Request, db: Session = Depends(get_db)):
+async def sync_status(
+    request: Request,
+    db: Session = Depends(get_db),
+    _scope: dict = Depends(require_merchant_scope),
+):
     """Return current sync status and entity counts."""
     tenant_id = resolve_tenant_id(request)
 
@@ -109,7 +115,11 @@ async def sync_status(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/knowledge")
-async def get_knowledge_overview(request: Request, db: Session = Depends(get_db)):
+async def get_knowledge_overview(
+    request: Request,
+    db: Session = Depends(get_db),
+    _scope: dict = Depends(require_merchant_scope),
+):
     """
     Return a summary of the AI-ready knowledge snapshot for this tenant.
     Does NOT include full product lists — for dashboard overview only.

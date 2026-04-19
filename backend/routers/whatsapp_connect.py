@@ -35,7 +35,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from models import WhatsAppConnection  # noqa: E402
 
 from core.audit import audit
-from core.auth import get_jwt_user_id, require_admin
+from core.auth import get_jwt_user_id, require_admin, require_merchant_scope
 from core.config import (
     BACKEND_URL,
     D360_COHOST_ALLOW_SELF_REQUEST,
@@ -1147,6 +1147,7 @@ async def get_usage(
     request:  Request,
     db:       Session = Depends(get_db),
     breakdown: bool   = False,
+    _scope:   dict    = Depends(require_merchant_scope),
 ):
     """
     Return this month's WhatsApp conversation usage for the tenant.

@@ -1,7 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
-import { register } from '../auth'
+import { register, getDefaultRoute } from '../auth'
 import { API_BASE } from '../api/client'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
@@ -54,7 +54,7 @@ export default function Register() {
     setLoading(true)
     const result = await register(email, password, storeName, phone, inviteToken)
     if (result.ok) {
-      navigate('/overview', { replace: true })
+      navigate(getDefaultRoute(), { replace: true })
     } else {
       setError(result.error ?? (lang === 'ar' ? 'فشل التسجيل' : 'Registration failed'))
       setLoading(false)

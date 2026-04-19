@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react'
-import { login } from '../auth'
+import { login, getDefaultRoute } from '../auth'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
 import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
@@ -20,7 +20,10 @@ export default function Login() {
     setLoading(true)
     const ok = await login(email, password)
     if (ok) {
-      navigate('/overview', { replace: true })
+      // Route strictly by role — owners never land on merchant /overview, which would
+      // call merchant-scoped endpoints with the owner JWT (whose tenant_id is the
+      // demo tenant by convention) and surface that tenant's data inside the owner UI.
+      navigate(getDefaultRoute(), { replace: true })
     } else {
       setError(t(tr => tr.login.invalidCreds))
       setLoading(false)

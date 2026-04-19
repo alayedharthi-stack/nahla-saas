@@ -288,6 +288,62 @@ def get_client_ip(request: Request) -> str:
     )
 
 
+def require_merchant_scope(
+    request: Request,
+    creds: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+) -> Dict[str, Any]:
+    """
+    Dependency that REJECTS platform-staff tokens on merchant-scoped endpoints.
+
+    Background
+    ──────────
+    Platform admin/owner tokens carry ``tenant_id = 1`` by convention (see
+    ``core.middleware.jwt_enforcement_middleware``). When such a token reaches
+    a merchant-scoped endpoint that resolves the tenant from the JWT claim,
+    the endpoint happily returns tenant 1's data to the owner UI. This is
+    a tenant-isolation breach: the owner dashboard ends up rendering one
+    specific merchant's conversations, orders and revenue.
+
+    Contract
+    ────────
+    * If the role is in :data:`PLATFORM_ADMIN_ROLES` AND the token does NOT
+      carry ``impersonation = True`` → reject with HTTP 403. Platform admins
+      must use ``/admin/*`` endpoints (which return platform-wide aggregates)
+      or explicitly impersonate a merchant before calling tenant-scoped APIs.
+    * Support-impersonation tokens are allowed; they already encode an
+      explicit, audited choice to act inside one merchant's scope.
+    * Merchant tokens pass through untouched.
+
+    Apply this dependency to every endpoint that returns merchant detail
+    (``/store-sync/status``, ``/store-sync/knowledge``, ``/whatsapp/usage``, ...)
+    so a misrouted owner request fails closed instead of leaking tenant data.
+    """
+    user = get_current_user(creds)
+    role = str(user.get("role") or "").strip()
+    is_impersonating = bool(user.get("impersonation"))
+
+    if role in PLATFORM_ADMIN_ROLES and not is_impersonating:
+        client_ip = get_client_ip(request)
+        audit(
+            "merchant_scope_denied_for_admin",
+            path=str(request.url.path),
+            method=request.method,
+            role=role,
+            sub=user.get("sub"),
+            tenant_id=user.get("tenant_id"),
+            ip=client_ip,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "هذه الواجهة مخصصة لبيانات تاجر محدد. "
+                "حسابات المنصة لا تستطيع قراءة بيانات متجر مباشرة دون "
+                "تفعيل وضع الدعم/التشخيص لمتجر محدد."
+            ),
+        )
+    return user
+
+
 def require_not_support_impersonation(
     request: Request,
     creds: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
