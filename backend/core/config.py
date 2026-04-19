@@ -158,6 +158,127 @@ OPENAI_API_BASE   = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1
 OPENAI_MODEL      = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_AUDIO_MODEL = os.environ.get("OPENAI_AUDIO_MODEL", "whisper-1")
 
+# ── Cross-Merchant Learning (anonymized signals only) ─────────────────────────
+# Salt used by TenantIsolationLayer to derive non-reversible tenant hashes
+# before any signal is written to the cross-merchant learning store.  This
+# value MUST be stable across deploys for aggregations to remain comparable;
+# it MUST also stay private — leaking the salt re-enables tenant correlation.
+CROSS_MERCHANT_ANON_SALT = os.environ.get("CROSS_MERCHANT_ANON_SALT", "")
+if not CROSS_MERCHANT_ANON_SALT:
+    _cfg_logger.warning(
+        "CROSS_MERCHANT_ANON_SALT is not set. Tenant hashes for cross-merchant "
+        "signals will fall back to a deterministic local salt. Set this in "
+        "production to prevent salt-prediction attacks."
+    )
+    CROSS_MERCHANT_ANON_SALT = "nahla-local-dev-salt-do-not-use-in-prod"
+
+# Master switch — when False, no signal is ever written to the cross-merchant
+# learning store, even if the rest of the AI pipeline runs normally.
+CROSS_MERCHANT_LEARNING_ENABLED = (
+    os.environ.get("CROSS_MERCHANT_LEARNING_ENABLED", "true").lower() == "true"
+)
+
+# ── Learned Sales Policies (Phase 1.7 Global / Vertical Learner) ──────────────
+# Master switch — when False, the PolicyLearner never runs and the
+# PolicyOverrideLayer becomes a no-op (returns the inner decision unchanged).
+# Defaults to False so a fresh deploy never auto-influences merchant behavior
+# until an operator explicitly enables it.
+LEARNED_POLICY_ENABLED = (
+    os.environ.get("LEARNED_POLICY_ENABLED", "false").lower() == "true"
+)
+
+# Minimum signals required for an aggregate to become a published policy.
+# Below this threshold the (intent[, industry]) bucket is skipped — keeping
+# noise out of the runtime store and protecting against early-stage bias.
+LEARNED_POLICY_MIN_SAMPLE_SIZE = int(
+    os.environ.get("LEARNED_POLICY_MIN_SAMPLE_SIZE", "30")
+)
+
+# Minimum dominance ratio for the winning action over its bucket.  At 0.6
+# the leading action must account for at least 60% of positive outcomes
+# before it is published as a recommendation.
+LEARNED_POLICY_MIN_CONFIDENCE = float(
+    os.environ.get("LEARNED_POLICY_MIN_CONFIDENCE", "0.6")
+)
+
+# ── Soft-bias readiness gates (Phase 1.8) ─────────────────────────────────────
+# These thresholds gate the future Soft Bias rollout (phase >= 1.9).  They are
+# evaluated by ``modules.ai.learning.readiness.ReadinessGate`` against the
+# adoption report computed from anonymized signals.
+#
+# Hard rules:
+#   * ``MIN_SAMPLE_SIZE`` is per (intent, industry) bucket — not global.
+#   * ``MIN_UPLIFT`` is the conversion delta between aligned and not-aligned
+#     turns.  Buckets below the threshold are blocked even if alignment is
+#     high — high alignment alone does not prove the hint is *useful*.
+#   * Negative uplift on a sensitive intent (checkout / payment / handoff /
+#     objection / abandon) blocks readiness immediately, no override path.
+LEARNED_POLICY_BIAS_MIN_SAMPLE_SIZE = int(
+    os.environ.get("LEARNED_POLICY_BIAS_MIN_SAMPLE_SIZE", "100")
+)
+LEARNED_POLICY_BIAS_MIN_UPLIFT = float(
+    os.environ.get("LEARNED_POLICY_BIAS_MIN_UPLIFT", "0.05")
+)
+LEARNED_POLICY_BIAS_MIN_ALIGNMENT = float(
+    os.environ.get("LEARNED_POLICY_BIAS_MIN_ALIGNMENT", "0.30")
+)
+
+# ── Soft Policy Bias rollout (Phase 1.9) ──────────────────────────────────────
+# Master switch.  Defaults to ``False`` so a fresh deploy never silently steers
+# any merchant; an operator must opt in explicitly.  Even when ``True`` the
+# bias layer remains a no-op for any (intent, industry) bucket whose
+# readiness verdict is not ready.
+LEARNED_POLICY_BIAS_ENABLED = (
+    os.environ.get("LEARNED_POLICY_BIAS_ENABLED", "false").lower() == "true"
+)
+
+# Per-intent allowlist — only intents in this set may receive a soft bias.
+# Sensitive intents (checkout / payment / objection / handoff / abandon /
+# complaint) are *additionally* hard-coded as protected inside
+# ``modules.ai.learning.bias`` and cannot be enabled here.
+LEARNED_POLICY_BIAS_INTENTS = os.environ.get(
+    "LEARNED_POLICY_BIAS_INTENTS",
+    "ask_product,greeting,faq,browse,product_inquiry,recommendation",
+)
+
+# Per-industry rollout filter.  ``"*"`` enables every industry (including the
+# global tier).  Comma-separated list otherwise (e.g. "fashion,electronics").
+LEARNED_POLICY_BIAS_INDUSTRIES = os.environ.get(
+    "LEARNED_POLICY_BIAS_INDUSTRIES",
+    "*",
+)
+
+# Process-level TTL for the readiness verdict cache used by the bias layer.
+# Recomputing the readiness summary requires scanning anonymized signals, so
+# the cache must be long enough to amortize that cost across many turns but
+# short enough to react to a learner re-run within minutes.
+LEARNED_POLICY_BIAS_REGISTRY_TTL_SECONDS = int(
+    os.environ.get("LEARNED_POLICY_BIAS_REGISTRY_TTL_SECONDS", "600")
+)
+
+# ── Soft-bias rollout (Phase 1.9 → narrow staging trial) ─────────────────────
+# Comma-separated list of environments where bias may fire, even when
+# ``LEARNED_POLICY_BIAS_ENABLED=true``.  Defaults to "staging" so a misplaced
+# enable in production is automatically inert.  ``"*"`` allows every env.
+LEARNED_POLICY_BIAS_ENVIRONMENTS = os.environ.get(
+    "LEARNED_POLICY_BIAS_ENVIRONMENTS", "staging"
+)
+
+# Per-component master switches.  The bias layer applies a component only
+# when the corresponding flag is True.  This lets us roll out
+# ``preferred_ui_mode`` first, observe production behavior, then enable the
+# rest one at a time.
+LEARNED_POLICY_BIAS_ALLOW_UI_MODE = (
+    os.environ.get("LEARNED_POLICY_BIAS_ALLOW_UI_MODE", "true").lower() == "true"
+)
+LEARNED_POLICY_BIAS_ALLOW_CHOICE_COUNT = (
+    os.environ.get("LEARNED_POLICY_BIAS_ALLOW_CHOICE_COUNT", "true").lower() == "true"
+)
+# Disabled by default — enable manually after the first metrics window.
+LEARNED_POLICY_BIAS_ALLOW_RECOMMENDATION_STYLE = (
+    os.environ.get("LEARNED_POLICY_BIAS_ALLOW_RECOMMENDATION_STYLE", "false").lower() == "true"
+)
+
 # ── Merchant Brain (Phase 1 Commerce Decision Engine) ──────────────────────────
 # Global flag — activates Brain for ALL merchant tenants when true.
 MERCHANT_BRAIN_ENABLED = os.environ.get("MERCHANT_BRAIN_ENABLED", "false").lower() == "true"

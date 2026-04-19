@@ -55,6 +55,7 @@ class _SendPaymentLinkHandler:
             tenant_id=ctx.tenant_id,
             customer_phone=ctx.customer_phone,
             customer_id=ctx.customer_id,
+            tenant_context=ctx.tenant_context,
         )
         runtime_result = await runtime.execute(
             "send_payment_link",
@@ -82,6 +83,7 @@ class _SuggestCouponHandler:
             tenant_id=ctx.tenant_id,
             customer_phone=ctx.customer_phone,
             customer_id=ctx.customer_id,
+            tenant_context=ctx.tenant_context,
         )
         payload = {
             "discount_pct": (ctx.sales_context.offer_signals or {}).get("recommended_discount_pct", 0)
@@ -129,6 +131,7 @@ class _RecommendAddonHandler:
             tenant_id=ctx.tenant_id,
             customer_phone=ctx.customer_phone,
             customer_id=ctx.customer_id,
+            tenant_context=ctx.tenant_context,
         )
         result = await runtime.execute(
             "recommend_addon",
@@ -157,6 +160,7 @@ class _WebSearchHandler:
             tenant_id=ctx.tenant_id,
             customer_phone=ctx.customer_phone,
             customer_id=ctx.customer_id,
+            tenant_context=ctx.tenant_context,
         )
         result = await runtime.execute(
             "web_search",

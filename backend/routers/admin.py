@@ -2935,3 +2935,44 @@ async def admin_recompute_customer_profiles(
         profiles_rebuilt=n,
     )
     return {"ok": True, "tenant_id": tenant_id, "profiles_rebuilt": n}
+
+
+# ── Phase 1.9 — Soft Bias rollout metrics (admin-only, read-only) ─────────────
+@router.get("/admin/learning/bias-comparison")
+def admin_bias_comparison(
+    intent:    Optional[str] = Query(None, max_length=64),
+    industry:  Optional[str] = Query(None, max_length=64),
+    days:      int = Query(30, ge=1, le=180),
+    limit:     int = Query(50000, ge=100, le=500000),
+    db:        Session       = Depends(get_db),
+    _admin:    Dict[str, Any] = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Return ``bias_on`` vs ``bias_off`` comparison metrics for the soft
+    bias rollout.  Read-only on ``cross_merchant_signals``.
+
+    The endpoint operates on **already anonymized** signals — no merchant
+    or customer data is touched.  Filters are optional; the staging
+    rollout is monitored with ``intent=ask_product&industry=fashion``.
+    """
+    try:
+        from modules.ai.learning import load_bias_comparison
+    except Exception as exc:
+        logger.exception("[admin] bias-comparison import failed: %s", exc)
+        raise HTTPException(status_code=503, detail="bias metrics unavailable")
+
+    since = datetime.now(timezone.utc) - timedelta(days=int(days))
+    report = load_bias_comparison(
+        db,
+        intent   = intent or None,
+        industry = industry or None,
+        since    = since,
+        limit    = int(limit),
+    )
+    audit(
+        "admin_bias_comparison_view",
+        admin    = _admin.get("sub"),
+        intent   = intent or "*",
+        industry = industry or "*",
+        days     = int(days),
+    )
+    return report.to_dict()

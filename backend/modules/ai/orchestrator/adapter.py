@@ -498,10 +498,40 @@ def _context_to_history(ctx: Dict[str, Any], message: str) -> List[Dict[str, Any
     return history
 
 
-def _build_runtime(tenant_id: int, customer_phone: str, customer_id: Optional[int]):
+def _build_runtime(
+    tenant_id: int,
+    customer_phone: str,
+    customer_id: Optional[int],
+    tenant_context: Optional[Any] = None,
+):
+    """Construct a tenant-scoped CommerceToolRuntime.
+
+    A ``TenantContext`` is built (or reused if the caller already validated
+    one for the current turn) so the runtime's own isolation guard sees an
+    active context up-front.  Returning ``(None, None)`` is preserved as
+    the legacy "could-not-construct" sentinel; the only difference from
+    pre-Phase 1.6 is that a hard ``TenantIsolationViolation`` (e.g. an
+    invalid tenant_id supplied by an upstream legacy caller) now also
+    falls back to that sentinel rather than crashing the request — the
+    isolation contract is still enforced inside the runtime itself.
+    """
     try:
         from core.database import SessionLocal
         from modules.ai.commerce.runtime import CommerceToolRuntime
+        from modules.ai.security import TenantIsolationLayer, TenantIsolationViolation
+
+        if tenant_context is None:
+            try:
+                tenant_context = TenantIsolationLayer.make_context(
+                    tenant_id,
+                    customer_phone=customer_phone,
+                    customer_id=customer_id,
+                )
+            except TenantIsolationViolation as exc:
+                logger.warning(
+                    "[adapter._build_runtime] tenant context build failed: %s", exc
+                )
+                return None, None
 
         db = SessionLocal()
         return (
@@ -510,6 +540,7 @@ def _build_runtime(tenant_id: int, customer_phone: str, customer_id: Optional[in
                 tenant_id=tenant_id,
                 customer_phone=customer_phone,
                 customer_id=customer_id,
+                tenant_context=tenant_context,
             ),
             db,
         )

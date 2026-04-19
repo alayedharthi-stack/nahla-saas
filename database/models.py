@@ -1496,3 +1496,80 @@ class WebhookEvent(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+# ── Cross-merchant anonymized learning signals ───────────────────────────────
+#
+# This table is INTENTIONALLY NOT tenant-scoped.  It only stores anonymized
+# categorical / bucketed signals derived from many merchants' turns by the
+# CrossMerchantLearningStore writer.  No raw tenant_id, customer_id, phone,
+# message text, product titles or money values are ever persisted here.
+#
+# Tenants are represented by ``tenant_hash`` — a salted SHA-256 truncation
+# produced by ``modules.ai.security.trace_schema.anonymize_tenant``.
+class CrossMerchantSignal(Base):
+    __tablename__ = 'cross_merchant_signals'
+    __table_args__ = (
+        Index('ix_xms_industry_action', 'industry', 'action'),
+        Index('ix_xms_action_outcome', 'action', 'outcome'),
+        Index('ix_xms_tier_industry', 'tier', 'industry'),
+        Index('ix_xms_created_at', 'created_at'),
+    )
+
+    id           = Column(Integer, primary_key=True)
+    tenant_hash  = Column(String(64), nullable=False, index=True)
+    industry     = Column(String(64), nullable=False, default='unknown')
+    intent       = Column(String(64), nullable=False, default='unknown')
+    action       = Column(String(64), nullable=False, default='unknown')
+    ui_mode      = Column(String(32), nullable=False, default='unknown')
+    outcome      = Column(String(32), nullable=False, default='unknown')
+    value_bucket = Column(String(32), nullable=False, default='unknown')
+    turn_index   = Column(Integer, nullable=False, default=0)
+    model_path   = Column(String(32), nullable=False, default='rule')
+    latency_ms   = Column(Integer, nullable=False, default=0)
+    tier         = Column(String(16), nullable=False, default='global')
+    extra        = Column(JSONB, nullable=True)
+    created_at   = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+# ── Learned cross-merchant sales policies (Phase 1.7) ────────────────────────
+#
+# Output of the ``PolicyLearner`` that aggregates ``cross_merchant_signals``
+# into recommended (action, ui_mode) per (intent[, industry]).
+#
+# Anti-leak guarantees mirror ``CrossMerchantSignal``:
+#   * No tenant_id / customer_id columns.
+#   * No raw text — only categorical labels already validated by the
+#     anonymized trace schema.
+#   * ``industry == "*"`` represents the GLOBAL tier (cross-vertical).
+#
+# Uniqueness on (scope, industry, intent) lets the learner UPSERT in a
+# single statement and lets the runtime store look up by composite key
+# without scanning.
+class LearnedSalesPolicy(Base):
+    __tablename__ = 'learned_sales_policies'
+    __table_args__ = (
+        UniqueConstraint('scope', 'industry', 'intent', name='uq_lsp_scope_industry_intent'),
+        Index('ix_lsp_intent', 'intent'),
+        Index('ix_lsp_industry_intent', 'industry', 'intent'),
+    )
+
+    id                 = Column(Integer, primary_key=True)
+    scope              = Column(String(16), nullable=False, default='global')   # global | vertical
+    industry           = Column(String(64), nullable=False, default='*')        # '*' for global
+    intent             = Column(String(64), nullable=False, default='unknown')
+    recommended_action = Column(String(64), nullable=False, default='unknown')
+    recommended_ui     = Column(String(32), nullable=False, default='unknown')
+    confidence         = Column(Float, nullable=False, default=0.0)
+    sample_size        = Column(Integer, nullable=False, default=0)
+    extra              = Column(JSONB, nullable=True)
+    updated_at         = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )

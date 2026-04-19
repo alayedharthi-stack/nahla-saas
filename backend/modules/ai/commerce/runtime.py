@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional
 
 from core.store_knowledge import CatalogContextBuilder, CustomerContextBuilder, StoreKnowledgeLoader
 from modules.ai.commerce.permissions import CommercePermissionSet
+from modules.ai.security import (
+    TenantContext,
+    TenantIsolationLayer,
+    TenantIsolationViolation,
+)
 
 logger = logging.getLogger("nahla.ai.commerce.runtime")
 
@@ -36,14 +41,35 @@ class CommerceToolRuntime:
         customer_phone: str = "",
         customer_id: Optional[int] = None,
         permissions: Optional[CommercePermissionSet] = None,
+        tenant_context: Optional[TenantContext] = None,
     ) -> None:
+        # Build a validated TenantContext eagerly so any caller that forgot
+        # to pass tenant_id or passed an invalid value fails fast — before
+        # we touch the DB or any external service.
+        if tenant_context is None:
+            tenant_context = TenantIsolationLayer.make_context(
+                tenant_id,
+                customer_phone=customer_phone,
+                customer_id=customer_id,
+            )
+        else:
+            TenantIsolationLayer.assert_active(tenant_context)
+            if tenant_context.tenant_id != int(tenant_id):
+                raise TenantIsolationViolation(
+                    f"runtime tenant_id={tenant_id} does not match "
+                    f"context tenant_id={tenant_context.tenant_id}"
+                )
+
         self.db = db
-        self.tenant_id = tenant_id
-        self.customer_phone = customer_phone
-        self.customer_id = customer_id
-        self.permissions = permissions or CommercePermissionSet(tenant_id=tenant_id)
-        self.catalog = CatalogContextBuilder(db, tenant_id)
-        self.store_loader = StoreKnowledgeLoader(db, tenant_id)
+        self.tenant_context = tenant_context
+        self.tenant_id = tenant_context.tenant_id
+        self.customer_phone = tenant_context.customer_phone or customer_phone
+        self.customer_id = tenant_context.customer_id or customer_id
+        self.permissions = permissions or CommercePermissionSet(
+            tenant_id=self.tenant_id
+        )
+        self.catalog = CatalogContextBuilder(db, self.tenant_id)
+        self.store_loader = StoreKnowledgeLoader(db, self.tenant_id)
 
     async def execute(self, tool_name: str, payload: Dict[str, Any]) -> ToolExecutionResult:
         handler = getattr(self, f"_tool_{tool_name}", None)
@@ -54,8 +80,33 @@ class CommerceToolRuntime:
                 error="unknown_tool",
                 audit={"tool_name": tool_name},
             )
+        # Sanitise the incoming payload through the isolation layer so a
+        # hallucinated tenant_id from the LLM cannot redirect a tool call.
         try:
-            return await handler(payload or {})
+            safe_payload = TenantIsolationLayer.verify_payload(
+                payload or {}, self.tenant_context
+            )
+        except TenantIsolationViolation as exc:
+            logger.error("[CommerceToolRuntime] payload rejected: %s", exc)
+            return ToolExecutionResult(
+                ok=False,
+                tool_name=tool_name,
+                error="tenant_isolation_violation",
+                audit={"tool_name": tool_name, "reason": str(exc)},
+            )
+        try:
+            return await handler(safe_payload)
+        except TenantIsolationViolation as exc:
+            logger.error(
+                "[CommerceToolRuntime] tool=%s isolation breach: %s",
+                tool_name, exc,
+            )
+            return ToolExecutionResult(
+                ok=False,
+                tool_name=tool_name,
+                error="tenant_isolation_violation",
+                audit={"tool_name": tool_name, "reason": str(exc)},
+            )
         except Exception as exc:
             logger.exception("[CommerceToolRuntime] tool=%s failed: %s", tool_name, exc)
             return ToolExecutionResult(

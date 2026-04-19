@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:  # avoid runtime import cycles
+    from modules.ai.security import TenantContext
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,6 +372,10 @@ class BrainContext:
     suggestion: Optional[SuggestionSnapshot] = None
     reply_state: Optional[BrainReplyState] = None
     sales_context: Optional[SalesContextSnapshot] = None
+    # Single source of truth for "which tenant is this turn about?".
+    # Built once at the top of the pipeline and forwarded to every layer
+    # so no downstream code re-derives or re-validates the tenant id.
+    tenant_context: Optional["TenantContext"] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

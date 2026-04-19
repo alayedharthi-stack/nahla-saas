@@ -39,6 +39,7 @@ class ProductSearchHandler:
                 tenant_id=ctx.tenant_id,
                 customer_phone=ctx.customer_phone,
                 customer_id=ctx.customer_id,
+                tenant_context=ctx.tenant_context,
             )
             runtime_result = await runtime.execute(
                 "search_products",

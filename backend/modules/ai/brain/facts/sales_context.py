@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..types import MerchantConversationState, SalesContextSnapshot
+from modules.ai.security import (
+    TenantContext,
+    TenantIsolationLayer,
+    TenantIsolationViolation,
+)
 
 
 class DefaultSalesContextLoader:
@@ -28,9 +33,26 @@ class DefaultSalesContextLoader:
         history: List[Dict[str, Any]],
         profile: Dict[str, Any],
         customer_id: Optional[int] = None,
+        tenant_context: Optional[TenantContext] = None,
     ) -> SalesContextSnapshot:
         from core.store_knowledge import StoreKnowledgeLoader
         from services.offer_decision_service import collect_signals
+
+        # Build / validate the tenant context first so any retrieval below
+        # is provably scoped to a single store.
+        if tenant_context is None:
+            tenant_context = TenantIsolationLayer.make_context(
+                tenant_id,
+                customer_phone=customer_phone,
+                customer_id=customer_id,
+            )
+        else:
+            TenantIsolationLayer.assert_active(tenant_context)
+            if tenant_context.tenant_id != int(tenant_id):
+                raise TenantIsolationViolation(
+                    "sales context tenant mismatch: "
+                    f"context={tenant_context.tenant_id} vs requested={tenant_id}"
+                )
 
         snapshot = SalesContextSnapshot()
 

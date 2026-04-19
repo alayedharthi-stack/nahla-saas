@@ -99,8 +99,39 @@ class MerchantBrain:
         profile: Dict[str, Any],
         customer_id: Optional[int] = None,
         conversation_id: Optional[int] = None,
+        tenant_context: Optional[Any] = None,
     ) -> Dict[str, Any]:
         t0 = time.monotonic()
+
+        # ── 0. Tenant isolation context (single source of truth for the turn) ─
+        # Built once here. Every downstream layer (sales context loader,
+        # handlers/runtime, memory updater, signal emitter) MUST reuse this
+        # object instead of re-deriving the tenant id from raw inputs.
+        from modules.ai.security import (
+            TenantIsolationLayer,
+            TenantIsolationViolation,
+        )
+
+        try:
+            if tenant_context is not None:
+                TenantIsolationLayer.assert_active(tenant_context)
+                if int(tenant_context.tenant_id) != int(tenant_id):
+                    raise TenantIsolationViolation(
+                        f"tenant_context.tenant_id={tenant_context.tenant_id} "
+                        f"does not match process(tenant_id={tenant_id})"
+                    )
+                tenant_ctx = tenant_context
+            else:
+                tenant_ctx = TenantIsolationLayer.make_context(
+                    tenant_id      = tenant_id,
+                    customer_phone = customer_phone,
+                    customer_id    = customer_id,
+                )
+        except TenantIsolationViolation:
+            # Hard error — never silently degrade tenant safety. The caller
+            # surface (router / orchestrator) is responsible for translating
+            # this into a user-facing error.
+            raise
 
         # ── 1. Intent ────────────────────────────────────────────────────
         state_for_classify = self._state_store.load(db, tenant_id, customer_phone)
@@ -119,6 +150,7 @@ class MerchantBrain:
             history=history,
             profile=profile,
             customer_id=customer_id,
+            tenant_context=tenant_ctx,
         )
         ctx = BrainContext(
             tenant_id      = tenant_id,
@@ -132,6 +164,7 @@ class MerchantBrain:
             customer_id    = customer_id,
             conversation_id= conversation_id,
             sales_context  = sales_context,
+            tenant_context = tenant_ctx,
         )
         # Attach db for handlers that need it (avoids threading Session issues)
         ctx._db = db  # type: ignore[attr-defined]
@@ -393,7 +426,23 @@ def _price_sensitivity_label(score: float) -> str:
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 def build_default_brain() -> MerchantBrain:
-    """Wire all Phase 2 default implementations together."""
+    """Wire all Phase 2 default implementations together.
+
+    The decision engine is wrapped (left-to-right) by:
+      1. ``DefaultDecisionEngine`` — the rule / state machine engine.
+      2. ``PolicyOverrideLayer``   — Phase 1.7, attaches a non-binding
+         ``policy_hint`` to ``decision.args``.  No-op when no learned
+         policy exists for the current ``(intent, industry)``.
+      3. ``PolicyBiasLayer``       — Phase 1.9, narrowly mutates
+         ``decision.args`` (UI / choice_count / recommendation_style)
+         for non-protected actions.  Hard-disabled by default — the
+         master switch ``LEARNED_POLICY_BIAS_ENABLED`` must be flipped
+         on for this layer to do anything.
+
+    Both decorators are *defense-in-depth*: failure inside any of them
+    falls back to the inner decision unchanged, so wiring them by
+    default carries zero behavioral risk for a fresh deploy.
+    """
     from .intent.classifier  import DefaultIntentClassifier
     from .state.store        import DefaultStateStore
     from .facts.commerce_facts import DefaultFactsLoader
@@ -405,11 +454,24 @@ def build_default_brain() -> MerchantBrain:
     from .suggestion.engine  import DefaultSuggestionEngine
     from .facts.sales_context import DefaultSalesContextLoader
 
+    # Build the layered decision engine.  Imports are inside the
+    # function so that the brain package can be loaded even when the
+    # learning subpackage is absent (e.g. older test fixtures).
+    decision_engine: Any = DefaultDecisionEngine()
+    try:
+        from modules.ai.learning import PolicyBiasLayer, PolicyOverrideLayer
+        decision_engine = PolicyOverrideLayer(decision_engine)
+        decision_engine = PolicyBiasLayer(decision_engine)
+    except Exception:
+        # If the learning package fails to import we silently keep the
+        # bare engine — the rest of the brain must still work.
+        pass
+
     return MerchantBrain(
         classifier     = DefaultIntentClassifier(),
         state_store    = DefaultStateStore(),
         facts_loader   = DefaultFactsLoader(),
-        decision_engine= DefaultDecisionEngine(),
+        decision_engine= decision_engine,
         policy_gate    = RealPolicyGate(),    # Phase 2: real rules
         executor       = DefaultActionExecutor(),
         composer       = DefaultComposer(),
