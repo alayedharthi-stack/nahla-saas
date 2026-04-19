@@ -4,6 +4,7 @@ import { Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react'
 import { login } from '../auth'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
+import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 export default function Login() {
   const navigate = useNavigate()
   const { t, lang, setLang, dir } = useLanguage()
@@ -27,11 +28,12 @@ export default function Login() {
   }
 
   return (
-    <div
-      className="min-h-dvh flex items-center justify-center bg-slate-900 px-4 py-safe-top pb-safe-bottom"
-      dir={dir}
-    >
-      <div className="w-full max-w-sm">
+    <div className="bg-slate-900" dir={dir}>
+      {/* ── Existing login form (unchanged layout) ──────────────────── */}
+      <div
+        className="min-h-dvh flex items-center justify-center px-4 py-safe-top pb-safe-bottom"
+      >
+        <div className="w-full max-w-sm">
         {/* Language toggle */}
         <div className="flex justify-end mb-4">
           <button
@@ -148,7 +150,11 @@ export default function Login() {
           </p>
           <LegalFooter variant="light" />
         </div>
+        </div>
       </div>
+
+      {/* ── New: collective sales-learning marketing section ─────────── */}
+      <SalesIntelligenceSection lang={lang} />
     </div>
   )
 }
