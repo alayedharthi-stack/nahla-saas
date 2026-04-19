@@ -40,8 +40,7 @@ class DraftOrderHandler:
     """Handles ACTION_PROPOSE_DRAFT_ORDER."""
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from store_integration.models import OrderInput, OrderItemInput
-        from store_integration.order_service import create_draft_order
+        from modules.ai.commerce.runtime import CommerceToolRuntime
 
         product_info = decision.args.get("product") or ctx.state.current_product_focus
         if not product_info:
@@ -79,43 +78,47 @@ class DraftOrderHandler:
                 data={"message": "product_has_no_external_id"},
             )
 
-        order_input = OrderInput(
-            customer_name=_full_name(prep, ctx.profile.get("name", "عميل")),
+        runtime = CommerceToolRuntime(
+            ctx._db,  # type: ignore[attr-defined]
+            tenant_id=ctx.tenant_id,
             customer_phone=ctx.customer_phone,
-            customer_email=prep.customer_email or ctx.profile.get("email"),
-            customer_first_name=prep.customer_first_name,
-            customer_last_name=prep.customer_last_name,
-            building_number=prep.building_number,
-            additional_number=prep.additional_number,
-            street=prep.street,
-            district=prep.district,
-            postal_code=prep.postal_code,
-            city=prep.city,
-            address=_address_line(prep),
-            short_address_code=prep.short_address_code,
-            google_maps_url=prep.google_maps_url,
-            latitude=_safe_float(prep.latitude),
-            longitude=_safe_float(prep.longitude),
-            payment_method="online",
-            items=[OrderItemInput(product_id=external_id, quantity=max(int(prep.quantity or 1), 1))],
-            notes=_build_order_notes(prep),
+            customer_id=ctx.customer_id,
         )
-
-        try:
-            order = await create_draft_order(ctx.tenant_id, order_input)
-        except Exception as exc:
-            logger.warning("[DraftOrderHandler] create_draft_order error: %s", exc)
-            order = None
+        runtime_result = await runtime.execute(
+            "create_draft_order",
+            {
+                "product_id": external_id,
+                "quantity": max(int(prep.quantity or 1), 1),
+                "customer_name": _full_name(prep, ctx.profile.get("name", "عميل")),
+                "customer_email": prep.customer_email or ctx.profile.get("email"),
+                "customer_first_name": prep.customer_first_name,
+                "customer_last_name": prep.customer_last_name,
+                "building_number": prep.building_number,
+                "additional_number": prep.additional_number,
+                "street": prep.street,
+                "district": prep.district,
+                "postal_code": prep.postal_code,
+                "city": prep.city,
+                "address": _address_line(prep),
+                "short_address_code": prep.short_address_code,
+                "google_maps_url": prep.google_maps_url,
+                "latitude": _safe_float(prep.latitude),
+                "longitude": _safe_float(prep.longitude),
+                "payment_method": "online",
+                "notes": _build_order_notes(prep),
+            },
+        )
+        order = runtime_result.payload.get("order")
 
         if order:
             return ActionResult(
                 success=True,
                 data={
-                    "order_id":    order.id,
-                    "reference":   order.reference_id or order.id,
-                    "checkout_url": order.payment_link or "",
-                    "total":       order.total,
-                    "currency":    order.currency,
+                    "order_id":    order.get("id"),
+                    "reference":   order.get("reference_id") or order.get("id"),
+                    "checkout_url": order.get("payment_link") or "",
+                    "total":       order.get("total"),
+                    "currency":    order.get("currency", "SAR"),
                     "product":     product_info,
                     "order_prep":  prep.to_dict(),
                 },
@@ -142,30 +145,32 @@ class TrackOrderHandler:
     """Handles ACTION_TRACK_ORDER."""
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from store_integration.order_service import get_customer_orders
+        from modules.ai.commerce.runtime import CommerceToolRuntime
 
-        try:
-            orders = await get_customer_orders(ctx.tenant_id, ctx.customer_phone)
-        except Exception as exc:
-            logger.warning("[TrackOrderHandler] error: %s", exc)
-            orders = []
+        runtime = CommerceToolRuntime(
+            ctx._db,  # type: ignore[attr-defined]
+            tenant_id=ctx.tenant_id,
+            customer_phone=ctx.customer_phone,
+            customer_id=ctx.customer_id,
+        )
+        runtime_result = await runtime.execute("track_order", {})
+        latest = runtime_result.payload.get("order") if runtime_result.ok else None
 
-        if not orders:
+        if not latest:
             return ActionResult(
                 success=False,
                 error="no_orders",
                 data={"message": "no_orders_found"},
             )
 
-        latest = orders[0]
         return ActionResult(
             success=True,
             data={
-                "order_id":  latest.id,
-                "reference": latest.reference_id or latest.id,
-                "status":    latest.status,
-                "total":     latest.total,
-                "currency":  latest.currency,
+                "order_id":  latest.get("id"),
+                "reference": latest.get("reference_id") or latest.get("id"),
+                "status":    latest.get("status"),
+                "total":     latest.get("total"),
+                "currency":  latest.get("currency", "SAR"),
             },
         )
 

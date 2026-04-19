@@ -32,6 +32,8 @@ ACTION_SUGGEST_COUPON      = "suggest_coupon"
 ACTION_TRACK_ORDER         = "track_order"
 ACTION_HANDOFF             = "handoff_to_human"
 ACTION_LLM_REPLY           = "llm_reply"    # catch-all — routes to orchestrator
+ACTION_RECOMMEND_ADDON     = "recommend_addon"
+ACTION_WEB_SEARCH          = "web_search"
 
 # ── Phase 2 action constants ──────────────────────────────────────────────────
 # Ask the customer one clarifying question (e.g. "ما المنتج الذي تود طلبه؟")
@@ -49,6 +51,8 @@ ALL_ACTIONS = [
     ACTION_TRACK_ORDER,
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
+    ACTION_RECOMMEND_ADDON,
+    ACTION_WEB_SEARCH,
     ACTION_CLARIFY,
     ACTION_NARROW,
 ]

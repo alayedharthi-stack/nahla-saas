@@ -28,8 +28,29 @@ SUGGEST_PRODUCT  = "suggest_product"
 SUGGEST_COUPON   = "suggest_coupon"
 SUGGEST_BUNDLE   = "suggest_bundle"
 PROPOSE_ORDER    = "propose_order"
+SEARCH_PRODUCTS  = "search_products"
+GET_PRODUCT_DETAILS = "get_product_details"
+CHECK_STOCK      = "check_stock"
+TRACK_ORDER      = "track_order"
+GET_STORE_INFO   = "get_store_info"
+GET_CUSTOMER_HISTORY = "get_customer_history"
+RECOMMEND_ADDON  = "recommend_addon"
+WEB_SEARCH       = "web_search"
 
-ALLOWED_ACTION_TYPES = {SUGGEST_PRODUCT, SUGGEST_COUPON, SUGGEST_BUNDLE, PROPOSE_ORDER}
+ALLOWED_ACTION_TYPES = {
+    SUGGEST_PRODUCT,
+    SUGGEST_COUPON,
+    SUGGEST_BUNDLE,
+    PROPOSE_ORDER,
+    SEARCH_PRODUCTS,
+    GET_PRODUCT_DETAILS,
+    CHECK_STOCK,
+    TRACK_ORDER,
+    GET_STORE_INFO,
+    GET_CUSTOMER_HISTORY,
+    RECOMMEND_ADDON,
+    WEB_SEARCH,
+}
 
 
 def validate_actions(

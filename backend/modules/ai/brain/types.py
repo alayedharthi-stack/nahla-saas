@@ -139,6 +139,17 @@ class MerchantConversationState:
     updated_at: str = ""
     # Last ≤3 products shown as numbered list — used to resolve numeric picks
     last_search_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    # Last recent turns cached in state so thin-LLM and automations can share
+    # the same short-term memory without re-querying unrelated tables.
+    recent_messages: List[Dict[str, Any]] = field(default_factory=list)
+    # Rolling summary mirrored from ConversationHistorySummary when available.
+    conversation_summary: str = ""
+    # Commercial state needed to complete the order inside chat.
+    cart_items: List[Dict[str, Any]] = field(default_factory=list)
+    selected_variant: Optional[Dict[str, Any]] = None
+    payment_method: str = ""
+    pending_action: str = ""
+    last_recommended_products: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -156,6 +167,13 @@ class MerchantConversationState:
             "turn": self.turn,
             "updated_at": self.updated_at,
             "last_search_candidates": self.last_search_candidates,
+            "recent_messages": self.recent_messages,
+            "conversation_summary": self.conversation_summary,
+            "cart_items": self.cart_items,
+            "selected_variant": self.selected_variant,
+            "payment_method": self.payment_method,
+            "pending_action": self.pending_action,
+            "last_recommended_products": self.last_recommended_products,
         }
 
     @staticmethod
@@ -175,6 +193,13 @@ class MerchantConversationState:
             turn=int(d.get("turn", 0)),
             updated_at=d.get("updated_at", ""),
             last_search_candidates=list(d.get("last_search_candidates") or []),
+            recent_messages=list(d.get("recent_messages") or []),
+            conversation_summary=str(d.get("conversation_summary", "") or ""),
+            cart_items=list(d.get("cart_items") or []),
+            selected_variant=d.get("selected_variant"),
+            payment_method=str(d.get("payment_method", "") or ""),
+            pending_action=str(d.get("pending_action", "") or ""),
+            last_recommended_products=list(d.get("last_recommended_products") or []),
         )
 
 
@@ -260,6 +285,39 @@ class SuggestionSnapshot:
 
 
 @dataclass
+class SalesContextSnapshot:
+    """
+    Unified turn-level sales context shared by MerchantBrain and the canonical
+    AI orchestration path.
+
+    The goal is to give every layer one stable object instead of rebuilding
+    ad-hoc prompt dicts in multiple places.
+    """
+    store_profile: Dict[str, Any] = field(default_factory=dict)
+    store_policies: Dict[str, Any] = field(default_factory=dict)
+    customer_profile: Dict[str, Any] = field(default_factory=dict)
+    customer_preferences: Dict[str, Any] = field(default_factory=dict)
+    conversation_memory: Dict[str, Any] = field(default_factory=dict)
+    offer_signals: Dict[str, Any] = field(default_factory=dict)
+    recommendations: List[Dict[str, Any]] = field(default_factory=list)
+    repeat_purchase_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    web_search_policy: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "store_profile": self.store_profile,
+            "store_policies": self.store_policies,
+            "customer_profile": self.customer_profile,
+            "customer_preferences": self.customer_preferences,
+            "conversation_memory": self.conversation_memory,
+            "offer_signals": self.offer_signals,
+            "recommendations": self.recommendations,
+            "repeat_purchase_candidates": self.repeat_purchase_candidates,
+            "web_search_policy": self.web_search_policy,
+        }
+
+
+@dataclass
 class BrainReplyState:
     """
     Explicit structured state injected into every MerchantBrain LLM call.
@@ -280,6 +338,11 @@ class BrainReplyState:
     coupon_policy: Dict[str, Any] = field(default_factory=dict)
     recent_turns: List[str] = field(default_factory=list)
     policy_reason: str = ""
+    conversation_summary: str = ""
+    store_knowledge: Dict[str, Any] = field(default_factory=dict)
+    customer_memory: Dict[str, Any] = field(default_factory=dict)
+    last_recommended_products: List[Dict[str, Any]] = field(default_factory=list)
+    explicit_pending_action: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,6 +368,7 @@ class BrainContext:
     conversation_id: Optional[int] = None
     suggestion: Optional[SuggestionSnapshot] = None
     reply_state: Optional[BrainReplyState] = None
+    sales_context: Optional[SalesContextSnapshot] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

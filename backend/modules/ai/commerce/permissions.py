@@ -34,6 +34,14 @@ CANCEL_ORDER             = "cancel_order"
 SUGGEST_PRODUCT          = "suggest_product"
 SUGGEST_BUNDLE           = "suggest_bundle"
 SEND_MESSAGE             = "send_message"
+SEARCH_PRODUCTS          = "search_products"
+GET_PRODUCT_DETAILS      = "get_product_details"
+CHECK_STOCK              = "check_stock"
+TRACK_ORDER              = "track_order"
+GET_STORE_INFO           = "get_store_info"
+GET_CUSTOMER_HISTORY     = "get_customer_history"
+RECOMMEND_ADDON          = "recommend_addon"
+WEB_SEARCH               = "web_search"
 
 # Hardcoded-forbidden (cannot be unlocked by any config)
 DELETE_ORDER             = "delete_order"
@@ -52,6 +60,14 @@ _ACTION_TO_PERMISSION: Dict[str, Optional[str]] = {
     SUGGEST_PRODUCT:         None,
     SUGGEST_BUNDLE:          None,
     SEND_MESSAGE:            None,
+    SEARCH_PRODUCTS:         None,
+    GET_PRODUCT_DETAILS:     None,
+    CHECK_STOCK:             None,
+    TRACK_ORDER:             None,
+    GET_STORE_INFO:          None,
+    GET_CUSTOMER_HISTORY:    None,
+    RECOMMEND_ADDON:         None,
+    WEB_SEARCH:              None,
 
     # Require permission flag
     CREATE_DRAFT_ORDER:      "can_create_orders",

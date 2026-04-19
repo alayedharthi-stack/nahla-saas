@@ -67,6 +67,7 @@ from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALO
 from core.database import get_db
 from core.nahla_knowledge import build_nahla_system_prompt
 from core.wa_usage import track_conversation
+from modules.ai.media.normalizer import normalize_whatsapp_inbound
 from modules.ai.orchestrator.adapter import generate_ai_reply
 from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
 
@@ -470,8 +471,15 @@ async def _dispatch_message(
         except Exception as exc:
             logger.debug("[Webhook] emit whatsapp_message_received failed: %s", exc)
 
+        normalized_inbound = await normalize_whatsapp_inbound(
+            db=db,
+            wa_conn=wa_conn,
+            tenant_id=resolved_tenant_id,
+            message=msg,
+        )
+
         # ── Handle interactive button replies ──────────────────────────────────────
-        if msg_type == "interactive":
+        if normalized_inbound.normalized_type == "interactive":
             interactive = msg.get("interactive", {})
             if interactive.get("type") == "button_reply":
                 br      = interactive.get("button_reply", {}) or {}
@@ -518,10 +526,10 @@ async def _dispatch_message(
                 )
             return
 
-        if msg_type != "text":
+        if normalized_inbound.normalized_type not in {"text", "audio"}:
             return
 
-        text = msg.get("text", {}).get("body", "").strip()
+        text = normalized_inbound.text.strip()
         if not text:
             return
 
@@ -539,6 +547,7 @@ async def _dispatch_message(
             await _handle_merchant_message(
                 phone_id=used_pid, to=sender, text=text,
                 tenant_id=resolved_tenant_id, db=db,
+                inbound_metadata=normalized_inbound.metadata,
             )
             return
 
@@ -748,6 +757,7 @@ async def _handle_merchant_message(
     text: str,
     tenant_id: int,
     db,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     For merchant tenants (tenant_id > 1): reply using the store's own AI context.
@@ -799,6 +809,27 @@ async def _handle_merchant_message(
 
         # Persist inbound immediately for inbox visibility and history continuity.
         StateManager.save_message(db, to, text, "inbound", conversation_id=convo.id, tenant_id=tenant_id)
+        if inbound_metadata:
+            try:
+                latest_event = (
+                    db.query(MessageEvent)
+                    .filter(
+                        MessageEvent.tenant_id == tenant_id,
+                        MessageEvent.conversation_id == convo.id,
+                    )
+                    .order_by(MessageEvent.id.desc())
+                    .first()
+                )
+                if latest_event:
+                    meta = dict(latest_event.extra_metadata or {})
+                    meta["normalized_inbound"] = dict(inbound_metadata)
+                    latest_event.extra_metadata = meta
+                    db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
         # Keep a lightweight state row in sync with the same phone key used by history.
         state = StateManager.load(db, phone=to, tenant_id=tenant_id)
@@ -821,12 +852,35 @@ async def _handle_merchant_message(
                 profile = {}
                 try:
                     svc = CustomerIntelligenceService(db, tenant_id)
-                    customer = svc.get_or_create_customer(phone=to)
+                    customer = svc.upsert_lead_customer(
+                        phone=to,
+                        source="whatsapp_inbound",
+                        extra_metadata={
+                            "channel": "whatsapp",
+                            "normalized_inbound": inbound_metadata or {},
+                        },
+                        commit=False,
+                    )
                     profile = {
                         "name":  getattr(customer, "name", None) or "",
                         "email": getattr(customer, "email", None) or "",
                         "id":    getattr(customer, "id", None),
                     }
+                    if customer is not None:
+                        full_profile = svc.ensure_profile(customer)
+                        profile.update({
+                            "segment": getattr(full_profile, "segment", "") or "",
+                            "customer_status": getattr(full_profile, "customer_status", "") or "",
+                            "rfm_segment": getattr(full_profile, "rfm_segment", "") or "",
+                            "is_returning": bool(getattr(full_profile, "is_returning", False)),
+                            "total_orders": int(getattr(full_profile, "total_orders", 0) or 0),
+                            "total_spend_sar": float(getattr(full_profile, "total_spend_sar", 0.0) or 0.0),
+                            "last_order_at": (
+                                full_profile.last_order_at.isoformat()
+                                if getattr(full_profile, "last_order_at", None)
+                                else None
+                            ),
+                        })
                 except Exception:
                     pass
 

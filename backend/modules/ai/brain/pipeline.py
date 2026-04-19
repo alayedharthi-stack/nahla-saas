@@ -34,6 +34,7 @@ from .types import (
     Intent,
     MerchantConversationState,
     OrderPreparationState,
+    SalesContextSnapshot,
     SuggestionSnapshot,
     INTENT_GENERAL,
     INTENT_PICK_LIST_ITEM,
@@ -69,6 +70,7 @@ class MerchantBrain:
         composer: Composer,
         memory_updater: MemoryUpdater,
         suggestion_engine: Optional[SuggestionEngine] = None,
+        sales_context_loader: Optional[Any] = None,
     ) -> None:
         self._classifier     = classifier
         self._state_store    = state_store
@@ -78,6 +80,10 @@ class MerchantBrain:
         self._executor       = executor
         self._composer       = composer
         self._memory_updater = memory_updater
+        if sales_context_loader is None:
+            from .facts.sales_context import DefaultSalesContextLoader
+            sales_context_loader = DefaultSalesContextLoader()
+        self._sales_context_loader = sales_context_loader
         if suggestion_engine is None:
             from .suggestion.engine import DefaultSuggestionEngine
             suggestion_engine = DefaultSuggestionEngine()
@@ -105,6 +111,15 @@ class MerchantBrain:
         facts: CommerceFacts             = self._facts_loader.load(db, tenant_id)
 
         # ── 3. Assemble context ───────────────────────────────────────────
+        sales_context: SalesContextSnapshot = self._sales_context_loader.load(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            state=state,
+            history=history,
+            profile=profile,
+            customer_id=customer_id,
+        )
         ctx = BrainContext(
             tenant_id      = tenant_id,
             customer_phone = customer_phone,
@@ -116,6 +131,7 @@ class MerchantBrain:
             profile        = profile,
             customer_id    = customer_id,
             conversation_id= conversation_id,
+            sales_context  = sales_context,
         )
         # Attach db for handlers that need it (avoids threading Session issues)
         ctx._db = db  # type: ignore[attr-defined]
@@ -154,7 +170,18 @@ class MerchantBrain:
         new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)
         ctx.state = new_state
         suggestion = self._suggestion_engine.suggest(ctx, decision, result)
+        new_state.recent_messages = list((history or [])[-20:])
+        new_state.conversation_summary = str(
+            (sales_context.conversation_memory or {}).get("conversation_summary", "")
+            or new_state.conversation_summary
+            or ""
+        )
+        if result.data.get("recommended_products"):
+            new_state.last_recommended_products = list(result.data["recommended_products"])
+        elif sales_context.recommendations:
+            new_state.last_recommended_products = list(sales_context.recommendations[:5])
         new_state.recommended_next_step = suggestion.suggested_next_step
+        new_state.pending_action = suggestion.suggested_next_step or new_state.pending_action
         ctx.suggestion = suggestion
         ctx.reply_state = _build_reply_state(
             ctx=ctx,
@@ -342,6 +369,14 @@ def _build_reply_state(
         },
         recent_turns=recent_turns,
         policy_reason=str(decision.args.get("policy_reason") or ""),
+        conversation_summary=current_state.conversation_summary,
+        store_knowledge=(ctx.sales_context.store_profile if ctx.sales_context else {}),
+        customer_memory={
+            **(ctx.sales_context.customer_profile if ctx.sales_context else {}),
+            **(ctx.sales_context.customer_preferences if ctx.sales_context else {}),
+        },
+        last_recommended_products=list(current_state.last_recommended_products or []),
+        explicit_pending_action=current_state.pending_action,
     )
 
 
@@ -368,6 +403,7 @@ def build_default_brain() -> MerchantBrain:
     from .compose.responder  import DefaultComposer
     from .memory.updater     import DefaultMemoryUpdater
     from .suggestion.engine  import DefaultSuggestionEngine
+    from .facts.sales_context import DefaultSalesContextLoader
 
     return MerchantBrain(
         classifier     = DefaultIntentClassifier(),
@@ -379,6 +415,7 @@ def build_default_brain() -> MerchantBrain:
         composer       = DefaultComposer(),
         memory_updater = DefaultMemoryUpdater(),
         suggestion_engine = DefaultSuggestionEngine(),
+        sales_context_loader = DefaultSalesContextLoader(),
     )
 
 

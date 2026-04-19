@@ -23,9 +23,11 @@ from ..types import ActionResult, BrainContext, Decision
 from ..decision.actions import (
     ACTION_SEARCH_PRODUCTS,
     ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_RECOMMEND_ADDON,
     ACTION_SUGGEST_COUPON,
     ACTION_HANDOFF,
     ACTION_SEND_PAYMENT_LINK,
+    ACTION_WEB_SEARCH,
 )
 from ..types import INTENT_HESITATION
 
@@ -51,6 +53,7 @@ class DefaultMemoryUpdater:
         self._write_trace(db, ctx, decision, result, reply, stage_before, latency_ms)
         self._bump_affinity(db, ctx, decision, result)
         self._nudge_price_sensitivity(db, ctx)
+        self._emit_sales_events(db, ctx, decision, result)
         if ctx.state.turn % SUMMARISE_EVERY_N == 0:
             self._summarise(db, ctx)
 
@@ -213,6 +216,69 @@ class DefaultMemoryUpdater:
         except Exception as exc:
             db.rollback()
             logger.debug("[MemoryUpdater] price_sensitivity nudge failed: %s", exc)
+
+    # ── 3.5 Automation + recommendation event loop ───────────────────────────
+
+    def _emit_sales_events(
+        self,
+        db: Any,
+        ctx: BrainContext,
+        decision: Decision,
+        result: ActionResult,
+    ) -> None:
+        if not ctx.customer_id:
+            return
+        try:
+            from core.automation_engine import emit_automation_event
+
+            if decision.action == ACTION_SEND_PAYMENT_LINK and result.data.get("checkout_url"):
+                emit_automation_event(
+                    db,
+                    tenant_id=ctx.tenant_id,
+                    event_type="order_payment_pending",
+                    customer_id=ctx.customer_id,
+                    payload={
+                        "source": "merchant_brain",
+                        "checkout_url": result.data.get("checkout_url"),
+                        "draft_order_id": ctx.state.draft_order_id,
+                    },
+                    commit=True,
+                )
+            elif decision.action == ACTION_RECOMMEND_ADDON and result.data.get("products"):
+                emit_automation_event(
+                    db,
+                    tenant_id=ctx.tenant_id,
+                    event_type="product_created",
+                    customer_id=ctx.customer_id,
+                    payload={
+                        "source": "merchant_brain",
+                        "kind": "addon_recommendation",
+                        "products": result.data.get("products", []),
+                    },
+                    commit=True,
+                )
+            elif (
+                decision.action in {ACTION_SEARCH_PRODUCTS, ACTION_PROPOSE_DRAFT_ORDER, ACTION_WEB_SEARCH}
+                and ctx.sales_context
+                and ctx.sales_context.repeat_purchase_candidates
+            ):
+                emit_automation_event(
+                    db,
+                    tenant_id=ctx.tenant_id,
+                    event_type="predictive_reorder_due",
+                    customer_id=ctx.customer_id,
+                    payload={
+                        "source": "merchant_brain",
+                        "candidates": ctx.sales_context.repeat_purchase_candidates[:3],
+                    },
+                    commit=True,
+                )
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.debug("[MemoryUpdater] emit_sales_events failed: %s", exc)
 
     # ── 4. ConversationHistorySummary ─────────────────────────────────────────
 

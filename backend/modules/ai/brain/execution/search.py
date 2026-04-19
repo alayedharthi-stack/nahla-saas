@@ -29,21 +29,27 @@ class ProductSearchHandler:
     """Handles ACTION_SEARCH_PRODUCTS decision."""
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from core.store_knowledge import CatalogContextBuilder   # lazy import to avoid circulars
+        from modules.ai.commerce.runtime import CommerceToolRuntime
 
         query = decision.args.get("query", ctx.message)
 
         try:
-            builder  = CatalogContextBuilder(ctx._db, ctx.tenant_id)    # type: ignore[attr-defined]
-            products = (
-                builder.search_products(query, limit=8)
-                if query
-                else builder.get_top_products(limit=8)
+            runtime = CommerceToolRuntime(
+                ctx._db,  # type: ignore[attr-defined]
+                tenant_id=ctx.tenant_id,
+                customer_phone=ctx.customer_phone,
+                customer_id=ctx.customer_id,
             )
+            runtime_result = await runtime.execute(
+                "search_products",
+                {"query": query, "limit": 8},
+            )
+            products = list(runtime_result.payload.get("products") or [])
 
             # If search produced nothing but products exist → fallback to top 8
             if not products:
-                products = builder.get_top_products(limit=8)
+                runtime_result = await runtime.execute("search_products", {"limit": 8})
+                products = list(runtime_result.payload.get("products") or [])
 
             if not products:
                 return ActionResult(

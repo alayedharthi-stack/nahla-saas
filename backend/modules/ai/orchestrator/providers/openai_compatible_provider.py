@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
@@ -57,7 +57,13 @@ class OpenAICompatibleProvider(BaseAIProvider):
         """Return True when OPENAI_API_KEY is set."""
         return bool(_API_KEY)
 
-    def call(self, message: str, prompt: str) -> Dict[str, Any]:
+    def call(
+        self,
+        message: str,
+        prompt: str,
+        *,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """
         Call an OpenAI-compatible chat completions endpoint synchronously.
 
@@ -97,10 +103,7 @@ class OpenAICompatibleProvider(BaseAIProvider):
             }
             body = {
                 "model": _MODEL,
-                "messages": [
-                    {"role": "system",  "content": prompt},
-                    {"role": "user",    "content": message},
-                ],
+                "messages": [{"role": "system", "content": prompt}, *_merge_history(history, message)],
                 "max_tokens":  1024,
                 "temperature": 0.7,
             }
@@ -137,3 +140,21 @@ class OpenAICompatibleProvider(BaseAIProvider):
                 "reply_text": "",
                 "status":     "call_error",
             }
+
+
+def _merge_history(
+    history: Optional[List[Dict[str, Any]]],
+    message: str,
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    for item in history or []:
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        merged.append({"role": role, "content": content})
+    if not merged or merged[-1]["role"] != "user":
+        merged.append({"role": "user", "content": message})
+    elif merged[-1]["content"] != message:
+        merged.append({"role": "user", "content": message})
+    return merged

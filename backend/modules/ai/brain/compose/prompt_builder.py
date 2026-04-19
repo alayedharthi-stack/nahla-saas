@@ -39,7 +39,9 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         "- لا تخترع حقائق غير موجودة في known_facts أو selected_product.\n"
         "- اجعل ردك قصيراً ومناسباً لواتساب.\n\n"
         "BrainStateJSON:\n"
-        f"{brain_state_json}"
+        f"{brain_state_json}\n\n"
+        "إذا كانت conversation_summary أو customer_memory أو store_knowledge موجودة فاستخدمها لفهم السياق "
+        "واقتراح الخطوة التجارية التالية، لكن لا تذكر أي معلومة غير موجودة فيها."
     )
 
 

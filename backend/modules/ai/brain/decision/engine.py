@@ -31,10 +31,12 @@ from .actions import (
     ACTION_LLM_REPLY,
     ACTION_NARROW,
     ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_WEB_SEARCH,
 )
 from ..types import (
     INTENT_ASK_OWNER_CONTACT,
@@ -250,6 +252,34 @@ class DefaultDecisionEngine:
                     reason="customer hesitating — nudge with a coupon",
                     confidence=0.75,
                 )
+
+        # ── 8.5 Upsell / addon recommendation ────────────────────────────
+        if (
+            state.current_product_focus
+            and ctx.sales_context
+            and ctx.sales_context.recommendations
+            and intent.name in (INTENT_START_ORDER, INTENT_PAY_NOW, INTENT_ASK_PRODUCT)
+        ):
+            return Decision(
+                action=ACTION_RECOMMEND_ADDON,
+                args={"query": state.current_product_focus.get("category", "")},
+                reason="customer close to purchase with recommendations available",
+                confidence=0.68,
+            )
+
+        # ── 8.6 Web research when store knowledge likely insufficient ─────
+        if (
+            intent.name == INTENT_GENERAL
+            and ctx.sales_context
+            and not ctx.facts.has_products
+            and len(ctx.message.split()) >= 4
+        ):
+            return Decision(
+                action=ACTION_WEB_SEARCH,
+                args={"query": ctx.message},
+                reason="general knowledge question with weak store context",
+                confidence=0.55,
+            )
 
         # ── 9. Fallback: LLM ─────────────────────────────────────────────
         return Decision(

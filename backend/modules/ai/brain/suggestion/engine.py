@@ -18,10 +18,12 @@ from ..decision.actions import (
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_WEB_SEARCH,
 )
 from ..types import (
     BrainContext,
@@ -129,6 +131,13 @@ class DefaultSuggestionEngine:
             suggestion.route_to_checkout = True
             return suggestion
 
+        if decision.action == ACTION_RECOMMEND_ADDON:
+            suggestion.suggested_next_step = "consider_addon"
+            suggestion.close_to_purchase = True
+            suggestion.needs_follow_up_question = True
+            suggestion.follow_up_question = "إذا أعجبك أحد هذه الإضافات أضيفه لك مع الطلب مباشرة."
+            return suggestion
+
         if decision.action == ACTION_TRACK_ORDER:
             suggestion.suggested_next_step = "offer_additional_help"
             suggestion.needs_follow_up_question = True
@@ -158,6 +167,16 @@ class DefaultSuggestionEngine:
             if ctx.intent.name == INTENT_HESITATION and suggestion.discount_ok_now:
                 suggestion.suggested_next_step = "soft_discount_nudge"
                 suggestion.close_to_purchase = True
+            return suggestion
+
+        if decision.action == ACTION_WEB_SEARCH:
+            suggestion.suggested_next_step = "ground_external_answer_to_store"
+            suggestion.needs_follow_up_question = bool(ctx.facts.has_products)
+            suggestion.follow_up_question = (
+                "إذا تحب، أقدر أيضاً أربط هذه المعلومة بمنتجات المتجر المناسبة لك."
+                if ctx.facts.has_products
+                else ""
+            )
             return suggestion
 
         return suggestion

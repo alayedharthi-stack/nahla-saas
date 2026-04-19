@@ -76,7 +76,7 @@ class AIOrchestratorEngine:
 
     def _call_with_chain(
         self,
-        request: AIOrchestrationRequest,
+        request: AIOrchestrationRequest | str,
         prompt: str,
         provider_chain: ProviderChainConfig,
     ) -> Dict[str, Any]:
@@ -97,6 +97,7 @@ class AIOrchestratorEngine:
         Never raises.
         """
         observer = ChainObserver(provider_chain.providers)
+        request_obj = self._coerce_request(request)
 
         for provider_name in provider_chain.providers:
             provider = get_provider(provider_name)
@@ -126,13 +127,18 @@ class AIOrchestratorEngine:
                 provider_name,
                 (
                     lambda p=provider: p.call_with_tools(
-                        message=request.message,
+                        message=request_obj.message,
                         prompt=prompt,
-                        tools=request.tool_definitions,
+                        tools=request_obj.tool_definitions,
                         tool_choice="auto",
+                        history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
                     )
-                    if request.tool_definitions and hasattr(p, "call_with_tools")
-                    else p.call(request.message, prompt)
+                    if request_obj.tool_definitions and hasattr(p, "call_with_tools")
+                    else p.call(
+                        request_obj.message,
+                        prompt,
+                        history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
+                    )
                 ),
                 timeout=_PROVIDER_TIMEOUT,
             )
@@ -169,15 +175,20 @@ class AIOrchestratorEngine:
             "using default provider fallback (anthropic)"
         )
         _t0 = time.monotonic()
-        if request.tool_definitions and hasattr(self._provider, "call_with_tools"):
+        if request_obj.tool_definitions and hasattr(self._provider, "call_with_tools"):
             result = self._provider.call_with_tools(
-                message=request.message,
+                message=request_obj.message,
                 prompt=prompt,
-                tools=request.tool_definitions,
+                tools=request_obj.tool_definitions,
                 tool_choice="auto",
+                history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
             )
         else:
-            result = self._provider.call(request.message, prompt)
+            result = self._provider.call(
+                request_obj.message,
+                prompt,
+                history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
+            )
         _duration_ms = (time.monotonic() - _t0) * 1000
         _fallback_status = "succeeded" if result.get("reply_text") else "failed"
         observer.record_call(f"{self._provider.provider_name}(fallback)", _duration_ms, _fallback_status)
@@ -254,8 +265,23 @@ class AIOrchestratorEngine:
                 prompt=prompt,
                 tools=request.tool_definitions,
                 tool_choice="auto",
+                history=[{"role": msg.role, "content": msg.content} for msg in request.history],
             )
-        return self._provider.call(request.message, prompt)
+        return self._provider.call(
+            request.message,
+            prompt,
+            history=[{"role": msg.role, "content": msg.content} for msg in request.history],
+        )
+
+    def _coerce_request(self, request: AIOrchestrationRequest | str) -> AIOrchestrationRequest:
+        if isinstance(request, AIOrchestrationRequest):
+            return request
+        from modules.ai.orchestrator.types import AIContext
+
+        return AIOrchestrationRequest(
+            context=AIContext(channel="system"),
+            message=str(request),
+        )
 
     # ── Reply generation ──────────────────────────────────────────────────────
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
@@ -53,7 +53,13 @@ class GeminiProvider(BaseAIProvider):
         """Return True when GEMINI_API_KEY is set."""
         return bool(_API_KEY)
 
-    def call(self, message: str, prompt: str) -> Dict[str, Any]:
+    def call(
+        self,
+        message: str,
+        prompt: str,
+        *,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """
         Call the Gemini generateContent API synchronously.
 
@@ -95,9 +101,7 @@ class GeminiProvider(BaseAIProvider):
                 "system_instruction": {
                     "parts": [{"text": prompt}]
                 },
-                "contents": [
-                    {"role": "user", "parts": [{"text": message}]}
-                ],
+                "contents": _merge_history(history, message),
                 "generationConfig": {
                     "maxOutputTokens": 1024,
                     "temperature":     0.7,
@@ -134,3 +138,21 @@ class GeminiProvider(BaseAIProvider):
                 "reply_text": "",
                 "status":     "call_error",
             }
+
+
+def _merge_history(
+    history: Optional[List[Dict[str, Any]]],
+    message: str,
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    for item in history or []:
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        merged.append({"role": role, "parts": [{"text": content}]})
+    if not merged or merged[-1]["role"] != "user":
+        merged.append({"role": "user", "parts": [{"text": message}]})
+    elif (merged[-1].get("parts") or [{}])[0].get("text") != message:
+        merged.append({"role": "user", "parts": [{"text": message}]})
+    return merged

@@ -31,6 +31,7 @@ from modules.ai.orchestrator.pipeline import AIOrchestrationPipeline
 from modules.ai.orchestrator.types import (
     AIChannel,
     AIContext,
+    AIMessage,
     AIOrchestrationRequest,
     AIProvider,
     AIReplyPayload,
@@ -40,6 +41,17 @@ logger = logging.getLogger("nahla.ai.orchestrator.adapter")
 
 # Shared pipeline instance — stateless, safe to reuse across calls
 _pipeline = AIOrchestrationPipeline(engine=AIOrchestratorEngine())
+
+_RUNTIME_ACTION_TO_TOOL = {
+    "search_products": "search_products",
+    "get_product_details": "get_product_details",
+    "check_stock": "check_stock",
+    "track_order": "track_order",
+    "get_store_info": "get_store_info",
+    "get_customer_history": "get_customer_history",
+    "recommend_addon": "recommend_addon",
+    "web_search": "web_search",
+}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -54,6 +66,7 @@ def generate_ai_reply(
     store_name: str = "",
     channel: str = "system",
     locale: str = "ar",
+    history: Optional[List[Dict[str, Any]]] = None,
     context_metadata: Optional[Dict[str, Any]] = None,
     tools_requested: Optional[List[str]] = None,
     tool_definitions: Optional[List[Dict[str, Any]]] = None,
@@ -104,6 +117,15 @@ def generate_ai_reply(
             metadata=context_metadata or {},
         ),
         message=message,
+        history=[
+            AIMessage(
+                role=str(item.get("role") or "user"),  # type: ignore[arg-type]
+                content=str(item.get("content") or ""),
+                metadata=dict(item.get("metadata") or {}),
+            )
+            for item in (history or [])
+            if str(item.get("content") or "").strip()
+        ],
         tools_requested=tools_requested or [],
         tool_definitions=tool_definitions or [],
         prompt_overrides=prompt_overrides or {},
@@ -154,6 +176,7 @@ async def generate_orchestrate_response(
     from execution.action_execution_guard import decide as execution_decide  # type: ignore[import-not-found]
     from engine.claude_client import _TOOLS as ORCHESTRATOR_TOOLS  # type: ignore[import-not-found]
     from modules.ai.prompts.builder import build_system_prompt
+    from modules.ai.commerce.runtime import CommerceToolRuntime
 
     try:
         ctx = load_customer_memory(tenant_id, customer_phone)
@@ -184,6 +207,7 @@ async def generate_orchestrate_response(
         store_name=ctx.get("store_name", ""),
         channel="whatsapp",
         locale=ctx.get("preferred_language", "ar"),
+        history=_context_to_history(ctx, message),
         context_metadata={
             **ctx,
             "conversation_id": conversation_id,
@@ -205,14 +229,6 @@ async def generate_orchestrate_response(
         logger.warning("[adapter.generate_orchestrate_response] grounding fetch failed: %s", exc)
         grounding = GroundingData()
 
-    mentioned_coupons = extract_coupon_codes_from_text(raw_reply)
-    vetted = vet_reply(raw_reply, grounding, mentioned_coupon_codes=mentioned_coupons)
-    vetted_reply = vetted.vetted_text
-    fact_guard = {
-        "was_modified": vetted.was_modified,
-        "claims_detected": [c.claim_type for c in vetted.claims if c.detected],
-    }
-
     policy_gated = validate_actions(raw_actions, ctx)
     permission_gated = permission_gate(policy_gated, permissions)
     fully_gated = execution_decide(permission_gated, tenant_id)
@@ -220,28 +236,75 @@ async def generate_orchestrate_response(
     approved_product_ids: List[int] = []
     coupon_code_to_inject: Optional[str] = None
     coupon_expiry_text_to_inject: Optional[str] = None
-    for action in fully_gated:
-        if action.get("executable") and action.get("final_payload"):
-            fp = action["final_payload"]
-            if action["type"] == "suggest_product":
-                pid = fp.get("product_id")
-                if pid:
-                    approved_product_ids.append(pid)
-            elif action["type"] in ("suggest_bundle", "propose_order", "create_draft_order"):
-                approved_product_ids.extend(fp.get("product_ids", []))
-            elif action["type"] == "suggest_coupon":
-                coupon_payload = await _execute_suggest_coupon(
-                    tenant_id, customer_segment, fp,
-                    customer_id=customer_id,
-                )
-                if coupon_payload:
-                    coupon_code_to_inject = coupon_payload.get("code")
-                    coupon_expiry_text_to_inject = coupon_payload.get("expires_text")
-                    fp["coupon_code"] = coupon_code_to_inject
-                    if coupon_payload.get("expires_at"):
-                        fp["coupon_expires_at"] = coupon_payload["expires_at"]
-                    if coupon_expiry_text_to_inject:
-                        fp["coupon_expires_text"] = coupon_expiry_text_to_inject
+    runtime_summaries: List[str] = []
+    runtime, runtime_db = _build_runtime(tenant_id, customer_phone, customer_id)
+    try:
+        for action in fully_gated:
+            if action.get("executable") and action.get("final_payload") is not None:
+                fp = action["final_payload"]
+                if action["type"] == "suggest_product":
+                    pid = fp.get("product_id")
+                    if pid:
+                        approved_product_ids.append(pid)
+                elif action["type"] in ("suggest_bundle", "propose_order", "create_draft_order"):
+                    approved_product_ids.extend(fp.get("product_ids", []))
+                elif action["type"] == "suggest_coupon":
+                    coupon_payload = await _execute_suggest_coupon(
+                        tenant_id, customer_segment, fp,
+                        customer_id=customer_id,
+                    )
+                    if coupon_payload:
+                        coupon_code_to_inject = coupon_payload.get("code")
+                        coupon_expiry_text_to_inject = coupon_payload.get("expires_text")
+                        fp["coupon_code"] = coupon_code_to_inject
+                        if coupon_payload.get("expires_at"):
+                            fp["coupon_expires_at"] = coupon_payload["expires_at"]
+                        if coupon_expiry_text_to_inject:
+                            fp["coupon_expires_text"] = coupon_expiry_text_to_inject
+                elif action["type"] == "propose_order" and runtime is not None:
+                    product_ids = list(fp.get("product_ids") or [])
+                    if product_ids:
+                        runtime_result = await runtime.execute(
+                            "create_draft_order",
+                            {
+                                "product_id": str(product_ids[0]),
+                                "quantity": 1,
+                                "customer_name": ctx.get("customer_name") or "عميل",
+                                "customer_email": None,
+                            },
+                        )
+                        _attach_runtime_result(fp, runtime_result)
+                elif runtime is not None:
+                    runtime_call = _runtime_call_for_action(action["type"], fp, message)
+                    if runtime_call is not None:
+                        tool_name, tool_payload = runtime_call
+                        runtime_result = await runtime.execute(tool_name, tool_payload)
+                        _attach_runtime_result(fp, runtime_result)
+                        approved_product_ids.extend(
+                            _runtime_product_ids(action["type"], runtime_result.payload)
+                        )
+                        summary = _runtime_summary_for_action(
+                            action["type"],
+                            runtime_result.payload,
+                            runtime_result.error,
+                        )
+                        if summary:
+                            runtime_summaries.append(summary)
+    finally:
+        if runtime_db is not None:
+            try:
+                runtime_db.close()
+            except Exception:
+                pass
+
+    candidate_reply = _join_runtime_summaries(runtime_summaries) or raw_reply
+    mentioned_coupons = extract_coupon_codes_from_text(candidate_reply)
+    vetted = vet_reply(candidate_reply, grounding, mentioned_coupon_codes=mentioned_coupons)
+    vetted_reply = vetted.vetted_text
+    fact_guard = {
+        "was_modified": vetted.was_modified,
+        "claims_detected": [c.claim_type for c in vetted.claims if c.detected],
+    }
 
     if coupon_code_to_inject and coupon_code_to_inject not in (vetted_reply or ""):
         vetted_reply = (vetted_reply or "") + f"\n\nكود الخصم الخاص بك: {coupon_code_to_inject}"
@@ -420,6 +483,361 @@ def run_pipeline(request: AIOrchestrationRequest) -> AIReplyPayload:
     return _pipeline.run(request)
 
 
+def _context_to_history(ctx: Dict[str, Any], message: str) -> List[Dict[str, Any]]:
+    history: List[Dict[str, Any]] = []
+    recent_messages = list(ctx.get("recent_messages") or [])
+    for item in recent_messages:
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            history.append({"role": role, "content": content})
+    if not history or history[-1]["role"] != "user":
+        history.append({"role": "user", "content": message})
+    elif history[-1]["content"] != message:
+        history.append({"role": "user", "content": message})
+    return history
+
+
+def _build_runtime(tenant_id: int, customer_phone: str, customer_id: Optional[int]):
+    try:
+        from core.database import SessionLocal
+        from modules.ai.commerce.runtime import CommerceToolRuntime
+
+        db = SessionLocal()
+        return (
+            CommerceToolRuntime(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=customer_phone,
+                customer_id=customer_id,
+            ),
+            db,
+        )
+    except Exception:
+        return None, None
+
+
+def _runtime_call_for_action(
+    action_type: str,
+    payload: Dict[str, Any],
+    message: str,
+) -> Optional[tuple[str, Dict[str, Any]]]:
+    tool_name = _RUNTIME_ACTION_TO_TOOL.get(action_type)
+    if tool_name is None:
+        return None
+
+    if action_type == "search_products":
+        return (
+            tool_name,
+            {
+                "query": str(payload.get("query") or message).strip(),
+                "limit": int(payload.get("limit") or 8),
+            },
+        )
+    if action_type == "get_product_details":
+        return (
+            tool_name,
+            {
+                "query": str(payload.get("query") or payload.get("product_title") or "").strip(),
+                "external_id": str(payload.get("external_id") or "").strip(),
+            },
+        )
+    if action_type == "check_stock":
+        return (
+            tool_name,
+            {
+                "external_id": str(payload.get("external_id") or payload.get("product_id") or "").strip(),
+            },
+        )
+    if action_type == "recommend_addon":
+        return (
+            tool_name,
+            {
+                "product_id": payload.get("product_id"),
+                "query": str(payload.get("query") or "").strip(),
+            },
+        )
+    if action_type == "web_search":
+        return (
+            tool_name,
+            {
+                "query": str(payload.get("query") or message).strip(),
+            },
+        )
+    return tool_name, {}
+
+
+def _attach_runtime_result(final_payload: Dict[str, Any], runtime_result: Any) -> None:
+    final_payload["runtime_result"] = dict(runtime_result.payload or {})
+    final_payload["runtime_ok"] = bool(runtime_result.ok)
+    if runtime_result.error:
+        final_payload["runtime_error"] = runtime_result.error
+
+
+def _runtime_product_ids(action_type: str, payload: Dict[str, Any]) -> List[int]:
+    ids: List[int] = []
+    if action_type in {"search_products", "recommend_addon"}:
+        for product in list(payload.get("products") or []):
+            pid = _coerce_int(product.get("id"))
+            if pid is not None:
+                ids.append(pid)
+    elif action_type == "get_product_details":
+        product = payload.get("product") or {}
+        pid = _coerce_int(product.get("id"))
+        if pid is not None:
+            ids.append(pid)
+    return ids
+
+
+def _runtime_summary_for_action(
+    action_type: str,
+    payload: Dict[str, Any],
+    error: Optional[str] = None,
+) -> str:
+    if action_type == "search_products":
+        products = list(payload.get("products") or [])
+        query = str(payload.get("query") or "").strip()
+        if not products:
+            suffix = f' لـ "{query}"' if query else ""
+            return (
+                f"ما لقيت منتجات مطابقة{suffix} حالياً. "
+                "إذا تحب أقدر أجرّب وصفاً آخر أو أرشح لك أقرب الخيارات."
+            )
+        lines = []
+        intro = "هذه أقرب المنتجات المناسبة"
+        if query:
+            intro += f' لـ "{query}"'
+        lines.append(f"{intro}:")
+        lines.append("")
+        for idx, product in enumerate(products[:3], 1):
+            title = str(product.get("title") or f"منتج {idx}")
+            price = _product_price_text(product)
+            line = f"{idx}. {title}"
+            if price:
+                line += f" - {price}"
+            lines.append(line)
+        lines.append("")
+        lines.append("إذا رغبت، أقدر أوضح الفرق بينها أو أساعدك في الطلب مباشرة.")
+        return "\n".join(lines).strip()
+
+    if action_type == "get_product_details":
+        product = payload.get("product") or {}
+        if not product:
+            return (
+                "ما قدرت أحدد المنتج المقصود بدقة. "
+                "أرسل اسم المنتج أو اختَر أحد الخيارات الظاهرة وسأعطيك التفاصيل فوراً."
+            )
+        lines = [f"تفاصيل المنتج: {str(product.get('title') or 'المنتج المطلوب')}"]
+        price = _product_price_text(product)
+        if price:
+            lines.append(f"- السعر: {price}")
+        category = str(product.get("category") or "").strip()
+        if category:
+            lines.append(f"- التصنيف: {category}")
+        brand = str(product.get("brand") or "").strip()
+        if brand:
+            lines.append(f"- العلامة: {brand}")
+        in_stock = product.get("in_stock")
+        if in_stock is True:
+            lines.append("- التوفر: متوفر حالياً")
+        elif in_stock is False:
+            lines.append("- التوفر: غير متوفر حالياً")
+        lines.append("إذا ناسبك أقدر أكمل معك الطلب مباشرة.")
+        return "\n".join(lines)
+
+    if action_type == "check_stock":
+        stock = payload.get("stock") or {}
+        available = stock.get("available")
+        if available is None:
+            return (
+                "ما قدرت أتحقق من المخزون لهذا المنتج الآن. "
+                "إذا أرسلت اسم المنتج أو اخترته بشكل محدد أراجع لك التوفر فوراً."
+            )
+        lines = ["حالة التوفر: متوفر حالياً" if available else "حالة التوفر: غير متوفر حالياً"]
+        qty = stock.get("stock_qty")
+        if qty is not None:
+            lines.append(f"الكمية المتاحة تقريباً: {qty}")
+        price = _format_money(stock.get("sale_price") or stock.get("price"))
+        if price:
+            lines.append(f"السعر الحالي: {price}")
+        return "\n".join(lines)
+
+    if action_type == "track_order":
+        order = payload.get("order") or {}
+        if not order:
+            return "لم أجد أي طلبات مسجلة على هذا الرقم حالياً. إذا تحب أقدر أساعدك في إنشاء طلب جديد."
+        reference = str(order.get("reference_id") or order.get("id") or "").strip()
+        status = str(order.get("status") or "قيد المراجعة").strip()
+        lines = [f"حالة طلبك{f' رقم {reference}' if reference else ''}: {status}"]
+        total = _format_money(order.get("total"), order.get("currency") or "SAR")
+        if total:
+            lines.append(f"الإجمالي: {total}")
+        checkout_url = str(order.get("payment_link") or "").strip()
+        if checkout_url:
+            lines.append(f"رابط الدفع: {checkout_url}")
+        return "\n".join(lines)
+
+    if action_type == "get_store_info":
+        store_profile = payload.get("store_profile") or {}
+        shipping = payload.get("shipping_summary") or {}
+        policy = payload.get("policy_summary") or {}
+        catalog = payload.get("catalog_summary") or {}
+        store_name = str(store_profile.get("store_name") or "المتجر").strip()
+        lines = [f"هذه أبرز معلومات {store_name}:"]
+        description = str(store_profile.get("description") or "").strip()
+        if description:
+            lines.append(description)
+        store_url = str(store_profile.get("store_url") or "").strip()
+        if store_url:
+            lines.append(f"- رابط المتجر: {store_url}")
+        shipping_policy = str(
+            shipping.get("shipping_policy")
+            or shipping.get("summary")
+            or shipping.get("delivery_window")
+            or ""
+        ).strip()
+        if shipping_policy:
+            lines.append(f"- الشحن: {shipping_policy}")
+        courier = str(
+            shipping.get("courier")
+            or shipping.get("company")
+            or shipping.get("shipping_company")
+            or ""
+        ).strip()
+        if courier:
+            lines.append(f"- شركة الشحن: {courier}")
+        payment_methods = [
+            str(item).strip()
+            for item in list(policy.get("payment_methods") or policy.get("payments") or [])
+            if str(item).strip()
+        ]
+        if payment_methods:
+            lines.append(f"- الدفع: {', '.join(payment_methods[:4])}")
+        return_policy = str(policy.get("return_policy") or policy.get("returns") or "").strip()
+        if return_policy:
+            lines.append(f"- الاسترجاع: {return_policy}")
+        support_hours = str(policy.get("support_hours") or "").strip()
+        if support_hours:
+            lines.append(f"- ساعات الدعم: {support_hours}")
+        top_titles = _titles_from_items(
+            list(catalog.get("top_products") or store_profile.get("best_sellers") or []),
+            limit=3,
+        )
+        if top_titles:
+            lines.append(f"- الأكثر مبيعاً: {', '.join(top_titles)}")
+        if len(lines) == 1:
+            lines.append("أقدر أيضاً أساعدك في اختيار المنتج المناسب أو متابعة الطلب مباشرة.")
+        return "\n".join(lines)
+
+    if action_type == "get_customer_history":
+        history_block = str(payload.get("history_block") or "").strip()
+        if not history_block:
+            return (
+                "راجعت سجل التفاعل السابق لكن لا توجد بيانات كافية بعد. "
+                "إذا تحب أقدر أبدأ معك بترشيح الخيارات المناسبة من الصفر."
+            )
+        return (
+            "راجعت تفضيلاتك وسجلّك السابق، وأقدر أبني عليه في الترشيح أو إعادة الطلب. "
+            "إذا تحب أقدر أرشح لك نفس النوع الذي ناسبك قبل أو بدائل قريبة."
+        )
+
+    if action_type == "recommend_addon":
+        products = list(payload.get("products") or [])
+        if not products:
+            return (
+                "حاولت أبحث عن إضافة مناسبة لكن ما ظهر لي خيار واضح الآن. "
+                "إذا تحب أقدر أرشح لك بدائل مشابهة من المتجر."
+            )
+        lines = ["قد تناسبك أيضاً هذه الإضافات مع طلبك الحالي:", ""]
+        for idx, product in enumerate(products[:3], 1):
+            title = str(product.get("title") or f"إضافة {idx}")
+            price = _product_price_text(product)
+            line = f"{idx}. {title}"
+            if price:
+                line += f" - {price}"
+            lines.append(line)
+        lines.append("")
+        lines.append("إذا رغبت أضيف أي خيار منها مع الطلب مباشرة.")
+        return "\n".join(lines).strip()
+
+    if action_type == "web_search":
+        summary = str(payload.get("summary") or "").strip()
+        if not summary:
+            results = list(payload.get("results") or [])
+            if results:
+                summary = str(results[0].get("snippet") or "").strip()
+        if not summary:
+            if error:
+                return (
+                    "ما قدرت أوصل الآن إلى معلومات خارجية موثوقة بشكل كافٍ. "
+                    "إذا تحب أجاوبك بما هو متاح من معرفة المتجر الحالية."
+                )
+            return (
+                "ما لقيت معلومات خارجية كافية الآن. "
+                "إذا تحب أجاوبك بما هو متاح من معرفة المتجر أو توضح سؤالك أكثر."
+            )
+        lines = [summary]
+        citations = [
+            str(url).strip()
+            for url in list(payload.get("citations") or [])
+            if str(url).strip()
+        ]
+        if citations:
+            lines.append("")
+            lines.append("المصادر:")
+            for url in citations[:3]:
+                lines.append(f"- {url}")
+        return "\n".join(lines)
+
+    return ""
+
+
+def _join_runtime_summaries(summaries: List[str]) -> str:
+    unique: List[str] = []
+    for item in summaries:
+        text = str(item or "").strip()
+        if text and text not in unique:
+            unique.append(text)
+    return "\n\n".join(unique[:2]).strip()
+
+
+def _titles_from_items(items: List[Any], *, limit: int = 3) -> List[str]:
+    titles: List[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            title = str(item.get("title") or item.get("name") or "").strip()
+        else:
+            title = str(item).strip()
+        if title and title not in titles:
+            titles.append(title)
+        if len(titles) >= limit:
+            break
+    return titles
+
+
+def _product_price_text(product: Dict[str, Any]) -> str:
+    return _format_money(product.get("sale_price") or product.get("price"))
+
+
+def _format_money(amount: Any, currency: str = "SAR") -> str:
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return ""
+    text = str(int(value)) if value.is_integer() else f"{value:.2f}".rstrip("0").rstrip(".")
+    unit = "ريال" if str(currency or "SAR").upper() == "SAR" else str(currency)
+    return f"{text} {unit}".strip()
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Internal coercion helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -459,20 +877,16 @@ async def _execute_suggest_coupon(
     """
     Pick or create a real coupon for the customer segment.
 
-    Phase-3 wiring: dispatch is driven by the shared
-    `tenant_decision_mode` resolver (single source of truth for the
-    OfferDecisionService rollout — see
-    `services.offer_decision_flags`):
+    Phase-3 wiring: regardless of which surface the merchant has opted
+    into, we ALSO call `OfferDecisionService.decide` here so the chat
+    decision is captured in the ledger. Two modes are supported via the
+    per-tenant feature flag (`offer_decision_service`):
 
-      • OFF / ADVISORY → **advisory behaviour**. The legacy resolver
-        produces the actual coupon and the LLM-suggested discount %
-        stays in effect. The decision service still runs for telemetry
-        and a ledger row is written; the issued coupon is back-stamped
-        with `decision_id` so attribution works. This is the default —
-        it lets us measure parity before flipping merchants to
-        enforcement, and keeps the chat surface safe under both OFF
-        and ADVISORY rollout modes.
-      • ENFORCE → **enforce mode**. The decision service's output
+      • flag OFF → **advisory mode**. The decision service runs purely
+        for telemetry; the LLM-suggested discount % stays in effect.
+        This is the default — it lets us measure parity before flipping
+        any merchant to enforcement.
+      • flag ON  → **enforce mode**. The decision service's output
         (source/value/validity) is the source of truth, the LLM's
         suggested % is treated as a hint, and the resulting Coupon
         carries `decision_id` so order_paid attribution works.
@@ -484,11 +898,10 @@ async def _execute_suggest_coupon(
 
         from core.database import SessionLocal
         from services.coupon_generator import CouponGeneratorService, build_coupon_send_payload
-        from services.offer_decision_flags import DecisionMode, tenant_decision_mode
 
         db = SessionLocal()
         try:
-            enforce = tenant_decision_mode(db, tenant_id) is DecisionMode.ENFORCE
+            enforce = _tenant_uses_decision_service_enforce(db, tenant_id)
             requested_discount = payload.get("discount_pct")
 
             if enforce:
@@ -598,6 +1011,22 @@ async def _execute_suggest_coupon(
     except Exception as exc:
         logger.error("suggest_coupon execution failed: %s", exc, exc_info=True)
     return None
+
+
+def _tenant_uses_decision_service_enforce(db, tenant_id: int) -> bool:
+    """Per-tenant flag identical to the automation engine wiring. When
+    True the chat path is fully delegated to OfferDecisionService."""
+    try:
+        from database.models import TenantSettings  # noqa: PLC0415
+
+        ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+        if ts is None:
+            return False
+        meta = dict(ts.extra_metadata or {})
+        flags = dict(meta.get("tenant_features") or {})
+        return bool(flags.get("offer_decision_service"))
+    except Exception:
+        return False
 
 
 def _stamp_advisory_decision_id(db, coupon, decision) -> None:

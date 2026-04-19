@@ -12,7 +12,7 @@ provider-specific execution logic directly.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 
 class BaseAIProvider(ABC):
@@ -46,7 +46,13 @@ class BaseAIProvider(ABC):
         ...
 
     @abstractmethod
-    def call(self, message: str, prompt: str) -> Dict[str, Any]:
+    def call(
+        self,
+        message: str,
+        prompt: str,
+        *,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """
         Invoke the provider synchronously and return a result dict.
 
@@ -54,6 +60,7 @@ class BaseAIProvider(ABC):
         ----------
         message : inbound customer message (user turn)
         prompt  : pre-built system prompt from the prompt builder
+        history : optional prior conversation turns in provider-neutral format
 
         Must never raise.  Return reply_text="" on any failure.
         """

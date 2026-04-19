@@ -31,6 +31,7 @@ from database.models import (
     Tenant,
     TenantSettings,
     WhatsAppNumber,
+    MessageEvent,
 )
 from database.session import SessionLocal
 
@@ -233,6 +234,7 @@ def load_customer_memory(
                 }
                 for o in recent_orders
             ],
+            "recent_messages": _load_recent_messages(db, tenant_id, customer_phone),
         }
 
     finally:
@@ -296,6 +298,7 @@ def _new_customer_context(tenant: Tenant, phone: str, db) -> Dict[str, Any]:
             for c in coupons
         ],
         "recent_orders": [],
+        "recent_messages": _load_recent_messages(db, tenant.id, phone),
     }
 
 
@@ -316,5 +319,29 @@ def _empty_context() -> Dict[str, Any]:
         "past_products_mentioned": [], "last_intent": None,
         "sentiment": "neutral", "escalation_count": 0,
         "products": [], "high_affinity_product_ids": [],
-        "coupons": [], "recent_orders": [],
+        "coupons": [], "recent_orders": [], "recent_messages": [],
     }
+
+
+def _load_recent_messages(db, tenant_id: int, phone: str) -> List[Dict[str, Any]]:
+    try:
+        events = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                MessageEvent.extra_metadata.op("->>")("phone") == phone,
+            )
+            .order_by(MessageEvent.id.desc())
+            .limit(20)
+            .all()
+        )
+        return [
+            {
+                "role": "user" if e.direction == "inbound" else "assistant",
+                "content": str(e.body or "").strip(),
+            }
+            for e in reversed(events)
+            if str(e.body or "").strip()
+        ]
+    except Exception:
+        return []

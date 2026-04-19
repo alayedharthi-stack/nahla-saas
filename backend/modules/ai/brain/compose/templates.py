@@ -192,6 +192,29 @@ def coupon_offer(coupon_block: str = "", product: Dict[str, Any] | None = None, 
     return f"{intro}{coupon_block}"
 
 
+def addon_recommendations(products: List[Dict[str, Any]], **_: Any) -> str:
+    if not products:
+        return generic_fallback()
+    lines = ["قد يناسبك أيضاً مع هذا المنتج:\n"]
+    for idx, product in enumerate(products[:3], 1):
+        title = str(product.get("title") or f"منتج {idx}")
+        price = product.get("price")
+        if price:
+            lines.append(f"{idx}. *{title}* — {price} ريال")
+        else:
+            lines.append(f"{idx}. *{title}*")
+    lines.append("\nإذا رغبت أضيفه لك مع الطلب أو أشرح لك الفرق بين الخيارات.")
+    return "\n".join(lines)
+
+
+def web_search_summary(summary: str = "", citations: List[str] | None = None, **_: Any) -> str:
+    text = summary.strip() or "وجدت بعض المعلومات العامة من مصادر خارجية لكن أحتاج سؤالك بشكل أدق."
+    refs = [url for url in (citations or [])[:3] if url]
+    if refs:
+        text += "\n\nالمصادر:\n" + "\n".join(f"- {url}" for url in refs)
+    return text
+
+
 # ── Handoff ───────────────────────────────────────────────────────────────────
 
 def handoff(**_: Any) -> str:

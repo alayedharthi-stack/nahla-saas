@@ -79,6 +79,14 @@ class OrchestrateResponse(BaseModel):
     model_used: str
 
 
+# Pydantic v2 + importlib-based test loading can leave postponed annotations
+# unresolved unless the models are rebuilt explicitly.
+OrchestrateRequest.model_rebuild()
+GatedAction.model_rebuild()
+FactGuardResult.model_rebuild()
+OrchestrateResponse.model_rebuild()
+
+
 # ── Main orchestration endpoint ───────────────────────────────────────────────
 
 @router.post("/orchestrate", response_model=OrchestrateResponse)

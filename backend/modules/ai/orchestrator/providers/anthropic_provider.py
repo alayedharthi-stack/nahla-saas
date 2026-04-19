@@ -79,6 +79,7 @@ class AnthropicProvider(BaseAIProvider):
         prompt: str,
         tools: List[Dict[str, Any]],
         tool_choice: str = "auto",
+        history: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Call Claude with native tool use enabled.
@@ -88,13 +89,19 @@ class AnthropicProvider(BaseAIProvider):
         under modules.ai.orchestrator.providers.
         """
         return self._call_internal(
-            messages=[{"role": "user", "content": message}],
+            messages=_merge_history(history, message),
             prompt=prompt,
             tools=tools,
             tool_choice=tool_choice,
         )
 
-    def call(self, message: str, prompt: str) -> Dict[str, Any]:
+    def call(
+        self,
+        message: str,
+        prompt: str,
+        *,
+        history: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """
         Call Claude synchronously.
 
@@ -102,7 +109,7 @@ class AnthropicProvider(BaseAIProvider):
         Never raises — empty reply_text signals failure to the engine.
         """
         return self._call_internal(
-            messages=[{"role": "user", "content": message}],
+            messages=_merge_history(history, message),
             prompt=prompt,
         )
 
@@ -270,3 +277,25 @@ class AnthropicProvider(BaseAIProvider):
                 "provider": "anthropic", "model": _MODEL,
                 "reply_text": "", "status": "httpx_error", "actions": [],
             }
+
+
+def _merge_history(
+    history: Optional[List[Dict[str, Any]]],
+    message: str,
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    for item in history or []:
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        if merged and merged[-1]["role"] == role:
+            merged[-1]["content"] += f"\n{content}"
+        else:
+            merged.append({"role": role, "content": content})
+
+    if not merged or merged[-1]["role"] != "user":
+        merged.append({"role": "user", "content": message})
+    elif merged[-1]["content"] != message:
+        merged.append({"role": "user", "content": message})
+    return merged

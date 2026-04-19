@@ -11,6 +11,13 @@ import logging as _logging
 _cfg_logger = _logging.getLogger("nahla-backend")
 
 # ── JWT ────────────────────────────────────────────────────────────────────────
+def _safe_token_hex(nbytes: int = 32) -> str:
+    token_hex = getattr(_secrets_mod, "token_hex", None)
+    if callable(token_hex):
+        return token_hex(nbytes)
+    return os.urandom(nbytes).hex()
+
+
 _jwt_secret_env = os.environ.get("JWT_SECRET", "")
 if not _jwt_secret_env:
     _cfg_logger.critical(
@@ -18,7 +25,7 @@ if not _jwt_secret_env:
         "Generating a random secret — all sessions will be invalidated on restart. "
         "Set JWT_SECRET in Railway environment variables immediately."
     )
-JWT_SECRET    = _jwt_secret_env or _secrets_mod.token_hex(32)
+JWT_SECRET    = _jwt_secret_env or _safe_token_hex(32)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_H  = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))  # 7 days
 
@@ -143,6 +150,13 @@ ANTHROPIC_API_KEY = (
     os.environ.get("ANTHROPIC_API_KEY", "")
 )
 CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
+
+# ── AI / OpenAI-compatible helpers ────────────────────────────────────────────
+# Used by optional voice transcription and compatible fallback providers.
+OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_API_BASE   = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
+OPENAI_MODEL      = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_AUDIO_MODEL = os.environ.get("OPENAI_AUDIO_MODEL", "whisper-1")
 
 # ── Merchant Brain (Phase 1 Commerce Decision Engine) ──────────────────────────
 # Global flag — activates Brain for ALL merchant tenants when true.

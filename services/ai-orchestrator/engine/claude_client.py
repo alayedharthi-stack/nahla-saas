@@ -133,6 +133,85 @@ _TOOLS: List[Dict] = [
             "required": ["product_ids", "reason"],
         },
     },
+    {
+        "name": "search_products",
+        "description": "Search the store catalog using a product name or customer description.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_product_details",
+        "description": "Fetch the details of a specific product already known by name or external id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "external_id": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "check_stock",
+        "description": "Check product availability and stock for a specific external product id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "external_id": {"type": "string"},
+            },
+            "required": ["external_id"],
+        },
+    },
+    {
+        "name": "track_order",
+        "description": "Check the latest order status for the current customer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_store_info",
+        "description": "Load store shipping, return, payment, and policy information.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "get_customer_history",
+        "description": "Load the known customer profile, previous orders, and conversation memory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "recommend_addon",
+        "description": "Recommend a matching addon or cross-sell product.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "product_id": {"type": "integer"},
+                "query": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "web_search",
+        "description": "Search the public web for domain knowledge when store knowledge is not enough.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 

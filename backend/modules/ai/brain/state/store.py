@@ -213,6 +213,13 @@ class DefaultStateStore:
             updated_at=datetime.now(timezone.utc).isoformat(),
             # Carry candidates forward so pipeline can clear them after pick
             last_search_candidates=list(state.last_search_candidates or []),
+            recent_messages=list(state.recent_messages or []),
+            conversation_summary=state.conversation_summary,
+            cart_items=list(state.cart_items or []),
+            selected_variant=state.selected_variant,
+            payment_method=state.payment_method,
+            pending_action=state.pending_action,
+            last_recommended_products=list(state.last_recommended_products or []),
         )
 
         action = decision.action

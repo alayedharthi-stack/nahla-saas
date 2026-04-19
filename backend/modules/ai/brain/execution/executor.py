@@ -23,10 +23,12 @@ from ..decision.actions import (
     ACTION_LLM_REPLY,
     ACTION_NARROW,
     ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_WEB_SEARCH,
 )
 
 logger = logging.getLogger("nahla.brain.executor")
@@ -46,7 +48,24 @@ class _HandoffHandler:
 
 class _SendPaymentLinkHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        url = decision.args.get("checkout_url") or ctx.state.checkout_url or ""
+        from modules.ai.commerce.runtime import CommerceToolRuntime
+
+        runtime = CommerceToolRuntime(
+            ctx._db,  # type: ignore[attr-defined]
+            tenant_id=ctx.tenant_id,
+            customer_phone=ctx.customer_phone,
+            customer_id=ctx.customer_id,
+        )
+        runtime_result = await runtime.execute(
+            "send_payment_link",
+            {
+                "checkout_url": decision.args.get("checkout_url") or ctx.state.checkout_url or "",
+                "order_id": decision.args.get("draft_order_id") or ctx.state.draft_order_id or "",
+                "amount": decision.args.get("amount") or 0,
+                "description": decision.args.get("description") or "",
+            },
+        )
+        url = str(runtime_result.payload.get("checkout_url") or "").strip()
         return ActionResult(
             success=bool(url),
             data={"checkout_url": url, "type": "payment_link"},
@@ -56,23 +75,34 @@ class _SendPaymentLinkHandler:
 
 class _SuggestCouponHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from core.store_knowledge import CouponContextBuilder  # lazy
-        import os, sys
-        _BACKEND = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "../../../../..")
-        )
-        if _BACKEND not in sys.path:
-            sys.path.insert(0, _BACKEND)
+        from modules.ai.commerce.runtime import CommerceToolRuntime
 
-        try:
-            builder = CouponContextBuilder(ctx._db, ctx.tenant_id)   # type: ignore[attr-defined]
-            block   = builder.build_context_block()
-        except Exception:
-            block = ""
+        runtime = CommerceToolRuntime(
+            ctx._db,  # type: ignore[attr-defined]
+            tenant_id=ctx.tenant_id,
+            customer_phone=ctx.customer_phone,
+            customer_id=ctx.customer_id,
+        )
+        payload = {
+            "discount_pct": (ctx.sales_context.offer_signals or {}).get("recommended_discount_pct", 0)
+            if ctx.sales_context
+            else 0,
+            "segment": (ctx.sales_context.customer_profile or {}).get("segment", "")
+            if ctx.sales_context
+            else "",
+        }
+        runtime_result = await runtime.execute("apply_coupon", payload)
+        coupon = runtime_result.payload.get("coupon") or {}
+        code = str(coupon.get("coupon_code") or coupon.get("discount_code") or "").strip()
+        block = f"كود الخصم: {code}" if code else ""
 
         return ActionResult(
             success=bool(block),
-            data={"coupon_block": block, "product": decision.args.get("product")},
+            data={
+                "coupon_block": block,
+                "product": decision.args.get("product"),
+                "coupon_payload": coupon,
+            },
         )
 
 
@@ -88,6 +118,60 @@ class _NarrowHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         products = decision.args.get("products", [])
         return ActionResult(success=True, data={"products": products, "type": "narrow"})
+
+
+class _RecommendAddonHandler:
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from modules.ai.commerce.runtime import CommerceToolRuntime
+
+        runtime = CommerceToolRuntime(
+            ctx._db,  # type: ignore[attr-defined]
+            tenant_id=ctx.tenant_id,
+            customer_phone=ctx.customer_phone,
+            customer_id=ctx.customer_id,
+        )
+        result = await runtime.execute(
+            "recommend_addon",
+            {
+                "product_id": (ctx.state.current_product_focus or {}).get("id"),
+                "query": decision.args.get("query") or "",
+            },
+        )
+        return ActionResult(
+            success=result.ok,
+            data={
+                "products": result.payload.get("products", []),
+                "recommended_products": result.payload.get("products", []),
+                "type": "recommend_addon",
+            },
+            error=result.error,
+        )
+
+
+class _WebSearchHandler:
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from modules.ai.commerce.runtime import CommerceToolRuntime
+
+        runtime = CommerceToolRuntime(
+            ctx._db,  # type: ignore[attr-defined]
+            tenant_id=ctx.tenant_id,
+            customer_phone=ctx.customer_phone,
+            customer_id=ctx.customer_id,
+        )
+        result = await runtime.execute(
+            "web_search",
+            {"query": decision.args.get("query") or ctx.message},
+        )
+        return ActionResult(
+            success=result.ok,
+            data={
+                "summary": result.payload.get("summary", ""),
+                "results": result.payload.get("results", []),
+                "citations": result.payload.get("citations", []),
+                "type": "web_search",
+            },
+            error=result.error,
+        )
 
 
 class _LLMReplyHandler:
@@ -121,6 +205,8 @@ class DefaultActionExecutor:
             ACTION_HANDOFF:             _HandoffHandler(),
             ACTION_CLARIFY:             _ClarifyHandler(),
             ACTION_NARROW:              _NarrowHandler(),
+            ACTION_RECOMMEND_ADDON:     _RecommendAddonHandler(),
+            ACTION_WEB_SEARCH:          _WebSearchHandler(),
             ACTION_LLM_REPLY:           _LLMReplyHandler(),
         }
 

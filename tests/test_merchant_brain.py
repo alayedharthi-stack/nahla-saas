@@ -35,7 +35,7 @@ from modules.ai.brain.types import (
     INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO, INTENT_START_ORDER,
     INTENT_GENERAL, INTENT_WHO_ARE_YOU,
     BrainContext, CommerceFacts, Decision, ActionResult, Intent,
-    MerchantConversationState, OrderPreparationState,
+    MerchantConversationState, OrderPreparationState, SalesContextSnapshot,
 )
 from modules.ai.brain.decision.actions import (
     ACTION_FAQ_REPLY, ACTION_GREET, ACTION_SEARCH_PRODUCTS, ACTION_PROPOSE_DRAFT_ORDER,
@@ -488,8 +488,42 @@ class TestThinLLMComposer:
         kwargs = mock_generate.call_args.kwargs
         assert kwargs["context_metadata"]["brain_state"]["stage"] == "exploring"
         assert kwargs["context_metadata"]["brain_state"]["recommended_next_step"] == "clarify_need"
+        assert "sales_context" in kwargs["context_metadata"]
         assert kwargs["prompt_overrides"]["__full_system_prompt"]
         assert result.data["chosen_path"] == "llm"
+
+    def test_llm_compose_passes_history(self):
+        from modules.ai.brain.compose.responder import DefaultComposer
+        from modules.ai.brain.types import BrainReplyState, SuggestionSnapshot
+        from modules.ai.orchestrator.types import AIReplyPayload
+
+        composer = DefaultComposer()
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000001",
+            message="رسالة جديدة",
+            intent=Intent(name=INTENT_GENERAL, confidence=0.55, raw_message="رسالة جديدة"),
+            state=_make_state(greeted=True, stage="exploring"),
+            facts=_make_facts(),
+            profile={"preferred_language": "ar", "communication_style": "neutral"},
+            history=[
+                {"direction": "inbound", "body": "أبغى منتج"},
+                {"direction": "outbound", "body": "أكيد"},
+            ],
+            sales_context=SalesContextSnapshot(conversation_memory={"conversation_summary": "ملخص"}),
+        )
+        ctx.reply_state = BrainReplyState(store_name="متجر", stage="exploring")
+        ctx.suggestion = SuggestionSnapshot(suggested_next_step="clarify_need")
+        result = ActionResult(success=True, data={"type": "llm_fallback"})
+
+        with patch(
+            "modules.ai.orchestrator.adapter.generate_ai_reply",
+            return_value=AIReplyPayload(reply_text="رد", provider_used="anthropic", metadata={"model": "x"}),
+        ) as mock_generate:
+            reply = _run(composer.compose(Decision(action=ACTION_LLM_REPLY), result, ctx))
+
+        assert reply == "رد"
+        assert len(mock_generate.call_args.kwargs["history"]) == 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -588,10 +622,11 @@ class TestBrainPipeline:
             profile={},
         ))
 
-        assert isinstance(reply, str)
-        assert len(reply) > 0
+        assert isinstance(reply, dict)
+        assert isinstance(reply.get("reply"), str)
+        assert len(reply["reply"]) > 0
         # Greeting template should mention متجرنا or the store name
-        assert "أهلاً" in reply or "مرحب" in reply or "متجر" in reply
+        assert "أهلاً" in reply["reply"] or "مرحب" in reply["reply"] or "متجر" in reply["reply"]
 
     def test_no_products_scenario(self):
         intent = Intent(name=INTENT_ASK_PRODUCT, confidence=0.90, raw_message="عندكم منتج؟",
@@ -631,5 +666,6 @@ class TestBrainPipeline:
                 profile={},
             ))
 
-        assert isinstance(reply, str)
-        assert len(reply) > 0
+        assert isinstance(reply, dict)
+        assert isinstance(reply.get("reply"), str)
+        assert len(reply["reply"]) > 0

@@ -17,6 +17,7 @@ from dataclasses import asdict
 import logging
 import os
 import sys
+from typing import Any, Dict, List
 
 logger = logging.getLogger("nahla.brain.responder")
 
@@ -29,10 +30,12 @@ from ..decision.actions import (
     ACTION_LLM_REPLY,
     ACTION_NARROW,
     ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_WEB_SEARCH,
 )
 from ..execution.faq import (
     TOPIC_IDENTITY,
@@ -172,6 +175,24 @@ class DefaultComposer:
                 ctx,
             )
 
+        # ── Addon recommendation ───────────────────────────────────────────
+        if action == ACTION_RECOMMEND_ADDON:
+            if not result.success:
+                return T.generic_fallback()
+            return self._with_follow_up(
+                T.addon_recommendations(products=data.get("products", [])),
+                ctx,
+            )
+
+        # ── Web search ─────────────────────────────────────────────────────
+        if action == ACTION_WEB_SEARCH:
+            if not result.success:
+                return await self._llm_compose(ctx, result)
+            return T.web_search_summary(
+                summary=data.get("summary", ""),
+                citations=data.get("citations", []),
+            )
+
         # ── Clarify ────────────────────────────────────────────────────────
         if action == ACTION_CLARIFY:
             return T.clarify(question=data.get("question", ""))
@@ -233,6 +254,7 @@ class DefaultComposer:
 
             prompt = build_brain_reply_prompt(reply_state)
             locale = str(ctx.profile.get("preferred_language") or "ar")
+            history_messages = _as_ai_history(ctx.history, ctx.message)
 
             payload = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -243,9 +265,11 @@ class DefaultComposer:
                     store_name=ctx.facts.store_name,
                     channel="whatsapp",
                     locale=locale,
+                    history=history_messages,
                     context_metadata={
                         "brain_state": asdict(reply_state),
                         "suggestion": asdict(ctx.suggestion) if ctx.suggestion else {},
+                        "sales_context": ctx.sales_context.to_dict() if ctx.sales_context else {},
                     },
                     prompt_overrides={"__full_system_prompt": prompt},
                     provider_hint="anthropic",
@@ -318,3 +342,28 @@ class DefaultComposer:
 
         result.data["chosen_path"] = "llm_fallback_failed"
         return T.generic_fallback()
+
+
+def _as_ai_history(history: List[Dict[str, Any]], current_message: str) -> List[Dict[str, str]]:
+    messages: List[Dict[str, str]] = []
+    for turn in (history or [])[-20:]:
+        direction = str(turn.get("direction") or "").strip()
+        body = str(turn.get("body") or "").strip()
+        if not body:
+            continue
+        if direction in {"in", "inbound"}:
+            role = "user"
+        elif direction in {"out", "outbound"}:
+            role = "assistant"
+        else:
+            continue
+        if messages and messages[-1]["role"] == role:
+            messages[-1]["content"] += f"\n{body}"
+        else:
+            messages.append({"role": role, "content": body})
+
+    if not messages or messages[-1]["role"] != "user":
+        messages.append({"role": "user", "content": current_message})
+    elif messages[-1]["content"] != current_message:
+        messages.append({"role": "user", "content": current_message})
+    return messages
