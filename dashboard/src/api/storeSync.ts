@@ -4,11 +4,22 @@ import { apiCall } from './client'
 
 export interface SyncStatus {
   has_snapshot: boolean
+  // Live counts — always reflect what's actually in the DB right now,
+  // matching what /orders, /coupons and /products return. Use these in UI.
   product_count: number
   category_count: number
   order_count: number
   coupon_count: number
+  coupon_total?: number
   customer_count: number
+  // Last-sync deltas (created+updated during the most recent run). Useful
+  // for diagnostics / "your last sync upserted N rows", but NEVER for
+  // headline counters — they go to 0 whenever a sync happens to fetch
+  // nothing (token expired, empty incremental window, rate-limit, ...).
+  snapshot_product_count?: number
+  snapshot_order_count?: number
+  snapshot_coupon_count?: number
+  snapshot_category_count?: number
   last_full_sync_at: string | null
   last_incremental_sync_at: string | null
   sync_version: number
@@ -28,6 +39,7 @@ export interface KnowledgeOverview {
   categories?: string[]
   order_count: number
   coupon_count: number
+  coupon_total?: number
   active_coupons?: Array<{ code: string; description: string; discount_value: string }>
   last_full_sync: string | null
   last_inc_sync: string | null

@@ -123,14 +123,38 @@ async def get_knowledge_overview(
     """
     Return a summary of the AI-ready knowledge snapshot for this tenant.
     Does NOT include full product lists — for dashboard overview only.
+
+    Counts are computed LIVE from the same tables that /orders, /coupons,
+    /products read from. This avoids the misleading "0 orders / 0 coupons"
+    state that used to appear here whenever the most recent Salla sync
+    returned an empty delta (e.g. token expired, incremental window empty)
+    even though the underlying tables still held real, previously-synced
+    data. The snapshot row is now used only for the AI-ready store profile
+    and timestamps — never as the source of truth for entity counts.
     """
     tenant_id = resolve_tenant_id(request)
+
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from services.store_sync import StoreSyncService  # noqa: PLC0415
+
     snap = (
         db.query(StoreKnowledgeSnapshot)
         .filter_by(tenant_id=tenant_id)
         .first()
     )
-    if not snap:
+    live = StoreSyncService(db, tenant_id)._compute_live_totals()
+
+    # "Ready" now means "the merchant actually has something connected" —
+    # any of products / orders / coupons being non-zero is enough. We no
+    # longer require a snapshot row, because the snapshot row can lag the
+    # webhook-fed tables by a full sync cycle.
+    has_any_data = (
+        live["product_count"] > 0
+        or live["order_count"]   > 0
+        or live["coupon_total"]  > 0
+    )
+
+    if not snap and not has_any_data:
         return {
             "ready":          False,
             "message":        "لم يتم مزامنة بيانات المتجر بعد. اضغط 'مزامنة الآن' لتهيئة نحلة.",
@@ -138,25 +162,27 @@ async def get_knowledge_overview(
             "category_count": 0,
             "order_count":    0,
             "coupon_count":   0,
+            "coupon_total":   0,
         }
 
-    store_profile = snap.store_profile or {}
-    catalog       = snap.catalog_summary or {}
-    coupons       = snap.coupon_summary  or {}
+    store_profile = (snap.store_profile if snap else None) or {}
+    catalog       = (snap.catalog_summary if snap else None) or {}
+    coupons       = (snap.coupon_summary  if snap else None) or {}
 
     return {
         "ready":           True,
         "store_name":      store_profile.get("store_name", ""),
         "store_url":       store_profile.get("store_url", ""),
-        "product_count":   snap.product_count,
-        "category_count":  snap.category_count,
+        "product_count":   live["product_count"],
+        "category_count":  live["category_count"],
         "categories":      catalog.get("categories", [])[:10],
-        "order_count":     snap.order_count,
-        "coupon_count":    snap.coupon_count,
+        "order_count":     live["order_count"],
+        "coupon_count":    live["coupon_count"],
+        "coupon_total":    live["coupon_total"],
         "active_coupons":  (coupons.get("coupons") or [])[:5],
-        "last_full_sync":  snap.last_full_sync_at.isoformat() if snap.last_full_sync_at else None,
-        "last_inc_sync":   snap.last_incremental_sync_at.isoformat() if snap.last_incremental_sync_at else None,
-        "sync_version":    snap.sync_version,
+        "last_full_sync":  snap.last_full_sync_at.isoformat() if (snap and snap.last_full_sync_at) else None,
+        "last_inc_sync":   snap.last_incremental_sync_at.isoformat() if (snap and snap.last_incremental_sync_at) else None,
+        "sync_version":    snap.sync_version if snap else 0,
     }
 
 

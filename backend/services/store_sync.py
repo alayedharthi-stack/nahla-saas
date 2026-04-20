@@ -1354,6 +1354,92 @@ class StoreSyncService:
 
     # ── Status ─────────────────────────────────────────────────────────────────
 
+    def _compute_live_totals(self) -> Dict:
+        """
+        Live counts straight from the source-of-truth tables.
+
+        Why this exists: the snapshot columns (``snap.product_count``,
+        ``snap.order_count``, ``snap.coupon_count``, ``snap.category_count``)
+        are written by ``_rebuild_snapshot`` from the **delta** of the most
+        recent sync run (``created + updated``), NOT the live totals. When
+        an incremental sync returns 0 rows (e.g. Salla 401, empty window,
+        rate-limit), those columns are silently overwritten with 0 even
+        though the real ``orders`` / ``coupons`` tables still hold the
+        previously-synced data. The Connection screen then displays
+        misleading zeros while the dedicated /orders and /coupons pages
+        show the correct figures. To fix the inconsistency we always
+        report counts derived from the same tables those pages read from.
+        """
+        now = datetime.now(timezone.utc)
+
+        product_count  = (
+            self.db.query(Product).filter_by(tenant_id=self.tenant_id).count()
+        )
+        order_count    = (
+            self.db.query(Order).filter_by(tenant_id=self.tenant_id).count()
+        )
+        customer_count = (
+            self.db.query(Customer).filter_by(tenant_id=self.tenant_id).count()
+        )
+
+        # Coupons: we want both "all stored" (matches the /coupons list page)
+        # and "active right now" (what the merchant most likely cares about
+        # when they look at their integration health card). We compute
+        # `active` in Python so we honour the optional
+        # ``extra_metadata.active`` override the same way ``GET /coupons``
+        # does — keeping the two surfaces consistent.
+        coupon_rows = (
+            self.db.query(Coupon).filter_by(tenant_id=self.tenant_id).all()
+        )
+        total_coupons = len(coupon_rows)
+        active_coupons = 0
+        for coupon in coupon_rows:
+            meta = coupon.extra_metadata or {}
+            override = meta.get("active")
+            if isinstance(override, bool):
+                if override:
+                    active_coupons += 1
+                continue
+            expires = coupon.expires_at
+            if expires is None:
+                active_coupons += 1
+                continue
+            if getattr(expires, "tzinfo", None) is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if expires > now:
+                active_coupons += 1
+
+        # Categories: distinct, non-empty values from product metadata.
+        # We previously sampled only the first 50 products, which is what
+        # made categories show 0 for many catalogues. Now we scan ALL
+        # products for this tenant; with a typical catalogue size this is
+        # well below 1ms and is far less misleading.
+        category_rows = (
+            self.db.query(Product.extra_metadata)
+            .filter(Product.tenant_id == self.tenant_id)
+            .all()
+        )
+        categories: set[str] = set()
+        for (meta,) in category_rows:
+            if not isinstance(meta, dict):
+                continue
+            cat = meta.get("category")
+            if isinstance(cat, str) and cat.strip():
+                categories.add(cat.strip())
+            elif isinstance(cat, list):
+                for c in cat:
+                    if isinstance(c, str) and c.strip():
+                        categories.add(c.strip())
+
+        return {
+            "product_count":   product_count,
+            "order_count":     order_count,
+            "coupon_count":    active_coupons,
+            "coupon_total":    total_coupons,
+            "category_count":  len(categories),
+            "customer_count":  customer_count,
+        }
+
     def get_status(self) -> Dict:
         """Return current sync status + real-time dashboard KPIs."""
         snap = (
@@ -1400,13 +1486,26 @@ class StoreSyncService:
         # numbers match exactly what the merchant sees in /orders.
         dashboard_kpis = self._compute_dashboard_kpis()
 
+        # Source of truth: live counts from the same tables that /orders,
+        # /coupons and /products read from. The snapshot deltas are kept
+        # alongside (under ``snapshot_*``) for debugging / observability.
+        live = self._compute_live_totals()
+
         return {
             "has_snapshot":           snap is not None,
-            "product_count":          snap.product_count  if snap else 0,
-            "category_count":         snap.category_count if snap else 0,
-            "order_count":            snap.order_count    if snap else 0,
-            "coupon_count":           snap.coupon_count   if snap else 0,
-            "customer_count":         snap.customer_count if snap else 0,
+            "product_count":          live["product_count"],
+            "category_count":         live["category_count"],
+            "order_count":            live["order_count"],
+            "coupon_count":           live["coupon_count"],
+            "coupon_total":           live["coupon_total"],
+            "customer_count":         live["customer_count"],
+            # Last-sync deltas (NOT totals) — useful to know how the most
+            # recent sync run performed. Frontends should not display these
+            # as "your store has X items"; use the live counts above.
+            "snapshot_product_count": snap.product_count  if snap else 0,
+            "snapshot_order_count":   snap.order_count    if snap else 0,
+            "snapshot_coupon_count":  snap.coupon_count   if snap else 0,
+            "snapshot_category_count": snap.category_count if snap else 0,
             "last_full_sync_at":      snap.last_full_sync_at.isoformat() if (snap and snap.last_full_sync_at) else None,
             "last_incremental_sync_at": snap.last_incremental_sync_at.isoformat() if (snap and snap.last_incremental_sync_at) else None,
             "sync_version":           snap.sync_version   if snap else 0,
