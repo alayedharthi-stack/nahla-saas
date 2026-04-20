@@ -204,32 +204,58 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
+    # ── Resolve every phone shape this customer has ever appeared as ──────────
+    # Inbound rows are stored with the raw WhatsApp ``from`` (no plus); outbound
+    # campaign/template rows often carry the normalised E.164 form. Without
+    # matching both we silently lose half the thread the moment a normaliser
+    # behaviour changes.
+    normalized = normalize_phone(customer_phone) or customer_phone
+    phone_variants = {customer_phone, normalized}
+    phone_variants.discard("")
+
+    # ── Pull the LATEST ``limit`` messages for THIS customer only ─────────────
+    # The previous query fetched the OLDEST ``limit`` rows for the entire
+    # tenant and filtered by phone in Python. Once the tenant accumulates
+    # more than ``limit`` total ``MessageEvent`` rows (trivial after a few
+    # test conversations) every customer's "today" tail falls outside the
+    # window and the chat panel freezes on the first day of traffic. Filter
+    # at the DB layer against both metadata keys (``phone`` is what
+    # ``StateManager.save_message`` writes; ``customer_phone`` is what the
+    # legacy code path used) and order DESC so we always keep the freshest
+    # ``limit`` rows; reverse afterwards so the chat UI renders in
+    # chronological order.
+    from sqlalchemy import or_  # noqa: PLC0415  (kept local — used only here)
+
+    phone_filters = []
+    for variant in phone_variants:
+        phone_filters.append(MessageEvent.extra_metadata["phone"].astext == variant)
+        phone_filters.append(MessageEvent.extra_metadata["customer_phone"].astext == variant)
+
     rows = (
         db.query(MessageEvent)
-        .filter(MessageEvent.tenant_id == tenant_id)
-        .order_by(MessageEvent.created_at.asc())
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            or_(*phone_filters) if phone_filters else False,
+        )
+        .order_by(MessageEvent.created_at.desc())
         .limit(limit)
         .all()
     )
+    rows.reverse()  # oldest → newest for the chat thread view
 
-    filtered = []
-    for row in rows:
-        meta = row.extra_metadata or {}
-        row_phone = meta.get("phone") or meta.get("customer_phone")
-        if row_phone == customer_phone:
-            filtered.append(row)
-
-    if not filtered:
+    if not rows:
+        # Same fix on the trace-fallback path: keep the freshest rows.
         trace_rows = (
             db.query(ConversationTrace)
             .filter(
                 ConversationTrace.tenant_id == tenant_id,
-                ConversationTrace.customer_phone == customer_phone,
+                ConversationTrace.customer_phone.in_(list(phone_variants)),
             )
-            .order_by(ConversationTrace.created_at.asc())
+            .order_by(ConversationTrace.created_at.desc())
             .limit(limit)
             .all()
         )
+        trace_rows.reverse()
         messages: List[Dict[str, Any]] = []
         for idx, row in enumerate(trace_rows):
             messages.append({
@@ -258,7 +284,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
                 "time": row.created_at.isoformat() if row.created_at else "",
                 "isAI": bool((row.extra_metadata or {}).get("is_ai")),
             }
-            for row in filtered
+            for row in rows
         ]
     }
 
