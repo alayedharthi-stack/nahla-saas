@@ -58,47 +58,125 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
         "name":            "استرداد العربة المتروكة",
         "enabled":         False,
         "config": {
-            # ── Three-stage recovery workflow ───────────────────────────────
-            # Stage 1 (30 min)   — friendly reminder, NO discount.
-            # Stage 2 (6 h)      — empathetic urgency, "need help?", NO discount.
-            # Stage 3 (24 h)     — last chance with a real coupon.
+            # ── Four-stage recovery workflow (premium UX) ──────────────────
             #
-            # Stages 2 and 3 are NOT triggered by the storefront snippet —
-            # only stage 1 is. The follow-ups are emitted by
+            # Stage 1 (30 min)    — Meta-approved template, dynamic URL
+            #                       button to the live cart_url. Opens a
+            #                       new marketing window if needed.
+            # Stage 2 (6 h)       — Free-form interactive message with 3
+            #                       dynamic reply buttons. Stays inside
+            #                       the existing service window when the
+            #                       customer engaged stage 1 (zero extra
+            #                       conversation cost). Falls back to the
+            #                       template if the window has closed.
+            # Stage 3 (8 h)       — Optional AI recovery turn. Disabled
+            #                       by default; the merchant can flip
+            #                       `ai_recovery_enabled=true` and tune
+            #                       the delay (8h / 10h / 12h are the
+            #                       supported presets).
+            # Stage 4 (23 h 50 m) — Final CTA-URL push with the coupon
+            #                       baked into the cart_url so the
+            #                       primary action is "open the cart with
+            #                       the discount applied". Sent BEFORE
+            #                       the 24-hour window expires so we
+            #                       don't pay for a fresh marketing
+            #                       conversation just to deliver a coupon.
+            #
+            # Stages 2-4 are emitted by
             # `automation_emitters.scan_abandoned_cart_followups`, which
             # writes a NEW `cart_abandoned` AutomationEvent carrying
-            # `payload.step_idx = 1` (stage 2) or `step_idx = 2` (stage 3).
-            # The engine honours that explicit index instead of recomputing
-            # from event age (see `_active_step_for_event`), so each stage
-            # gets its own AutomationExecution row, its own template, and
-            # its own coupon decision.
+            # `payload.step_idx`. The engine honours that explicit index
+            # (see `_active_step_for_event`) so each stage gets its own
+            # AutomationExecution row, its own template/interactive
+            # render, and its own coupon decision.
             #
-            # AI gating: stage 3 sets `auto_coupon=true`. For tenants on
+            # AI gating: stage 4 sets `auto_coupon=true`. For tenants on
             # OFF, that always issues a coupon from the pool. For tenants
             # on ADVISORY/ENFORCE the OfferDecisionService takes over and
             # may return SOURCE_NONE (no coupon) for low-value carts or
-            # customers who already received one this week — that is the
-            # "AI may decide depending on customer value or cart size"
-            # contract from the product spec.
+            # customers who already received one this week.
             "steps": [
+                # Stage 1 — template, URL button to cart
                 {
-                    "delay_minutes": 30,
-                    "message_type":  "reminder",
-                    "template_name":    "abandoned_cart_recovery_ar",
-                    "template_name_en": "abandoned_cart_recovery_en",
+                    "delay_minutes":     30,
+                    "enabled":           True,
+                    "message_type":      "reminder",
+                    "delivery_mode":     "template",
+                    "template_name":     "abandoned_cart_recovery_ar",
+                    "template_name_en":  "abandoned_cart_recovery_en",
+                    "buttons":           ["resume_cart", "ask_question", "postpone"],
+                    "cta_labels": {
+                        "resume_cart":  "إكمال الطلب",
+                        "ask_question": "عندي استفسار",
+                        "postpone":     "لاحقاً",
+                    },
                 },
+                # Stage 2 — interactive (in-window), 3 dynamic buttons
                 {
-                    "delay_minutes": 360,
-                    "message_type":  "reminder",
-                    "template_name":    "abandoned_cart_followup_ar",
-                    "template_name_en": "abandoned_cart_followup_en",
+                    "delay_minutes":     360,
+                    "enabled":           True,
+                    "message_type":      "reminder",
+                    "delivery_mode":     "interactive",
+                    "template_name":     "abandoned_cart_followup_ar",
+                    "template_name_en":  "abandoned_cart_followup_en",
+                    "buttons":           ["resume_cart", "human_help", "postpone"],
+                    "cta_labels": {
+                        "resume_cart": "الرجوع للسلة",
+                        "human_help":  "تحدث مع الدعم",
+                        "postpone":    "ما زلت متردد",
+                    },
+                    "body_text_ar": (
+                        "{{customer_name}} 🌷\n\n"
+                        "السلة في {{store_name}} لا تزال محفوظة لك.\n\n"
+                        "إذا واجهتَ أي عقبة في الدفع أو الشحن، نحن هنا لمساعدتك "
+                        "مباشرة. اختر ما يناسبك:"
+                    ),
+                    "body_text_en": (
+                        "{{customer_name}} 🌷\n\n"
+                        "Your cart at {{store_name}} is still saved.\n\n"
+                        "If anything got in the way — payment, shipping, sizing — "
+                        "we'd love to help. Pick what works for you:"
+                    ),
                 },
+                # Stage 3 — optional AI recovery turn (disabled by default)
                 {
-                    "delay_minutes": 1440,
-                    "message_type":  "coupon",
-                    "auto_coupon":   True,
-                    "template_name":    "abandoned_cart_final_offer_ar",
-                    "template_name_en": "abandoned_cart_final_offer_en",
+                    "delay_minutes":       480,    # 8 h — merchant can edit to 600 / 720
+                    "enabled":             False,
+                    "message_type":        "ai_recovery",
+                    "delivery_mode":       "ai_recovery",
+                    "ai_recovery_enabled": False,
+                    "ai_persona":          "concierge",
+                    "buttons":             ["resume_cart", "ask_question", "postpone"],
+                },
+                # Stage 4 — final coupon CTA (interactive cta_url) at 23h50m
+                {
+                    "delay_minutes":     1430,    # 23 h 50 m — stays inside the 24h window
+                    "enabled":           True,
+                    "message_type":      "coupon",
+                    "delivery_mode":     "interactive",
+                    "auto_coupon":       True,
+                    "template_name":     "abandoned_cart_final_offer_ar",
+                    "template_name_en":  "abandoned_cart_final_offer_en",
+                    "buttons":           ["apply_coupon", "resume_cart", "ask_question"],
+                    "cta_labels": {
+                        "apply_coupon": "استخدم الخصم الآن",
+                        "resume_cart":  "أكمل الطلب",
+                        "ask_question": "عندي سؤال",
+                    },
+                    "body_text_ar": (
+                        "{{customer_name}} 💛\n\n"
+                        "آخر تذكير لطلبك في {{store_name}}.\n"
+                        "حضّرنا لك خصماً صغيراً لتجربة أهدأ:\n\n"
+                        "كود الخصم: {{discount_code}}\n\n"
+                        "زر «استخدم الخصم» يفتح السلة والكود مفعَّل تلقائياً."
+                    ),
+                    "body_text_en": (
+                        "{{customer_name}} 💛\n\n"
+                        "Last nudge for your cart at {{store_name}}.\n"
+                        "We saved a small discount to make this easy:\n\n"
+                        "Code: {{discount_code}}\n\n"
+                        "Tap \"Use discount\" — it opens the cart with the code applied."
+                    ),
                 },
             ],
             # `template_name` is kept as the default for the legacy
@@ -107,6 +185,28 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             "template_name":    "abandoned_cart_recovery_ar",
             "template_name_en": "abandoned_cart_recovery_en",
             "language":         "ar",
+            # Master toggle for the optional AI recovery stage (mirrors
+            # the per-step flag so the dashboard can flip it from one
+            # place without reaching into the steps array).
+            "ai_recovery_enabled": False,
+            # Saudi-time courtesy — when True, sends scheduled between
+            # 00:00 and 08:00 KSA are deferred to 08:30 KSA on the same
+            # day. Default ON because every Nahla merchant is in KSA.
+            "respect_saudi_quiet_hours": True,
+            # ── Conversion-layer knobs ────────────────────────────────
+            # Keep the defaults in sync with
+            # `services.conversion_layer.{HIGH_VALUE_THRESHOLD_DEFAULT,
+            # MIN_COUPON_THRESHOLD_DEFAULT, POSTPONE_RESCHEDULE_MINUTES_DEFAULT}`.
+            # They live on the config JSON too so merchants can tune
+            # them from the dashboard without shipping code.
+            "high_value_threshold":        500.0,
+            "min_coupon_threshold":        100.0,
+            "postpone_reschedule_minutes": 720,    # 12h
+            "coupon_tiers": [
+                {"min_cart_value": 800.0, "percent": 5.0},
+                {"min_cart_value": 300.0, "percent": 8.0},
+                {"min_cart_value": 0.0,   "percent": 10.0},
+            ],
         },
     },
     {

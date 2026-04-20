@@ -1396,6 +1396,43 @@ async def _handle_button_reply(
     try:
         state = StateManager.load(db, phone=to, tenant_id=tenant_id) if db else None
 
+        # ── Dynamic abandoned-cart recovery buttons ──────────────────────
+        # These ids carry the cart/coupon/stage context inline, so they
+        # bypass the fixed-id ladder below and route through their own
+        # dispatcher. We do this first because the prefix check is a
+        # cheap startswith and we want recovery taps to be acknowledged
+        # before any state machine mutation.
+        try:
+            from services.cart_recovery_actions import (  # noqa: PLC0415
+                handle_cart_recovery_button, is_cart_recovery_button,
+            )
+            if is_cart_recovery_button(btn_id) and db is not None:
+                handled = await handle_cart_recovery_button(
+                    db=db,
+                    button_id=btn_id,
+                    phone_id=phone_id,
+                    to_phone=to,
+                    tenant_id=tenant_id,
+                    send_cta_url=_send_cta_url,
+                    send_text=_send_whatsapp_message,
+                    send_buttons=_send_interactive_reply,
+                )
+                if handled:
+                    if db and state:
+                        try:
+                            StateManager.save_message(
+                                db, to, f"[button:{btn_id}]", "inbound",
+                            )
+                            StateManager.save(db, state)
+                        except Exception:
+                            pass
+                    return
+        except Exception:
+            logger.exception(
+                "[Buttons] Cart-recovery dispatcher failed id=%s tenant=%s",
+                btn_id, tenant_id,
+            )
+
         if btn_id == "contact_founder":
             await _send_whatsapp_message(
                 phone_id=phone_id, to=to,

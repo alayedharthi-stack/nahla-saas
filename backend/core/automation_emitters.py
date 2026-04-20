@@ -222,10 +222,22 @@ def scan_abandoned_cart_followups(
     db: Session, tenant_id: int, *, now: Optional[datetime] = None,
 ) -> int:
     """
-    Re-emit `cart_abandoned` events for stages 2 and 3 of the recovery
+    Re-emit `cart_abandoned` events for stages 2..N of the recovery
     workflow. Stage 1 is already emitted by the storefront snippet at
     abandonment time and processed by the engine after its 30-minute
     delay; this sweeper only owns the follow-up half.
+
+    The current canonical seed is the four-stage premium recovery flow:
+
+      • stage 1 — 30 min   template (URL button → cart)              [self-emitted]
+      • stage 2 — 6 h      interactive (resume / human / postpone)   [this sweeper]
+      • stage 3 — 8 h      optional AI recovery turn                 [this sweeper]
+      • stage 4 — 23 h 50  CTA-URL coupon push (still in 24h window) [this sweeper]
+
+    Steps with `enabled: false` are skipped at emission time — emitting
+    a no-op event would just create a noisy "skipped" AutomationExecution
+    row and waste a poll cycle. The merchant editor flips the same flag
+    so disabling stage 3 in the dashboard short-circuits both ends.
 
     Returns the number of new follow-up events emitted.
 
@@ -275,7 +287,11 @@ def scan_abandoned_cart_followups(
         # the original event already covers them.
         return 0
 
-    horizon = now - timedelta(hours=36)
+    # 48h buffer so the 23h50m stage 4 still has headroom even if the
+    # engine's poll loop fell behind. Anything older than that is past
+    # the WhatsApp service window anyway and chasing it would force a
+    # brand-new (paid) marketing conversation.
+    horizon = now - timedelta(hours=48)
     candidates: List[Any] = (
         db.query(AutomationEvent)
         .filter(
@@ -317,6 +333,35 @@ def scan_abandoned_cart_followups(
             if step_idx == 0:
                 continue
             if step_idx in already_emitted:
+                continue
+            # Honour per-step enable/disable from the merchant editor.
+            # Skipping the emit (vs. emitting + having the engine bail)
+            # keeps the AutomationExecution table clean and avoids paying
+            # for a wake-up that's guaranteed to no-op. Mark the step as
+            # "emitted" anyway so future scans don't re-evaluate it.
+            if step.get("enabled") is False:
+                already_emitted.add(step_idx)
+                progress.append({
+                    "step_idx":  step_idx,
+                    "skipped":   True,
+                    "reason":    "step_disabled",
+                    "emitted_at": now.isoformat(),
+                })
+                continue
+            # The AI recovery stage carries an extra `ai_recovery_enabled`
+            # flag so a merchant can keep the step's slot in the timeline
+            # but defer the AI cost. Treat the same way as `enabled=False`.
+            if (
+                step.get("message_type") == "ai_recovery"
+                and step.get("ai_recovery_enabled") is False
+            ):
+                already_emitted.add(step_idx)
+                progress.append({
+                    "step_idx":   step_idx,
+                    "skipped":    True,
+                    "reason":     "ai_recovery_disabled",
+                    "emitted_at": now.isoformat(),
+                })
                 continue
             delay = int(step.get("delay_minutes") or 0)
             if (now - _naive(original.created_at)) < timedelta(minutes=delay):

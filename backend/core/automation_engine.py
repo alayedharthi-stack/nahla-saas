@@ -422,7 +422,7 @@ async def _try_execute(
 
     # ── Delay check ───────────────────────────────────────────────────────────
     config: Dict[str, Any] = automation.config or {}
-    delay_minutes: int = _resolve_delay(config)
+    delay_minutes: int = _resolve_delay(config, event=event)
     event_age_minutes = (now - _naive_utc(event.created_at)).total_seconds() / 60.0
     if event_age_minutes < delay_minutes:
         remaining = delay_minutes - event_age_minutes
@@ -431,6 +431,27 @@ async def _try_execute(
             event.id, automation.id, remaining,
         )
         return "delay"
+
+    # ── Saudi quiet-hours guard ──────────────────────────────────────────────
+    # When the merchant has enabled Saudi quiet hours (default ON for the
+    # cart-recovery automation), a stage that becomes due between 00:00
+    # and 08:00 KSA is held back until 08:30 KSA on the same day. We
+    # short-circuit with `delay` so the next engine cycle re-checks; this
+    # is cheaper than scheduling a one-off wakeup and keeps the engine's
+    # crash-safety story intact (no in-memory timers).
+    if config.get("respect_saudi_quiet_hours", False):
+        from core.saudi_time_guard import (  # noqa: PLC0415
+            adjust_for_saudi_sleep_window,
+            is_inside_quiet_hours,
+        )
+        if is_inside_quiet_hours(now):
+            adjusted = adjust_for_saudi_sleep_window(now)
+            logger.info(
+                "[AutoEngine] Saudi quiet hours — deferring event=%s automation=%s "
+                "until %s",
+                event.id, automation.id, adjusted.isoformat(),
+            )
+            return "delay"
 
     # ── Condition evaluation ──────────────────────────────────────────────────
     from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
@@ -493,8 +514,24 @@ async def _try_execute(
 
 # ── Internal: helpers ─────────────────────────────────────────────────────────
 
-def _resolve_delay(config: Dict[str, Any]) -> int:
-    """Extract delay_minutes from automation config (flat or steps-based)."""
+def _resolve_delay(config: Dict[str, Any], *, event: Any = None) -> int:
+    """
+    Extract delay_minutes from automation config (flat or steps-based).
+
+    When an `event` is passed and its `payload.step_idx` is greater than
+    zero, the event is a follow-up that was emitted by a sweeper after
+    the configured delay had already elapsed on the parent event — it
+    must NOT wait the stage-1 delay again. Returning 0 lets the engine
+    process the follow-up immediately.
+    """
+    if event is not None:
+        try:
+            payload = getattr(event, "payload", None) or {}
+            step_idx = int(payload.get("step_idx") or 0)
+            if step_idx > 0:
+                return 0
+        except Exception:
+            pass
     # Flat form: {"delay_minutes": 30}
     if "delay_minutes" in config:
         return int(config["delay_minutes"])
@@ -572,7 +609,20 @@ async def _execute_action(
     config: Dict[str, Any],
 ) -> Tuple[bool, Dict[str, Any]]:
     """
-    Send a WhatsApp template message to the event's customer.
+    Send a WhatsApp message to the event's customer.
+
+    Per-step `delivery_mode` controls the wire format:
+      • "template"     — Meta-approved template send (opens marketing
+                         conversation if no service window is open).
+                         Default and the only legal mode for stage 1.
+      • "interactive"  — Free-form interactive message with dynamic reply
+                         buttons. Used for stages 2-4 of the cart-recovery
+                         workflow when the customer service window is
+                         still open. Falls back to template delivery if
+                         the window has closed.
+      • "ai_recovery"  — Optional Claude-driven recovery turn. Records a
+                         skip when the merchant hasn't enabled it.
+
     Returns (success, info_dict).
     """
     from models import Customer, WhatsAppConnection, WhatsAppTemplate  # noqa: PLC0415
@@ -605,9 +655,116 @@ async def _execute_action(
     if not wa_conn:
         return False, {"error": "no_whatsapp_connection"}
 
+    # ── Per-step delivery routing (cart-recovery workflow) ───────────────────
+    # Resolve the active step once and let it decide the wire format. The
+    # `template` branch below is preserved for everything else.
+    active_step: Dict[str, Any] = _active_step_for_event(event, config)
+    if not active_step.get("enabled", True) and active_step:
+        return False, {"error": "step_disabled"}
+
+    # ── Conversion Layer (WHAT to send, before we pick WHEN) ─────────────────
+    # Only the cart-recovery workflow gets the layer today — every other
+    # automation keeps the legacy direct-to-template path. That boundary
+    # is what lets us roll this out without churning unrelated flows.
+    conversion_decision = None
+    is_cart_recovery = (
+        getattr(automation, "automation_type", None) == "abandoned_cart"
+    )
+    if is_cart_recovery:
+        try:
+            from services.conversion_layer import (  # noqa: PLC0415
+                build_context as _conv_build_context,
+                decide as _conv_decide,
+            )
+            ctx = _conv_build_context(
+                db,
+                tenant_id=tenant_id, event=event, customer=customer,
+                automation=automation, active_step=active_step, config=config,
+            )
+            conversion_decision = _conv_decide(
+                ctx, active_step=active_step, config=config,
+            )
+        except Exception as exc:
+            logger.exception(
+                "[AutoEngine] Conversion layer failed — falling back to "
+                "step config. tenant=%s automation=%s event=%s: %s",
+                tenant_id, getattr(automation, "id", None),
+                getattr(event, "id", None), exc,
+            )
+            conversion_decision = None
+
+        if conversion_decision is not None and not conversion_decision.proceed:
+            # Optional reschedule — re-queue this step later instead of
+            # killing it outright (e.g. customer is actively chatting).
+            if conversion_decision.reschedule_minutes > 0:
+                try:
+                    _reschedule_followup_event(
+                        db, tenant_id=tenant_id, event=event,
+                        step_idx=active_step_index_for_event(event),
+                        delay_minutes=conversion_decision.reschedule_minutes,
+                        reason=conversion_decision.skip_reason or "rescheduled",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[AutoEngine] Reschedule failed tenant=%s event=%s: %s",
+                        tenant_id, getattr(event, "id", None), exc,
+                    )
+            info: Dict[str, Any] = {
+                "skipped":      True,
+                "skip_reason":  conversion_decision.skip_reason,
+                "reschedule_minutes": conversion_decision.reschedule_minutes,
+                "conversion_audit": conversion_decision.audit,
+            }
+            return False, info
+
+    delivery_mode = (
+        (conversion_decision.delivery_mode_override
+         if conversion_decision else None)
+        or active_step.get("delivery_mode")
+        or config.get("delivery_mode")
+        or "template"
+    )
+
+    if delivery_mode == "ai_recovery":
+        ai_enabled = bool(
+            active_step.get("ai_recovery_enabled")
+            or config.get("ai_recovery_enabled")
+        )
+        if not ai_enabled:
+            return False, {"error": "ai_recovery_disabled"}
+        return await _execute_ai_recovery_step(
+            db, tenant_id=tenant_id, event=event, customer=customer,
+            wa_conn=wa_conn, to_phone=to_phone, config=config,
+            active_step=active_step, automation_id=getattr(automation, "id", None),
+        )
+
+    if delivery_mode == "interactive":
+        # Interactive in-window send is only legal while the customer's
+        # service window is still open. When it has closed (or never
+        # opened — most stage-1 carts), we transparently fall back to
+        # the template path so we still deliver the message — just at
+        # marketing-conversation cost.
+        from core.wa_usage import has_open_service_window  # noqa: PLC0415
+        window_open = has_open_service_window(db, tenant_id, to_phone)
+        if window_open:
+            return await _execute_interactive_step(
+                db, tenant_id=tenant_id, event=event, customer=customer,
+                wa_conn=wa_conn, to_phone=to_phone, config=config,
+                active_step=active_step, automation=automation,
+                conversion_decision=conversion_decision,
+            )
+        # Fall through to the template path below — same code, no copy.
+
     # ── Template lookup ───────────────────────────────────────────────────────
+    # Per-step template_name (set by the cart-recovery seed) wins over the
+    # automation-wide default so each stage of a multi-stage workflow picks
+    # the right Meta-approved template.
     template: Optional[Any] = None
-    if automation.template_id:
+    tpl_name = (
+        active_step.get("template_name")
+        or config.get("template_name")
+    )
+    if not tpl_name and automation.template_id:
         template = (
             db.query(WhatsAppTemplate)
             .filter(
@@ -616,18 +773,16 @@ async def _execute_action(
             )
             .first()
         )
-    if not template:
-        tpl_name = config.get("template_name")
-        if tpl_name:
-            template = (
-                db.query(WhatsAppTemplate)
-                .filter(
-                    WhatsAppTemplate.tenant_id == tenant_id,
-                    WhatsAppTemplate.name == tpl_name,
-                    WhatsAppTemplate.status == "APPROVED",
-                )
-                .first()
+    if not template and tpl_name:
+        template = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.name == tpl_name,
+                WhatsAppTemplate.status == "APPROVED",
             )
+            .first()
+        )
     if not template:
         return False, {"error": "no_approved_template"}
 
@@ -644,7 +799,7 @@ async def _execute_action(
     _config_with_type.setdefault("automation_type", getattr(automation, "automation_type", None))
     coupon_extras = await _resolve_auto_coupon(
         db, tenant_id=tenant_id, customer=customer, config=_config_with_type,
-        active_step=_active_step_for_event(event, config),
+        active_step=active_step,
         automation_id=getattr(automation, "id", None),
         event_id=getattr(event, "id", None),
     )
@@ -928,15 +1083,117 @@ def _resolve_slot_value(
     return str(payload.get(slot, ""))
 
 
+def active_step_index_for_event(event: Any) -> int:
+    """
+    Return the integer step index this event represents.
+
+    Used by the conversion layer's reschedule path to stamp a re-queued
+    event with the same step_idx it was about to run — we want the
+    retry to be the same stage, just later in time.
+    """
+    payload = getattr(event, "payload", None) or {}
+    try:
+        v = payload.get("step_idx")
+        if v is None:
+            return 0
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reschedule_followup_event(
+    db: Session,
+    *,
+    tenant_id: int,
+    event: Any,
+    step_idx: int,
+    delay_minutes: int,
+    reason: str,
+) -> Optional[int]:
+    """
+    Re-queue the current cart-recovery step to fire `delay_minutes` in
+    the future instead of killing it.
+
+    Works by inserting a new AutomationEvent with the same event_type,
+    the same payload (including step_idx), and a `created_at` set to
+    `now + delay_minutes`. The engine's wait-loop sees the future
+    `created_at`, computes a negative age, and quietly keeps the row
+    pending until the clock catches up.
+
+    The original event is not mutated. Its execution row (written by
+    the caller) records the skip reason, so the sweeper's
+    already-emitted bookkeeping is preserved.
+
+    Returns the id of the new event, or None on failure.
+    """
+    try:
+        from models import AutomationEvent  # noqa: PLC0415
+    except Exception:
+        return None
+
+    base_payload: Dict[str, Any] = dict(getattr(event, "payload", None) or {})
+    base_payload["step_idx"] = int(step_idx)
+    base_payload.setdefault("parent_event_id", getattr(event, "id", None))
+    base_payload["reschedule_reason"] = reason
+    base_payload["reschedule_source"] = "conversion_layer"
+
+    try:
+        fire_at = datetime.now(timezone.utc).replace(tzinfo=None) + \
+                  timedelta(minutes=max(1, int(delay_minutes)))
+        ev = AutomationEvent(
+            tenant_id   = tenant_id,
+            event_type  = getattr(event, "event_type", None) or "cart_abandoned",
+            customer_id = getattr(event, "customer_id", None),
+            payload     = base_payload,
+            processed   = False,
+            created_at  = fire_at,
+        )
+        db.add(ev)
+        db.commit()
+        db.refresh(ev)
+        return ev.id
+    except Exception as exc:
+        logger.warning(
+            "[AutoEngine] Failed to reschedule event=%s tenant=%s: %s",
+            getattr(event, "id", None), tenant_id, exc,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
 def _active_step_for_event(event: Any, config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    For multi-step automations (e.g. cart_abandoned with 3 reminders), pick
-    the step whose `delay_minutes` matches how old the event is. Returns the
-    flat config when there are no steps.
+    For multi-step automations (e.g. cart_abandoned with 4 reminders), pick
+    the step that should fire for this event.
+
+    Resolution order:
+      1. `payload.step_idx` — explicit index written by the sweeper. Trusted
+         even when the event is brand new (age 0); the sweeper is the
+         authority for which stage this row represents.
+      2. Fallback: pick the latest step whose `delay_minutes` is ≤ event age.
+         Kept for legacy single-event automations that don't carry a
+         step_idx in the payload.
+
+    Returns the flat config when there are no steps.
     """
     steps = config.get("steps")
     if not isinstance(steps, list) or not steps:
         return {}
+
+    # Explicit index from the sweeper takes priority.
+    payload = getattr(event, "payload", None) or {}
+    explicit = payload.get("step_idx")
+    if explicit is not None:
+        try:
+            idx = int(explicit)
+            if 0 <= idx < len(steps) and isinstance(steps[idx], dict):
+                return steps[idx]
+        except (TypeError, ValueError):
+            pass
+
     age_minutes = max(
         0,
         int((_utcnow_naive() - _naive_utc(event.created_at)).total_seconds() // 60),
@@ -1358,6 +1615,412 @@ def _write_execution(
         executed_at=_utcnow_naive(),
     )
     db.add(rec)
+
+
+# ── Interactive (in-window) cart-recovery send ───────────────────────────────
+
+async def _execute_interactive_step(
+    db: Session,
+    *,
+    tenant_id: int,
+    event: Any,
+    customer: Any,
+    wa_conn: Any,
+    to_phone: str,
+    config: Dict[str, Any],
+    active_step: Dict[str, Any],
+    automation: Any,
+    conversion_decision: Any = None,
+) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Send a free-form interactive message with dynamic cart-recovery buttons.
+
+    This path is only reached when the customer's service window is open
+    (the caller already checked via `has_open_service_window`), so the
+    message ships at zero marketing-conversation cost.
+
+    The active step controls everything user-facing:
+      • body_text_{ar,en}    — Arabic / English copy with `{{slot}}`
+                                placeholders that get expanded against the
+                                same slot resolver the template path uses.
+      • buttons              — list of action ids (resume_cart,
+                                ask_question, postpone, apply_coupon,
+                                human_help). Up to 3 are rendered; extras
+                                are dropped.
+      • cta_labels           — per-action label overrides; defaults to the
+                                premium Arabic labels in
+                                `services.cart_recovery_buttons`.
+
+    When the active step is the coupon stage (`auto_coupon=True` or
+    `message_type=='coupon'`), the message is sent as a Meta CTA-URL
+    interactive instead — the primary visual is one big "Use the
+    discount now" button that opens the cart with the code attached.
+    """
+    from services.cart_recovery_buttons import (  # noqa: PLC0415
+        ACTION_APPLY_COUPON,
+        attach_coupon_to_url,
+        build_cta_url_payload,
+        build_interactive_payload,
+        label_for,
+        stage_default_actions,
+    )
+    from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+
+    # ── Coupon resolution (mirrors the template path) ────────────────────
+    # The conversion layer may have decided up-front that we won't grant
+    # a coupon on this send (e.g. cart below the minimum, or the
+    # customer already tapped resume_cart). When that's the case we
+    # skip the coupon resolver entirely so we don't burn a code and
+    # then fail to show it.
+    skip_coupon_resolution = bool(
+        conversion_decision is not None
+        and (
+            active_step.get("auto_coupon") is True
+            or active_step.get("message_type") == "coupon"
+        )
+        and not getattr(conversion_decision, "coupon_granted", False)
+    )
+
+    if skip_coupon_resolution:
+        coupon_extras: Dict[str, str] = {}
+        coupon_code = ""
+    else:
+        _config_with_type = dict(config or {})
+        _config_with_type.setdefault(
+            "automation_type", getattr(automation, "automation_type", None)
+        )
+        coupon_extras = await _resolve_auto_coupon(
+            db, tenant_id=tenant_id, customer=customer, config=_config_with_type,
+            active_step=active_step,
+            automation_id=getattr(automation, "id", None),
+            event_id=getattr(event, "id", None),
+        )
+        coupon_code = (
+            coupon_extras.get("discount_code")
+            or coupon_extras.get("coupon_code")
+            or ""
+        )
+
+    coupon_percent: Optional[float] = (
+        getattr(conversion_decision, "coupon_percent", None)
+        if conversion_decision is not None else None
+    )
+
+    # ── Resolve every named slot the body might reference ───────────────
+    payload = dict(getattr(event, "payload", None) or {})
+    cart_url = (
+        payload.get("checkout_url")
+        or payload.get("cart_url")
+        or ""
+    )
+    cart_id = (
+        payload.get("cart_id")
+        or payload.get("cart_external_id")
+        or payload.get("checkout_id")
+        or getattr(event, "id", None)
+    )
+    customer_name = customer.name or "العميل"
+    store_name = _resolve_store_name(db, tenant_id)
+    language = (
+        active_step.get("language")
+        or config.get("language")
+        or "ar"
+    ).lower()
+
+    # Body — explicit per-step text wins; otherwise we fall back to the
+    # named-slot resolver so a merchant can leave it empty and still get
+    # something sensible. The conversion layer gets final say via its
+    # body_text_override.
+    body_override = getattr(conversion_decision, "body_text_override", None) \
+        if conversion_decision is not None else None
+    body_template_key = "body_text_en" if language == "en" else "body_text_ar"
+    body_template = (
+        body_override
+        or active_step.get(body_template_key)
+        or active_step.get("body_text")
+    )
+    if not body_template:
+        body_template = (
+            "{{customer_name}} 🌷\n\n"
+            "السلة في {{store_name}} لا تزال محفوظة لك."
+        )
+    slot_values: Dict[str, str] = {
+        "customer_name": customer_name,
+        "store_name":    store_name,
+        "discount_code": coupon_code,
+        "cart_total":    str(payload.get("cart_total") or payload.get("total") or ""),
+        "checkout_url":  cart_url,
+    }
+    body_text = _render_named_slots(body_template, slot_values)
+
+    # Premium coupon presentation — when the conversion layer granted a
+    # coupon, splice a copy-friendly block into the body (or append it
+    # when the merchant's body didn't include a `{{discount_code}}`
+    # placeholder). This is what lets the customer long-press-copy the
+    # code on any WhatsApp client while still seeing the primary CTA.
+    if coupon_code and (
+        conversion_decision is None
+        or getattr(conversion_decision, "coupon_granted", False)
+    ):
+        try:
+            from services.conversion_layer import (  # noqa: PLC0415
+                enrich_body_with_coupon as _enrich,
+            )
+            body_text = _enrich(
+                body_text, coupon_code, coupon_percent, language=language,
+            )
+        except Exception:
+            pass
+
+    # Stage index — used inside the button id payload so a tap one day
+    # later still tells us which stage the customer was on.
+    payload_stage = payload.get("step_idx")
+    stage = int(payload_stage) if payload_stage is not None else 0
+
+    # Buttons — conversion layer override wins, then merchant pins, then
+    # stage defaults. The coupon-granted flag from the layer keeps the
+    # dual-CTA contract honest: `apply_coupon` only renders when the
+    # layer actually granted a coupon on this send.
+    override_buttons = getattr(conversion_decision, "buttons_override", None) \
+        if conversion_decision is not None else None
+    if override_buttons is not None:
+        actions: List[str] = list(override_buttons)
+    else:
+        actions = list(active_step.get("buttons") or [])
+    if not actions:
+        actions = stage_default_actions(
+            stage,
+            with_coupon=bool(coupon_code) or bool(active_step.get("auto_coupon")),
+        )
+
+    # Defensive: if apply_coupon slipped through without an actual code,
+    # strip it so we never show a CTA the webhook can't honour.
+    if not coupon_code and ACTION_APPLY_COUPON in actions:
+        actions = [a for a in actions if a != ACTION_APPLY_COUPON]
+
+    cta_labels: Dict[str, str] = dict(active_step.get("cta_labels") or {})
+    override_labels = getattr(conversion_decision, "cta_labels_override", None) \
+        if conversion_decision is not None else None
+    if isinstance(override_labels, dict):
+        cta_labels.update(override_labels)
+
+    # ── Dual-CTA vs single-CTA routing ────────────────────────────────
+    #
+    # Meta interactive messages are mutually-exclusive on button types:
+    # either a single CTA-URL button OR up to three reply buttons.
+    # Rule:
+    #   • apply_coupon ∈ actions  → reply-buttons message with dual CTAs
+    #                                (cart + coupon + optional 3rd), and
+    #                                the code copy-ready in the body
+    #   • coupon stage, no coupon → reply-buttons message with a single
+    #                                primary cart CTA (+ escape hatches)
+    #   • coupon stage + cart_url → legacy single CTA-URL (only when
+    #                                apply_coupon isn't in play; kept for
+    #                                merchants who pinned `cta_url` mode)
+    automation_id = getattr(automation, "id", None)
+    is_coupon_stage = (
+        active_step.get("auto_coupon") is True
+        or active_step.get("message_type") == "coupon"
+        or ACTION_APPLY_COUPON in actions
+    )
+    prefer_cta_url = (
+        is_coupon_stage
+        and bool(cart_url)
+        and bool(coupon_code)
+        and ACTION_APPLY_COUPON not in actions
+        and str(active_step.get("coupon_layout") or "").lower() == "cta_url"
+    )
+
+    if prefer_cta_url:
+        cta_label = (
+            cta_labels.get(ACTION_APPLY_COUPON)
+            or label_for(ACTION_APPLY_COUPON, language=language)
+        )
+        send_payload = build_cta_url_payload(
+            to_phone   = to_phone,
+            body_text  = body_text,
+            cta_label  = cta_label,
+            cta_url    = attach_coupon_to_url(cart_url, coupon_code or None),
+        )
+    else:
+        send_payload = build_interactive_payload(
+            to_phone        = to_phone,
+            body_text       = body_text,
+            actions         = actions,
+            language        = language,
+            cart_id         = cart_id,
+            coupon_code     = coupon_code or None,
+            stage           = stage,
+            automation_id   = automation_id,
+            cta_labels      = cta_labels,
+        )
+
+    try:
+        response, _ctx = await provider_send_message(
+            db,
+            wa_conn,
+            tenant_id=tenant_id,
+            operation="send_interactive",
+            phone_id=wa_conn.phone_number_id,
+            payload=send_payload,
+        )
+        action_info: Dict[str, Any] = {
+            "delivery_mode": "interactive",
+            "stage":         stage,
+            "to":            to_phone,
+            "buttons":       actions,
+            "coupon_code":   coupon_code or None,
+            "coupon_percent": coupon_percent,
+            "dual_cta":      (
+                ACTION_APPLY_COUPON in actions and "resume_cart" in actions
+            ),
+            "wa_message_id": (response or {}).get("messages", [{}])[0].get("id"),
+            "metrics":       {"sent": 1},
+        }
+        if conversion_decision is not None:
+            action_info["conversion_audit"] = getattr(
+                conversion_decision, "audit", {},
+            )
+        return True, action_info
+    except Exception as exc:
+        logger.error(
+            "[AutoEngine] Interactive send failed event=%s automation=%s "
+            "tenant=%s: %s",
+            getattr(event, "id", None),
+            getattr(automation, "id", None),
+            tenant_id, exc,
+        )
+        return False, {"error": str(exc)[:500]}
+
+
+async def _execute_ai_recovery_step(
+    db: Session,
+    *,
+    tenant_id: int,
+    event: Any,
+    customer: Any,
+    wa_conn: Any,
+    to_phone: str,
+    config: Dict[str, Any],
+    active_step: Dict[str, Any],
+    automation_id: Optional[int],
+) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Optional AI-driven recovery turn.
+
+    Sends an AI-generated nudge that references the abandoned cart's
+    contents. Kept lightweight — the engine boundary stays Rule-First,
+    and we only burn AI tokens when:
+
+      • the merchant has explicitly enabled this stage, AND
+      • the customer's service window is open (free-form text allowed).
+
+    When the window has closed we record a `skipped` execution rather
+    than falling back to a template — sending a generic template here
+    would defeat the point of the AI stage.
+    """
+    from core.wa_usage import has_open_service_window  # noqa: PLC0415
+
+    if not has_open_service_window(db, tenant_id, to_phone):
+        return False, {"error": "ai_recovery_window_closed"}
+
+    payload = dict(getattr(event, "payload", None) or {})
+    cart_url = (
+        payload.get("checkout_url")
+        or payload.get("cart_url")
+        or ""
+    )
+    customer_name = customer.name or "العميل"
+    store_name = _resolve_store_name(db, tenant_id)
+    cart_total = payload.get("cart_total") or payload.get("total") or ""
+
+    # Try the project's AI client; degrade to a friendly default if the
+    # call fails so the engine never blocks on a model outage.
+    ai_text: Optional[str] = None
+    try:
+        from services.ai_client import generate_cart_recovery_text  # noqa: PLC0415
+        ai_text = await generate_cart_recovery_text(
+            customer_name=customer_name,
+            store_name=store_name,
+            cart_total=cart_total,
+            cart_url=cart_url,
+            language=(active_step.get("language") or config.get("language") or "ar"),
+            persona=active_step.get("ai_persona") or "concierge",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[AutoEngine] AI recovery generation failed tenant=%s: %s",
+            tenant_id, exc,
+        )
+
+    if not ai_text:
+        ai_text = (
+            f"مرحباً {customer_name} 🌟\n"
+            f"لاحظت سلتك في {store_name} ولم تكتمل بعد. "
+            f"إن أردت أساعدك في اختيار البديل المناسب أو الإجابة عن أي سؤال، "
+            f"أنا هنا الآن.\n\n{cart_url}".strip()
+        )
+
+    from services.cart_recovery_buttons import (  # noqa: PLC0415
+        build_interactive_payload,
+        stage_default_actions,
+    )
+    from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+
+    payload_stage = payload.get("step_idx")
+    stage = int(payload_stage) if payload_stage is not None else 0
+    actions = list(active_step.get("buttons") or stage_default_actions(stage))
+
+    send_payload = build_interactive_payload(
+        to_phone        = to_phone,
+        body_text       = ai_text,
+        actions         = actions,
+        language        = (active_step.get("language") or config.get("language") or "ar"),
+        cart_id         = (
+            payload.get("cart_id")
+            or payload.get("cart_external_id")
+            or getattr(event, "id", None)
+        ),
+        stage           = stage,
+        automation_id   = automation_id,
+        cta_labels      = active_step.get("cta_labels") or {},
+    )
+
+    try:
+        response, _ctx = await provider_send_message(
+            db,
+            wa_conn,
+            tenant_id=tenant_id,
+            operation="send_ai_recovery",
+            phone_id=wa_conn.phone_number_id,
+            payload=send_payload,
+        )
+        return True, {
+            "delivery_mode": "ai_recovery",
+            "stage":         stage,
+            "to":            to_phone,
+            "wa_message_id": (response or {}).get("messages", [{}])[0].get("id"),
+        }
+    except Exception as exc:
+        logger.error(
+            "[AutoEngine] AI recovery send failed tenant=%s: %s", tenant_id, exc,
+        )
+        return False, {"error": str(exc)[:500]}
+
+
+def _render_named_slots(template: str, values: Dict[str, str]) -> str:
+    """
+    Tiny named-slot renderer used by the interactive path.
+
+    Handles `{{customer_name}}`-style placeholders. Empty values render
+    as empty strings rather than the literal `{{slot}}` text — that's
+    the same forgiving behaviour the template path uses for unknown
+    Meta variables.
+    """
+    out = template
+    for slot, val in values.items():
+        out = out.replace("{{" + slot + "}}", str(val or ""))
+    return out
 
 
 # ── Scheduler loop (called from core/scheduler.py) ───────────────────────────

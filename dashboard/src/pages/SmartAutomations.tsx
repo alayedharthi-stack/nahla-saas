@@ -26,6 +26,7 @@ import {
   ORDER_STATUS_LABELS,
   ORDER_STATUS_COLORS,
 } from '../api/autopilot'
+import AbandonedCartEditor from './AbandonedCartEditor'
 
 // ── Template variable map panel ───────────────────────────────────────────────
 
@@ -635,7 +636,14 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
             إعدادات الأتمتة
           </p>
 
-          {steps ? (
+          {isAbandonedCart ? (
+            <AbandonedCartEditor
+              config={(automation.config || {}) as Record<string, unknown>}
+              onSave={async (next) => {
+                await automationsApi.updateConfig(automation.id, next)
+              }}
+            />
+          ) : steps ? (
             <div className="space-y-3">
               {steps.map((step, idx) => (
                 <div key={idx} className="bg-white rounded-xl border border-slate-200 p-3">
@@ -652,17 +660,19 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
             </div>
           )}
 
-          {automation.template_name && (
+          {!isAbandonedCart && automation.template_name && (
             <TemplateVarMapPanel templateName={automation.template_name} />
           )}
-          {!automation.template_name && !!(automation.config as Record<string, unknown>).template_name && (
+          {!isAbandonedCart && !automation.template_name && !!(automation.config as Record<string, unknown>).template_name && (
             <TemplateVarMapPanel templateName={String((automation.config as Record<string, unknown>).template_name)} />
           )}
 
-          <p className="text-xs text-slate-400 mt-3 flex items-center gap-1.5">
-            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-            التعديل على الإعدادات متاح من لوحة الإعدادات المتقدمة.
-          </p>
+          {!isAbandonedCart && (
+            <p className="text-xs text-slate-400 mt-3 flex items-center gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              التعديل على الإعدادات متاح من لوحة الإعدادات المتقدمة.
+            </p>
+          )}
         </div>
       )}
     </div>
