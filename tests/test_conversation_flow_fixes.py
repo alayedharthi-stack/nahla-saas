@@ -107,16 +107,39 @@ def test_state_store_finds_customer_when_webhook_phone_lacks_plus(monkeypatch):
     fake_db = _FakeSession([customer])
 
     # The webhook-style identifier (digits only, no plus)
-    found = state_store_module._find_customer(fake_db, tenant_id=7, phone="966555555555")
+    found, matched_value, matched_column, tried = state_store_module._find_customer(
+        fake_db, tenant_id=7, phone="966555555555"
+    )
     assert found is customer
+    assert matched_column in ("normalized_phone", "phone")
+    assert "966555555555" in tried or "+966555555555" in tried
 
     # Direct E.164 also resolves
-    found2 = state_store_module._find_customer(fake_db, tenant_id=7, phone="+966555555555")
+    found2, *_ = state_store_module._find_customer(
+        fake_db, tenant_id=7, phone="+966555555555"
+    )
     assert found2 is customer
 
     # Local Saudi format also resolves to the same row through normalize.
     # We don't strictly require this, but the helper should not crash.
     _ = state_store_module._find_customer(fake_db, tenant_id=7, phone="0555555555")
+
+
+def test_mask_phone_keeps_prefix_and_last_four():
+    from modules.ai.brain.state.store import _mask_phone
+
+    masked = _mask_phone("+966555123456")
+    assert masked.startswith("+966")
+    assert masked.endswith("3456")
+    assert "X" in masked
+    assert "5551" not in masked        # middle digits must be hidden
+
+    masked2 = _mask_phone("966555123456")
+    assert masked2.endswith("3456")
+    assert "X" in masked2
+
+    assert _mask_phone("") == "<empty>"
+    assert _mask_phone("12345") != "12345"
 
 
 # ── Fix B: transition refuses to downgrade committed sales stages ─────────────

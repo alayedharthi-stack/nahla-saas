@@ -69,6 +69,11 @@ def _find_customer(db: Any, tenant_id: int, phone: str):
 
     Strategy: try every realistic shape of the phone, in order of how the
     DB actually stores it.
+
+    Returns the Customer row plus a small diagnostics tuple consumed by
+    ``DefaultStateStore.load`` for INFO-level audit logging — that lets
+    operators confirm in production whether the second-turn lookup hit
+    the same row as the first turn.
     """
     from database.models import Customer
 
@@ -103,7 +108,7 @@ def _find_customer(db: Any, tenant_id: int, phone: str):
             .first()
         )
         if customer:
-            return customer
+            return customer, candidate, "normalized_phone", candidates
 
         customer = (
             db.query(Customer)
@@ -114,9 +119,26 @@ def _find_customer(db: Any, tenant_id: int, phone: str):
             .first()
         )
         if customer:
-            return customer
+            return customer, candidate, "phone", candidates
 
-    return None
+    return None, "", "", candidates
+
+
+def _mask_phone(phone: str) -> str:
+    """
+    Mask a phone number for logging — keep country prefix and last 4 digits
+    only, replace the middle with X. ``"+966555123456"`` → ``"+966XXXXXX3456"``.
+    Never log full PII.
+    """
+    raw = (phone or "").strip()
+    if not raw:
+        return "<empty>"
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) <= 6:
+        return raw[0] + "X" * (len(raw) - 1)
+    prefix = "+" + digits[:3] if raw.startswith("+") or len(digits) >= 11 else digits[:2]
+    suffix = digits[-4:]
+    return f"{prefix}{'X' * (len(digits) - len(prefix.lstrip('+')) - 4)}{suffix}"
 
 
 def _find_conversation(db: Any, tenant_id: int, customer_id: int):
@@ -140,37 +162,62 @@ class DefaultStateStore:
     # ── Load ─────────────────────────────────────────────────────────────────
 
     def load(self, db: Any, tenant_id: int, customer_phone: str) -> MerchantConversationState:
+        masked = _mask_phone(customer_phone)
         try:
-            customer = _find_customer(db, tenant_id, customer_phone)
+            customer, matched_value, matched_column, tried = _find_customer(
+                db, tenant_id, customer_phone
+            )
             if not customer:
-                logger.debug(
-                    "[StateStore] no customer for tenant=%s phone=%s — fresh state",
-                    tenant_id, customer_phone,
+                # Single, parseable INFO line that answers exactly the
+                # diagnostic question "did the second-turn lookup hit?"
+                logger.info(
+                    "[StateStore] turn_load tenant=%s phone=%s "
+                    "customer_found=False candidates_tried=%d "
+                    "matched_column=- state_source=fresh",
+                    tenant_id, masked, len(tried),
                 )
                 return MerchantConversationState()
 
             conv = _find_conversation(db, tenant_id, customer.id)
             if not conv:
-                logger.debug(
-                    "[StateStore] no conversation for customer=%s — fresh state",
-                    customer.id,
+                logger.info(
+                    "[StateStore] turn_load tenant=%s phone=%s "
+                    "customer_found=True customer_id=%s matched_column=%s "
+                    "conv_found=False state_source=fresh",
+                    tenant_id, masked, customer.id, matched_column,
                 )
                 return MerchantConversationState()
 
             meta = conv.extra_metadata or {}
             raw  = meta.get(_STATE_KEY)
             if not raw:
+                logger.info(
+                    "[StateStore] turn_load tenant=%s phone=%s "
+                    "customer_found=True customer_id=%s conv_id=%s "
+                    "matched_column=%s state_source=fresh "
+                    "reason=no_brain_state_in_metadata",
+                    tenant_id, masked, customer.id, conv.id, matched_column,
+                )
                 return MerchantConversationState()
 
             state = MerchantConversationState.from_dict(raw)
-            logger.debug(
-                "[StateStore] loaded state for tenant=%s customer=%s stage=%s turn=%s",
-                tenant_id, customer.id, state.stage, state.turn,
+            logger.info(
+                "[StateStore] turn_load tenant=%s phone=%s "
+                "customer_found=True customer_id=%s conv_id=%s "
+                "matched_column=%s state_source=persisted "
+                "stage=%s turn=%s greeted=%s focus=%s",
+                tenant_id, masked, customer.id, conv.id, matched_column,
+                state.stage, state.turn, state.greeted,
+                bool(state.current_product_focus),
             )
             return state
 
         except Exception as exc:
-            logger.warning("[StateStore] load error: %s — returning fresh state", exc)
+            logger.warning(
+                "[StateStore] turn_load tenant=%s phone=%s ERROR=%s "
+                "state_source=fresh_fallback",
+                tenant_id, masked, exc,
+            )
             return MerchantConversationState()
 
     # ── Save ─────────────────────────────────────────────────────────────────
@@ -182,26 +229,46 @@ class DefaultStateStore:
         customer_phone: str,
         state: MerchantConversationState,
     ) -> None:
+        masked = _mask_phone(customer_phone)
         try:
-            customer = _find_customer(db, tenant_id, customer_phone)
+            customer, _matched_value, matched_column, tried = _find_customer(
+                db, tenant_id, customer_phone
+            )
             if not customer:
-                logger.debug("[StateStore] save: no customer found — skip")
+                # If save can't find the customer, the next turn won't be
+                # able to load state either — surface this loudly so we
+                # catch it before it manifests as the "bot keeps greeting".
+                logger.warning(
+                    "[StateStore] turn_save tenant=%s phone=%s "
+                    "customer_found=False candidates_tried=%d "
+                    "result=skip reason=no_customer_row",
+                    tenant_id, masked, len(tried),
+                )
                 return
 
             conv = _find_conversation(db, tenant_id, customer.id)
             if not conv:
-                logger.debug("[StateStore] save: no conversation found — skip")
+                logger.warning(
+                    "[StateStore] turn_save tenant=%s phone=%s "
+                    "customer_found=True customer_id=%s conv_found=False "
+                    "result=skip reason=no_conversation_row",
+                    tenant_id, masked, customer.id,
+                )
                 return
 
             meta = dict(conv.extra_metadata or {})
             meta[_STATE_KEY] = state.to_dict()
-            # Reassign whole dict so SQLAlchemy detects the JSONB mutation
             conv.extra_metadata = meta
             db.commit()
 
-            logger.debug(
-                "[StateStore] saved state for tenant=%s customer=%s stage=%s",
-                tenant_id, customer.id, state.stage,
+            logger.info(
+                "[StateStore] turn_save tenant=%s phone=%s "
+                "customer_found=True customer_id=%s conv_id=%s "
+                "matched_column=%s result=ok "
+                "stage=%s turn=%s greeted=%s focus=%s",
+                tenant_id, masked, customer.id, conv.id, matched_column,
+                state.stage, state.turn, state.greeted,
+                bool(state.current_product_focus),
             )
 
         except Exception as exc:
@@ -209,7 +276,10 @@ class DefaultStateStore:
                 db.rollback()
             except Exception:
                 pass
-            logger.error("[StateStore] save error: %s", exc)
+            logger.error(
+                "[StateStore] turn_save tenant=%s phone=%s ERROR=%s",
+                tenant_id, masked, exc,
+            )
 
     # ── Transition ────────────────────────────────────────────────────────────
 
