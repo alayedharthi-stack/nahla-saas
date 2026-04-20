@@ -851,10 +851,25 @@ class StoreSyncService:
             return result
 
         result["salla_count"] = len(raw_list)
+        # ── BEFORE-normalization log ──────────────────────────────────────
+        # Print the raw cart count + the first few external ids verbatim
+        # so an operator grepping logs can confirm the adapter actually
+        # delivered carts to the sync layer (separately from how many
+        # we *kept* after normalization).
+        _raw_id_preview = [
+            str((c.get("id") or c.get("cart_id") or c.get("token") or "?"))
+            for c in raw_list[:5] if isinstance(c, dict)
+        ]
         logger.info(
-            "tenant=%s syncing abandoned carts — fetched=%d from Salla",
-            self.tenant_id, len(raw_list),
+            "[StoreSync] ABANDONED_SYNC_FETCHED tenant=%s raw_cart_count=%d "
+            "first_ids=%s",
+            self.tenant_id, len(raw_list), _raw_id_preview,
         )
+
+        # Track failures per stage for the end-of-run summary.
+        result["normalize_errors"] = 0   # type: ignore[assignment]
+        result["save_errors"]      = 0   # type: ignore[assignment]
+        normalised_external_ids: List[str] = []
 
         # Existing cart rows for this tenant — keyed by external_id so we
         # can both upsert and reconcile in a single pass.
@@ -880,69 +895,132 @@ class StoreSyncService:
         seen_external_ids = set()
 
         for raw in raw_list:
-            normalised = _normalise_abandoned_cart(raw)
+            # ── Per-cart isolation ─────────────────────────────────────
+            # Wrap each cart's normalization+persist in its own try block.
+            # Without this, ONE malformed cart from Salla (unexpected
+            # field shape, NaN, infinite recursion in nested totals…)
+            # crashed the whole loop and silently wiped the rest of the
+            # batch — exactly the "Salla shows N, Nahla shows 0" symptom
+            # we're trying to eradicate.
+            try:
+                normalised = _normalise_abandoned_cart(raw)
+            except Exception as exc:
+                result["normalize_errors"] += 1
+                logger.exception(
+                    "[StoreSync] tenant=%s NORMALIZE_FAILED — skipping one "
+                    "cart, continuing batch | error=%s | raw_keys=%s | "
+                    "raw_preview=%s",
+                    self.tenant_id, exc,
+                    sorted(list(raw.keys())) if isinstance(raw, dict) else type(raw).__name__,
+                    str(raw)[:300],
+                )
+                continue
+
             ext_id = normalised["external_id"]
             if not ext_id:
                 result["skipped_no_id"] += 1
-                logger.debug(
-                    "tenant=%s skipping abandoned cart with empty id — raw=%s",
-                    self.tenant_id, str(raw)[:200],
+                logger.warning(
+                    "[StoreSync] tenant=%s SKIPPED_NO_ID — abandoned cart had "
+                    "no usable id field | raw_keys=%s | raw_preview=%s",
+                    self.tenant_id,
+                    sorted(list(raw.keys())) if isinstance(raw, dict) else type(raw).__name__,
+                    str(raw)[:300],
                 )
                 continue
+
+            normalised_external_ids.append(ext_id)
+
+            # NOTE: previously this loop also dropped carts where BOTH
+            # customer_info and line_items were empty. That filter is
+            # gone — we now persist any cart that has a stable id, even
+            # if it's a bare draft. The recovery flow can decide later
+            # whether it's actionable; the dashboard should never lose
+            # visibility into a real cart just because the customer
+            # hasn't entered their phone yet.
             if not normalised["customer_info"] and not normalised["line_items"]:
-                # Salla occasionally returns a draft-cart shell with no
-                # customer and no items; nothing for us to message about.
-                result["skipped_no_data"] += 1
-                continue
+                logger.info(
+                    "[StoreSync] tenant=%s PERSISTING_EMPTY_SHELL ext_id=%s "
+                    "(no customer + no items) — kept for dashboard visibility",
+                    self.tenant_id, ext_id,
+                )
 
             seen_external_ids.add(ext_id)
-            existing = existing_carts.get(ext_id) or (
-                self.db.query(Order)
-                .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
-                .first()
-            )
+            try:
+                existing = existing_carts.get(ext_id) or (
+                    self.db.query(Order)
+                    .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+                    .first()
+                )
 
-            if existing:
-                existing.status                = normalised["status"]
-                existing.total                 = normalised["total"]
-                existing.customer_info         = normalised["customer_info"]
-                existing.line_items            = normalised["line_items"]
-                existing.is_abandoned          = True
-                existing.checkout_url          = normalised["checkout_url"]
-                existing.external_order_number = normalised["external_order_number"]
-                if normalised["customer_name"]:
-                    existing.customer_name = normalised["customer_name"]
-                existing.source = "salla"
-                meta = dict(existing.extra_metadata or {})
-                meta["created_at"]    = normalised.get("created_at") or meta.get("created_at")
-                meta["abandoned_at"]  = meta.get("abandoned_at") or normalised.get("created_at")
-                meta["last_synced_at"] = datetime.now(timezone.utc).isoformat()
-                meta["source_kind"]   = "abandoned_cart"
-                meta["raw_cart_id"]   = normalised.get("raw_cart_id")
-                existing.extra_metadata = meta
-                result["updated"] += 1
-            else:
-                self.db.add(Order(
-                    tenant_id             = self.tenant_id,
-                    external_id           = ext_id,
-                    external_order_number = normalised["external_order_number"],
-                    status                = normalised["status"],
-                    total                 = normalised["total"],
-                    customer_name         = normalised["customer_name"] or None,
-                    customer_info         = normalised["customer_info"],
-                    line_items            = normalised["line_items"],
-                    checkout_url          = normalised["checkout_url"],
-                    is_abandoned          = True,
-                    source                = "salla",
-                    extra_metadata        = {
-                        "created_at":     normalised.get("created_at"),
-                        "abandoned_at":   normalised.get("created_at"),
-                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
-                        "source_kind":    "abandoned_cart",
-                        "raw_cart_id":    normalised.get("raw_cart_id"),
-                    },
-                ))
-                result["saved"] += 1
+                if existing:
+                    existing.status                = normalised["status"]
+                    existing.total                 = normalised["total"]
+                    existing.customer_info         = normalised["customer_info"]
+                    existing.line_items            = normalised["line_items"]
+                    existing.is_abandoned          = True
+                    existing.checkout_url          = normalised["checkout_url"]
+                    existing.external_order_number = normalised["external_order_number"]
+                    if normalised["customer_name"]:
+                        existing.customer_name = normalised["customer_name"]
+                    existing.source = "salla"
+                    meta = dict(existing.extra_metadata or {})
+                    meta["created_at"]    = normalised.get("created_at") or meta.get("created_at")
+                    meta["abandoned_at"]  = meta.get("abandoned_at") or normalised.get("created_at")
+                    meta["last_synced_at"] = datetime.now(timezone.utc).isoformat()
+                    meta["source_kind"]   = "abandoned_cart"
+                    meta["raw_cart_id"]   = normalised.get("raw_cart_id")
+                    existing.extra_metadata = meta
+                    result["updated"] += 1
+                    logger.info(
+                        "[StoreSync] tenant=%s UPDATED_abandoned_cart "
+                        "ext_id=%s order_id=%s items=%d total=%s "
+                        "customer=%s",
+                        self.tenant_id, ext_id, existing.id,
+                        len(normalised["line_items"] or []),
+                        normalised["total"],
+                        bool(normalised["customer_info"]),
+                    )
+                else:
+                    self.db.add(Order(
+                        tenant_id             = self.tenant_id,
+                        external_id           = ext_id,
+                        external_order_number = normalised["external_order_number"],
+                        status                = normalised["status"],
+                        total                 = normalised["total"],
+                        customer_name         = normalised["customer_name"] or None,
+                        customer_info         = normalised["customer_info"],
+                        line_items            = normalised["line_items"],
+                        checkout_url          = normalised["checkout_url"],
+                        is_abandoned          = True,
+                        source                = "salla",
+                        extra_metadata        = {
+                            "created_at":     normalised.get("created_at"),
+                            "abandoned_at":   normalised.get("created_at"),
+                            "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                            "source_kind":    "abandoned_cart",
+                            "raw_cart_id":    normalised.get("raw_cart_id"),
+                        },
+                    ))
+                    result["saved"] += 1
+                    logger.info(
+                        "[StoreSync] tenant=%s SAVED_abandoned_cart "
+                        "ext_id=%s items=%d total=%s customer=%s "
+                        "checkout_url=%s",
+                        self.tenant_id, ext_id,
+                        len(normalised["line_items"] or []),
+                        normalised["total"],
+                        bool(normalised["customer_info"]),
+                        bool(normalised["checkout_url"]),
+                    )
+            except Exception as exc:
+                result["save_errors"] += 1
+                self.db.rollback()
+                logger.exception(
+                    "[StoreSync] tenant=%s SAVE_FAILED ext_id=%s — "
+                    "rolling back this cart only, continuing batch | "
+                    "error=%s",
+                    self.tenant_id, ext_id, exc,
+                )
 
         # ── Reconcile: clear is_abandoned on rows Salla no longer lists ─
         # The customer either resumed → became a real order, or Salla aged
@@ -958,13 +1036,31 @@ class StoreSyncService:
 
         self.db.flush()
 
+        # ── AFTER-normalization log + structured summary ─────────────────
+        # Single grep-friendly line so the operator can answer
+        # "did this run succeed end-to-end?" with one log search.
+        # If raw_cart_count > 0 but saved+updated == 0, the bug is
+        # downstream of normalize/save and the per-cart logs above will
+        # tell us exactly which stage dropped the cart.
         logger.info(
-            "tenant=%s abandoned-cart sync done — fetched=%d saved=%d updated=%d "
-            "reconciled=%d skipped_no_id=%d skipped_no_data=%d previous=%d",
-            self.tenant_id, result["salla_count"], result["saved"], result["updated"],
-            result["reconciled"], result["skipped_no_id"], result["skipped_no_data"],
+            "[StoreSync] ABANDONED_SYNC_SUMMARY tenant=%s "
+            "raw_cart_count=%d normalized_cart_count=%d "
+            "saved=%d updated=%d reconciled=%d "
+            "skipped_no_id=%d normalize_errors=%d save_errors=%d "
+            "previous=%d external_ids=%s",
+            self.tenant_id,
+            result["salla_count"],
+            len(normalised_external_ids),
+            result["saved"], result["updated"], result["reconciled"],
+            result["skipped_no_id"], result["normalize_errors"], result["save_errors"],
             previous_count,
+            normalised_external_ids[:10],
         )
+
+        # Surface counts in the JSON result so the debug endpoints
+        # (and the scheduler audit log) can show them without reading
+        # raw application logs.
+        result["normalized_count"] = len(normalised_external_ids)  # type: ignore[assignment]
         return result
 
     # ── Coupons sync ───────────────────────────────────────────────────────────
