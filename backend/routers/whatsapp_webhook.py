@@ -423,6 +423,48 @@ async def _dispatch_message(
         except Exception as _stamp_exc:
             logger.debug("[Webhook] Failed to stamp last_webhook_received_at: %s", _stamp_exc)
 
+        # ── Universal idempotency guard ─────────────────────────────────
+        # Meta retries webhooks aggressively. Without this check on the
+        # MERCHANT + INTERACTIVE paths (the legacy guard only ran inside
+        # the platform-tenant branch below) a single retry produced a
+        # second brain turn — which is exactly how the dashboard ended
+        # up with duplicated "addon recommendations" and "recorded
+        # interest" bubbles. Same logic for interactive button replies:
+        # a duplicate `cart:resume_cart:…` tap previously fired the
+        # CTA-URL twice, sending two checkout messages back-to-back.
+        #
+        # We load conversation state once here and reuse it for the
+        # downstream branches via ``inbound_dedup_state`` so we never
+        # double-load the row. State persists in
+        # ``Conversation.extra_metadata`` (rolling window of last 50
+        # message ids), which means the guard survives container
+        # restarts and is shared across worker processes.
+        inbound_dedup_state = None
+        if sender and msg_id:
+            try:
+                inbound_dedup_state = StateManager.load(
+                    db, phone=sender, tenant_id=resolved_tenant_id,
+                )
+                if IdempotencyGuard.is_duplicate(inbound_dedup_state, msg_id):
+                    logger.info(
+                        "[Idempotency] DROP duplicate inbound msg_id=%s "
+                        "tenant=%s from=%s — Meta webhook retry",
+                        msg_id, resolved_tenant_id, sender,
+                    )
+                    return
+                IdempotencyGuard.mark_processed(inbound_dedup_state, msg_id)
+                StateManager.save(
+                    db, inbound_dedup_state, tenant_id=resolved_tenant_id,
+                )
+            except Exception as _dedup_exc:
+                # Never block real traffic on a dedup-table hiccup. Log
+                # at WARNING (not DEBUG) so a repeated failure surfaces.
+                logger.warning(
+                    "[Idempotency] guard load/save failed tenant=%s msg_id=%s "
+                    "err=%s — proceeding without dedup for this message",
+                    resolved_tenant_id, msg_id, _dedup_exc,
+                )
+
         normalized_sender = normalize_phone(sender) or sender
         contact_name = _extract_contact_name(value, sender)
         _inbound_customer_id: int | None = None
@@ -555,28 +597,31 @@ async def _dispatch_message(
         effective_tenant_id = resolved_tenant_id
 
         # ── ① Load state — scoped to the correct merchant tenant ──────────────
-        state = StateManager.load(db, phone=sender, tenant_id=effective_tenant_id)
+        # Reuse the row already loaded by the universal dedup guard above
+        # when the tenant matches; this avoids a second SELECT/UPDATE
+        # round-trip per inbound. Falls back to a fresh load only when
+        # the dedup guard couldn't run (no msg_id, or DB hiccup logged).
+        if (
+            inbound_dedup_state is not None
+            and effective_tenant_id == resolved_tenant_id
+        ):
+            state = inbound_dedup_state
+        else:
+            state = StateManager.load(
+                db, phone=sender, tenant_id=effective_tenant_id,
+            )
         stage_before = state.stage
         logger.info(
             "[TRACE][3/6] SESSION_LOADED | tenant_id=%s sender=%s stage=%s",
             effective_tenant_id, sender, stage_before,
         )
 
-        # ── ③ Idempotency check ──────────────────────────────────────────────
-        if msg_id and IdempotencyGuard.is_duplicate(state, msg_id):
-            logger.info("[Idempotency] Skipping duplicate msg_id=%s from=%s", msg_id, sender)
-            ObservabilityLogger.log(db, TurnLog(
-                phone=sender, turn=state.turn, raw_message=text,
-                detected_intent="DUPLICATE", confidence=1.0,
-                extracted_slots=[], stage_before=stage_before, stage_after=stage_before,
-                stage_transition=None, decision="SKIP", decision_reason="idempotency_duplicate",
-                ai_called=False, idempotency_skip=True, latency_ms=0,
-            ))
-            return
-
+        # NOTE: idempotency check moved to ``_dispatch_message`` (universal
+        # guard right after tenant resolution) so merchant + interactive
+        # paths get the same protection. The legacy per-branch check that
+        # used to live here would now always fire on a re-loaded state
+        # row — the universal guard already marked the id as processed.
         state.turn += 1
-        if msg_id:
-            IdempotencyGuard.mark_processed(state, msg_id)
 
         # ── ③ Intent detection ───────────────────────────────────────────────
         intent, confidence = IntentEngine.classify(text, state)

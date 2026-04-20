@@ -1036,6 +1036,74 @@ class StoreSyncService:
 
         self.db.flush()
 
+        # ── Kick off the recovery automation for newly-seen carts ─────────
+        # Idempotent on ``Order.extra_metadata.recovery_event_id`` so a
+        # cart that already produced an event (via the webhook path or a
+        # previous sweep) does NOT double-emit. The emit happens AFTER
+        # the upsert flush so the marker write and the parent row are in
+        # a consistent state. We commit eagerly inside the emitter so a
+        # later cart's failure cannot rollback an already-emitted one.
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            logger.exception(
+                "[StoreSync] tenant=%s commit before recovery emit failed",
+                self.tenant_id,
+            )
+
+        emit_count = 0
+        emit_failures = 0
+        try:
+            from services.cart_recovery_emitter import (  # noqa: PLC0415
+                emit_cart_abandoned_if_new,
+            )
+            for raw in raw_list:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    emit_normalised = _normalise_abandoned_cart(raw)
+                except Exception:
+                    continue
+                ext_id = emit_normalised.get("external_id") or ""
+                if not ext_id or ext_id not in seen_external_ids:
+                    continue
+                cart_row = (
+                    self.db.query(Order)
+                    .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+                    .first()
+                )
+                if cart_row is None:
+                    continue
+                try:
+                    new_id = emit_cart_abandoned_if_new(
+                        self.db,
+                        tenant_id=self.tenant_id,
+                        cart_row=cart_row,
+                        normalised=emit_normalised,
+                        source="store_sync",
+                    )
+                    if new_id is not None and (cart_row.extra_metadata or {}).get(
+                        "recovery_event_id"
+                    ) == new_id:
+                        # Only count rows where THIS sweep actually wrote
+                        # the marker (the helper returns the existing id
+                        # for already-emitted carts).
+                        emit_count += 1
+                except Exception:
+                    emit_failures += 1
+                    logger.exception(
+                        "[StoreSync] tenant=%s cart=%s emit_cart_abandoned_if_new failed",
+                        self.tenant_id, ext_id,
+                    )
+        except Exception:
+            logger.exception(
+                "[StoreSync] tenant=%s recovery emit pass aborted", self.tenant_id,
+            )
+
+        result["recovery_events_emitted"] = emit_count    # type: ignore[assignment]
+        result["recovery_emit_failures"] = emit_failures  # type: ignore[assignment]
+
         # ── AFTER-normalization log + structured summary ─────────────────
         # Single grep-friendly line so the operator can answer
         # "did this run succeed end-to-end?" with one log search.
@@ -1482,6 +1550,29 @@ class StoreSyncService:
             "tenant=%s abandoned_cart webhook upserted cart external_id=%s",
             self.tenant_id, ext_id,
         )
+
+        # Fire the recovery flow. Idempotent on
+        # ``Order.extra_metadata.recovery_event_id`` so concurrent
+        # webhook + sweep calls cannot double-emit. Failures here log
+        # at WARNING but never break the webhook ingest path — the cart
+        # row is already durably stored.
+        try:
+            from services.cart_recovery_emitter import (  # noqa: PLC0415
+                emit_cart_abandoned_if_new,
+            )
+            emit_cart_abandoned_if_new(
+                self.db,
+                tenant_id=self.tenant_id,
+                cart_row=cart_row,
+                normalised=normalised,
+                source="webhook",
+            )
+        except Exception:
+            logger.exception(
+                "[StoreSync] cart_abandoned emit failed tenant=%s cart=%s "
+                "(cart row saved, recovery flow will not start until next sweep)",
+                self.tenant_id, ext_id,
+            )
 
     async def handle_order_webhook(self, payload: Dict) -> None:
         """

@@ -95,7 +95,16 @@ async def handle_cart_recovery_button(
         automation_id=automation_id,
     )
 
-    cart_url = _resolve_cart_url(parent_event)
+    # Resolve the URL through a layered fallback so we never ship the
+    # generic "أخبرني وش تحتاج" reply when a real checkout link exists.
+    # Layer 1: the parent event payload (where the engine put it at
+    # send-time). Layer 2: the durable Order row keyed by
+    # ``cart-{cart_id}`` — survives even if the parent event was emitted
+    # without a URL, which used to be the silent failure mode that made
+    # "إكمال الطلب" look broken to merchants.
+    cart_url = _resolve_cart_url(
+        parent_event, db=db, tenant_id=tenant_id, cart_id=cart_id,
+    )
 
     try:
         if action == ACTION_RESUME_CART:
@@ -193,9 +202,23 @@ async def _handle_resume(
             _tenant_id=tenant_id, _db=db,
         )
     else:
+        # Authoritative miss: we couldn't resolve a checkout URL from
+        # the event payload OR from the persisted Order row. This is a
+        # rare edge (cart deleted between send and tap, or the merchant
+        # disconnected the platform) — be HONEST instead of falling back
+        # to a generic "tell me what you need" line that looks identical
+        # to the merchant brain and made the button look broken.
+        logger.warning(
+            "[CartRecovery] resume_cart could not resolve checkout URL "
+            "tenant=%s phone=%s — falling back to plain ack (no fake-AI prompt)",
+            tenant_id, to_phone,
+        )
         await send_text(
             phone_id=phone_id, to=to_phone,
-            text="ممتاز! نقدر نساعدك تكمل الطلب الآن. أخبرني وش تحتاج 🤝",
+            text=(
+                "حاضر 🌷 سلتك لا تزال محفوظة لك في المتجر — افتحها وكمّل الطلب "
+                "في أي وقت يناسبك."
+            ),
             _tenant_id=tenant_id, _db=db,
         )
 
@@ -519,15 +542,57 @@ def _lookup_parent_records(
     return event, execution
 
 
-def _resolve_cart_url(parent_event: Any) -> Optional[str]:
-    if parent_event is None:
-        return None
-    payload = parent_event.payload or {}
-    return (
-        payload.get("checkout_url")
-        or payload.get("cart_url")
-        or None
-    )
+def _resolve_cart_url(
+    parent_event: Any,
+    *,
+    db: Any = None,
+    tenant_id: Optional[int] = None,
+    cart_id: Any = None,
+) -> Optional[str]:
+    """
+    Three-tier resolution so a missing/empty payload never silently
+    downgrades the customer to a generic chat fallback:
+
+      1. ``parent_event.payload.{checkout_url, cart_url}`` —
+         what the engine stamped at send-time. Authoritative when present.
+      2. ``Order.checkout_url`` for the matching ``cart-{cart_id}`` row —
+         the same column the dashboard reads from. Always populated by
+         ``store_sync._normalise_abandoned_cart`` for Salla carts.
+      3. ``None`` — caller decides what to do (the resume handler now
+         shows a plain "open the store" message instead of a fake-AI
+         line, so we never look like we forgot the cart).
+    """
+    if parent_event is not None:
+        payload = parent_event.payload or {}
+        from_event = payload.get("checkout_url") or payload.get("cart_url")
+        if from_event:
+            return from_event
+
+    if db is not None and tenant_id is not None and cart_id:
+        try:
+            from models import Order  # noqa: PLC0415
+            row = (
+                db.query(Order)
+                .filter(
+                    Order.tenant_id == tenant_id,
+                    Order.external_id == f"cart-{cart_id}",
+                )
+                .first()
+            )
+            if row and row.checkout_url:
+                logger.info(
+                    "[CartRecovery] resolved checkout_url from Order row "
+                    "tenant=%s cart_id=%s (parent event payload was empty)",
+                    tenant_id, cart_id,
+                )
+                return row.checkout_url
+        except Exception:  # pragma: no cover - never let a fallback crash a tap
+            logger.exception(
+                "[CartRecovery] Order fallback lookup failed tenant=%s cart_id=%s",
+                tenant_id, cart_id,
+            )
+
+    return None
 
 
 def _record_outcome(
