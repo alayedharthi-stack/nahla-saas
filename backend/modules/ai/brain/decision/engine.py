@@ -114,19 +114,32 @@ class DefaultDecisionEngine:
             )
 
         # ── 3.5 Pick from numbered list ───────────────────────────────────────
-        if intent.name == INTENT_PICK_LIST_ITEM and state.last_search_candidates:
-            idx = int(intent.slots.get("list_index", 1))
-            idx = max(1, min(idx, len(state.last_search_candidates)))
-            product = state.last_search_candidates[idx - 1]
-            if product:
-                if facts.orderable:
-                    return Decision(
-                        action=ACTION_PROPOSE_DRAFT_ORDER,
-                        args={"product": product},
-                        reason=f"customer picked option {idx} from list — start order",
-                        confidence=0.95,
-                    )
-                else:
+        # CRITICAL bridging logic: when the customer picks "1" / "2" / "3"
+        # we MUST commit to a product and start the order flow. Falling
+        # through to the LLM here was the production bug that broke the
+        # whole sales funnel — the user would type a number, the bot would
+        # respond with generic chit-chat, and product_focus stayed null
+        # forever.
+        if intent.name == INTENT_PICK_LIST_ITEM:
+            # Prefer the candidates persisted from the most recent search;
+            # fall back to last_recommended_products (set by the suggestion
+            # engine) so an old recommendation list is still actionable.
+            candidates = (
+                list(state.last_search_candidates or [])
+                or list(state.last_recommended_products or [])
+            )
+            if candidates:
+                idx = int(intent.slots.get("list_index", 1))
+                idx = max(1, min(idx, len(candidates)))
+                product = candidates[idx - 1]
+                if product:
+                    if facts.orderable:
+                        return Decision(
+                            action=ACTION_PROPOSE_DRAFT_ORDER,
+                            args={"product": product},
+                            reason=f"customer picked option {idx} from list — start order",
+                            confidence=0.95,
+                        )
                     # Store not orderable — confirm product focus, show details
                     return Decision(
                         action=ACTION_SEARCH_PRODUCTS,
@@ -135,6 +148,15 @@ class DefaultDecisionEngine:
                         reason=f"customer picked option {idx} — not orderable, confirm product",
                         confidence=0.90,
                     )
+            # We saw a numeric pick but have no list to map it onto. Don't
+            # punt to the LLM — ask for clarification so the customer can
+            # name the product (or repeat the search).
+            return Decision(
+                action=ACTION_CLARIFY,
+                args={"question": "أي منتج تقصد؟ اكتب اسمه أو اطلب مني عرض المنتجات مرة ثانية."},
+                reason="pick_list_item with no remembered candidates — ask for clarification",
+                confidence=0.7,
+            )
 
         # ── 3.7 Continue order preparation while collecting checkout details ──
         # CRITICAL: while ordering we treat almost any free-form message as a

@@ -194,10 +194,23 @@ class MerchantBrain:
             new_state.order_prep = OrderPreparationState.from_dict(result.data.get("order_prep"))
 
         # ── 6b. Persist search candidates so user can pick by number ─────────
-        if result.data.get("pending_candidates"):
-            new_state.last_search_candidates = list(result.data["pending_candidates"])
+        # IMPORTANT: the source of truth is the executor (search.py returns
+        # `products`). The composer tags a narrower `pending_candidates`
+        # for buttons, but it runs AFTER this block — so we must NOT rely on
+        # it to populate state. This was the root cause of the production bug
+        # where pick_list_item ("اخترت 2") fell through to the LLM because
+        # state.last_search_candidates was always empty.
+        _search_products = (
+            result.data.get("pending_candidates")
+            or result.data.get("products")
+            or []
+        )
+        if decision.action == "search_products" and _search_products:
+            # Cap to 8 so a pick like "5" is meaningful but state stays small.
+            new_state.last_search_candidates = list(_search_products)[:8]
         elif intent.name == INTENT_PICK_LIST_ITEM:
-            # Clear candidates after a selection is made
+            # Clear candidates after a successful pick (decision engine already
+            # consumed the chosen product into ACTION_PROPOSE_DRAFT_ORDER).
             new_state.last_search_candidates = []
 
         new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)

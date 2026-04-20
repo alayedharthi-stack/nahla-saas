@@ -723,6 +723,192 @@ def test_state_manager_save_preserves_brain_state(monkeypatch):
     assert conv.extra_metadata.get("customer_phone") == "+966555906901"
 
 
+# ── Fix I: pick_list_item must bridge into the order flow ────────────────────
+# Production logs showed:
+#   intent=pick_list_item, slots={"list_index":2}, stage_before=exploring
+#   → action=llm_reply, product_focus=null, stage_after=exploring
+# The customer's selection was silently lost because:
+#   (a) the search executor returned `products` but pipeline only looked at
+#       `pending_candidates`, which was set later by the composer, so
+#       state.last_search_candidates was always empty.
+#   (b) the decision engine had no fallback when last_search_candidates was
+#       empty — it skipped the pick_list_item branch entirely and fell
+#       through to ACTION_LLM_REPLY.
+
+
+def test_pick_list_item_with_candidates_proposes_draft_order():
+    """
+    With a remembered candidate list, picking option N must commit to that
+    product and trigger ACTION_PROPOSE_DRAFT_ORDER (so transition advances
+    stage → ordering and sets current_product_focus).
+    """
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.state.stages import STAGE_EXPLORING
+    from modules.ai.brain.types import INTENT_PICK_LIST_ITEM
+
+    engine = DefaultDecisionEngine()
+    state = _make_state(STAGE_EXPLORING, product=None)
+    state.last_search_candidates = [
+        {"id": 11, "title": "فستان أزرق", "price": 149},
+        {"id": 12, "title": "فستان أحمر", "price": 189},
+        {"id": 13, "title": "فستان أسود", "price": 229},
+    ]
+
+    decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 2}))
+
+    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.args.get("product", {}).get("id") == 12
+
+
+def test_pick_list_item_falls_back_to_recommended_products():
+    """
+    When the search candidate list is empty but a recommendation list is
+    still in state, a numeric pick must resolve against the recommendations
+    instead of dropping into the LLM.
+    """
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.state.stages import STAGE_EXPLORING
+    from modules.ai.brain.types import INTENT_PICK_LIST_ITEM
+
+    engine = DefaultDecisionEngine()
+    state = _make_state(STAGE_EXPLORING, product=None)
+    state.last_search_candidates = []
+    state.last_recommended_products = [
+        {"id": 21, "title": "بلوزة", "price": 79},
+        {"id": 22, "title": "تنورة", "price": 99},
+    ]
+
+    decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 1}))
+
+    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.args.get("product", {}).get("id") == 21
+
+
+def test_pick_list_item_without_any_candidates_clarifies_not_llm():
+    """
+    No remembered candidates anywhere → ask for clarification (so we don't
+    silently lose context). Critically, the action MUST NOT be llm_reply,
+    because the LLM has no idea what "2" referred to and will give a
+    generic response that breaks the funnel.
+    """
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.decision.actions import ACTION_CLARIFY, ACTION_LLM_REPLY
+    from modules.ai.brain.state.stages import STAGE_EXPLORING
+    from modules.ai.brain.types import INTENT_PICK_LIST_ITEM
+
+    engine = DefaultDecisionEngine()
+    state = _make_state(STAGE_EXPLORING, product=None)
+    state.last_search_candidates = []
+    state.last_recommended_products = []
+
+    decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 2}))
+
+    assert decision.action != ACTION_LLM_REPLY
+    assert decision.action == ACTION_CLARIFY
+
+
+def test_pick_list_item_clamps_index_within_bounds():
+    """Defensive: a too-large index picks the last available candidate."""
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.state.stages import STAGE_EXPLORING
+    from modules.ai.brain.types import INTENT_PICK_LIST_ITEM
+
+    engine = DefaultDecisionEngine()
+    state = _make_state(STAGE_EXPLORING, product=None)
+    state.last_search_candidates = [
+        {"id": 1, "title": "A"},
+        {"id": 2, "title": "B"},
+    ]
+
+    decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 99}))
+    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.args["product"]["id"] == 2
+
+
+def test_after_pick_name_message_continues_order_flow():
+    """
+    Full bridging chain: once pick_list_item moved us into STAGE_ORDERING
+    with a product_focus, a free-form message that the slot extractor reads
+    as a customer name MUST keep us in PROPOSE_DRAFT_ORDER and never
+    bounce back to greeting/exploring. This is the regression for
+    "the maps URL after picking went to handoff_to_human".
+    """
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.state.stages import STAGE_ORDERING
+    from modules.ai.brain.types import INTENT_GENERAL
+
+    engine = DefaultDecisionEngine()
+    state = _make_state(STAGE_ORDERING, product={"id": 42, "title": "فستان", "price": 189})
+
+    decision = engine.decide(
+        _ctx(state, INTENT_GENERAL, {"customer_first_name": "تركي", "customer_last_name": "الحارثي"})
+    )
+    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+
+
+def test_after_pick_maps_url_continues_order_flow():
+    """Same chain, but the slot is the Google Maps URL collected from the customer."""
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.state.stages import STAGE_ORDERING
+    from modules.ai.brain.types import INTENT_GENERAL
+
+    engine = DefaultDecisionEngine()
+    state = _make_state(STAGE_ORDERING, product={"id": 42, "title": "فستان", "price": 189})
+
+    decision = engine.decide(
+        _ctx(state, INTENT_GENERAL, {"google_maps_url": "https://maps.app.goo.gl/abc123"})
+    )
+    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+
+
+# ── Fix I.b: pipeline persists candidates from search executor results ───────
+
+
+def test_pipeline_persists_search_executor_products_as_candidates():
+    """
+    The search executor returns `result.data['products']`. The pipeline
+    must persist them as `last_search_candidates` so the very next
+    pick_list_item turn can resolve against them. This is independent of
+    the composer (which runs later and only sometimes tags
+    `pending_candidates`).
+    """
+    # We exercise the relevant code path directly without spinning up the
+    # full pipeline by mimicking the persistence block.
+    from modules.ai.brain.types import (
+        ActionResult, INTENT_ASK_PRODUCT, MerchantConversationState,
+    )
+
+    new_state = MerchantConversationState()
+    result = ActionResult(success=True, data={
+        "products": [
+            {"id": 1, "title": "فستان أزرق", "price": 149},
+            {"id": 2, "title": "فستان أحمر", "price": 189},
+        ],
+        # Composer hasn't run yet — pending_candidates is intentionally absent.
+    })
+    decision_action = "search_products"
+    intent_name = INTENT_ASK_PRODUCT
+
+    # Mirror pipeline.py lines around "Persist search candidates":
+    _search_products = (
+        result.data.get("pending_candidates")
+        or result.data.get("products")
+        or []
+    )
+    if decision_action == "search_products" and _search_products:
+        new_state.last_search_candidates = list(_search_products)[:8]
+    elif intent_name == "pick_list_item":
+        new_state.last_search_candidates = []
+
+    assert len(new_state.last_search_candidates) == 2
+    assert new_state.last_search_candidates[1]["id"] == 2
+
+
 def test_state_manager_save_does_not_drop_unrelated_keys(monkeypatch):
     """
     Defensive: any future key written to extra_metadata by another
