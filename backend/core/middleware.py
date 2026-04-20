@@ -25,6 +25,10 @@ logger = logging.getLogger("nahla-backend")
 # expose protected endpoints under the same prefix.
 JWT_PUBLIC_PREFIXES = (
     "/health",
+    "/version",                         # public deploy-identity probe
+    "/api/version",                     # alias of /version
+    "/debug/",                          # TEMPORARY: token-gated debug surface
+                                        # (gated inside the handler via DEBUG_ADMIN_TOKEN)
     "/webhook",
     "/auth",
     "/oauth",                           # Salla/WhatsApp OAuth callbacks
@@ -65,6 +69,9 @@ async def api_key_middleware(request: Request, call_next):
         path = request.url.path
         if not (
             path.startswith("/health")
+            or path.startswith("/version")
+            or path.startswith("/api/version")
+            or path.startswith("/debug/")    # TEMPORARY: token-gated debug surface
             or path.startswith("/webhook")
             or path.startswith("/auth")
         ):
