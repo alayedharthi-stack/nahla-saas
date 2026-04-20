@@ -137,7 +137,12 @@ from routers.addons            import router as _addons_router               # n
 from routers.widgets           import router as _widgets_router              # noqa: E402
 from routers.product_interests import router as _product_interests_router    # noqa: E402
 
+# TEMPORARY: token-gated public debug router. Safe to delete once the
+# abandoned-cart investigation is closed. See routers/debug_public.py.
+from routers.debug_public      import router as _debug_public_router       # noqa: E402
+
 app.include_router(_health_router)
+app.include_router(_debug_public_router)
 app.include_router(_admin_router)
 app.include_router(_auth_router)
 app.include_router(_settings_router)
