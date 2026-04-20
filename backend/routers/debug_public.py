@@ -77,27 +77,29 @@ def _resolve_default_tenant(db: Session) -> int:
     """Pick a sensible tenant when the caller didn't specify one.
 
     Preference order:
-      1. Most recent tenant that has a Salla StoreIntegration row
-         (the ones we can actually fetch carts for).
-      2. Otherwise, the lowest-id tenant on record.
+      1. Most recent ``Integration`` row whose ``provider == 'salla'``
+         (those are the tenants we can actually fetch carts for).
+      2. Otherwise, the lowest-id tenant on record — useful for raw
+         ``/debug/db-overview`` calls where the operator just wants to
+         confirm any tenant exists.
 
-    Raises 404 if the database has no tenants at all.
+    On any DB/import failure the *real* exception bubbles up as a 500
+    with detail — earlier the broad ``except`` here swallowed an
+    ``ImportError`` (wrong class name) and silently returned the
+    misleading "no tenants found in DB" 404.
     """
-    try:
-        from models import StoreIntegration, Tenant  # noqa: PLC0415
-        integ = (
-            db.query(StoreIntegration)
-            .filter(StoreIntegration.platform == "salla")
-            .order_by(StoreIntegration.id.desc())
-            .first()
-        )
-        if integ and integ.tenant_id:
-            return int(integ.tenant_id)
-        t = db.query(Tenant).order_by(Tenant.id.asc()).first()
-        if t:
-            return int(t.id)
-    except Exception as exc:
-        logger.warning("[debug_public] tenant resolution failed: %s", exc)
+    from models import Integration, Tenant  # noqa: PLC0415
+    integ = (
+        db.query(Integration)
+        .filter(Integration.provider == "salla")
+        .order_by(Integration.id.desc())
+        .first()
+    )
+    if integ and integ.tenant_id:
+        return int(integ.tenant_id)
+    t = db.query(Tenant).order_by(Tenant.id.asc()).first()
+    if t:
+        return int(t.id)
     raise HTTPException(status_code=404, detail="no tenants found in DB")
 
 
@@ -118,6 +120,127 @@ async def debug_version(debug_token: str = Query(..., description="Shared secret
     out["status"]     = "ok"
     out["checked_at"] = datetime.now(timezone.utc).isoformat()
     return out
+
+
+# ── /debug/db-overview ──────────────────────────────────────────────────
+@router.get("/debug/db-overview")
+async def debug_db_overview(
+    debug_token: str = Query(..., description="Shared secret from env"),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """High-level "is the DB even populated?" probe.
+
+    Returns counts + first-10 rows of the tables that the abandoned-cart
+    pipeline depends on, so we can answer questions like:
+      • Is there any tenant at all?
+      • Is there a Salla integration row, and which tenant owns it?
+      • Are there any Order rows (abandoned or otherwise)?
+
+    Each section is wrapped in its own try/except so a single bad model
+    import or missing table doesn't black out the whole endpoint.
+    """
+    _check_token(debug_token)
+    out: Dict[str, Any] = {"sections": {}, "errors": {}}
+
+    # ── Tenants ──────────────────────────────────────────────────────────
+    try:
+        from models import Tenant  # noqa: PLC0415
+        rows = db.query(Tenant).order_by(Tenant.id.asc()).limit(10).all()
+        total = db.query(Tenant).count()
+        out["sections"]["tenants"] = {
+            "total": total,
+            "rows": [
+                {
+                    "id":         t.id,
+                    "name":       t.name,
+                    "domain":     getattr(t, "domain", None),
+                    "is_active":  getattr(t, "is_active", None),
+                    "is_platform_tenant": getattr(t, "is_platform_tenant", None),
+                    "created_at": t.created_at.isoformat() if getattr(t, "created_at", None) else None,
+                }
+                for t in rows
+            ],
+        }
+    except Exception as exc:
+        out["errors"]["tenants"] = repr(exc)
+
+    # ── Integrations (Salla + others) ────────────────────────────────────
+    try:
+        from models import Integration  # noqa: PLC0415
+        rows = db.query(Integration).order_by(Integration.id.desc()).limit(20).all()
+        total = db.query(Integration).count()
+        salla_count = db.query(Integration).filter(Integration.provider == "salla").count()
+        out["sections"]["integrations"] = {
+            "total":       total,
+            "salla_count": salla_count,
+            "rows": [
+                {
+                    "id":                i.id,
+                    "provider":          i.provider,
+                    "tenant_id":         i.tenant_id,
+                    "external_store_id": getattr(i, "external_store_id", None),
+                    "enabled":           getattr(i, "enabled", None),
+                    "config_keys":       sorted(list((i.config or {}).keys())) if isinstance(i.config, dict) else None,
+                    "has_access_token":  bool(isinstance(i.config, dict) and i.config.get("access_token")),
+                    "has_refresh_token": bool(isinstance(i.config, dict) and i.config.get("refresh_token")),
+                }
+                for i in rows
+            ],
+        }
+    except Exception as exc:
+        out["errors"]["integrations"] = repr(exc)
+
+    # ── Orders (abandoned + total) ───────────────────────────────────────
+    try:
+        from models import Order  # noqa: PLC0415
+        total = db.query(Order).count()
+        abandoned = db.query(Order).filter(Order.is_abandoned == True).count()  # noqa: E712
+        out["sections"]["orders"] = {
+            "total":          total,
+            "abandoned":      abandoned,
+            "by_tenant": [
+                {"tenant_id": tid, "abandoned_count": cnt}
+                for tid, cnt in (
+                    db.query(Order.tenant_id, sa_func_count_id())
+                    .filter(Order.is_abandoned == True)  # noqa: E712
+                    .group_by(Order.tenant_id)
+                    .all()
+                )
+            ],
+        }
+    except Exception as exc:
+        out["errors"]["orders"] = repr(exc)
+
+    # ── Users (lets the operator verify which tenant their account is on) ─
+    try:
+        from models import User  # noqa: PLC0415
+        rows = db.query(User).order_by(User.id.asc()).limit(10).all()
+        total = db.query(User).count()
+        out["sections"]["users"] = {
+            "total": total,
+            "rows": [
+                {
+                    "id":        u.id,
+                    "email":     u.email,
+                    "role":      getattr(u, "role", None),
+                    "tenant_id": getattr(u, "tenant_id", None),
+                    "is_active": getattr(u, "is_active", None),
+                }
+                for u in rows
+            ],
+        }
+    except Exception as exc:
+        out["errors"]["users"] = repr(exc)
+
+    return out
+
+
+# Helper for Order.by_tenant aggregate above. Defined at module scope so
+# we don't pay the import cost on every call.
+def sa_func_count_id():
+    from sqlalchemy import func  # noqa: PLC0415
+    from models import Order  # noqa: PLC0415
+    return func.count(Order.id)
 
 
 # ── /debug/abandoned-carts-sync ─────────────────────────────────────────
