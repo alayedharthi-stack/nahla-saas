@@ -1505,6 +1505,61 @@ class StoreSyncService:
                     self.tenant_id, order_row.id, exc,
                 )
 
+        # ── P0: Cancel any in-flight abandoned-cart recovery ──────────────
+        # The single worst UX bug the cart-recovery flow can ship is a
+        # "you forgot your cart" reminder that arrives AFTER the customer
+        # has already paid. We have three layers of defence
+        # (pre-send conversion-layer guard, sweeper guard, and this hook)
+        # but the event-driven cancellation here is what kills any
+        # already-queued future-dated AutomationEvent before it ever
+        # reaches the engine — which the other two guards cannot do for
+        # rescheduled events that have a future ``created_at``.
+        #
+        # Triggered on every webhook that lands a "real purchase" status
+        # (anything not in the cancelled / pre-payment exclusion set).
+        # We cover both the new-order case AND the case where Salla
+        # only fires order.payment.updated after a previously-pending
+        # order is paid (covered because we re-run on every webhook).
+        try:
+            from services.cart_recovery_cancel import (  # noqa: PLC0415
+                cancel_recovery_for_customer,
+                order_is_a_purchase,
+            )
+            current_status = normalised.get("status")
+            if (
+                customer
+                and customer.id
+                and order_is_a_purchase(current_status)
+            ):
+                # Re-derive prev_status here for the existing-order path
+                # so we only cancel on a transition INTO a paid state
+                # (avoids re-stamping every metadata refresh).
+                prev_status_for_cancel = None
+                if not is_new and order_row is not None:
+                    prev_status_for_cancel = (order_row.extra_metadata or {}).get(
+                        "prev_status"
+                    )
+                if is_new or not order_is_a_purchase(prev_status_for_cancel):
+                    cancel_recovery_for_customer(
+                        self.db,
+                        tenant_id=self.tenant_id,
+                        customer_id=customer.id,
+                        reason="customer_purchased",
+                        order_id=order_row.id if order_row else None,
+                        order_external_id=ext_id,
+                        order_status=current_status,
+                        commit=True,
+                    )
+        except Exception as exc:
+            logger.exception(
+                "[StoreSync] cancel_recovery_for_customer failed tenant=%s "
+                "customer=%s order=%s: %s",
+                self.tenant_id,
+                getattr(customer, "id", None),
+                getattr(order_row, "id", None),
+                exc,
+            )
+
         # Emit order_shipped when the order transitions into a shipped/in-transit
         # status so that the shipping_update automation can fire and send a
         # tracking-link message to the customer.

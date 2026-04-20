@@ -671,6 +671,27 @@ async def _execute_action(
         getattr(automation, "automation_type", None) == "abandoned_cart"
     )
     if is_cart_recovery:
+        # ── P0 fast-path pre-send guard ──────────────────────────────────
+        # If the order webhook (or a manual cancel) has already stamped
+        # ``recovery_converted_at`` on this event — or on the parent
+        # event for a follow-up — never send. This is a layered defence
+        # on top of the conversion-layer DB lookup below: even if the
+        # Order rows haven't synced or the lookup misses, the explicit
+        # cancel stamp is the source of truth and we honour it directly.
+        skip_reason_fast = _detect_recovery_already_converted(db, event)
+        if skip_reason_fast:
+            logger.info(
+                "[AutoEngine] cart-recovery pre-send guard fired "
+                "tenant=%s automation=%s event=%s reason=%s — skipping "
+                "step because customer has already purchased.",
+                tenant_id, getattr(automation, "id", None),
+                getattr(event, "id", None), skip_reason_fast,
+            )
+            return False, {
+                "skipped":     True,
+                "skip_reason": skip_reason_fast,
+            }
+
         try:
             from services.conversion_layer import (  # noqa: PLC0415
                 build_context as _conv_build_context,
@@ -1081,6 +1102,60 @@ def _resolve_slot_value(
     # Unknown named slot → fall back to the raw payload key so merchant
     # extensions still work without us having to teach this resolver.
     return str(payload.get(slot, ""))
+
+
+def _detect_recovery_already_converted(db: Any, event: Any) -> Optional[str]:
+    """
+    Cheap, allocation-free pre-send check: did the
+    ``cart_recovery_cancel`` service already mark this recovery thread
+    as converted?
+
+    We look in two places:
+
+      1. The event's own payload — covers the case where the cancel
+         hook ran AFTER this event was inserted but BEFORE it was
+         picked up (the most common path: order webhook lands while a
+         postpone-rescheduled event sits with a future ``created_at``).
+
+      2. The parent event's payload — for follow-up events emitted by
+         ``scan_abandoned_cart_followups``, the conversion stamp lives
+         on the stage-1 parent. We resolve via ``parent_event_id`` if
+         present, falling back to a customer-scoped lookup of stage-1
+         events for the same cart_id.
+
+    Returns the ``recovery_cancel_reason`` string when a stamp is found
+    (so the caller can record an accurate ``skip_reason`` in
+    AutomationExecution), or None to fall through to the conversion
+    layer's slower DB-backed check.
+    """
+    payload = getattr(event, "payload", None) or {}
+    if payload.get("recovery_converted_at"):
+        return str(payload.get("recovery_cancel_reason") or "customer_purchased")
+
+    # Follow-up events carry parent_event_id (we set it in the postpone
+    # reschedule path and the sweeper sets it implicitly via copy).
+    parent_id = payload.get("parent_event_id")
+    if parent_id is None:
+        return None
+    try:
+        from models import AutomationEvent  # noqa: PLC0415
+        parent = (
+            db.query(AutomationEvent)
+            .filter(AutomationEvent.id == int(parent_id))
+            .first()
+        )
+        if parent is not None:
+            ppayload = parent.payload or {}
+            if ppayload.get("recovery_converted_at"):
+                return str(
+                    ppayload.get("recovery_cancel_reason")
+                    or "customer_purchased"
+                )
+    except Exception:
+        # The fast-path is best-effort; the conversion-layer DB check
+        # downstream will catch it if this lookup fails.
+        return None
+    return None
 
 
 def active_step_index_for_event(event: Any) -> int:
