@@ -275,6 +275,211 @@ async def debug_abandoned_carts_sync_public(
     )
 
 
+# ── /debug/salla-direct ─────────────────────────────────────────────────
+@router.get("/debug/salla-direct")
+async def debug_salla_direct(
+    debug_token: str = Query(..., description="Shared secret from env"),
+    tenant_id: Optional[int] = Query(None, description="Defaults to most-recent Salla tenant"),
+    path: str = Query("/carts/abandoned", description="Salla path (relative to /admin/v2)"),
+    per_page: int = Query(10, ge=1, le=50),
+    page: int = Query(1, ge=1),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Raw, un-wrapped HTTP call to Salla — bypasses the adapter entirely.
+
+    This endpoint exists because the adapter's ``_get_all_pages`` has a
+    broad ``except Exception: break`` that converts auth failures
+    (401/403) and server errors (5xx) into a silent empty list — making
+    the symptom indistinguishable from "Salla genuinely returned 0".
+
+    What this returns
+    ─────────────────
+      • The exact HTTP status Salla replied with
+      • Response headers (rate-limit, request-id) and a body preview
+        so you can read Salla's own error message verbatim
+      • The token's first 12 chars + length (so we can confirm a token
+        is actually being sent without leaking the secret)
+      • Hints based on the status code (401 → token; 403 → scope; 200
+        + empty data → genuinely no abandoned carts)
+
+    Default ``path`` hits the abandoned-cart endpoint, but you can
+    pass any other admin path (e.g. ``/store/info`` to confirm basic
+    auth works, or ``/orders?per_page=1`` to confirm orders.read scope).
+    """
+    _check_token(debug_token)
+    if tenant_id is None:
+        tenant_id = _resolve_default_tenant(db)
+
+    from datetime import datetime, timezone  # noqa: PLC0415
+    import httpx  # noqa: PLC0415
+    from models import Integration, Tenant  # noqa: PLC0415
+
+    out: Dict[str, Any] = {
+        "tenant_id":     tenant_id,
+        "tenant_name":   None,
+        "checked_at":    datetime.now(timezone.utc).isoformat(),
+        "request": {
+            "url":      None,
+            "params":   {"per_page": per_page, "page": page},
+            "has_auth": False,
+            "token_preview": None,
+            "token_length":  0,
+        },
+        "response": {
+            "status":         None,
+            "headers":        None,
+            "body_keys":      None,
+            "data_count":     None,
+            "pagination":     None,
+            "body_preview":   None,
+            "elapsed_ms":     None,
+        },
+        "integration": None,
+        "hint":        None,
+        "error":       None,
+    }
+
+    t = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not t:
+        out["error"] = f"tenant {tenant_id} not found"
+        return out
+    out["tenant_name"] = t.name
+
+    integ = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .order_by(Integration.id.desc())
+        .first()
+    )
+    if not integ:
+        out["error"] = "no_salla_integration_for_tenant"
+        out["hint"]  = "This tenant has no Integration row with provider='salla'."
+        return out
+
+    cfg: Dict[str, Any] = integ.config or {}
+    out["integration"] = {
+        "id":                integ.id,
+        "enabled":           bool(integ.enabled),
+        "external_store_id": integ.external_store_id,
+        "config_keys":       sorted(list(cfg.keys())),
+        "no_auto_refresh":   bool(cfg.get("no_auto_refresh")),
+        "needs_reauth":      bool(cfg.get("needs_reauth")),
+        "uninstalled_at":    cfg.get("uninstalled_at"),
+        "revoked_reason":    cfg.get("revoked_reason"),
+    }
+
+    # Salla's stored "api_key" IS the OAuth access_token in this codebase
+    # (see SallaAdapter._persist_refreshed_tokens which writes the
+    # refreshed access_token back into config["api_key"]).
+    token = cfg.get("api_key") or cfg.get("access_token") or ""
+    if not token:
+        out["error"] = "no_token_in_config"
+        out["hint"]  = (
+            "Integration row exists but config has no api_key / access_token. "
+            "Merchant must reconnect Salla or paste a fresh Account Token."
+        )
+        return out
+
+    out["request"]["has_auth"]      = True
+    out["request"]["token_preview"] = token[:12] + "..."
+    out["request"]["token_length"]  = len(token)
+
+    base = "https://api.salla.dev/admin/v2"
+    url  = f"{base}{path if path.startswith('/') else '/' + path}"
+    out["request"]["url"] = url
+
+    import time as _time  # noqa: PLC0415
+    started = _time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept":        "application/json",
+                },
+                params={"per_page": per_page, "page": page},
+            )
+        elapsed = round((_time.monotonic() - started) * 1000)
+        out["response"]["status"]     = resp.status_code
+        out["response"]["elapsed_ms"] = elapsed
+        # Only safe response headers — never echo Authorization back.
+        out["response"]["headers"] = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() in {
+                "content-type", "x-request-id", "x-ratelimit-limit",
+                "x-ratelimit-remaining", "x-ratelimit-reset",
+                "retry-after", "date",
+            }
+        }
+        body_text = resp.text or ""
+        out["response"]["body_preview"] = body_text[:600]
+        try:
+            body_json = resp.json()
+            if isinstance(body_json, dict):
+                out["response"]["body_keys"]   = sorted(list(body_json.keys()))
+                data = body_json.get("data")
+                if isinstance(data, list):
+                    out["response"]["data_count"] = len(data)
+                pag = body_json.get("pagination") or body_json.get("meta")
+                if isinstance(pag, dict):
+                    out["response"]["pagination"] = {
+                        k: pag.get(k) for k in
+                        ("count", "total", "perPage", "currentPage",
+                         "totalPages", "last_page", "current_page", "per_page")
+                        if k in pag
+                    }
+        except Exception:
+            pass
+
+        # ── Diagnostic hints ─────────────────────────────────────────
+        sc = resp.status_code
+        if sc == 401:
+            out["hint"] = (
+                "401 Unauthorized — token is invalid or expired. "
+                "Salla's refresh_token rotation likely needs to run, "
+                "OR the merchant needs to paste a fresh Account Token "
+                "from Salla Partners → API credentials."
+            )
+        elif sc == 403:
+            out["hint"] = (
+                "403 Forbidden — token is valid but missing the required "
+                "scope. /carts/abandoned needs the 'carts.read' scope. "
+                "Re-install the Salla app with all required scopes."
+            )
+        elif sc == 404:
+            out["hint"] = (
+                "404 Not Found — wrong URL or this Salla plan does not "
+                "expose this endpoint. Confirm the path is correct."
+            )
+        elif sc == 429:
+            out["hint"] = "429 — rate limited. Try again in a few seconds."
+        elif sc >= 500:
+            out["hint"] = f"{sc} — Salla server error. Check Salla status page."
+        elif sc == 200:
+            dc = out["response"]["data_count"]
+            if dc == 0:
+                out["hint"] = (
+                    "200 OK with empty data array — Salla genuinely has "
+                    "0 abandoned carts for this store right now. The "
+                    "carts shown in the merchant's Salla dashboard "
+                    "may be live (not yet abandoned by Salla's "
+                    "definition; Salla typically waits 30+ minutes "
+                    "before classifying a cart as 'abandoned'). "
+                    "Try /debug/salla-direct?path=/orders to confirm "
+                    "the token works for other endpoints."
+                )
+            else:
+                out["hint"] = f"200 OK with {dc} cart(s) — adapter pipeline should pick these up."
+    except httpx.TimeoutException:
+        out["error"] = "salla_timeout_after_20s"
+        out["hint"]  = "Salla didn't respond within 20s. Try again."
+    except Exception as exc:
+        out["error"] = f"network_error: {type(exc).__name__}: {exc}"
+
+    return out
+
+
 # ── /debug/abandoned-carts-raw ──────────────────────────────────────────
 @router.get("/debug/abandoned-carts-raw")
 async def debug_abandoned_carts_raw_public(
