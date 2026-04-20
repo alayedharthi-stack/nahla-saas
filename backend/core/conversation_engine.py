@@ -761,6 +761,16 @@ class StateManager:
         state.tenant_id = _tid   # carry it for downstream save
         return state
 
+    # Keys owned by ConversationState.to_dict(); everything else in
+    # Conversation.extra_metadata (e.g. ``brain_state`` written by the
+    # MerchantBrain state store, "customer_phone" / "phone" written by
+    # ``_get_or_create_conversation``) MUST be preserved on save.
+    _OWNED_META_KEYS = frozenset({
+        "phone", "stage", "turn", "intent_history", "slots",
+        "last_action", "last_message_id", "processed_message_ids",
+        "updated_at", "tenant_id",
+    })
+
     @classmethod
     def save(cls, db, state: "ConversationState", tenant_id: Optional[int] = None) -> Optional[Any]:
         # Prefer explicit tenant_id arg, then the one attached to the state, then platform default
@@ -779,7 +789,29 @@ class StateManager:
                 .first()
             )
             if conv:
-                conv.extra_metadata = meta
+                # ── CRITICAL: merge with existing metadata ──────────────────
+                # Direct ``conv.extra_metadata = meta`` would wipe keys this
+                # class does not own — most importantly ``brain_state`` from
+                # the MerchantBrain. That bug caused every inbound webhook
+                # to silently reset the brain to a fresh greeting state.
+                existing = dict(conv.extra_metadata or {})
+                merged = dict(existing)
+                merged.update(meta)
+                # Re-apply any unrelated keys that ``meta`` did not explicitly
+                # set (covers future additions to extra_metadata).
+                for key, value in existing.items():
+                    if key not in cls._OWNED_META_KEYS and key not in meta:
+                        merged[key] = value
+                conv.extra_metadata = merged
+
+                # JSONB needs an explicit dirty flag for SQLAlchemy to emit an
+                # UPDATE when the column object identity does not change in
+                # some replacement strategies; safe to call regardless.
+                try:
+                    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                    flag_modified(conv, "extra_metadata")
+                except Exception:
+                    pass
             else:
                 conv = Conversation(
                     tenant_id=_tid,

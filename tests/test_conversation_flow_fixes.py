@@ -596,3 +596,160 @@ def test_intl_question_text_is_english_for_intl_flow():
 
     assert "country" in q_country.lower()
     assert "address" in q_address.lower()
+
+
+# ── Fix H: StateManager.save MUST preserve brain_state ────────────────────────
+# Regression for the "verified=True at save, but state_source=fresh on next
+# turn" production bug. ``StateManager.save`` (called once per inbound webhook
+# from whatsapp_webhook._handle_merchant_message before brain.process) used to
+# overwrite the entire ``Conversation.extra_metadata`` JSONB column, silently
+# wiping the ``brain_state`` key written by the MerchantBrain on the previous
+# turn — which caused every customer message to look like the first turn and
+# triggered an endless greeting loop.
+
+class _FakeConvWithMeta:
+    def __init__(self, conv_id: int, tenant_id: int, extra_metadata: dict):
+        self.id = conv_id
+        self.tenant_id = tenant_id
+        self.status = "active"
+        self.extra_metadata = extra_metadata
+
+
+class _FakeJSONBKey:
+    def __init__(self, key: str):
+        self._key = key
+        self.astext = self  # so ``.astext == phone`` works in the filter clause
+
+    def __eq__(self, other):  # noqa: D401 - chainable comparison sentinel
+        return ("phone_eq", other)
+
+
+class _FakeMetaColumn:
+    def __getitem__(self, key):
+        return _FakeJSONBKey(key)
+
+
+class _FakeConversationModel:
+    tenant_id = "tenant_id"
+    extra_metadata = _FakeMetaColumn()
+
+    @classmethod
+    def __call__(cls, *args, **kwargs):
+        return _FakeConvWithMeta(
+            conv_id=kwargs.get("id", 999),
+            tenant_id=kwargs.get("tenant_id", 0),
+            extra_metadata=kwargs.get("extra_metadata", {}),
+        )
+
+
+class _FakeMetaQuery:
+    def __init__(self, conv):
+        self._conv = conv
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return self._conv
+
+
+class _FakeMetaSession:
+    def __init__(self, conv):
+        self._conv = conv
+        self.committed = False
+
+    def query(self, *args, **kwargs):
+        return _FakeMetaQuery(self._conv)
+
+    def add(self, _obj):
+        return None
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        return None
+
+
+def test_state_manager_save_preserves_brain_state(monkeypatch):
+    """
+    StateManager.save MUST merge with existing extra_metadata so that
+    ``brain_state`` (owned by the MerchantBrain) survives across turns.
+    """
+    from core import conversation_engine as ce
+
+    existing_brain_state = {
+        "stage": "ordering",
+        "turn": 2,
+        "greeted": True,
+        "current_product_focus": {"id": 42, "name": "فستان", "price": 189.0},
+        "order_prep": {"customer_first_name": "تركي", "city": "الطائف"},
+    }
+    conv = _FakeConvWithMeta(
+        conv_id=9,
+        tenant_id=1,
+        extra_metadata={
+            "phone": "+966555906901",
+            "stage": "active",
+            "turn": 1,
+            "brain_state": existing_brain_state,
+            "customer_phone": "+966555906901",
+        },
+    )
+
+    fake_session = _FakeMetaSession(conv)
+    monkeypatch.setattr(ce, "Conversation", _FakeConversationModel, raising=False)
+
+    state = ce.ConversationState(phone="+966555906901")
+    state.tenant_id = 1
+    state.turn = 2
+    state.stage = "active"
+
+    ce.StateManager.save(fake_session, state, tenant_id=1)
+
+    assert fake_session.committed is True, "StateManager.save must commit"
+    # Owned keys updated:
+    assert conv.extra_metadata.get("turn") == 2
+    assert conv.extra_metadata.get("stage") == "active"
+    assert conv.extra_metadata.get("phone") == "+966555906901"
+    # Unowned keys preserved — this is the regression guard:
+    assert conv.extra_metadata.get("brain_state") == existing_brain_state, (
+        "brain_state must NOT be wiped by StateManager.save — "
+        "this is the production bug that caused endless greeting loops."
+    )
+    assert conv.extra_metadata.get("customer_phone") == "+966555906901"
+
+
+def test_state_manager_save_does_not_drop_unrelated_keys(monkeypatch):
+    """
+    Defensive: any future key written to extra_metadata by another
+    subsystem must also survive a StateManager.save call.
+    """
+    from core import conversation_engine as ce
+
+    conv = _FakeConvWithMeta(
+        conv_id=10,
+        tenant_id=1,
+        extra_metadata={
+            "phone": "+966500000000",
+            "brain_state": {"stage": "deciding"},
+            "ai_handoff_token": "abc123",
+            "experimental_flag": {"variant": "B"},
+        },
+    )
+    fake_session = _FakeMetaSession(conv)
+    monkeypatch.setattr(ce, "Conversation", _FakeConversationModel, raising=False)
+
+    state = ce.ConversationState(phone="+966500000000")
+    state.tenant_id = 1
+    state.turn = 5
+    state.stage = "active"
+    ce.StateManager.save(fake_session, state, tenant_id=1)
+
+    assert conv.extra_metadata["brain_state"] == {"stage": "deciding"}
+    assert conv.extra_metadata["ai_handoff_token"] == "abc123"
+    assert conv.extra_metadata["experimental_flag"] == {"variant": "B"}
+    assert conv.extra_metadata["turn"] == 5

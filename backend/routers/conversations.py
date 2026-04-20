@@ -106,6 +106,11 @@ def _get_or_create_conversation(
         meta["customer_phone"] = customer_phone
         meta["phone"] = customer_phone
         convo.extra_metadata = meta
+        try:
+            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+            flag_modified(convo, "extra_metadata")
+        except Exception:
+            pass
     if not convo.extra_metadata:
         convo.extra_metadata = {"customer_phone": customer_phone, "phone": customer_phone}
     return convo
