@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import { featureRealityApi, type DashboardConversation, type DashboardMessage } from '../api/featureReality'
+import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
 
 interface Conversation extends DashboardConversation {
   messages: DashboardMessage[]
@@ -251,7 +252,7 @@ export default function Conversations() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between mb-0.5">
                   <p className="text-sm font-semibold text-slate-900 truncate">{c.customer}</p>
-                  <span className="text-xs text-slate-400 shrink-0 ms-2">{c.time}</span>
+                  <span className="text-xs text-slate-400 shrink-0 ms-2">{formatRiyadh(c.time)}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <p className="text-xs text-slate-500 truncate flex-1">{c.lastMsg}</p>
@@ -362,7 +363,11 @@ export default function Conversations() {
               {selected.messages.map((m, idx) => {
                 const isOut   = m.direction === 'out'
                 const prevMsg = selected.messages[idx - 1]
-                const showDate = !prevMsg || prevMsg.time.split(' ')[0] !== m.time.split(' ')[0]
+                // Compare day boundaries in Riyadh time, not on a brittle
+                // ``split(' ')[0]`` of an opaque backend ISO string.
+                const dayKey  = formatRiyadhDate(m.time)
+                const prevDay = prevMsg ? formatRiyadhDate(prevMsg.time) : ''
+                const showDate = !prevMsg || prevDay !== dayKey
 
                 return (
                   <div key={m.id}>
@@ -370,7 +375,7 @@ export default function Conversations() {
                     {showDate && (
                       <div className="flex justify-center my-3">
                         <span className="text-xs text-slate-500 bg-white px-3 py-1 rounded-full shadow-sm border border-slate-100">
-                          {m.time.split(' ')[0]}
+                          {dayKey}
                         </span>
                       </div>
                     )}
@@ -399,7 +404,7 @@ export default function Conversations() {
                         {/* Time + read status */}
                         <div className={`flex items-center gap-1 mt-0.5 px-1 ${isOut ? 'flex-row-reverse' : ''}`}>
                           <span className="text-xs text-slate-400">
-                            {m.time.split(' ').slice(1).join(' ') || m.time}
+                            {formatRiyadhTime(m.time)}
                           </span>
                           {isOut && (
                             <CheckCheck className="w-3.5 h-3.5 text-brand-400" />

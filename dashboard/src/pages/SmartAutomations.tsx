@@ -21,12 +21,15 @@ import {
   autopilotApi,
   type AutopilotQueues,
   type AbandonedCartItem,
+  type AbandonedCartRecoveryTimeline,
+  type RecoveryStatus,
   type PredictiveReorderItem,
   type OrderStatusUpdateItem,
   ORDER_STATUS_LABELS,
   ORDER_STATUS_COLORS,
 } from '../api/autopilot'
 import AbandonedCartEditor from './AbandonedCartEditor'
+import { formatRiyadh, formatRelativeRiyadh } from '../lib/datetime'
 
 // ── Template variable map panel ───────────────────────────────────────────────
 
@@ -280,7 +283,220 @@ function OrderStatusQueue({ items }: { items: OrderStatusUpdateItem[] }) {
   )
 }
 
+// ── Recovery status badge (per-cart, derived) ────────────────────────────────
+//
+// Maps the backend ``RecoveryStatus`` taxonomy onto the merchant-facing
+// vocabulary the dashboard already uses elsewhere. Always returns
+// something printable — never an empty pill.
+const RECOVERY_BADGE: Record<RecoveryStatus, { label: string; cls: string; tip: string }> = {
+  no_recovery: {
+    label: 'لم يبدأ',
+    cls:   'bg-slate-50 text-slate-500 border-slate-200',
+    tip:   'لم يتم إنشاء حدث استعادة لهذه السلة بعد — تحقق من تفعيل الأتمتة وأن العميل لديه رقم جوال.',
+  },
+  pending: {
+    label: 'بانتظار الإرسال',
+    cls:   'bg-amber-50 text-amber-700 border-amber-200',
+    tip:   'تم جدولة التذكير، سيُرسل في الجولة التالية للمحرك (كل 60 ثانية).',
+  },
+  in_progress: {
+    label: 'قيد المتابعة',
+    cls:   'bg-blue-50 text-blue-700 border-blue-200',
+    tip:   'تم إرسال تذكير واحد على الأقل، ولا يزال هناك تذكيرات قادمة.',
+  },
+  completed: {
+    label: 'اكتملت التذكيرات',
+    cls:   'bg-purple-50 text-purple-700 border-purple-200',
+    tip:   'أُرسلت كل التذكيرات المعرّفة دون أن يكمل العميل الشراء.',
+  },
+  converted: {
+    label: 'تم الشراء — أوقفت',
+    cls:   'bg-emerald-50 text-emerald-700 border-emerald-200',
+    tip:   'العميل أكمل طلباً بعد التذكير — تم إيقاف بقية المراحل تلقائيًا.',
+  },
+  failed: {
+    label: 'فشل الإرسال',
+    cls:   'bg-red-50 text-red-700 border-red-200',
+    tip:   'فشل آخر تذكير في الإرسال — افتح التفاصيل لمعرفة السبب.',
+  },
+}
+
+function RecoveryStatusBadge({ status }: { status: RecoveryStatus }) {
+  const meta = RECOVERY_BADGE[status] ?? RECOVERY_BADGE.no_recovery
+  return (
+    <span
+      title={meta.tip}
+      className={`inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 border rounded-full ${meta.cls}`}
+    >
+      {meta.label}
+    </span>
+  )
+}
+
+function RecoveryDrawer({
+  cart,
+  onClose,
+}: {
+  cart: AbandonedCartItem
+  onClose: () => void
+}) {
+  const [timeline, setTimeline] = useState<AbandonedCartRecoveryTimeline | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    autopilotApi
+      .abandonedCartRecovery(cart.order_id)
+      .then((res) => {
+        if (!cancelled) setTimeline(res)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e?.message || 'تعذر تحميل تفاصيل الاستعادة')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [cart.order_id])
+
+  return (
+    <div
+      className="fixed inset-0 bg-slate-900/40 z-40 flex justify-end"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md h-full bg-white shadow-2xl overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b border-slate-100 flex items-start justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-slate-800">تفاصيل الاستعادة</h3>
+            <p className="text-xs text-slate-500 mt-1">{cart.customer_name} · {cart.customer_phone || '—'}</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-600 text-sm"
+            aria-label="إغلاق"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {loading && (
+            <div className="text-center py-6 text-slate-400 text-sm">جارٍ التحميل…</div>
+          )}
+          {error && (
+            <div className="text-center py-6 text-red-500 text-sm">{error}</div>
+          )}
+          {!loading && !error && timeline && (
+            <>
+              {/* Summary card */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-slate-100 p-3">
+                  <p className="text-[11px] text-slate-400">الحالة</p>
+                  <div className="mt-1"><RecoveryStatusBadge status={timeline.status} /></div>
+                </div>
+                <div className="rounded-lg border border-slate-100 p-3">
+                  <p className="text-[11px] text-slate-400">تذكيرات أُرسلت</p>
+                  <p className="mt-1 text-sm font-medium text-slate-700">{timeline.steps_sent}</p>
+                </div>
+                <div className="rounded-lg border border-slate-100 p-3">
+                  <p className="text-[11px] text-slate-400">آخر إرسال</p>
+                  <p className="mt-1 text-xs text-slate-700">{formatRelativeRiyadh(timeline.last_sent_at) || '—'}</p>
+                </div>
+                <div className="rounded-lg border border-slate-100 p-3">
+                  <p className="text-[11px] text-slate-400">التذكير القادم</p>
+                  <p className="mt-1 text-xs text-slate-700">
+                    {timeline.next_pending_at ? formatRiyadh(timeline.next_pending_at) : '—'}
+                  </p>
+                </div>
+              </div>
+
+              {timeline.converted_at && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                  <p className="text-xs text-emerald-700">
+                    تم الشراء في <strong>{formatRiyadh(timeline.converted_at)}</strong>
+                    {timeline.cancel_reason ? ` (${timeline.cancel_reason})` : ''} — تم
+                    إيقاف بقية التذكيرات تلقائيًا.
+                  </p>
+                </div>
+              )}
+
+              {timeline.last_error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+                  <p className="text-xs text-red-700">
+                    آخر خطأ: <span className="font-mono">{timeline.last_error}</span>
+                  </p>
+                </div>
+              )}
+
+              {/* Steps timeline */}
+              <div>
+                <h4 className="text-xs font-medium text-slate-500 mb-2">سلسلة التذكيرات</h4>
+                {timeline.steps.length === 0 ? (
+                  <p className="text-xs text-slate-400">لا توجد مراحل بعد.</p>
+                ) : (
+                  <ol className="space-y-2">
+                    {timeline.steps.map((step) => (
+                      <li
+                        key={`${step.event_id}-${step.step_idx}`}
+                        className="flex items-start gap-2 rounded-md border border-slate-100 p-2.5"
+                      >
+                        <span className="shrink-0 w-6 h-6 rounded-full bg-slate-100 text-slate-600 text-xs flex items-center justify-center">
+                          {step.step_idx}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-medium text-slate-700">
+                              المرحلة {step.step_idx}{step.is_root ? ' (أساسية)' : ''}
+                            </span>
+                            <RecoveryStatusBadge status={step.status as RecoveryStatus} />
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-0.5">
+                            {step.sent_at
+                              ? <>أُرسلت {formatRiyadh(step.sent_at)}</>
+                              : step.scheduled_at
+                                ? <>مجدولة {formatRiyadh(step.scheduled_at)}</>
+                                : ''}
+                          </div>
+                          {step.template_name && (
+                            <div className="text-[11px] text-slate-500 mt-0.5">
+                              قالب: <span className="font-mono">{step.template_name}</span>
+                            </div>
+                          )}
+                          {step.skip_reason && (
+                            <div className="text-[11px] text-amber-700 mt-0.5">
+                              تم التخطّي: {step.skip_reason}
+                            </div>
+                          )}
+                          {step.error && (
+                            <div className="text-[11px] text-red-600 mt-0.5 font-mono">
+                              {step.error}
+                            </div>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AbandonedCartsQueue({ items }: { items: AbandonedCartItem[] }) {
+  const [openCart, setOpenCart] = useState<AbandonedCartItem | null>(null)
+
   if (items.length === 0) {
     return (
       <div className="text-center py-8 text-slate-400">
@@ -290,40 +506,79 @@ function AbandonedCartsQueue({ items }: { items: AbandonedCartItem[] }) {
     )
   }
   return (
-    <div className="divide-y divide-slate-100">
-      {items.map((item) => (
-        <div key={item.order_id} className="flex items-center justify-between gap-3 py-3 px-1">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
-            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-              {item.customer_phone && (
-                <span className="flex items-center gap-1 text-xs text-slate-400">
-                  <Phone className="w-3 h-3" />{item.customer_phone}
-                </span>
-              )}
-              {item.total > 0 && (
-                <span className="text-xs font-medium text-slate-600">
-                  {item.total.toLocaleString('ar-SA')} ر.س
-                </span>
-              )}
+    <>
+      <div className="divide-y divide-slate-100">
+        {items.map((item) => {
+          // Recovery payload is always present (backend never returns null),
+          // but we tolerate the legacy shape so an old cached UI build does
+          // not crash if it predates the schema bump.
+          const recovery = item.recovery ?? {
+            status:          'no_recovery' as RecoveryStatus,
+            steps_sent:      0,
+            steps_failed:    0,
+            last_sent_at:    null,
+            last_status:     null,
+            last_error:      null,
+            next_pending_at: null,
+            converted_at:    null,
+            cancel_reason:   null,
+            recovery_event_id: null,
+          }
+          return (
+            <div key={item.order_id} className="flex items-center justify-between gap-3 py-3 px-1">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
+                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                  {item.customer_phone && (
+                    <span className="flex items-center gap-1 text-xs text-slate-400">
+                      <Phone className="w-3 h-3" />{item.customer_phone}
+                    </span>
+                  )}
+                  {item.total > 0 && (
+                    <span className="text-xs font-medium text-slate-600">
+                      {item.total.toLocaleString('ar-SA')} ر.س
+                    </span>
+                  )}
+                  {/* Recovery progress on the queue row itself, so the
+                      merchant can scan "who got reminders / who's stuck"
+                      without opening every drawer. */}
+                  <span className="text-[11px] text-slate-400">
+                    {recovery.steps_sent > 0
+                      ? <>أُرسل {recovery.steps_sent} تذكير{recovery.steps_sent > 1 ? '' : ''}</>
+                      : 'لم يُرسل تذكير بعد'}
+                    {recovery.last_sent_at && <> · آخرها {formatRelativeRiyadh(recovery.last_sent_at)}</>}
+                  </span>
+                </div>
+              </div>
+              <div className="shrink-0 flex items-center gap-2">
+                <RecoveryStatusBadge status={recovery.status} />
+                <button
+                  onClick={() => setOpenCart(item)}
+                  className="text-[11px] text-slate-500 hover:text-brand-600 underline-offset-2 hover:underline"
+                  title="عرض تفاصيل التذكيرات"
+                >
+                  تفاصيل
+                </button>
+                {item.checkout_url && (
+                  <a
+                    href={item.checkout_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-brand-500 hover:text-brand-700"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+              </div>
             </div>
-          </div>
-          <div className="shrink-0 flex items-center gap-2">
-            <StatusBadge status="abandoned" />
-            {item.checkout_url && (
-              <a
-                href={item.checkout_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-brand-500 hover:text-brand-700"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            )}
-          </div>
-        </div>
-      ))}
-    </div>
+          )
+        })}
+      </div>
+
+      {openCart && (
+        <RecoveryDrawer cart={openCart} onClose={() => setOpenCart(null)} />
+      )}
+    </>
   )
 }
 

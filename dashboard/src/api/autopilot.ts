@@ -66,6 +66,47 @@ export interface AutopilotRunResult {
 
 // ── Queue item types ──────────────────────────────────────────────────────────
 
+// Per-cart recovery progress surfaced on the autopilot queue. Mirrors
+// ``services/cart_recovery_status.RECOVERY_STATUS_*`` (backend).
+export type RecoveryStatus =
+  | 'no_recovery'
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'converted'
+  | 'failed'
+
+export interface AbandonedCartRecoverySummary {
+  status: RecoveryStatus
+  steps_sent: number
+  steps_failed: number
+  last_sent_at: string | null
+  last_status: string | null
+  last_error: string | null
+  next_pending_at: string | null
+  converted_at: string | null
+  cancel_reason: string | null
+  recovery_event_id: number | null
+}
+
+export interface AbandonedCartRecoveryStep {
+  step_idx: number
+  event_id: number
+  is_root: boolean
+  status: 'sent' | 'pending' | 'skipped' | 'failed' | string
+  scheduled_at: string | null
+  sent_at: string | null
+  error: string | null
+  skip_reason: string | null
+  wa_message_id: string | null
+  channel: string | null
+  template_name: string | null
+}
+
+export interface AbandonedCartRecoveryTimeline extends AbandonedCartRecoverySummary {
+  steps: AbandonedCartRecoveryStep[]
+}
+
 export interface AbandonedCartItem {
   order_id: number
   external_id: string | null
@@ -75,6 +116,8 @@ export interface AbandonedCartItem {
   total: number
   status: string
   created_at: string
+  abandoned_at?: string
+  recovery: AbandonedCartRecoverySummary
 }
 
 export interface PredictiveReorderItem {
@@ -128,6 +171,14 @@ export const autopilotApi = {
   /** Get operational queues: abandoned carts, predictive reorder, order status updates. */
   queues: () =>
     apiCall<AutopilotQueues>('/autopilot/queues'),
+
+  /** Per-cart recovery timeline (every reminder stage emitted, with delivery
+   *  status and error). Returns ``status="no_recovery"`` + empty ``steps``
+   *  for carts that never produced a cart_abandoned event. */
+  abandonedCartRecovery: (orderId: number) =>
+    apiCall<AbandonedCartRecoveryTimeline>(
+      `/autopilot/abandoned-carts/${orderId}/recovery`,
+    ),
 }
 
 // ── Order status labels (Arabic) ──────────────────────────────────────────────

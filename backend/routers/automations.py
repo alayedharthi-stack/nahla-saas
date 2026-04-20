@@ -1094,6 +1094,17 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
         .limit(50)
         .all()
     )
+
+    # Pull recovery progress for the whole batch in one helper call so the
+    # queue page can answer "who got reminder #1/#2/#3?", "whose reminder
+    # is pending right now?", "whose reminder failed and why?", "who
+    # converted?" without N+1 round-trips. The helper joins
+    # AutomationEvent + AutomationExecution + the cancel-on-purchase
+    # markers stored on event payloads — see services/cart_recovery_status.
+    from services.cart_recovery_status import summarise_for_orders  # noqa: PLC0415
+
+    recovery_summaries = summarise_for_orders(db, tenant_id, abandoned)
+
     cart_items = []
     for o in abandoned:
         ci = o.customer_info or {}
@@ -1112,6 +1123,21 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             "status":         o.status or "abandoned",
             "created_at":     meta.get("created_at", "") or meta.get("abandoned_at", ""),
             "abandoned_at":   meta.get("abandoned_at") or meta.get("created_at", ""),
+            # Recovery progress — derived per-cart, never null. See
+            # services/cart_recovery_status.RECOVERY_STATUS_* for the
+            # taxonomy used by the dashboard badge.
+            "recovery":       recovery_summaries.get(o.id) or {
+                "status":            "no_recovery",
+                "steps_sent":        0,
+                "steps_failed":      0,
+                "last_sent_at":      None,
+                "last_status":       None,
+                "last_error":        None,
+                "next_pending_at":   None,
+                "converted_at":      None,
+                "cancel_reason":     None,
+                "recovery_event_id": None,
+            },
         })
 
     # ── Predictive reorder ───────────────────────────────────────────────────
@@ -1193,3 +1219,37 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
         "predictive_reorder":   reorder_items,
         "order_status_updates": order_updates,
     }
+
+
+@router.get("/autopilot/abandoned-carts/{order_id}/recovery")
+async def abandoned_cart_recovery_timeline(
+    order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Per-cart recovery timeline used by the queue drawer / detail view.
+
+    Returns the same summary fields as the per-cart entry on
+    ``/autopilot/queues`` (status, last_sent_at, next_pending_at,
+    converted_at, …) plus a chronologically-ordered ``steps`` array —
+    one entry per follow-up stage emitted, with delivery status, error
+    message, channel and template id when available.
+
+    Empty / missing recovery returns ``status="no_recovery"`` with an
+    empty ``steps`` array — never an error — so the UI can render a
+    clear "no reminders queued for this cart" empty state.
+    """
+    from services.cart_recovery_status import timeline_for_order  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id, Order.tenant_id == tenant_id)
+        .first()
+    )
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found for this tenant")
+
+    return timeline_for_order(db, tenant_id, order)

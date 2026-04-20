@@ -25,6 +25,7 @@ import {
   type OrderSourceKey,
   type OrderTimelineEvent,
 } from '../api/featureReality'
+import { formatRiyadh } from '../lib/datetime'
 
 const STATUS_VARIANT: Record<string, 'green' | 'amber' | 'red' | 'slate'> = {
   paid:      'green',
@@ -53,18 +54,9 @@ const sourceIcon = (s: OrderSourceKey) =>
   s === 'whatsapp' ? MessageCircle :
   s === 'manual'   ? ShoppingBag   : Store
 
-function formatDateTime(iso?: string): string {
-  if (!iso) return '—'
-  try {
-    const d = new Date(iso)
-    return new Intl.DateTimeFormat('ar-SA', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    }).format(d)
-  } catch {
-    return iso
-  }
-}
+// Locked to Asia/Riyadh via the shared helper (see dashboard/src/lib/datetime.ts)
+const formatDateTime = (iso?: string): string =>
+  formatRiyadh(iso, { dateStyle: 'medium', timeStyle: 'short' })
 
 const NEEDS_ACTION_CLASS: Record<NeedsActionLevel, string> = {
   amber:  'bg-amber-50  text-amber-700  border-amber-200',

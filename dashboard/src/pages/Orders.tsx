@@ -7,6 +7,7 @@ import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { ShoppingCart, Clock, CheckCircle, MessageSquare } from 'lucide-react'
 import { featureRealityApi, type DashboardOrder, type NeedsActionLevel, type OrderSourceKey, type OrdersDashboard } from '../api/featureReality'
+import { formatRiyadh } from '../lib/datetime'
 
 type OrderStatus = 'paid' | 'pending' | 'failed' | 'cancelled'
 
@@ -72,18 +73,9 @@ const sourceIcon = (s: OrderSourceKey) =>
 // New ordering: الطلب · العميل · المبلغ · الحالة · المصدر · المنتجات · التاريخ
 const TABLE_HEADERS = ['الطلب', 'العميل', 'المبلغ', 'الحالة', 'المصدر', 'المنتجات', 'التاريخ', '']
 
-function formatDate(iso: string): string {
-  if (!iso) return '—'
-  try {
-    const d = new Date(iso)
-    return new Intl.DateTimeFormat('ar-SA', {
-      dateStyle: 'short',
-      timeStyle: 'short',
-    }).format(d)
-  } catch {
-    return iso
-  }
-}
+// Locked to Asia/Riyadh via the shared helper — never trust the browser TZ
+// for merchant timestamps (see dashboard/src/lib/datetime.ts header).
+const formatDate = (iso: string): string => formatRiyadh(iso)
 
 export default function Orders() {
   const [tab, setTab] = useState<TabKey>('all')
