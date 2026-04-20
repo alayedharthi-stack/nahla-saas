@@ -2976,3 +2976,174 @@ def admin_bias_comparison(
         days     = int(days),
     )
     return report.to_dict()
+
+
+# ── Abandoned-cart sync diagnostics ────────────────────────────────────────────
+#
+# This endpoint is the support-side single source of truth for diagnosing
+# the "Salla shows N carts, Nahla shows 0" class of bug. It walks every
+# stage of the abandoned-cart pipeline and reports counts + last error +
+# sample rows so we can pinpoint exactly which stage broke without ssh-ing
+# into a worker.
+#
+# Stages reported:
+#   1. salla_count          → live count of carts returned by Salla's
+#                             /admin/v2/carts endpoint right now
+#   2. db_count             → rows currently in our orders table with
+#                             is_abandoned=True for this tenant
+#   3. eligible_count       → db_count, after the same filter the
+#                             dashboard query applies (no extra hide rules
+#                             today, but kept distinct so we can spot any
+#                             future regression where dashboard < db)
+#   4. last_sync_at / error → most recent StoreSyncJob row
+#   5. recent_carts         → up to 5 sample cart rows with id / status /
+#                             customer / total / metadata for spot-checks
+@router.get("/admin/debug/abandoned-carts-sync")
+async def debug_abandoned_carts_sync(
+    request: Request,
+    tenant_id: Optional[int] = Query(None, description="Tenant to inspect; defaults to caller's tenant"),
+    run_sync: bool = Query(False, description="If true, trigger a live sync_abandoned_carts before reporting"),
+    db: Session = Depends(get_db),
+    _admin: dict = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Inspect the abandoned-cart pipeline end-to-end for one tenant."""
+    import os as _os, sys as _sys  # noqa: PLC0415
+    _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    from core.tenant import resolve_tenant_id  # noqa: PLC0415
+
+    if tenant_id is None:
+        tenant_id = resolve_tenant_id(request)
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail=f"tenant {tenant_id} not found")
+
+    out: Dict[str, Any] = {
+        "tenant_id":         tenant_id,
+        "tenant_name":       tenant.name,
+        "checked_at":        datetime.now(timezone.utc).isoformat(),
+        "salla_count":       None,
+        "salla_fetch_error": None,
+        "db_count":          0,
+        "eligible_count":    0,
+        "last_sync":         None,
+        "recent_carts":      [],
+        "warnings":          [],
+        "live_sync":         None,
+    }
+
+    if run_sync:
+        try:
+            from services.store_sync import StoreSyncService  # noqa: PLC0415
+            svc = StoreSyncService(db, tenant_id)
+            out["live_sync"] = await svc.sync_abandoned_carts()
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            out["live_sync"] = {"error": str(exc)}
+            logger.exception(
+                "[debug] live abandoned-cart sync failed for tenant=%s: %s",
+                tenant_id, exc,
+            )
+
+    # ── Stage 1: live Salla read ────────────────────────────────────────────
+    try:
+        from store_integration.registry import get_adapter  # noqa: PLC0415
+        adapter = get_adapter(tenant_id)
+        if adapter and hasattr(adapter, "get_abandoned_carts"):
+            try:
+                raw_list = await adapter.get_abandoned_carts()
+                out["salla_count"] = len(raw_list or [])
+            except Exception as exc:
+                out["salla_count"] = None
+                out["salla_fetch_error"] = str(exc)
+        else:
+            out["salla_fetch_error"] = "adapter_missing_get_abandoned_carts"
+    except Exception as exc:
+        out["salla_fetch_error"] = f"adapter_init_failed: {exc}"
+
+    # ── Stage 2 + 3: DB read (raw + eligible) ───────────────────────────────
+    cart_rows = (
+        db.query(Order)
+        .filter(Order.tenant_id == tenant_id, Order.is_abandoned == True)  # noqa: E712
+        .order_by(Order.id.desc())
+        .all()
+    )
+    out["db_count"]       = len(cart_rows)
+    out["eligible_count"] = len(cart_rows)  # mirrors dashboard filter (no extra excludes today)
+
+    for o in cart_rows[:5]:
+        ci = o.customer_info or {}
+        meta = o.extra_metadata or {}
+        out["recent_carts"].append({
+            "order_id":      o.id,
+            "external_id":   o.external_id,
+            "status":        o.status,
+            "is_abandoned":  bool(o.is_abandoned),
+            "total":         o.total,
+            "checkout_url":  o.checkout_url,
+            "customer":      {
+                "name":  ci.get("name") or o.customer_name,
+                "phone": ci.get("phone") or ci.get("mobile"),
+            },
+            "metadata":      {
+                "source_kind":   meta.get("source_kind"),
+                "abandoned_at":  meta.get("abandoned_at"),
+                "last_synced_at": meta.get("last_synced_at"),
+                "raw_cart_id":   meta.get("raw_cart_id"),
+            },
+        })
+
+    # ── Stage 4: last sync state ────────────────────────────────────────────
+    last_job = (
+        db.query(StoreSyncJob)
+        .filter(StoreSyncJob.tenant_id == tenant_id)
+        .order_by(StoreSyncJob.id.desc())
+        .first()
+    )
+    if last_job:
+        out["last_sync"] = {
+            "id":             last_job.id,
+            "status":         last_job.status,
+            "sync_type":      last_job.sync_type,
+            "triggered_by":   last_job.triggered_by,
+            "started_at":     last_job.started_at.isoformat() if last_job.started_at else None,
+            "completed_at":   last_job.completed_at.isoformat() if last_job.completed_at else None,
+            "orders_synced":  last_job.orders_synced,
+            "error_message":  last_job.error_message,
+            "extra_metadata": last_job.extra_metadata,
+        }
+
+    # ── Inconsistency warnings ──────────────────────────────────────────────
+    if out["salla_count"] is not None and out["salla_count"] > 0 and out["db_count"] == 0:
+        out["warnings"].append({
+            "code": "salla_has_carts_but_db_empty",
+            "detail": (
+                f"Salla returned {out['salla_count']} cart(s) but the DB has none. "
+                "Run with ?run_sync=true to force a sync, or check the last_sync.error_message."
+            ),
+        })
+    if out["salla_count"] == 0 and out["db_count"] > 0:
+        out["warnings"].append({
+            "code": "db_has_carts_but_salla_empty",
+            "detail": (
+                "Salla returned zero abandoned carts but DB still has rows flagged "
+                "is_abandoned=True. The next sync will reconcile them — this is "
+                "expected when carts get resumed/converted."
+            ),
+        })
+    if out["salla_fetch_error"]:
+        out["warnings"].append({
+            "code":   "salla_fetch_error",
+            "detail": out["salla_fetch_error"],
+        })
+
+    audit(
+        "admin_debug_abandoned_carts_sync",
+        admin       = _admin.get("sub"),
+        tenant_id   = tenant_id,
+        salla_count = out["salla_count"],
+        db_count    = out["db_count"],
+        run_sync    = run_sync,
+    )
+    return out

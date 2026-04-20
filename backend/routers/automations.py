@@ -1078,6 +1078,15 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
 
     # ── Abandoned carts ──────────────────────────────────────────────────────
+    # Source of truth: ``Order.is_abandoned`` rows for this tenant. These
+    # come from two paths:
+    #   1) ``StoreSyncService.sync_abandoned_carts`` polling Salla's
+    #      /admin/v2/carts endpoint on every full_sync.
+    #   2) Real-time ``abandoned.cart`` Salla webhooks routed through
+    #      ``StoreSyncService.handle_abandoned_cart_webhook``.
+    # If both paths are dark we surface that as a clear empty state — and
+    # the /admin/debug/abandoned-carts-sync endpoint can be used to confirm
+    # which stage of the pipeline broke.
     abandoned = (
         db.query(Order)
         .filter(Order.tenant_id == tenant_id, Order.is_abandoned == True)
@@ -1089,15 +1098,20 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
     for o in abandoned:
         ci = o.customer_info or {}
         meta = o.extra_metadata or {}
+        try:
+            total_val = float(o.total or 0)
+        except (TypeError, ValueError):
+            total_val = 0.0
         cart_items.append({
             "order_id":       o.id,
             "external_id":    o.external_id,
-            "customer_name":  ci.get("name", "—"),
-            "customer_phone": ci.get("phone") or ci.get("mobile", ""),
+            "customer_name":  ci.get("name") or o.customer_name or "—",
+            "customer_phone": ci.get("phone") or ci.get("mobile") or "",
             "checkout_url":   o.checkout_url or "",
-            "total":          float(o.total or 0),
+            "total":          total_val,
             "status":         o.status or "abandoned",
-            "created_at":     meta.get("created_at", ""),
+            "created_at":     meta.get("created_at", "") or meta.get("abandoned_at", ""),
+            "abandoned_at":   meta.get("abandoned_at") or meta.get("created_at", ""),
         })
 
     # ── Predictive reorder ───────────────────────────────────────────────────

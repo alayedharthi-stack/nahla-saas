@@ -198,6 +198,77 @@ def _normalise_order(raw: Any) -> Dict:
     }
 
 
+def _normalise_abandoned_cart(raw: Any) -> Dict:
+    """Convert a Salla-style abandoned-cart payload into the internal Order shape.
+
+    Salla's ``GET /admin/v2/carts`` endpoint returns a different shape than
+    ``/orders``:
+
+      * The cart's primary key is ``id`` (small integer).
+      * ``total`` may live at ``total.amount`` OR at top-level ``total``.
+      * Customer is at ``customer`` (same nested shape as orders, but may
+        include only ``mobile`` without a name).
+      * ``checkout_url`` is the resume-cart URL we surface to the dashboard
+        and to the WhatsApp recovery flow — never compute it ourselves.
+      * ``items`` is the line-item list; we keep it verbatim so the cart
+        editor / recovery message can render product names.
+
+    We intentionally prefix the external_id with ``cart-`` so an abandoned
+    cart can NEVER collide with a real Salla order that happens to share
+    the same numeric id (Salla's cart and order id-spaces are independent).
+    Without this prefix a later ``sync_orders`` could overwrite the saved
+    cart row when an order with the same id eventually exists.
+    """
+    if hasattr(raw, "dict"):
+        raw = raw.dict()
+    if not isinstance(raw, dict):
+        raw = {}
+
+    customer_info = dict(raw.get("customer") or {})
+    if customer_info:
+        normalized_phone = _normalize_phone(
+            customer_info.get("mobile", customer_info.get("phone", ""))
+        )
+        if normalized_phone:
+            customer_info["mobile"] = normalized_phone
+            customer_info["phone"] = normalized_phone
+
+    raw_total = raw.get("total") or raw.get("sub_total") or raw.get("amount") or raw.get("amounts", {})
+
+    cart_id = str(raw.get("id") or raw.get("cart_id") or raw.get("token") or "").strip()
+    external_id = f"cart-{cart_id}" if cart_id else ""
+    external_order_number = str(
+        raw.get("reference_id")
+        or raw.get("number")
+        or raw.get("code")
+        or cart_id
+    ).strip() or cart_id
+
+    customer_name = (
+        (customer_info.get("name") if isinstance(customer_info, dict) else None)
+        or raw.get("customer_name")
+        or ""
+    )
+    customer_name = str(customer_name).strip()
+
+    cart_dt = _extract_order_datetime(raw)
+
+    return {
+        "external_id":           external_id,
+        "external_order_number": external_order_number,
+        "status":                "abandoned",
+        "total":                 _extract_amount_string(raw_total),
+        "customer_name":         customer_name,
+        "customer_info":         customer_info,
+        "line_items":            raw.get("items") or raw.get("line_items") or [],
+        "checkout_url":          raw.get("checkout_url", "") or raw.get("url", ""),
+        "is_abandoned":          True,
+        "source":                "salla",
+        "created_at":            cart_dt.isoformat() if cart_dt else (raw.get("created_at") or raw.get("updated_at")),
+        "raw_cart_id":           cart_id,
+    }
+
+
 def _normalise_coupon(raw: Any) -> Dict:
     if hasattr(raw, "dict"):
         raw = raw.dict()
@@ -684,6 +755,179 @@ class StoreSyncService:
         self.db.flush()
         return created + updated
 
+    # ── Abandoned carts sync ──────────────────────────────────────────────────
+    #
+    # Salla's abandoned carts live behind a SEPARATE endpoint (/admin/v2/carts).
+    # The /orders endpoint never returns them, so until we wired this method
+    # in the dashboard read at /autopilot/queues — which filters
+    # `Order.is_abandoned == True` — was always empty regardless of how many
+    # carts the merchant had abandoned in Salla. That is the root cause of
+    # the "Salla shows 2, Nahla shows 0" inconsistency the merchant reported.
+    #
+    # Behaviour & invariants:
+    #   1. We persist abandoned carts INTO the same `orders` table the
+    #      dashboard already reads from, with `is_abandoned=True` and
+    #      `status="abandoned"`. This avoids a parallel data path and reuses
+    #      every existing recovery automation.
+    #   2. We prefix the external_id with `cart-` so a future order with the
+    #      same numeric Salla id never overwrites the cart row (Salla's
+    #      cart and order id-spaces are independent integers).
+    #   3. Reconcile: any cart row we previously stored that no longer
+    #      appears in Salla's response (because the customer either
+    #      converted it to an order or Salla aged it out) is flipped back
+    #      to `is_abandoned=False` so the dashboard count tracks Salla's
+    #      live state rather than a growing backlog.
+    #   4. SILENT-FAIL guard: if Salla returns zero carts but we still have
+    #      previously-saved carts, we log a loud warning AND keep the old
+    #      rows visible. This is the same protection pattern already used
+    #      for the live-totals snapshot (see test_store_sync_live_totals).
+    #      A transient 401 / empty-page response must never wipe the
+    #      dashboard.
+    async def sync_abandoned_carts(self) -> Dict[str, int]:
+        adapter = self._get_adapter()
+        result = {
+            "salla_count":     0,
+            "saved":           0,
+            "updated":         0,
+            "reconciled":      0,
+            "skipped_no_id":   0,
+            "skipped_no_data": 0,
+            "fetched":         False,
+        }
+        if not adapter or not hasattr(adapter, "get_abandoned_carts"):
+            logger.info(
+                "tenant=%s abandoned-cart sync skipped — adapter missing get_abandoned_carts",
+                self.tenant_id,
+            )
+            return result
+
+        try:
+            raw_list = await adapter.get_abandoned_carts() or []
+            result["fetched"] = True
+        except Exception as exc:
+            logger.warning(
+                "tenant=%s abandoned-cart fetch failed (%s) — KEEPING existing rows visible",
+                self.tenant_id, exc,
+            )
+            return result
+
+        result["salla_count"] = len(raw_list)
+        logger.info(
+            "tenant=%s syncing abandoned carts — fetched=%d from Salla",
+            self.tenant_id, len(raw_list),
+        )
+
+        # Existing cart rows for this tenant — keyed by external_id so we
+        # can both upsert and reconcile in a single pass.
+        existing_carts: Dict[str, Order] = {
+            o.external_id: o
+            for o in self.db.query(Order)
+            .filter(Order.tenant_id == self.tenant_id, Order.is_abandoned == True)  # noqa: E712
+            .all()
+        }
+        previous_count = len(existing_carts)
+
+        # ── SILENT-FAIL guard ──────────────────────────────────────────────
+        if previous_count > 0 and result["salla_count"] == 0:
+            logger.warning(
+                "tenant=%s ⚠️ abandoned-cart sync returned ZERO from Salla "
+                "but %d carts were previously saved — KEEPING existing rows "
+                "to avoid wiping the merchant dashboard on a transient empty "
+                "response. Investigate adapter / token / Salla state.",
+                self.tenant_id, previous_count,
+            )
+            return result
+
+        seen_external_ids = set()
+
+        for raw in raw_list:
+            normalised = _normalise_abandoned_cart(raw)
+            ext_id = normalised["external_id"]
+            if not ext_id:
+                result["skipped_no_id"] += 1
+                logger.debug(
+                    "tenant=%s skipping abandoned cart with empty id — raw=%s",
+                    self.tenant_id, str(raw)[:200],
+                )
+                continue
+            if not normalised["customer_info"] and not normalised["line_items"]:
+                # Salla occasionally returns a draft-cart shell with no
+                # customer and no items; nothing for us to message about.
+                result["skipped_no_data"] += 1
+                continue
+
+            seen_external_ids.add(ext_id)
+            existing = existing_carts.get(ext_id) or (
+                self.db.query(Order)
+                .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+                .first()
+            )
+
+            if existing:
+                existing.status                = normalised["status"]
+                existing.total                 = normalised["total"]
+                existing.customer_info         = normalised["customer_info"]
+                existing.line_items            = normalised["line_items"]
+                existing.is_abandoned          = True
+                existing.checkout_url          = normalised["checkout_url"]
+                existing.external_order_number = normalised["external_order_number"]
+                if normalised["customer_name"]:
+                    existing.customer_name = normalised["customer_name"]
+                existing.source = "salla"
+                meta = dict(existing.extra_metadata or {})
+                meta["created_at"]    = normalised.get("created_at") or meta.get("created_at")
+                meta["abandoned_at"]  = meta.get("abandoned_at") or normalised.get("created_at")
+                meta["last_synced_at"] = datetime.now(timezone.utc).isoformat()
+                meta["source_kind"]   = "abandoned_cart"
+                meta["raw_cart_id"]   = normalised.get("raw_cart_id")
+                existing.extra_metadata = meta
+                result["updated"] += 1
+            else:
+                self.db.add(Order(
+                    tenant_id             = self.tenant_id,
+                    external_id           = ext_id,
+                    external_order_number = normalised["external_order_number"],
+                    status                = normalised["status"],
+                    total                 = normalised["total"],
+                    customer_name         = normalised["customer_name"] or None,
+                    customer_info         = normalised["customer_info"],
+                    line_items            = normalised["line_items"],
+                    checkout_url          = normalised["checkout_url"],
+                    is_abandoned          = True,
+                    source                = "salla",
+                    extra_metadata        = {
+                        "created_at":     normalised.get("created_at"),
+                        "abandoned_at":   normalised.get("created_at"),
+                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                        "source_kind":    "abandoned_cart",
+                        "raw_cart_id":    normalised.get("raw_cart_id"),
+                    },
+                ))
+                result["saved"] += 1
+
+        # ── Reconcile: clear is_abandoned on rows Salla no longer lists ─
+        # The customer either resumed → became a real order, or Salla aged
+        # the cart out. Either way the dashboard must stop showing it.
+        for ext_id, row in existing_carts.items():
+            if ext_id in seen_external_ids:
+                continue
+            row.is_abandoned = False
+            meta = dict(row.extra_metadata or {})
+            meta["recovered_or_expired_at"] = datetime.now(timezone.utc).isoformat()
+            row.extra_metadata = meta
+            result["reconciled"] += 1
+
+        self.db.flush()
+
+        logger.info(
+            "tenant=%s abandoned-cart sync done — fetched=%d saved=%d updated=%d "
+            "reconciled=%d skipped_no_id=%d skipped_no_data=%d previous=%d",
+            self.tenant_id, result["salla_count"], result["saved"], result["updated"],
+            result["reconciled"], result["skipped_no_id"], result["skipped_no_data"],
+            previous_count,
+        )
+        return result
+
     # ── Coupons sync ───────────────────────────────────────────────────────────
 
     async def sync_coupons(self) -> int:
@@ -912,6 +1156,22 @@ class StoreSyncService:
         try:
             products_n  = await self.sync_products(incremental=is_incremental)
             orders_n    = await self.sync_orders(incremental=is_incremental)
+            # Abandoned carts come from a SEPARATE Salla endpoint
+            # (/admin/v2/carts), not from /orders. We sync them right after
+            # orders so any customer who just resumed their cart into a
+            # real order is reconciled correctly (sync_orders runs first
+            # → row exists with is_abandoned=False; then sync_abandoned_carts
+            # only re-flags rows Salla still lists as abandoned).
+            try:
+                carts_result = await self.sync_abandoned_carts()
+                abandoned_n  = carts_result.get("saved", 0) + carts_result.get("updated", 0)
+            except Exception as cart_exc:
+                logger.warning(
+                    "tenant=%s abandoned-cart sync raised — orders pipeline kept alive: %s",
+                    self.tenant_id, cart_exc,
+                )
+                carts_result = {}
+                abandoned_n  = 0
             coupons_n   = await self.sync_coupons()
             customers_n = await self.sync_customers(incremental=is_incremental)
             profiles_n  = self._customer_intelligence.rebuild_profiles_for_tenant(
@@ -942,14 +1202,16 @@ class StoreSyncService:
                 )
 
             result = {
-                "status":           "completed",
-                "sync_type":        sync_type,
-                "products_synced":  products_n,
-                "orders_synced":    orders_n,
-                "coupons_synced":   coupons_n,
-                "customers_synced": customers_n,
-                "profiles_updated": profiles_n,
-                "job_id":           job.id,
+                "status":                   "completed",
+                "sync_type":                sync_type,
+                "products_synced":          products_n,
+                "orders_synced":            orders_n,
+                "coupons_synced":           coupons_n,
+                "customers_synced":         customers_n,
+                "profiles_updated":         profiles_n,
+                "abandoned_carts_synced":   abandoned_n,
+                "abandoned_carts_detail":   carts_result,
+                "job_id":                   job.id,
             }
             if total_items == 0:
                 result["message"] = (
@@ -1007,6 +1269,84 @@ class StoreSyncService:
             self.db.commit()
 
     # ── Incremental order update (called by webhook) ────────────────────────
+
+    async def handle_abandoned_cart_webhook(self, payload: Dict) -> None:
+        """
+        Process a single ``abandoned.cart`` event from a Salla webhook.
+
+        Persists the cart payload into the same ``orders`` table the
+        dashboard reads from with ``is_abandoned=True``. Idempotent by the
+        ``cart-{cart_id}`` external_id we assign in
+        ``_normalise_abandoned_cart``, which is intentionally namespaced so
+        a real order with the same numeric Salla id can never collide.
+        """
+        normalised = _normalise_abandoned_cart(payload)
+        ext_id     = normalised["external_id"]
+        if not ext_id:
+            logger.info(
+                "tenant=%s abandoned_cart webhook ignored — payload had no cart id",
+                self.tenant_id,
+            )
+            return
+
+        cart_row = (
+            self.db.query(Order)
+            .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+            .first()
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        if cart_row is not None:
+            cart_row.status                = normalised["status"]
+            cart_row.total                 = normalised["total"]
+            cart_row.customer_info         = normalised["customer_info"]
+            cart_row.line_items            = normalised["line_items"]
+            cart_row.is_abandoned          = True
+            cart_row.checkout_url          = normalised["checkout_url"] or cart_row.checkout_url
+            cart_row.external_order_number = normalised["external_order_number"]
+            if normalised["customer_name"]:
+                cart_row.customer_name = normalised["customer_name"]
+            cart_row.source = "salla"
+            meta = dict(cart_row.extra_metadata or {})
+            meta["created_at"]    = normalised.get("created_at") or meta.get("created_at")
+            meta["abandoned_at"]  = meta.get("abandoned_at") or normalised.get("created_at") or now_iso
+            meta["last_synced_at"] = now_iso
+            meta["source_kind"]   = "abandoned_cart"
+            meta["raw_cart_id"]   = normalised.get("raw_cart_id")
+            cart_row.extra_metadata = meta
+        else:
+            cart_row = Order(
+                tenant_id             = self.tenant_id,
+                external_id           = ext_id,
+                external_order_number = normalised["external_order_number"],
+                status                = normalised["status"],
+                total                 = normalised["total"],
+                customer_name         = normalised["customer_name"] or None,
+                customer_info         = normalised["customer_info"],
+                line_items            = normalised["line_items"],
+                checkout_url          = normalised["checkout_url"],
+                is_abandoned          = True,
+                source                = "salla",
+                extra_metadata        = {
+                    "created_at":     normalised.get("created_at") or now_iso,
+                    "abandoned_at":   normalised.get("created_at") or now_iso,
+                    "last_synced_at": now_iso,
+                    "source_kind":    "abandoned_cart",
+                    "raw_cart_id":    normalised.get("raw_cart_id"),
+                },
+            )
+            self.db.add(cart_row)
+
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+        logger.info(
+            "tenant=%s abandoned_cart webhook upserted cart external_id=%s",
+            self.tenant_id, ext_id,
+        )
 
     async def handle_order_webhook(self, payload: Dict) -> None:
         """

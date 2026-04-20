@@ -481,6 +481,40 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_customer_orders", exc)
             return []
 
+    # ── Abandoned carts ────────────────────────────────────────────────────────
+    #
+    # Salla's `/orders` endpoint NEVER returns abandoned carts — those live
+    # behind a completely separate endpoint at GET /admin/v2/carts. This is
+    # the source the merchant sees on their Salla dashboard's
+    # "السلات المتروكة" page. We treat every row Salla returns from this
+    # endpoint as a candidate abandoned cart and let the upstream sync layer
+    # decide which to surface (Salla itself only lists carts that have not
+    # converted to orders, so the list IS the abandoned set).
+    async def get_abandoned_carts(self) -> List[Dict[str, Any]]:
+        """Fetch all abandoned carts from Salla.
+
+        Returns the raw cart dicts (not normalized into NormalizedOrder) so
+        the sync layer can preserve cart-specific fields like ``checkout_url``
+        and ``items`` exactly as Salla returns them. Never raises — returns
+        an empty list on any error so the orders sync pipeline keeps moving.
+        """
+        try:
+            return await self._get_all_pages(
+                "/carts", label="abandoned_carts",
+            )
+        except SallaTokenRevokedException:
+            raise
+        except httpx.HTTPStatusError as exc:
+            self._log_error("get_abandoned_carts", exc)
+            logger.error(
+                "Salla get_abandoned_carts HTTP %s: %s",
+                exc.response.status_code, exc.response.text[:300],
+            )
+            return []
+        except Exception as exc:
+            self._log_error("get_abandoned_carts", exc)
+            return []
+
     def _normalize_order(self, raw: Dict[str, Any], order_input: Optional[OrderInput]) -> NormalizedOrder:
         amounts = raw.get("amounts") or {}
 

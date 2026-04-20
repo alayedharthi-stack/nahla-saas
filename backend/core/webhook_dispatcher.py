@@ -111,6 +111,15 @@ async def _dispatch_salla(db: Session, event) -> None:
         await svc.handle_customer_webhook(data)
         return
 
+    # Salla fires `abandoned.cart` (sometimes namespaced as `cart.abandoned`)
+    # when a customer leaves the checkout. We persist the cart payload into
+    # the same Order table the dashboard reads from with `is_abandoned=True`
+    # so the recovery automation can pick it up immediately — without having
+    # to wait for the next scheduled `sync_abandoned_carts` poll.
+    if event_type in ("abandoned.cart", "cart.abandoned", "abandoned_cart"):
+        await svc.handle_abandoned_cart_webhook(data)
+        return
+
     # Unknown event — mark processed so it does not retry forever.
     logger.info(
         "[Dispatcher] Unhandled salla event_type=%s webhook_event_id=%s — marking processed",
