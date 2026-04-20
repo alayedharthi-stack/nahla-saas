@@ -264,7 +264,7 @@ async def debug_abandoned_carts_sync_public(
         tenant_id = _resolve_default_tenant(db)
 
     from routers.admin import debug_abandoned_carts_sync  # noqa: PLC0415
-    return await debug_abandoned_carts_sync(
+    payload = await debug_abandoned_carts_sync(
         request=request,
         tenant_id=tenant_id,
         run_sync=run_sync,
@@ -273,6 +273,29 @@ async def debug_abandoned_carts_sync_public(
         db=db,
         _admin=_FAKE_ADMIN,
     )
+    # Splice in scheduler health so an operator gets one-stop visibility
+    # on "is the auto-sync loop actually running for this tenant?".
+    try:
+        from core.abandoned_cart_scheduler import (  # noqa: PLC0415
+            get_state_snapshot, get_last_run_for_tenant,
+        )
+        scheduler_snap = get_state_snapshot()
+        if isinstance(payload, dict):
+            payload["scheduler"] = {
+                "started_at":            scheduler_snap.get("started_at"),
+                "interval_seconds":      scheduler_snap.get("interval_seconds"),
+                "last_cycle_at":         scheduler_snap.get("last_cycle_at"),
+                "last_cycle_ok":         scheduler_snap.get("last_cycle_ok"),
+                "next_cycle_at":         scheduler_snap.get("next_cycle_at"),
+                "cycles_completed":      scheduler_snap.get("cycles_completed"),
+                "tenants_in_last_cycle": scheduler_snap.get("tenants_in_last_cycle"),
+                "this_tenant":           get_last_run_for_tenant(tenant_id),
+            }
+    except Exception as exc:
+        # Never let a visibility add-on break the diagnostic endpoint.
+        if isinstance(payload, dict):
+            payload["scheduler"] = {"error": f"{type(exc).__name__}: {exc}"}
+    return payload
 
 
 # ── /debug/salla-direct ─────────────────────────────────────────────────
@@ -502,3 +525,53 @@ async def debug_abandoned_carts_raw_public(
         db=db,
         _admin=_FAKE_ADMIN,
     )
+
+
+# ── /debug/scheduler-status ─────────────────────────────────────────────
+@router.get("/debug/scheduler-status")
+async def debug_scheduler_status(
+    debug_token: str = Query(..., description="Shared secret from env"),
+) -> Dict[str, Any]:
+    """Health probe for the dedicated abandoned-cart reconciliation loop.
+
+    Returns the in-memory state of
+    :mod:`backend.core.abandoned_cart_scheduler` — when it last ran,
+    how often it runs, when the next tick is due, and per-tenant
+    success/failure for the most recent attempt.
+
+    This is the canonical place to look when a merchant says
+    "carts only show after manual sync": if ``last_cycle_at`` is
+    older than ``interval_seconds`` ago, the scheduler is dead and
+    Railway needs a restart. If ``last_runs[tenant_id].status`` is
+    ``"error"`` and ``consecutive_failures`` is climbing, the
+    integration itself is broken (token, scope, network).
+    """
+    _check_token(debug_token)
+    from core.abandoned_cart_scheduler import get_state_snapshot  # noqa: PLC0415
+    snap = get_state_snapshot()
+
+    # Compute a human-readable "is the scheduler alive?" verdict so an
+    # operator doesn't have to do timestamp math in their head.
+    from datetime import datetime, timezone  # noqa: PLC0415
+    verdict = "unknown"
+    seconds_since_last = None
+    if snap.get("last_cycle_at"):
+        try:
+            last = datetime.fromisoformat(snap["last_cycle_at"])
+            seconds_since_last = int(
+                (datetime.now(timezone.utc) - last).total_seconds()
+            )
+            # We expect a tick at least every interval+grace; be lenient
+            # for the first cycle delay.
+            grace = int(snap.get("interval_seconds", 300)) * 2
+            verdict = "alive" if seconds_since_last <= grace else "stalled"
+        except Exception:
+            verdict = "unknown"
+    elif snap.get("started_at"):
+        verdict = "starting"
+
+    return {
+        "verdict":              verdict,
+        "seconds_since_last":   seconds_since_last,
+        "scheduler":            snap,
+    }

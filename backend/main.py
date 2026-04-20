@@ -480,6 +480,25 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("Store sync scheduler could not start: %s", exc)
 
+    # 4b. Dedicated abandoned-cart scheduler (every 5 min by default).
+    # The hourly full sync above ALSO runs sync_abandoned_carts as part
+    # of full_sync, but 1h is far too slow for a "near real-time"
+    # dashboard. This dedicated loop calls only sync_abandoned_carts
+    # per active Salla integration so merchants see new carts within
+    # minutes — not after the next full sync. Webhook ingestion (in
+    # core/webhook_dispatcher) remains the seconds-latency primary
+    # path; this loop is the reconciliation safety net.
+    try:
+        from core.abandoned_cart_scheduler import (  # noqa: PLC0415
+            run_abandoned_cart_scheduler, INTERVAL_SECONDS as _AC_INT,
+        )
+        asyncio.create_task(run_abandoned_cart_scheduler())
+        logger.info(
+            "Abandoned-cart scheduler started (every %ds).", _AC_INT,
+        )
+    except Exception as exc:
+        logger.warning("Abandoned-cart scheduler could not start: %s", exc)
+
     # 5. Coupon pool generator scheduler (every 6h)
     try:
         from core.scheduler import run_coupon_generator_scheduler  # noqa: PLC0415
