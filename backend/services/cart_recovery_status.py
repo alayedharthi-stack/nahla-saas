@@ -161,6 +161,33 @@ def _step_for_event(
 
     action = execution.action_taken if execution and isinstance(execution.action_taken, dict) else {}
 
+    # Pull the structured failure code + Arabic label out of the action
+    # payload first, then fall back to the legacy text in
+    # ``error_message`` (which may itself be a structured code now).
+    # Carrying both lets the UI:
+    #   - render the localised ``failure_label`` directly (no English token), and
+    #   - branch on ``failure_code`` for icons / retry eligibility.
+    failure_code: Optional[str] = None
+    failure_label: Optional[str] = None
+    meta_error: Optional[Dict[str, Any]] = None
+    if isinstance(action, dict):
+        failure_code  = action.get("error_code") or action.get("error")
+        failure_label = action.get("error_label")
+        raw_meta = action.get("meta_error")
+        if isinstance(raw_meta, dict):
+            meta_error = raw_meta
+
+    if stage_status == "failed" and execution is not None and not failure_code:
+        # Legacy rows written before the structured payload existed —
+        # try to classify the bare ``error_message`` string.
+        try:
+            from services.cart_recovery_failures import classify_internal_error  # noqa: PLC0415
+            code, label = classify_internal_error(execution.error_message or "")
+            failure_code = code
+            failure_label = label
+        except Exception:
+            failure_label = execution.error_message or None
+
     return {
         "step_idx":      _step_idx(event),
         "event_id":      event.id,
@@ -169,12 +196,17 @@ def _step_for_event(
         "scheduled_at":  _isoformat_utc(event.created_at),
         "sent_at":       _isoformat_utc(execution.executed_at) if execution else None,
         "error":         (execution.error_message or None) if execution else None,
+        # ``failure_code`` / ``failure_label`` are the post-fix dashboard
+        # contract — taxonomised, Arabic, and safe to render directly.
+        "failure_code":  failure_code if stage_status == "failed" else None,
+        "failure_label": failure_label if stage_status == "failed" else None,
+        "meta_error":    meta_error if stage_status == "failed" else None,
         "skip_reason":   metrics.get("skip_reason") if metrics else (
             payload.get("recovery_cancel_reason") if stage_status == "skipped" else None
         ),
         "wa_message_id": action.get("wa_message_id") if isinstance(action, dict) else None,
         "channel":       action.get("channel") or action.get("delivery_mode") if isinstance(action, dict) else None,
-        "template_name": action.get("template_name") if isinstance(action, dict) else None,
+        "template_name": action.get("template_name") or action.get("template") if isinstance(action, dict) else None,
     }
 
 
@@ -353,16 +385,18 @@ def summarise_for_orders(
 
 def _empty_summary() -> Dict[str, Any]:
     return {
-        "status":            RECOVERY_STATUS_NO_RECOVERY,
-        "steps_sent":        0,
-        "steps_failed":      0,
-        "last_sent_at":      None,
-        "last_status":       None,
-        "last_error":        None,
-        "next_pending_at":   None,
-        "converted_at":      None,
-        "cancel_reason":     None,
-        "recovery_event_id": None,
+        "status":              RECOVERY_STATUS_NO_RECOVERY,
+        "steps_sent":          0,
+        "steps_failed":        0,
+        "last_sent_at":        None,
+        "last_status":         None,
+        "last_error":          None,
+        "last_failure_code":   None,
+        "last_failure_label":  None,
+        "next_pending_at":     None,
+        "converted_at":        None,
+        "cancel_reason":       None,
+        "recovery_event_id":   None,
     }
 
 
@@ -404,17 +438,24 @@ def _summary_from_tree(
         # Fallback — shouldn't happen but we never want a missing key.
         status = RECOVERY_STATUS_PENDING
 
+    # Pick the latest failed step (if any) so the queue list can show
+    # the localised failure label inline — without forcing the merchant
+    # to open the drawer just to see WHY a reminder failed.
+    last_failed = max(failed, key=lambda s: s.get("sent_at") or s.get("scheduled_at") or "", default=None)
+
     return {
-        "status":            status,
-        "steps_sent":        len(sent),
-        "steps_failed":      len(failed),
-        "last_sent_at":      last_sent.get("sent_at") if last_sent else None,
-        "last_status":       last_step.get("status") if last_step else None,
-        "last_error":        last_step.get("error") if last_step else None,
-        "next_pending_at":   next_pending.get("scheduled_at") if next_pending else None,
-        "converted_at":      converted_at,
-        "cancel_reason":     cancel_reason,
-        "recovery_event_id": root.id,
+        "status":              status,
+        "steps_sent":          len(sent),
+        "steps_failed":        len(failed),
+        "last_sent_at":        last_sent.get("sent_at") if last_sent else None,
+        "last_status":         last_step.get("status") if last_step else None,
+        "last_error":          last_step.get("error") if last_step else None,
+        "last_failure_code":   last_failed.get("failure_code") if last_failed else None,
+        "last_failure_label":  last_failed.get("failure_label") if last_failed else None,
+        "next_pending_at":     next_pending.get("scheduled_at") if next_pending else None,
+        "converted_at":        converted_at,
+        "cancel_reason":       cancel_reason,
+        "recovery_event_id":   root.id,
     }
 
 

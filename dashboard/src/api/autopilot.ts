@@ -54,6 +54,10 @@ export interface AutopilotStatus {
   daily_summary: DailySummaryItem[]
   last_run_at: string | null
   is_running: boolean
+  /** Temporary, env-gated switch (`AUTOPILOT_ENABLE_MANUAL_RETRY`) for the
+   *  abandoned-cart manual retry button. Default false. When false the UI
+   *  hides the button entirely. */
+  manual_retry_enabled?: boolean
 }
 
 export interface AutopilotRunResult {
@@ -82,7 +86,14 @@ export interface AbandonedCartRecoverySummary {
   steps_failed: number
   last_sent_at: string | null
   last_status: string | null
+  /** Raw error_message from AutomationExecution — kept for backward
+   *  compat. Prefer ``last_failure_label`` for display. */
   last_error: string | null
+  /** Internal failure code (``invalid_phone_number`` / ``template_not_approved``
+   *  / …). Stable enum the dashboard can branch on. */
+  last_failure_code: string | null
+  /** Localised Arabic label for the latest failure — safe to render as-is. */
+  last_failure_label: string | null
   next_pending_at: string | null
   converted_at: string | null
   cancel_reason: string | null
@@ -96,7 +107,14 @@ export interface AbandonedCartRecoveryStep {
   status: 'sent' | 'pending' | 'skipped' | 'failed' | string
   scheduled_at: string | null
   sent_at: string | null
+  /** Raw error_message — kept for engineering, hidden from the merchant
+   *  in favour of ``failure_label`` when present. */
   error: string | null
+  failure_code: string | null
+  failure_label: string | null
+  /** Raw Meta error envelope (code/subcode/message/trace_id). Only set
+   *  for steps that actually called the provider. */
+  meta_error: Record<string, unknown> | null
   skip_reason: string | null
   wa_message_id: string | null
   channel: string | null
@@ -179,6 +197,25 @@ export const autopilotApi = {
     apiCall<AbandonedCartRecoveryTimeline>(
       `/autopilot/abandoned-carts/${orderId}/recovery`,
     ),
+
+  /** Manually re-enqueue the latest failed stage of a cart's recovery
+   *  sequence. Feature-flagged on the backend
+   *  (``AUTOPILOT_ENABLE_MANUAL_RETRY``); the dashboard hides its
+   *  trigger button when ``AutopilotStatus.manual_retry_enabled`` is
+   *  false, so calling this with the flag off returns 403.
+   *
+   *  Idempotent: if a retry was already enqueued in the last 60s for
+   *  the same step, the response carries ``deduplicated: true`` and
+   *  the existing event id. */
+  retryAbandonedCart: (orderId: number) =>
+    apiCall<{
+      ok: boolean
+      deduplicated: boolean
+      retry_event_id: number
+      step_idx: number
+      queued_at: string
+      message: string
+    }>(`/autopilot/abandoned-carts/${orderId}/retry`, { method: 'POST' }),
 }
 
 // ── Order status labels (Arabic) ──────────────────────────────────────────────

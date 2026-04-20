@@ -475,13 +475,37 @@ async def _try_execute(
 
     # ── Execute action ────────────────────────────────────────────────────────
     success, action_info = await _execute_action(db, tenant_id, event, automation, config)
-    status = "sent" if success else "failed"
 
+    # ── Result classification ────────────────────────────────────────────────
+    # Three outcomes — not two — so the dashboard can distinguish a real
+    # send failure (red badge, retry button) from a deliberate skip
+    # (amber, "تم التخطّي because customer purchased / opted out").
+    # Conversion-layer pre-send guards return (False, {"skipped": True,
+    # "skip_reason": "..."}) and we want those to land as
+    # status="skipped", not "failed" with a NULL error_message — that
+    # latter combo is what made the queue show "فشل الإرسال" with no
+    # explanation for converted carts.
+    if success:
+        status = "sent"
+        error_message = None
+    elif action_info.get("skipped") and action_info.get("skip_reason"):
+        status = "skipped"
+        error_message = None
+    else:
+        status = "failed"
+        error_message = action_info.get("error") or action_info.get("error_label")
+
+    # On failure we now ALSO persist ``action_info`` (template name, to,
+    # meta_error envelope, error_code, error_label) so the per-cart
+    # recovery timeline can render a useful diagnosis without a second
+    # round-trip — and the manual-retry endpoint has the context it
+    # needs to re-enqueue with the same step_idx.
     _write_execution(
         db, event.id, automation.id, event.customer_id, tenant_id,
         status=status,
-        action_taken=action_info if success else None,
-        error_message=None if success else action_info.get("error"),
+        action_taken=action_info if action_info else None,
+        skip_reason=action_info.get("skip_reason") if status == "skipped" else None,
+        error_message=error_message,
     )
 
     if success:
@@ -630,7 +654,11 @@ async def _execute_action(
 
     customer_id = event.customer_id
     if not customer_id:
-        return False, {"error": "no_customer_id"}
+        return False, {
+            "error":       "no_customer_id",
+            "error_code":  "no_customer",
+            "error_label": "العميل غير مرتبط بالحدث",
+        }
 
     # ── Customer + phone ──────────────────────────────────────────────────────
     customer: Optional[Any] = (
@@ -639,9 +667,29 @@ async def _execute_action(
         .first()
     )
     if not customer or not customer.phone:
-        return False, {"error": "no_customer_phone"}
+        return False, {
+            "error":       "no_customer_phone",
+            "error_code":  "missing_phone_number",
+            "error_label": "لا يوجد رقم جوال للعميل",
+        }
 
-    to_phone = normalize_phone(customer.phone) or customer.phone
+    # P0 fix: never silently fall back to the raw `customer.phone` when
+    # normalisation fails. Pre-fix this path sent a non-E.164 string to
+    # Meta and the Cloud API either rejected it inline (empty
+    # ``messages`` array) or accepted it and dropped the message later
+    # at delivery time — both surfaced as a generic "send failed" with
+    # no diagnostic value. Now we short-circuit with a structured
+    # ``invalid_phone_number`` so the dashboard can show the real cause
+    # and the merchant knows to fix the customer record.
+    normalized_phone = normalize_phone(customer.phone)
+    if not normalized_phone:
+        return False, {
+            "error":       "invalid_phone_number",
+            "error_code":  "invalid_phone_number",
+            "error_label": "رقم الجوال غير صالح",
+            "raw_phone":   str(customer.phone)[:64],
+        }
+    to_phone = normalized_phone
 
     # ── WhatsApp connection ───────────────────────────────────────────────────
     wa_conn: Optional[Any] = (
@@ -653,14 +701,22 @@ async def _execute_action(
         .first()
     )
     if not wa_conn:
-        return False, {"error": "no_whatsapp_connection"}
+        return False, {
+            "error":       "no_whatsapp_connection",
+            "error_code":  "no_whatsapp_connection",
+            "error_label": "لم يتم ربط واتساب الأعمال",
+        }
 
     # ── Per-step delivery routing (cart-recovery workflow) ───────────────────
     # Resolve the active step once and let it decide the wire format. The
     # `template` branch below is preserved for everything else.
     active_step: Dict[str, Any] = _active_step_for_event(event, config)
     if not active_step.get("enabled", True) and active_step:
-        return False, {"error": "step_disabled"}
+        return False, {
+            "error":       "step_disabled",
+            "error_code":  "step_disabled",
+            "error_label": "هذه المرحلة معطّلة في الإعدادات",
+        }
 
     # ── Conversion Layer (WHAT to send, before we pick WHEN) ─────────────────
     # Only the cart-recovery workflow gets the layer today — every other
@@ -794,8 +850,12 @@ async def _execute_action(
         # The policy module already verified ai_eligible; this is just
         # belt-and-braces in case future call sites bypass it.
         if not ai_eligible:
-            return False, {"error": "ai_recovery_disabled",
-                           "delivery_policy": decision.to_audit()}
+            return False, {
+                "error":           "ai_recovery_disabled",
+                "error_code":      "ai_recovery_disabled",
+                "error_label":     "خطوة الذكاء الاصطناعي غير مفعّلة",
+                "delivery_policy": decision.to_audit(),
+            }
         return await _execute_ai_recovery_step(
             db, tenant_id=tenant_id, event=event, customer=customer,
             wa_conn=wa_conn, to_phone=to_phone, config=config,
@@ -840,7 +900,12 @@ async def _execute_action(
             .first()
         )
     if not template:
-        return False, {"error": "no_approved_template"}
+        return False, {
+            "error":       "no_approved_template",
+            "error_code":  "template_not_approved",
+            "error_label": "القالب غير معتمد من Meta",
+            "template":    tpl_name or (str(automation.template_id) if automation.template_id else None),
+        }
 
     # ── Auto-coupon resolution ───────────────────────────────────────────────
     # When the automation step opts in via `auto_coupon: true` (e.g.
@@ -933,6 +998,10 @@ async def _execute_action(
     # ── Send ──────────────────────────────────────────────────────────────────
     try:
         from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+        from services.cart_recovery_failures import (  # noqa: PLC0415
+            classify_meta_response,
+            classify_send_exception,
+        )
 
         response, _ctx = await provider_send_message(
             db,
@@ -942,6 +1011,35 @@ async def _execute_action(
             phone_id=wa_conn.phone_number_id,
             payload=send_payload,
         )
+
+        # P0 fix: Meta returns ``{"error": {...}}`` instead of
+        # ``{"messages": [...]}`` whenever the template is rejected,
+        # the customer can't receive, the access token expired, etc.
+        # Pre-fix the engine read ``response["messages"][0]["id"]``
+        # blindly and either crashed (false-failed with a Python
+        # KeyError as the "reason") or silently recorded a sent row
+        # with ``wa_message_id=None``. Now we classify the response
+        # explicitly and surface the structured failure.
+        failure = classify_meta_response(response)
+        if failure is not None:
+            code, label_ar, raw_meta = failure
+            logger.error(
+                "[AutoEngine] Template send rejected by provider "
+                "tenant=%s event=%s automation=%s template=%s "
+                "code=%s label=%s raw=%s",
+                tenant_id, event.id, automation.id, template.name,
+                code, label_ar, raw_meta,
+            )
+            return False, {
+                "error":       code,
+                "error_code":  code,
+                "error_label": label_ar,
+                "meta_error":  raw_meta,
+                "template":    template.name,
+                "to":          to_phone,
+                "vars":        vars_map,
+            }
+
         action_info = {
             "template": template.name,
             "to": to_phone,
@@ -951,11 +1049,21 @@ async def _execute_action(
         return True, action_info
 
     except Exception as exc:
+        from services.cart_recovery_failures import classify_send_exception  # noqa: PLC0415
+        code, label_ar, raw = classify_send_exception(exc)
         logger.error(
-            "[AutoEngine] Send failed event=%s automation=%s tenant=%s: %s",
-            event.id, automation.id, tenant_id, exc,
+            "[AutoEngine] Send failed event=%s automation=%s tenant=%s "
+            "code=%s raw=%s",
+            event.id, automation.id, tenant_id, code, raw,
         )
-        return False, {"error": str(exc)[:500]}
+        return False, {
+            "error":       code,
+            "error_code":  code,
+            "error_label": label_ar,
+            "exception":   raw,
+            "template":    template.name,
+            "to":          to_phone,
+        }
 
 
 def _build_template_vars(
@@ -1966,6 +2074,11 @@ async def _execute_interactive_step(
         )
 
     try:
+        from services.cart_recovery_failures import (  # noqa: PLC0415
+            classify_meta_response,
+            classify_send_exception,
+        )
+
         response, _ctx = await provider_send_message(
             db,
             wa_conn,
@@ -1974,6 +2087,26 @@ async def _execute_interactive_step(
             phone_id=wa_conn.phone_number_id,
             payload=send_payload,
         )
+
+        failure = classify_meta_response(response)
+        if failure is not None:
+            code, label_ar, raw_meta = failure
+            logger.error(
+                "[AutoEngine] Interactive send rejected by provider "
+                "tenant=%s event=%s code=%s label=%s raw=%s",
+                tenant_id, getattr(event, "id", None),
+                code, label_ar, raw_meta,
+            )
+            return False, {
+                "error":         code,
+                "error_code":    code,
+                "error_label":   label_ar,
+                "meta_error":    raw_meta,
+                "delivery_mode": "interactive",
+                "stage":         stage,
+                "to":            to_phone,
+            }
+
         action_info: Dict[str, Any] = {
             "delivery_mode": "interactive",
             "stage":         stage,
@@ -1993,14 +2126,24 @@ async def _execute_interactive_step(
             )
         return True, action_info
     except Exception as exc:
+        from services.cart_recovery_failures import classify_send_exception  # noqa: PLC0415
+        code, label_ar, raw = classify_send_exception(exc)
         logger.error(
             "[AutoEngine] Interactive send failed event=%s automation=%s "
-            "tenant=%s: %s",
+            "tenant=%s code=%s raw=%s",
             getattr(event, "id", None),
             getattr(automation, "id", None),
-            tenant_id, exc,
+            tenant_id, code, raw,
         )
-        return False, {"error": str(exc)[:500]}
+        return False, {
+            "error":         code,
+            "error_code":    code,
+            "error_label":   label_ar,
+            "exception":     raw,
+            "delivery_mode": "interactive",
+            "stage":         stage,
+            "to":            to_phone,
+        }
 
 
 async def _execute_ai_recovery_step(
@@ -2032,7 +2175,11 @@ async def _execute_ai_recovery_step(
     from core.wa_usage import has_open_service_window  # noqa: PLC0415
 
     if not has_open_service_window(db, tenant_id, to_phone):
-        return False, {"error": "ai_recovery_window_closed"}
+        return False, {
+            "error":       "ai_recovery_window_closed",
+            "error_code":  "ai_recovery_window_closed",
+            "error_label": "نافذة الذكاء الاصطناعي مغلقة",
+        }
 
     payload = dict(getattr(event, "payload", None) or {})
     cart_url = (
@@ -2097,6 +2244,11 @@ async def _execute_ai_recovery_step(
     )
 
     try:
+        from services.cart_recovery_failures import (  # noqa: PLC0415
+            classify_meta_response,
+            classify_send_exception,
+        )
+
         response, _ctx = await provider_send_message(
             db,
             wa_conn,
@@ -2105,6 +2257,25 @@ async def _execute_ai_recovery_step(
             phone_id=wa_conn.phone_number_id,
             payload=send_payload,
         )
+
+        failure = classify_meta_response(response)
+        if failure is not None:
+            code, label_ar, raw_meta = failure
+            logger.error(
+                "[AutoEngine] AI recovery send rejected by provider "
+                "tenant=%s code=%s label=%s raw=%s",
+                tenant_id, code, label_ar, raw_meta,
+            )
+            return False, {
+                "error":         code,
+                "error_code":    code,
+                "error_label":   label_ar,
+                "meta_error":    raw_meta,
+                "delivery_mode": "ai_recovery",
+                "stage":         stage,
+                "to":            to_phone,
+            }
+
         return True, {
             "delivery_mode": "ai_recovery",
             "stage":         stage,
@@ -2112,10 +2283,21 @@ async def _execute_ai_recovery_step(
             "wa_message_id": (response or {}).get("messages", [{}])[0].get("id"),
         }
     except Exception as exc:
+        from services.cart_recovery_failures import classify_send_exception  # noqa: PLC0415
+        code, label_ar, raw = classify_send_exception(exc)
         logger.error(
-            "[AutoEngine] AI recovery send failed tenant=%s: %s", tenant_id, exc,
+            "[AutoEngine] AI recovery send failed tenant=%s code=%s raw=%s",
+            tenant_id, code, raw,
         )
-        return False, {"error": str(exc)[:500]}
+        return False, {
+            "error":         code,
+            "error_code":    code,
+            "error_label":   label_ar,
+            "exception":     raw,
+            "delivery_mode": "ai_recovery",
+            "stage":         stage,
+            "to":            to_phone,
+        }
 
 
 def _render_named_slots(template: str, values: Dict[str, str]) -> str:

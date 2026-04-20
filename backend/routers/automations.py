@@ -75,6 +75,29 @@ from core.tenant import (
 router = APIRouter()
 
 
+# ── Feature flags (process-level, runtime-readable) ───────────────────────────
+def _manual_retry_enabled() -> bool:
+    """
+    Temporary, env-gated switch for the abandoned-cart manual retry button.
+
+    The autopilot's *philosophy* is fully automatic — we never want a
+    merchant to be manually re-poking failed reminders in production.
+    But while the new structured-failure pipeline is being burned in
+    (template approval issues, phone-format edge cases, …) we expose a
+    one-click retry so the merchant can recover stuck carts without
+    waiting for an engineer.
+
+    Default: **off**. Flip to ``"true"`` (Railway → Variables) to expose
+    the button. Set back to ``"false"`` (or remove) to hide it again
+    everywhere — frontend reads this same flag via /autopilot/status.
+
+    Env: ``AUTOPILOT_ENABLE_MANUAL_RETRY``  values: ``true|false`` (case-insensitive).
+    """
+    return str(os.getenv("AUTOPILOT_ENABLE_MANUAL_RETRY", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 #
 # The canonical seed list now lives in core/automations_seed.py. Both this
@@ -976,6 +999,11 @@ async def autopilot_status(request: Request, db: Session = Depends(get_db)):
         "daily_summary": summary,
         "last_run_at": last_run_at,
         "is_running": False,
+        # Surface the manual-retry feature flag so the dashboard can
+        # hide the temporary "إعادة الإرسال" button cleanly when it's
+        # turned off, instead of relying on an env var leaked into the
+        # frontend bundle (which would require a redeploy to flip).
+        "manual_retry_enabled": _manual_retry_enabled(),
     }
 
 
@@ -1127,16 +1155,18 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             # services/cart_recovery_status.RECOVERY_STATUS_* for the
             # taxonomy used by the dashboard badge.
             "recovery":       recovery_summaries.get(o.id) or {
-                "status":            "no_recovery",
-                "steps_sent":        0,
-                "steps_failed":      0,
-                "last_sent_at":      None,
-                "last_status":       None,
-                "last_error":        None,
-                "next_pending_at":   None,
-                "converted_at":      None,
-                "cancel_reason":     None,
-                "recovery_event_id": None,
+                "status":              "no_recovery",
+                "steps_sent":          0,
+                "steps_failed":        0,
+                "last_sent_at":        None,
+                "last_status":         None,
+                "last_error":          None,
+                "last_failure_code":   None,
+                "last_failure_label":  None,
+                "next_pending_at":     None,
+                "converted_at":        None,
+                "cancel_reason":       None,
+                "recovery_event_id":   None,
             },
         })
 
@@ -1253,3 +1283,210 @@ async def abandoned_cart_recovery_timeline(
         raise HTTPException(status_code=404, detail="Order not found for this tenant")
 
     return timeline_for_order(db, tenant_id, order)
+
+
+# ── Manual retry (temporary, feature-flagged) ────────────────────────────────
+@router.post("/autopilot/abandoned-carts/{order_id}/retry")
+async def retry_abandoned_cart(
+    order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Re-enqueue the **last failed** stage of a cart's recovery sequence.
+
+    Why this exists
+    ───────────────
+    The autopilot is meant to be hands-off — the engine retries on its
+    own cadence. But while the new structured-failure pipeline burns
+    in (template approval gaps, phone-format edge cases, transient
+    Meta 5xx) the merchant occasionally needs to nudge a stuck cart
+    without waiting for an engineer. This endpoint is **gated behind
+    `AUTOPILOT_ENABLE_MANUAL_RETRY=true`** and the dashboard hides
+    its trigger button when the flag is off — so flipping the env to
+    `false` removes the feature entirely with no code redeploy.
+
+    Safety contract
+    ───────────────
+    * 403 when the feature flag is off — the route is *visible* even
+      then so the dashboard's "this is disabled" hint can render a
+      consistent error instead of a 404 (= ambiguous between "feature
+      off" and "wrong route").
+    * 404 when the order doesn't belong to the current tenant.
+    * 409 when the cart has no recovery event linked, when the latest
+      stage is anything other than `failed`, or when the cart is
+      already converted / cancelled. We treat these as "nothing to
+      retry" rather than 422 because the caller (dashboard button) is
+      synchronous and the merchant wants a clear refusal, not a
+      validation error.
+    * Idempotency: a retry that lands within 60s of an *unprocessed*
+      retry event for the same step short-circuits and returns the
+      existing event id — protecting against double-clicks and
+      accidental tab-spam.
+    * The new event carries `manual_retry=True`,
+      `retry_of=<failed_event_id>` and `parent_event_id=<root>` so the
+      timeline drawer can render the lineage and the engine treats it
+      as a normal pending event (no special path needed in
+      automation_engine).
+    """
+    if not _manual_retry_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "manual_retry_disabled",
+                "message": (
+                    "زر إعادة الإرسال اليدوي معطّل في هذه البيئة. "
+                    "اضبط المتغير AUTOPILOT_ENABLE_MANUAL_RETRY=true لتفعيله."
+                ),
+            },
+        )
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id, Order.tenant_id == tenant_id)
+        .first()
+    )
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found for this tenant")
+
+    from services.cart_recovery_status import timeline_for_order  # noqa: PLC0415
+
+    timeline = timeline_for_order(db, tenant_id, order)
+
+    # Eligibility — every refusal returns a structured error so the UI
+    # can render a precise message and the merchant knows why.
+    if not timeline.get("recovery_event_id"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "no_recovery_event",
+                "message": "لا توجد حملة استعادة مرتبطة بهذه السلة بعد.",
+            },
+        )
+
+    if timeline.get("status") == "converted":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "already_converted",
+                "message": "تم الشراء بالفعل — لا حاجة لإعادة الإرسال.",
+            },
+        )
+
+    steps: List[Dict[str, Any]] = list(timeline.get("steps") or [])
+    if not steps:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "no_steps_to_retry",
+                "message": "لا توجد مراحل قابلة لإعادة الإرسال في هذه السلة.",
+            },
+        )
+
+    # Walk the chronological tail and pick the latest step that's a
+    # real failure (skip 'pending' / 'sent' / 'skipped'). Steps were
+    # already sorted ascending in timeline_for_order, so reverse-walk.
+    target: Optional[Dict[str, Any]] = None
+    for step in reversed(steps):
+        if step.get("status") == "failed":
+            target = step
+            break
+
+    if target is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "no_failed_step",
+                "message": "لا توجد مرحلة فاشلة لإعادة إرسالها.",
+            },
+        )
+
+    root_event_id = int(timeline["recovery_event_id"])
+    failed_event_id = int(target["event_id"])
+    step_idx = int(target.get("step_idx") or 1)
+
+    # ── Idempotency: short-circuit on a recent unprocessed retry ─────────
+    # We don't want a frantic merchant double-click to enqueue two
+    # parallel retries that race to send the same WhatsApp.
+    from datetime import timedelta
+
+    recent_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=60)
+    existing_retry = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type == "cart_abandoned",
+            AutomationEvent.processed == False,
+            AutomationEvent.created_at >= recent_cutoff,
+        )
+        .all()
+    )
+    for ev in existing_retry:
+        payload = ev.payload or {}
+        if (
+            payload.get("manual_retry") is True
+            and int(payload.get("parent_event_id") or 0) == root_event_id
+            and int(payload.get("step_idx") or 0) == step_idx
+        ):
+            return {
+                "ok":               True,
+                "deduplicated":     True,
+                "retry_event_id":   ev.id,
+                "step_idx":         step_idx,
+                "queued_at":        ev.created_at.replace(tzinfo=timezone.utc).isoformat(),
+                "message":          "هناك إعادة إرسال قيد التنفيذ بالفعل لهذه المرحلة.",
+            }
+
+    # ── Resolve the customer + payload from the failed event ────────────
+    failed_event = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.id == failed_event_id,
+        )
+        .first()
+    )
+    if failed_event is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error":   "failed_event_missing",
+                "message": "تعذّر العثور على المرحلة الفاشلة الأصلية.",
+            },
+        )
+
+    base_payload: Dict[str, Any] = dict(failed_event.payload or {})
+    base_payload["step_idx"]         = step_idx
+    base_payload["parent_event_id"]  = root_event_id
+    base_payload["manual_retry"]     = True
+    base_payload["retry_of"]         = failed_event_id
+    base_payload["retry_requested_at"] = datetime.now(timezone.utc).isoformat()
+    base_payload["retry_reason"]     = target.get("failure_code") or target.get("error") or "manual_retry"
+
+    new_event = AutomationEvent(
+        tenant_id   = tenant_id,
+        event_type  = failed_event.event_type or "cart_abandoned",
+        customer_id = failed_event.customer_id,
+        payload     = base_payload,
+        processed   = False,
+        # ``created_at`` = now → engine picks it up on the next cycle
+        # (within ~60s). We deliberately don't bypass the engine here
+        # so all the existing pre-send guards (already-purchased,
+        # opt-out, quiet hours, idempotency) still protect the send.
+        created_at  = datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    db.add(new_event)
+    db.commit()
+    db.refresh(new_event)
+
+    return {
+        "ok":             True,
+        "deduplicated":   False,
+        "retry_event_id": new_event.id,
+        "step_idx":       step_idx,
+        "queued_at":      new_event.created_at.replace(tzinfo=timezone.utc).isoformat(),
+        "message":        "تم جدولة إعادة إرسال هذه المرحلة — ستُنفّذ خلال دقيقة.",
+    }

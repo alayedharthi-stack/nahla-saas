@@ -336,15 +336,25 @@ function RecoveryStatusBadge({ status }: { status: RecoveryStatus }) {
 function RecoveryDrawer({
   cart,
   onClose,
+  manualRetryEnabled = false,
+  onRetried,
 }: {
   cart: AbandonedCartItem
   onClose: () => void
+  /** Show the temporary "إعادة الإرسال" button — gated by the backend
+   *  feature flag (`AUTOPILOT_ENABLE_MANUAL_RETRY`). */
+  manualRetryEnabled?: boolean
+  /** Called after a successful retry so the parent can refresh the
+   *  queue list (status badge → "قيد المتابعة"). */
+  onRetried?: () => void
 }) {
   const [timeline, setTimeline] = useState<AbandonedCartRecoveryTimeline | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [retrying, setRetrying] = useState(false)
+  const [retryNotice, setRetryNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
 
-  useEffect(() => {
+  const refresh = useCallback(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -363,6 +373,42 @@ function RecoveryDrawer({
       cancelled = true
     }
   }, [cart.order_id])
+
+  useEffect(() => {
+    return refresh()
+  }, [refresh])
+
+  const handleRetry = useCallback(async () => {
+    setRetrying(true)
+    setRetryNotice(null)
+    try {
+      const res = await autopilotApi.retryAbandonedCart(cart.order_id)
+      setRetryNotice({
+        kind: 'ok',
+        text: res.deduplicated
+          ? 'تم تجاهل النقر — هناك إعادة إرسال قيد التنفيذ بالفعل لهذه المرحلة.'
+          : (res.message || 'تمت جدولة إعادة الإرسال — ستُنفّذ خلال دقيقة.'),
+      })
+      // Re-fetch the timeline so the new pending step shows up.
+      refresh()
+      onRetried?.()
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : ''
+      setRetryNotice({
+        kind: 'err',
+        text: raw || 'تعذّر إعادة الإرسال — حاول مرة أخرى.',
+      })
+    } finally {
+      setRetrying(false)
+    }
+  }, [cart.order_id, refresh, onRetried])
+
+  const canRetry = Boolean(
+    manualRetryEnabled
+    && timeline
+    && timeline.status === 'failed'
+    && timeline.recovery_event_id,
+  )
 
   return (
     <div
@@ -428,11 +474,43 @@ function RecoveryDrawer({
                 </div>
               )}
 
-              {timeline.last_error && (
-                <div className="rounded-lg border border-red-200 bg-red-50 p-3">
-                  <p className="text-xs text-red-700">
-                    آخر خطأ: <span className="font-mono">{timeline.last_error}</span>
-                  </p>
+              {(timeline.last_failure_label || timeline.last_error) && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-2">
+                  <div>
+                    <p className="text-xs text-red-700">
+                      <span className="font-medium">سبب آخر فشل:</span>{' '}
+                      {timeline.last_failure_label || timeline.last_error}
+                    </p>
+                    {timeline.last_failure_code && (
+                      <p className="text-[10px] text-red-500/80 mt-0.5 font-mono">
+                        ({timeline.last_failure_code})
+                      </p>
+                    )}
+                  </div>
+                  {canRetry && (
+                    <button
+                      type="button"
+                      onClick={handleRetry}
+                      disabled={retrying}
+                      className="text-xs px-3 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                      title="ميزة تجريبية مؤقتة — تعيد إرسال آخر مرحلة فشلت فقط"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`} />
+                      {retrying ? 'جارٍ الإرسال…' : 'إعادة الإرسال (تجريبي)'}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {retryNotice && (
+                <div
+                  className={`rounded-lg border p-3 text-xs ${
+                    retryNotice.kind === 'ok'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-700'
+                  }`}
+                >
+                  {retryNotice.text}
                 </div>
               )}
 
@@ -475,9 +553,14 @@ function RecoveryDrawer({
                               تم التخطّي: {step.skip_reason}
                             </div>
                           )}
-                          {step.error && (
-                            <div className="text-[11px] text-red-600 mt-0.5 font-mono">
-                              {step.error}
+                          {(step.failure_label || step.error) && step.status === 'failed' && (
+                            <div className="text-[11px] text-red-600 mt-0.5">
+                              {step.failure_label || step.error}
+                              {step.failure_code && (
+                                <span className="text-red-400/70 font-mono ms-1">
+                                  ({step.failure_code})
+                                </span>
+                              )}
                             </div>
                           )}
                         </div>
@@ -494,7 +577,15 @@ function RecoveryDrawer({
   )
 }
 
-function AbandonedCartsQueue({ items }: { items: AbandonedCartItem[] }) {
+function AbandonedCartsQueue({
+  items,
+  manualRetryEnabled = false,
+  onRetried,
+}: {
+  items: AbandonedCartItem[]
+  manualRetryEnabled?: boolean
+  onRetried?: () => void
+}) {
   const [openCart, setOpenCart] = useState<AbandonedCartItem | null>(null)
 
   if (items.length === 0) {
@@ -513,16 +604,18 @@ function AbandonedCartsQueue({ items }: { items: AbandonedCartItem[] }) {
           // but we tolerate the legacy shape so an old cached UI build does
           // not crash if it predates the schema bump.
           const recovery = item.recovery ?? {
-            status:          'no_recovery' as RecoveryStatus,
-            steps_sent:      0,
-            steps_failed:    0,
-            last_sent_at:    null,
-            last_status:     null,
-            last_error:      null,
-            next_pending_at: null,
-            converted_at:    null,
-            cancel_reason:   null,
-            recovery_event_id: null,
+            status:             'no_recovery' as RecoveryStatus,
+            steps_sent:         0,
+            steps_failed:       0,
+            last_sent_at:       null,
+            last_status:        null,
+            last_error:         null,
+            last_failure_code:  null,
+            last_failure_label: null,
+            next_pending_at:    null,
+            converted_at:       null,
+            cancel_reason:      null,
+            recovery_event_id:  null,
           }
           return (
             <div key={item.order_id} className="flex items-center justify-between gap-3 py-3 px-1">
@@ -548,6 +641,14 @@ function AbandonedCartsQueue({ items }: { items: AbandonedCartItem[] }) {
                       : 'لم يُرسل تذكير بعد'}
                     {recovery.last_sent_at && <> · آخرها {formatRelativeRiyadh(recovery.last_sent_at)}</>}
                   </span>
+                  {recovery.status === 'failed' && recovery.last_failure_label && (
+                    <span
+                      className="text-[11px] text-red-600 truncate max-w-[180px]"
+                      title={recovery.last_failure_label}
+                    >
+                      · {recovery.last_failure_label}
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="shrink-0 flex items-center gap-2">
@@ -576,7 +677,12 @@ function AbandonedCartsQueue({ items }: { items: AbandonedCartItem[] }) {
       </div>
 
       {openCart && (
-        <RecoveryDrawer cart={openCart} onClose={() => setOpenCart(null)} />
+        <RecoveryDrawer
+          cart={openCart}
+          onClose={() => setOpenCart(null)}
+          manualRetryEnabled={manualRetryEnabled}
+          onRetried={onRetried}
+        />
       )}
     </>
   )
@@ -621,9 +727,13 @@ interface OperationalQueuesProps {
   queues: AutopilotQueues | null
   loading: boolean
   onRefresh: () => void
+  /** Backend feature flag for the temporary "إعادة الإرسال" button on
+   *  failed cart-recovery rows. When false the button is hidden
+   *  everywhere — see backend ``AUTOPILOT_ENABLE_MANUAL_RETRY``. */
+  manualRetryEnabled?: boolean
 }
 
-function OperationalQueues({ queues, loading, onRefresh }: OperationalQueuesProps) {
+function OperationalQueues({ queues, loading, onRefresh, manualRetryEnabled = false }: OperationalQueuesProps) {
   const [activeTab, setActiveTab] = useState<QueueTab>('order_status')
 
   const tabs: { id: QueueTab; label: string; icon: React.ReactNode; count: number }[] = [
@@ -714,7 +824,11 @@ function OperationalQueues({ queues, loading, onRefresh }: OperationalQueuesProp
               <OrderStatusQueue items={queues?.order_status_updates ?? []} />
             )}
             {activeTab === 'abandoned_carts' && (
-              <AbandonedCartsQueue items={queues?.abandoned_carts ?? []} />
+              <AbandonedCartsQueue
+                items={queues?.abandoned_carts ?? []}
+                manualRetryEnabled={manualRetryEnabled}
+                onRetried={onRefresh}
+              />
             )}
             {activeTab === 'predictive_reorder' && (
               <PredictiveReorderQueue items={queues?.predictive_reorder ?? []} />
@@ -1167,6 +1281,10 @@ export default function SmartAutomations() {
   const [error, setError] = useState<string | null>(null)
   const [queues, setQueues] = useState<AutopilotQueues | null>(null)
   const [queuesLoading, setQueuesLoading] = useState(false)
+  // Backend-controlled feature flag (env: AUTOPILOT_ENABLE_MANUAL_RETRY).
+  // We default to false so the temporary retry button stays hidden when
+  // the dashboard is ahead of a backend that doesn't expose it yet.
+  const [manualRetryEnabled, setManualRetryEnabled] = useState(false)
 
   const loadQueues = useCallback(async () => {
     setQueuesLoading(true)
@@ -1191,6 +1309,7 @@ export default function SmartAutomations() {
       ])
       setAutomations(data.automations)
       setAutopilot(Boolean(autopilotStatus.settings.enabled))
+      setManualRetryEnabled(Boolean(autopilotStatus.manual_retry_enabled))
       setEngines(summary.engines)
     } catch (e) {
       const message = e instanceof Error ? e.message : ''
@@ -1344,6 +1463,7 @@ export default function SmartAutomations() {
         queues={queues}
         loading={queuesLoading}
         onRefresh={loadQueues}
+        manualRetryEnabled={manualRetryEnabled}
       />
 
       {/* ── Compliance notice ── */}
