@@ -55,7 +55,13 @@ class DraftOrderHandler:
         _merge_message_details(prep, ctx.intent.slots, ctx.message)
         await _resolve_checkout_address(prep)
 
-        missing = _missing_checkout_fields(prep)
+        # Country-aware address rules: Saudi customers can finish the
+        # order with name + city + (national short code OR Maps URL).
+        # International customers need an explicit country and either
+        # a structured address or a free-form address line. The phone
+        # E.164 prefix is the source of truth for "is the customer in SA".
+        is_sa = _is_saudi_customer(ctx.customer_phone)
+        missing = _missing_checkout_fields(prep, is_sa=is_sa)
         prep.missing_fields = missing
         if missing:
             return ActionResult(
@@ -64,9 +70,10 @@ class DraftOrderHandler:
                     "product": product_info,
                     "needs_collection": True,
                     "missing_fields": missing,
-                    "question": _checkout_question(missing[0]),
+                    "question": _checkout_question(missing[0], is_sa=is_sa),
                     "order_prep": prep.to_dict(),
                     "resolution_available": spl_resolution_available(),
+                    "customer_region": "SA" if is_sa else "INTL",
                 },
             )
 
@@ -199,6 +206,7 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
     first_name = str(slots.get("customer_first_name") or slots.get("first_name") or "").strip()
     last_name = str(slots.get("customer_last_name") or slots.get("last_name") or "").strip()
     city = str(slots.get("city") or "").strip()
+    country = str(slots.get("country") or "").strip()
     email = str(slots.get("customer_email") or slots.get("email") or "").strip()
     short_code = str(slots.get("short_address_code") or "").strip().upper()
     maps_url = str(slots.get("google_maps_url") or slots.get("location_url") or "").strip()
@@ -218,6 +226,8 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
         prep.customer_last_name = last_name
     if city:
         prep.city = city
+    if country:
+        prep.country = country
     if email:
         prep.customer_email = email
     if short_code:
@@ -308,7 +318,26 @@ def _merge_resolved_address(
         prep.resolution_source = resolution_source
 
 
-def _missing_checkout_fields(prep: OrderPreparationState) -> list[str]:
+def _missing_checkout_fields(
+    prep: OrderPreparationState,
+    *,
+    is_sa: bool = True,
+) -> list[str]:
+    """
+    Checkout requirements differ by region:
+
+      Saudi customers (default):
+        - first name + last name (or single full name)
+        - city
+        - SHORT national address code  OR  Google Maps URL
+          (no need to grill them about district/street/postal)
+
+      International customers:
+        - first name + last name
+        - country (free text or detected from phone)
+        - city
+        - a structured address OR an explicit free-form address_line
+    """
     missing: list[str] = []
     if not prep.customer_first_name:
         missing.append("customer_first_name")
@@ -316,8 +345,16 @@ def _missing_checkout_fields(prep: OrderPreparationState) -> list[str]:
         missing.append("customer_last_name")
     if not prep.city:
         missing.append("city")
-    if not _has_checkout_address(prep):
-        missing.append("address_location")
+
+    if is_sa:
+        if not _has_sa_checkout_address(prep):
+            missing.append("address_location")
+    else:
+        if not _has_intl_country(prep):
+            missing.append("country")
+        if not _has_intl_address(prep):
+            missing.append("address_line")
+
     return missing
 
 
@@ -325,26 +362,86 @@ def _has_structured_address(prep: OrderPreparationState) -> bool:
     return bool(prep.street and prep.district and prep.postal_code)
 
 
-def _has_checkout_address(prep: OrderPreparationState) -> bool:
+def _has_sa_checkout_address(prep: OrderPreparationState) -> bool:
+    """SA flow: short code OR maps URL is enough; structured address still
+    counts as a complete answer if the customer happened to send it."""
     return bool(
         prep.short_address_code
         or prep.google_maps_url
+        or (prep.latitude is not None and prep.longitude is not None)
         or _has_structured_address(prep)
         or prep.address_line
     )
 
 
-def _checkout_question(field_name: str) -> str:
-    questions = {
-        "customer_first_name": "ممتاز، ما اسمك الأول لإكمال الطلب؟",
-        "customer_last_name": "وما اسم العائلة كما يظهر في عنوان التسليم؟",
-        "city": "ما المدينة التي سيصلها الطلب؟",
-        "address_location": (
-            "أرسل الرمز الوطني المختصر للعقار، أو أرسل رابط موقعك من Google Maps "
-            "وسأجهز بيانات الطلب."
-        ),
-    }
+def _has_intl_address(prep: OrderPreparationState) -> bool:
+    """International flow: free-form address line OR a fully-structured one."""
+    return bool(prep.address_line or _has_structured_address(prep))
+
+
+def _has_intl_country(prep: OrderPreparationState) -> bool:
+    return bool(getattr(prep, "country", "") or getattr(prep, "country_code", ""))
+
+
+def _checkout_question(field_name: str, *, is_sa: bool = True) -> str:
+    if is_sa:
+        questions = {
+            "customer_first_name": "ممتاز، ما اسمك الأول لإكمال الطلب؟",
+            "customer_last_name": "وما اسم العائلة كما يظهر في عنوان التسليم؟",
+            "city": "ما المدينة التي سيصلها الطلب؟",
+            "address_location": (
+                "أرسل الرمز الوطني المختصر للعقار، أو رابط موقعك من Google Maps "
+                "وسأجهّز الطلب فوراً."
+            ),
+        }
+    else:
+        questions = {
+            "customer_first_name": "Could I have your first name to start the order?",
+            "customer_last_name":  "And your last name (as it should appear on the delivery)?",
+            "country":             "Which country should we ship to?",
+            "city":                "Which city should we ship to?",
+            "address_line": (
+                "Please share the full delivery address (building / street / "
+                "district / postal code, or any landmark). You can also paste a "
+                "Google Maps link if that's easier."
+            ),
+        }
     return questions.get(field_name, "أرسل لي التفاصيل الناقصة لإكمال الطلب.")
+
+
+def _is_saudi_customer(customer_phone: str | None) -> bool:
+    """
+    True when the customer's phone is a Saudi (+966) E.164 number.
+    Falls back to True (SA-first product strategy) when the phone is empty
+    or unparseable, so we never accidentally inflict the long international
+    flow on a customer the system simply couldn't classify.
+    """
+    raw = (customer_phone or "").strip()
+    if not raw:
+        return True
+
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if raw.startswith("+966") or digits.startswith("966"):
+        return True
+
+    # Any explicit "+<other-country>" prefix means international flow,
+    # regardless of whether libphonenumber is available to normalise it.
+    if raw.startswith("+"):
+        return False
+
+    # Try libphonenumber for ambiguous shapes like "971501234567".
+    try:
+        from services.customer_intelligence import normalize_phone as _normalize
+        e164 = _normalize(raw) or ""
+        if e164.startswith("+966"):
+            return True
+        if e164.startswith("+"):
+            return False
+    except Exception:
+        pass
+
+    # Local-format "05xxxxxxxx" — almost always Saudi in this product context.
+    return True
 
 
 def _split_name(full_name: str) -> tuple[str, str]:

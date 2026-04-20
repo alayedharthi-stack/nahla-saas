@@ -59,6 +59,7 @@ class OrderPreparationState:
     customer_last_name: str = ""
     customer_email: str = ""
     city: str = ""
+    country: str = ""
     short_address_code: str = ""
     google_maps_url: str = ""
     latitude: Optional[float] = None
@@ -79,6 +80,7 @@ class OrderPreparationState:
             "customer_last_name": self.customer_last_name,
             "customer_email": self.customer_email,
             "city": self.city,
+            "country": self.country,
             "short_address_code": self.short_address_code,
             "google_maps_url": self.google_maps_url,
             "latitude": self.latitude,
@@ -102,6 +104,7 @@ class OrderPreparationState:
             customer_last_name=str(raw.get("customer_last_name", "") or ""),
             customer_email=str(raw.get("customer_email", "") or ""),
             city=str(raw.get("city", "") or ""),
+            country=str(raw.get("country", "") or ""),
             short_address_code=str(raw.get("short_address_code", "") or ""),
             google_maps_url=str(raw.get("google_maps_url", "") or ""),
             latitude=_as_optional_float(raw.get("latitude")),

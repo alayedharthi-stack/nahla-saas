@@ -54,7 +54,7 @@ from ..types import (
     INTENT_WHO_ARE_YOU,
     INTENT_PICK_LIST_ITEM,
 )
-from ..state.stages import STAGE_CHECKOUT, STAGE_ORDERING
+from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 
 logger = logging.getLogger("nahla.brain.decision")
 
@@ -137,12 +137,26 @@ class DefaultDecisionEngine:
                     )
 
         # ── 3.7 Continue order preparation while collecting checkout details ──
+        # CRITICAL: while ordering we treat almost any free-form message as a
+        # potential slot fill (name/city/maps URL/short code). Even a short
+        # polite "هلا" must NOT bounce the customer back to the greeting
+        # template, so INTENT_GREETING is also accepted as continuation here.
+        # The DraftOrderHandler will run extract_address_signals on the raw
+        # text and decide whether the message actually contained data.
+        _CONTINUATION_INTENTS = (
+            INTENT_START_ORDER,
+            INTENT_GENERAL,
+            INTENT_GREETING,        # see comment above — keep flow locked
+            INTENT_ASK_PRODUCT,     # answers like "فستان" while we still need name/city
+            INTENT_ASK_PRICE,
+            INTENT_HESITATION,
+        )
         if (
-            state.stage == STAGE_ORDERING
+            state.stage in (STAGE_ORDERING, STAGE_DECIDING)
             and state.current_product_focus
             and not state.checkout_url
             and (
-                intent.name in (INTENT_START_ORDER, INTENT_GENERAL)
+                intent.name in _CONTINUATION_INTENTS
                 or any(slot in intent.slots for slot in checkout_slots)
             )
         ):
@@ -183,11 +197,28 @@ class DefaultDecisionEngine:
             )
 
         # ── 5. Greeting (explicit greeting or first-turn generic help) ─────
-        if intent.name == INTENT_GREETING or (not state.greeted and intent.name == INTENT_GENERAL):
-            return Decision(
-                action=ACTION_GREET,
-                reason="explicit greeting or first-turn general help",
-            )
+        # Two hard rules to prevent the "bot keeps re-greeting mid-order" bug:
+        #   a) NEVER greet if the customer is in a committed sales stage
+        #      (deciding/ordering/checkout). The continuation block above
+        #      already routes those messages back into the order flow.
+        #   b) NEVER greet twice in the same conversation: once `greeted`
+        #      is true, only an explicit INTENT_GREETING re-triggers the
+        #      template, and even then we only do it when the funnel is
+        #      back at discovery (e.g. after an order completed).
+        _greet_locked = state.stage in (
+            STAGE_DECIDING, STAGE_ORDERING, STAGE_CHECKOUT,
+        )
+        if not _greet_locked:
+            if intent.name == INTENT_GREETING and not state.greeted:
+                return Decision(
+                    action=ACTION_GREET,
+                    reason="explicit greeting on first turn",
+                )
+            if not state.greeted and intent.name == INTENT_GENERAL:
+                return Decision(
+                    action=ACTION_GREET,
+                    reason="first-turn general help",
+                )
 
         # ── 6. Start order — product in focus ──────────────────────────────
         if intent.name == INTENT_START_ORDER:

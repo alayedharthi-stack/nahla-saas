@@ -58,30 +58,65 @@ _STATE_KEY = "brain_state"
 def _find_customer(db: Any, tenant_id: int, phone: str):
     """
     Locate a Customer row for this (tenant, phone).
-    Tries normalized_phone first (E.164), then raw phone column.
+
+    The webhook hands us the raw ``to`` field straight from Meta (e.g.
+    ``966555555555`` or ``+966555555555``), but :class:`Customer` rows are
+    written by ``_get_or_create_customer`` with both ``phone`` and
+    ``normalized_phone = E.164`` (see customer_intelligence.normalize_phone).
+    Mismatching the format here means we fail the lookup, return a fresh
+    state, and the bot loses turn-to-turn memory — the root cause of the
+    "greeting repeats every message" symptom.
+
+    Strategy: try every realistic shape of the phone, in order of how the
+    DB actually stores it.
     """
     from database.models import Customer
 
-    customer = (
-        db.query(Customer)
-        .filter(
-            Customer.tenant_id == tenant_id,
-            Customer.normalized_phone == phone,
-        )
-        .first()
-    )
-    if customer:
-        return customer
+    candidates: list[str] = []
+    raw = (phone or "").strip()
+    if raw:
+        candidates.append(raw)
 
-    # Fallback to raw phone — may not be normalised
-    return (
-        db.query(Customer)
-        .filter(
-            Customer.tenant_id == tenant_id,
-            Customer.phone == phone,
+    try:  # noqa: PLC0415 — local import to avoid cycle on package init
+        from services.customer_intelligence import normalize_phone as _normalize
+        e164 = _normalize(raw) or ""
+        if e164 and e164 not in candidates:
+            candidates.append(e164)
+    except Exception as _exc:
+        logger.debug("[StateStore] phone normalize unavailable: %s", _exc)
+
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if digits and digits not in candidates:
+        candidates.append(digits)
+    if digits and not digits.startswith("+"):
+        plus = f"+{digits}"
+        if plus not in candidates:
+            candidates.append(plus)
+
+    for candidate in candidates:
+        customer = (
+            db.query(Customer)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                Customer.normalized_phone == candidate,
+            )
+            .first()
         )
-        .first()
-    )
+        if customer:
+            return customer
+
+        customer = (
+            db.query(Customer)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                Customer.phone == candidate,
+            )
+            .first()
+        )
+        if customer:
+            return customer
+
+    return None
 
 
 def _find_conversation(db: Any, tenant_id: int, customer_id: int):
@@ -224,19 +259,39 @@ class DefaultStateStore:
 
         action = decision.action
 
+        # Stages that represent committed sales progress. Once we are in any
+        # of these, only an explicit handoff or completion can move us out —
+        # NOT a stray greeting/search detected mid-flow. This is the lock
+        # that prevents the "bot resets to greeting after the customer sent
+        # their name" symptom.
+        _PROGRESS_STAGES = {STAGE_DECIDING, STAGE_ORDERING, STAGE_CHECKOUT}
+
         if action == ACTION_GREET:
             s.greeted = True
-            s.stage   = STAGE_DISCOVERY
+            # Preserve any in-progress sales stage. The greeting itself is
+            # also gated upstream in the decision engine, so reaching this
+            # branch with a progress stage should be very rare — but if it
+            # happens we MUST NOT downgrade the funnel.
+            if state.stage not in _PROGRESS_STAGES:
+                s.stage = STAGE_DISCOVERY
 
         elif action == ACTION_SEARCH_PRODUCTS:
             if intent.name == INTENT_ASK_PRODUCT:
                 s.current_product_focus = None
-            s.stage = STAGE_EXPLORING
+            # Browsing again is fine while exploring/discovery, but DON'T
+            # demote a customer who is mid-checkout or mid-ordering.
+            if state.stage not in {STAGE_ORDERING, STAGE_CHECKOUT}:
+                s.stage = STAGE_EXPLORING
 
         elif action in (ACTION_CLARIFY, ACTION_NARROW):
-            s.stage = STAGE_EXPLORING
+            if state.stage not in _PROGRESS_STAGES:
+                s.stage = STAGE_EXPLORING
 
         elif action == ACTION_PROPOSE_DRAFT_ORDER:
+            # Distinguish "still gathering details" from "fully prepared":
+            # if the order action returned needs_collection, we are deciding
+            # on what to fill next, not yet finalising. Both mean the funnel
+            # is committed; only checkout supersedes ordering downstream.
             s.stage = STAGE_ORDERING
             if decision.args.get("product"):
                 s.current_product_focus = decision.args["product"]
