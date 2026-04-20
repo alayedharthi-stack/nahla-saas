@@ -61,6 +61,9 @@ class _FakeQuery:
         self._filters.append(conditions)
         return self
 
+    def order_by(self, *_):
+        return self
+
     def first(self):
         # Conditions look like: Customer.tenant_id == 7
         # We unwrap each into (column_name, value) by inspecting .left/.right.
@@ -123,6 +126,86 @@ def test_state_store_finds_customer_when_webhook_phone_lacks_plus(monkeypatch):
     # Local Saudi format also resolves to the same row through normalize.
     # We don't strictly require this, but the helper should not crash.
     _ = state_store_module._find_customer(fake_db, tenant_id=7, phone="0555555555")
+
+
+def test_state_save_calls_flag_modified_for_jsonb_persistence(monkeypatch):
+    """
+    Production logs (2026-04-20) showed turn_save reporting result=ok but
+    the next turn_load reading state_source=fresh / no_brain_state_in_metadata.
+    Root cause: Conversation.extra_metadata is JSONB without
+    MutableDict.as_mutable(), so dict reassignment can be silently dropped
+    when an earlier autoflush in the same request snapshotted the column.
+
+    The save MUST call sqlalchemy.orm.attributes.flag_modified() to force
+    the column dirty regardless of snapshot history. This test asserts
+    that save actually invokes flag_modified for the extra_metadata column.
+    """
+    from modules.ai.brain.state import store as state_store_module
+    from modules.ai.brain.types import MerchantConversationState
+
+    # Capture flag_modified invocations
+    calls = []
+    real_flag = state_store_module.__dict__.get("flag_modified")  # may not exist yet
+
+    import sqlalchemy.orm.attributes as sa_attrs
+
+    def _spy(instance, key):
+        calls.append((type(instance).__name__, key))
+
+    monkeypatch.setattr(sa_attrs, "flag_modified", _spy, raising=True)
+
+    # Build a fake conversation row + customer + session that records writes
+    class _FakeConv:
+        def __init__(self):
+            self.id = 9
+            self.tenant_id = 1
+            self.customer_id = 66
+            self.extra_metadata = {"customer_phone": "+966555906901"}
+
+    class _FakeCustomer2:
+        id = 66
+        tenant_id = 1
+        phone = "+966555906901"
+        normalized_phone = "+966555906901"
+
+    fake_conv = _FakeConv()
+    fake_customer = _FakeCustomer2()
+
+    class _FakeSession2:
+        def __init__(self):
+            self.commits = 0
+
+        def query(self, model):
+            name = getattr(model, "__name__", "")
+            rows = [fake_customer] if name == "Customer" else [fake_conv]
+            return _FakeQuery(rows)
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            pass
+
+        def refresh(self, _row, attribute_names=None):
+            # Simulate the post-commit verify step succeeding.
+            return None
+
+    db = _FakeSession2()
+    store = state_store_module.DefaultStateStore()
+
+    state = MerchantConversationState()
+    state.stage = "ordering"
+    state.turn = 2
+    state.greeted = True
+
+    store.save(db, tenant_id=1, customer_phone="+966555906901", state=state)
+
+    # Verify the brain_state was written to the dict
+    assert "brain_state" in (fake_conv.extra_metadata or {})
+    # Verify flag_modified was called for extra_metadata
+    assert ("_FakeConv", "extra_metadata") in calls, (
+        f"flag_modified was not called; calls={calls!r}"
+    )
 
 
 def test_mask_phone_keeps_prefix_and_last_four():

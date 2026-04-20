@@ -259,17 +259,56 @@ class DefaultStateStore:
             meta = dict(conv.extra_metadata or {})
             meta[_STATE_KEY] = state.to_dict()
             conv.extra_metadata = meta
+
+            # JSONB without MutableDict.as_mutable() does NOT track in-place
+            # dict mutations, and even attribute reassignment can be lost in
+            # the presence of autoflush snapshots taken earlier in the same
+            # request (a known SQLAlchemy + JSONB gotcha — see how
+            # promotion_engine.py and coupon_generator.py handle the same
+            # column). flag_modified guarantees the column is actually
+            # written on the next flush, regardless of how the attribute
+            # got there. Without this, brain_state is silently dropped on
+            # the second turn and the bot re-greets — exactly the live
+            # symptom we observed in production.
+            try:
+                from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                flag_modified(conv, "extra_metadata")
+            except Exception as _exc:
+                logger.debug("[StateStore] flag_modified unavailable: %s", _exc)
+
             db.commit()
 
-            logger.info(
-                "[StateStore] turn_save tenant=%s phone=%s "
-                "customer_found=True customer_id=%s conv_id=%s "
-                "matched_column=%s result=ok "
-                "stage=%s turn=%s greeted=%s focus=%s",
-                tenant_id, masked, customer.id, conv.id, matched_column,
-                state.stage, state.turn, state.greeted,
-                bool(state.current_product_focus),
-            )
+            # Verify the write actually landed. We refresh the row from DB
+            # and re-read brain_state. This is cheap (a single SELECT) and
+            # turns a silent persistence failure into a loud WARNING.
+            persistence_verified = False
+            try:
+                db.refresh(conv, attribute_names=["extra_metadata"])
+                fresh_meta = conv.extra_metadata or {}
+                persistence_verified = bool(fresh_meta.get(_STATE_KEY))
+            except Exception as _exc:
+                logger.debug("[StateStore] post-commit verify failed: %s", _exc)
+
+            if not persistence_verified:
+                logger.warning(
+                    "[StateStore] turn_save tenant=%s phone=%s "
+                    "customer_id=%s conv_id=%s matched_column=%s "
+                    "result=committed_but_unverified "
+                    "reason=brain_state_not_present_after_commit "
+                    "stage=%s turn=%s",
+                    tenant_id, masked, customer.id, conv.id, matched_column,
+                    state.stage, state.turn,
+                )
+            else:
+                logger.info(
+                    "[StateStore] turn_save tenant=%s phone=%s "
+                    "customer_found=True customer_id=%s conv_id=%s "
+                    "matched_column=%s result=ok verified=True "
+                    "stage=%s turn=%s greeted=%s focus=%s",
+                    tenant_id, masked, customer.id, conv.id, matched_column,
+                    state.stage, state.turn, state.greeted,
+                    bool(state.current_product_focus),
+                )
 
         except Exception as exc:
             try:
