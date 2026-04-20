@@ -484,12 +484,29 @@ class SallaAdapter(BaseStoreAdapter):
     # ── Abandoned carts ────────────────────────────────────────────────────────
     #
     # Salla's `/orders` endpoint NEVER returns abandoned carts — those live
-    # behind a completely separate endpoint at GET /admin/v2/carts. This is
-    # the source the merchant sees on their Salla dashboard's
-    # "السلات المتروكة" page. We treat every row Salla returns from this
-    # endpoint as a candidate abandoned cart and let the upstream sync layer
-    # decide which to surface (Salla itself only lists carts that have not
-    # converted to orders, so the list IS the abandoned set).
+    # behind the dedicated Merchant API endpoint:
+    #
+    #     GET https://api.salla.dev/admin/v2/carts/abandoned
+    #
+    # docs:  https://docs.salla.dev/api-5394138 (List Abandoned Carts)
+    # scope: ``carts.read``
+    #
+    # CRITICAL: an earlier version of this adapter called ``/carts``
+    # (without the ``/abandoned`` suffix). That path silently returns a
+    # 404 / empty body on Salla, which is then swallowed by the
+    # ``except`` blocks below — the symptom on the merchant's screen is
+    # that "Salla shows N abandoned carts" while Nahla's dashboard sits
+    # on zero forever. The fix below restores the documented path.
+    #
+    # The Salla response shape is:
+    #   { "status": 200, "success": true,
+    #     "data": [ { "id": ..., "total": {amount,currency},
+    #                 "checkout_url": "...", "customer": {...},
+    #                 "items": [...], "created_at": {date,timezone,...} } ],
+    #     "pagination": {count,total,perPage,currentPage,totalPages,links} }
+    #
+    # ``_get_all_pages`` already extracts the ``data`` array and walks
+    # pagination — we just need the right URL.
     async def get_abandoned_carts(self) -> List[Dict[str, Any]]:
         """Fetch all abandoned carts from Salla.
 
@@ -500,7 +517,7 @@ class SallaAdapter(BaseStoreAdapter):
         """
         try:
             return await self._get_all_pages(
-                "/carts", label="abandoned_carts",
+                "/carts/abandoned", label="abandoned_carts",
             )
         except SallaTokenRevokedException:
             raise

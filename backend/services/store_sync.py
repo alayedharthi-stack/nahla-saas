@@ -198,20 +198,47 @@ def _normalise_order(raw: Any) -> Dict:
     }
 
 
+def _flatten_salla_datetime(value: Any) -> str:
+    """
+    Salla's abandoned-cart payload returns timestamps as a nested object:
+
+        {"date": "2026-04-19 10:00:00.000000", "timezone_type": 3,
+         "timezone": "Asia/Riyadh"}
+
+    Older endpoints (and a few storefront webhooks) still send a flat
+    string. We accept either shape and always return a string the
+    downstream parser can read. Returning "" rather than None keeps the
+    column non-NULL and the dashboard timestamp formatter happy.
+    """
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("date") or value.get("iso") or value.get("formatted") or "")
+    return str(value)
+
+
 def _normalise_abandoned_cart(raw: Any) -> Dict:
     """Convert a Salla-style abandoned-cart payload into the internal Order shape.
 
-    Salla's ``GET /admin/v2/carts`` endpoint returns a different shape than
-    ``/orders``:
+    Salla's ``GET /admin/v2/carts/abandoned`` endpoint returns a shape
+    that differs from ``/orders`` in a few important ways
+    (docs: https://docs.salla.dev/api-5394138):
 
       * The cart's primary key is ``id`` (small integer).
-      * ``total`` may live at ``total.amount`` OR at top-level ``total``.
-      * Customer is at ``customer`` (same nested shape as orders, but may
-        include only ``mobile`` without a name).
+      * ``total`` is ``{"amount": <number>, "currency": "SAR"}``.
+      * ``customer`` carries ``{id, name, mobile, email, ...}`` — the
+        phone is in ``mobile``, not ``phone``.
       * ``checkout_url`` is the resume-cart URL we surface to the dashboard
         and to the WhatsApp recovery flow — never compute it ourselves.
       * ``items`` is the line-item list; we keep it verbatim so the cart
         editor / recovery message can render product names.
+      * ``created_at`` and ``updated_at`` are nested objects
+        ``{date, timezone, timezone_type}``, NOT plain strings. The old
+        normalizer fell through ``str(dict)`` here and produced a row
+        with an unparseable timestamp — handled now via
+        ``_flatten_salla_datetime``.
 
     We intentionally prefix the external_id with ``cart-`` so an abandoned
     cart can NEVER collide with a real Salla order that happens to share
@@ -251,7 +278,19 @@ def _normalise_abandoned_cart(raw: Any) -> Dict:
     )
     customer_name = str(customer_name).strip()
 
-    cart_dt = _extract_order_datetime(raw)
+    # Flatten the Salla nested {date, timezone} shape BEFORE handing
+    # the dict to ``_extract_order_datetime`` — that function does
+    # ``str(value)`` on whatever is at ``raw["created_at"]`` and would
+    # otherwise produce a literal "{'date': ...}" string that no parser
+    # accepts. We mutate a copy so we never alter the adapter's payload.
+    raw_for_dt = dict(raw)
+    flat_created = _flatten_salla_datetime(raw.get("created_at"))
+    flat_updated = _flatten_salla_datetime(raw.get("updated_at"))
+    if flat_created:
+        raw_for_dt["created_at"] = flat_created
+    if flat_updated:
+        raw_for_dt["updated_at"] = flat_updated
+    cart_dt = _extract_order_datetime(raw_for_dt)
 
     return {
         "external_id":           external_id,
@@ -264,7 +303,7 @@ def _normalise_abandoned_cart(raw: Any) -> Dict:
         "checkout_url":          raw.get("checkout_url", "") or raw.get("url", ""),
         "is_abandoned":          True,
         "source":                "salla",
-        "created_at":            cart_dt.isoformat() if cart_dt else (raw.get("created_at") or raw.get("updated_at")),
+        "created_at":            cart_dt.isoformat() if cart_dt else (flat_created or flat_updated),
         "raw_cart_id":           cart_id,
     }
 

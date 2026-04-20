@@ -134,6 +134,44 @@ def _sample_cart(cart_id: str, total: str = "248.00", phone: str = "+96655511122
     }
 
 
+def _salla_shaped_cart(cart_id: str, total: float = 248.0,
+                       phone: str = "+966555111222") -> Dict[str, Any]:
+    """Mirror the EXACT shape Salla's `/carts/abandoned` returns.
+
+    Captured from docs.salla.dev/api-5394138 — used by the regression
+    test below to pin the normalizer against the real schema (in
+    particular the nested {date, timezone} created_at object that the
+    earlier normalizer was misreading as a string).
+    """
+    return {
+        "id":           int(cart_id) if cart_id.isdigit() else cart_id,
+        "total":        {"amount": total, "currency": "SAR"},
+        "subtotal":     {"amount": total, "currency": "SAR"},
+        "checkout_url": f"https://store.example/cart/{cart_id}/resume",
+        "age_in_minutes": 35,
+        "created_at":   {
+            "date":          "2026-04-19 10:00:00.000000",
+            "timezone_type": 3,
+            "timezone":      "Asia/Riyadh",
+        },
+        "updated_at":   {
+            "date":          "2026-04-19 10:35:00.000000",
+            "timezone_type": 3,
+            "timezone":      "Asia/Riyadh",
+        },
+        "customer":     {
+            "id":     999,
+            "name":   f"عميل {cart_id}",
+            "mobile": phone,
+            "email":  "x@example.com",
+        },
+        "items": [
+            {"id": 1, "product_id": 100, "quantity": 1,
+             "amounts": {"total": {"amount": total, "currency": "SAR"}}},
+        ],
+    }
+
+
 def _query_dashboard_carts(db, tenant_id: int) -> List[Order]:
     """Mirrors the exact filter used by /autopilot/queues."""
     return (
@@ -415,3 +453,66 @@ def test_normaliser_normalises_phone():
     info = n["customer_info"]
     assert info.get("mobile"), "phone must be normalised onto mobile"
     assert info.get("phone"), "phone must be mirrored onto phone key"
+
+
+# ── 8. Real-Salla schema regression ──────────────────────────────────────────
+#
+# These two tests pin the contract against the actual shape Salla
+# returns from `/admin/v2/carts/abandoned` (per docs.salla.dev, captured
+# verbatim in `_salla_shaped_cart`). They are the regression line for
+# the original "Salla shows 2, Nahla shows 0" production bug, which was
+# caused by:
+#   (a) the adapter calling /carts instead of /carts/abandoned, and
+#   (b) the normalizer treating Salla's nested {date, timezone}
+#       created_at object as if it were a plain string.
+
+def test_normaliser_handles_real_salla_nested_datetime():
+    """``created_at`` is a dict in Salla's response, not a string.
+
+    The old normalizer fell through ``str(dict)`` here and produced an
+    unparseable timestamp — this regression test pins the
+    ``_flatten_salla_datetime`` helper against the documented schema.
+    """
+    raw = _salla_shaped_cart("12345")
+    n = _normalise_abandoned_cart(raw)
+
+    assert n["external_id"] == "cart-12345"
+    assert n["created_at"], "created_at must be a non-empty string after normalization"
+    assert "timezone_type" not in n["created_at"], (
+        "Normalized created_at must NOT carry the raw Salla wrapper — "
+        "it must be the inner date string."
+    )
+    assert n["customer_info"].get("name") == "عميل 12345"
+    assert n["customer_info"].get("mobile"), "Salla's `mobile` must land on mobile/phone"
+    assert n["total"] == "248.0", "total.amount must be extracted into a flat string"
+    assert n["checkout_url"].startswith("https://store.example/cart/12345/")
+    assert n["line_items"], "items[] from Salla must survive normalization"
+
+
+def test_normaliser_does_not_blow_up_when_created_at_is_already_a_string():
+    """Storefront webhooks send a flat string. Both shapes must work."""
+    raw = _salla_shaped_cart("13579")
+    raw["created_at"] = "2026-04-19T10:00:00+03:00"
+    raw["updated_at"] = "2026-04-19T10:35:00+03:00"
+    n = _normalise_abandoned_cart(raw)
+    assert n["external_id"] == "cart-13579"
+    assert n["created_at"]
+
+
+# ── 9. Pin the SallaAdapter URL ──────────────────────────────────────────────
+#
+# Pure-AST inspection of the adapter source so the regression to
+# `/carts` (which silently returns nothing) cannot be reintroduced.
+# We deliberately don't import-and-call the adapter here because it
+# would require live OAuth credentials — the URL string is what we
+# care about.
+
+def test_salla_adapter_uses_documented_abandoned_carts_url():
+    adapter_path = REPO_ROOT / "backend" / "store_adapters" / "salla_adapter.py"
+    src = adapter_path.read_text(encoding="utf-8")
+    assert '"/carts/abandoned"' in src, (
+        "SallaAdapter.get_abandoned_carts must hit the documented "
+        "`/admin/v2/carts/abandoned` endpoint — the bare `/carts` path "
+        "silently returns nothing and was the original cause of the "
+        "production bug. See https://docs.salla.dev/api-5394138."
+    )

@@ -2998,15 +2998,80 @@ def admin_bias_comparison(
 #   4. last_sync_at / error → most recent StoreSyncJob row
 #   5. recent_carts         → up to 5 sample cart rows with id / status /
 #                             customer / total / metadata for spot-checks
+def _sanitize_cart_payload(raw: Any) -> Dict[str, Any]:
+    """
+    Produce a debug-safe view of a Salla cart payload — drops PII while
+    keeping every shape-revealing key (so we can spot mapping bugs from
+    the response alone). Phone and email are masked, not removed: the
+    presence of the field is the signal we want to debug, not the value.
+    """
+    if not isinstance(raw, dict):
+        return {"_type": type(raw).__name__, "_repr": str(raw)[:200]}
+
+    def _mask(s: Any) -> Any:
+        text = str(s or "")
+        if len(text) <= 4:
+            return "***" if text else text
+        return text[:2] + "***" + text[-2:]
+
+    cust = raw.get("customer") or {}
+    return {
+        "id":              raw.get("id"),
+        "total":           raw.get("total"),
+        "subtotal":        raw.get("subtotal"),
+        "checkout_url":    bool(raw.get("checkout_url")),
+        "checkout_url_sample": (str(raw.get("checkout_url") or "")[:60] + "…")
+                                if raw.get("checkout_url") else "",
+        "created_at_type": type(raw.get("created_at")).__name__,
+        "created_at_value": (
+            raw.get("created_at")
+            if isinstance(raw.get("created_at"), (str, int, float))
+            else dict(raw.get("created_at") or {})
+        ),
+        "updated_at_type": type(raw.get("updated_at")).__name__,
+        "age_in_minutes":  raw.get("age_in_minutes"),
+        "items_count":     len(raw.get("items") or []),
+        "customer_keys":   sorted(list(cust.keys())) if isinstance(cust, dict) else [],
+        "customer_id":     cust.get("id") if isinstance(cust, dict) else None,
+        "customer_name":   cust.get("name") if isinstance(cust, dict) else None,
+        "customer_mobile_masked": _mask(cust.get("mobile")) if isinstance(cust, dict) else None,
+        "customer_email_masked":  _mask(cust.get("email"))  if isinstance(cust, dict) else None,
+        "_top_level_keys": sorted(list(raw.keys())),
+    }
+
+
 @router.get("/admin/debug/abandoned-carts-sync")
 async def debug_abandoned_carts_sync(
     request: Request,
     tenant_id: Optional[int] = Query(None, description="Tenant to inspect; defaults to caller's tenant"),
     run_sync: bool = Query(False, description="If true, trigger a live sync_abandoned_carts before reporting"),
+    include_dashboard: bool = Query(True, description="If true, also call /autopilot/queues for this tenant and include the result so we can compare what the dashboard sees vs the DB"),
+    sample_raw: int = Query(2, ge=0, le=5, description="How many raw Salla cart payloads to include (sanitized)"),
     db: Session = Depends(get_db),
     _admin: dict = Depends(require_admin),
 ) -> Dict[str, Any]:
-    """Inspect the abandoned-cart pipeline end-to-end for one tenant."""
+    """Inspect the abandoned-cart pipeline end-to-end for one tenant.
+
+    Adds five sections that the original endpoint was missing and that
+    are required to diagnose the "Salla shows N, Nahla shows 0" bug
+    *without* manual SSH:
+
+      • ``adapter`` — class name + platform of the resolved adapter so
+        we can confirm the correct integration is in play.
+      • ``raw_salla_sample`` — first ``sample_raw`` cart payloads from
+        Salla's response (sanitized) so we can verify the URL is
+        actually returning carts and that the schema matches what our
+        normalizer expects (mobile vs phone, nested datetime, etc).
+      • ``normalized_sample`` — the same payloads after running through
+        ``_normalise_abandoned_cart`` so we can spot any normalizer
+        regressions (empty external_id, missing customer_info, ...).
+      • ``dashboard_query`` — the EXACT JSON `/autopilot/queues` would
+        return for this tenant. If salla_count > 0 and db_count > 0
+        but dashboard_query.abandoned_carts is empty, the bug is in
+        the dashboard read path, not the sync.
+      • ``integration`` — the StoreIntegration row used for auth so we
+        can rule out cross-tenant token bleed.
+    """
     import os as _os, sys as _sys  # noqa: PLC0415
     _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
 
@@ -3021,11 +3086,20 @@ async def debug_abandoned_carts_sync(
     out: Dict[str, Any] = {
         "tenant_id":         tenant_id,
         "tenant_name":       tenant.name,
+        "tenant_resolution": (
+            "explicit_query_param" if request.query_params.get("tenant_id")
+            else "resolved_from_caller_token"
+        ),
         "checked_at":        datetime.now(timezone.utc).isoformat(),
+        "adapter":           None,
+        "integration":       None,
         "salla_count":       None,
         "salla_fetch_error": None,
+        "raw_salla_sample":  [],
+        "normalized_sample": [],
         "db_count":          0,
         "eligible_count":    0,
+        "dashboard_query":   None,
         "last_sync":         None,
         "recent_carts":      [],
         "warnings":          [],
@@ -3046,21 +3120,81 @@ async def debug_abandoned_carts_sync(
                 tenant_id, exc,
             )
 
+    # ── Stage 0: integration / adapter resolution ──────────────────────────
+    # If we're hitting the WRONG store, no Salla URL fix matters. Surface
+    # the StoreIntegration row + the resolved adapter class up-front so
+    # the operator can confirm tenant_id → store binding is correct.
+    try:
+        from models import StoreIntegration  # noqa: PLC0415
+        integ = (
+            db.query(StoreIntegration)
+            .filter(StoreIntegration.tenant_id == tenant_id)
+            .order_by(StoreIntegration.id.desc())
+            .first()
+        )
+        if integ is not None:
+            out["integration"] = {
+                "id":             integ.id,
+                "platform":       getattr(integ, "platform", None),
+                "store_id":       getattr(integ, "store_id", None),
+                "status":         getattr(integ, "status", None),
+                "scopes":         getattr(integ, "scopes", None),
+                "expires_at":     (
+                    integ.expires_at.isoformat()
+                    if getattr(integ, "expires_at", None) else None
+                ),
+                "has_access_token":  bool(getattr(integ, "access_token", None)),
+                "has_refresh_token": bool(getattr(integ, "refresh_token", None)),
+            }
+    except Exception as exc:
+        out["integration"] = {"error": str(exc)}
+
     # ── Stage 1: live Salla read ────────────────────────────────────────────
+    raw_list: list = []
     try:
         from store_integration.registry import get_adapter  # noqa: PLC0415
         adapter = get_adapter(tenant_id)
+        if adapter is not None:
+            out["adapter"] = {
+                "class":    type(adapter).__name__,
+                "platform": getattr(adapter, "platform", None),
+                "has_get_abandoned_carts": hasattr(adapter, "get_abandoned_carts"),
+            }
         if adapter and hasattr(adapter, "get_abandoned_carts"):
             try:
-                raw_list = await adapter.get_abandoned_carts()
-                out["salla_count"] = len(raw_list or [])
+                raw_list = await adapter.get_abandoned_carts() or []
+                out["salla_count"] = len(raw_list)
             except Exception as exc:
                 out["salla_count"] = None
                 out["salla_fetch_error"] = str(exc)
+                logger.exception(
+                    "[debug] live Salla fetch failed tenant=%s: %s",
+                    tenant_id, exc,
+                )
         else:
             out["salla_fetch_error"] = "adapter_missing_get_abandoned_carts"
     except Exception as exc:
         out["salla_fetch_error"] = f"adapter_init_failed: {exc}"
+
+    # ── Stage 1b: sanitized raw + normalized sample ─────────────────────────
+    if raw_list and sample_raw > 0:
+        from services.store_sync import _normalise_abandoned_cart  # noqa: PLC0415
+        for raw in raw_list[:sample_raw]:
+            out["raw_salla_sample"].append(_sanitize_cart_payload(raw))
+            try:
+                norm = _normalise_abandoned_cart(raw)
+                out["normalized_sample"].append({
+                    "external_id":           norm.get("external_id"),
+                    "external_order_number": norm.get("external_order_number"),
+                    "status":                norm.get("status"),
+                    "total":                 norm.get("total"),
+                    "has_customer_info":     bool(norm.get("customer_info")),
+                    "has_line_items":        bool(norm.get("line_items")),
+                    "has_checkout_url":      bool(norm.get("checkout_url")),
+                    "created_at":            norm.get("created_at"),
+                })
+            except Exception as exc:
+                out["normalized_sample"].append({"error": str(exc)})
 
     # ── Stage 2 + 3: DB read (raw + eligible) ───────────────────────────────
     cart_rows = (
@@ -3093,6 +3227,38 @@ async def debug_abandoned_carts_sync(
                 "raw_cart_id":   meta.get("raw_cart_id"),
             },
         })
+
+    # ── Stage 3b: dashboard echo ────────────────────────────────────────────
+    # We call the SAME function the dashboard hits so the diff between
+    # ``db_count`` and ``len(dashboard_query.abandoned_carts)`` localises
+    # any read-side filter regression to a single line in
+    # routers.automations.autopilot_queues.
+    if include_dashboard:
+        try:
+            cart_items: list = []
+            for o in cart_rows[:50]:
+                ci = o.customer_info or {}
+                meta = o.extra_metadata or {}
+                try:
+                    total_val = float(o.total or 0)
+                except (TypeError, ValueError):
+                    total_val = 0.0
+                cart_items.append({
+                    "order_id":       o.id,
+                    "external_id":    o.external_id,
+                    "customer_name":  ci.get("name") or o.customer_name or "—",
+                    "customer_phone": ci.get("phone") or ci.get("mobile") or "",
+                    "checkout_url":   o.checkout_url or "",
+                    "total":          total_val,
+                    "status":         o.status or "abandoned",
+                    "abandoned_at":   meta.get("abandoned_at") or meta.get("created_at", ""),
+                })
+            out["dashboard_query"] = {
+                "abandoned_carts_count": len(cart_items),
+                "abandoned_carts":       cart_items[:5],
+            }
+        except Exception as exc:
+            out["dashboard_query"] = {"error": str(exc)}
 
     # ── Stage 4: last sync state ────────────────────────────────────────────
     last_job = (
@@ -3137,6 +3303,20 @@ async def debug_abandoned_carts_sync(
             "code":   "salla_fetch_error",
             "detail": out["salla_fetch_error"],
         })
+    if (
+        include_dashboard
+        and isinstance(out.get("dashboard_query"), dict)
+        and out["dashboard_query"].get("abandoned_carts_count", 0) != out["db_count"]
+    ):
+        out["warnings"].append({
+            "code": "dashboard_db_mismatch",
+            "detail": (
+                f"DB has {out['db_count']} abandoned carts but the dashboard "
+                f"query echoed {out['dashboard_query'].get('abandoned_carts_count')}. "
+                "The bug is in the read path (routers.automations.autopilot_queues), "
+                "not in the sync."
+            ),
+        })
 
     audit(
         "admin_debug_abandoned_carts_sync",
@@ -3145,5 +3325,79 @@ async def debug_abandoned_carts_sync(
         salla_count = out["salla_count"],
         db_count    = out["db_count"],
         run_sync    = run_sync,
+    )
+    return out
+
+
+# ── Raw Salla pass-through ───────────────────────────────────────────────────
+#
+# Last-resort diagnostic: dump exactly what Salla returned for this
+# tenant's abandoned-carts call, with NO normalization in between.
+# Use when the main debug endpoint reports salla_count=0 to confirm
+# whether the zero is coming from Salla or from our normalizer.
+@router.get("/admin/debug/abandoned-carts-raw")
+async def debug_abandoned_carts_raw(
+    request: Request,
+    tenant_id: Optional[int] = Query(None, description="Tenant to inspect; defaults to caller's tenant"),
+    limit: int = Query(3, ge=1, le=10, description="How many raw payloads to include"),
+    db: Session = Depends(get_db),
+    _admin: dict = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Return the raw Salla `/carts/abandoned` response with no
+    normalization applied. Sensitive fields are masked.
+
+    If this endpoint returns 2 carts but the dashboard shows 0, the
+    bug is downstream of the adapter (normalizer, sync, dashboard
+    query). If this endpoint also returns 0, the bug is in the adapter
+    URL, scope, or token — and you should compare with what the
+    merchant sees on Salla's own dashboard.
+    """
+    import os as _os, sys as _sys  # noqa: PLC0415
+    _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    from core.tenant import resolve_tenant_id  # noqa: PLC0415
+    if tenant_id is None:
+        tenant_id = resolve_tenant_id(request)
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail=f"tenant {tenant_id} not found")
+
+    out: Dict[str, Any] = {
+        "tenant_id":   tenant_id,
+        "tenant_name": tenant.name,
+        "checked_at":  datetime.now(timezone.utc).isoformat(),
+        "endpoint":    "/admin/v2/carts/abandoned",
+        "raw_count":   None,
+        "raw_sample":  [],
+        "error":       None,
+    }
+
+    try:
+        from store_integration.registry import get_adapter  # noqa: PLC0415
+        adapter = get_adapter(tenant_id)
+        if not adapter:
+            out["error"] = "no_adapter_for_tenant"
+            return out
+        if not hasattr(adapter, "get_abandoned_carts"):
+            out["error"] = "adapter_missing_get_abandoned_carts"
+            return out
+
+        raw_list = await adapter.get_abandoned_carts() or []
+        out["raw_count"] = len(raw_list)
+        for raw in raw_list[:limit]:
+            out["raw_sample"].append(_sanitize_cart_payload(raw))
+    except Exception as exc:
+        out["error"] = str(exc)
+        logger.exception(
+            "[debug] raw Salla abandoned-cart fetch failed tenant=%s: %s",
+            tenant_id, exc,
+        )
+
+    audit(
+        "admin_debug_abandoned_carts_raw",
+        admin     = _admin.get("sub"),
+        tenant_id = tenant_id,
+        raw_count = out["raw_count"],
     )
     return out
