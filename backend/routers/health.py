@@ -15,9 +15,12 @@ Routes:
 Dependencies: core/database, core/tenant, observability/health
 """
 import logging
+import os
+import subprocess
 import time as _time
 from datetime import datetime, timezone
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -38,6 +41,99 @@ router = APIRouter()
 
 # Captured at import time — measures uptime relative to first router load.
 _START_TIME = _time.monotonic()
+# Captured at import time — best estimate of when this process (and therefore
+# this deploy) started serving traffic. Used by /version.
+_DEPLOYED_AT = datetime.now(timezone.utc)
+
+
+def _read_git_head_sha() -> Optional[str]:
+    """
+    Fallback for environments that don't inject RAILWAY_GIT_COMMIT_SHA.
+
+    Tries, in order:
+      1. ``git rev-parse HEAD`` (works in dev / any image with git installed).
+      2. Reading ``.git/HEAD`` directly (works in slim images without git).
+
+    Returns None if neither approach succeeds — callers should treat that as
+    "unknown" rather than crash.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        sha = out.decode("ascii", errors="ignore").strip()
+        if sha:
+            return sha
+    except Exception:
+        pass
+
+    # Walk up from this file looking for a .git directory.
+    here = Path(__file__).resolve()
+    for parent in [here, *here.parents]:
+        git_dir = parent / ".git"
+        if not git_dir.exists():
+            continue
+        try:
+            head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        except Exception:
+            return None
+        if head.startswith("ref:"):
+            ref_path = git_dir / head.split(" ", 1)[1].strip()
+            try:
+                return ref_path.read_text(encoding="utf-8").strip() or None
+            except Exception:
+                return None
+        return head or None
+    return None
+
+
+def _resolve_deploy_metadata() -> Dict[str, Any]:
+    """
+    Collect deploy / build identity from the environment.
+
+    Railway injects ``RAILWAY_GIT_*`` and ``RAILWAY_*`` vars on every build.
+    We also accept generic ``GIT_SHA`` / ``GIT_BRANCH`` so non-Railway hosts
+    (Render, Fly, Docker self-host) can populate the same endpoint.
+
+    Anything truly missing falls through to a best-effort ``.git/HEAD`` read,
+    and finally ``"unknown"`` so the response is always well-formed.
+    """
+    sha = (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_SHA")
+        or os.getenv("SOURCE_COMMIT")
+        or os.getenv("COMMIT_SHA")
+        or _read_git_head_sha()
+        or "unknown"
+    )
+    branch = (
+        os.getenv("RAILWAY_GIT_BRANCH")
+        or os.getenv("GIT_BRANCH")
+        or os.getenv("SOURCE_BRANCH")
+        or "unknown"
+    )
+    return {
+        "git_sha":             sha,
+        "git_sha_short":       sha[:7] if sha and sha != "unknown" else "unknown",
+        "git_branch":          branch,
+        "git_commit_message":  os.getenv("RAILWAY_GIT_COMMIT_MESSAGE"),
+        "git_author":          os.getenv("RAILWAY_GIT_AUTHOR"),
+        "deployed_at":         _DEPLOYED_AT.isoformat(),
+        "uptime_seconds":      round(_time.monotonic() - _START_TIME),
+        "railway_environment": os.getenv("RAILWAY_ENVIRONMENT_NAME") or os.getenv("RAILWAY_ENVIRONMENT"),
+        "railway_service":     os.getenv("RAILWAY_SERVICE_NAME"),
+        "railway_project":     os.getenv("RAILWAY_PROJECT_NAME"),
+        "railway_deployment_id": os.getenv("RAILWAY_DEPLOYMENT_ID"),
+        "railway_replica_id":  os.getenv("RAILWAY_REPLICA_ID"),
+    }
+
+
+# Resolved once at import — avoids re-running git on every request and
+# guarantees the SHA we report is the SHA of the binary actually running,
+# even if the working tree is later mutated by a sidecar.
+_DEPLOY_METADATA: Dict[str, Any] = _resolve_deploy_metadata()
 
 
 @router.get("/")
@@ -71,6 +167,32 @@ async def health_alias():
         "uptime_seconds": round(_time.monotonic() - _START_TIME),
         "version":        "1.0.0",
     }
+
+
+@router.get("/version")
+async def version():
+    """
+    Deploy identity probe — returns the git SHA, branch, and Railway
+    environment of the **running** binary.
+
+    Use this to confirm a redeploy actually picked up your latest commit:
+        $ curl -s https://api.nahlah.ai/version | jq .git_sha
+
+    No auth required by design — the response contains zero secrets and is
+    intended to be hit by humans, CI smoke tests, and uptime probes.
+    """
+    meta = dict(_DEPLOY_METADATA)
+    meta["uptime_seconds"] = round(_time.monotonic() - _START_TIME)
+    meta["service"] = "nahla-saas"
+    meta["status"] = "ok"
+    meta["checked_at"] = datetime.now(timezone.utc).isoformat()
+    return meta
+
+
+@router.get("/api/version")
+async def version_alias():
+    """Alias: /api/version → same as /version."""
+    return await version()
 
 
 @router.get("/health/db")
