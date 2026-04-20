@@ -66,6 +66,19 @@ KNOWN_ACTIONS = frozenset({
 
 DeliveryMode = Literal["template", "interactive", "ai_recovery"]
 
+# Delivery *policy* — what the merchant configures per step. The
+# concrete wire format the engine ends up sending is one of
+# :data:`DeliveryMode` and is resolved at send time by
+# :func:`services.delivery_policy.resolve_delivery_mode` based on the
+# live customer-service-window state and AI eligibility.
+#
+#   "auto"        — recommended default; pick the best legal mode
+#   "template"    — always template (works inside or outside window)
+#   "interactive" — interactive when window open, fallback otherwise
+#   "ai_recovery" — Claude turn when window open + AI eligible, else fallback
+PrimaryDeliveryMode = Literal["auto", "template", "interactive", "ai_recovery"]
+FallbackDeliveryMode = Literal["template", "none"]
+
 
 # ── id codec ────────────────────────────────────────────────────────────────
 

@@ -34,6 +34,15 @@ import {
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type DeliveryMode = 'template' | 'interactive' | 'ai_recovery'
+// Primary policy slot — what the merchant *configures*. The runtime
+// engine resolves this into a concrete `DeliveryMode` at send time
+// based on the live customer-service-window state. See
+// `backend/services/delivery_policy.py::resolve_delivery_mode`.
+export type PrimaryDeliveryMode = 'auto' | DeliveryMode
+// Only template makes sense as a fallback today (it's the only wire
+// format Meta lets us send unconditionally outside the 24h window).
+export type FallbackDeliveryMode = 'template' | 'none'
+
 export type ButtonAction =
   | 'resume_cart' | 'apply_coupon' | 'ask_question'
   | 'human_help' | 'postpone'
@@ -41,7 +50,12 @@ export type ButtonAction =
 interface RecoveryStep {
   enabled?: boolean
   delay_minutes?: number
+  // Legacy single-mode field, still written on save for backwards
+  // compatibility with older backend builds. New code reads
+  // primary_mode / fallback_mode below.
   delivery_mode?: DeliveryMode
+  primary_mode?: PrimaryDeliveryMode
+  fallback_mode?: FallbackDeliveryMode
   message_type?: string
   template_name?: string
   template_name_en?: string
@@ -74,16 +88,71 @@ interface AbandonedCartEditorProps {
 // ── Static metadata ──────────────────────────────────────────────────────────
 
 const STAGE_LABELS_AR: Record<number, { title: string; sub: string; tone: string }> = {
-  0: { title: '١. التذكير الأول',         sub: '٣٠ دقيقة — قالب رسمي',              tone: 'bg-amber-50 text-amber-700 border-amber-200' },
+  0: { title: '١. التذكير الأول',         sub: '٣٠ دقيقة — قالب معتمد',              tone: 'bg-amber-50 text-amber-700 border-amber-200' },
   1: { title: '٢. متابعة ذكية',          sub: '٦ ساعات — رسالة تفاعلية داخل النافذة', tone: 'bg-blue-50  text-blue-700  border-blue-200'  },
   2: { title: '٣. استرداد بالذكاء (اختياري)', sub: '٨ ساعات — يستخدم الذكاء عند الحاجة',    tone: 'bg-purple-50 text-purple-700 border-purple-200' },
   3: { title: '٤. الدفعة الأخيرة بالخصم', sub: '٢٣ ساعة و٥٠ دقيقة — قبل انتهاء النافذة', tone: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
 }
 
-const DELIVERY_MODE_LABELS: Record<DeliveryMode, string> = {
-  template:    'قالب معتمد (مارا 24س)',
-  interactive: 'رسالة تفاعلية (داخل النافذة)',
-  ai_recovery: 'استرداد بالذكاء',
+// What we render in the dropdown for each "primary" choice. The
+// helper hint underneath each option explains Meta's window rules
+// so the merchant doesn't pick "interactive" for a stage-1 cart and
+// then wonder why messages aren't going out.
+const PRIMARY_MODE_OPTIONS: {
+  value: PrimaryDeliveryMode
+  label: string
+  hint:  string
+}[] = [
+  { value: 'auto',
+    label: '⚡ اختيار تلقائي (موصى به)',
+    hint:  'يستخدم رسالة تفاعلية أو ذكاء داخل النافذة، ويرجع للقالب خارجها.' },
+  { value: 'interactive',
+    label: 'رسالة تفاعلية',
+    hint:  'تعمل فقط داخل نافذة الـ 24 ساعة. خارجها نرجع للقالب تلقائياً.' },
+  { value: 'ai_recovery',
+    label: 'استرداد بالذكاء',
+    hint:  'تعمل فقط داخل النافذة ومع تفعيل الذكاء. خارجها نرجع للقالب.' },
+  { value: 'template',
+    label: 'قالب معتمد دائماً',
+    hint:  'قالب معتمد من ميتا — يعمل في أي وقت داخل أو خارج النافذة.' },
+]
+
+const FALLBACK_MODE_OPTIONS: {
+  value: FallbackDeliveryMode
+  label: string
+  hint:  string
+}[] = [
+  { value: 'template',
+    label: 'قالب معتمد (الإفتراضي)',
+    hint:  'إذا لم تتوفر النافذة أو الذكاء، نرسل القالب لضمان وصول الرسالة.' },
+  { value: 'none',
+    label: 'لا تُرسل أي شيء',
+    hint:  'تخطّي الرسالة بدلاً من إرسال القالب. نوصي بعدم استخدام هذا.' },
+]
+
+// Effective inside-window vs outside-window mode preview, computed
+// live from the policy so the merchant sees what will actually be
+// sent in each scenario before saving.
+function previewEffective(
+  primary: PrimaryDeliveryMode,
+  fallback: FallbackDeliveryMode,
+  aiEnabled: boolean,
+): { inside: string; outside: string } {
+  const inside =
+    primary === 'auto'
+      ? (aiEnabled ? 'استرداد بالذكاء' : 'رسالة تفاعلية')
+      : primary === 'template'
+        ? 'قالب معتمد'
+        : primary === 'interactive'
+          ? 'رسالة تفاعلية'
+          : (aiEnabled ? 'استرداد بالذكاء' : 'قالب معتمد (الذكاء غير مُفعّل)')
+  const outside =
+    primary === 'template'
+      ? 'قالب معتمد'
+      : fallback === 'template'
+        ? 'قالب معتمد (تلقائياً)'
+        : '— لا تُرسل —'
+  return { inside, outside }
 }
 
 const BUTTON_LABELS_AR: Record<ButtonAction, { label: string; hint: string }> = {
@@ -269,9 +338,50 @@ function StepEditor({ stepIdx, step, onChange }: StepEditorProps) {
   const meta = STAGE_LABELS_AR[stepIdx] ?? {
     title: `خطوة ${stepIdx + 1}`, sub: '', tone: 'bg-slate-50 text-slate-700 border-slate-200',
   }
-  const isAiStep = step.message_type === 'ai_recovery' || step.delivery_mode === 'ai_recovery'
+  // ── Resolve the merchant's policy ──────────────────────────────────────
+  // Read the new `primary_mode` first, then fall back to the legacy
+  // `delivery_mode` so configs saved before this UI shipped still
+  // resolve to the same intent without a migration.
+  const primaryMode: PrimaryDeliveryMode =
+    (step.primary_mode as PrimaryDeliveryMode | undefined)
+    ?? (step.delivery_mode as PrimaryDeliveryMode | undefined)
+    ?? 'auto'
+  const fallbackMode: FallbackDeliveryMode = step.fallback_mode ?? 'template'
+
+  const isAiStep =
+    step.message_type === 'ai_recovery'
+    || primaryMode === 'ai_recovery'
+    || (primaryMode === 'auto' && step.ai_recovery_enabled === true)
+  // We need the body text editor whenever the engine *might* end up
+  // sending a non-template wire format (interactive / ai_recovery),
+  // and the template-name inputs whenever it *might* end up sending
+  // a template — including the "auto" case where both can happen
+  // depending on the live window state.
+  const showBodyEditor = primaryMode !== 'template'
+  const showTemplateInputs =
+    primaryMode === 'template'
+    || primaryMode === 'auto'
+    || fallbackMode === 'template'
+
   const buttons: ButtonAction[] = Array.isArray(step.buttons) ? step.buttons : []
   const ctaLabels = step.cta_labels ?? {}
+
+  const setPrimary = (next: PrimaryDeliveryMode) => {
+    // Mirror to legacy delivery_mode so an older backend reading the
+    // legacy field still sends the right wire format. "auto" maps to
+    // "interactive" in the legacy field because that was the previous
+    // default behaviour for in-window stages.
+    const legacy: DeliveryMode =
+      next === 'auto' ? 'interactive' : next
+    onChange({ primary_mode: next, delivery_mode: legacy })
+  }
+  const setFallback = (next: FallbackDeliveryMode) => {
+    onChange({ fallback_mode: next })
+  }
+
+  const aiEnabledForPreview =
+    step.ai_recovery_enabled === true
+  const preview = previewEffective(primaryMode, fallbackMode, aiEnabledForPreview)
 
   // Delay split into hours+minutes for a friendlier UX.
   const totalMinutes = Number(step.delay_minutes ?? 0) || 0
@@ -315,22 +425,72 @@ function StepEditor({ stepIdx, step, onChange }: StepEditorProps) {
           </Field>
         </div>
 
-        {/* Delivery mode */}
-        <Field label="طريقة الإرسال">
-          <select
-            value={step.delivery_mode ?? 'template'}
-            onChange={e => onChange({ delivery_mode: e.target.value as DeliveryMode })}
-            className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg bg-white"
-          >
-            {Object.entries(DELIVERY_MODE_LABELS).map(([k, v]) => (
-              <option key={k} value={k}>{v}</option>
-            ))}
-          </select>
-        </Field>
+        {/* ── Delivery policy ────────────────────────────────────────────
+            Two slots — "primary" (what to try first) and "fallback"
+            (what to use when primary isn't legal). Replaces the old
+            single dropdown that misled merchants into thinking
+            "interactive" or "ai_recovery" would always work. */}
+        <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 space-y-3">
+          <div className="flex items-start gap-2">
+            <MessageSquare className="w-3.5 h-3.5 text-slate-500 mt-0.5 shrink-0" />
+            <p className="text-[11px] text-slate-600 leading-relaxed">
+              ميتا تفرض قاعدة الـ 24 ساعة:
+              <span className="font-semibold"> داخل النافذة</span>
+              {' '}يمكن إرسال رسائل تفاعلية أو ذكاء، أما
+              <span className="font-semibold"> خارجها</span>
+              {' '}فلا يُسمح إلا بقالب معتمد.
+              لذلك حدّد ما تريد تجربته أولاً — وسنرجع للقالب تلقائياً عند الحاجة.
+            </p>
+          </div>
 
-        {/* Body text — only for interactive / ai_recovery; templates
-            are managed in the templates page. */}
-        {step.delivery_mode !== 'template' && (
+          <Field label="طريقة الإرسال الأساسية">
+            <select
+              value={primaryMode}
+              onChange={e => setPrimary(e.target.value as PrimaryDeliveryMode)}
+              className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg bg-white"
+            >
+              {PRIMARY_MODE_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+              {PRIMARY_MODE_OPTIONS.find(o => o.value === primaryMode)?.hint}
+            </p>
+          </Field>
+
+          {primaryMode !== 'template' && (
+            <Field label="إذا لم تكن متاحة، استخدم">
+              <select
+                value={fallbackMode}
+                onChange={e => setFallback(e.target.value as FallbackDeliveryMode)}
+                className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg bg-white"
+              >
+                {FALLBACK_MODE_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                {FALLBACK_MODE_OPTIONS.find(o => o.value === fallbackMode)?.hint}
+              </p>
+            </Field>
+          )}
+
+          {/* Effective preview — what actually gets sent in each case */}
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            <div className="rounded border border-emerald-200 bg-emerald-50 px-2.5 py-2">
+              <p className="text-[10px] font-semibold text-emerald-700">داخل النافذة</p>
+              <p className="text-[12px] text-emerald-900 mt-0.5">{preview.inside}</p>
+            </div>
+            <div className="rounded border border-amber-200 bg-amber-50 px-2.5 py-2">
+              <p className="text-[10px] font-semibold text-amber-700">خارج النافذة</p>
+              <p className="text-[12px] text-amber-900 mt-0.5">{preview.outside}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Body text — needed whenever we *might* send a non-template
+            wire format (interactive / ai_recovery / auto-resolved). */}
+        {showBodyEditor && (
           <>
             <Field label="نص الرسالة (عربي)">
               <textarea
@@ -355,8 +515,9 @@ function StepEditor({ stepIdx, step, onChange }: StepEditorProps) {
           </>
         )}
 
-        {/* Template names — only for template mode */}
-        {step.delivery_mode === 'template' && (
+        {/* Template names — needed whenever the template fallback
+            (or explicit template primary) might be sent. */}
+        {showTemplateInputs && (
           <div className="grid grid-cols-2 gap-3">
             <Field label="اسم القالب (عربي)">
               <input

@@ -738,21 +738,64 @@ async def _execute_action(
             }
             return False, info
 
-    delivery_mode = (
-        (conversion_decision.delivery_mode_override
-         if conversion_decision else None)
-        or active_step.get("delivery_mode")
-        or config.get("delivery_mode")
-        or "template"
+    # ── Delivery policy resolution ───────────────────────────────────────────
+    # Replaces the legacy single-`delivery_mode` if-chain with a real
+    # primary/fallback policy that is window-aware AND AI-aware. This
+    # is what lets a merchant pick "interactive" or "ai_recovery" (or
+    # the recommended "auto") in the editor without ever silently
+    # losing a message when the 24h window has closed or the AI turn
+    # isn't eligible — the policy module always picks a legal wire
+    # format and surfaces *why* in the audit trail.
+    from core.wa_usage import has_open_service_window  # noqa: PLC0415
+    from services.delivery_policy import resolve_delivery_mode  # noqa: PLC0415
+
+    window_open = has_open_service_window(db, tenant_id, to_phone)
+    ai_eligible = bool(
+        (active_step.get("ai_recovery_enabled")
+         or config.get("ai_recovery_enabled"))
+    )
+
+    # Conversion-layer overrides still win — they encode signals the
+    # static policy can't see (e.g. "customer is actively chatting,
+    # send a softer interactive instead of a template").
+    override = (
+        conversion_decision.delivery_mode_override
+        if conversion_decision else None
+    )
+    if override:
+        # Synthesize a step view so the policy module still applies
+        # window/AI legality on top of the override (defence in depth).
+        decision = resolve_delivery_mode(
+            step={"primary_mode": override,
+                  "fallback_mode": active_step.get("fallback_mode")
+                                   or config.get("fallback_mode") or "template",
+                  "ai_recovery_enabled": ai_eligible},
+            config=config,
+            window_open=window_open,
+            ai_eligible=ai_eligible,
+        )
+    else:
+        decision = resolve_delivery_mode(
+            step=active_step, config=config,
+            window_open=window_open, ai_eligible=ai_eligible,
+        )
+
+    delivery_mode = decision.mode
+    logger.info(
+        "[AutoEngine] tenant=%s event=%s delivery_policy primary=%s "
+        "fallback=%s window_open=%s ai_eligible=%s -> mode=%s reason=%s",
+        tenant_id, getattr(event, "id", None),
+        decision.primary, decision.fallback,
+        decision.window_open, decision.ai_eligible,
+        decision.mode, decision.reason,
     )
 
     if delivery_mode == "ai_recovery":
-        ai_enabled = bool(
-            active_step.get("ai_recovery_enabled")
-            or config.get("ai_recovery_enabled")
-        )
-        if not ai_enabled:
-            return False, {"error": "ai_recovery_disabled"}
+        # The policy module already verified ai_eligible; this is just
+        # belt-and-braces in case future call sites bypass it.
+        if not ai_eligible:
+            return False, {"error": "ai_recovery_disabled",
+                           "delivery_policy": decision.to_audit()}
         return await _execute_ai_recovery_step(
             db, tenant_id=tenant_id, event=event, customer=customer,
             wa_conn=wa_conn, to_phone=to_phone, config=config,
@@ -760,21 +803,13 @@ async def _execute_action(
         )
 
     if delivery_mode == "interactive":
-        # Interactive in-window send is only legal while the customer's
-        # service window is still open. When it has closed (or never
-        # opened — most stage-1 carts), we transparently fall back to
-        # the template path so we still deliver the message — just at
-        # marketing-conversation cost.
-        from core.wa_usage import has_open_service_window  # noqa: PLC0415
-        window_open = has_open_service_window(db, tenant_id, to_phone)
-        if window_open:
-            return await _execute_interactive_step(
-                db, tenant_id=tenant_id, event=event, customer=customer,
-                wa_conn=wa_conn, to_phone=to_phone, config=config,
-                active_step=active_step, automation=automation,
-                conversion_decision=conversion_decision,
-            )
-        # Fall through to the template path below — same code, no copy.
+        return await _execute_interactive_step(
+            db, tenant_id=tenant_id, event=event, customer=customer,
+            wa_conn=wa_conn, to_phone=to_phone, config=config,
+            active_step=active_step, automation=automation,
+            conversion_decision=conversion_decision,
+        )
+    # Anything else falls through to the template path below.
 
     # ── Template lookup ───────────────────────────────────────────────────────
     # Per-step template_name (set by the cart-recovery seed) wins over the
