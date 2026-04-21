@@ -886,6 +886,31 @@ async def _handle_merchant_message(
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
 
+        # ── Top-level Conversation Mode Controller ───────────────────────────
+        # Decides who owns this turn (live chat, automation recovery,
+        # identity reply, support escalation, checkout assist, post
+        # purchase) BEFORE routing to Brain or legacy. Persists a sticky
+        # lease on the conversation so a free-form reply that overrides
+        # automation cannot bounce back to recovery in the same window.
+        from modules.ai.routing.conversation_mode import (  # noqa: PLC0415
+            MODE_IDENTITY_REPLY,
+            mode_prompt_overlay,
+            render_identity_reply,
+            resolve_conversation_mode,
+            save_lease,
+        )
+        mode_decision = resolve_conversation_mode(
+            db,
+            tenant_id=tenant_id,
+            convo=convo,
+            customer_phone=to,
+            text=text,
+            history=history,
+        )
+        save_lease(db, convo, mode_decision.lease)
+        logger.info("[Mode] tenant=%s to=%s decision=%s",
+                    tenant_id, to, mode_decision.to_log_dict())
+
         # ── Trial / subscription guard for AI replies ────────────────────────
         # If trial expired and no subscription: send a static fallback reply
         # so the customer isn't left hanging, but skip the expensive AI call.
@@ -893,7 +918,30 @@ async def _handle_merchant_message(
         if not _has_billing(db, tenant_id):
             reply = "شكراً لتواصلك! هذا الحساب في وضع التجربة المنتهية. يُرجى التواصل مع صاحب المتجر."
             StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)
-            await _send_whatsapp_message(phone_id=used_pid, to=to, text=reply, _tenant_id=tenant_id, _db=db)
+            await _send_whatsapp_message(phone_id=phone_id, to=to, text=reply, _tenant_id=tenant_id, _db=db)
+            return
+
+        # ── Identity / greeting fast path ────────────────────────────────────
+        # When the customer asked "who are you?" / "السلام عليكم", answer
+        # deterministically with the merchant's configured assistant name
+        # so we never fall through to AI fallbacks that might leak
+        # automation boilerplate.
+        if mode_decision.mode == MODE_IDENTITY_REPLY:
+            reply = render_identity_reply(
+                db, tenant_id=tenant_id, topic=mode_decision.identity_topic,
+            )
+            StateManager.save_message(
+                db, to, reply, "outbound",
+                conversation_id=convo.id, tenant_id=tenant_id,
+            )
+            await _send_whatsapp_message(
+                phone_id=phone_id, to=to, text=reply,
+                _tenant_id=tenant_id, _db=db,
+            )
+            logger.info(
+                "[Mode] identity_reply tenant=%s topic=%s",
+                tenant_id, mode_decision.identity_topic,
+            )
             return
 
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
@@ -988,6 +1036,7 @@ async def _handle_merchant_message(
 
             from modules.ai.prompts.tenant_overlay import load_tenant_ai_overlay  # noqa: PLC0415
             tenant_overlay = load_tenant_ai_overlay(db, tenant_id)
+            mode_overlay = mode_prompt_overlay(mode_decision)
 
             system_prompt = f"""أنت مساعد ذكي لمتجر إلكتروني. مهمتك الرد على استفسارات العملاء بأسلوب ودي واحترافي باللغة العربية.
 
@@ -999,8 +1048,11 @@ async def _handle_merchant_message(
 - أجب باختصار وبوضوح
 - لا تذكر منصة نحلة أو أي منصة SaaS أخرى
 - إذا لم تجد إجابة في البيانات المتاحة، قل للعميل أنك ستتحقق وتعود إليه
-- تحدث كموظف خدمة العملاء للمتجر مباشرةً"""
+- تحدث كموظف خدمة العملاء للمتجر مباشرةً
+- أهم رسالة هي آخر رسالة من العميل — ركّز عليها وردّ مباشرة دون تكرار رسائل سابقة."""
 
+            if mode_overlay:
+                system_prompt = f"{mode_overlay}\n\n{system_prompt}"
             if tenant_overlay:
                 system_prompt = f"{tenant_overlay}\n\n{system_prompt}"
 

@@ -1,0 +1,846 @@
+"""
+modules/ai/routing/conversation_mode.py
+───────────────────────────────────────
+Top-level Conversation Mode Controller.
+
+This module sits ABOVE the Merchant Brain / legacy-AI split. For every
+incoming customer message we ask a single question first:
+
+    "Who owns this conversation right now?"
+
+The answer is one of a small, well-defined set of MODES:
+
+    - automation_recovery   → cart-recovery / abandoned-cart automation
+                               is currently driving the thread
+    - live_chat             → the customer is conversing freely with the
+                               store assistant (Brain or legacy)
+    - identity_reply        → the customer just asked "who are you?" /
+                               "السلام عليكم" / "من أنت" — answer
+                               deterministically before anything else
+    - support_escalation    → human handoff / explicit complaint
+    - checkout_assist       → mid-checkout (open draft order, payment)
+    - post_purchase         → tracking / status / after-sale follow-up
+
+Why a controller, not just better prompts
+─────────────────────────────────────────
+The bug we are fixing is architectural, not stylistic: the system kept
+behaving like an automation even after the customer switched to a
+free-form conversational message inside the open 24-hour session.
+
+That happened because mode was implicit, scattered across:
+  * automation event lineage (recovery_event_id / step_idx)
+  * brain_state.stage         (sales-funnel substate)
+  * conversation flags        (is_human_handoff, paused_by_human)
+  * ad-hoc prompt wording     in two separate AI paths
+
+There was no shared decision layer. This controller IS that layer.
+
+Design contract
+───────────────
+- READ-ONLY w.r.t. the engine (`brain/decision/engine.py`),
+  provider selection, fallback, and rule-first decision flow.
+- Persists its lease on `Conversation.extra_metadata['conversation_mode']`
+  using the merge-safe metadata write path that already preserves
+  `brain_state` (see core.conversation_engine.StateManager.save).
+- Sticky LIVE_CHAT lease: when a free-form message overrides a prior
+  `automation_recovery`, we acquire a short-lived lease so subsequent
+  turns in the same activity window stay in live chat instead of
+  bouncing back to automation behavior.
+- Safe fallback: if the stored lease is missing/malformed, we rebuild
+  it from current signals and continue without ever raising.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("nahla.routing.mode")
+
+
+# ── Mode constants ────────────────────────────────────────────────────────────
+
+MODE_AUTOMATION_RECOVERY = "automation_recovery"
+MODE_LIVE_CHAT           = "live_chat"
+MODE_IDENTITY_REPLY      = "identity_reply"
+MODE_SUPPORT_ESCALATION  = "support_escalation"
+MODE_CHECKOUT_ASSIST     = "checkout_assist"
+MODE_POST_PURCHASE       = "post_purchase"
+
+ALL_MODES: Tuple[str, ...] = (
+    MODE_AUTOMATION_RECOVERY,
+    MODE_LIVE_CHAT,
+    MODE_IDENTITY_REPLY,
+    MODE_SUPPORT_ESCALATION,
+    MODE_CHECKOUT_ASSIST,
+    MODE_POST_PURCHASE,
+)
+
+# Stored on Conversation.extra_metadata. Kept namespaced so we never
+# collide with brain_state, phone, customer_phone, etc.
+META_KEY = "conversation_mode"
+
+# Default sticky LIVE_CHAT lease in minutes. Aligned with the
+# scheduler-side "active conversation" guard so an automation already
+# scheduled for delivery is naturally deferred while the lease is held.
+# See: services.conversion_layer.ACTIVE_CONVERSATION_WINDOW_MINUTES.
+DEFAULT_LEASE_MINUTES_LIVE_CHAT      = 10
+DEFAULT_LEASE_MINUTES_CHECKOUT       = 15
+DEFAULT_LEASE_MINUTES_SUPPORT        = 30
+DEFAULT_LEASE_MINUTES_POST_PURCHASE  = 15
+
+# Sources used by `reason` / observability. Kept as constants so logs
+# and tests can match exact strings.
+SOURCE_OVERRIDE_FREEFORM   = "override_from_recovery_freeform"
+SOURCE_IDENTITY_DETECTED   = "identity_question_detected"
+SOURCE_HANDOFF_FLAG        = "human_handoff_flag"
+SOURCE_RECOVERY_ACTIVE     = "recovery_lineage_active"
+SOURCE_CHECKOUT_OPEN       = "checkout_open"
+SOURCE_POST_PURCHASE_HINT  = "post_purchase_signal"
+SOURCE_LEASE_HELD          = "live_chat_lease_held"
+SOURCE_DEFAULT_FALLBACK    = "default_live_chat"
+
+
+# ── Dataclasses ──────────────────────────────────────────────────────────────
+
+@dataclass
+class RecoverySnapshot:
+    """Lightweight summary of the customer's recovery lineage. Built
+    from existing `Order.extra_metadata.recovery_event_id` + automation
+    event tree so the controller never needs to re-implement that
+    logic. All fields are best-effort and may be empty."""
+    has_recovery: bool = False
+    recovery_active: bool = False     # event tree is not converted/cancelled
+    last_step_idx: int = 0
+    last_step_at: Optional[str] = None  # ISO UTC of latest sent step
+    converted_at: Optional[str] = None
+    cancel_reason: Optional[str] = None
+    order_id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ModeLease:
+    """The persisted, per-conversation lease record. Stored under
+    `Conversation.extra_metadata['conversation_mode']`."""
+    mode: str = MODE_LIVE_CHAT
+    previous_mode: str = ""
+    reason: str = ""
+    source: str = ""
+    changed_at: str = ""           # ISO UTC of last transition
+    locked_until: str = ""         # ISO UTC; "" == no active lease
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(raw: Optional[Dict[str, Any]]) -> "ModeLease":
+        if not isinstance(raw, dict):
+            return ModeLease()
+        return ModeLease(
+            mode          = str(raw.get("mode") or MODE_LIVE_CHAT),
+            previous_mode = str(raw.get("previous_mode") or ""),
+            reason        = str(raw.get("reason") or ""),
+            source        = str(raw.get("source") or ""),
+            changed_at    = str(raw.get("changed_at") or ""),
+            locked_until  = str(raw.get("locked_until") or ""),
+        )
+
+    def is_lease_active(self, now: Optional[datetime] = None) -> bool:
+        if not self.locked_until:
+            return False
+        try:
+            until = _parse_iso(self.locked_until)
+        except Exception:
+            return False
+        return _now(now) < until
+
+
+@dataclass
+class ModeDecision:
+    """Result returned by the controller to the webhook. The webhook
+    routes by `mode` and persists `lease` back to the conversation."""
+    mode: str
+    lease: ModeLease
+    previous_mode: str = ""
+    reason: str = ""
+    source: str = ""
+    transitioned: bool = False
+    recovery: RecoverySnapshot = field(default_factory=RecoverySnapshot)
+    identity_topic: str = ""        # set when mode==identity_reply
+    free_form_override: bool = False
+
+    def is_identity(self) -> bool:
+        return self.mode == MODE_IDENTITY_REPLY
+
+    def to_log_dict(self) -> Dict[str, Any]:
+        return {
+            "mode":             self.mode,
+            "previous_mode":    self.previous_mode,
+            "reason":           self.reason,
+            "source":           self.source,
+            "transitioned":     self.transitioned,
+            "lease_until":      self.lease.locked_until,
+            "free_form_override": self.free_form_override,
+            "recovery_active":  self.recovery.recovery_active,
+        }
+
+
+# ── Time helpers ─────────────────────────────────────────────────────────────
+
+def _now(now: Optional[datetime] = None) -> datetime:
+    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+
+
+def _parse_iso(value: str) -> datetime:
+    """Parse an ISO8601 timestamp; assume UTC if naive."""
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+# ── Inbound signal detectors ─────────────────────────────────────────────────
+
+# Identity / "who are you" — borrowed from brain.intent.rules so behavior
+# stays consistent whether the controller fires before Brain or alongside
+# legacy. Patterns are narrow on purpose: false positives here would
+# pull a real conversational turn into the deterministic identity reply.
+_IDENTITY_PATTERNS: Tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
+        r"^\s*(من\s*أنت|من\s*انت|من\s*أنتِ|انت\s*مين|انتي\s*مين|مين\s*أنت|"
+        r"وش\s*أنت|وش\s*انت|ايش\s*انت|ايش\s*أنت)\b",
+        r"\b(عرفني\s+بنفسك|عرفني\s+عليك|who\s+are\s+you|what\s+are\s+you)\b",
+    )
+)
+
+_GREETING_PATTERNS: Tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
+        r"^\s*(السلام\s*عليكم|وعليكم\s*السلام|مرحبا?ً?|أهلاً?|هلا+|"
+        r"صباح\s+الخير|مساء\s+الخير|كيف\s+حالك|هاي|هلو|hello|hi|hey)\b",
+        r"^\s*(أهلين|يا\s*هلا|أهلا\s+وسهلا)\b",
+    )
+)
+
+_SUPPORT_PATTERNS: Tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
+        r"\b(تحدث\s+مع\s+(إنسان|بشر|موظف)|موظف|خدمة\s+العملاء|تواصل\s+مع\s+شخص|"
+        r"إنسان\s+حقيقي|مو\s+روبوت|مو\s+بوت)\b",
+        r"\b(human\s+agent|real\s+person|customer\s+service|speak\s+to\s+someone|"
+        r"talk\s+to\s+agent)\b",
+        r"\b(شكوى|أشتكي|اشتكي|مشكلة\s+كبيرة|ما\s+ينفع|تعب|سيء|سيئة|سيئ|"
+        r"مزعج|مزعجة|complaint|terrible|awful|disappointed)\b",
+    )
+)
+
+_TRACKING_PATTERNS: Tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
+        r"\b(وين\s+طلبي|وين\s+أمري|تتبع\s+الطلب|متى\s+يوصل\s+طلبي|"
+        r"رقم\s+التتبع|طلبي\s+وين|شحنتي\s+وين)\b",
+        r"\b(track|track\s+my\s+order|where\s+is\s+my\s+order|order\s+status)\b",
+    )
+)
+
+_CHECKOUT_PATTERNS: Tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
+        r"\b(ادفع|أدفع|دفع|سدد|أسدد|إتمام\s+الدفع|الدفع\s+الآن|أكمل\s+الدفع|"
+        r"رابط\s+الدفع|رابط\s+الطلب|أتمم\s+الطلب)\b",
+        r"\b(pay|payment\s+link|checkout|complete\s+order)\b",
+    )
+)
+
+
+def _matches_any(text: str, patterns: Tuple[re.Pattern, ...]) -> bool:
+    if not text:
+        return False
+    for pattern in patterns:
+        if pattern.search(text):
+            return True
+    return False
+
+
+def detect_identity_topic(text: str) -> str:
+    """Return 'identity' for who-are-you, 'greeting' for السلام-عليكم,
+    or '' for anything else. Both topics route to MODE_IDENTITY_REPLY
+    so the deterministic identity path can introduce the assistant
+    once instead of falling through to automation boilerplate."""
+    if not isinstance(text, str):
+        return ""
+    if _matches_any(text, _IDENTITY_PATTERNS):
+        return "identity"
+    if _matches_any(text, _GREETING_PATTERNS):
+        return "greeting"
+    return ""
+
+
+def is_free_form_message(text: str) -> bool:
+    """True for any non-empty inbound that isn't a button payload or
+    pure interactive token. Free-form messages are the trigger for
+    overriding a prior automation_recovery owner."""
+    if not isinstance(text, str):
+        return False
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+    # WhatsApp button taps land here as "[button:...]" or as a pick
+    # token ("pick_1"); both are interactive payloads, not free-form.
+    if cleaned.startswith("[button:") or cleaned.startswith("pick_"):
+        return False
+    return True
+
+
+# ── Recovery snapshot loader ─────────────────────────────────────────────────
+
+def load_recovery_snapshot(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+) -> RecoverySnapshot:
+    """Return a small recovery snapshot for the given customer.
+
+    Reads from the existing recovery lineage (Order.extra_metadata
+    .recovery_event_id + AutomationEvent payload) without duplicating
+    the timeline summary logic. Always returns a snapshot — never
+    raises — so the controller stays safe under DB hiccups."""
+    snapshot = RecoverySnapshot()
+    if not db or not tenant_id or not customer_phone:
+        return snapshot
+
+    try:
+        from models import (  # noqa: PLC0415
+            AutomationEvent, Customer, Order,
+        )
+        # Resolve the most-recent customer row for this phone within the
+        # tenant. Recovery lineage is anchored on Order.extra_metadata
+        # so we need an actual Order row to walk back to the root event.
+        cust = (
+            db.query(Customer)
+            .filter(Customer.tenant_id == tenant_id)
+            .filter(Customer.phone == customer_phone)
+            .order_by(Customer.id.desc())
+            .first()
+        )
+        if cust is None:
+            return snapshot
+
+        order = (
+            db.query(Order)
+            .filter(Order.tenant_id == tenant_id)
+            .filter(Order.customer_id == cust.id)
+            .order_by(Order.id.desc())
+            .first()
+        )
+        if order is None or not order.extra_metadata:
+            return snapshot
+
+        meta = order.extra_metadata or {}
+        raw_root = meta.get("recovery_event_id")
+        if raw_root is None:
+            return snapshot
+
+        try:
+            root_event_id = int(raw_root)
+        except (TypeError, ValueError):
+            return snapshot
+
+        snapshot.has_recovery = True
+        snapshot.order_id = int(order.id)
+
+        root = (
+            db.query(AutomationEvent)
+            .filter(AutomationEvent.id == root_event_id)
+            .filter(AutomationEvent.tenant_id == tenant_id)
+            .first()
+        )
+        if root is None:
+            return snapshot
+
+        payload = root.payload or {}
+        snapshot.converted_at  = payload.get("recovery_converted_at")
+        snapshot.cancel_reason = payload.get("recovery_cancel_reason")
+        snapshot.recovery_active = not (
+            snapshot.converted_at or snapshot.cancel_reason
+        )
+
+        # Pull the latest step_idx/timestamp from follow-up events when
+        # available; falls back to the root row otherwise. We keep this
+        # loose on purpose — the controller only needs a coarse signal.
+        followups = (
+            db.query(AutomationEvent)
+            .filter(AutomationEvent.tenant_id == tenant_id)
+            .filter(
+                AutomationEvent.payload["parent_event_id"].astext
+                == str(root_event_id)
+            )
+            .order_by(AutomationEvent.id.desc())
+            .limit(5)
+            .all()
+        )
+        last_event = followups[0] if followups else root
+        last_payload = last_event.payload or {}
+        try:
+            snapshot.last_step_idx = int(last_payload.get("step_idx") or 0)
+        except (TypeError, ValueError):
+            snapshot.last_step_idx = 0
+        if last_event.created_at:
+            snapshot.last_step_at = _iso(
+                last_event.created_at if last_event.created_at.tzinfo
+                else last_event.created_at.replace(tzinfo=timezone.utc)
+            )
+        return snapshot
+    except Exception as exc:
+        logger.debug("[mode] recovery snapshot failed: %s", exc)
+        return snapshot
+
+
+# ── Lease persistence ────────────────────────────────────────────────────────
+
+def load_lease(convo: Any) -> ModeLease:
+    """Read the persisted lease from `convo.extra_metadata`. Always
+    returns a ModeLease, even when the field is missing or malformed."""
+    try:
+        meta = getattr(convo, "extra_metadata", None) or {}
+        raw = meta.get(META_KEY)
+        return ModeLease.from_dict(raw if isinstance(raw, dict) else None)
+    except Exception:
+        return ModeLease()
+
+
+def save_lease(db: Any, convo: Any, lease: ModeLease) -> None:
+    """Persist the lease on the conversation row using the existing
+    metadata-merge contract. We deliberately read-modify-write the dict
+    so we never wipe sibling keys (brain_state, phone, customer_phone)
+    that other layers own."""
+    if convo is None:
+        return
+    try:
+        meta = dict(getattr(convo, "extra_metadata", None) or {})
+        meta[META_KEY] = lease.to_dict()
+        convo.extra_metadata = meta
+        try:
+            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+            flag_modified(convo, "extra_metadata")
+        except Exception:
+            pass
+        db.add(convo)
+        db.flush()
+    except Exception as exc:
+        logger.warning("[mode] save_lease failed: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+# ── Lease builders ───────────────────────────────────────────────────────────
+
+def _build_lease(
+    *,
+    mode: str,
+    previous_mode: str,
+    reason: str,
+    source: str,
+    minutes: int,
+    now: Optional[datetime] = None,
+) -> ModeLease:
+    n = _now(now)
+    locked_until = ""
+    if minutes and minutes > 0:
+        locked_until = _iso(n + timedelta(minutes=int(minutes)))
+    return ModeLease(
+        mode          = mode,
+        previous_mode = previous_mode,
+        reason        = reason,
+        source        = source,
+        changed_at    = _iso(n),
+        locked_until  = locked_until,
+    )
+
+
+def _conversation_handoff_flag(convo: Any) -> bool:
+    """True when the conversation row is currently flagged for human
+    handoff. Honoured as the highest-priority override."""
+    return bool(
+        getattr(convo, "is_human_handoff", False)
+        or getattr(convo, "paused_by_human", False)
+    )
+
+
+# ── Public API: resolve_conversation_mode ────────────────────────────────────
+
+def resolve_conversation_mode(
+    db: Any,
+    *,
+    tenant_id: int,
+    convo: Any,
+    customer_phone: str,
+    text: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+    now: Optional[datetime] = None,
+) -> ModeDecision:
+    """Decide who owns this conversation right now.
+
+    Order of resolution (first match wins):
+
+      1. Human handoff flag on the conversation row.
+      2. Identity / greeting detection in the inbound text.
+      3. Sticky LIVE_CHAT lease that has not expired yet.
+      4. Free-form override of an existing automation_recovery owner.
+      5. Active recovery lineage (and no overriding signal).
+      6. Default to live_chat.
+
+    Returns a ModeDecision. Persistence is the caller's responsibility
+    via `save_lease(...)`; this function is pure-ish and never raises.
+    """
+    text_clean = (text or "").strip()
+    history_safe = list(history or [])
+    snapshot = load_recovery_snapshot(
+        db, tenant_id=tenant_id, customer_phone=customer_phone,
+    )
+    prior_lease = load_lease(convo)
+    prior_mode = prior_lease.mode or MODE_LIVE_CHAT
+
+    # 1) Human handoff trumps everything ────────────────────────────────
+    if _conversation_handoff_flag(convo):
+        lease = _build_lease(
+            mode=MODE_SUPPORT_ESCALATION,
+            previous_mode=prior_mode,
+            reason="conversation flagged for human handoff",
+            source=SOURCE_HANDOFF_FLAG,
+            minutes=DEFAULT_LEASE_MINUTES_SUPPORT,
+            now=now,
+        )
+        return ModeDecision(
+            mode=MODE_SUPPORT_ESCALATION,
+            lease=lease,
+            previous_mode=prior_mode,
+            reason=lease.reason,
+            source=lease.source,
+            transitioned=(prior_mode != MODE_SUPPORT_ESCALATION),
+            recovery=snapshot,
+        )
+
+    # 2) Identity / greeting detection ──────────────────────────────────
+    identity_topic = detect_identity_topic(text_clean)
+    if identity_topic:
+        # Identity replies are deterministic single-turn answers. We
+        # acquire a LIVE_CHAT lease right after so the conversation
+        # stays in live mode for the next turn instead of falling back
+        # into automation behavior.
+        lease = _build_lease(
+            mode=MODE_LIVE_CHAT,
+            previous_mode=prior_mode,
+            reason=f"customer asked: {identity_topic}",
+            source=SOURCE_IDENTITY_DETECTED,
+            minutes=DEFAULT_LEASE_MINUTES_LIVE_CHAT,
+            now=now,
+        )
+        return ModeDecision(
+            mode=MODE_IDENTITY_REPLY,
+            lease=lease,
+            previous_mode=prior_mode,
+            reason=lease.reason,
+            source=lease.source,
+            transitioned=(prior_mode != MODE_LIVE_CHAT),
+            recovery=snapshot,
+            identity_topic=identity_topic,
+            free_form_override=(prior_mode == MODE_AUTOMATION_RECOVERY),
+        )
+
+    # 3) Sticky LIVE_CHAT lease still active ────────────────────────────
+    # Once we have switched into live chat, we DO NOT bounce back to
+    # automation_recovery just because the recovery tree is still open.
+    # The lease must expire (or be explicitly released) first.
+    if prior_lease.is_lease_active(now) and prior_mode == MODE_LIVE_CHAT:
+        # Refresh the sliding window on each turn so a chatty customer
+        # keeps the conversation in live mode for the whole exchange.
+        lease = _build_lease(
+            mode=MODE_LIVE_CHAT,
+            previous_mode=MODE_LIVE_CHAT,
+            reason="live chat lease still active — refreshing window",
+            source=SOURCE_LEASE_HELD,
+            minutes=DEFAULT_LEASE_MINUTES_LIVE_CHAT,
+            now=now,
+        )
+        return ModeDecision(
+            mode=MODE_LIVE_CHAT,
+            lease=lease,
+            previous_mode=prior_mode,
+            reason=lease.reason,
+            source=lease.source,
+            transitioned=False,
+            recovery=snapshot,
+        )
+
+    # Other sticky leases (checkout, support, post-purchase) also win
+    # over automation recovery while held.
+    if prior_lease.is_lease_active(now) and prior_mode in (
+        MODE_CHECKOUT_ASSIST, MODE_SUPPORT_ESCALATION, MODE_POST_PURCHASE,
+    ):
+        lease = _build_lease(
+            mode=prior_mode,
+            previous_mode=prior_mode,
+            reason="non-recovery lease still active",
+            source=SOURCE_LEASE_HELD,
+            minutes=_lease_minutes_for(prior_mode),
+            now=now,
+        )
+        return ModeDecision(
+            mode=prior_mode,
+            lease=lease,
+            previous_mode=prior_mode,
+            reason=lease.reason,
+            source=lease.source,
+            transitioned=False,
+            recovery=snapshot,
+        )
+
+    # 4) Free-form override of an existing automation_recovery owner ────
+    if (
+        prior_mode == MODE_AUTOMATION_RECOVERY
+        and is_free_form_message(text_clean)
+    ):
+        # The customer broke out of the automation script with a
+        # free-form reply inside the open 24h session. Move ownership
+        # to live chat and lock it in for the activity window.
+        target_mode, target_source = _classify_freeform(text_clean)
+        lease = _build_lease(
+            mode=target_mode,
+            previous_mode=prior_mode,
+            reason="free-form reply overrides automation_recovery owner",
+            source=SOURCE_OVERRIDE_FREEFORM,
+            minutes=_lease_minutes_for(target_mode),
+            now=now,
+        )
+        return ModeDecision(
+            mode=target_mode,
+            lease=lease,
+            previous_mode=prior_mode,
+            reason=lease.reason,
+            source=target_source or lease.source,
+            transitioned=True,
+            recovery=snapshot,
+            free_form_override=True,
+        )
+
+    # 5) Active recovery lineage ─────────────────────────────────────────
+    if snapshot.recovery_active and not is_free_form_message(text_clean):
+        lease = _build_lease(
+            mode=MODE_AUTOMATION_RECOVERY,
+            previous_mode=prior_mode,
+            reason="recovery lineage active and no overriding signal",
+            source=SOURCE_RECOVERY_ACTIVE,
+            # No lease for recovery: we want any subsequent free-form
+            # message to be able to flip ownership instantly.
+            minutes=0,
+            now=now,
+        )
+        return ModeDecision(
+            mode=MODE_AUTOMATION_RECOVERY,
+            lease=lease,
+            previous_mode=prior_mode,
+            reason=lease.reason,
+            source=lease.source,
+            transitioned=(prior_mode != MODE_AUTOMATION_RECOVERY),
+            recovery=snapshot,
+        )
+
+    # 5b) Active recovery + free-form message → upgrade to live chat
+    # immediately even when the prior mode wasn't recovery yet (first
+    # contact case where the snapshot says recovery is active).
+    if snapshot.recovery_active and is_free_form_message(text_clean):
+        target_mode, target_source = _classify_freeform(text_clean)
+        lease = _build_lease(
+            mode=target_mode,
+            previous_mode=prior_mode,
+            reason="recovery active but customer messaged free-form",
+            source=SOURCE_OVERRIDE_FREEFORM,
+            minutes=_lease_minutes_for(target_mode),
+            now=now,
+        )
+        return ModeDecision(
+            mode=target_mode,
+            lease=lease,
+            previous_mode=prior_mode,
+            reason=lease.reason,
+            source=target_source or lease.source,
+            transitioned=(prior_mode != target_mode),
+            recovery=snapshot,
+            free_form_override=True,
+        )
+
+    # 6) Default to live chat (with no lease — natural behavior) ────────
+    target_mode, target_source = _classify_freeform(text_clean)
+    lease = _build_lease(
+        mode=target_mode,
+        previous_mode=prior_mode,
+        reason="default live chat owner",
+        source=SOURCE_DEFAULT_FALLBACK,
+        minutes=_lease_minutes_for(target_mode) if target_mode != MODE_LIVE_CHAT else 0,
+        now=now,
+    )
+    return ModeDecision(
+        mode=target_mode,
+        lease=lease,
+        previous_mode=prior_mode,
+        reason=lease.reason,
+        source=target_source or lease.source,
+        transitioned=(prior_mode != target_mode),
+        recovery=snapshot,
+    )
+
+
+def _classify_freeform(text: str) -> Tuple[str, str]:
+    """Classify a free-form inbound into one of the live owner modes.
+
+    Returns (mode, source). Falls back to live_chat when no specific
+    secondary owner is detected — which is exactly what we want: the
+    default active conversation owner is the store's normal AI assistant.
+    """
+    if _matches_any(text, _SUPPORT_PATTERNS):
+        return MODE_SUPPORT_ESCALATION, SOURCE_HANDOFF_FLAG
+    if _matches_any(text, _CHECKOUT_PATTERNS):
+        return MODE_CHECKOUT_ASSIST, SOURCE_CHECKOUT_OPEN
+    if _matches_any(text, _TRACKING_PATTERNS):
+        return MODE_POST_PURCHASE, SOURCE_POST_PURCHASE_HINT
+    return MODE_LIVE_CHAT, SOURCE_DEFAULT_FALLBACK
+
+
+def _lease_minutes_for(mode: str) -> int:
+    if mode == MODE_LIVE_CHAT:
+        return DEFAULT_LEASE_MINUTES_LIVE_CHAT
+    if mode == MODE_CHECKOUT_ASSIST:
+        return DEFAULT_LEASE_MINUTES_CHECKOUT
+    if mode == MODE_SUPPORT_ESCALATION:
+        return DEFAULT_LEASE_MINUTES_SUPPORT
+    if mode == MODE_POST_PURCHASE:
+        return DEFAULT_LEASE_MINUTES_POST_PURCHASE
+    return 0
+
+
+# ── Identity reply rendering (deterministic, no AI) ──────────────────────────
+
+def _load_assistant_name(db: Any, tenant_id: int) -> str:
+    """Best-effort load of the merchant's configured assistant name.
+    Returns "" on any failure so the template can fall back gracefully."""
+    try:
+        from models import TenantSettings  # noqa: PLC0415
+        ts = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.tenant_id == tenant_id)
+            .first()
+        )
+        if not ts:
+            return ""
+        ai = getattr(ts, "ai_settings", None) or {}
+        if isinstance(ai, dict):
+            name = ai.get("assistant_name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _load_store_name(db: Any, tenant_id: int) -> str:
+    try:
+        from models import Tenant  # noqa: PLC0415
+        t = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if t:
+            for attr in ("store_name", "name", "display_name"):
+                val = getattr(t, attr, None)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def render_identity_reply(
+    db: Any,
+    *,
+    tenant_id: int,
+    topic: str,
+) -> str:
+    """Render a deterministic identity / greeting reply that uses the
+    merchant's configured assistant name when available. This bypasses
+    the AI entirely so identity questions never leak recovery
+    boilerplate even if the AI engine is degraded or down."""
+    assistant_name = _load_assistant_name(db, tenant_id)
+    store_name = _load_store_name(db, tenant_id) or "متجرنا"
+
+    if topic == "greeting":
+        if assistant_name:
+            return (
+                f"وعليكم السلام ورحمة الله 🌿\n"
+                f"أنا {assistant_name}، مساعد {store_name}. "
+                f"أقدر أساعدك في المنتجات والأسعار والطلبات والشحن.\n"
+                f"وش أقدر أخدمك فيه؟"
+            )
+        return (
+            f"وعليكم السلام ورحمة الله 🌿\n"
+            f"أهلاً فيك في {store_name}. "
+            f"أقدر أساعدك في المنتجات والأسعار والطلبات والشحن.\n"
+            f"وش أقدر أخدمك فيه؟"
+        )
+
+    # Default: identity question
+    if assistant_name:
+        return (
+            f"أنا {assistant_name}، المساعد الذكي لـ {store_name} 🤖\n"
+            f"أساعدك في الإجابة عن أسئلتك حول المنتجات والأسعار، "
+            f"وأقدر أكمل لك الطلب أو أتابع شحنتك.\n"
+            f"وش تبغى تسوي اليوم؟"
+        )
+    return (
+        f"أنا المساعد الذكي لـ {store_name} 🤖\n"
+        f"أساعدك في الإجابة عن أسئلتك حول المنتجات والأسعار، "
+        f"وأقدر أكمل لك الطلب أو أتابع شحنتك.\n"
+        f"وش تبغى تسوي اليوم؟"
+    )
+
+
+# ── Mode-aware prompt augmentation (for legacy fallback) ─────────────────────
+
+def mode_prompt_overlay(decision: ModeDecision) -> str:
+    """A short instruction block that tells the legacy LLM prompt how
+    to behave for the resolved mode. Designed as an additive overlay
+    so it never replaces the existing system prompt — it just sets
+    expectations about ownership for THIS turn."""
+    mode = decision.mode
+    if mode == MODE_LIVE_CHAT:
+        if decision.free_form_override:
+            return (
+                "وضع المحادثة: محادثة حيّة بعد تذكير سلة سابق.\n"
+                "- لا تكرر رسائل حفظ الطلب أو استرجاع السلة.\n"
+                "- ركّز على آخر رسالة من العميل وردّ عليها مباشرة بأسلوب طبيعي."
+            )
+        return (
+            "وضع المحادثة: محادثة حيّة طبيعية.\n"
+            "- ركّز على آخر رسالة من العميل وردّ عليها مباشرة دون تكرار."
+        )
+    if mode == MODE_CHECKOUT_ASSIST:
+        return (
+            "وضع المحادثة: مساعدة في إتمام الشراء.\n"
+            "- ساعد العميل في الدفع أو إكمال الطلب الحالي بدون تشتيت."
+        )
+    if mode == MODE_SUPPORT_ESCALATION:
+        return (
+            "وضع المحادثة: تصعيد لخدمة العملاء.\n"
+            "- اعتذر بلطف ووضّح أنك ستحوّل المحادثة لفريق المتجر."
+        )
+    if mode == MODE_POST_PURCHASE:
+        return (
+            "وضع المحادثة: متابعة ما بعد الشراء.\n"
+            "- ساعد العميل في تتبع الطلب أو الاستفسار عن الشحن."
+        )
+    return ""
