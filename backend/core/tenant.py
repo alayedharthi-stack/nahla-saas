@@ -172,6 +172,11 @@ def resolve_tenant_id(request: Request) -> int:
         )
 
     # Path 2 — header/state (dev testing only)
+    # NOTE: catch TypeError as well — `int(None)` raises TypeError, not
+    # ValueError, and `request.state.tenant_id` is explicitly set to `None`
+    # by middleware when no header is present. Without this catch the
+    # request would 500 instead of returning a 401, leaking a server error
+    # for what is really an auth-scope failure.
     try:
         tid = int(request.state.tenant_id)
         if tid > 0:
@@ -181,7 +186,7 @@ def resolve_tenant_id(request: Request) -> int:
                 request.url.path, tid,
             )
             return tid
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         pass
 
     # Path 3 — explicit failure (SHOULD NEVER REACH HERE)

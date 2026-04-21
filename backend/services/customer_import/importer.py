@@ -340,7 +340,7 @@ def _apply_non_destructive_merge(
     existing.extra_metadata = meta
     try:
         flag_modified(existing, "extra_metadata")
-    except Exception:
+    except Exception:  # noqa: silent-ok — flag_modified is an SQLAlchemy hint; reassignment above already triggers UPDATE
         pass
 
 

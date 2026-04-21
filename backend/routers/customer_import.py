@@ -125,7 +125,7 @@ def _persist_rows(batch: CustomerImportBatch, payload: List[Dict[str, Any]]) -> 
     try:
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
         flag_modified(batch, "rows_payload")
-    except Exception:
+    except Exception:  # noqa: silent-ok — flag_modified is an SQLAlchemy hint; reassignment above already triggers UPDATE
         pass
 
 

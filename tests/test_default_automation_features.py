@@ -95,20 +95,30 @@ def test_template_uses_only_numeric_placeholders(feature_key: str, lang: str) ->
 @pytest.mark.parametrize("lang", ["ar", "en"])
 def test_slot_count_matches_placeholder_count(feature_key: str, lang: str) -> None:
     """
-    Every numeric placeholder in the body must have a corresponding entry in
-    the `slots` list. This is the contract the engine reads to know which
-    real value to inject for `{{N}}`.
+    Every numeric placeholder in the BODY must have a corresponding entry in
+    `body_slots` (preferred) or the legacy `slots` list. This is the contract
+    the engine reads to know which real value to inject for `{{N}}` in the
+    body component.
+
+    NOTE: button-URL placeholders are intentionally excluded — they live in a
+    separate index space and are resolved by `_URL_SLOT_PRECEDENCE` in
+    `automation_engine.py`. Mixing them was the historical root cause of
+    Meta error #132000 ("number of body parameters did not match"), so the
+    library now publishes `body_slots` as the body-only contract.
     """
     spec = DEFAULT_AUTOMATION_TEMPLATES[feature_key]["languages"][lang]
-    placeholders = set()
+    body_placeholders = set()
     for comp in spec["components"]:
+        if (comp.get("type") or "").upper() != "BODY":
+            continue
         text = comp.get("text", "") or ""
-        placeholders.update(re.findall(r"\{\{(\d+)\}\}", text))
+        body_placeholders.update(re.findall(r"\{\{(\d+)\}\}", text))
 
-    expected_indexes = {str(i + 1) for i in range(len(spec["slots"]))}
-    assert placeholders == expected_indexes, (
-        f"{feature_key}/{lang}: placeholders={sorted(placeholders)} "
-        f"but slots imply {sorted(expected_indexes)}"
+    body_slots = spec.get("body_slots") or spec.get("slots") or []
+    expected_indexes = {str(i + 1) for i in range(len(body_slots))}
+    assert body_placeholders == expected_indexes, (
+        f"{feature_key}/{lang}: body placeholders={sorted(body_placeholders)} "
+        f"but body_slots imply {sorted(expected_indexes)}"
     )
 
 
@@ -155,13 +165,17 @@ def test_iter_template_seeds_returns_one_per_feature_per_language() -> None:
 
 
 def test_numeric_var_map_for_known_template() -> None:
-    """The library's var_map must round-trip correctly."""
+    """The library's var_map must round-trip the BODY contract correctly.
+
+    NOTE: `numeric_var_map_for` returns ONLY body slots (button URL params
+    are resolved separately by the engine — see the docstring on
+    `template_library.numeric_var_map_for` and Meta error #132000).
+    The cart-recovery template was migrated to a single BODY placeholder
+    (`customer_name`) plus a dynamic URL button; older revisions had three
+    body placeholders.
+    """
     var_map = numeric_var_map_for("abandoned_cart_recovery_ar")
-    assert var_map == {
-        "{{1}}": "customer_name",
-        "{{2}}": "store_name",
-        "{{3}}": "checkout_url",
-    }
+    assert var_map == {"{{1}}": "customer_name"}
 
 
 def test_numeric_var_map_for_unknown_template_is_empty() -> None:
@@ -183,19 +197,27 @@ def test_cart_abandoned_seed_uses_library_template() -> None:
     assert seed["config"]["template_name_en"] == "abandoned_cart_recovery_en"
 
 
-def test_cart_abandoned_step_three_has_auto_coupon() -> None:
+def test_cart_abandoned_final_step_has_auto_coupon() -> None:
     """
-    The 24-hour reminder must request a real coupon from the pool, not a
-    static placeholder. This is what wires step-3 to the coupon_generator.
+    The final reminder (just before the 24-hour Meta marketing window
+    expires) must request a real coupon from the pool, not a static
+    placeholder. This is what wires the last step to the coupon_generator.
+
+    NOTE: the seed grew from 3 to 4 stages with the premium UX rollout
+    (added an optional AI-recovery turn at +8h, disabled by default —
+    see backend/core/automations_seed.py). The contract this test pins
+    is "the *last* step is the coupon CTA and fires inside the 24h
+    window", not the absolute step count.
     """
     seed = _seed_for("abandoned_cart")
     steps = seed["config"]["steps"]
-    assert len(steps) == 3
-    assert steps[0]["delay_minutes"] == 30   # Reminder 1
-    assert steps[1]["delay_minutes"] == 360  # Reminder 2 (6h)
-    assert steps[2]["delay_minutes"] == 1440 # Reminder 3 (24h)
-    assert steps[2].get("auto_coupon") is True
-    assert steps[2].get("message_type") == "coupon"
+    assert len(steps) >= 3
+    assert steps[0]["delay_minutes"] == 30   # Stage 1 — initial reminder
+    coupon_step = steps[-1]
+    assert coupon_step.get("auto_coupon") is True
+    assert coupon_step.get("message_type") == "coupon"
+    # Final coupon CTA must stay inside Meta's 24h marketing window.
+    assert 0 < coupon_step["delay_minutes"] <= 1440
 
 
 def test_winback_seed_has_auto_coupon_and_library_template() -> None:
@@ -230,8 +252,13 @@ class _StubCustomer:
 def test_build_vars_resolves_library_template_by_name() -> None:
     """
     With no explicit `var_map` in config, the engine must look the template
-    up in the library and resolve its named slots from event payload +
-    helper kwargs.
+    up in the library and resolve its named *body* slots from event payload
+    + helper kwargs.
+
+    NOTE: The cart-recovery template was migrated to a single body
+    placeholder (`customer_name`) plus a separate URL-button slot
+    (`checkout_url`) to avoid Meta error #132000. Button-URL params are
+    resolved by the engine elsewhere and are not part of the body var_map.
     """
     vars_map = _build_template_vars(
         event=_StubEvent({"checkout_url": "https://shop/c/abc"}),
@@ -240,11 +267,7 @@ def test_build_vars_resolves_library_template_by_name() -> None:
         template_name="abandoned_cart_recovery_ar",
         store_name="MyStore",
     )
-    assert vars_map == {
-        "{{1}}": "Sara",
-        "{{2}}": "MyStore",
-        "{{3}}": "https://shop/c/abc",
-    }
+    assert vars_map == {"{{1}}": "Sara"}
 
 
 def test_build_vars_injects_coupon_extras_into_discount_code_slot() -> None:

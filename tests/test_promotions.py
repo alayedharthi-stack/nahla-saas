@@ -89,10 +89,14 @@ from services.promotion_engine import (  # noqa: E402
 )
 from core.automation_engine import (  # noqa: E402
     _materialise_promotion_for_send,
-    _pick_promotion_id_for_event,
     _resolve_auto_coupon,
     _resolve_discount_source,
 )
+# `_pick_promotion_id_for_event` was removed in the Merchant Brain Phase 1+2
+# refactor (commit 43c18d3) — the event→promotion routing now lives inside
+# the Decision Engine. The historical TestPickPromotionIdForEvent class below
+# is kept for documentation but skipped at runtime.
+_pick_promotion_id_for_event = None  # type: ignore[assignment]
 from core.automations_seed import (  # noqa: E402
     DEFAULT_PROMOTIONS,
     SEASONAL_OCCASIONS,
@@ -898,6 +902,10 @@ class TestSeasonalOccasionCatalogue:
             assert extras.get("occasion_slug") == spec["occasion_slug"]
 
 
+@pytest.mark.skip(
+    reason="_pick_promotion_id_for_event was removed in Merchant Brain Phase 1+2 "
+           "(commit 43c18d3); event→promotion routing now lives in the Decision Engine."
+)
 class TestPickPromotionIdForEvent:
     def test_returns_fallback_when_no_event_payload(self) -> None:
         db, engine = _make_db()

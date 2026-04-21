@@ -8,13 +8,31 @@ Usage:
     python tests/tenant_isolation_test.py [BASE_URL]
     default BASE_URL = http://127.0.0.1:8000
 """
+import os
 import sys
 import json
 import time
 from typing import Any, Dict, Optional
+
+import pytest
 import requests
 
-BASE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+# This file is an E2E *script* against a live server, but pytest discovers it
+# because its name ends with `_test.py` and the helpers are named `test_*`.
+# In CI no server is running, and pytest passes its own flags as argv, which
+# pollutes BASE_URL. Skip the whole module unless explicitly opted in via
+# NAHLA_LIVE_E2E=1 (and ideally NAHLA_E2E_BASE_URL=http://host:port).
+if not os.getenv("NAHLA_LIVE_E2E"):
+    pytest.skip(
+        "Live E2E tenant-isolation script — set NAHLA_LIVE_E2E=1 (and run "
+        "`uvicorn backend.main:app` separately) to enable.",
+        allow_module_level=True,
+    )
+
+BASE_URL = (
+    os.getenv("NAHLA_E2E_BASE_URL")
+    or (sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].startswith("http") else "http://127.0.0.1:8000")
+)
 TENANT_A = "1"
 TENANT_B = "2"
 

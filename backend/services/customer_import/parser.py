@@ -182,7 +182,7 @@ def _parse_xlsx(content: bytes, filename: str) -> ParsedFile:
 
     try:
         wb.close()
-    except Exception:
+    except Exception:  # noqa: silent-ok — best-effort workbook cleanup; leak doesn't affect import correctness
         pass
 
     if not headers:

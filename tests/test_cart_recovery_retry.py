@@ -232,7 +232,12 @@ def _seed_failed_cart(Session, *, status: str = "failed", converted: bool = Fals
 
 # ── Feature flag: OFF ────────────────────────────────────────────────────────
 def test_retry_returns_403_when_feature_flag_disabled():
-    client, Session = _build_client(retry_flag=None)
+    # NOTE: the production default for AUTOPILOT_ENABLE_MANUAL_RETRY flipped
+    # from "false" to "true" once the manual retry button stabilised in
+    # production (see backend/routers/automations.py::_manual_retry_enabled).
+    # This test now pins the *disabled* contract by setting the flag to
+    # "false" explicitly rather than relying on an unset env.
+    client, Session = _build_client(retry_flag="false")
     order_id, _ = _seed_failed_cart(Session)
 
     resp = client.post(f"/autopilot/abandoned-carts/{order_id}/retry")
@@ -363,8 +368,12 @@ def test_autopilot_status_exposes_manual_retry_flag_on():
     assert resp.json()["manual_retry_enabled"] is True
 
 
-def test_autopilot_status_exposes_manual_retry_flag_off_by_default():
-    client, _ = _build_client(retry_flag=None)
+def test_autopilot_status_exposes_manual_retry_flag_when_explicitly_off():
+    # NOTE: production default for AUTOPILOT_ENABLE_MANUAL_RETRY flipped from
+    # "false" to "true" once the manual retry button stabilised. The status
+    # endpoint must still surface the flag accurately when an operator turns
+    # it back off.
+    client, _ = _build_client(retry_flag="false")
     resp = client.get("/autopilot/status")
     assert resp.status_code == 200
     assert resp.json()["manual_retry_enabled"] is False

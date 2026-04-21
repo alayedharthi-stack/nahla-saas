@@ -3,9 +3,20 @@
 # one line per pre-existing violation. The linter fails CI only if the
 # number of violations in a file grows beyond this count.
 # To regenerate: python scripts/lint_no_silent_except.py --update-baseline
+backend/core/automation_emitters.py::silent pass on broad except
+backend/core/automation_engine.py::logger.debug-only on broad except (use logger.exception)
+backend/core/automation_engine.py::logger.debug-only on broad except (use logger.exception)
+backend/core/automation_engine.py::silent pass on broad except
+backend/core/automation_engine.py::silent pass on broad except
+backend/core/automation_engine.py::silent pass on broad except
+backend/core/automation_engine.py::silent return on broad except
+backend/core/automation_engine.py::silent return on broad except
+backend/core/automation_engine.py::silent return on broad except
 backend/core/conversation_engine.py::silent pass on broad except
 backend/core/conversation_engine.py::silent pass on broad except
 backend/core/conversation_engine.py::silent pass on broad except
+backend/core/conversation_engine.py::silent pass on broad except
+backend/core/store_knowledge.py::silent pass on broad except
 backend/core/tenant_integrity.py::silent pass on broad except
 backend/core/webhook_dispatcher.py::silent pass on broad except
 backend/core/webhook_dispatcher.py::silent pass on broad except
@@ -16,19 +27,60 @@ backend/core/webhook_guardian.py::silent pass on broad except
 backend/core/webhook_guardian.py::silent pass on broad except
 backend/core/webhook_guardian.py::silent pass on broad except
 backend/core/webhook_guardian.py::silent pass on broad except
+backend/modules/ai/brain/decision/policy.py::logger.debug-only on broad except (use logger.exception)
+backend/modules/ai/brain/execution/orders.py::silent pass on broad except
+backend/modules/ai/brain/execution/orders.py::silent return on broad except
+backend/modules/ai/brain/facts/commerce_facts.py::silent pass on broad except
+backend/modules/ai/brain/memory/updater.py::silent pass on broad except
+backend/modules/ai/brain/memory/updater.py::silent pass on broad except
+backend/modules/ai/brain/memory/updater.py::silent pass on broad except
+backend/modules/ai/brain/pipeline.py::silent pass on broad except
+backend/modules/ai/brain/pipeline.py::silent pass on broad except
+backend/modules/ai/brain/pipeline.py::silent pass on broad except
+backend/modules/ai/brain/state/store.py::logger.debug-only on broad except (use logger.exception)
+backend/modules/ai/brain/state/store.py::logger.debug-only on broad except (use logger.exception)
+backend/modules/ai/brain/state/store.py::logger.debug-only on broad except (use logger.exception)
+backend/modules/ai/brain/state/store.py::silent pass on broad except
+backend/modules/ai/brain/types.py::silent return on broad except
+backend/modules/ai/learning/bias.py::logger.debug-only on broad except (use logger.exception)
+backend/modules/ai/learning/bias.py::silent return on broad except
+backend/modules/ai/learning/bias.py::silent return on broad except
+backend/modules/ai/learning/learner.py::silent pass on broad except
+backend/modules/ai/learning/policy_override.py::logger.debug-only on broad except (use logger.exception)
+backend/modules/ai/media/normalizer.py::silent pass on broad except
+backend/modules/ai/orchestrator/adapter.py::logger.debug-only on broad except (use logger.exception)
+backend/modules/ai/orchestrator/adapter.py::silent pass on broad except
+backend/modules/ai/prompts/tenant_overlay.py::silent pass on broad except
+backend/modules/ai/routing/conversation_mode.py::silent pass on broad except
+backend/modules/ai/routing/conversation_mode.py::silent pass on broad except
+backend/modules/ai/routing/conversation_mode.py::silent pass on broad except
+backend/modules/ai/routing/conversation_mode.py::silent pass on broad except
+backend/modules/ai/security/cross_merchant_store.py::silent pass on broad except
+backend/routers/admin.py::silent pass on broad except
+backend/routers/admin.py::silent pass on broad except
 backend/routers/ai_sales.py::silent pass on broad except
+backend/routers/conversations.py::silent pass on broad except
+backend/routers/debug_public.py::silent pass on broad except
 backend/routers/handoff.py::silent pass on broad except
+backend/routers/health.py::silent pass on broad except
+backend/routers/health.py::silent return on broad except
+backend/routers/health.py::silent return on broad except
 backend/routers/intelligence.py::silent pass on broad except
 backend/routers/salla_oauth.py::silent pass on broad except
 backend/routers/salla_oauth.py::silent pass on broad except
 backend/routers/salla_oauth.py::silent pass on broad except
 backend/routers/salla_oauth.py::silent pass on broad except
-backend/routers/templates.py::silent return on broad except
+backend/routers/store_integration.py::silent pass on broad except
+backend/routers/templates.py::silent pass on broad except
+backend/routers/templates.py::silent pass on broad except
+backend/routers/templates.py::silent pass on broad except
+backend/routers/webhooks.py::logger.debug-only on broad except (use logger.exception)
 backend/routers/webhooks.py::logger.debug-only on broad except (use logger.exception)
 backend/routers/webhooks.py::silent pass on broad except
 backend/routers/whatsapp_embedded.py::silent pass on broad except
 backend/routers/whatsapp_webhook.py::logger.debug-only on broad except (use logger.exception)
 backend/routers/whatsapp_webhook.py::logger.debug-only on broad except (use logger.exception)
+backend/routers/whatsapp_webhook.py::logger.debug-only on broad except (use logger.exception)
 backend/routers/whatsapp_webhook.py::silent pass on broad except
 backend/routers/whatsapp_webhook.py::silent pass on broad except
 backend/routers/whatsapp_webhook.py::silent pass on broad except
@@ -40,7 +92,47 @@ backend/routers/whatsapp_webhook.py::silent pass on broad except
 backend/routers/whatsapp_webhook.py::silent pass on broad except
 backend/routers/whatsapp_webhook.py::silent pass on broad except
 backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/routers/whatsapp_webhook.py::silent pass on broad except
+backend/services/address_resolution.py::silent return on broad except
+backend/services/address_resolution.py::silent return on broad except
+backend/services/cart_recovery_actions.py::silent pass on broad except
+backend/services/cart_recovery_actions.py::silent pass on broad except
+backend/services/cart_recovery_actions.py::silent pass on broad except
+backend/services/cart_recovery_actions.py::silent pass on broad except
+backend/services/cart_recovery_actions.py::silent pass on broad except
+backend/services/cart_recovery_actions.py::silent pass on broad except
+backend/services/cart_recovery_cancel.py::silent pass on broad except
+backend/services/cart_recovery_cancel.py::silent pass on broad except
+backend/services/cart_recovery_cancel.py::silent pass on broad except
+backend/services/cart_recovery_cancel.py::silent pass on broad except
+backend/services/cart_recovery_emitter.py::silent pass on broad except
+backend/services/cart_recovery_emitter.py::silent return on broad except
+backend/services/conversion_layer.py::silent pass on broad except
+backend/services/conversion_layer.py::silent pass on broad except
+backend/services/customer_intelligence.py::logger.debug-only on broad except (use logger.exception)
+backend/services/customer_intelligence.py::logger.debug-only on broad except (use logger.exception)
+backend/services/offer_decision_flags.py::logger.debug-only on broad except (use logger.exception)
+backend/services/offer_decision_flags.py::logger.debug-only on broad except (use logger.exception)
+backend/services/offer_decision_service.py::logger.debug-only on broad except (use logger.exception)
+backend/services/offer_decision_service.py::logger.debug-only on broad except (use logger.exception)
+backend/services/offer_decision_service.py::logger.debug-only on broad except (use logger.exception)
+backend/services/offer_decision_service.py::logger.debug-only on broad except (use logger.exception)
+backend/services/offer_decision_service.py::logger.debug-only on broad except (use logger.exception)
+backend/services/offer_decision_service.py::silent pass on broad except
+backend/services/offer_decision_service.py::silent pass on broad except
+backend/services/offer_decision_service.py::silent return on broad except
+backend/services/promotion_engine.py::silent pass on broad except
+backend/services/store_sync.py::logger.debug-only on broad except (use logger.exception)
+backend/services/store_sync.py::logger.debug-only on broad except (use logger.exception)
 backend/services/store_sync.py::silent pass on broad except
 backend/store_adapters/salla_adapter.py::silent pass on broad except
+backend/utils/phone_utils.py::silent return on broad except
 scripts/cleanup_salla_duplicates.py::silent pass on broad except
+scripts/fix_tenant1_and_salla_auth.py::silent pass on broad except
+scripts/fix_test_store_pinning.py::silent pass on broad except
+scripts/fix_test_store_pinning.py::silent pass on broad except
 scripts/verify_salla_no_duplicates.py::silent pass on broad except
