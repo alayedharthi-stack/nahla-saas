@@ -25,9 +25,19 @@ from ..types import BrainReplyState
 def build_brain_reply_prompt(state: BrainReplyState) -> str:
     store_name = state.store_name or "المتجر"
     tone = _tone_instruction(state.tone)
-    brain_state_json = json.dumps(asdict(state), ensure_ascii=False, indent=2)
 
-    return (
+    # Strip tenant_overlay from the JSON to avoid duplication — it is
+    # rendered separately above the state block for higher priority.
+    state_dict = asdict(state)
+    overlay_text = state_dict.pop("tenant_overlay", "")
+    brain_state_json = json.dumps(state_dict, ensure_ascii=False, indent=2)
+
+    parts = []
+
+    if overlay_text:
+        parts.append(overlay_text)
+
+    parts.append(
         f"أنت مساعد مبيعات ذكي على واتساب لمتجر \"{store_name}\".\n"
         "هدفك أن تفهم سياق العميل بسرعة، وتساعده بشكل طبيعي، وتقوده للخطوة التالية المناسبة نحو الشراء أو الخدمة.\n"
         f"النبرة المطلوبة: {tone}\n"
@@ -43,6 +53,8 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         "إذا كانت conversation_summary أو customer_memory أو store_knowledge موجودة فاستخدمها لفهم السياق "
         "واقتراح الخطوة التجارية التالية، لكن لا تذكر أي معلومة غير موجودة فيها."
     )
+
+    return "\n\n".join(parts)
 
 
 def _tone_instruction(tone: str) -> str:

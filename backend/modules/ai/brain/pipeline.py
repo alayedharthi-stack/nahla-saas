@@ -229,12 +229,25 @@ class MerchantBrain:
         new_state.recommended_next_step = suggestion.suggested_next_step
         new_state.pending_action = suggestion.suggested_next_step or new_state.pending_action
         ctx.suggestion = suggestion
+        _tenant_tone = ""
+        _tenant_overlay = ""
+        try:
+            from modules.ai.prompts.tenant_overlay import (  # noqa: PLC0415
+                get_tenant_tone, load_tenant_ai_overlay,
+            )
+            _tenant_tone = get_tenant_tone(db, tenant_id)
+            _tenant_overlay = load_tenant_ai_overlay(db, tenant_id)
+        except Exception:
+            pass
+
         ctx.reply_state = _build_reply_state(
             ctx=ctx,
             previous_state=state,
             current_state=new_state,
             suggestion=suggestion,
             decision=decision,
+            tenant_tone=_tenant_tone,
+            tenant_overlay=_tenant_overlay,
         )
 
         # ── 7. Compose reply ──────────────────────────────────────────────
@@ -368,6 +381,8 @@ def _build_reply_state(
     current_state: MerchantConversationState,
     suggestion: SuggestionSnapshot,
     decision: Decision,
+    tenant_tone: str = "",
+    tenant_overlay: str = "",
 ) -> BrainReplyState:
     recent_turns = []
     for turn in (ctx.history or [])[-4:]:
@@ -396,9 +411,11 @@ def _build_reply_state(
         "checkout_preparation": current_state.order_prep.to_dict(),
     }
 
+    effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
+
     return BrainReplyState(
         store_name=ctx.facts.store_name,
-        tone=str(ctx.profile.get("communication_style") or "neutral"),
+        tone=effective_tone,
         stage=current_state.stage,
         customer_goal=current_state.customer_goal,
         selected_product=selected_product,
@@ -422,6 +439,7 @@ def _build_reply_state(
             **(ctx.sales_context.customer_preferences if ctx.sales_context else {}),
         },
         last_recommended_products=list(current_state.last_recommended_products or []),
+        tenant_overlay=tenant_overlay,
         explicit_pending_action=current_state.pending_action,
     )
 

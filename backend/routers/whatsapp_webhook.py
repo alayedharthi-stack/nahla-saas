@@ -986,6 +986,9 @@ async def _handle_merchant_message(
 
             store_context_text = build_ai_context(db, tenant_id, customer_phone=to, product_query=text)
 
+            from modules.ai.prompts.tenant_overlay import load_tenant_ai_overlay  # noqa: PLC0415
+            tenant_overlay = load_tenant_ai_overlay(db, tenant_id)
+
             system_prompt = f"""أنت مساعد ذكي لمتجر إلكتروني. مهمتك الرد على استفسارات العملاء بأسلوب ودي واحترافي باللغة العربية.
 
 استخدم المعلومات التالية للإجابة بدقة — لا تخترع معلومات خارجها:
@@ -997,6 +1000,9 @@ async def _handle_merchant_message(
 - لا تذكر منصة نحلة أو أي منصة SaaS أخرى
 - إذا لم تجد إجابة في البيانات المتاحة، قل للعميل أنك ستتحقق وتعود إليه
 - تحدث كموظف خدمة العملاء للمتجر مباشرةً"""
+
+            if tenant_overlay:
+                system_prompt = f"{tenant_overlay}\n\n{system_prompt}"
 
             history_transcript = "\n".join(
                 f"{m['role']}: {m['content']}" for m in messages[:-1]

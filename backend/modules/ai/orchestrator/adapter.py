@@ -200,6 +200,11 @@ async def generate_orchestrate_response(
         "preferred_language": ctx.get("preferred_language", "ar"),
     })
 
+    # ── Tenant assistant settings overlay ─────────────────────────────────
+    tenant_overlay = _load_tenant_overlay_safe(tenant_id)
+    if tenant_overlay:
+        full_system_prompt = f"{tenant_overlay}\n\n{full_system_prompt}"
+
     payload = generate_ai_reply(
         tenant_id=tenant_id,
         customer_phone=customer_phone,
@@ -1082,3 +1087,26 @@ def _stamp_advisory_decision_id(db, coupon, decision) -> None:
         db.commit()
     except Exception as exc:  # pragma: no cover
         logger.debug("[suggest_coupon] advisory stamp failed: %s", exc)
+
+
+def _load_tenant_overlay_safe(tenant_id: Optional[int]) -> str:
+    """Load the tenant prompt overlay via a short-lived DB session.
+
+    Returns "" on any failure so the pipeline is never broken.
+    This function is intentionally isolated: opens and closes its own
+    session so the adapter remains a pure bridge layer.
+    """
+    if not tenant_id:
+        return ""
+    try:
+        from core.database import SessionLocal  # noqa: PLC0415
+        from modules.ai.prompts.tenant_overlay import load_tenant_ai_overlay  # noqa: PLC0415
+
+        db = SessionLocal()
+        try:
+            return load_tenant_ai_overlay(db, tenant_id)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug("[adapter] tenant overlay load failed: %s", exc)
+        return ""

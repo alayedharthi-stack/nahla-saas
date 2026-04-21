@@ -349,6 +349,7 @@ class BrainReplyState:
     customer_memory: Dict[str, Any] = field(default_factory=dict)
     last_recommended_products: List[Dict[str, Any]] = field(default_factory=list)
     explicit_pending_action: str = ""
+    tenant_overlay: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
