@@ -933,8 +933,31 @@ async def _execute_action(
         coupon_extras=coupon_extras,
     )
 
-    # Build Meta API body components
-    body_params = [{"type": "text", "text": str(v)} for v in vars_map.values()]
+    # Count how many {{N}} the BODY component actually contains so we
+    # only feed that many parameters to Meta. Templates where the URL
+    # button has its own {{1}} (independent from the BODY {{1}}) used
+    # to fail with Meta 132000 "parameter count mismatch" because the
+    # old code passed button-slot values as body parameters.
+    import re as _re
+    _body_ph_count = 0
+    for _tcomp in (template.components or []):
+        if str(_tcomp.get("type", "")).upper() == "BODY":
+            _body_ph_count = len(_re.findall(r"\{\{[^{}]+\}\}", str(_tcomp.get("text") or "")))
+            break
+
+    _var_values = list(vars_map.values())
+    # If var_map has MORE slots than the BODY expects (e.g. because
+    # legacy `slots` included `checkout_url` alongside body vars),
+    # truncate to exactly what the body needs. This is the definitive
+    # guard against 132000.
+    if _body_ph_count and len(_var_values) > _body_ph_count:
+        logger.info(
+            "[AutoEngine] trimming body_params from %d to %d for template %s",
+            len(_var_values), _body_ph_count, template.name,
+        )
+        _var_values = _var_values[:_body_ph_count]
+
+    body_params = [{"type": "text", "text": str(v)} for v in _var_values]
     components: List[Dict[str, Any]] = []
     if body_params:
         components.append({"type": "body", "parameters": body_params})
@@ -946,7 +969,7 @@ async def _execute_action(
     # from whichever URL slot (checkout, tracking, payment) is populated in the
     # event payload.
     _URL_SLOT_PRECEDENCE = (
-        "checkout_url", "tracking_url", "payment_url",
+        "checkout_url", "cart_url", "tracking_url", "payment_url",
         "product_url", "reorder_url", "store_url",
     )
     _customer_name_for_btn = customer.name or ""
@@ -1161,6 +1184,8 @@ def _resolve_slot_value(
         return str(payload.get("store_url") or config.get("store_url") or "")
     if slot == "checkout_url":
         return str(payload.get("checkout_url") or payload.get("cart_url") or "")
+    if slot == "cart_url":
+        return str(payload.get("cart_url") or payload.get("checkout_url") or "")
     if slot == "cart_total":
         return str(payload.get("cart_total") or payload.get("total") or "")
     if slot == "product_name":

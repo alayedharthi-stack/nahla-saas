@@ -69,10 +69,13 @@ SUPPORTED_TEMPLATE_FIELDS: Dict[int, List[str]] = {
 }
 
 SUPPORTED_FEATURE_RULES: Dict[str, Dict[str, Any]] = {
-    "order_status_update": {"category": {"UTILITY"}, "min_vars": 2, "max_vars": 3},
-    "predictive_reorder": {"category": {"MARKETING", "UTILITY"}, "min_vars": 2, "max_vars": 3},
-    "abandoned_cart": {"category": {"MARKETING", "UTILITY"}, "min_vars": 2, "max_vars": 2},
-    "inactive_recovery": {"category": {"MARKETING"}, "min_vars": 2, "max_vars": 3},
+    "order_status_update": {"category": {"UTILITY"}, "min_body_vars": 2, "max_body_vars": 3},
+    "predictive_reorder":  {"category": {"MARKETING", "UTILITY"}, "min_body_vars": 2, "max_body_vars": 3},
+    # Abandoned-cart: BODY needs only the customer name (1 var).  The
+    # cart URL lives in the URL button component and is resolved
+    # independently by the engine — it must NOT be counted as a body var.
+    "abandoned_cart":      {"category": {"MARKETING", "UTILITY"}, "min_body_vars": 1, "max_body_vars": 1, "requires_url_button": True},
+    "inactive_recovery":   {"category": {"MARKETING"}, "min_body_vars": 2, "max_body_vars": 3},
 }
 
 DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
@@ -150,11 +153,15 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
-            {"type": "BODY", "text": "مرحباً {{1}}،\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن من متجر {{2}} قبل نفاد الكمية.",
-             "example": {"body_text": [["أحمد", "متجر الأناقة"]]}},
+            # Single body placeholder = customer name. The cart link is
+            # delivered through the URL button only — keeping the two
+            # placeholder spaces apart so the engine never sends a body
+            # parameter for a slot that lives in the button component.
+            {"type": "BODY", "text": "مرحباً {{1}} 🛒\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nسلتك محفوظة وتنتظرك — أكمل طلبك الآن قبل نفاد الكمية.",
+             "example": {"body_text": [["أحمد"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
             {"type": "BUTTONS", "buttons": [
-                {"type": "URL", "text": "أكمل الطلب 🛒",
+                {"type": "URL", "text": "أكمل الطلب",
                  "url": "https://example.com/cart/{{1}}",
                  "example": ["https://example.com/cart/abc123"]},
             ]},
@@ -276,8 +283,11 @@ TEMPLATE_VAR_MAP: Dict[str, Dict[str, str]] = {
         "{{3}}": "order_amount",
     },
     "abandoned_cart_reminder": {
+        # BODY only — the URL button's {{1}} is fed independently by the
+        # engine's URL-slot resolver (`_URL_SLOT_PRECEDENCE`). Adding a
+        # second body entry here would cause Meta error 132000 because
+        # the BODY only has one {{N}} placeholder.
         "{{1}}": "customer_name",
-        "{{2}}": "cart_url",
     },
     "special_offer": {
         "{{1}}": "customer_name",
@@ -347,9 +357,17 @@ MOCK_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
-            {"type": "BODY",   "text": "مرحباً {{1}}،\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن قبل نفاد الكمية: {{2}}"},
+            # BODY has ONE placeholder = customer name.
+            # The cart URL is delivered through the dedicated URL button
+            # below, NOT inlined into the body, so the body and button
+            # never collide on the same {{N}} index.
+            {"type": "BODY",   "text": "مرحباً {{1}} 🛒\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن قبل نفاد الكمية."},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
-            {"type": "BUTTONS", "buttons": [{"type": "URL", "text": "أكمل الطلب", "url": "{{2}}"}]},
+            {"type": "BUTTONS", "buttons": [{
+                "type": "URL", "text": "أكمل الطلب",
+                "url": "https://example.com/cart/{{1}}",
+                "example": ["https://example.com/cart/abc123"],
+            }]},
         ],
     },
     {
@@ -649,6 +667,7 @@ def _extract_placeholders_from_text(text: str) -> List[str]:
 
 
 def _extract_template_placeholders(components: List[Dict[str, Any]]) -> List[str]:
+    """Return ALL placeholders (body + header + buttons) flattened."""
     placeholders: set[str] = set()
     for comp in components or []:
         text = str(comp.get("text") or "")
@@ -657,6 +676,29 @@ def _extract_template_placeholders(components: List[Dict[str, Any]]) -> List[str
             placeholders.update(_extract_placeholders_from_text(str(btn.get("text") or "")))
             placeholders.update(_extract_placeholders_from_text(str(btn.get("url") or "")))
     return sorted(placeholders, key=_placeholder_sort_key)
+
+
+def _extract_body_placeholders(components: List[Dict[str, Any]]) -> List[str]:
+    """Return placeholders from BODY components ONLY (not buttons/header)."""
+    placeholders: set[str] = set()
+    for comp in components or []:
+        if str(comp.get("type", "")).upper() != "BODY":
+            continue
+        placeholders.update(_extract_placeholders_from_text(str(comp.get("text") or "")))
+    return sorted(placeholders, key=_placeholder_sort_key)
+
+
+def _has_url_button_placeholder(components: List[Dict[str, Any]]) -> bool:
+    """True when at least one URL button contains a {{N}} placeholder."""
+    for comp in components or []:
+        if str(comp.get("type", "")).upper() != "BUTTONS":
+            continue
+        for btn in comp.get("buttons") or []:
+            if str(btn.get("type", "")).upper() != "URL":
+                continue
+            if _extract_placeholders_from_text(str(btn.get("url") or "")):
+                return True
+    return False
 
 
 def _guess_field_candidates(placeholder: str, *, category: str, template_name: str) -> List[str]:
@@ -740,12 +782,17 @@ def _compute_template_compatibility(
         issues.append("القالب لا يحتوي على BODY نصي")
     if status_norm != "APPROVED":
         issues.append(f"حالة Meta الحالية: {status_norm}")
+    body_phs = _extract_body_placeholders(components)
+    has_url_btn = _has_url_button_placeholder(components)
+
     supported_features: List[str] = []
     for feature, rule in SUPPORTED_FEATURE_RULES.items():
         if category not in rule["category"]:
             continue
-        count = len(placeholders)
-        if count < rule["min_vars"] or count > rule["max_vars"]:
+        body_count = len(body_phs)
+        if body_count < rule["min_body_vars"] or body_count > rule["max_body_vars"]:
+            continue
+        if rule.get("requires_url_button") and not has_url_btn:
             continue
         supported_features.append(feature)
     compatibility = "compatible" if has_body_text and bool(supported_features) else "review_needed"
@@ -754,6 +801,8 @@ def _compute_template_compatibility(
     return {
         "compatibility": compatibility,
         "placeholder_count": len(placeholders),
+        "body_placeholder_count": len(body_phs),
+        "has_url_button": has_url_btn,
         "placeholders": placeholders,
         "var_map": var_map,
         "supported_features": supported_features,

@@ -48,22 +48,35 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["recovery", "cart"],
         "smart_trigger":  "cart_abandoned",
         "smart_label":    "يُرسل تلقائياً: عند ترك السلة",
-        "slots":          ["customer_name", "store_name"],
+        # Two distinct slot kinds — keep them separate so the engine never
+        # mixes a body placeholder with the URL-button placeholder. The
+        # body needs only the customer name (greeting) and the button is
+        # fed independently from the cart URL coming off the event payload.
+        "body_slots":   ["customer_name"],
+        "button_slots": ["cart_url"],
+        # Legacy single-list `slots` kept for back-compat with consumers
+        # that read `slots`; equals body + button concatenated.
+        "slots":          ["customer_name", "cart_url"],
         "components": [
             {
                 "type": "BODY",
                 "text": (
                     "مرحباً {{1}} 🛒\n\n"
-                    "لاحظنا أنك أضفت منتجات إلى سلتك في متجر {{2}} لكنك لم تكمل الطلب بعد.\n\n"
+                    "لاحظنا أنك أضفت منتجات إلى سلتك لكنك لم تكمل الطلب بعد.\n\n"
                     "سلتك محفوظة وتنتظرك — أكمل طلبك الآن قبل نفاذ المخزون!"
                 ),
-                "example": {"body_text": [["أحمد", "متجر الأناقة"]]},
+                "example": {"body_text": [["أحمد"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
                 "type": "BUTTONS",
                 "buttons": [
                     {
+                        # The URL button takes a cart suffix (Meta dynamic
+                        # URL). Engine fills the {{1}} from event.payload's
+                        # checkout_url / cart_url — NOT from the body var
+                        # map, so the customer name and cart URL never
+                        # collide on the same {{1}} index.
                         "type": "URL", "text": "أكمل طلبك",
                         "url": "https://example.com/cart/{{1}}",
                         "example": ["https://example.com/cart/abc123"],
@@ -84,17 +97,22 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "filter_tags":    ["recovery", "cart"],
         "smart_trigger":  "cart_abandoned",
         "smart_label":    "يُرسل تلقائياً: متابعة السلة المتروكة",
-        "slots":          ["customer_name", "store_name"],
+        # Same body/button split as `abandoned_cart_reminder` — see comment
+        # there. Body keeps the customer name only; the URL button is fed
+        # independently from the cart URL on the event payload.
+        "body_slots":   ["customer_name"],
+        "button_slots": ["cart_url"],
+        "slots":          ["customer_name", "cart_url"],
         "components": [
             {
                 "type": "BODY",
                 "text": (
                     "{{1}} 👋\n\n"
-                    "طلبك في متجر {{2}} ما زال بانتظارك.\n\n"
+                    "طلبك ما زال بانتظارك.\n\n"
                     "إذا واجهتَ أي صعوبة في الدفع أو الشحن، ردّ على هذه الرسالة وسنساعدك فوراً.\n\n"
                     "أو أكمل طلبك مباشرةً من هنا:"
                 ),
-                "example": {"body_text": [["سارة", "متجر الجمال"]]},
+                "example": {"body_text": [["سارة"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {

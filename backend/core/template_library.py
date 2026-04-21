@@ -91,43 +91,67 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "languages": {
             "ar": {
                 "template_name": "abandoned_cart_recovery_ar",
-                "slots":         ["customer_name", "store_name", "checkout_url"],
+                # `body_slots` is what gets fed into the BODY {{N}} positions
+                # during render; `button_slots` is what fills the URL button's
+                # dynamic suffix. They are NEVER concatenated into a single
+                # numeric var map — keeping them apart is what prevents the
+                # historical 132000 "parameter mismatch" failures where the
+                # engine sent body params for a cart_url that actually
+                # belonged in the button URL component.
+                "body_slots":   ["customer_name"],
+                "button_slots": ["checkout_url"],
+                # Legacy concatenated `slots` (still read by callers that
+                # haven't migrated yet) — order is body first, button last.
+                "slots":         ["customer_name", "checkout_url"],
                 "components": [
                     {
                         "type": "BODY",
                         "text": (
-                            "مرحباً {{1}} 👋\n\n"
-                            "لاحظنا أنك أضفت بعض المنتجات إلى السلة في متجر {{2}} لكن لم تكتمل عملية الشراء.\n\n"
-                            "يمكنك إكمال الطلب بسهولة من هنا:\n\n"
-                            "{{3}}\n\n"
-                            "إذا احتجت أي مساعدة يسعدنا خدمتك 🌟"
+                            "مرحباً {{1}} 🛒\n\n"
+                            "لاحظنا أنك أضفت بعض المنتجات إلى سلتك لكن لم تكتمل عملية الشراء.\n\n"
+                            "سلتك ما زالت محفوظة وتنتظرك — أكمل طلبك الآن قبل نفاد المخزون!"
                         ),
+                        "example": {"body_text": [["أحمد"]]},
                     },
                     {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
                     {
                         "type": "BUTTONS",
-                        "buttons": [{"type": "URL", "text": "إكمال الطلب", "url": "{{3}}"}],
+                        # Meta dynamic URL button: a fixed prefix + {{1}}
+                        # placeholder. The engine's URL-button resolver
+                        # (`_URL_SLOT_PRECEDENCE` in automation_engine.py)
+                        # picks `checkout_url` first and substitutes the
+                        # last path segment into {{1}}.
+                        "buttons": [{
+                            "type": "URL", "text": "أكمل طلبك",
+                            "url": "https://example.com/checkout/{{1}}",
+                            "example": ["https://example.com/checkout/abc123"],
+                        }],
                     },
                 ],
             },
             "en": {
                 "template_name": "abandoned_cart_recovery_en",
-                "slots":         ["customer_name", "store_name", "checkout_url"],
+                "body_slots":   ["customer_name"],
+                "button_slots": ["checkout_url"],
+                "slots":         ["customer_name", "checkout_url"],
                 "components": [
                     {
                         "type": "BODY",
                         "text": (
-                            "Hi {{1}} 👋\n\n"
-                            "We noticed you added some items to your cart at {{2}} but didn't complete checkout.\n\n"
-                            "You can finish your order here:\n\n"
-                            "{{3}}\n\n"
-                            "Reply to this message if you need any help 🌟"
+                            "Hi {{1}} 🛒\n\n"
+                            "We noticed you added some items to your cart but didn't complete checkout.\n\n"
+                            "Your cart is still saved and waiting — finish checkout before items go out of stock!"
                         ),
+                        "example": {"body_text": [["Ahmad"]]},
                     },
                     {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
                     {
                         "type": "BUTTONS",
-                        "buttons": [{"type": "URL", "text": "Complete order", "url": "{{3}}"}],
+                        "buttons": [{
+                            "type": "URL", "text": "Complete order",
+                            "url": "https://example.com/checkout/{{1}}",
+                            "example": ["https://example.com/checkout/abc123"],
+                        }],
                     },
                 ],
             },
@@ -478,45 +502,60 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "languages": {
             "ar": {
                 "template_name": "abandoned_cart_followup_ar",
-                "slots":         ["customer_name", "store_name", "checkout_url"],
+                # Same body-vs-button split as stage 1 — keep the BODY
+                # tight (just the customer name) and let the URL button
+                # carry the cart link via the engine's URL-slot resolver.
+                "body_slots":   ["customer_name"],
+                "button_slots": ["checkout_url"],
+                "slots":         ["customer_name", "checkout_url"],
                 "components": [
                     {
                         "type": "BODY",
                         "text": (
                             "مرحباً {{1}} 🌷\n\n"
-                            "ما زال طلبك في متجر {{2}} بانتظارك.\n\n"
+                            "ما زال طلبك بانتظارك.\n\n"
                             "إذا واجهتَ أي صعوبة في إتمام الطلب — سواء بالدفع أو "
                             "الشحن أو معلومات المنتج — يسعدنا مساعدتك مباشرة عبر هذه المحادثة.\n\n"
-                            "أو يمكنك إكمال الطلب من هنا متى أردت:\n\n"
-                            "{{3}}"
+                            "أو يمكنك إكمال الطلب من هنا متى أردت:"
                         ),
+                        "example": {"body_text": [["أحمد"]]},
                     },
                     {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
                     {
                         "type": "BUTTONS",
-                        "buttons": [{"type": "URL", "text": "إكمال الطلب", "url": "{{3}}"}],
+                        "buttons": [{
+                            "type": "URL", "text": "إكمال الطلب",
+                            "url": "https://example.com/checkout/{{1}}",
+                            "example": ["https://example.com/checkout/abc123"],
+                        }],
                     },
                 ],
             },
             "en": {
                 "template_name": "abandoned_cart_followup_en",
-                "slots":         ["customer_name", "store_name", "checkout_url"],
+                "body_slots":   ["customer_name"],
+                "button_slots": ["checkout_url"],
+                "slots":         ["customer_name", "checkout_url"],
                 "components": [
                     {
                         "type": "BODY",
                         "text": (
                             "Hi {{1}} 🌷\n\n"
-                            "Your cart at {{2}} is still waiting for you.\n\n"
+                            "Your cart is still waiting for you.\n\n"
                             "If you ran into any trouble — payment, shipping, or "
                             "questions about the product — just reply here and we'll help.\n\n"
-                            "Or pick up where you left off any time:\n\n"
-                            "{{3}}"
+                            "Or pick up where you left off any time:"
                         ),
+                        "example": {"body_text": [["Ahmad"]]},
                     },
                     {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
                     {
                         "type": "BUTTONS",
-                        "buttons": [{"type": "URL", "text": "Complete order", "url": "{{3}}"}],
+                        "buttons": [{
+                            "type": "URL", "text": "Complete order",
+                            "url": "https://example.com/checkout/{{1}}",
+                            "example": ["https://example.com/checkout/abc123"],
+                        }],
                     },
                 ],
             },
@@ -537,45 +576,60 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "languages": {
             "ar": {
                 "template_name": "abandoned_cart_final_offer_ar",
-                "slots":         ["customer_name", "store_name", "discount_code", "checkout_url"],
+                # Stage-3 body keeps customer name + discount code only.
+                # The URL button is fed independently from checkout_url —
+                # never share a {{N}} index between body and button.
+                "body_slots":   ["customer_name", "discount_code"],
+                "button_slots": ["checkout_url"],
+                "slots":         ["customer_name", "discount_code", "checkout_url"],
                 "components": [
                     {
                         "type": "BODY",
                         "text": (
                             "مرحباً {{1}} 💛\n\n"
-                            "آخر تذكير لطلبك في متجر {{2}}.\n\n"
+                            "آخر تذكير لطلبك المحفوظ.\n\n"
                             "حضّرنا لك عرضاً صغيراً لتجربة مريحة — استخدم الكود التالي:\n\n"
-                            "{{3}}\n\n"
-                            "أكمل طلبك الآن:\n\n"
-                            "{{4}}"
+                            "{{2}}\n\n"
+                            "ثم أكمل طلبك من الزر بالأسفل."
                         ),
+                        "example": {"body_text": [["أحمد", "WELCOME10"]]},
                     },
                     {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
                     {
                         "type": "BUTTONS",
-                        "buttons": [{"type": "URL", "text": "إكمال الطلب", "url": "{{4}}"}],
+                        "buttons": [{
+                            "type": "URL", "text": "إكمال الطلب",
+                            "url": "https://example.com/checkout/{{1}}",
+                            "example": ["https://example.com/checkout/abc123"],
+                        }],
                     },
                 ],
             },
             "en": {
                 "template_name": "abandoned_cart_final_offer_en",
-                "slots":         ["customer_name", "store_name", "discount_code", "checkout_url"],
+                "body_slots":   ["customer_name", "discount_code"],
+                "button_slots": ["checkout_url"],
+                "slots":         ["customer_name", "discount_code", "checkout_url"],
                 "components": [
                     {
                         "type": "BODY",
                         "text": (
                             "Hi {{1}} 💛\n\n"
-                            "Last nudge for your cart at {{2}}.\n\n"
+                            "Last nudge for your saved cart.\n\n"
                             "We've prepared a small offer to make this easy — use this code:\n\n"
-                            "{{3}}\n\n"
-                            "Finish your order:\n\n"
-                            "{{4}}"
+                            "{{2}}\n\n"
+                            "Then tap the button below to finish checkout."
                         ),
+                        "example": {"body_text": [["Ahmad", "WELCOME10"]]},
                     },
                     {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
                     {
                         "type": "BUTTONS",
-                        "buttons": [{"type": "URL", "text": "Complete order", "url": "{{4}}"}],
+                        "buttons": [{
+                            "type": "URL", "text": "Complete order",
+                            "url": "https://example.com/checkout/{{1}}",
+                            "example": ["https://example.com/checkout/abc123"],
+                        }],
                     },
                 ],
             },
@@ -709,15 +763,34 @@ def numeric_var_map_for(template_name: str) -> Dict[str, str]:
     Return `{"{{1}}": "customer_name", "{{2}}": ...}` for the named template,
     or {} if it isn't part of the default library.
 
-    The order of `slots` in `DEFAULT_AUTOMATION_TEMPLATES` is the contract:
-    slot[0] → {{1}}, slot[1] → {{2}}, …
+    Returns ONLY the BODY positional contract — never includes URL-button
+    slots. Mixing the two was the historical root cause of Meta error
+    132000 (number of body parameters did not match the BODY's actual
+    placeholder count): if a template's BODY has 1 placeholder and the
+    button has 1 placeholder, we used to flatten both into a single
+    list of length 2 and shove all of them into the body component.
+
+    Order contract:
+      * Prefer `body_slots` when defined — slot[0] → {{1}}, slot[1] → {{2}}, …
+      * Fall back to legacy `slots` for older specs that haven't been
+        migrated. This keeps templates without explicit `body_slots`
+        working unchanged.
+
+    Button URL parameters are resolved separately by the engine via
+    `_URL_SLOT_PRECEDENCE` in `automation_engine.py`.
     """
     for spec in DEFAULT_AUTOMATION_TEMPLATES.values():
         for lang_spec in spec["languages"].values():
             if lang_spec["template_name"] == template_name:
+                body_slots = lang_spec.get("body_slots")
+                if body_slots is None:
+                    # Legacy spec — assume all `slots` are body slots, the
+                    # historical (buggy) behaviour. New specs override this
+                    # by declaring `body_slots` explicitly.
+                    body_slots = lang_spec.get("slots", [])
                 return {
                     f"{{{{{i + 1}}}}}": slot
-                    for i, slot in enumerate(lang_spec["slots"])
+                    for i, slot in enumerate(body_slots)
                 }
     return {}
 
