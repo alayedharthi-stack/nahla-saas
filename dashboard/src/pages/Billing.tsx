@@ -35,41 +35,47 @@ const PLAN_GRADIENTS: Record<string, string> = {
 
 function PlanCard({
   plan,
-  isCurrentPlan,
+  billingStatus,
   onCheckout,
   checkingOut,
 }: {
-  plan:         BillingPlan
-  isCurrentPlan: boolean
-  onCheckout:   (slug: string) => void
-  checkingOut:  string | null
+  plan:          BillingPlan
+  billingStatus: BillingStatus | null
+  onCheckout:    (slug: string) => void
+  checkingOut:   string | null
 }) {
   const isPopular  = plan.slug === 'growth'
   const gradient   = PLAN_GRADIENTS[plan.slug] ?? 'from-slate-500 to-slate-600'
   const isLoading  = checkingOut === plan.slug
   const hasDiscount = plan.launch_price_sar < plan.price_sar
 
+  const isPaidActive = billingStatus?.has_subscription
+    && billingStatus.status === 'active'
+    && billingStatus.plan?.slug === plan.slug
+  const isTrialPlan = billingStatus?.is_trial && !billingStatus.has_subscription
+  const isHighlighted = isPaidActive
+
   return (
     <div
       className={[
         'relative rounded-2xl border-2 flex flex-col transition-all duration-200',
-        isCurrentPlan
+        isHighlighted
           ? 'border-brand-500 shadow-lg shadow-brand-500/10'
           : 'border-slate-200 hover:border-slate-300 hover:shadow-md',
       ].join(' ')}
     >
       {/* Badge */}
-      {isPopular && !isCurrentPlan && (
+      {isPopular && !isPaidActive && (
         <div className="absolute -top-3 start-1/2 -translate-x-1/2 rtl:translate-x-1/2">
           <span className="bg-brand-500 text-white text-[11px] font-bold px-3 py-1 rounded-full flex items-center gap-1">
             <Star className="w-3 h-3" /> الأكثر شيوعاً
           </span>
         </div>
       )}
-      {isCurrentPlan && (
+      {isPaidActive && (
         <div className="absolute -top-3 start-1/2 -translate-x-1/2 rtl:translate-x-1/2">
           <span className="bg-emerald-500 text-white text-[11px] font-bold px-3 py-1 rounded-full flex items-center gap-1">
-            <CheckCircle className="w-3 h-3" /> خطتك الحالية
+            <CheckCircle className="w-3 h-3" /> مشترك الآن
           </span>
         </div>
       )}
@@ -119,29 +125,37 @@ function PlanCard({
 
       {/* CTA */}
       <div className="px-5 pb-5">
-        {isCurrentPlan ? (
+        {isPaidActive ? (
           <div className="w-full py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm font-semibold text-center">
             مشترك الآن ✓
           </div>
         ) : (
-          <button
-            onClick={() => onCheckout(plan.slug)}
-            disabled={!!checkingOut}
-            className={[
-              'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all',
-              'flex items-center justify-center gap-2',
-              `bg-gradient-to-br ${gradient}`,
-              checkingOut ? 'opacity-60 cursor-not-allowed' : 'hover:opacity-90 active:scale-95',
-            ].join(' ')}
-          >
-            {isLoading
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ التوجيه للدفع...</>
-              : <><ExternalLink className="w-4 h-4" /> ادفع الآن — {plan.launch_price_sar.toLocaleString('ar-SA')} ر.س</>}
-          </button>
+          <>
+            {isTrialPlan && (
+              <div className="w-full py-2 rounded-xl bg-brand-50 border border-brand-200 text-brand-700 text-xs font-semibold text-center mb-2 flex items-center justify-center gap-1.5">
+                <Clock className="w-3.5 h-3.5" />
+                تجربة مجانية — متبقي {billingStatus?.trial_days_remaining ?? 0} يوم
+              </div>
+            )}
+            <button
+              onClick={() => onCheckout(plan.slug)}
+              disabled={!!checkingOut}
+              className={[
+                'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all',
+                'flex items-center justify-center gap-2',
+                `bg-gradient-to-br ${gradient}`,
+                checkingOut ? 'opacity-60 cursor-not-allowed' : 'hover:opacity-90 active:scale-95',
+              ].join(' ')}
+            >
+              {isLoading
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ التوجيه للدفع...</>
+                : <><ExternalLink className="w-4 h-4" /> ادفع الآن — {plan.launch_price_sar.toLocaleString('ar-SA')} ر.س</>}
+            </button>
+          </>
         )}
 
         {/* Secure payment note */}
-        {!isCurrentPlan && (
+        {!isPaidActive && (
           <p className="flex items-center justify-center gap-1 text-[10px] text-slate-400 mt-2">
             <ShieldCheck className="w-3 h-3" />
             دفع آمن عبر موى
@@ -459,7 +473,7 @@ export default function Billing() {
             <PlanCard
               key={plan.slug}
               plan={plan}
-              isCurrentPlan={status?.plan?.slug === plan.slug}
+              billingStatus={status}
               onCheckout={handleCheckout}
               checkingOut={checkingOut}
             />
