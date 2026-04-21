@@ -149,9 +149,9 @@ export const templatesApi = {
       method: 'POST',
     }),
 
-  delete: (id: number, deleteFromMeta = false) =>
+  delete: (id: number, nahlaOnly = false) =>
     apiCall<{ deleted: boolean; soft_removed?: boolean; meta_deleted?: boolean; meta_error?: string; message?: string }>(
-      `/templates/${id}${deleteFromMeta ? '?delete_from_meta=true' : ''}`,
+      `/templates/${id}${nahlaOnly ? '?nahla_only=true' : ''}`,
       { method: 'DELETE' },
     ),
 

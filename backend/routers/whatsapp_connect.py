@@ -1152,24 +1152,16 @@ async def get_usage(
     """
     Return this month's WhatsApp conversation usage for the tenant.
 
-    Query params
-    ------------
-    breakdown=true  — also include daily_breakdown list (for detail page chart)
-
-    Response always includes
-    ------------------------
-    service_conversations_used, marketing_conversations_used,
-    conversations_used (sum), conversations_limit, usage_pct,
-    exceeded, near_limit, hard_stop, unlimited, month, year, reset_date
-
-    With breakdown=true also includes
-    ----------------------------------
-    daily_breakdown: [{day, service, marketing, total}, ...]
+    Also auto-refreshes Meta tier data when stale (>24 h) or missing.
     """
     from core.wa_usage import get_usage_this_month, get_daily_breakdown  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
-    data      = get_usage_this_month(db, tenant_id)
+
+    # ── Opportunistic Meta tier refresh ──────────────────────────────────
+    await _maybe_refresh_meta_tier(db, tenant_id)
+
+    data = get_usage_this_month(db, tenant_id)
 
     if breakdown:
         data["daily_breakdown"] = get_daily_breakdown(
@@ -1177,6 +1169,49 @@ async def get_usage(
         )
 
     return data
+
+
+_META_TIER_STALE_HOURS = 24
+
+
+async def _maybe_refresh_meta_tier(db: "Session", tenant_id: int) -> None:
+    """Fetch Meta tier from Graph API if cached data is missing or stale."""
+    import logging as _log  # noqa: PLC0415
+    _logger = _log.getLogger("nahla.whatsapp.tier")
+    try:
+        from datetime import datetime, timedelta, timezone as tz  # noqa: PLC0415
+        conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+        if not conn or conn.status != "connected":
+            return
+
+        now = datetime.now(tz.utc)
+        last = conn.meta_tier_updated_at
+        if last and last.tzinfo is None:
+            last = last.replace(tzinfo=tz.utc)
+        if last and (now - last).total_seconds() < _META_TIER_STALE_HOURS * 3600:
+            return
+
+        ctx = get_token_context(conn)
+        if not ctx.token:
+            return
+
+        from services.whatsapp_platform.service import fetch_meta_phone_tier  # noqa: PLC0415
+        tier_data = await fetch_meta_phone_tier(conn, ctx, tenant_id=tenant_id)
+        if not tier_data:
+            return
+
+        if tier_data.get("messaging_limit"):
+            conn.meta_messaging_limit = tier_data["messaging_limit"]
+        if tier_data.get("quality_rating"):
+            conn.meta_quality_rating = tier_data["quality_rating"]
+        conn.meta_tier_updated_at = now
+        db.commit()
+        _logger.info("[WA tier] refreshed tenant=%s limit=%s quality=%s",
+                     tenant_id, conn.meta_messaging_limit, conn.meta_quality_rating)
+    except Exception as exc:
+        _log.getLogger("nahla.whatsapp.tier").warning(
+            "[WA tier] auto-refresh failed tenant=%s: %s", tenant_id, exc,
+        )
 
 
 @router.post("/refresh-meta-tier")

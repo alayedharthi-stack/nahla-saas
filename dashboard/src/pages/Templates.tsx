@@ -1583,14 +1583,16 @@ export default function Templates() {
     }
   }
 
-  const doDelete = async (id: number, fromMeta: boolean) => {
+  const doDelete = async (id: number, nahlaOnly: boolean) => {
     setDeleting(true)
     try {
-      const res = await templatesApi.delete(id, fromMeta)
-      setTemplates(ts => ts.filter(t => t.id !== id))
+      const res = await templatesApi.delete(id, nahlaOnly)
+      if (res.deleted || res.soft_removed) {
+        setTemplates(ts => ts.filter(t => t.id !== id))
+      }
       if (res.message) {
         setDeleteMsg(res.message)
-        setTimeout(() => setDeleteMsg(null), 5000)
+        setTimeout(() => setDeleteMsg(null), 8000)
       }
     } catch { /* ignore */ }
     finally {
@@ -1694,12 +1696,26 @@ export default function Templates() {
             </div>
 
             <p className="text-sm text-slate-600">
-              هذا القالب معتمد من Meta. كيف تريد حذفه؟
+              هذا القالب معتمد من Meta. سيتم حذفه نهائياً من Meta ونحلة معاً.
             </p>
 
             <div className="space-y-2">
               <button
                 onClick={() => doDelete(deleteConfirm.id, false)}
+                disabled={deleting}
+                className="w-full flex items-center gap-3 text-right border-2 border-red-300 bg-red-50 rounded-xl px-4 py-3 hover:bg-red-100 transition-colors disabled:opacity-50"
+              >
+                <div className="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center shrink-0">
+                  <Trash2 className="w-4 h-4 text-red-600" />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-red-700">حذف القالب نهائياً</p>
+                  <p className="text-xs text-red-500">سيتم حذفه من Meta ونحلة — لا يمكن التراجع</p>
+                </div>
+              </button>
+
+              <button
+                onClick={() => doDelete(deleteConfirm.id, true)}
                 disabled={deleting}
                 className="w-full flex items-center gap-3 text-right border border-slate-200 rounded-xl px-4 py-3 hover:bg-slate-50 transition-colors disabled:opacity-50"
               >
@@ -1707,22 +1723,8 @@ export default function Templates() {
                   <EyeOff className="w-4 h-4 text-amber-600" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-slate-800">إزالة من نحلة فقط</p>
-                  <p className="text-xs text-slate-500">يبقى القالب في حسابك على Meta ويمكنك استعادته لاحقاً</p>
-                </div>
-              </button>
-
-              <button
-                onClick={() => doDelete(deleteConfirm.id, true)}
-                disabled={deleting}
-                className="w-full flex items-center gap-3 text-right border border-red-200 rounded-xl px-4 py-3 hover:bg-red-50 transition-colors disabled:opacity-50"
-              >
-                <div className="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center shrink-0">
-                  <Trash2 className="w-4 h-4 text-red-600" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-red-700">حذف نهائي من نحلة و Meta</p>
-                  <p className="text-xs text-red-500">سيتم حذف القالب نهائياً ولا يمكن استعادته</p>
+                  <p className="text-sm font-semibold text-slate-700">إزالة من نحلة فقط</p>
+                  <p className="text-xs text-slate-500">يبقى في حسابك على Meta ويمكنك استعادته لاحقاً</p>
                 </div>
               </button>
             </div>
