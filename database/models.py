@@ -473,17 +473,23 @@ class CustomerImportBatch(Base):
     `rows_payload` (JSONB) so we never re-parse the file twice."""
     __tablename__ = 'customer_import_batches'
 
+    # NOTE on server_defaults: we use `func.now()` / Python literals here
+    # instead of `sa.text('now()')` so the same model can be reflected by
+    # SQLite-backed unit tests *and* by Postgres in production. Raw
+    # `text('now()')` is emitted verbatim into the CREATE TABLE DDL and
+    # SQLite (which has no `now()` function) refuses it with
+    # `OperationalError: near "(": syntax error`. `func.now()` is dialect-
+    # aware — Postgres renders `now()`, SQLite renders `CURRENT_TIMESTAMP`.
     id          = Column(Integer, primary_key=True)
     tenant_id   = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
     created_by  = Column(Integer, ForeignKey('users.id'), nullable=True)
     created_at  = Column(DateTime(timezone=True), nullable=False,
-                         server_default=sa.text('now()'))
+                         server_default=sa.func.now())
     committed_at = Column(DateTime(timezone=True), nullable=True)
 
     filename    = Column(String, nullable=True)
     file_kind   = Column(String, nullable=True)        # csv | xlsx
-    status      = Column(String, nullable=False,
-                         server_default=sa.text("'parsed'"))
+    status      = Column(String, nullable=False, server_default='parsed')
     # parsed → mapping submitted → previewed → committed | failed
 
     # Column mapping submitted by the user on step 2:
@@ -491,17 +497,17 @@ class CustomerImportBatch(Base):
     column_mapping = Column(JSONB, nullable=True)
 
     # Aggregate counters populated after dedupe classification.
-    total_rows     = Column(Integer, nullable=False, server_default=sa.text('0'))
-    new_count      = Column(Integer, nullable=False, server_default=sa.text('0'))
-    match_count    = Column(Integer, nullable=False, server_default=sa.text('0'))
-    suspect_count  = Column(Integer, nullable=False, server_default=sa.text('0'))
-    invalid_count  = Column(Integer, nullable=False, server_default=sa.text('0'))
+    total_rows     = Column(Integer, nullable=False, server_default='0')
+    new_count      = Column(Integer, nullable=False, server_default='0')
+    match_count    = Column(Integer, nullable=False, server_default='0')
+    suspect_count  = Column(Integer, nullable=False, server_default='0')
+    invalid_count  = Column(Integer, nullable=False, server_default='0')
 
     # Final commit results (populated only on successful commit).
-    created_count  = Column(Integer, nullable=False, server_default=sa.text('0'))
-    updated_count  = Column(Integer, nullable=False, server_default=sa.text('0'))
-    skipped_count  = Column(Integer, nullable=False, server_default=sa.text('0'))
-    error_count    = Column(Integer, nullable=False, server_default=sa.text('0'))
+    created_count  = Column(Integer, nullable=False, server_default='0')
+    updated_count  = Column(Integer, nullable=False, server_default='0')
+    skipped_count  = Column(Integer, nullable=False, server_default='0')
+    error_count    = Column(Integer, nullable=False, server_default='0')
 
     # Full classified payload — array of row dicts. Each row has at
     # least: row_index, raw, normalized, classification, suggestion.
