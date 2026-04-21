@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Plus, RefreshCw, CheckCircle, Clock, XCircle, AlertCircle,
-  Eye, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
+  Eye, EyeOff, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
   Type, Link2, Phone, Copy as CopyIcon, Zap, Star,
   BookOpen, Download, Sparkles, Tag, Search, Bot, CheckCheck,
   Pencil, Send,
@@ -1570,18 +1570,33 @@ export default function Templates() {
   }
 
   const [deleteMsg, setDeleteMsg] = useState<string | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<WhatsAppTemplateRecord | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = (id: number) => {
+    const tpl = templates.find(t => t.id === id)
+    if (!tpl) return
+    if (tpl.status !== 'APPROVED') {
+      doDelete(id, false)
+    } else {
+      setDeleteConfirm(tpl)
+    }
+  }
+
+  const doDelete = async (id: number, fromMeta: boolean) => {
+    setDeleting(true)
     try {
-      const res = await templatesApi.delete(id)
-      if (res.soft_removed) {
-        setTemplates(ts => ts.filter(t => t.id !== id))
-        setDeleteMsg(res.message || 'تمت إزالة القالب من نحلة')
-        setTimeout(() => setDeleteMsg(null), 4000)
-      } else {
-        setTemplates(ts => ts.filter(t => t.id !== id))
+      const res = await templatesApi.delete(id, fromMeta)
+      setTemplates(ts => ts.filter(t => t.id !== id))
+      if (res.message) {
+        setDeleteMsg(res.message)
+        setTimeout(() => setDeleteMsg(null), 5000)
       }
     } catch { /* ignore */ }
+    finally {
+      setDeleting(false)
+      setDeleteConfirm(null)
+    }
   }
 
   const handlePreviewUpdate = (updated: WhatsAppTemplateRecord) => {
@@ -1661,6 +1676,65 @@ export default function Templates() {
           <button onClick={() => setDeleteMsg(null)} className="ml-2 opacity-70 hover:opacity-100">
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {/* Delete confirmation modal for APPROVED templates */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4" dir="rtl">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-red-100 rounded-xl flex items-center justify-center">
+                <Trash2 className="w-5 h-5 text-red-600" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-800">حذف القالب</h3>
+                <p className="text-xs text-slate-500 mt-0.5">{deleteConfirm.display_name_ar || deleteConfirm.name}</p>
+              </div>
+            </div>
+
+            <p className="text-sm text-slate-600">
+              هذا القالب معتمد من Meta. كيف تريد حذفه؟
+            </p>
+
+            <div className="space-y-2">
+              <button
+                onClick={() => doDelete(deleteConfirm.id, false)}
+                disabled={deleting}
+                className="w-full flex items-center gap-3 text-right border border-slate-200 rounded-xl px-4 py-3 hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                <div className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center shrink-0">
+                  <EyeOff className="w-4 h-4 text-amber-600" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-slate-800">إزالة من نحلة فقط</p>
+                  <p className="text-xs text-slate-500">يبقى القالب في حسابك على Meta ويمكنك استعادته لاحقاً</p>
+                </div>
+              </button>
+
+              <button
+                onClick={() => doDelete(deleteConfirm.id, true)}
+                disabled={deleting}
+                className="w-full flex items-center gap-3 text-right border border-red-200 rounded-xl px-4 py-3 hover:bg-red-50 transition-colors disabled:opacity-50"
+              >
+                <div className="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center shrink-0">
+                  <Trash2 className="w-4 h-4 text-red-600" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-red-700">حذف نهائي من نحلة و Meta</p>
+                  <p className="text-xs text-red-500">سيتم حذف القالب نهائياً ولا يمكن استعادته</p>
+                </div>
+              </button>
+            </div>
+
+            <button
+              onClick={() => setDeleteConfirm(null)}
+              disabled={deleting}
+              className="w-full text-center text-sm text-slate-500 hover:text-slate-700 py-2"
+            >
+              إلغاء
+            </button>
+          </div>
         </div>
       )}
 

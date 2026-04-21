@@ -1246,14 +1246,26 @@ async def update_template_status(
 
 
 @router.delete("/templates/{template_id}")
-async def delete_template(template_id: int, request: Request, db: Session = Depends(get_db)):
+async def delete_template(
+    template_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    delete_from_meta: bool = False,
+):
     """
     Delete or soft-remove a template.
 
-    - Non-approved templates: deleted from the database.
-    - Approved templates: hidden from Nahla (is_hidden=True, is_active=False)
-      without attempting to delete from Meta. The merchant sees a clear message.
+    Query params:
+      delete_from_meta=true  — also delete the template from Meta (WABA).
+
+    Behaviour:
+      - Non-approved templates: always hard-deleted from DB.
+      - Approved + delete_from_meta=false: soft-remove in Nahla only.
+      - Approved + delete_from_meta=true: delete from Meta Graph API
+        AND hard-delete from DB.
     """
+    from models import WhatsAppConnection  # noqa: PLC0415
+
     tenant_id = resolve_tenant_id(request)
     tpl = db.query(WhatsAppTemplate).filter(
         WhatsAppTemplate.id == template_id,
@@ -1261,6 +1273,53 @@ async def delete_template(template_id: int, request: Request, db: Session = Depe
     ).first()
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
+
+    if tpl.status == "APPROVED" and delete_from_meta:
+        conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+        waba_id = conn.whatsapp_business_account_id if conn else None
+        meta_deleted = False
+        meta_error = None
+
+        if conn and waba_id and conn.status == "connected":
+            try:
+                from services.whatsapp_platform.service import provider_delete_template  # noqa: PLC0415
+                result = await provider_delete_template(
+                    db, conn,
+                    tenant_id=tenant_id,
+                    waba_id=waba_id,
+                    template_name=tpl.name,
+                )
+                if result.get("success", False) or not result.get("error"):
+                    meta_deleted = True
+                else:
+                    meta_error = result.get("error", {}).get("message", str(result))
+            except Exception as exc:
+                logger.error("[Templates] Meta delete failed: %s", exc)
+                meta_error = str(exc)
+        else:
+            meta_error = "واتساب غير متصل — لا يمكن الحذف من Meta"
+
+        if meta_deleted:
+            db.delete(tpl)
+            db.commit()
+            return {
+                "deleted": True,
+                "soft_removed": False,
+                "meta_deleted": True,
+                "message": "تم حذف القالب نهائياً من نحلة ومن Meta.",
+            }
+        else:
+            tpl.is_hidden = True
+            tpl.is_active = False
+            tpl.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            return {
+                "deleted": False,
+                "soft_removed": True,
+                "meta_deleted": False,
+                "meta_error": meta_error,
+                "message": f"تمت إزالة القالب من نحلة، لكن فشل حذفه من Meta: {meta_error}",
+            }
 
     if tpl.status == "APPROVED":
         tpl.is_hidden = True

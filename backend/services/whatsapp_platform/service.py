@@ -270,6 +270,49 @@ async def provider_submit_template(
     return data, ctx
 
 
+async def provider_delete_template(
+    db: Session,
+    conn: Any,
+    *,
+    tenant_id: Optional[int],
+    waba_id: str,
+    template_name: str,
+    prefer_platform: bool = False,
+    timeout: float = 20,
+) -> Dict[str, Any]:
+    """
+    Delete a template from Meta by name.
+
+    Meta API: DELETE /{waba_id}/message_templates?name={template_name}
+    360dialog: DELETE v1/configs/templates?name={template_name}
+    """
+    ctx = await get_token_for_operation(
+        db, conn,
+        tenant_id=tenant_id,
+        operation="template_delete",
+        prefer_platform=prefer_platform,
+    )
+    provider = wa_provider(conn)
+
+    if provider == WHATSAPP_PROVIDER_360DIALOG:
+        path = f"v1/configs/templates"
+    else:
+        path = f"{waba_id}/message_templates"
+
+    headers = _provider_headers(conn, ctx)
+    url = _provider_url(conn, path)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.delete(url, headers=headers, params={"name": template_name})
+        data = resp.json()
+
+    logger.info(
+        "[WA template_delete] tenant=%s provider=%s name=%s status=%s",
+        tenant_id, provider, template_name, resp.status_code,
+    )
+    return data
+
+
 async def provider_list_templates(
     db: Session,
     conn: Any,
