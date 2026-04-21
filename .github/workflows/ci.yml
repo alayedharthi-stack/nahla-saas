@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: write
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -43,18 +46,39 @@ jobs:
         run: python scripts/lint_no_silent_except.py
 
       - name: Run unit tests (verbose, capture full output)
+        id: pytest
         run: |
           python -m pytest --collect-only -q > pytest-collect.txt 2>&1 || true
-          set -o pipefail
+          set +e
           python -m pytest -v --maxfail=1 --tb=long -rA 2>&1 | tee pytest-output.txt
+          rc=${PIPESTATUS[0]}
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
         shell: bash
 
-      - name: Upload pytest output (for offline debugging)
+      - name: Push debug logs to ci-debug branch (orphan)
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-debug
-          path: |
-            pytest-collect.txt
-            pytest-output.txt
-          retention-days: 7
+        run: |
+          set -e
+          mkdir -p _debug
+          cp pytest-collect.txt _debug/ 2>/dev/null || true
+          cp pytest-output.txt _debug/ 2>/dev/null || true
+          cd _debug
+          git init -q
+          git config user.email "ci@nahla.local"
+          git config user.name "CI Debug Bot"
+          echo "# CI debug for $GITHUB_SHA" > README.md
+          echo "Run: $GITHUB_RUN_ID  Status: pytest_rc=${{ steps.pytest.outputs.rc }}" >> README.md
+          git add -A
+          git commit -q -m "ci-debug: $GITHUB_SHA run=$GITHUB_RUN_ID"
+          git branch -M ci-debug
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git push -f origin ci-debug
+        shell: bash
+
+      - name: Fail the job if pytest failed
+        if: steps.pytest.outputs.rc != '0'
+        run: |
+          echo "pytest exited with rc=${{ steps.pytest.outputs.rc }}"
+          exit 1
+        shell: bash
