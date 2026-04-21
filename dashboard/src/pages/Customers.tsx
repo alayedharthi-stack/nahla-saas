@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Search,
   UserPlus,
@@ -11,6 +12,7 @@ import {
   Phone,
   Mail,
   User,
+  Upload,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -51,6 +53,7 @@ function formatDate(dateStr: string | null): string {
 
 export default function Customers() {
   useLanguage()
+  const navigate = useNavigate()
 
   const [customers, setCustomers] = useState<CustomerRecord[]>([])
   const [metrics, setMetrics] = useState<{
@@ -147,13 +150,22 @@ export default function Customers() {
         title="العملاء"
         subtitle="إدارة وتصنيف العملاء"
         action={
-          <button
-            onClick={() => setShowAdd(true)}
-            className="btn-primary text-sm flex items-center gap-2"
-          >
-            <UserPlus className="w-4 h-4" />
-            إضافة عميل
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => navigate('/customers/import')}
+              className="btn-secondary text-sm flex items-center gap-2"
+            >
+              <Upload className="w-4 h-4" />
+              استيراد العملاء
+            </button>
+            <button
+              onClick={() => setShowAdd(true)}
+              className="btn-primary text-sm flex items-center gap-2"
+            >
+              <UserPlus className="w-4 h-4" />
+              إضافة عميل
+            </button>
+          </div>
         }
       />
 

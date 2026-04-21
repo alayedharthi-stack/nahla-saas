@@ -56,6 +56,7 @@ import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
 import MerchantWidgets from './pages/MerchantWidgets'
 import Customers from './pages/Customers'
+import CustomersImport from './pages/CustomersImport'
 import WhatsAppManualSetup from './pages/WhatsAppManualSetup'
 
 export default function App() {
@@ -102,6 +103,7 @@ export default function App() {
             <Route path="orders"             element={<Orders />} />
             <Route path="orders/:orderId"    element={<OrderDetail />} />
             <Route path="customers"          element={<Customers />} />
+            <Route path="customers/import"   element={<CustomersImport />} />
             <Route path="coupons"            element={<Coupons />} />
             <Route path="promotions"         element={<Promotions />} />
             <Route path="campaigns"          element={<Campaigns />} />

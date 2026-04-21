@@ -115,6 +115,7 @@ from routers.offer_decisions import router as _offer_decisions_router  # noqa: E
 from routers.orders       import router as _orders_router        # noqa: E402
 from routers.intelligence import router as _intelligence_router  # noqa: E402
 from routers.customers    import router as _customers_router     # noqa: E402
+from routers.customer_import import router as _customer_import_router  # noqa: E402
 
 # Newly extracted routers
 from routers.ai_sales          import router as _ai_sales_router         # noqa: E402
@@ -157,6 +158,7 @@ app.include_router(_offer_decisions_router)
 app.include_router(_orders_router)
 app.include_router(_intelligence_router)
 app.include_router(_customers_router)
+app.include_router(_customer_import_router)
 app.include_router(_ai_sales_router)
 app.include_router(_billing_router)
 app.include_router(_webhooks_router)
