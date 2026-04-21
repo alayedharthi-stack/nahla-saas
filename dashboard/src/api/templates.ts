@@ -51,6 +51,18 @@ export interface WhatsAppTemplateRecord {
     rfm_segments: string[]
   } | null
   compatibility?: TemplateCompatibility
+  // Nahla display & management
+  display_name_ar?: string | null
+  service_key?: string | null
+  service_name_ar?: string
+  service_icon?: string
+  service_color?: string
+  nahla_source_key?: string | null
+  is_active?: boolean
+  is_hidden?: boolean
+  step_number?: number | null
+  has_coupon?: boolean
+  trigger_delay_hours?: number | null
 }
 
 export interface CreateTemplatePayload {
@@ -138,7 +150,7 @@ export const templatesApi = {
     }),
 
   delete: (id: number) =>
-    apiCall<{ deleted: boolean }>(`/templates/${id}`, { method: 'DELETE' }),
+    apiCall<{ deleted: boolean; soft_removed?: boolean; message?: string }>(`/templates/${id}`, { method: 'DELETE' }),
 
   sync: () =>
     apiCall<{ synced: number; message: string }>('/templates/sync', { method: 'POST' }),
@@ -177,6 +189,27 @@ export const templatesApi = {
       '/templates/import-nahla-template',
       { method: 'POST', body: JSON.stringify({ template_key, language, custom_name }) },
     ),
+
+  updateNahlaSettings: (id: number, payload: NahlaSettingsPayload) =>
+    apiCall<WhatsAppTemplateRecord>(`/templates/${id}/nahla-settings`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  unlinkService: (id: number) =>
+    apiCall<{ message: string; template: WhatsAppTemplateRecord }>(`/templates/${id}/unlink-service`, {
+      method: 'POST',
+    }),
+
+  restore: (id: number) =>
+    apiCall<{ message: string; template: WhatsAppTemplateRecord }>(`/templates/${id}/restore`, {
+      method: 'POST',
+    }),
+
+  setActive: (id: number) =>
+    apiCall<{ message: string; template: WhatsAppTemplateRecord; deactivated_template_name?: string }>(`/templates/${id}/set-active`, {
+      method: 'POST',
+    }),
 }
 
 // ── Nahla Library Types ───────────────────────────────────────────────────────
@@ -194,6 +227,23 @@ export interface NahlaLibraryTemplate {
   buttons:       TemplateButton[]
   slot_count:    number
   slots:         string[]
+  service_key:            string
+  service_name_ar:        string
+  service_description_ar: string
+  service_icon:           string
+  service_color:          string
+  step_number?:           number | null
+  has_coupon?:            boolean
+  trigger_delay_hours?:   number | null
+}
+
+export interface NahlaSettingsPayload {
+  display_name_ar?: string
+  service_key?: string
+  is_active?: boolean
+  step_number?: number
+  has_coupon?: boolean
+  trigger_delay_hours?: number
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

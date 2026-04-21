@@ -34,6 +34,91 @@ FILTER_TAGS = {
 }
 
 
+# ── كتالوج الخدمات (الغرض التجاري لكل عائلة قوالب) ────────────────────
+# يُعرض في واجهة التاجر كبطاقة تعريفية أعلى معاينة القالب.
+# كل service_key يُربط بعدة قوالب تنتمي لنفس الخدمة التجارية.
+SERVICE_CATALOG: Dict[str, Dict[str, str]] = {
+    "cart_recovery": {
+        "name_ar":        "استرجاع السلات المتروكة",
+        "description_ar": "تذكير العملاء الذين أضافوا منتجات لسلتهم دون إكمال الطلب لاسترجاع المبيعات",
+        "icon":           "🛒",
+        "color":          "amber",
+    },
+    "order_confirmation": {
+        "name_ar":        "تأكيد الطلب",
+        "description_ar": "إشعار العميل بتأكيد واستلام طلبه مع ملخص التفاصيل",
+        "icon":           "📦",
+        "color":          "blue",
+    },
+    "cod_confirmation": {
+        "name_ar":        "تأكيد الدفع عند الاستلام",
+        "description_ar": "التحقق من جدية العميل في طلبات الدفع عند الاستلام لتقليل الطلبات الوهمية",
+        "icon":           "💰",
+        "color":          "emerald",
+    },
+    "shipping_tracking": {
+        "name_ar":        "الشحن وتتبع الطلب",
+        "description_ar": "إبقاء العميل على اطلاع بحالة شحن طلبه ومواعيد التوصيل",
+        "icon":           "🚚",
+        "color":          "violet",
+    },
+    "post_delivery": {
+        "name_ar":        "ما بعد التسليم",
+        "description_ar": "تعزيز تجربة العميل بعد استلام الطلب وطلب تقييمه للمنتج",
+        "icon":           "⭐",
+        "color":          "yellow",
+    },
+    "predictive_reorder": {
+        "name_ar":        "إعادة الطلب التنبؤية",
+        "description_ar": "تذكير العملاء بإعادة شراء منتجات استهلاكية عند توقع نفادها",
+        "icon":           "🔄",
+        "color":          "teal",
+    },
+    "marketing_campaigns": {
+        "name_ar":        "الحملات التسويقية",
+        "description_ar": "إرسال عروض ترويجية وأكواد خصم وإعلانات المنتجات الجديدة",
+        "icon":           "📢",
+        "color":          "pink",
+    },
+    "welcome_onboarding": {
+        "name_ar":        "الترحيب بالعملاء",
+        "description_ar": "ترحيب بالعملاء الجدد عند أول تواصل أو تسجيل في المتجر",
+        "icon":           "👋",
+        "color":          "sky",
+    },
+    "customer_support": {
+        "name_ar":        "خدمة العملاء",
+        "description_ar": "متابعة العملاء بعد حل مشكلاتهم والتأكد من رضاهم",
+        "icon":           "💬",
+        "color":          "slate",
+    },
+    "customer_retention": {
+        "name_ar":        "استرجاع العملاء غير النشطين",
+        "description_ar": "تحفيز العملاء الذين لم يشتروا منذ فترة على العودة للتسوق",
+        "icon":           "💛",
+        "color":          "orange",
+    },
+    "payment_reminder": {
+        "name_ar":        "تذكير بالدفع",
+        "description_ar": "تذكير العملاء بإكمال دفع الطلبات المعلقة",
+        "icon":           "💳",
+        "color":          "rose",
+    },
+    "customer_engagement": {
+        "name_ar":        "تفاعل العملاء",
+        "description_ar": "متابعة العملاء المهتمين بمنتجات معينة لتشجيعهم على الشراء",
+        "icon":           "💡",
+        "color":          "cyan",
+    },
+    "vip_rewards": {
+        "name_ar":        "مكافآت العملاء المميزين",
+        "description_ar": "عروض حصرية ومكافآت لعملاء VIP المميزين",
+        "icon":           "👑",
+        "color":          "purple",
+    },
+}
+
+
 # ── مكتبة القوالب الرئيسية ────────────────────────────────────────────
 NAHLA_TEMPLATES: List[Dict[str, Any]] = [
 
@@ -42,20 +127,25 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "abandoned_cart_reminder",
-        "name_ar":        "تذكير السلة المتروكة",
+        "service_key":    "cart_recovery",
+        "name_ar":        "تذكير السلة المتروكة — المرحلة الأولى",
         "description_ar": "تُرسل تلقائياً بعد ساعة من ترك العميل المنتجات في السلة دون إكمال الطلب",
         "category":       "MARKETING",
         "filter_tags":    ["recovery", "cart"],
         "smart_trigger":  "cart_abandoned",
-        "smart_label":    "يُرسل تلقائياً: عند ترك السلة",
-        # Two distinct slot kinds — keep them separate so the engine never
-        # mixes a body placeholder with the URL-button placeholder. The
-        # body needs only the customer name (greeting) and the button is
-        # fed independently from the cart URL coming off the event payload.
+        "smart_label":    "يُرسل تلقائياً: بعد ساعة من ترك السلة",
+        "step_number":         1,
+        "has_coupon":          False,
+        "trigger_delay_hours": 1,
+        # BODY gets only the customer name; the URL button's {{1}} is fed
+        # independently from the event payload (cart_url / checkout_url).
+        # The base URL is merchant-agnostic: at import time example.com is
+        # swapped with the merchant's real domain, and at send time the
+        # engine passes the full path as the dynamic suffix — so this
+        # single template works for /cart/, /checkout/, or any other path
+        # structure across all merchants.
         "body_slots":   ["customer_name"],
         "button_slots": ["cart_url"],
-        # Legacy single-list `slots` kept for back-compat with consumers
-        # that read `slots`; equals body + button concatenated.
         "slots":          ["customer_name", "cart_url"],
         "components": [
             {
@@ -72,13 +162,8 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "type": "BUTTONS",
                 "buttons": [
                     {
-                        # The URL button takes a cart suffix (Meta dynamic
-                        # URL). Engine fills the {{1}} from event.payload's
-                        # checkout_url / cart_url — NOT from the body var
-                        # map, so the customer name and cart URL never
-                        # collide on the same {{1}} index.
                         "type": "URL", "text": "أكمل طلبك",
-                        "url": "https://example.com/cart/{{1}}",
+                        "url": "https://example.com/{{1}}",
                         "example": ["https://example.com/cart/abc123"],
                     },
                 ],
@@ -91,15 +176,16 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "complete_your_order",
-        "name_ar":        "استكمال الطلب",
+        "service_key":    "cart_recovery",
+        "name_ar":        "تذكير السلة المتروكة — المرحلة الثانية",
         "description_ar": "تذكير ثانٍ للعميل بإكمال طلبه (يُرسل بعد 6 ساعات من التذكير الأول)",
         "category":       "MARKETING",
         "filter_tags":    ["recovery", "cart"],
         "smart_trigger":  "cart_abandoned",
-        "smart_label":    "يُرسل تلقائياً: متابعة السلة المتروكة",
-        # Same body/button split as `abandoned_cart_reminder` — see comment
-        # there. Body keeps the customer name only; the URL button is fed
-        # independently from the cart URL on the event payload.
+        "smart_label":    "يُرسل تلقائياً: بعد 6 ساعات من ترك السلة",
+        "step_number":         2,
+        "has_coupon":          False,
+        "trigger_delay_hours": 6,
         "body_slots":   ["customer_name"],
         "button_slots": ["cart_url"],
         "slots":          ["customer_name", "cart_url"],
@@ -120,7 +206,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                 "buttons": [
                     {
                         "type": "URL", "text": "إتمام الطلب",
-                        "url": "https://example.com/cart/{{1}}",
+                        "url": "https://example.com/{{1}}",
                         "example": ["https://example.com/cart/abc123"],
                     },
                 ],
@@ -133,6 +219,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "comeback_discount",
+        "service_key":    "customer_retention",
         "name_ar":        "كود خصم للعودة",
         "description_ar": "تُرسل للعملاء غير النشطين (لم يشتروا منذ 30+ يوم) مع كود خصم حصري",
         "category":       "MARKETING",
@@ -170,6 +257,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "post_purchase_thanks",
+        "service_key":    "order_confirmation",
         "name_ar":        "شكر بعد الشراء",
         "description_ar": "تُرسل فور تأكيد الطلب لتعزيز تجربة العميل وبناء الثقة",
         "category":       "UTILITY",
@@ -206,6 +294,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "shipping_update",
+        "service_key":    "shipping_tracking",
         "name_ar":        "تحديث الشحن",
         "description_ar": "تُرسل عند شحن الطلب لإبقاء العميل على اطلاع بحالة طلبه",
         "category":       "UTILITY",
@@ -242,6 +331,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "order_delivered",
+        "service_key":    "post_delivery",
         "name_ar":        "تم التوصيل",
         "description_ar": "تُرسل عند وصول الطلب وتدعو العميل لتقييم تجربته",
         "category":       "UTILITY",
@@ -278,6 +368,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "review_request",
+        "service_key":    "post_delivery",
         "name_ar":        "طلب تقييم المنتج",
         "description_ar": "تُرسل بعد 3 أيام من استلام الطلب لطلب تقييم المنتج",
         "category":       "MARKETING",
@@ -314,6 +405,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "special_offer",
+        "service_key":    "marketing_campaigns",
         "name_ar":        "عرض خاص للعملاء",
         "description_ar": "عرض ترويجي مع كود خصم قابل للنسخ بلمسة واحدة",
         "category":       "MARKETING",
@@ -351,6 +443,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "welcome_message",
+        "service_key":    "welcome_onboarding",
         "name_ar":        "رسالة ترحيب",
         "description_ar": "تُرسل لكل عميل جديد عند تسجيله أو أول تواصل مع المتجر",
         "category":       "MARKETING",
@@ -387,6 +480,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "interested_followup",
+        "service_key":    "customer_engagement",
         "name_ar":        "متابعة عميل مهتم",
         "description_ar": "تُرسل للعملاء الذين تصفحوا المنتجات أو سألوا عنها دون شراء",
         "category":       "MARKETING",
@@ -420,6 +514,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "order_confirmed",
+        "service_key":    "order_confirmation",
         "name_ar":        "تأكيد الطلب",
         "description_ar": "إشعار رسمي بتأكيد الطلب يتضمن رقم الطلب وتفاصيله",
         "category":       "UTILITY",
@@ -456,6 +551,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "cod_confirmation",
+        "service_key":    "cod_confirmation",
         "name_ar":        "تأكيد الدفع عند الاستلام",
         "description_ar": "يطلب من العميل تأكيد طلب الدفع عند الاستلام بلمسة واحدة",
         "category":       "UTILITY",
@@ -489,6 +585,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "payment_reminder",
+        "service_key":    "payment_reminder",
         "name_ar":        "تذكير بإكمال الدفع",
         "description_ar": "تُرسل للطلبات التي لم يُكتمل دفعها بعد مرور وقت محدد",
         "category":       "UTILITY",
@@ -525,6 +622,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "vip_exclusive",
+        "service_key":    "vip_rewards",
         "name_ar":        "عرض VIP حصري",
         "description_ar": "مكافأة حصرية لعملاء VIP المميزين بكود خصم قابل للنسخ",
         "category":       "MARKETING",
@@ -562,6 +660,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "new_arrivals",
+        "service_key":    "marketing_campaigns",
         "name_ar":        "منتجات جديدة وصلت",
         "description_ar": "إشعار للعملاء بوصول منتجات جديدة تناسب اهتماماتهم",
         "category":       "MARKETING",
@@ -588,6 +687,354 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
                         "url": "https://example.com/new/",
                         "example": ["https://example.com/new/"],
                     },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 16. سلة متروكة + كود خصم (24 ساعة) — ABANDONED CART 24H COUPON
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "abandoned_cart_24h_coupon",
+        "service_key":    "cart_recovery",
+        "name_ar":        "تذكير السلة المتروكة — المرحلة الثالثة مع خصم",
+        "description_ar": "تُرسل بعد 24 ساعة من ترك السلة مع كود خصم حصري لتشجيع العميل على إكمال الطلب",
+        "category":       "MARKETING",
+        "filter_tags":    ["recovery", "cart", "discounts"],
+        "smart_trigger":  "cart_abandoned",
+        "smart_label":    "يُرسل تلقائياً: بعد 24 ساعة من ترك السلة",
+        "step_number":         3,
+        "has_coupon":          True,
+        "trigger_delay_hours": 24,
+        "body_slots":   ["customer_name"],
+        "button_slots": ["cart_url"],
+        "slots":          ["customer_name", "cart_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "{{1}} 💛\n\n"
+                    "سلتك لا تزال بانتظارك!\n\n"
+                    "جهّزنا لك كود خصم حصري كهدية — انسخه وأكمل طلبك الآن قبل انتهاء العرض:"
+                ),
+                "example": {"body_text": [["أحمد"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {"type": "COPY_CODE", "example": ["CART15"]},
+                    {
+                        "type": "URL", "text": "أكمل طلبك بالخصم",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/cart/abc123"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 16b. سلة متروكة — تذكير أخير بعد 3 أيام — ABANDONED CART 3-DAY
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "abandoned_cart_3day_final",
+        "service_key":    "cart_recovery",
+        "name_ar":        "تذكير السلة المتروكة — المرحلة الرابعة (تذكير أخير)",
+        "description_ar": "تذكير أخير يُرسل بعد 3 أيام من ترك السلة لتشجيع العميل على الشراء قبل حذف السلة",
+        "category":       "MARKETING",
+        "filter_tags":    ["recovery", "cart"],
+        "smart_trigger":  "cart_abandoned",
+        "smart_label":    "يُرسل تلقائياً: بعد 3 أيام من ترك السلة",
+        "step_number":         4,
+        "has_coupon":          False,
+        "trigger_delay_hours": 72,
+        "body_slots":   ["customer_name"],
+        "button_slots": ["cart_url"],
+        "slots":          ["customer_name", "cart_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "{{1}} 🔔\n\n"
+                    "هذا آخر تذكير — سلتك ستُحذف قريباً.\n\n"
+                    "المنتجات التي اخترتها ما زالت متاحة الآن، لكن لا نضمن بقاءها.\n\n"
+                    "أكمل طلبك الآن ولا تفوّت الفرصة:"
+                ),
+                "example": {"body_text": [["فهد"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "أكمل طلبك الآن",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/cart/abc123"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 17. ملخص الطلب — ORDER SUMMARY
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "order_summary",
+        "service_key":    "order_confirmation",
+        "name_ar":        "ملخص الطلب",
+        "description_ar": "تُرسل فور إنشاء الطلب بملخص شامل يتضمن رقم الطلب والمبلغ",
+        "category":       "UTILITY",
+        "filter_tags":    ["orders"],
+        "smart_trigger":  "order_created",
+        "smart_label":    "يُرسل تلقائياً: عند إنشاء الطلب",
+        "body_slots":   ["customer_name", "order_id", "order_total"],
+        "button_slots": ["tracking_url"],
+        "slots":          ["customer_name", "order_id", "order_total", "tracking_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "تم استلام طلبك يا {{1}} 📦\n\n"
+                    "رقم الطلب: #{{2}}\n"
+                    "المبلغ الإجمالي: {{3}} ريال\n\n"
+                    "سنبدأ تجهيز طلبك فوراً ونُعلمك بكل جديد."
+                ),
+                "example": {"body_text": [["سارة", "45678", "350"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "عرض تفاصيل الطلب",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/orders/45678"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 18. تأكيد COD قبل الشحن — COD REMINDER BEFORE SHIPPING
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "cod_reminder_before_shipping",
+        "service_key":    "cod_confirmation",
+        "name_ar":        "تأكيد COD قبل الشحن",
+        "description_ar": "تُرسل قبل شحن طلب الدفع عند الاستلام للتأكد من جدية العميل وتقليل الطلبات الوهمية",
+        "category":       "UTILITY",
+        "filter_tags":    ["orders"],
+        "smart_trigger":  "cod_confirmation_pending",
+        "smart_label":    "يُرسل تلقائياً: قبل شحن طلب COD",
+        "slots":          ["customer_name", "order_id", "order_total"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "مرحباً {{1}} 📋\n\n"
+                    "طلبك رقم #{{2}} بقيمة {{3}} ريال جاهز للشحن.\n\n"
+                    "بما أن الطلب بنظام الدفع عند الاستلام، نحتاج تأكيدك قبل الشحن:"
+                ),
+                "example": {"body_text": [["خالد", "67890", "280"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {"type": "QUICK_REPLY", "text": "تأكيد الطلب ✅"},
+                    {"type": "QUICK_REPLY", "text": "إلغاء الطلب ❌"},
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 19. الطلب في الطريق — ORDER OUT FOR DELIVERY
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "order_out_for_delivery",
+        "service_key":    "shipping_tracking",
+        "name_ar":        "الطلب في الطريق",
+        "description_ar": "تُرسل عند خروج الطلب للتوصيل ليستعد العميل لاستلامه",
+        "category":       "UTILITY",
+        "filter_tags":    ["shipping", "orders"],
+        "smart_trigger":  "order_out_for_delivery",
+        "smart_label":    "يُرسل تلقائياً: عند خروج الطلب للتوصيل",
+        "body_slots":   ["customer_name", "order_id"],
+        "button_slots": ["tracking_url"],
+        "slots":          ["customer_name", "order_id", "tracking_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "{{1}} 🚗\n\n"
+                    "طلبك رقم #{{2}} خرج للتوصيل وسيصل إليك قريباً!\n\n"
+                    "يرجى التأكد من وجودك في العنوان المحدد لاستلام طلبك."
+                ),
+                "example": {"body_text": [["نورة", "78901"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "تتبع التوصيل",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/track/78901"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 20. تذكير إعادة الطلب الذكي — PREDICTIVE REORDER REMINDER
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "predictive_reorder_reminder",
+        "service_key":    "predictive_reorder",
+        "name_ar":        "تذكير إعادة الطلب الذكي",
+        "description_ar": "تُرسل عندما يتوقع النظام أن المنتج أوشك على النفاد لدى العميل (عسل، قهوة، مكملات...)",
+        "category":       "MARKETING",
+        "filter_tags":    ["marketing", "recovery"],
+        "smart_trigger":  "reorder_prediction",
+        "smart_label":    "يُرسل تلقائياً: عند توقع نفاد المنتج",
+        "body_slots":   ["customer_name", "product_name"],
+        "button_slots": ["reorder_url"],
+        "slots":          ["customer_name", "product_name", "reorder_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "مرحباً {{1}} 🍯\n\n"
+                    "نتوقع أن {{2}} لديك أوشك على النفاد!\n\n"
+                    "اطلب الآن ليصلك قبل ما يخلص:"
+                ),
+                "example": {"body_text": [["فهد", "عسل السدر الطبيعي"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "أعد الطلب",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/products/honey-123"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 21. رابط إعادة طلب سريع — REORDER QUICK LINK
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "reorder_quick_link",
+        "service_key":    "predictive_reorder",
+        "name_ar":        "رابط إعادة طلب سريع",
+        "description_ar": "رسالة مختصرة برابط مباشر لإعادة طلب منتج سبق شراؤه",
+        "category":       "MARKETING",
+        "filter_tags":    ["marketing", "recovery"],
+        "smart_trigger":  "reorder_prediction",
+        "smart_label":    "يُرسل تلقائياً: رابط سريع لإعادة الطلب",
+        "body_slots":   ["customer_name", "product_name"],
+        "button_slots": ["reorder_url"],
+        "slots":          ["customer_name", "product_name", "reorder_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "{{1}} 👋\n\n"
+                    "حان وقت تجديد {{2}}!\n\n"
+                    "اطلب بلمسة واحدة من هنا:"
+                ),
+                "example": {"body_text": [["دانة", "القهوة المختصة"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "اطلب الآن",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/reorder/coffee-456"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 22. حملة تسويقية عامة — MARKETING CAMPAIGN
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "marketing_campaign",
+        "service_key":    "marketing_campaigns",
+        "name_ar":        "حملة تسويقية عامة",
+        "description_ar": "قالب مرن للحملات التسويقية والعروض الموسمية لجميع المتاجر",
+        "category":       "MARKETING",
+        "filter_tags":    ["marketing"],
+        "smart_trigger":  None,
+        "smart_label":    "يُرسل يدوياً أو عبر الحملات",
+        "slots":          ["customer_name", "store_name"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "مرحباً {{1}} 🎉\n\n"
+                    "{{2}} عنده مفاجأة لك!\n\n"
+                    "عروض حصرية لفترة محدودة — لا تفوّت الفرصة:"
+                ),
+                "example": {"body_text": [["عبدالله", "متجر الإلكترونيات"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "تسوق العروض",
+                        "url": "https://example.com/",
+                        "example": ["https://example.com/"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 23. متابعة خدمة العملاء — SUPPORT FOLLOWUP
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "support_followup",
+        "service_key":    "customer_support",
+        "name_ar":        "متابعة خدمة العملاء",
+        "description_ar": "تُرسل بعد حل مشكلة العميل للتأكد من رضاه عن الخدمة",
+        "category":       "UTILITY",
+        "filter_tags":    ["orders"],
+        "smart_trigger":  "support_resolved",
+        "smart_label":    "يُرسل تلقائياً: بعد حل مشكلة الدعم",
+        "slots":          ["customer_name"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "مرحباً {{1}} 💙\n\n"
+                    "نأمل أن تكون مشكلتك قد حُلّت بالكامل.\n\n"
+                    "هل هناك أي شيء آخر يمكننا مساعدتك فيه؟"
+                ),
+                "example": {"body_text": [["سعود"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {"type": "QUICK_REPLY", "text": "نعم، تم الحل ✅"},
+                    {"type": "QUICK_REPLY", "text": "لا، أحتاج مساعدة"},
                 ],
             },
         ],
@@ -643,6 +1090,8 @@ def template_preview(tpl: Dict[str, Any]) -> Dict[str, Any]:
     footer_component = next(
         (c for c in tpl["components"] if c["type"] == "FOOTER"), {}
     )
+    service_key = tpl.get("service_key", "")
+    service = SERVICE_CATALOG.get(service_key, {})
     return {
         "key":          tpl["key"],
         "name_ar":      tpl["name_ar"],
@@ -656,4 +1105,12 @@ def template_preview(tpl: Dict[str, Any]) -> Dict[str, Any]:
         "buttons": buttons_component.get("buttons", []),
         "slot_count": len(tpl.get("slots", [])),
         "slots": tpl.get("slots", []),
+        "service_key":            service_key,
+        "service_name_ar":        service.get("name_ar", ""),
+        "service_description_ar": service.get("description_ar", ""),
+        "service_icon":           service.get("icon", ""),
+        "service_color":          service.get("color", "amber"),
+        "step_number":            tpl.get("step_number"),
+        "has_coupon":             tpl.get("has_coupon", False),
+        "trigger_delay_hours":    tpl.get("trigger_delay_hours"),
     }

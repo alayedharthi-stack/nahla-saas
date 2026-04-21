@@ -91,17 +91,8 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "languages": {
             "ar": {
                 "template_name": "abandoned_cart_recovery_ar",
-                # `body_slots` is what gets fed into the BODY {{N}} positions
-                # during render; `button_slots` is what fills the URL button's
-                # dynamic suffix. They are NEVER concatenated into a single
-                # numeric var map — keeping them apart is what prevents the
-                # historical 132000 "parameter mismatch" failures where the
-                # engine sent body params for a cart_url that actually
-                # belonged in the button URL component.
                 "body_slots":   ["customer_name"],
                 "button_slots": ["checkout_url"],
-                # Legacy concatenated `slots` (still read by callers that
-                # haven't migrated yet) — order is body first, button last.
                 "slots":         ["customer_name", "checkout_url"],
                 "components": [
                     {
@@ -116,14 +107,9 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
                     {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
                     {
                         "type": "BUTTONS",
-                        # Meta dynamic URL button: a fixed prefix + {{1}}
-                        # placeholder. The engine's URL-button resolver
-                        # (`_URL_SLOT_PRECEDENCE` in automation_engine.py)
-                        # picks `checkout_url` first and substitutes the
-                        # last path segment into {{1}}.
                         "buttons": [{
                             "type": "URL", "text": "أكمل طلبك",
-                            "url": "https://example.com/checkout/{{1}}",
+                            "url": "https://example.com/{{1}}",
                             "example": ["https://example.com/checkout/abc123"],
                         }],
                     },
@@ -149,7 +135,7 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
                         "type": "BUTTONS",
                         "buttons": [{
                             "type": "URL", "text": "Complete order",
-                            "url": "https://example.com/checkout/{{1}}",
+                            "url": "https://example.com/{{1}}",
                             "example": ["https://example.com/checkout/abc123"],
                         }],
                     },

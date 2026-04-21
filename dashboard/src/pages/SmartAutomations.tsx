@@ -51,7 +51,6 @@ const STATIC_VAR_MAPS: Record<string, Record<string, string>> = {
   },
   abandoned_cart_reminder: {
     '{{1}}': 'اسم العميل',
-    '{{2}}': 'رابط السلة',
   },
   special_offer: {
     '{{1}}': 'اسم العميل',

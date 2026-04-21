@@ -19,6 +19,77 @@ import {
   STATUS_COLORS, STATUS_LABELS, CATEGORY_LABELS, LANGUAGE_LABELS,
 } from '../api/templates'
 
+// ── Service catalog (mirrors backend SERVICE_CATALOG) ─────────────────────────
+
+const SERVICE_INFO: Record<string, { name: string; description: string; icon: string; color: string }> = {
+  cart_recovery:        { name: 'استرجاع السلات المتروكة',         description: 'تذكير العملاء الذين أضافوا منتجات لسلتهم دون إكمال الطلب', icon: '🛒', color: 'amber'   },
+  order_confirmation:   { name: 'تأكيد الطلب',                    description: 'إشعار العميل بتأكيد واستلام طلبه مع ملخص التفاصيل',        icon: '📦', color: 'blue'    },
+  cod_confirmation:     { name: 'تأكيد الدفع عند الاستلام',       description: 'التحقق من جدية العميل في طلبات الدفع عند الاستلام',         icon: '💰', color: 'emerald' },
+  shipping_tracking:    { name: 'الشحن وتتبع الطلب',              description: 'إبقاء العميل على اطلاع بحالة شحن طلبه',                   icon: '🚚', color: 'violet'  },
+  post_delivery:        { name: 'ما بعد التسليم',                  description: 'تعزيز تجربة العميل بعد استلام الطلب وطلب تقييمه',           icon: '⭐', color: 'yellow'  },
+  predictive_reorder:   { name: 'إعادة الطلب التنبؤية',            description: 'تذكير العملاء بإعادة شراء منتجات عند توقع نفادها',          icon: '🔄', color: 'teal'    },
+  marketing_campaigns:  { name: 'الحملات التسويقية',               description: 'إرسال عروض ترويجية وأكواد خصم وإعلانات المنتجات الجديدة',  icon: '📢', color: 'pink'    },
+  welcome_onboarding:   { name: 'الترحيب بالعملاء',                description: 'ترحيب بالعملاء الجدد عند أول تواصل أو تسجيل في المتجر',    icon: '👋', color: 'sky'     },
+  customer_support:     { name: 'خدمة العملاء',                    description: 'متابعة العملاء بعد حل مشكلاتهم والتأكد من رضاهم',          icon: '💬', color: 'slate'   },
+  customer_retention:   { name: 'استرجاع العملاء غير النشطين',     description: 'تحفيز العملاء الذين لم يشتروا منذ فترة على العودة',         icon: '💛', color: 'orange'  },
+  payment_reminder:     { name: 'تذكير بالدفع',                    description: 'تذكير العملاء بإكمال دفع الطلبات المعلقة',                 icon: '💳', color: 'rose'    },
+  customer_engagement:  { name: 'تفاعل العملاء',                   description: 'متابعة العملاء المهتمين بمنتجات معينة',                    icon: '💡', color: 'cyan'    },
+  vip_rewards:          { name: 'مكافآت العملاء المميزين',          description: 'عروض حصرية ومكافآت لعملاء VIP',                           icon: '👑', color: 'purple'  },
+}
+
+// Tailwind needs full class names at build time — map color tokens to
+// the exact gradient / border / text classes used in the service badge.
+const SERVICE_COLOR_CLASSES: Record<string, { bg: string; border: string; label: string; text: string }> = {
+  amber:   { bg: 'from-amber-50 to-orange-50',    border: 'border-amber-200',   label: 'text-amber-600',   text: 'text-amber-700'   },
+  blue:    { bg: 'from-blue-50 to-indigo-50',      border: 'border-blue-200',    label: 'text-blue-600',    text: 'text-blue-700'    },
+  emerald: { bg: 'from-emerald-50 to-green-50',    border: 'border-emerald-200', label: 'text-emerald-600', text: 'text-emerald-700' },
+  violet:  { bg: 'from-violet-50 to-purple-50',    border: 'border-violet-200',  label: 'text-violet-600',  text: 'text-violet-700'  },
+  yellow:  { bg: 'from-yellow-50 to-amber-50',     border: 'border-yellow-200',  label: 'text-yellow-600',  text: 'text-yellow-700'  },
+  teal:    { bg: 'from-teal-50 to-emerald-50',     border: 'border-teal-200',    label: 'text-teal-600',    text: 'text-teal-700'    },
+  pink:    { bg: 'from-pink-50 to-rose-50',         border: 'border-pink-200',    label: 'text-pink-600',    text: 'text-pink-700'    },
+  sky:     { bg: 'from-sky-50 to-blue-50',          border: 'border-sky-200',     label: 'text-sky-600',     text: 'text-sky-700'     },
+  slate:   { bg: 'from-slate-50 to-gray-50',        border: 'border-slate-200',   label: 'text-slate-500',   text: 'text-slate-600'   },
+  orange:  { bg: 'from-orange-50 to-amber-50',     border: 'border-orange-200',  label: 'text-orange-600',  text: 'text-orange-700'  },
+  rose:    { bg: 'from-rose-50 to-pink-50',         border: 'border-rose-200',    label: 'text-rose-600',    text: 'text-rose-700'    },
+  cyan:    { bg: 'from-cyan-50 to-teal-50',         border: 'border-cyan-200',    label: 'text-cyan-600',    text: 'text-cyan-700'    },
+  purple:  { bg: 'from-purple-50 to-violet-50',    border: 'border-purple-200',  label: 'text-purple-600',  text: 'text-purple-700'  },
+}
+
+function svcColors(color: string) {
+  return SERVICE_COLOR_CLASSES[color] ?? SERVICE_COLOR_CLASSES.amber
+}
+
+const TRIGGER_TO_SERVICE: Record<string, string> = {
+  cart_abandoned:           'cart_recovery',
+  order_confirmed:          'order_confirmation',
+  order_created:            'order_confirmation',
+  order_cod_pending:        'cod_confirmation',
+  cod_confirmation_pending: 'cod_confirmation',
+  order_shipped:            'shipping_tracking',
+  order_out_for_delivery:   'shipping_tracking',
+  order_delivered:          'post_delivery',
+  reorder_prediction:       'predictive_reorder',
+  predictive_reorder_due:   'predictive_reorder',
+  new_customer:             'welcome_onboarding',
+  customer_first_message:   'welcome_onboarding',
+  new_product_alert:        'marketing_campaigns',
+  campaign_send:            'marketing_campaigns',
+  customer_inactive:        'customer_retention',
+  product_interest:         'customer_engagement',
+  vip_customer_upgrade:     'vip_rewards',
+  order_payment_pending:    'payment_reminder',
+  support_resolved:         'customer_support',
+}
+
+function resolveServiceForTemplate(tpl: WhatsAppTemplateRecord) {
+  const objective = tpl.library?.objective
+  if (objective) {
+    const serviceKey = TRIGGER_TO_SERVICE[objective]
+    if (serviceKey) return SERVICE_INFO[serviceKey]
+  }
+  return null
+}
+
 // ── Default templates metadata ────────────────────────────────────────────────
 
 const DEFAULT_TEMPLATE_META: Record<string, {
@@ -91,6 +162,10 @@ function TemplateRow({
   const meta = DEFAULT_TEMPLATE_META[tpl.name]
   const compatibility = tpl.compatibility
 
+  const displayName = tpl.display_name_ar || (isDefault && meta ? meta.purposeLabel : null)
+  const serviceInfo = tpl.service_key ? SERVICE_INFO[tpl.service_key] : null
+  const isInactive = tpl.is_active === false
+
   const statusLabel = (() => {
     switch (tpl.status) {
       case 'DRAFT':          return t(tr => tr.templatesMgmt.statusDraft)
@@ -115,25 +190,56 @@ function TemplateRow({
   })()
 
   return (
-    <tr className={`hover:bg-slate-50 transition-colors ${isDefault ? 'bg-brand-50/30' : ''}`}>
+    <tr className={`hover:bg-slate-50 transition-colors ${isDefault ? 'bg-brand-50/30' : ''} ${isInactive ? 'opacity-60' : ''}`}>
       <td className="px-5 py-3.5">
         <div className="flex items-center gap-2 flex-wrap">
-          <p className="text-xs font-semibold text-slate-900">{tpl.name.replace(/_/g, ' ')}</p>
+          {serviceInfo && (
+            <span className="text-sm leading-none">{serviceInfo.icon}</span>
+          )}
+          <div className="min-w-0">
+            {displayName ? (
+              <>
+                <p className="text-xs font-bold text-slate-900">{displayName}</p>
+                <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate max-w-[200px]">{tpl.name.replace(/_/g, ' ')}</p>
+              </>
+            ) : (
+              <p className="text-xs font-semibold text-slate-900">{tpl.name.replace(/_/g, ' ')}</p>
+            )}
+          </div>
           {isDefault && (
             <span className="inline-flex items-center gap-1 text-[10px] bg-brand-100 text-brand-700 border border-brand-200 px-1.5 py-0.5 rounded-full font-medium">
               <Star className="w-2.5 h-2.5" />
               {t(tr => tr.templatesMgmt.defaultBadge)}
             </span>
           )}
+          {tpl.service_key && tpl.is_active && (
+            <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded-full font-medium">
+              ● نشط
+            </span>
+          )}
+          {isInactive && tpl.service_key && (
+            <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full font-medium">
+              بديل
+            </span>
+          )}
+          {isInactive && !tpl.service_key && (
+            <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full font-medium">
+              معطّل
+            </span>
+          )}
         </div>
-        {isDefault && meta && (
-          <p className="text-[10px] text-brand-600 mt-0.5 flex items-center gap-1">
-            <Zap className="w-2.5 h-2.5" />
-            {meta.purposeLabel}
+        {tpl.step_number != null && (
+          <p className="text-[10px] text-slate-500 mt-0.5">
+            المرحلة {tpl.step_number}
+            {tpl.trigger_delay_hours != null && ` · بعد ${tpl.trigger_delay_hours >= 24 ? `${Math.round(tpl.trigger_delay_hours / 24)} يوم` : `${tpl.trigger_delay_hours} ساعة`}`}
+            {tpl.has_coupon && ' · مع خصم'}
           </p>
         )}
-        {!isDefault && tpl.meta_template_id && (
-          <p className="text-[10px] text-slate-400 font-mono mt-0.5">{tpl.meta_template_id}</p>
+        {serviceInfo && !displayName && (
+          <p className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1">
+            <Zap className="w-2.5 h-2.5" />
+            {serviceInfo.name}
+          </p>
         )}
       </td>
       <td className="px-5 py-3.5 text-xs text-slate-600">{LANGUAGE_LABELS[tpl.language] ?? tpl.language}</td>
@@ -217,15 +323,13 @@ function TemplateRow({
               {isSubmitting ? t(tr => tr.templatesMgmt.submittingBtn) : t(tr => tr.templatesMgmt.submitBtn)}
             </button>
           )}
-          {tpl.status !== 'APPROVED' && (
-            <button
-              onClick={onDelete}
-              className="text-slate-300 hover:text-red-500 transition-colors"
-              title={t(tr => tr.templatesMgmt.tooltipDelete)}
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          )}
+          <button
+            onClick={onDelete}
+            className="text-slate-300 hover:text-red-500 transition-colors"
+            title={tpl.status === 'APPROVED' ? 'إزالة من نحلة' : t(tr => tr.templatesMgmt.tooltipDelete)}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
         </div>
       </td>
     </tr>
@@ -234,9 +338,13 @@ function TemplateRow({
 
 // ── Preview modal ─────────────────────────────────────────────────────────────
 
-function PreviewModal({ tpl, onClose }: { tpl: WhatsAppTemplateRecord; onClose: () => void }) {
+function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord; onClose: () => void; onUpdate?: (updated: WhatsAppTemplateRecord) => void }) {
   const [vars, setVars] = useState<Record<string, string>>({})
   const [varMapData, setVarMapData] = useState<TemplateVarMapRecord | null>(null)
+  const [editingName, setEditingName] = useState(false)
+  const [editNameValue, setEditNameValue] = useState(tpl.display_name_ar || '')
+  const [saving, setSaving] = useState(false)
+  const [actionMsg, setActionMsg] = useState('')
 
   const bodyRaw = getBody(tpl)
   const varKeys = extractVars(bodyRaw)
@@ -245,14 +353,17 @@ function PreviewModal({ tpl, onClose }: { tpl: WhatsAppTemplateRecord; onClose: 
   const isDefault = isDefaultTemplate(tpl.name)
   const defaultMeta = DEFAULT_TEMPLATE_META[tpl.name]
 
-  // Pre-fill var inputs with Arabic placeholder labels from default meta
+  const displayName = tpl.display_name_ar || (isDefault && defaultMeta ? defaultMeta.purposeLabel : null)
+  const svcKey = tpl.service_key
+  const serviceInfo = svcKey ? SERVICE_INFO[svcKey] : resolveServiceForTemplate(tpl)
+  const svcColor = tpl.service_color || serviceInfo?.color || 'amber'
+
   const getVarPlaceholder = (varKey: string): string => {
     if (defaultMeta?.varLabels[varKey]) return defaultMeta.varLabels[varKey]
     if (varMapData?.var_map_annotated[varKey]) return varMapData.var_map_annotated[varKey].label
     return `قيمة ${varKey}`
   }
 
-  // Fetch var map from API for non-default templates
   useEffect(() => {
     if (!isDefault && tpl.id) {
       templatesApi.getVarMap(tpl.id)
@@ -260,6 +371,54 @@ function PreviewModal({ tpl, onClose }: { tpl: WhatsAppTemplateRecord; onClose: 
         .catch(() => {/* non-critical */})
     }
   }, [tpl.id, isDefault])
+
+  const handleSaveDisplayName = async () => {
+    setSaving(true)
+    try {
+      const res = await templatesApi.updateNahlaSettings(tpl.id, { display_name_ar: editNameValue })
+      onUpdate?.(res)
+      setEditingName(false)
+      setActionMsg('تم حفظ الاسم')
+      setTimeout(() => setActionMsg(''), 2000)
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  const handleToggleActive = async () => {
+    setSaving(true)
+    try {
+      const res = await templatesApi.updateNahlaSettings(tpl.id, { is_active: !tpl.is_active })
+      onUpdate?.(res)
+      setActionMsg(res.is_active ? 'تم تفعيل القالب' : 'تم تعطيل القالب')
+      setTimeout(() => setActionMsg(''), 2000)
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  const handleUnlinkService = async () => {
+    setSaving(true)
+    try {
+      const res = await templatesApi.unlinkService(tpl.id)
+      onUpdate?.(res.template)
+      setActionMsg('تم فك ربط القالب من الخدمة')
+      setTimeout(() => setActionMsg(''), 2000)
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  const handleSetActive = async () => {
+    setSaving(true)
+    try {
+      const res = await templatesApi.setActive(tpl.id)
+      onUpdate?.(res.template)
+      const msg = res.deactivated_template_name
+        ? `تم تعيينه كنشط — تم تعطيل: ${res.deactivated_template_name}`
+        : 'تم تعيينه كقالب نشط'
+      setActionMsg(msg)
+      setTimeout(() => setActionMsg(''), 4000)
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
@@ -273,15 +432,76 @@ function PreviewModal({ tpl, onClose }: { tpl: WhatsAppTemplateRecord; onClose: 
                 افتراضي
               </span>
             )}
+            {tpl.is_active === false && (
+              <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full font-medium">معطّل</span>
+            )}
           </div>
           <button onClick={onClose}><X className="w-5 h-5 text-slate-400 hover:text-slate-600" /></button>
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          {/* Arabic display name + service badge */}
+          {(displayName || serviceInfo) && (() => {
+            const c = svcColors(svcColor)
+            return (
+              <div className={`bg-gradient-to-br ${c.bg} border ${c.border} rounded-xl p-4`} dir="rtl">
+                <p className={`text-[10px] ${c.label} font-medium mb-1`}>الخدمة / الغرض من القالب</p>
+                {serviceInfo && (
+                  <div className="flex items-center gap-2.5 mb-1.5">
+                    <span className="text-xl leading-none">{serviceInfo.icon}</span>
+                    <p className="text-base font-bold text-slate-900">{serviceInfo.name}</p>
+                  </div>
+                )}
+                {displayName && !serviceInfo && (
+                  <p className="text-base font-bold text-slate-900 mb-1.5">{displayName}</p>
+                )}
+                {serviceInfo && (
+                  <p className="text-xs text-slate-600 leading-relaxed">{serviceInfo.description}</p>
+                )}
+                {displayName && serviceInfo && displayName !== serviceInfo.name && (
+                  <p className="text-sm font-semibold text-slate-800 mt-2">{displayName}</p>
+                )}
+                {tpl.step_number != null && (
+                  <p className="text-xs text-slate-500 mt-1.5">
+                    المرحلة {tpl.step_number}
+                    {tpl.trigger_delay_hours != null && ` · بعد ${tpl.trigger_delay_hours >= 24 ? `${Math.round(tpl.trigger_delay_hours / 24)} يوم` : `${tpl.trigger_delay_hours} ساعة`}`}
+                    {tpl.has_coupon && ' · يتضمن كود خصم'}
+                  </p>
+                )}
+              </div>
+            )
+          })()}
+
+          {/* Editable Arabic name */}
+          <div className="bg-slate-50 rounded-xl p-3" dir="rtl">
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-[10px] text-slate-400 font-medium">الاسم العربي</p>
+              {!editingName && (
+                <button onClick={() => { setEditNameValue(tpl.display_name_ar || ''); setEditingName(true) }} className="text-[10px] text-brand-500 hover:text-brand-700 font-medium">تعديل</button>
+              )}
+            </div>
+            {editingName ? (
+              <div className="flex items-center gap-2">
+                <input
+                  className="input text-xs py-1.5 flex-1"
+                  value={editNameValue}
+                  onChange={e => setEditNameValue(e.target.value)}
+                  placeholder="أدخل اسم عربي واضح..."
+                  autoFocus
+                />
+                <button onClick={handleSaveDisplayName} disabled={saving} className="text-[11px] bg-brand-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-brand-600 disabled:opacity-50">حفظ</button>
+                <button onClick={() => setEditingName(false)} className="text-[11px] text-slate-400 hover:text-slate-600">إلغاء</button>
+              </div>
+            ) : (
+              <p className="text-sm font-semibold text-slate-800">{displayName || <span className="text-slate-400 italic">لم يُحدد</span>}</p>
+            )}
+            <p className="text-[10px] text-slate-400 font-mono mt-1 truncate">{tpl.name}</p>
+          </div>
+
           {/* Meta info */}
           <div className="grid grid-cols-3 gap-3 text-xs">
             <div className="bg-slate-50 rounded-lg p-2.5">
-              <p className="text-slate-400 mb-0.5">الاسم</p>
+              <p className="text-slate-400 mb-0.5">اسم Meta</p>
               <p className="font-medium text-slate-800 truncate">{tpl.name.replace(/_/g, ' ')}</p>
             </div>
             <div className="bg-slate-50 rounded-lg p-2.5">
@@ -292,6 +512,53 @@ function PreviewModal({ tpl, onClose }: { tpl: WhatsAppTemplateRecord; onClose: 
               <p className="text-slate-400 mb-0.5">الحالة</p>
               <Badge label={STATUS_LABELS[tpl.status] ?? tpl.status} variant={(STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'} dot />
             </div>
+          </div>
+
+          {/* Management actions */}
+          <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+            {tpl.service_key && tpl.step_number != null && tpl.is_active !== true && (
+              <button
+                onClick={handleSetActive}
+                disabled={saving}
+                className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors disabled:opacity-50"
+              >
+                ● تعيين كنشط
+              </button>
+            )}
+            <button
+              onClick={handleToggleActive}
+              disabled={saving}
+              className={`flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                tpl.is_active !== false
+                  ? 'bg-amber-50 text-amber-700 hover:bg-amber-100'
+                  : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+              } disabled:opacity-50`}
+            >
+              {tpl.is_active !== false ? '⏸ تعطيل' : '▶ تفعيل'}
+            </button>
+            {tpl.service_key && (
+              <button
+                onClick={handleUnlinkService}
+                disabled={saving}
+                className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors disabled:opacity-50"
+              >
+                🔗 فك ربط الخدمة
+              </button>
+            )}
+            {actionMsg && (
+              <span className="text-[11px] text-emerald-600 font-medium self-center">{actionMsg}</span>
+            )}
+          </div>
+
+          {/* Session-window rule explainer */}
+          <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 text-xs leading-relaxed text-sky-800" dir="rtl">
+            <p className="font-bold mb-1">متى يُستخدم هذا القالب؟</p>
+            <p className="text-sky-700">
+              <span className="font-semibold">خارج نافذة المحادثة (24 ساعة):</span> يُرسل تلقائياً عبر القالب المعتمد فقط.
+            </p>
+            <p className="text-sky-700 mt-1">
+              <span className="font-semibold">داخل النافذة المفتوحة:</span> يعمل الذكاء الاصطناعي والردود التفاعلية المباشرة — لا حاجة لقالب.
+            </p>
           </div>
 
           {tpl.compatibility && (
@@ -1049,7 +1316,16 @@ function NahlaLibraryModal({ onClose, onImported }: {
                         preview?.key === tpl.key ? 'border-amber-400 bg-amber-50' : 'border-slate-200 bg-white'
                       }`}
                     >
-                      {/* Category badge */}
+                      {/* Service + Category badge */}
+                      {tpl.service_name_ar && (() => {
+                        const c = svcColors(tpl.service_color)
+                        return (
+                          <div className="flex items-center gap-1.5 mb-1.5">
+                            <span className="text-sm leading-none">{tpl.service_icon}</span>
+                            <span className={`text-[10px] font-semibold ${c.text}`}>{tpl.service_name_ar}</span>
+                          </div>
+                        )
+                      })()}
                       <div className="flex items-start justify-between gap-2 mb-2">
                         <span className="font-semibold text-slate-900 text-sm leading-tight">{tpl.name_ar}</span>
                         <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
@@ -1064,6 +1340,25 @@ function NahlaLibraryModal({ onClose, onImported }: {
                       {/* Description */}
                       {tpl.description_ar && (
                         <p className="text-xs text-slate-500 mb-2 leading-relaxed line-clamp-2">{tpl.description_ar}</p>
+                      )}
+
+                      {/* Step metadata */}
+                      {tpl.step_number != null && (
+                        <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+                          <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">
+                            المرحلة {tpl.step_number}
+                          </span>
+                          {tpl.trigger_delay_hours != null && (
+                            <span className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-medium">
+                              {tpl.trigger_delay_hours >= 24 ? `${Math.round(tpl.trigger_delay_hours / 24)} يوم` : `${tpl.trigger_delay_hours} ساعة`}
+                            </span>
+                          )}
+                          {tpl.has_coupon && (
+                            <span className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full font-medium">
+                              🎟 خصم
+                            </span>
+                          )}
+                        </div>
                       )}
 
                       {/* Smart trigger */}
@@ -1120,6 +1415,38 @@ function NahlaLibraryModal({ onClose, onImported }: {
           {/* Preview panel */}
           {preview && (
             <div className="w-72 border-r border-slate-100 bg-slate-50 p-4 overflow-y-auto hidden lg:block">
+              {/* Service badge */}
+              {preview.service_name_ar && (() => {
+                const c = svcColors(preview.service_color)
+                return (
+                  <div className={`bg-gradient-to-br ${c.bg} border ${c.border} rounded-xl p-3 mb-4`} dir="rtl">
+                    <p className={`text-[10px] ${c.label} font-medium mb-1`}>الخدمة / الغرض من القالب</p>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="text-lg leading-none">{preview.service_icon}</span>
+                      <p className="text-sm font-bold text-slate-900">{preview.service_name_ar}</p>
+                    </div>
+                    {preview.service_description_ar && (
+                      <p className="text-[11px] text-slate-600 leading-relaxed">{preview.service_description_ar}</p>
+                    )}
+                    {preview.step_number != null && (
+                      <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                        <span className="text-[10px] bg-white/60 text-slate-600 px-2 py-0.5 rounded-full font-medium">
+                          المرحلة {preview.step_number}
+                        </span>
+                        {preview.trigger_delay_hours != null && (
+                          <span className="text-[10px] bg-white/60 text-slate-600 px-2 py-0.5 rounded-full font-medium">
+                            بعد {preview.trigger_delay_hours >= 24 ? `${Math.round(preview.trigger_delay_hours / 24)} يوم` : `${preview.trigger_delay_hours} ساعة`}
+                          </span>
+                        )}
+                        {preview.has_coupon && (
+                          <span className="text-[10px] bg-white/60 text-emerald-600 px-2 py-0.5 rounded-full font-medium">🎟 مع خصم</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
+
               <p className="text-xs font-semibold text-slate-700 mb-3">معاينة الرسالة</p>
               {/* WhatsApp bubble */}
               <div className="bg-[#e5ddd5] rounded-xl p-3 mb-4">
@@ -1242,11 +1569,24 @@ export default function Templates() {
     }
   }
 
+  const [deleteMsg, setDeleteMsg] = useState<string | null>(null)
+
   const handleDelete = async (id: number) => {
     try {
-      await templatesApi.delete(id)
-      setTemplates(ts => ts.filter(t => t.id !== id))
+      const res = await templatesApi.delete(id)
+      if (res.soft_removed) {
+        setTemplates(ts => ts.filter(t => t.id !== id))
+        setDeleteMsg(res.message || 'تمت إزالة القالب من نحلة')
+        setTimeout(() => setDeleteMsg(null), 4000)
+      } else {
+        setTemplates(ts => ts.filter(t => t.id !== id))
+      }
     } catch { /* ignore */ }
+  }
+
+  const handlePreviewUpdate = (updated: WhatsAppTemplateRecord) => {
+    setTemplates(ts => ts.map(t => t.id === updated.id ? updated : t))
+    setPreview(updated)
   }
 
   const handleSubmitTemplate = async (id: number) => {
@@ -1285,7 +1625,7 @@ export default function Templates() {
         />
       )}
       {preview && (
-        <PreviewModal tpl={preview} onClose={() => setPreview(null)} />
+        <PreviewModal tpl={preview} onClose={() => setPreview(null)} onUpdate={handlePreviewUpdate} />
       )}
       {editTemplate && (
         <EditModal
@@ -1309,6 +1649,16 @@ export default function Templates() {
           <XCircle className="w-4 h-4 shrink-0" />
           <span>{submitError.msg}</span>
           <button onClick={() => setSubmitError(null)} className="ml-2 opacity-70 hover:opacity-100">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Soft-delete confirmation toast */}
+      {deleteMsg && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-amber-600 text-white px-5 py-3 rounded-xl shadow-xl text-sm">
+          <span>{deleteMsg}</span>
+          <button onClick={() => setDeleteMsg(null)} className="ml-2 opacity-70 hover:opacity-100">
             <X className="w-4 h-4" />
           </button>
         </div>

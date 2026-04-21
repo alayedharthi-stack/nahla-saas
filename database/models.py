@@ -826,6 +826,15 @@ class WhatsAppTemplate(Base):
     recommendation_state = Column(String, nullable=True)         # none | pending | accepted | dismissed
     recommendation_note = Column(Text, nullable=True)
     ai_generation_metadata = Column(JSONB, nullable=True)        # prompt, model, generation params
+    # Nahla display & management (migration 0035)
+    display_name_ar = Column(String, nullable=True)              # human-readable Arabic name shown to merchant
+    service_key = Column(String, nullable=True)                  # maps to SERVICE_CATALOG (e.g. cart_recovery)
+    nahla_source_key = Column(String, nullable=True)             # original Nahla library key used at import
+    is_active = Column(Boolean, default=True, nullable=False)    # active within Nahla (can be toggled)
+    is_hidden = Column(Boolean, default=False, nullable=False)   # hidden from merchant's template list
+    step_number = Column(Integer, nullable=True)                 # sequence step (multi-step flows like cart recovery)
+    has_coupon = Column(Boolean, default=False, nullable=True)   # template includes a coupon/discount code
+    trigger_delay_hours = Column(Float, nullable=True)           # delay before auto-send (hours)
 
 
 class Campaign(Base):

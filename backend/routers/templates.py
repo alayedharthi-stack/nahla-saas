@@ -153,16 +153,12 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
-            # Single body placeholder = customer name. The cart link is
-            # delivered through the URL button only — keeping the two
-            # placeholder spaces apart so the engine never sends a body
-            # parameter for a slot that lives in the button component.
             {"type": "BODY", "text": "مرحباً {{1}} 🛒\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nسلتك محفوظة وتنتظرك — أكمل طلبك الآن قبل نفاد الكمية.",
              "example": {"body_text": [["أحمد"]]}},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
             {"type": "BUTTONS", "buttons": [
                 {"type": "URL", "text": "أكمل الطلب",
-                 "url": "https://example.com/cart/{{1}}",
+                 "url": "https://example.com/{{1}}",
                  "example": ["https://example.com/cart/abc123"]},
             ]},
         ],
@@ -357,15 +353,11 @@ MOCK_TEMPLATES: List[Dict[str, Any]] = [
         "status": "APPROVED",
         "components": [
             {"type": "HEADER", "format": "TEXT", "text": "سلّتك في انتظارك! 🛒"},
-            # BODY has ONE placeholder = customer name.
-            # The cart URL is delivered through the dedicated URL button
-            # below, NOT inlined into the body, so the body and button
-            # never collide on the same {{N}} index.
             {"type": "BODY",   "text": "مرحباً {{1}} 🛒\nلاحظنا أنك تركت بعض المنتجات في سلّتك.\nأكمل طلبك الآن قبل نفاد الكمية."},
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
             {"type": "BUTTONS", "buttons": [{
                 "type": "URL", "text": "أكمل الطلب",
-                "url": "https://example.com/cart/{{1}}",
+                "url": "https://example.com/{{1}}",
                 "example": ["https://example.com/cart/abc123"],
             }]},
         ],
@@ -586,6 +578,16 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         template_name=t.name,
     )
     library_meta = DEFAULT_TEMPLATE_LIBRARY.get(t.name, {})
+
+    service_key = getattr(t, "service_key", None)
+    svc_info: Dict[str, str] = {}
+    if service_key:
+        try:
+            from services.whatsapp_templates.nahla_templates import SERVICE_CATALOG  # noqa: PLC0415
+            svc_info = SERVICE_CATALOG.get(service_key, {})
+        except Exception:
+            pass
+
     return {
         "id": t.id,
         "meta_template_id": t.meta_template_id,
@@ -612,6 +614,18 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "submittable": t.status in {"DRAFT", "REJECTED"},
         "library": library_meta or None,
         "compatibility": compatibility,
+        # Nahla display & management fields
+        "display_name_ar": getattr(t, "display_name_ar", None),
+        "service_key": service_key,
+        "service_name_ar": svc_info.get("name_ar", ""),
+        "service_icon": svc_info.get("icon", ""),
+        "service_color": svc_info.get("color", ""),
+        "nahla_source_key": getattr(t, "nahla_source_key", None),
+        "is_active": getattr(t, "is_active", True),
+        "is_hidden": getattr(t, "is_hidden", False),
+        "step_number": getattr(t, "step_number", None),
+        "has_coupon": getattr(t, "has_coupon", False),
+        "trigger_delay_hours": getattr(t, "trigger_delay_hours", None),
     }
 
 
@@ -1050,6 +1064,9 @@ async def list_templates(
     q = db.query(WhatsAppTemplate).filter(WhatsAppTemplate.tenant_id == tenant_id)
     if status:
         q = q.filter(WhatsAppTemplate.status == status.upper())
+    q = q.filter(
+        (WhatsAppTemplate.is_hidden == False) | (WhatsAppTemplate.is_hidden == None)  # noqa: E712
+    )
     templates = q.order_by(WhatsAppTemplate.created_at.desc()).all()
     return {"templates": [_tpl_to_dict(t) for t in templates]}
 
@@ -1230,7 +1247,13 @@ async def update_template_status(
 
 @router.delete("/templates/{template_id}")
 async def delete_template(template_id: int, request: Request, db: Session = Depends(get_db)):
-    """Delete a template (only allowed for PENDING/REJECTED/DISABLED)."""
+    """
+    Delete or soft-remove a template.
+
+    - Non-approved templates: deleted from the database.
+    - Approved templates: hidden from Nahla (is_hidden=True, is_active=False)
+      without attempting to delete from Meta. The merchant sees a clear message.
+    """
     tenant_id = resolve_tenant_id(request)
     tpl = db.query(WhatsAppTemplate).filter(
         WhatsAppTemplate.id == template_id,
@@ -1238,14 +1261,192 @@ async def delete_template(template_id: int, request: Request, db: Session = Depe
     ).first()
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
+
     if tpl.status == "APPROVED":
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete an APPROVED template — disable it from Meta Business Manager first",
-        )
+        tpl.is_hidden = True
+        tpl.is_active = False
+        tpl.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return {
+            "deleted": False,
+            "soft_removed": True,
+            "message": "تمت إزالة القالب من نحلة، لكنه ما يزال موجوداً في حسابك على Meta.",
+        }
+
     db.delete(tpl)
     db.commit()
-    return {"deleted": True}
+    return {"deleted": True, "soft_removed": False}
+
+
+class NahlaSettingsIn(BaseModel):
+    display_name_ar: Optional[str] = None
+    service_key: Optional[str] = None
+    is_active: Optional[bool] = None
+    step_number: Optional[int] = None
+    has_coupon: Optional[bool] = None
+    trigger_delay_hours: Optional[float] = None
+
+
+@router.put("/templates/{template_id}/nahla-settings")
+async def update_nahla_settings(
+    template_id: int,
+    body: NahlaSettingsIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Update Nahla-level settings for a template (works regardless of Meta status).
+
+    Allows the merchant to change the Arabic display name, linked service,
+    activation state, and multi-step metadata without touching the Meta template.
+    """
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    if body.display_name_ar is not None:
+        tpl.display_name_ar = body.display_name_ar
+    if body.service_key is not None:
+        tpl.service_key = body.service_key
+    if body.step_number is not None:
+        tpl.step_number = body.step_number
+    if body.has_coupon is not None:
+        tpl.has_coupon = body.has_coupon
+    if body.trigger_delay_hours is not None:
+        tpl.trigger_delay_hours = body.trigger_delay_hours
+
+    # Enforce single-active invariant when activating
+    deactivated_name = None
+    if body.is_active is not None:
+        tpl.is_active = body.is_active
+        if body.is_active and tpl.service_key and tpl.step_number is not None:
+            from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+            prev_id = ensure_single_active(
+                db, tenant_id, tpl.service_key, tpl.step_number, tpl.id,
+            )
+            if prev_id:
+                prev = db.query(WhatsAppTemplate).get(prev_id)
+                deactivated_name = getattr(prev, "display_name_ar", None) or getattr(prev, "name", "")
+
+    tpl.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(tpl)
+
+    result = _tpl_to_dict(tpl)
+    if deactivated_name:
+        result["_deactivated_template"] = deactivated_name
+    return result
+
+
+@router.post("/templates/{template_id}/unlink-service")
+async def unlink_template_service(
+    template_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Unlink a template from its Nahla service without deleting it."""
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    tpl.service_key = None
+    tpl.is_active = False
+    tpl.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(tpl)
+    return {
+        "message": "تم فك ربط القالب من الخدمة.",
+        "template": _tpl_to_dict(tpl),
+    }
+
+
+@router.post("/templates/{template_id}/restore")
+async def restore_template(
+    template_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Restore a soft-removed (hidden) template back into the merchant's library."""
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    tpl.is_hidden = False
+    tpl.is_active = True
+    tpl.updated_at = datetime.now(timezone.utc)
+
+    # Enforce single-active invariant when restoring
+    if tpl.service_key and tpl.step_number is not None:
+        from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+        ensure_single_active(db, tenant_id, tpl.service_key, tpl.step_number, tpl.id)
+
+    db.commit()
+    db.refresh(tpl)
+    return {
+        "message": "تم استعادة القالب بنجاح.",
+        "template": _tpl_to_dict(tpl),
+    }
+
+
+@router.post("/templates/{template_id}/set-active")
+async def set_template_active(
+    template_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Set a template as the active one for its service slot.
+
+    Deactivates any other template sharing the same
+    (tenant_id, service_key, step_number).  Returns both the newly-active
+    template and the name of the previously-active one (if any).
+    """
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if not tpl.service_key or tpl.step_number is None:
+        raise HTTPException(
+            status_code=400,
+            detail="لا يمكن تعيين هذا القالب كنشط — لم يُربط بخدمة ومرحلة بعد.",
+        )
+
+    from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+    prev_id = ensure_single_active(db, tenant_id, tpl.service_key, tpl.step_number, tpl.id)
+
+    deactivated_name = None
+    if prev_id:
+        prev = db.query(WhatsAppTemplate).get(prev_id)
+        deactivated_name = getattr(prev, "display_name_ar", None) or getattr(prev, "name", "")
+
+    tpl.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(tpl)
+
+    msg = "تم تعيين هذا القالب كنشط."
+    if deactivated_name:
+        msg += f" تم تعطيل القالب السابق: {deactivated_name}"
+
+    return {
+        "message": msg,
+        "template": _tpl_to_dict(tpl),
+        "deactivated_template_name": deactivated_name,
+    }
 
 
 _AI_REWRITE_MODES: Dict[str, Dict[str, str]] = {
@@ -2082,6 +2283,7 @@ async def get_nahla_library(
     """
     from services.whatsapp_templates.nahla_templates import (  # noqa: PLC0415
         filter_templates, template_preview, FILTER_TAGS, SMART_TRIGGER_MAP,
+        SERVICE_CATALOG,
     )
     templates = filter_templates(category=category, tag=tag, search=search)
     return {
@@ -2089,6 +2291,7 @@ async def get_nahla_library(
         "total":     len(templates),
         "filter_tags": FILTER_TAGS,
         "smart_trigger_map": SMART_TRIGGER_MAP,
+        "service_catalog": SERVICE_CATALOG,
     }
 
 
@@ -2187,20 +2390,37 @@ async def import_nahla_template(
 
     now = datetime.now(timezone.utc)
     new_tpl = WhatsAppTemplate(
-        tenant_id        = tenant_id,
-        meta_template_id = f"nahla_draft_{body.template_key}",
-        name             = template_name,
-        language         = body.language,
-        category         = tpl_def["category"],
-        status           = "DRAFT",
-        components       = components,           # ← المكونات مع الرابط المحدّث
-        source           = "nahla_library",
-        objective        = tpl_def.get("smart_trigger"),
-        created_at       = now,
-        updated_at       = now,
-        synced_at        = now,
+        tenant_id          = tenant_id,
+        meta_template_id   = f"nahla_draft_{body.template_key}",
+        name               = template_name,
+        language           = body.language,
+        category           = tpl_def["category"],
+        status             = "DRAFT",
+        components         = components,
+        source             = "nahla_library",
+        objective          = tpl_def.get("smart_trigger"),
+        created_at         = now,
+        updated_at         = now,
+        synced_at          = now,
+        display_name_ar    = tpl_def.get("name_ar", ""),
+        service_key        = tpl_def.get("service_key", ""),
+        nahla_source_key   = body.template_key,
+        is_active          = True,
+        is_hidden          = False,
+        step_number        = tpl_def.get("step_number"),
+        has_coupon         = tpl_def.get("has_coupon", False),
+        trigger_delay_hours = tpl_def.get("trigger_delay_hours"),
     )
     db.add(new_tpl)
+    db.flush()  # get new_tpl.id before enforcing invariant
+
+    # Enforce single-active invariant for the service slot
+    svc = tpl_def.get("service_key")
+    step = tpl_def.get("step_number")
+    if svc and step is not None:
+        from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+        ensure_single_active(db, tenant_id, svc, step, new_tpl.id)
+
     db.commit()
     db.refresh(new_tpl)
 

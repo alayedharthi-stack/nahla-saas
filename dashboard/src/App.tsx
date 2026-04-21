@@ -42,6 +42,7 @@ import AdminTenantIntegrity from './pages/AdminTenantIntegrity'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
+import SallaEmbedded from './pages/SallaEmbedded'
 import ZidCallback   from './pages/ZidCallback'
 import Register from './pages/Register'
 import WhatsAppConnect from './pages/WhatsAppConnect'
@@ -83,6 +84,7 @@ export default function App() {
           <Route path="/integrations/salla/success" element={<SallaOAuthSuccess />} />
           <Route path="/integrations/salla/error"   element={<SallaOAuthError />} />
           <Route path="/salla-callback"             element={<SallaCallback />} />
+          <Route path="/salla"                      element={<SallaEmbedded />} />
           <Route path="/zid-callback"               element={<ZidCallback />} />
 
           {/* Protected dashboard — all existing routes unchanged */}

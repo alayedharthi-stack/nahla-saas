@@ -872,15 +872,44 @@ async def _execute_action(
     # Anything else falls through to the template path below.
 
     # ── Template lookup ───────────────────────────────────────────────────────
-    # Per-step template_name (set by the cart-recovery seed) wins over the
-    # automation-wide default so each stage of a multi-stage workflow picks
-    # the right Meta-approved template.
+    #
+    # Resolution priority (first match wins):
+    #   1. Service-key + step-number resolver  — the canonical path.
+    #      Uses the merchant's explicitly-active template binding.
+    #   2. Per-step template_name from the automation config (legacy).
+    #   3. Automation-wide template_id FK (legacy).
+    #   4. Automation-wide template_name from config (legacy).
+    #
+    # Path 1 respects the single-active invariant and the session-window
+    # rule: templates are only needed when the 24h window is CLOSED.
+    # (When the window is open the code path above already branched to
+    #  interactive/AI mode via resolve_delivery_mode.)
+
     template: Optional[Any] = None
+
+    # Path 1 — service-key resolver (preferred)
+    svc_key  = active_step.get("service_key") or config.get("service_key")
+    step_num = active_step.get("step_number")
+    if step_num is None:
+        step_num = active_step.get("step_idx")
+    if svc_key and step_num is not None:
+        try:
+            from core.service_template_resolver import resolve_active_template  # noqa: PLC0415
+            template = resolve_active_template(db, tenant_id, svc_key, int(step_num))
+            if template:
+                logger.info(
+                    "[AutoEngine] Template resolved via service_key=%s step=%s → id=%s name=%s",
+                    svc_key, step_num, template.id, template.name,
+                )
+        except Exception as exc:
+            logger.warning("[AutoEngine] service_template_resolver error: %s", exc)
+
+    # Path 2 — per-step or config-level template_name (legacy fallback)
     tpl_name = (
         active_step.get("template_name")
         or config.get("template_name")
     )
-    if not tpl_name and automation.template_id:
+    if not template and not tpl_name and automation.template_id:
         template = (
             db.query(WhatsAppTemplate)
             .filter(
@@ -904,7 +933,7 @@ async def _execute_action(
             "error":       "no_approved_template",
             "error_code":  "template_not_approved",
             "error_label": "القالب غير معتمد من Meta",
-            "template":    tpl_name or (str(automation.template_id) if automation.template_id else None),
+            "template":    tpl_name or svc_key or (str(automation.template_id) if automation.template_id else None),
         }
 
     # ── Auto-coupon resolution ───────────────────────────────────────────────
@@ -963,11 +992,11 @@ async def _execute_action(
         components.append({"type": "body", "parameters": body_params})
 
     # ── URL button parameters ────────────────────────────────────────────────
-    # WhatsApp templates whose URL buttons contain {{1}} need a separate
-    # "button" component in the API call carrying the variable suffix.
-    # We scan the approved template's stored components and resolve the suffix
-    # from whichever URL slot (checkout, tracking, payment) is populated in the
-    # event payload.
+    # Templates with dynamic URL buttons (``{{1}}`` in the URL) need a
+    # separate "button" component carrying the variable suffix. The base
+    # URL is merchant-agnostic (set at import from the library); at send
+    # time we extract the dynamic path from whichever URL field the event
+    # payload provides.
     _URL_SLOT_PRECEDENCE = (
         "checkout_url", "cart_url", "tracking_url", "payment_url",
         "product_url", "reorder_url", "store_url",
@@ -975,6 +1004,8 @@ async def _execute_action(
     _customer_name_for_btn = customer.name or ""
     _store_name_for_btn    = _resolve_store_name(db, tenant_id)
     _payload_for_btn: Dict[str, Any] = dict(event.payload or {})
+    _has_dynamic_url_btn = False
+    _btn_suffix_resolved = False
     for comp in (template.components or []):
         if str(comp.get("type", "")).upper() != "BUTTONS":
             continue
@@ -984,7 +1015,7 @@ async def _execute_action(
             btn_url_tpl: str = btn.get("url", "")
             if "{{1}}" not in btn_url_tpl:
                 continue
-            # Try URL slots in priority order; use first non-empty result.
+            _has_dynamic_url_btn = True
             btn_suffix = ""
             for url_slot in _URL_SLOT_PRECEDENCE:
                 resolved = _resolve_slot_value(
@@ -1000,12 +1031,21 @@ async def _execute_action(
                     if btn_suffix:
                         break
             if btn_suffix:
+                _btn_suffix_resolved = True
                 components.append({
                     "type":       "button",
                     "sub_type":   "url",
                     "index":      str(btn_idx),
                     "parameters": [{"type": "text", "text": btn_suffix}],
                 })
+            else:
+                logger.warning(
+                    "[AutoEngine] Dynamic URL button on template %s has no "
+                    "resolvable URL — none of %s found in event payload. "
+                    "Button will use the template's base URL without a "
+                    "dynamic suffix (customer=%s, tenant=%s).",
+                    template.name, _URL_SLOT_PRECEDENCE, to_phone, tenant_id,
+                )
 
     send_payload: Dict[str, Any] = {
         "messaging_product": "whatsapp",
@@ -1801,33 +1841,44 @@ def _resolve_store_name(db: Session, tenant_id: int) -> str:
 
 def _extract_button_url_suffix(button_url_template: str, full_url: str) -> str:
     """
-    Given a template button URL like 'https://store.com/cart/{{1}}'
-    and a resolved full URL like 'https://store.com/cart?token=abc',
-    extract the variable suffix to send as the button parameter.
+    Extract the dynamic suffix that Meta expects for a URL-button parameter.
 
-    Meta requires only the dynamic suffix, not the full URL.
-    E.g. template 'https://store.com/{{1}}' + full 'https://store.com/cart?t=abc'
-    → suffix 'cart?t=abc'.
+    The template stores a fixed prefix ending with ``{{1}}``
+    (e.g. ``https://mystore.com/{{1}}``).  At send time Meta needs only
+    the part that replaces ``{{1}}`` — the *suffix*.
 
-    If domains differ (e.g. a third-party tracking URL), falls back to
-    the path+query portion of the full URL so at least something is passed.
+    Strategy:
+      1. If the resolved URL shares the same prefix as the template base,
+         strip it and return the remainder.
+      2. Otherwise (domain mismatch, third-party URL, different scheme),
+         return path + query + fragment so the button still works.
     """
     if not full_url:
         return ""
+
     placeholder = "{{1}}"
     pos = button_url_template.find(placeholder)
     if pos < 0:
         return ""
-    base = button_url_template[:pos]  # everything before the variable
+
+    base = button_url_template[:pos]
+
     if full_url.startswith(base):
         return full_url[len(base):]
-    # Domain mismatch — return path + query so the button is still usable.
+
     try:
         from urllib.parse import urlparse  # noqa: PLC0415
         parsed = urlparse(full_url)
         path_part = parsed.path.lstrip("/")
         query_part = f"?{parsed.query}" if parsed.query else ""
-        return f"{path_part}{query_part}"
+        fragment_part = f"#{parsed.fragment}" if parsed.fragment else ""
+        suffix = f"{path_part}{query_part}{fragment_part}"
+        logger.info(
+            "[AutoEngine] URL domain mismatch — template base=%r vs url=%r; "
+            "using path-based suffix=%r",
+            base, full_url, suffix,
+        )
+        return suffix
     except Exception:
         return full_url
 
