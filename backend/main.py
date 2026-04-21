@@ -247,12 +247,35 @@ async def on_startup() -> None:
                         logger.warning("Alembic stamp pre-check failed (non-fatal): %s", _stamp_exc)
 
                 # ── Step C: Apply any pending migrations (0017, 0018, …) ───────────────
-                subprocess.run(
+                # NOTE: capture stdout+stderr and surface them via the Python logger
+                # before re-raising. Previously we relied on `check=True` alone which
+                # crashed with `CalledProcessError` but left the actual Alembic stack
+                # trace (e.g. "Multiple head revisions present", "DuplicateColumn",
+                # "relation X already exists") only on Railway's raw stdout — invisible
+                # in the dashboard once `Application startup failed` was the last line
+                # the UI cropped to. Logging the captured output guarantees the real
+                # cause shows up in Railway's structured logs every time.
+                _alembic = subprocess.run(
                     [sys.executable, "-m", "alembic", "upgrade", "head"],
                     cwd=_DATABASE_DIR,
-                    check=True,
+                    check=False,
                     env=os.environ.copy(),
+                    capture_output=True,
+                    text=True,
                 )
+                if _alembic.stdout:
+                    logger.info("[alembic upgrade head] stdout:\n%s", _alembic.stdout.strip())
+                if _alembic.returncode != 0:
+                    logger.error(
+                        "[alembic upgrade head] FAILED rc=%d\n--- stderr ---\n%s\n--- stdout ---\n%s",
+                        _alembic.returncode,
+                        (_alembic.stderr or "").strip(),
+                        (_alembic.stdout or "").strip(),
+                    )
+                    raise RuntimeError(
+                        f"alembic upgrade head failed (rc={_alembic.returncode}); "
+                        "see logged stderr above"
+                    )
 
             await asyncio.get_running_loop().run_in_executor(None, _bootstrap_db_schema)
             logger.info("Database bootstrap (Salla cleanup + Alembic) completed.")

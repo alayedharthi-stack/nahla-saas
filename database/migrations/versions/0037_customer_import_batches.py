@@ -1,8 +1,12 @@
 """Add customer_import_batches table for the customer-import wizard.
 
-Revision ID: 0036
-Revises: 0035
-Create Date: 2026-04-21
+Revision ID: 0037
+Revises: 0036
+
+(Originally authored as 0036 alongside the customer-import wizard
+commit, but `0036_wa_connection_meta_tier` already claimed that slot
+and Railway's `alembic upgrade head` died on multiple-heads. Bumped
+to 0037 with `down_revision='0036'` so the chain is linear again.)
 
 Backs the four-step customer import flow (upload → mapping → preview
 → commit). Each row represents one upload session and stores the
@@ -14,8 +18,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
 
-revision = "0036"
-down_revision = "0035"
+revision = "0037"
+down_revision = "0036"
 branch_labels = None
 depends_on = None
 
