@@ -383,3 +383,35 @@ async def dialog360_get_channel_info(
         return resp.json()
     except Exception:
         return {"raw": resp.text}
+
+
+async def fetch_meta_phone_tier(
+    conn: Any,
+    ctx: WhatsAppTokenContext,
+    *,
+    tenant_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Fetch messaging_limit and quality_rating from Meta Graph API for the phone.
+
+    GET /{phone_number_id}?fields=messaging_limit_tier,quality_rating
+    """
+    phone_id = getattr(conn, "phone_number_id", None)
+    if not phone_id or not ctx.token:
+        return {}
+    try:
+        data = await provider_get_with_context(
+            conn, ctx,
+            tenant_id=tenant_id,
+            operation="fetch_phone_tier",
+            path=f"{phone_id}",
+            params={"fields": "messaging_limit_tier,quality_rating"},
+            timeout=15,
+        )
+        return {
+            "messaging_limit": data.get("messaging_limit_tier"),
+            "quality_rating":  data.get("quality_rating"),
+        }
+    except Exception as exc:
+        logger.warning("[WA] fetch_meta_phone_tier failed tenant=%s: %s", tenant_id, exc)
+        return {}

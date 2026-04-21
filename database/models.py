@@ -1152,6 +1152,11 @@ class WhatsAppConnection(Base):
     # Guardian: last time a real inbound webhook was received for this tenant
     last_webhook_received_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Meta account health (fetched periodically from Graph API)
+    meta_messaging_limit = Column(String, nullable=True)     # e.g. "TIER_1K", "TIER_10K", "TIER_100K", "UNLIMITED"
+    meta_quality_rating  = Column(String, nullable=True)     # "GREEN", "YELLOW", "RED"
+    meta_tier_updated_at = Column(DateTime, nullable=True)
+
     extra_metadata    = Column(JSONB, nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
     updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

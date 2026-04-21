@@ -193,6 +193,24 @@ async def process_pending_events(db: Session, tenant_id: int) -> int:
             tenant_id, exc, exc_info=True,
         )
 
+    # ── Trial / subscription guard ───────────────────────────────────────
+    # When the trial has expired AND no active subscription exists, drain
+    # every pending event as "trial_expired" so the queue never grows
+    # unbounded. This is the enforcement layer: the merchant must upgrade
+    # to resume automation sends.
+    from core.billing import has_billing_access  # noqa: PLC0415
+    if not has_billing_access(db, tenant_id):
+        skipped = _drain_pending_for_reason(db, tenant_id, "trial_expired")
+        if skipped:
+            _log_event(
+                _EVENTS.AUTOMATION_AUTOPILOT_DISABLED,
+                level=logging.INFO,
+                tenant_id=tenant_id,
+                events_drained=skipped,
+                reason="trial_expired",
+            )
+        return 0
+
     # ── Master autopilot switch ──────────────────────────────────────────
     # When the merchant has disabled the master switch every pending event
     # is recorded as `skipped` with reason="autopilot_disabled" so it does
@@ -316,6 +334,63 @@ def _drain_pending_for_disabled_autopilot(db: Session, tenant_id: int) -> int:
         except Exception as exc:
             db.rollback()
             logger.error("[AutoEngine] drain commit failed tenant=%s: %s", tenant_id, exc)
+            return 0
+    return drained
+
+
+def _drain_pending_for_reason(db: Session, tenant_id: int, reason: str) -> int:
+    """Drain pending events with a custom skip reason (e.g. trial_expired)."""
+    from models import AutomationEvent, AutomationExecution, SmartAutomation  # noqa: PLC0415
+
+    cutoff = _utcnow_naive() - timedelta(hours=_MAX_EVENT_AGE_HOURS)
+    events: List[Any] = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.processed.is_(False),
+            AutomationEvent.created_at >= cutoff,
+        )
+        .order_by(AutomationEvent.created_at.asc())
+        .limit(_BATCH_SIZE)
+        .all()
+    )
+    if not events:
+        return 0
+
+    drained = 0
+    for event in events:
+        matches: List[Any] = (
+            db.query(SmartAutomation)
+            .filter(
+                SmartAutomation.tenant_id == tenant_id,
+                SmartAutomation.trigger_event == event.event_type,
+            )
+            .all()
+        )
+        for auto in matches:
+            existing = (
+                db.query(AutomationExecution)
+                .filter(
+                    AutomationExecution.event_id == event.id,
+                    AutomationExecution.automation_id == auto.id,
+                )
+                .first()
+            )
+            if existing:
+                continue
+            _write_execution(
+                db, event.id, auto.id, event.customer_id, tenant_id,
+                status="skipped", skip_reason=reason,
+            )
+        event.processed = True
+        drained += 1
+
+    if drained:
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.error("[AutoEngine] drain(%s) commit failed tenant=%s: %s", reason, tenant_id, exc)
             return 0
     return drained
 

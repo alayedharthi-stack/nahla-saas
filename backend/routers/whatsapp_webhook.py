@@ -886,6 +886,16 @@ async def _handle_merchant_message(
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
 
+        # ── Trial / subscription guard for AI replies ────────────────────────
+        # If trial expired and no subscription: send a static fallback reply
+        # so the customer isn't left hanging, but skip the expensive AI call.
+        from core.billing import has_billing_access as _has_billing  # noqa: PLC0415
+        if not _has_billing(db, tenant_id):
+            reply = "شكراً لتواصلك! هذا الحساب في وضع التجربة المنتهية. يُرجى التواصل مع صاحب المتجر."
+            StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)
+            await _send_whatsapp_message(phone_id=used_pid, to=to, text=reply, _tenant_id=tenant_id, _db=db)
+            return
+
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
         # Active when: global flag is on OR this tenant is in the per-tenant list
         _brain_active = MERCHANT_BRAIN_ENABLED or (tenant_id in MERCHANT_BRAIN_TENANT_IDS)

@@ -1179,6 +1179,43 @@ async def get_usage(
     return data
 
 
+@router.post("/refresh-meta-tier")
+async def refresh_meta_tier(
+    request: Request,
+    db:      Session = Depends(get_db),
+    _scope:  dict    = Depends(require_merchant_scope),
+):
+    """Fetch the current messaging_limit tier and quality_rating from Meta."""
+    from services.whatsapp_platform.service import fetch_meta_phone_tier  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if not conn or conn.status != "connected":
+        return {"updated": False, "reason": "not_connected"}
+
+    ctx = get_token_context(conn)
+    if not ctx.token:
+        return {"updated": False, "reason": "no_token"}
+
+    tier_data = await fetch_meta_phone_tier(conn, ctx, tenant_id=tenant_id)
+    if not tier_data:
+        return {"updated": False, "reason": "meta_api_error"}
+
+    from datetime import datetime, timezone as tz  # noqa: PLC0415
+    if tier_data.get("messaging_limit"):
+        conn.meta_messaging_limit = tier_data["messaging_limit"]
+    if tier_data.get("quality_rating"):
+        conn.meta_quality_rating = tier_data["quality_rating"]
+    conn.meta_tier_updated_at = datetime.now(tz.utc)
+    db.commit()
+
+    return {
+        "updated":          True,
+        "messaging_limit":  conn.meta_messaging_limit,
+        "quality_rating":   conn.meta_quality_rating,
+    }
+
+
 @router.get("/connection/health")
 async def connection_health(request: Request, db: Session = Depends(get_db)):
     """Quick health-check endpoint for the merchant troubleshooting panel."""

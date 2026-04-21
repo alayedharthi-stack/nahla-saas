@@ -25,6 +25,8 @@ interface WaUsageDetail {
   usage_pct:                     number
   exceeded:                      boolean
   near_limit:                    boolean
+  warning_70?:                   boolean
+  warning_90?:                   boolean
   marketing_blocked:             boolean
   emergency_stop:                boolean
   unlimited:                     boolean
@@ -32,6 +34,9 @@ interface WaUsageDetail {
   year:                          number
   reset_date:                    string
   daily_breakdown:               DailyRow[]
+  meta_messaging_limit?:         string | null
+  meta_tier_label?:              string | null
+  meta_quality_rating?:          string | null
 }
 
 interface DailyRow {
@@ -48,8 +53,8 @@ const MONTH_NAMES: Record<number, string> = {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function StatusBadge({ marketing_blocked, near_limit, emergency_stop }: {
-  marketing_blocked: boolean; near_limit: boolean; emergency_stop: boolean
+function StatusBadge({ marketing_blocked, near_limit, emergency_stop, warning_70, warning_90 }: {
+  marketing_blocked: boolean; near_limit: boolean; emergency_stop: boolean; warning_70?: boolean; warning_90?: boolean
 }) {
   if (emergency_stop) return (
     <span className="inline-flex items-center gap-1 text-xs font-bold text-red-700 bg-red-100 px-2.5 py-1 rounded-full">
@@ -61,9 +66,14 @@ function StatusBadge({ marketing_blocked, near_limit, emergency_stop }: {
       <AlertTriangle className="w-3.5 h-3.5" /> الحملات متوقفة
     </span>
   )
-  if (near_limit) return (
+  if (warning_90) return (
+    <span className="inline-flex items-center gap-1 text-xs font-bold text-red-600 bg-red-100 px-2.5 py-1 rounded-full">
+      <AlertTriangle className="w-3.5 h-3.5" /> اقتربت من الحد — 90%
+    </span>
+  )
+  if (warning_70 || near_limit) return (
     <span className="inline-flex items-center gap-1 text-xs font-bold text-amber-700 bg-amber-100 px-2.5 py-1 rounded-full">
-      <AlertTriangle className="w-3.5 h-3.5" /> 80% مُستخدَم
+      <AlertTriangle className="w-3.5 h-3.5" /> {warning_70 ? '70% مُستخدَم' : '80% مُستخدَم'}
     </span>
   )
   return (
@@ -73,18 +83,19 @@ function StatusBadge({ marketing_blocked, near_limit, emergency_stop }: {
   )
 }
 
-function ProgressBar({ pct, marketing_blocked, near_limit, emergency_stop }: {
-  pct: number; marketing_blocked: boolean; near_limit: boolean; emergency_stop: boolean
+function ProgressBar({ pct, marketing_blocked, near_limit, emergency_stop, warning_90 }: {
+  pct: number; marketing_blocked: boolean; near_limit: boolean; emergency_stop: boolean; warning_90?: boolean
 }) {
   const barColor = emergency_stop    ? 'bg-red-500'
                  : marketing_blocked ? 'bg-orange-500'
+                 : warning_90         ? 'bg-red-400'
                  : near_limit         ? 'bg-amber-400'
                  : 'bg-emerald-500'
   const width = Math.min(pct, 100)
   return (
     <div className="relative w-full h-4 bg-slate-100 rounded-full overflow-hidden">
-      {/* 80% marker */}
-      <div className="absolute top-0 h-full w-px bg-slate-300 z-10" style={{ left: '80%' }} />
+      <div className="absolute top-0 h-full w-px bg-amber-300/60 z-10" style={{ left: '70%' }} />
+      <div className="absolute top-0 h-full w-px bg-red-300/60 z-10" style={{ left: '90%' }} />
       <div
         className={`h-full rounded-full transition-all duration-700 ${barColor}`}
         style={{ width: `${width}%` }}
@@ -123,7 +134,15 @@ function BlockingPolicyCard() {
       <div className="space-y-2.5 text-xs text-slate-600">
         <div className="flex items-start gap-2">
           <span className="w-2 h-2 rounded-full bg-emerald-400 mt-1 shrink-0" />
-          <span><strong>أقل من 100%</strong> — جميع الرسائل تعمل بشكل طبيعي (خدمة العملاء + الحملات).</span>
+          <span><strong>أقل من 70%</strong> — جميع الرسائل تعمل بشكل طبيعي.</span>
+        </div>
+        <div className="flex items-start gap-2">
+          <span className="w-2 h-2 rounded-full bg-amber-400 mt-1 shrink-0" />
+          <span><strong>70%</strong> — تنبيه تحذيري للتاجر بالاقتراب من الحد.</span>
+        </div>
+        <div className="flex items-start gap-2">
+          <span className="w-2 h-2 rounded-full bg-red-400 mt-1 shrink-0" />
+          <span><strong>90%</strong> — تنبيه أحمر عاجل — ارقِّ باقتك لتجنب توقف الحملات.</span>
         </div>
         <div className="flex items-start gap-2">
           <span className="w-2 h-2 rounded-full bg-orange-400 mt-1 shrink-0" />
@@ -140,7 +159,6 @@ function BlockingPolicyCard() {
           <span className="w-2 h-2 rounded-full bg-red-500 mt-1 shrink-0" />
           <span>
             <strong>تجاوز 300%</strong> — إيقاف طارئ كامل (حماية المنصة من الأتمتة المفرطة).
-            هذا السيناريو نادر جداً ولن يحدث في الاستخدام الطبيعي.
           </span>
         </div>
       </div>
@@ -223,6 +241,8 @@ export default function WaUsage() {
                 marketing_blocked={data.marketing_blocked}
                 near_limit={data.near_limit}
                 emergency_stop={data.emergency_stop}
+                warning_70={data.warning_70}
+                warning_90={data.warning_90}
               />
             </div>
 
@@ -232,6 +252,7 @@ export default function WaUsage() {
               marketing_blocked={data.marketing_blocked}
               near_limit={data.near_limit}
               emergency_stop={data.emergency_stop}
+              warning_90={data.warning_90}
             />
 
             <div className="flex items-center justify-between mt-2 text-sm">
@@ -251,10 +272,11 @@ export default function WaUsage() {
               </span>
             </div>
 
-            {/* 80% marker label */}
-            <p className="text-xs text-slate-400 mt-1">
-              حد التنبيه: 80% ({Math.round(data.conversations_limit * 0.8).toLocaleString('ar-SA')} محادثة)
-            </p>
+            {/* Threshold labels */}
+            <div className="flex items-center gap-4 text-xs text-slate-400 mt-1">
+              <span>تنبيه: 70% ({Math.round(data.conversations_limit * 0.7).toLocaleString('ar-SA')})</span>
+              <span>تنبيه أحمر: 90% ({Math.round(data.conversations_limit * 0.9).toLocaleString('ar-SA')})</span>
+            </div>
 
             {/* Status explanation */}
             {data.emergency_stop && (
@@ -358,6 +380,37 @@ export default function WaUsage() {
               </ResponsiveContainer>
             )}
           </div>
+
+          {/* ── Meta tier card ──────────────────────────────────────────── */}
+          {data.meta_tier_label && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <ShieldCheck className="w-4 h-4 text-slate-600" />
+                <h3 className="text-sm font-semibold text-slate-700">حد Meta للمحادثات</h3>
+              </div>
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                <div>
+                  <p className="text-xs text-slate-500 mb-1">المستوى الحالي من Meta</p>
+                  <p className="text-lg font-bold text-slate-800">{data.meta_tier_label}</p>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    يتم ترقية المستوى تلقائياً من Meta عند استيفاء شروط الجودة
+                  </p>
+                </div>
+                {data.meta_quality_rating && (
+                  <div className="text-center">
+                    <p className="text-xs text-slate-500 mb-1">جودة الرقم</p>
+                    <span className={`inline-block text-sm font-bold px-3 py-1.5 rounded-full ${
+                      data.meta_quality_rating === 'GREEN'  ? 'bg-emerald-100 text-emerald-700'
+                      : data.meta_quality_rating === 'YELLOW' ? 'bg-amber-100 text-amber-700'
+                      : 'bg-red-100 text-red-700'
+                    }`}>
+                      {data.meta_quality_rating === 'GREEN' ? 'ممتازة' : data.meta_quality_rating === 'YELLOW' ? 'متوسطة' : 'منخفضة'}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* ── Blocking policy info ─────────────────────────────────────── */}
           <BlockingPolicyCard />

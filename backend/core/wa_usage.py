@@ -79,7 +79,8 @@ logger = logging.getLogger("nahla-backend")
 # ── Constants ─────────────────────────────────────────────────────────────────
 TRIAL_LIMIT               = 100
 WINDOW_HOURS              = 24      # Meta billing window
-ALERT_PCT_LOW             = 80      # first alert threshold
+ALERT_PCT_LOW             = 70      # first warning threshold
+ALERT_PCT_HIGH            = 90      # urgent red alert threshold
 
 # SERVICE conversations (customer-initiated) are never blocked at 100%.
 # Only a true runaway-automation emergency triggers this hard stop.
@@ -351,9 +352,9 @@ def track_conversation(
     limit = usage.conversations_limit
     if limit > 0:
         pct = (total / limit) * 100
-        if pct >= 80 and not usage.alert_80_sent:
+        if pct >= ALERT_PCT_LOW and not usage.alert_80_sent:
             usage.alert_80_sent = True
-            _fire_alert(db, tenant_id, total, limit, "80%")
+            _fire_alert(db, tenant_id, total, limit, f"{ALERT_PCT_LOW}%")
         if pct >= 100 and not usage.alert_100_sent:
             usage.alert_100_sent = True
             _fire_alert(db, tenant_id, total, limit, "100%")
@@ -443,6 +444,21 @@ def check_limit(
     return AllowResult(allowed=True, reason="ok", used_total=used, limit=limit, pct=pct)
 
 
+META_TIER_MAP = {
+    "TIER_1K":    1_000,
+    "TIER_10K":  10_000,
+    "TIER_100K": 100_000,
+    "UNLIMITED":       -1,
+}
+
+META_TIER_LABEL = {
+    "TIER_1K":    "Tier 1 — 1,000",
+    "TIER_10K":   "Tier 2 — 10,000",
+    "TIER_100K":  "Tier 3 — 100,000",
+    "UNLIMITED":  "Tier 4 — Unlimited",
+}
+
+
 def get_usage_this_month(db: Session, tenant_id: int) -> dict:
     """Return a dict safe to serialise as an API response."""
     now   = _utcnow()
@@ -454,24 +470,54 @@ def get_usage_this_month(db: Session, tenant_id: int) -> dict:
     limit = usage.conversations_limit
     pct   = round((total / limit) * 100, 1) if limit > 0 else 0.0
 
+    meta_tier = _get_meta_tier(db, tenant_id)
+
     return {
         "service_conversations_used":   svc,
         "marketing_conversations_used": mkt,
-        "conversations_used":           total,          # kept for backward compat
+        "conversations_used":           total,
         "conversations_limit":          limit,
         "usage_pct":                    pct,
         "exceeded":                     (limit > 0 and total >= limit),
-        "near_limit":                   (limit > 0 and pct >= 80 and total < limit),
-        # hard_stop: only marketing is blocked when exceeded=True.
-        # emergency_stop (300%+) would block everything — shown separately.
+        "near_limit":                   (limit > 0 and pct >= 70 and total < limit),
+        "warning_70":                   (limit > 0 and 70 <= pct < 90),
+        "warning_90":                   (limit > 0 and pct >= 90 and total < limit),
         "marketing_blocked":            (limit > 0 and total >= limit),
         "emergency_stop":               (limit > 0 and total >= int(limit * SERVICE_EMERGENCY_STOP)),
-        "unlimited":                    False,           # no plan is truly unlimited
+        "unlimited":                    False,
         "month":                        now.month,
         "year":                         now.year,
         "reset_date":                   f"01/{now.month + 1 if now.month < 12 else 1}/{now.year if now.month < 12 else now.year + 1}",
         "alert_80_sent":                usage.alert_80_sent,
         "alert_100_sent":               usage.alert_100_sent,
+        **meta_tier,
+    }
+
+
+def _get_meta_tier(db: Session, tenant_id: int) -> dict:
+    """Return Meta messaging tier info for the tenant's WhatsApp connection."""
+    try:
+        from models import WhatsAppConnection  # noqa: PLC0415
+        conn = (
+            db.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.tenant_id == tenant_id)
+            .first()
+        )
+        if conn and conn.meta_messaging_limit:
+            tier_key = conn.meta_messaging_limit
+            return {
+                "meta_messaging_limit":     tier_key,
+                "meta_messaging_limit_num": META_TIER_MAP.get(tier_key, 0),
+                "meta_tier_label":          META_TIER_LABEL.get(tier_key, tier_key),
+                "meta_quality_rating":      conn.meta_quality_rating,
+            }
+    except Exception as exc:
+        logger.warning("[WaUsage] _get_meta_tier failed: %s", exc)
+    return {
+        "meta_messaging_limit":     None,
+        "meta_messaging_limit_num": None,
+        "meta_tier_label":          None,
+        "meta_quality_rating":      None,
     }
 
 
@@ -585,7 +631,7 @@ def _fire_alert(
         else:
             remaining = limit - used
             msg = (
-                f"⚠️ *استخدمت 80% من محادثات واتساب هذا الشهر*\n\n"
+                f"⚠️ *استخدمت {threshold} من محادثات واتساب هذا الشهر*\n\n"
                 f"الاستخدام: *{used:,} / {limit:,}* محادثة\n"
                 f"المتبقي: *{remaining:,}* محادثة\n\n"
                 "💡 ارقِّ باقتك الآن لتجنب توقف الحملات:\n"

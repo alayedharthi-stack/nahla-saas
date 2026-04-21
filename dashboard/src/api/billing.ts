@@ -26,6 +26,8 @@ export interface BillingStatus {
   trial_expired:           boolean
   conversations_used:      number
   conversations_limit:     number     // -1 = unlimited
+  usage_pct?:              number
+  conversations_exceeded?: boolean
   launch_discount_active:  boolean
   current_price_sar:       number
   integration_fee_sar:     number

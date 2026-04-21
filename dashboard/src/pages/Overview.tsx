@@ -49,9 +49,15 @@ interface WaUsage {
   usage_pct:             number
   exceeded:              boolean
   near_limit:            boolean
+  warning_70?:           boolean
+  warning_90?:           boolean
   marketing_blocked:     boolean
   emergency_stop:        boolean
   unlimited:             boolean
+  meta_messaging_limit?:     string | null
+  meta_messaging_limit_num?: number | null
+  meta_tier_label?:          string | null
+  meta_quality_rating?:      string | null
 }
 
 export default function Overview() {
@@ -129,23 +135,53 @@ export default function Overview() {
       </div>
 
       {/* WhatsApp Conversation Usage Widget */}
-      {waUsage && (
-        <div className={`rounded-2xl border p-4 ${
-          waUsage.emergency_stop   ? 'bg-red-50    border-red-300'
-          : waUsage.marketing_blocked ? 'bg-orange-50 border-orange-200'
-          : waUsage.near_limit         ? 'bg-amber-50  border-amber-200'
-          : 'bg-white border-slate-200'
-        }`}>
+      {waUsage && (() => {
+        const isWarning90 = waUsage.warning_90
+        const isWarning70 = waUsage.warning_70 && !waUsage.warning_90
+        const alertLevel = waUsage.emergency_stop ? 'emergency'
+          : waUsage.marketing_blocked ? 'blocked'
+          : isWarning90 ? 'warning90'
+          : isWarning70 ? 'warning70'
+          : 'normal'
+
+        const containerClass = {
+          emergency: 'bg-red-50 border-red-300',
+          blocked:   'bg-orange-50 border-orange-200',
+          warning90: 'bg-red-50 border-red-200',
+          warning70: 'bg-amber-50 border-amber-200',
+          normal:    'bg-white border-slate-200',
+        }[alertLevel]
+
+        const iconColor = {
+          emergency: 'text-red-500',
+          blocked:   'text-orange-500',
+          warning90: 'text-red-500',
+          warning70: 'text-amber-500',
+          normal:    'text-emerald-500',
+        }[alertLevel]
+
+        const barColor = {
+          emergency: 'bg-red-500',
+          blocked:   'bg-orange-500',
+          warning90: 'bg-red-400',
+          warning70: 'bg-amber-400',
+          normal:    'bg-emerald-500',
+        }[alertLevel]
+
+        const pctColor = {
+          emergency: 'text-red-600',
+          blocked:   'text-orange-600',
+          warning90: 'text-red-600',
+          warning70: 'text-amber-600',
+          normal:    'text-slate-400',
+        }[alertLevel]
+
+        return (
+        <div className={`rounded-2xl border p-4 ${containerClass}`}>
           <div className="flex items-center justify-between gap-3 flex-wrap">
-            {/* Left: label + bar */}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-2 flex-wrap">
-                <MessageSquare className={`w-4 h-4 shrink-0 ${
-                  waUsage.emergency_stop    ? 'text-red-500'
-                  : waUsage.marketing_blocked ? 'text-orange-500'
-                  : waUsage.near_limit          ? 'text-amber-500'
-                  : 'text-emerald-500'
-                }`} />
+                <MessageSquare className={`w-4 h-4 shrink-0 ${iconColor}`} />
                 <span className="text-sm font-semibold text-slate-700">
                   استخدام واتساب هذا الشهر
                 </span>
@@ -159,9 +195,14 @@ export default function Overview() {
                     <AlertTriangle className="w-3 h-3" /> الحملات متوقفة
                   </span>
                 )}
-                {waUsage.near_limit && !waUsage.marketing_blocked && (
+                {isWarning90 && (
+                  <span className="flex items-center gap-1 text-xs font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full">
+                    <AlertTriangle className="w-3 h-3" /> اقتربت من الحد — 90%
+                  </span>
+                )}
+                {isWarning70 && (
                   <span className="flex items-center gap-1 text-xs font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">
-                    <AlertTriangle className="w-3 h-3" /> 80% مستخدم
+                    <AlertTriangle className="w-3 h-3" /> 70% مستخدم
                   </span>
                 )}
               </div>
@@ -169,12 +210,7 @@ export default function Overview() {
               {/* Progress bar */}
               <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
                 <div
-                  className={`h-full rounded-full transition-all duration-500 ${
-                    waUsage.emergency_stop    ? 'bg-red-500'
-                    : waUsage.marketing_blocked ? 'bg-orange-500'
-                    : waUsage.near_limit          ? 'bg-amber-400'
-                    : 'bg-emerald-500'
-                  }`}
+                  className={`h-full rounded-full transition-all duration-500 ${barColor}`}
                   style={{ width: `${Math.min(waUsage.usage_pct, 100)}%` }}
                 />
               </div>
@@ -183,12 +219,7 @@ export default function Overview() {
                 <span className="text-xs text-slate-500">
                   {`${waUsage.conversations_used.toLocaleString('ar-SA')} / ${waUsage.conversations_limit.toLocaleString('ar-SA')} محادثة`}
                 </span>
-                <span className={`text-xs font-bold ${
-                  waUsage.emergency_stop    ? 'text-red-600'
-                  : waUsage.marketing_blocked ? 'text-orange-600'
-                  : waUsage.near_limit          ? 'text-amber-600'
-                  : 'text-slate-400'
-                }`}>
+                <span className={`text-xs font-bold ${pctColor}`}>
                   {waUsage.usage_pct}%
                 </span>
               </div>
@@ -203,13 +234,15 @@ export default function Overview() {
                 <ExternalLink className="w-3 h-3" />
                 تفاصيل
               </Link>
-              {(waUsage.marketing_blocked || waUsage.near_limit) && (
+              {(waUsage.marketing_blocked || isWarning90 || isWarning70) && (
                 <Link
                   to="/billing"
                   className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl transition-all ${
                     waUsage.marketing_blocked
                       ? 'bg-orange-600 text-white hover:bg-orange-500'
-                      : 'bg-amber-500 text-white hover:bg-amber-400'
+                      : isWarning90
+                        ? 'bg-red-500 text-white hover:bg-red-400'
+                        : 'bg-amber-500 text-white hover:bg-amber-400'
                   }`}
                 >
                   <ArrowUp className="w-3.5 h-3.5" />
@@ -219,7 +252,7 @@ export default function Overview() {
             </div>
           </div>
 
-          {/* Contextual status note — explains what's happening clearly */}
+          {/* Alert messages */}
           {waUsage.emergency_stop && (
             <p className="text-xs text-red-700 mt-2 font-medium bg-red-100 rounded-lg px-3 py-2">
               ⛔ جميع الرسائل متوقفة — تجاوزت الحد بشكل كبير. يرجى ترقية باقتك.
@@ -232,8 +265,37 @@ export default function Overview() {
               <Link to="/billing" className="underline mr-1 font-bold">ارقِّ باقتك</Link> لاستئناف الحملات.
             </p>
           )}
+          {isWarning90 && (
+            <p className="text-xs text-red-700 mt-2 font-medium bg-red-50 rounded-lg px-3 py-2">
+              ⚠️ اقتربت من حد المحادثات الشهري — ستتوقف الحملات عند الوصول إلى 100%.
+              <Link to="/billing" className="underline mr-1 font-bold">ارقِّ الآن</Link>
+            </p>
+          )}
+
+          {/* Meta Tier Card */}
+          {waUsage.meta_tier_label && (
+            <div className="mt-3 bg-slate-50 border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-slate-600">حد Meta الحالي</p>
+                <p className="text-sm font-bold text-slate-800 mt-0.5">{waUsage.meta_tier_label}</p>
+              </div>
+              {waUsage.meta_quality_rating && (
+                <div className="text-center">
+                  <p className="text-xs text-slate-500">جودة الرقم</p>
+                  <span className={`inline-block mt-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${
+                    waUsage.meta_quality_rating === 'GREEN'  ? 'bg-emerald-100 text-emerald-700'
+                    : waUsage.meta_quality_rating === 'YELLOW' ? 'bg-amber-100 text-amber-700'
+                    : 'bg-red-100 text-red-700'
+                  }`}>
+                    {waUsage.meta_quality_rating === 'GREEN' ? 'ممتازة' : waUsage.meta_quality_rating === 'YELLOW' ? 'متوسطة' : 'منخفضة'}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      )}
+        )
+      })()}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

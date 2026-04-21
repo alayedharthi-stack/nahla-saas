@@ -117,6 +117,9 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
+    from core.billing import require_billing_access  # noqa: PLC0415
+    require_billing_access(db, tenant_id)
+
     try:
         template_db_id = int(body.template_id)
     except (TypeError, ValueError):
