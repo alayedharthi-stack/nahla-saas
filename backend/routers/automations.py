@@ -78,24 +78,12 @@ router = APIRouter()
 # ── Feature flags (process-level, runtime-readable) ───────────────────────────
 def _manual_retry_enabled() -> bool:
     """
-    Temporary, env-gated switch for the abandoned-cart manual retry button.
+    Switch for the abandoned-cart manual retry button.
 
-    The autopilot's *philosophy* is fully automatic — we never want a
-    merchant to be manually re-poking failed reminders in production.
-    But while the new structured-failure pipeline is being burned in
-    (template approval issues, phone-format edge cases, …) we expose a
-    one-click retry so the merchant can recover stuck carts without
-    waiting for an engineer.
-
-    Default: **off**. Flip to ``"true"`` (Railway → Variables) to expose
-    the button. Set back to ``"false"`` (or remove) to hide it again
-    everywhere — frontend reads this same flag via /autopilot/status.
-
-    Env: ``AUTOPILOT_ENABLE_MANUAL_RETRY``  values: ``true|false`` (case-insensitive).
+    Default: **on**. Set ``AUTOPILOT_ENABLE_MANUAL_RETRY=false`` to hide.
     """
-    return str(os.getenv("AUTOPILOT_ENABLE_MANUAL_RETRY", "")).strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    val = str(os.getenv("AUTOPILOT_ENABLE_MANUAL_RETRY", "true")).strip().lower()
+    return val not in {"0", "false", "no", "off"}
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
