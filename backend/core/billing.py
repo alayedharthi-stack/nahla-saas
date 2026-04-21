@@ -136,21 +136,40 @@ def _coerce_utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
+def compute_trial_info(tenant: "Tenant") -> dict:
+    """
+    Unified trial computation used by both the billing status API
+    and the enforcement guard.
+
+    Priority: trial_ends_at > trial_started_at > created_at
+    """
+    now = datetime.now(timezone.utc)
+    trial_end = _coerce_utc(getattr(tenant, "trial_ends_at", None))
+    if trial_end is None:
+        trial_start = _coerce_utc(
+            getattr(tenant, "trial_started_at", None) or tenant.created_at
+        )
+        if trial_start is None:
+            return {"is_trial": False, "trial_days_remaining": 0, "trial_expired": True}
+        trial_end = trial_start + timedelta(days=FREE_TRIAL_DAYS)
+
+    remaining = (trial_end - now).total_seconds()
+    days_left = max(0, int(remaining / 86400) + (1 if remaining > 0 else 0))
+
+    return {
+        "is_trial":              remaining > 0,
+        "trial_days_remaining":  days_left,
+        "trial_expired":         remaining <= 0,
+        "trial_end":             trial_end.isoformat(),
+    }
+
+
 def has_active_trial(db: Session, tenant_id: int) -> bool:
     """True when the tenant is still within Nahla's free-trial window."""
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
         return False
-
-    now = datetime.now(timezone.utc)
-    trial_end = _coerce_utc(getattr(tenant, "trial_ends_at", None))
-    if trial_end is None:
-        trial_start = _coerce_utc(getattr(tenant, "trial_started_at", None) or tenant.created_at)
-        if trial_start is None:
-            return False
-        trial_end = trial_start + timedelta(days=FREE_TRIAL_DAYS)
-
-    return trial_end > now
+    return compute_trial_info(tenant)["is_trial"]
 
 
 def has_billing_access(db: Session, tenant_id: int) -> bool:

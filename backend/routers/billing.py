@@ -37,7 +37,6 @@ from models import (  # noqa: E402
 )
 
 from core.billing import (
-    FREE_TRIAL_DAYS,
     INTEGRATION_FEE_SAR,
     LAUNCH_PROMO_UNTIL,
     ensure_billing_plans,
@@ -52,7 +51,7 @@ from core.config import (
     HYPERPAY_LIVE_MODE,
     HYPERPAY_WEBHOOK_SECRET,
 )
-from core.auth import require_not_support_impersonation
+from core.auth import require_admin as require_admin_dep, require_not_support_impersonation
 from core.database import get_db
 from core.middleware import rate_limit
 from core.tenant import (
@@ -322,16 +321,12 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
     conversations_used = _usage_data["conversations_used"]
 
     tenant = get_or_create_tenant(db, tenant_id)
-    now = datetime.now(timezone.utc)
-    _raw_start = tenant.created_at or now
-    # Ensure trial_start is timezone-aware (DB stores naive UTC datetimes)
-    if hasattr(_raw_start, 'tzinfo') and _raw_start.tzinfo is None:
-        _raw_start = _raw_start.replace(tzinfo=timezone.utc)
-    trial_start          = _raw_start
-    trial_elapsed        = (now - trial_start).days
-    trial_days_remaining = max(0, FREE_TRIAL_DAYS - trial_elapsed)
-    is_trial     = sub is None and trial_days_remaining > 0
-    trial_expired = sub is None and trial_days_remaining == 0
+
+    from core.billing import compute_trial_info  # noqa: PLC0415
+    trial_info           = compute_trial_info(tenant)
+    is_trial             = sub is None and trial_info["is_trial"]
+    trial_expired        = sub is None and trial_info["trial_expired"]
+    trial_days_remaining = trial_info["trial_days_remaining"]
 
     if sub is None:
         return {
@@ -456,6 +451,39 @@ async def subscribe_to_plan(
         "plan_slug":             plan.slug,
         "launch_discount_active": launch,
         "current_price_sar":     price,
+    }
+
+
+class ResetTrialRequest(BaseModel):
+    tenant_id: int
+    days: int = 14
+
+
+@router.post("/billing/reset-trial")
+async def reset_trial(
+    body: ResetTrialRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    _admin = Depends(require_admin_dep),
+):
+    """
+    Admin endpoint: reset or extend the free trial for a tenant.
+    Sets trial_ends_at = now + body.days.
+    """
+    tenant = get_or_create_tenant(db, body.tenant_id)
+    now = datetime.now(timezone.utc)
+    new_end = now + timedelta(days=body.days)
+
+    tenant.trial_ends_at   = new_end
+    tenant.trial_started_at = now
+    db.commit()
+
+    logger.info("[Billing] Trial reset — tenant=%s days=%s new_end=%s", body.tenant_id, body.days, new_end)
+    return {
+        "success": True,
+        "tenant_id": body.tenant_id,
+        "trial_days": body.days,
+        "trial_ends_at": new_end.isoformat(),
     }
 
 
