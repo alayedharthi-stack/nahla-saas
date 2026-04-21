@@ -52,6 +52,7 @@ Design contract
 from __future__ import annotations
 
 import logging
+import random
 import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
@@ -765,82 +766,143 @@ def _load_store_name(db: Any, tenant_id: int) -> str:
     return ""
 
 
+# ── Identity / greeting variants ──────────────────────────────────────────────
+# Multiple short variants are rotated so the bot does not feel scripted.
+# Each variant follows the global emoji rules:
+#   - 1-2 emojis maximum per message
+#   - 🌷 for greeting, 🐝 for the Nahla identity hook (assistant name only),
+#     👍 for help / confirmation
+#   - emoji at start or end of a sentence — never mid-sentence
+
+def _greeting_variants(assistant_name: str, store_name: str) -> List[str]:
+    """Greeting variants used right after السلام عليكم / مرحبا.
+    The assistant name carries the bee 🐝 so the persona stays linked
+    to the brand mark; the leading 🌷 sets a warm tone."""
+    if assistant_name:
+        return [
+            (
+                f"وعليكم السلام 🌷\n"
+                f"أنا {assistant_name} 🐝 موجودة أساعدك في المنتجات أو "
+                f"الطلبات أو أي استفسار.\n"
+                f"وش تحب أعرفك عليه؟"
+            ),
+            (
+                f"حياك الله 🌷\n"
+                f"أنا {assistant_name} 🐝 كيف أقدر أخدمك اليوم؟"
+            ),
+            (
+                f"أهلاً وسهلاً 🌷\n"
+                f"أنا {assistant_name} 🐝 من {store_name}. "
+                f"وش تحب نبدأ فيه؟"
+            ),
+        ]
+    return [
+        (
+            f"وعليكم السلام 🌷\n"
+            f"أهلاً فيك في {store_name}. "
+            f"وش تحب أعرفك عليه اليوم؟"
+        ),
+        (
+            f"حياك الله 🌷\n"
+            f"أهلاً فيك في {store_name}. كيف أقدر أخدمك؟"
+        ),
+    ]
+
+
+def _identity_variants(assistant_name: str, store_name: str) -> List[str]:
+    """Variants for «من أنت» — anchor on the bee 🐝 with a closing 👍."""
+    if assistant_name:
+        return [
+            (
+                f"أنا {assistant_name} 🐝 مساعدة {store_name} هنا.\n"
+                f"أقدر أجاوب على أسئلتك عن المنتجات والأسعار، "
+                f"وأساعدك تكمل الطلب بسهولة 👍"
+            ),
+            (
+                f"أنا {assistant_name} 🐝 موجودة لخدمتك في {store_name}.\n"
+                f"وش تحب نبدأ فيه؟"
+            ),
+        ]
+    return [
+        (
+            f"أنا المساعدة الذكية لـ {store_name} 🐝\n"
+            f"أقدر أساعدك في المنتجات والأسعار وإكمال الطلب 👍"
+        ),
+    ]
+
+
 def render_identity_reply(
     db: Any,
     *,
     tenant_id: int,
     topic: str,
 ) -> str:
-    """Render a deterministic identity / greeting reply that uses the
-    merchant's configured assistant name when available. This bypasses
-    the AI entirely so identity questions never leak recovery
-    boilerplate even if the AI engine is degraded or down."""
+    """Render a deterministic identity / greeting reply.
+
+    Uses the merchant's configured assistant name when available, picks
+    one of several warm variants so the same trigger does not get the
+    same line every time, and follows the global emoji rules (1-2 max,
+    🌷 for greeting, 🐝 for the Nahla persona hook, 👍 for help)."""
     assistant_name = _load_assistant_name(db, tenant_id)
     store_name = _load_store_name(db, tenant_id) or "متجرنا"
 
     if topic == "greeting":
-        if assistant_name:
-            return (
-                f"وعليكم السلام ورحمة الله 🌿\n"
-                f"أنا {assistant_name}، مساعد {store_name}. "
-                f"أقدر أساعدك في المنتجات والأسعار والطلبات والشحن.\n"
-                f"وش أقدر أخدمك فيه؟"
-            )
-        return (
-            f"وعليكم السلام ورحمة الله 🌿\n"
-            f"أهلاً فيك في {store_name}. "
-            f"أقدر أساعدك في المنتجات والأسعار والطلبات والشحن.\n"
-            f"وش أقدر أخدمك فيه؟"
-        )
-
-    # Default: identity question
-    if assistant_name:
-        return (
-            f"أنا {assistant_name}، المساعد الذكي لـ {store_name} 🤖\n"
-            f"أساعدك في الإجابة عن أسئلتك حول المنتجات والأسعار، "
-            f"وأقدر أكمل لك الطلب أو أتابع شحنتك.\n"
-            f"وش تبغى تسوي اليوم؟"
-        )
-    return (
-        f"أنا المساعد الذكي لـ {store_name} 🤖\n"
-        f"أساعدك في الإجابة عن أسئلتك حول المنتجات والأسعار، "
-        f"وأقدر أكمل لك الطلب أو أتابع شحنتك.\n"
-        f"وش تبغى تسوي اليوم؟"
-    )
+        return random.choice(_greeting_variants(assistant_name, store_name))
+    return random.choice(_identity_variants(assistant_name, store_name))
 
 
 # ── Mode-aware prompt augmentation (for legacy fallback) ─────────────────────
+#
+# Mode overlays are now SHORT per-turn deltas — the canonical Nahla
+# persona (tone, emoji rules, anti-repeat, no-tech-talk) is injected
+# separately by `modules.ai.prompts.nahla_persona`. We only state what
+# is special about THIS turn so the model is not re-told the persona
+# on every round.
+#
+# The one exception is MODE_SUPPORT_ESCALATION: it explicitly REVOKES
+# the persona's emoji guidance so apologies stay serious.
 
 def mode_prompt_overlay(decision: ModeDecision) -> str:
-    """A short instruction block that tells the legacy LLM prompt how
-    to behave for the resolved mode. Designed as an additive overlay
-    so it never replaces the existing system prompt — it just sets
-    expectations about ownership for THIS turn."""
+    """Per-turn instruction delta for the resolved conversation mode.
+    Designed to layer ON TOP of the Nahla persona — never to replace it."""
     mode = decision.mode
+
     if mode == MODE_LIVE_CHAT:
         if decision.free_form_override:
             return (
-                "وضع المحادثة: محادثة حيّة بعد تذكير سلة سابق.\n"
-                "- لا تكرر رسائل حفظ الطلب أو استرجاع السلة.\n"
-                "- ركّز على آخر رسالة من العميل وردّ عليها مباشرة بأسلوب طبيعي."
+                "## وضع هذه الجولة: محادثة حيّة بعد تذكير سلة سابق\n"
+                "- لا تكرّري رسائل حفظ الطلب أو استرجاع السلة.\n"
+                "- ركّزي على آخر رسالة من العميل وردّي عليها مباشرة "
+                "بأسلوب طبيعي."
             )
         return (
-            "وضع المحادثة: محادثة حيّة طبيعية.\n"
-            "- ركّز على آخر رسالة من العميل وردّ عليها مباشرة دون تكرار."
+            "## وضع هذه الجولة: محادثة حيّة طبيعية\n"
+            "- ركّزي على آخر رسالة من العميل وردّي عليها مباشرة "
+            "دون تكرار."
         )
+
     if mode == MODE_CHECKOUT_ASSIST:
         return (
-            "وضع المحادثة: مساعدة في إتمام الشراء.\n"
-            "- ساعد العميل في الدفع أو إكمال الطلب الحالي بدون تشتيت."
+            "## وضع هذه الجولة: مساعدة في إتمام الشراء\n"
+            "- ساعدي العميل في الدفع أو إكمال الطلب الحالي بدون تشتيت.\n"
+            "- عند إرسال رابط الدفع يكفي 👍 في نهاية الجملة."
         )
-    if mode == MODE_SUPPORT_ESCALATION:
-        return (
-            "وضع المحادثة: تصعيد لخدمة العملاء.\n"
-            "- اعتذر بلطف ووضّح أنك ستحوّل المحادثة لفريق المتجر."
-        )
+
     if mode == MODE_POST_PURCHASE:
         return (
-            "وضع المحادثة: متابعة ما بعد الشراء.\n"
-            "- ساعد العميل في تتبع الطلب أو الاستفسار عن الشحن."
+            "## وضع هذه الجولة: متابعة ما بعد الشراء\n"
+            "- ساعدي العميل في تتبع الطلب أو الاستفسار عن الشحن.\n"
+            "- استخدمي 🚚 عند ذكر الشحن، بحد أقصى مرة واحدة في الرسالة."
         )
+
+    if mode == MODE_SUPPORT_ESCALATION:
+        # Hard override of the persona's emoji guidance for this turn.
+        return (
+            "## وضع هذه الجولة: تصعيد لخدمة العملاء أو شكوى\n"
+            "- اعتذري بلطف ووضّحي أنك ستحوّلين المحادثة لفريق المتجر.\n"
+            "- ⚠️ لا تستخدمي أي إيموجي في هذه الرسالة — النبرة جدّية "
+            "ومحترمة، حتى لو كانت قواعد الشخصية تسمح عادةً بالإيموجي.\n"
+            "- لا تعدي بحلول لا يمكنك ضمانها؛ اكتفي بأنك ستحوّلين الطلب."
+        )
+
     return ""

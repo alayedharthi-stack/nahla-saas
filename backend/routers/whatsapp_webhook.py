@@ -1035,26 +1035,37 @@ async def _handle_merchant_message(
             store_context_text = build_ai_context(db, tenant_id, customer_phone=to, product_query=text)
 
             from modules.ai.prompts.tenant_overlay import load_tenant_ai_overlay  # noqa: PLC0415
+            from modules.ai.prompts.nahla_persona import nahla_persona_system_prompt  # noqa: PLC0415
             tenant_overlay = load_tenant_ai_overlay(db, tenant_id)
             mode_overlay = mode_prompt_overlay(mode_decision)
 
-            system_prompt = f"""أنت مساعد ذكي لمتجر إلكتروني. مهمتك الرد على استفسارات العملاء بأسلوب ودي واحترافي باللغة العربية.
+            # Resolve a friendly store display name (best-effort) so the
+            # persona can introduce itself as «نحلة من <store>» instead
+            # of the generic «نحلة من المتجر».
+            _store_name = ""
+            try:
+                from models import Tenant  # noqa: PLC0415
+                _t = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+                if _t:
+                    for _attr in ("store_name", "name", "display_name"):
+                        _val = getattr(_t, _attr, None)
+                        if isinstance(_val, str) and _val.strip():
+                            _store_name = _val.strip()
+                            break
+            except Exception:
+                pass
 
-استخدم المعلومات التالية للإجابة بدقة — لا تخترع معلومات خارجها:
-
-{store_context_text}
-
-تعليمات:
-- أجب باختصار وبوضوح
-- لا تذكر منصة نحلة أو أي منصة SaaS أخرى
-- إذا لم تجد إجابة في البيانات المتاحة، قل للعميل أنك ستتحقق وتعود إليه
-- تحدث كموظف خدمة العملاء للمتجر مباشرةً
-- أهم رسالة هي آخر رسالة من العميل — ركّز عليها وردّ مباشرة دون تكرار رسائل سابقة."""
+            system_prompt = nahla_persona_system_prompt(
+                store_name=_store_name,
+                store_context_text=store_context_text,
+            )
 
             if mode_overlay:
-                system_prompt = f"{mode_overlay}\n\n{system_prompt}"
+                system_prompt = f"{system_prompt}\n\n{mode_overlay}"
             if tenant_overlay:
-                system_prompt = f"{tenant_overlay}\n\n{system_prompt}"
+                # Tenant overlay sits on top so merchant-specific tone /
+                # rules can override the default Nahla persona.
+                system_prompt = f"{system_prompt}\n\n{tenant_overlay}"
 
             history_transcript = "\n".join(
                 f"{m['role']}: {m['content']}" for m in messages[:-1]
