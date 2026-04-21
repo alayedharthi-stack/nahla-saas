@@ -42,8 +42,19 @@ jobs:
       - name: Lint — no new silent excepts
         run: python scripts/lint_no_silent_except.py
 
-      - name: Show pytest collection (debug aid for CI failures)
-        run: python -m pytest --collect-only -q 2>&1 | tail -50
+      - name: Run unit tests (verbose, capture full output)
+        run: |
+          python -m pytest --collect-only -q > pytest-collect.txt 2>&1 || true
+          set -o pipefail
+          python -m pytest -v --maxfail=1 --tb=long -rA 2>&1 | tee pytest-output.txt
+        shell: bash
 
-      - name: Run unit tests
-        run: python -m pytest -v --maxfail=1 --tb=short -rA 2>&1 | tail -200
+      - name: Upload pytest output (for offline debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-debug
+          path: |
+            pytest-collect.txt
+            pytest-output.txt
+          retention-days: 7
