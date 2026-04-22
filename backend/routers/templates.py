@@ -2132,7 +2132,44 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
         logger.info("[templates/sync] Removed %d seed templates for tenant=%s", deleted, tenant_id)
 
     # ── Upsert real templates from Meta ───────────────────────────────────────
+    #
+    # Auto-bind helper: when the Meta template name follows the Nahla
+    # import naming convention (`nahla_<library_key>_<rand>`), or when
+    # the merchant typed it manually but it still contains a known
+    # library key, copy the library's `service_key`, `step_number`, and
+    # `nahla_source_key` onto the row. This is the missing link that
+    # caused cart-recovery automations to fail with `template_not_approved`
+    # even though an APPROVED template existed: the sync used to create
+    # rows without any service binding, so the strict resolver returned
+    # None and the engine refused to send.
+    try:
+        from services.whatsapp_templates.nahla_templates import NAHLA_TEMPLATES  # noqa: PLC0415
+        _LIB_BY_KEY = {t["key"]: t for t in NAHLA_TEMPLATES}
+    except Exception:
+        _LIB_BY_KEY = {}
+
+    def _library_match(name: str) -> Optional[Dict[str, Any]]:
+        """Match a Meta template name to a Nahla library entry. Tries
+        the canonical `nahla_<key>_<suffix>` pattern first, then falls
+        back to any library key contained in the name."""
+        if not name or not _LIB_BY_KEY:
+            return None
+        n = name.lower().strip()
+        # Canonical: nahla_<key>_<rand4>
+        if n.startswith("nahla_"):
+            stem = n[len("nahla_"):]
+            for key, tpl in _LIB_BY_KEY.items():
+                k = key.lower()
+                if stem == k or stem.startswith(k + "_"):
+                    return tpl
+        # Last resort: any library key embedded in the name
+        for key, tpl in _LIB_BY_KEY.items():
+            if key.lower() in n:
+                return tpl
+        return None
+
     synced = 0
+    auto_bound = 0
     for item in live:
         meta_id = str(item.get("id", ""))
         if not meta_id:
@@ -2161,8 +2198,17 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
             "meta_quality_score": item.get("quality_score"),
             "meta_compatibility": compatibility,
         }
+        tpl_name_meta = item.get("name", "")
+        lib_match = _library_match(tpl_name_meta)
+        lib_service_key = lib_match.get("service_key") if lib_match else None
+        lib_step_number = lib_match.get("step_number") if lib_match else None
+        lib_source_key  = lib_match.get("key") if lib_match else None
+        lib_has_coupon  = lib_match.get("has_coupon", False) if lib_match else False
+        lib_delay_hours = lib_match.get("trigger_delay_hours") if lib_match else None
+        lib_display_ar  = lib_match.get("name_ar") if lib_match else None
+
         if existing:
-            existing.name             = item.get("name", existing.name)
+            existing.name             = tpl_name_meta or existing.name
             existing.language         = normalized_language
             existing.category         = normalized_category
             existing.status           = normalized_status
@@ -2174,11 +2220,28 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
             }
             existing.synced_at        = now
             existing.updated_at       = now
+            # Backfill bindings from the library if the row never got
+            # them (common when sync ran before the merchant ever opened
+            # the import flow).
+            if lib_match:
+                if not existing.service_key and lib_service_key:
+                    existing.service_key = lib_service_key
+                if existing.step_number is None and lib_step_number is not None:
+                    existing.step_number = lib_step_number
+                if not existing.nahla_source_key and lib_source_key:
+                    existing.nahla_source_key = lib_source_key
+                if not existing.display_name_ar and lib_display_ar:
+                    existing.display_name_ar = lib_display_ar
+                if existing.trigger_delay_hours is None and lib_delay_hours is not None:
+                    existing.trigger_delay_hours = lib_delay_hours
+                if not existing.has_coupon and lib_has_coupon:
+                    existing.has_coupon = True
+            row_for_bind = existing
         else:
-            db.add(WhatsAppTemplate(
+            row_for_bind = WhatsAppTemplate(
                 tenant_id=tenant_id,
                 meta_template_id=meta_id,
-                name=item.get("name", ""),
+                name=tpl_name_meta,
                 language=normalized_language,
                 category=normalized_category,
                 status=normalized_status,
@@ -2188,17 +2251,61 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
                 created_at=now,
                 updated_at=now,
                 synced_at=now,
-            ))
+                # Bindings from the Nahla library when the name matches.
+                service_key=lib_service_key,
+                step_number=lib_step_number,
+                nahla_source_key=lib_source_key,
+                display_name_ar=lib_display_ar,
+                has_coupon=lib_has_coupon,
+                trigger_delay_hours=lib_delay_hours,
+                # New rows are visible by default; activation is decided
+                # below once we know the status is APPROVED.
+                is_active=False,
+                is_hidden=False,
+            )
+            db.add(row_for_bind)
+
+        # Auto-activate APPROVED rows on a service slot. Single-active
+        # invariant is enforced via `ensure_single_active`.
+        if (
+            lib_match
+            and lib_service_key
+            and lib_step_number is not None
+            and normalized_status == "APPROVED"
+        ):
+            try:
+                db.flush()  # need row_for_bind.id
+                from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+                if not row_for_bind.is_active:
+                    row_for_bind.is_active = True
+                    row_for_bind.is_hidden = False
+                    auto_bound += 1
+                ensure_single_active(
+                    db, tenant_id, lib_service_key, lib_step_number, row_for_bind.id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[templates/sync] auto-bind failed tenant=%s name=%s: %s",
+                    tenant_id, tpl_name_meta, exc,
+                )
+
         synced += 1
 
     db.commit()
-    logger.info("[templates/sync] tenant=%s synced=%d from waba=%s", tenant_id, synced, waba_id)
+    logger.info(
+        "[templates/sync] tenant=%s synced=%d auto_bound=%d from waba=%s",
+        tenant_id, synced, auto_bound, waba_id,
+    )
+    msg = f"تمت مزامنة {synced} قالب من Meta"
+    if auto_bound:
+        msg += f" (تم ربط {auto_bound} قالب تلقائياً بخدمات نحلة)"
+    if deleted:
+        msg += f" (وحُذف {deleted} قالب تجريبي)"
     return {
-        "synced":       synced,
+        "synced":        synced,
+        "auto_bound":    auto_bound,
         "deleted_seeds": deleted,
-        "message": f"تمت مزامنة {synced} قالب من Meta" + (
-            f" (وحُذف {deleted} قالب تجريبي)" if deleted else ""
-        ),
+        "message":       msg,
     }
 
 

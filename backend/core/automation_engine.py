@@ -962,15 +962,28 @@ async def _execute_action(
 
     template: Optional[Any] = None
 
-    # Path 1 — service-key resolver (preferred)
+    # Path 1 — service-key SMART resolver (preferred). Uses the merchant's
+    # explicit binding when present, otherwise walks a fallback chain
+    # (matching service_key, nahla_source_key, config template_name) and
+    # AUTO-BINDS the first APPROVED template that plausibly serves the
+    # slot. See `core.service_template_resolver.resolve_template_for_send`
+    # for the full chain.
     svc_key  = active_step.get("service_key") or config.get("service_key")
     step_num = active_step.get("step_number")
     if step_num is None:
         step_num = active_step.get("step_idx")
+    tpl_name = (
+        active_step.get("template_name")
+        or config.get("template_name")
+    )
+
     if svc_key and step_num is not None:
         try:
-            from core.service_template_resolver import resolve_active_template  # noqa: PLC0415
-            template = resolve_active_template(db, tenant_id, svc_key, int(step_num))
+            from core.service_template_resolver import resolve_template_for_send  # noqa: PLC0415
+            template = resolve_template_for_send(
+                db, tenant_id, svc_key, int(step_num),
+                fallback_template_name=tpl_name,
+            )
             if template:
                 logger.info(
                     "[AutoEngine] Template resolved via service_key=%s step=%s → id=%s name=%s",
@@ -979,11 +992,7 @@ async def _execute_action(
         except Exception as exc:
             logger.warning("[AutoEngine] service_template_resolver error: %s", exc)
 
-    # Path 2 — per-step or config-level template_name (legacy fallback)
-    tpl_name = (
-        active_step.get("template_name")
-        or config.get("template_name")
-    )
+    # Path 2 — automation-wide template_id FK (legacy fallback)
     if not template and not tpl_name and automation.template_id:
         template = (
             db.query(WhatsAppTemplate)
@@ -993,6 +1002,9 @@ async def _execute_action(
             )
             .first()
         )
+
+    # Path 3 — config-level template_name (used when no service_key
+    # binding exists at all, e.g. older automation rows).
     if not template and tpl_name:
         template = (
             db.query(WhatsAppTemplate)
@@ -1003,12 +1015,68 @@ async def _execute_action(
             )
             .first()
         )
+
     if not template:
+        # Distinguish "no template at all" from "template exists but
+        # has no APPROVED variant", so the dashboard can guide the
+        # merchant to the right action (import vs submit-for-approval
+        # vs activate). We look at ANY template the merchant has on
+        # this slot — even REJECTED / PENDING — to figure out which
+        # state we're in.
+        any_for_slot = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.service_key == svc_key,
+            )
+            .order_by(WhatsAppTemplate.updated_at.desc())
+            .first()
+            if svc_key else None
+        )
+        any_by_name = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.name == tpl_name,
+            )
+            .first()
+            if tpl_name else None
+        )
+        candidate = any_for_slot or any_by_name
+        if candidate is not None:
+            cand_status = (candidate.status or "").upper()
+            if cand_status == "APPROVED":
+                # Approved exists somewhere but couldn't be matched to
+                # this slot even with the smart resolver — surface a
+                # distinct hint so the merchant can fix the binding.
+                error_label = (
+                    "يوجد قالب معتمد لكنه غير مربوط بهذه المرحلة. "
+                    "افتح صفحة القوالب وفعّل القالب المناسب لخدمة "
+                    f"«{svc_key or 'الإرسال'}» للمرحلة {step_num}."
+                )
+            elif cand_status in {"PENDING", "IN_REVIEW", "SUBMITTED"}:
+                error_label = (
+                    "القالب لم يُعتمد من Meta بعد — قيد المراجعة. "
+                    "سيُستأنف الإرسال تلقائياً عند الاعتماد."
+                )
+            elif cand_status == "REJECTED":
+                error_label = (
+                    "Meta رفض القالب. عدّل النص وأعد التقديم من صفحة القوالب."
+                )
+            else:
+                error_label = "القالب غير معتمد من Meta"
+        else:
+            error_label = (
+                "لا يوجد قالب لهذه المرحلة. استورد قالباً من مكتبة نحلة "
+                "أو أنشئه من صفحة القوالب ثم قدّمه للاعتماد."
+            )
         return False, {
             "error":       "no_approved_template",
             "error_code":  "template_not_approved",
-            "error_label": "القالب غير معتمد من Meta",
+            "error_label": error_label,
             "template":    tpl_name or svc_key or (str(automation.template_id) if automation.template_id else None),
+            "service_key": svc_key,
+            "step_number": step_num,
         }
 
     # ── Auto-coupon resolution ───────────────────────────────────────────────
