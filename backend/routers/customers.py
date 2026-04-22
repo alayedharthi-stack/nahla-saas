@@ -23,11 +23,10 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
 from models import Customer, CustomerProfile
-from services.campaign_wizard.segments import (
-    SEGMENTS as NAHLA_SEGMENTS,
+from services.nahla_segments import (
     build_segment_query,
-    count_segment,
     get_segment as get_nahla_segment,
+    list_segments_with_counts,
 )
 from services.customer_intelligence import (
     CUSTOMER_STATUS_LABELS,
@@ -268,32 +267,26 @@ async def list_customers(
 @router.get("/segments")
 async def customers_segments(request: Request, db: Session = Depends(get_db)):
     """
-    The same Nahla segment registry the campaign wizard uses, with a
-    `customer_count` per segment computed for THIS tenant. Counts here
-    intentionally include unreachable customers (no normalized_phone)
-    because the customers page is a management view, not a sending
-    surface — the merchant needs to see "8 VIPs" even if 1 has a
-    bad phone, so they can go fix it.
+    The canonical Nahla segment registry (`services.nahla_segments`)
+    with a `customer_count` per segment computed for THIS tenant.
+
+    Counts here intentionally include unreachable customers (no
+    `normalized_phone`) because the customers page is a *management*
+    view, not a *sending* surface — the merchant needs to see "8 VIPs"
+    even if 1 has a bad phone, so they can go fix it.
 
     Result is identical in shape to /campaigns/wizard/segments so the
-    same frontend chip component can render either view.
+    same frontend chip component can render either view, and the
+    `criteria_ar` field powers the in-app tooltip / info card that
+    explains what each chip means.
     """
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
-    out: List[Dict[str, Any]] = []
-    for seg in NAHLA_SEGMENTS:
-        out.append({
-            "key": seg.key,
-            "label_ar": seg.label_ar,
-            "label_en": seg.label_en,
-            "description_ar": seg.description_ar,
-            "icon": seg.icon,
-            "natural_goals": list(seg.natural_goals),
-            "customer_count": count_segment(
-                seg.key, db, tenant_id, require_reachable=False,
-            ),
-        })
-    return {"segments": out}
+    return {
+        "segments": list_segments_with_counts(
+            db, tenant_id, require_reachable=False,
+        ),
+    }
 
 
 @router.get("/metrics")

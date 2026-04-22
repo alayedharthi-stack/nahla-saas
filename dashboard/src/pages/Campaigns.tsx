@@ -219,6 +219,7 @@ function Step2Segment({
   }, [segments, wiz.goalKey])
 
   const goalLabel = goals.find(g => g.key === wiz.goalKey)?.label_ar
+  const selectedSeg = segments.find(s => s.key === wiz.segmentKey)
 
   if (loading) {
     return (
@@ -233,6 +234,12 @@ function Step2Segment({
         اختر الشريحة المستهدفة لحملة <span className="font-semibold text-slate-700">{goalLabel ?? '—'}</span>.
         الأرقام تعكس عدد العملاء القابل للوصول (لديهم رقم واتساب).
       </p>
+      {selectedSeg && (
+        <div className="bg-brand-50/50 border border-brand-100 rounded-lg p-3 text-xs text-slate-700 leading-relaxed">
+          <span className="font-semibold text-brand-700">معنى «{selectedSeg.label_ar}»: </span>
+          {selectedSeg.criteria_ar || selectedSeg.description_ar}
+        </div>
+      )}
       <div className="grid sm:grid-cols-2 gap-2 max-h-[26rem] overflow-y-auto pe-1">
         {ordered.map(s => {
           const selected = wiz.segmentKey === s.key
@@ -241,13 +248,14 @@ function Step2Segment({
             <button
               key={s.key}
               onClick={() => setWiz(w => ({ ...w, segmentKey: s.key, template: null, variables: {} }))}
-              className={`flex items-center gap-3 border rounded-xl p-3 text-start transition-all ${
+              title={s.criteria_ar || s.description_ar}
+              className={`flex items-start gap-3 border rounded-xl p-3 text-start transition-all ${
                 selected
                   ? 'border-brand-500 bg-brand-50 ring-2 ring-brand-200'
                   : 'border-slate-200 bg-white hover:border-slate-300'
               }`}
             >
-              <span className={`p-2 rounded-lg ${
+              <span className={`p-2 rounded-lg shrink-0 ${
                 selected ? 'bg-brand-100 text-brand-600' : 'bg-slate-100 text-slate-500'
               }`}>
                 <GoalIcon name={s.icon} className="w-4 h-4" />
@@ -261,8 +269,11 @@ function Step2Segment({
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] text-slate-500 truncate">
-                  {s.customer_count.toLocaleString('ar-SA')} عميل
+                <p className="text-[11px] text-slate-500 leading-snug line-clamp-2">
+                  {s.description_ar}
+                </p>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {s.customer_count.toLocaleString('ar-SA')} عميل قابل للوصول
                 </p>
               </div>
             </button>

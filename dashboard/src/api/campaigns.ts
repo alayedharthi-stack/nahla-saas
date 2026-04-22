@@ -85,8 +85,16 @@ export interface CustomerSegmentMeta {
   label_ar: string
   label_en: string
   description_ar: string
+  /** Long plain-Arabic description of this cohort, shown in the info
+   *  popover on chips so the merchant understands what each segment
+   *  means. Mirrors the field returned by /customers/segments. */
+  criteria_ar: string
   icon: string
   natural_goals: string[]
+  /** CRM customer_status values this cohort reads (docs / debugging). */
+  crm_statuses: string[]
+  /** RFM bucket values this cohort reads (docs / debugging). */
+  rfm_buckets: string[]
   customer_count: number
 }
 

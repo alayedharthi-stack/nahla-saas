@@ -80,8 +80,17 @@ export interface CustomerSegmentMeta {
   label_ar: string
   label_en: string
   description_ar: string
+  /** Long, plain-Arabic explanation of which customers fall into this
+   *  cohort. Returned by both /customers/segments and
+   *  /campaigns/wizard/segments — surfaced in the info popover so the
+   *  merchant knows exactly what each chip means. */
+  criteria_ar: string
   icon: string
   natural_goals: string[]
+  /** CRM `customer_status` values this cohort consumes (for docs only). */
+  crm_statuses: string[]
+  /** RFM bucket values this cohort consumes (for docs only). */
+  rfm_buckets: string[]
   customer_count: number
 }
 

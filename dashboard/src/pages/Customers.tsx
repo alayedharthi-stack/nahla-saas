@@ -13,6 +13,7 @@ import {
   Mail,
   User,
   Upload,
+  Info,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -660,6 +661,8 @@ interface SegmentChipsProps {
 }
 
 function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps) {
+  const [openInfo, setOpenInfo] = useState<string | null>(null)
+
   if (loading) {
     return (
       <div className="flex gap-2 overflow-hidden">
@@ -671,34 +674,93 @@ function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps
   }
   if (!segments || segments.length === 0) return null
 
+  const activeSeg = segments.find(s => s.key === active) ?? null
+  const popoverSeg = openInfo ? segments.find(s => s.key === openInfo) : null
+
   return (
-    <div className="flex items-center gap-2 overflow-x-auto pb-1 -mb-1">
-      {segments.map(seg => {
-        const isActive = active === seg.key
-        return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 overflow-x-auto pb-1 -mb-1">
+        {segments.map(seg => {
+          const isActive = active === seg.key
+          return (
+            <div key={seg.key} className="relative shrink-0">
+              <button
+                onClick={() => onSelect(seg.key)}
+                title={seg.description_ar}
+                className={
+                  'inline-flex items-center gap-2 ps-3.5 pe-2 py-1.5 rounded-full text-xs font-medium transition-colors border ' +
+                  (isActive
+                    ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300')
+                }
+              >
+                <span>{seg.label_ar}</span>
+                <span
+                  className={
+                    'inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold ' +
+                    (isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500')
+                  }
+                >
+                  {seg.customer_count.toLocaleString('ar-SA')}
+                </span>
+                <button
+                  type="button"
+                  aria-label={`تعريف شريحة ${seg.label_ar}`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setOpenInfo(openInfo === seg.key ? null : seg.key)
+                  }}
+                  className={
+                    'ms-0.5 inline-flex items-center justify-center w-5 h-5 rounded-full transition-colors ' +
+                    (isActive
+                      ? 'text-white/80 hover:bg-white/15'
+                      : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600')
+                  }
+                >
+                  <Info className="w-3.5 h-3.5" />
+                </button>
+              </button>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Lightweight inline info card — opens under the chips, NOT a modal,
+          so the merchant can keep scanning the table while reading. */}
+      {popoverSeg && (
+        <div className="relative bg-white border border-slate-200 rounded-lg shadow-sm p-4">
           <button
-            key={seg.key}
-            onClick={() => onSelect(seg.key)}
-            title={seg.description_ar}
-            className={
-              'shrink-0 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium transition-colors border ' +
-              (isActive
-                ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
-                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300')
-            }
+            type="button"
+            onClick={() => setOpenInfo(null)}
+            className="absolute top-3 end-3 text-slate-400 hover:text-slate-600"
+            aria-label="إغلاق التعريف"
           >
-            <span>{seg.label_ar}</span>
-            <span
-              className={
-                'inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold ' +
-                (isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500')
-              }
-            >
-              {seg.customer_count.toLocaleString('ar-SA')}
-            </span>
+            <X className="w-4 h-4" />
           </button>
-        )
-      })}
+          <p className="text-sm font-semibold text-slate-800 mb-1">
+            {popoverSeg.label_ar}
+          </p>
+          <p className="text-xs text-slate-500 leading-relaxed mb-3">
+            {popoverSeg.criteria_ar || popoverSeg.description_ar}
+          </p>
+          <div className="flex flex-wrap gap-3 text-[11px] text-slate-400">
+            <span>عدد الحالي: <span className="text-slate-600 font-medium">{popoverSeg.customer_count.toLocaleString('ar-SA')}</span></span>
+            {popoverSeg.crm_statuses.length > 0 && (
+              <span>حالات CRM: <span className="font-mono text-slate-600">{popoverSeg.crm_statuses.join(' · ')}</span></span>
+            )}
+            {popoverSeg.rfm_buckets.length > 0 && (
+              <span>RFM: <span className="font-mono text-slate-600">{popoverSeg.rfm_buckets.join(' · ')}</span></span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Active filter hint — visible even when no info popover is open. */}
+      {activeSeg && active !== 'all' && (
+        <p className="text-[11px] text-slate-500 ps-1">
+          عرض {activeSeg.customer_count.toLocaleString('ar-SA')} عميل ضمن «{activeSeg.label_ar}»
+        </p>
+      )}
     </div>
   )
 }
