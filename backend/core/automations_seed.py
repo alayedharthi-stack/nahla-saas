@@ -97,12 +97,20 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             # may return SOURCE_NONE (no coupon) for low-value carts or
             # customers who already received one this week.
             "steps": [
-                # Stage 1 — template, URL button to cart
+                # Stage 1 — template, URL button to cart.
+                # `service_key` + `step_number` let `automation_engine`
+                # invoke the smart resolver (`resolve_template_for_send`),
+                # which auto-binds APPROVED templates whose names match
+                # the Nahla library or service keyword patterns. Without
+                # them the engine falls back to a strict name lookup
+                # that only matches the literal `template_name` below.
                 {
                     "delay_minutes":     30,
                     "enabled":           True,
                     "message_type":      "reminder",
                     "delivery_mode":     "template",
+                    "service_key":       "cart_recovery",
+                    "step_number":       1,
                     "template_name":     "abandoned_cart_recovery_ar",
                     "template_name_en":  "abandoned_cart_recovery_en",
                     "buttons":           ["resume_cart", "ask_question", "postpone"],
@@ -118,6 +126,8 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
                     "enabled":           True,
                     "message_type":      "reminder",
                     "delivery_mode":     "interactive",
+                    "service_key":       "cart_recovery",
+                    "step_number":       2,
                     "template_name":     "abandoned_cart_followup_ar",
                     "template_name_en":  "abandoned_cart_followup_en",
                     "buttons":           ["resume_cart", "human_help", "postpone"],
@@ -145,6 +155,8 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
                     "enabled":             False,
                     "message_type":        "ai_recovery",
                     "delivery_mode":       "ai_recovery",
+                    "service_key":         "cart_recovery",
+                    "step_number":         3,
                     "ai_recovery_enabled": False,
                     "ai_persona":          "concierge",
                     "buttons":             ["resume_cart", "ask_question", "postpone"],
@@ -155,6 +167,8 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
                     "enabled":           True,
                     "message_type":      "coupon",
                     "delivery_mode":     "interactive",
+                    "service_key":       "cart_recovery",
+                    "step_number":       4,
                     "auto_coupon":       True,
                     "template_name":     "abandoned_cart_final_offer_ar",
                     "template_name_en":  "abandoned_cart_final_offer_en",

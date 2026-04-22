@@ -968,10 +968,26 @@ async def _execute_action(
     # AUTO-BINDS the first APPROVED template that plausibly serves the
     # slot. See `core.service_template_resolver.resolve_template_for_send`
     # for the full chain.
-    svc_key  = active_step.get("service_key") or config.get("service_key")
+    #
+    # Critical: derive `service_key` and `step_number` from
+    # automation_type / step position when the seed config doesn't carry
+    # them explicitly. The cart_abandoned automation seed historically
+    # stored only `template_name` per step, which meant the smart
+    # resolver was NEVER invoked for cart-recovery sends — the engine
+    # fell straight through to a strict name lookup that would only
+    # match the seed's literal `abandoned_cart_recovery_ar`. Real
+    # merchant templates (`nahla_abandoned_cart_reminder_<rand>`) never
+    # matched, producing `template_not_approved` even when an APPROVED
+    # template was right there. This derivation is what guarantees the
+    # smart resolver runs for every multi-step automation.
+    svc_key  = (
+        active_step.get("service_key")
+        or config.get("service_key")
+        or _derive_service_key(automation, active_step)
+    )
     step_num = active_step.get("step_number")
     if step_num is None:
-        step_num = active_step.get("step_idx")
+        step_num = _derive_step_number(active_step, config)
     tpl_name = (
         active_step.get("template_name")
         or config.get("template_name")
@@ -1588,6 +1604,80 @@ def _reschedule_followup_event(
         except Exception:
             pass
         return None
+
+
+# ── Service-key / step-number derivation ─────────────────────────────────────
+#
+# Maps an automation_type to the canonical `service_key` used by the
+# Nahla template library and the smart resolver. This is the bridge
+# that lets the resolver run even when the seed config doesn't carry
+# an explicit `service_key` per step (which historically was every
+# multi-step automation, including cart_abandoned).
+#
+# Keep in sync with `services.whatsapp_templates.nahla_templates.SERVICE_CATALOG`.
+_AUTOMATION_TYPE_TO_SERVICE_KEY: Dict[str, str] = {
+    "cart_abandoned":      "cart_recovery",
+    "cod_confirmation":    "cod_confirmation",
+    "order_confirmation":  "order_confirmation",
+    "shipping_update":     "shipping_update",
+    "predictive_reorder":  "predictive_reorder",
+    "customer_winback":    "customer_winback",
+    "vip_upgrade":         "vip_customer",
+    "new_product_alert":   "new_arrivals",
+    "back_in_stock":       "back_in_stock",
+}
+
+
+def _derive_service_key(
+    automation: Any,
+    active_step: Dict[str, Any],
+) -> Optional[str]:
+    """Return the canonical service_key for an automation when the seed
+    config didn't store one. Uses the automation's type as the source
+    of truth — every Nahla automation maps to exactly one service slot
+    family in the template library."""
+    auto_type = getattr(automation, "automation_type", None)
+    if not auto_type:
+        return None
+    return _AUTOMATION_TYPE_TO_SERVICE_KEY.get(str(auto_type))
+
+
+def _derive_step_number(
+    active_step: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Optional[int]:
+    """Return a 1-based step number for the current step.
+
+    Resolution order:
+      1. Explicit `step_number` already on the step (caller has already
+         tried this — we guard against re-entry just in case).
+      2. `step_idx` if present (0-based array index → +1).
+      3. Position of `active_step` inside `config["steps"]` (+1) when
+         we can identify it by object identity.
+      4. None when the automation has no multi-step config (e.g.
+         single-template automations like new_product_alert).
+    """
+    explicit = active_step.get("step_number")
+    if explicit is not None:
+        try:
+            return int(explicit)
+        except (TypeError, ValueError):
+            pass
+
+    idx = active_step.get("step_idx")
+    if idx is not None:
+        try:
+            return int(idx) + 1   # 0-based payload → 1-based step number
+        except (TypeError, ValueError):
+            pass
+
+    steps = config.get("steps") if isinstance(config, dict) else None
+    if isinstance(steps, list):
+        for i, step in enumerate(steps):
+            if step is active_step:
+                return i + 1
+
+    return None
 
 
 def _active_step_for_event(event: Any, config: Dict[str, Any]) -> Dict[str, Any]:

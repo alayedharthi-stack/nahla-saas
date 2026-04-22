@@ -467,3 +467,64 @@ def test_multiple_automations_same_event_all_executed():
         assert db.query(AutomationExecution).filter_by(status="sent").count() == 2
     finally:
         db.close(); engine.dispose()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Service-key / step-number derivation
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# These tests lock down the bridge that lets the smart template
+# resolver run for multi-step automations whose seed config doesn't
+# carry an explicit `service_key` per step. Without this derivation
+# every cart-recovery send would silently fail with `template_not_approved`
+# even when the merchant had an APPROVED template named after the
+# Nahla library convention (`nahla_abandoned_cart_reminder_<rand>`).
+
+class _DummyAutomation:
+    def __init__(self, automation_type: str | None):
+        self.automation_type = automation_type
+
+
+class TestDeriveServiceKey:
+    def test_cart_abandoned_maps_to_cart_recovery(self):
+        from core.automation_engine import _derive_service_key
+        assert _derive_service_key(_DummyAutomation("cart_abandoned"), {}) == "cart_recovery"
+
+    def test_cod_confirmation_maps_to_cod(self):
+        from core.automation_engine import _derive_service_key
+        assert _derive_service_key(_DummyAutomation("cod_confirmation"), {}) == "cod_confirmation"
+
+    def test_unknown_automation_type_returns_none(self):
+        from core.automation_engine import _derive_service_key
+        assert _derive_service_key(_DummyAutomation("totally_unknown"), {}) is None
+
+    def test_missing_automation_type_returns_none(self):
+        from core.automation_engine import _derive_service_key
+        assert _derive_service_key(_DummyAutomation(None), {}) is None
+
+
+class TestDeriveStepNumber:
+    def test_explicit_step_number_wins(self):
+        from core.automation_engine import _derive_step_number
+        assert _derive_step_number({"step_number": 7}, {}) == 7
+
+    def test_step_idx_is_converted_to_one_based(self):
+        from core.automation_engine import _derive_step_number
+        # step_idx=0 (first array slot) → step_number=1
+        assert _derive_step_number({"step_idx": 0}, {}) == 1
+        assert _derive_step_number({"step_idx": 3}, {}) == 4
+
+    def test_position_in_steps_array_is_one_based(self):
+        from core.automation_engine import _derive_step_number
+        step_a = {"name": "stage1"}
+        step_b = {"name": "stage2"}
+        config = {"steps": [step_a, step_b]}
+        assert _derive_step_number(step_a, config) == 1
+        assert _derive_step_number(step_b, config) == 2
+
+    def test_no_steps_returns_none(self):
+        from core.automation_engine import _derive_step_number
+        # Single-template automations like new_product_alert have no
+        # `steps` array and no `step_idx` — derivation must return None
+        # so the engine doesn't invent a step it can't justify.
+        assert _derive_step_number({}, {"template_name": "x"}) is None
