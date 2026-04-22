@@ -50,6 +50,9 @@ from services.campaign_wizard.recommender import (  # noqa: E402
 from services.campaign_wizard.test_send import (  # noqa: E402
     MOCK_DEFAULTS, build_test_payload, send_test_message,
 )
+from services.campaign_wizard.test_send_urls import (  # noqa: E402
+    DEMO_FALLBACK_URL, extract_button_suffix, resolve_test_button_url,
+)
 
 
 # ── SQLite compatibility shim (mirrors the pattern in other tests) ───────────
@@ -751,3 +754,262 @@ class TestSendTestMessageOrchestration:
         assert db.query(Campaign).count() == before_count, (
             "test-send unexpectedly created a Campaign row"
         )
+
+
+# ── test_send URL-button fallback (Salla sandbox / demo stores) ─────────────
+
+
+def _tpl_with_url_button(url_template: str = "https://store.salla.sa/{{1}}"):
+    """Cart-recovery shaped template: BODY with name + dynamic URL button."""
+    return _make_template(components=[
+        {"type": "BODY", "text": "مرحباً {{1}} 🛒"},
+        {"type": "FOOTER", "text": "نحلة"},
+        {
+            "type": "BUTTONS",
+            "buttons": [
+                {
+                    "type": "URL", "text": "أكمل طلبك",
+                    "url": url_template,
+                    "example": ["https://store.salla.sa/cart/abc"],
+                },
+            ],
+        },
+    ])
+
+
+class TestResolveTestButtonUrl:
+    """Pure-function tests for the test-send URL resolver. The contract:
+    cart_url wins, then checkout/product/order/store, then the tenant
+    domain hint, and only as a last resort the demo placeholder. NEVER
+    used by production cart-recovery — that path stays strict on
+    cart_url / checkout_url."""
+
+    def test_cart_url_wins_when_present(self):
+        url, source = resolve_test_button_url(
+            {"cart_url": "https://store.salla.sa/cart/abc"},
+        )
+        assert url == "https://store.salla.sa/cart/abc"
+        assert source == "cart_url"
+
+    def test_falls_back_to_checkout_then_product_then_order_then_store(self):
+        # checkout_url
+        url, src = resolve_test_button_url(
+            {"checkout_url": "https://store.salla.sa/checkout/xyz"},
+        )
+        assert url.endswith("/checkout/xyz") and src == "checkout_url"
+        # product_url (cart + checkout missing)
+        url, src = resolve_test_button_url(
+            {"product_url": "https://store.salla.sa/products/test-item"},
+        )
+        assert url.endswith("/products/test-item") and src == "product_url"
+        # order_url
+        url, src = resolve_test_button_url(
+            {"order_url": "https://store.salla.sa/orders/42"},
+        )
+        assert url.endswith("/orders/42") and src == "order_url"
+        # store_url (lowest-priority storefront link)
+        url, src = resolve_test_button_url(
+            {"store_url": "https://store.salla.sa/"},
+        )
+        assert url == "https://store.salla.sa/" and src == "store_url"
+
+    def test_skips_non_url_values(self):
+        # A free-text body var that happened to land under "cart_url"
+        # must not be passed to Meta as a button param.
+        url, src = resolve_test_button_url({"cart_url": "not a url"})
+        assert src != "cart_url"
+
+    def test_uses_store_domain_hint_when_no_vars(self):
+        url, src = resolve_test_button_url(
+            {}, store_domain_hint="mystore.salla.sa",
+        )
+        assert url == "https://mystore.salla.sa/"
+        assert src == "store_domain_hint"
+
+    def test_accepts_full_url_as_domain_hint(self):
+        url, src = resolve_test_button_url(
+            {}, store_domain_hint="https://mystore.salla.sa/extras",
+        )
+        # Hint collapses to the storefront root regardless of any path
+        # the merchant happened to paste in.
+        assert url == "https://mystore.salla.sa/"
+
+    def test_demo_fallback_when_nothing_else(self):
+        url, src = resolve_test_button_url({}, store_domain_hint=None)
+        assert url == DEMO_FALLBACK_URL
+        assert src == "demo_fallback"
+
+
+class TestExtractButtonSuffix:
+    """Meta's URL-button parameter is the suffix that REPLACES `{{1}}`,
+    not the full URL. Same-domain fast path strips the registered prefix;
+    cross-domain falls back to path+query+fragment."""
+
+    def test_same_domain_strips_registered_prefix(self):
+        suffix = extract_button_suffix(
+            "https://store.salla.sa/{{1}}",
+            "https://store.salla.sa/products/test-item",
+        )
+        assert suffix == "products/test-item"
+
+    def test_cross_domain_uses_path_query_fragment(self):
+        suffix = extract_button_suffix(
+            "https://example.com/{{1}}",
+            "https://other.example/cart/abc?coupon=NAHLA10#step=2",
+        )
+        assert suffix == "cart/abc?coupon=NAHLA10#step=2"
+
+    def test_template_root_url_returns_slash_for_storefront_root(self):
+        # `https://store.salla.sa` (no path) is a valid fallback target,
+        # but Meta still requires SOMETHING for the {{1}} param.
+        suffix = extract_button_suffix(
+            "https://store.salla.sa/{{1}}",
+            "https://store.salla.sa",
+        )
+        assert suffix == "/"
+
+    def test_empty_full_url_returns_empty(self):
+        assert extract_button_suffix("https://x/{{1}}", "") == ""
+
+
+class TestBuildTestPayloadUrlButtons:
+    """End-to-end: build_test_payload now appends a URL-button component
+    for every dynamic URL button in the template, with the suffix
+    derived from the test-mode fallback chain. Production cart-recovery
+    is unaffected — it goes through `core/automation_engine.py`."""
+
+    def test_url_button_component_added_with_cart_url(self):
+        tpl = _tpl_with_url_button()
+        payload = build_test_payload(
+            tpl, to_phone_e164="+966500000001",
+            merchant_vars={
+                "{{1}}": "نورة",
+                "cart_url": "https://store.salla.sa/cart/abc123",
+            },
+        )
+        components = payload["template"]["components"]
+        # One BODY + one BUTTON.
+        assert any(c["type"] == "body" for c in components)
+        btn_components = [c for c in components if c["type"] == "button"]
+        assert len(btn_components) == 1
+        btn = btn_components[0]
+        assert btn["sub_type"] == "url"
+        assert btn["index"] == "0"
+        assert btn["parameters"] == [{"type": "text", "text": "cart/abc123"}]
+
+    def test_falls_back_to_checkout_url_when_cart_url_missing(self):
+        tpl = _tpl_with_url_button()
+        payload = build_test_payload(
+            tpl, to_phone_e164="+966500000001",
+            merchant_vars={
+                "{{1}}": "نورة",
+                "checkout_url": "https://store.salla.sa/checkout/xyz",
+            },
+        )
+        btn = next(c for c in payload["template"]["components"] if c["type"] == "button")
+        assert btn["parameters"][0]["text"] == "checkout/xyz"
+
+    def test_falls_back_to_product_url_when_cart_and_checkout_missing(self):
+        tpl = _tpl_with_url_button()
+        payload = build_test_payload(
+            tpl, to_phone_e164="+966500000001",
+            merchant_vars={"product_url": "https://store.salla.sa/products/test-item"},
+        )
+        btn = next(c for c in payload["template"]["components"] if c["type"] == "button")
+        # Matches the brief's example exactly:
+        # https://store.salla.sa/products/test-item → products/test-item
+        assert btn["parameters"][0]["text"] == "products/test-item"
+
+    def test_uses_store_domain_hint_when_no_vars(self):
+        tpl = _tpl_with_url_button()
+        payload = build_test_payload(
+            tpl, to_phone_e164="+966500000001",
+            merchant_vars={},
+            store_domain_hint="mystore.salla.sa",
+        )
+        btn = next(c for c in payload["template"]["components"] if c["type"] == "button")
+        # Resolved URL is https://mystore.salla.sa/ which differs from
+        # the registered template prefix (store.salla.sa) — cross-domain
+        # path is "/", which the suffix extractor preserves.
+        assert btn["parameters"][0]["text"] == "/"
+
+    def test_demo_fallback_keeps_button_param_non_empty(self):
+        # No URL anywhere → the resolver returns DEMO_FALLBACK_URL so
+        # Meta still accepts the send. We never want code 132000
+        # ("parameter format mismatch") on a wizard preview.
+        tpl = _tpl_with_url_button()
+        payload = build_test_payload(
+            tpl, to_phone_e164="+966500000001",
+            merchant_vars={},
+            store_domain_hint=None,
+        )
+        btn = next(c for c in payload["template"]["components"] if c["type"] == "button")
+        assert btn["parameters"][0]["text"]  # non-empty
+
+    def test_static_url_button_does_not_get_a_parameter(self):
+        # Buttons WITHOUT `{{1}}` are static — Meta needs no parameter.
+        tpl = _make_template(components=[
+            {"type": "BODY", "text": "x"},
+            {"type": "BUTTONS", "buttons": [
+                {"type": "URL", "text": "زورنا", "url": "https://nahlah.ai"},
+            ]},
+        ])
+        payload = build_test_payload(
+            tpl, to_phone_e164="+966500000001", merchant_vars={},
+        )
+        btns = [c for c in payload["template"]["components"] if c["type"] == "button"]
+        assert btns == []
+
+    def test_send_test_message_passes_tenant_domain_to_resolver(self):
+        """Orchestration check: a tenant with a `domain` must propagate
+        it to the resolver so the URL button still works on Salla
+        sandbox stores where the merchant didn't fill any URL var."""
+        import asyncio
+        db, _engine = _make_db()
+        t = Tenant(name="Sandbox Store", is_active=True, domain="sandbox.salla.sa")
+        db.add(t)
+        db.commit()
+        db.refresh(t)
+
+        tpl = WhatsAppTemplate(
+            tenant_id=t.id, name="abandoned_cart", language="ar",
+            category="MARKETING", status="APPROVED",
+            components=[
+                {"type": "BODY", "text": "مرحباً {{1}}"},
+                {"type": "BUTTONS", "buttons": [
+                    {"type": "URL", "text": "أكمل",
+                     "url": "https://example.com/{{1}}"},
+                ]},
+            ],
+        )
+        conn = WhatsAppConnection(
+            tenant_id=t.id, status="connected", phone_number_id="PID_X",
+            phone_number="+966500000000", sending_enabled=True,
+            webhook_verified=True, connection_type="embedded", provider="meta",
+        )
+        db.add_all([tpl, conn])
+        db.commit()
+
+        captured = {}
+
+        async def _capture_provider(*args, **kwargs):
+            captured["payload"] = kwargs.get("payload")
+            return ({"messages": [{"id": "wamid.x"}]}, None)
+
+        with patch(
+            "services.whatsapp_platform.service.provider_send_message",
+            new=AsyncMock(side_effect=_capture_provider),
+        ):
+            result = asyncio.run(send_test_message(
+                db, tenant_id=t.id, template_db_id=tpl.id,
+                to_phone="+966500000001", merchant_vars={},
+            ))
+
+        assert result["sent"] is True
+        components = captured["payload"]["template"]["components"]
+        btn = next(c for c in components if c["type"] == "button")
+        # Tenant domain (sandbox.salla.sa) ≠ template registered prefix
+        # (example.com) → suffix synthesised from the URL path. Storefront
+        # root collapses to "/", which is a valid Meta param.
+        assert btn["sub_type"] == "url"
+        assert btn["parameters"][0]["text"] == "/"

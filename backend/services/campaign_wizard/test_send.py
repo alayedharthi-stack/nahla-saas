@@ -35,7 +35,12 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from models import WhatsAppConnection, WhatsAppTemplate
+from models import Tenant, WhatsAppConnection, WhatsAppTemplate
+
+from services.campaign_wizard.test_send_urls import (
+    extract_button_suffix,
+    resolve_test_button_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +85,38 @@ def _placeholders_in_order(text: str) -> List[str]:
     return seen
 
 
+def _dynamic_url_buttons(template: WhatsAppTemplate) -> List[Dict[str, Any]]:
+    """Return a flat list of ``{index, url_template}`` for every URL
+    button in the template that contains a ``{{1}}`` dynamic suffix.
+    Static URL buttons (no placeholder) need no parameter and are
+    skipped — Meta accepts them as-is."""
+    out: List[Dict[str, Any]] = []
+    for c in (template.components or []):
+        if str(c.get("type") or "").upper() != "BUTTONS":
+            continue
+        for idx, btn in enumerate(c.get("buttons") or []):
+            if str(btn.get("type") or "").upper() != "URL":
+                continue
+            url_tpl = btn.get("url") or ""
+            if "{{1}}" in url_tpl:
+                out.append({"index": idx, "url_template": url_tpl})
+    return out
+
+
 def build_test_payload(
     template: WhatsAppTemplate,
     *,
     to_phone_e164: str,
     merchant_vars: Optional[Dict[str, str]] = None,
+    store_domain_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Construct the Meta WhatsApp `type: "template"` payload. Pure
-    function so we can unit-test it without any DB / network."""
+    function so we can unit-test it without any DB / network.
+
+    ``store_domain_hint`` is only consulted by the URL-button resolver
+    when the merchant didn't supply *any* usable URL var. It is a
+    convenience for the test-send orchestrator, which derives it from
+    ``Tenant.domain``."""
     body = _body_text(template)
     placeholders = _placeholders_in_order(body)
     merchant_vars = merchant_vars or {}
@@ -102,6 +131,35 @@ def build_test_payload(
     components: List[Dict[str, Any]] = []
     if body_params:
         components.append({"type": "body", "parameters": body_params})
+
+    # ── Dynamic URL buttons (test-send only fallback chain) ────────────────
+    # Salla sandbox cart URLs frequently 404 / show maintenance — the test
+    # path therefore tolerates a missing cart_url and walks a documented
+    # fallback chain. PRODUCTION cart-recovery sends still go through
+    # `core/automation_engine.py` which deliberately fails closed when no
+    # real cart_url is present.
+    for btn_meta in _dynamic_url_buttons(template):
+        resolved_url, source = resolve_test_button_url(
+            merchant_vars, store_domain_hint=store_domain_hint,
+        )
+        suffix = extract_button_suffix(btn_meta["url_template"], resolved_url)
+        if not suffix:
+            # extract_button_suffix only returns "" for an empty input;
+            # belt-and-braces guard so we never emit a button parameter
+            # of "" which Meta rejects with code 132000.
+            suffix = "preview/test"
+        logger.info(
+            "[test_send] URL button idx=%s template_url=%s resolved=%s "
+            "(source=%s) suffix=%s",
+            btn_meta["index"], btn_meta["url_template"], resolved_url,
+            source, suffix,
+        )
+        components.append({
+            "type":       "button",
+            "sub_type":   "url",
+            "index":      str(btn_meta["index"]),
+            "parameters": [{"type": "text", "text": suffix}],
+        })
 
     return {
         "messaging_product": "whatsapp",
@@ -188,7 +246,23 @@ async def send_test_message(
             "error_message": "لا يوجد اتصال واتساب مفعّل — تمت محاكاة الإرسال فقط.",
         }
 
-    payload = build_test_payload(template, to_phone_e164=to_e164, merchant_vars=merchant_vars)
+    # Pull the tenant's storefront domain so the URL-button resolver
+    # has a sensible last-resort target when neither cart_url nor any
+    # other *_url variable was supplied (typical Salla sandbox case).
+    store_domain_hint: Optional[str] = None
+    try:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if tenant and getattr(tenant, "domain", None):
+            store_domain_hint = str(tenant.domain).strip() or None
+    except Exception as exc:  # observability only — never block test-send
+        logger.debug("[test_send] failed to read tenant domain: %s", exc)
+
+    payload = build_test_payload(
+        template,
+        to_phone_e164=to_e164,
+        merchant_vars=merchant_vars,
+        store_domain_hint=store_domain_hint,
+    )
 
     try:
         response, _ctx = await provider_send_message(
