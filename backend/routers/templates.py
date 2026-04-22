@@ -78,6 +78,12 @@ SUPPORTED_FEATURE_RULES: Dict[str, Dict[str, Any]] = {
     "inactive_recovery":   {"category": {"MARKETING"}, "min_body_vars": 2, "max_body_vars": 3},
 }
 
+# Template-library metadata. Each entry declares the audience (CRM
+# atoms + RFM buckets) the template was designed for. The wizard
+# recommender + library API enrich this with `cohort_keys`, the
+# *official Nahla marketing cohort* names this template targets —
+# auto-derived from the atoms via `services.crm_atoms` so we never
+# duplicate the cohort definitions here. See `_enrich_library_meta`.
 DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
     "welcome_intro": {
         "library_key": "welcome",
@@ -92,6 +98,9 @@ DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
         "objective": "abandoned_cart",
         "customer_statuses": ["new", "active"],
         "rfm_segments": ["regulars", "potential_loyalists", "promising"],
+        # `abandoned_cart` cohort is signal-driven (orders.is_abandoned)
+        # so atom-derivation can't infer it. Declare explicitly.
+        "cohort_keys": ["abandoned_cart"],
     },
     "win_back": {
         "library_key": "reactivation",
@@ -129,6 +138,23 @@ DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
         "rfm_segments": ["loyal_customers", "potential_loyalists", "regulars"],
     },
 }
+
+
+def _enrich_library_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach a derived ``cohort_keys`` list (the official Nahla
+    marketing cohorts this template is designed for) to a library
+    entry, computed from its declared CRM atoms.
+
+    Returns a *new* dict — never mutates ``DEFAULT_TEMPLATE_LIBRARY``
+    so the source-of-truth declarations stay clean. If ``meta`` is
+    falsy (template not in the library) returns ``meta`` unchanged.
+    """
+    if not meta:
+        return meta
+    from services.crm_atoms import derive_cohort_keys_for_template  # noqa: PLC0415
+    enriched = dict(meta)
+    enriched["cohort_keys"] = list(derive_cohort_keys_for_template(meta))
+    return enriched
 
 
 # ── Seed data ─────────────────────────────────────────────────────────────────
@@ -577,7 +603,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         status=t.status,
         template_name=t.name,
     )
-    library_meta = DEFAULT_TEMPLATE_LIBRARY.get(t.name, {})
+    library_meta = _enrich_library_meta(DEFAULT_TEMPLATE_LIBRARY.get(t.name, {}))
 
     service_key = getattr(t, "service_key", None)
     svc_info: Dict[str, str] = {}
@@ -2038,7 +2064,7 @@ async def list_template_library(request: Request):
     _ = request
     return {
         "templates": [
-            {"template_name": template_name, **meta}
+            {"template_name": template_name, **_enrich_library_meta(meta)}
             for template_name, meta in DEFAULT_TEMPLATE_LIBRARY.items()
         ]
     }
@@ -2296,7 +2322,7 @@ async def resolve_template_vars(
         "resolved_components": resolved_components,
         "rendered_body": body_text,
         "wa_parameters": wa_params,
-        "library": DEFAULT_TEMPLATE_LIBRARY.get(tpl.name),
+        "library": _enrich_library_meta(DEFAULT_TEMPLATE_LIBRARY.get(tpl.name, {})) or None,
         "compatibility": compatibility,
     }
 
@@ -2324,7 +2350,7 @@ async def get_campaign_templates(request: Request, db: Session = Depends(get_db)
             "category": t.category,
             "status": t.status,
             "components": t.components or [],
-            "library": DEFAULT_TEMPLATE_LIBRARY.get(t.name),
+            "library": _enrich_library_meta(DEFAULT_TEMPLATE_LIBRARY.get(t.name, {})) or None,
         })
     return {"templates": result, "source": "db"}
 

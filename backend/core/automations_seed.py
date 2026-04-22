@@ -26,6 +26,7 @@ from core.automation_triggers import (
     AutomationTrigger,
 )
 from models import Promotion, SmartAutomation
+from services.crm_atoms import CrmStatus
 
 
 # Canonical engine assignment per automation_type. Mirrors the backfill table
@@ -238,7 +239,12 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             # Payload-condition guard: only run when the status transition
             # actually landed the customer in an inactive/at_risk bucket.
             "conditions": {
-                "payload": {"to": ["inactive", "at_risk"]},
+                # Atom-level guard: only run when the customer's status
+                # transition lands them in an inactive/at-risk bucket.
+                # Constants from `services.crm_atoms` so a typo here
+                # would be an AttributeError at import time, not a
+                # silently-never-firing automation in production.
+                "payload": {"to": [CrmStatus.INACTIVE, CrmStatus.AT_RISK]},
             },
         },
     },
@@ -256,7 +262,7 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             "template_name_en": "vip_reward_en",
             "language":         "ar",
             "conditions": {
-                "payload": {"to": "vip"},
+                "payload": {"to": CrmStatus.VIP},
             },
         },
     },

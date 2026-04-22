@@ -79,25 +79,42 @@ class CouponPoolExhausted(RuntimeError):
     """Raised when we cannot find an unused code after many attempts."""
 
 
+# Per-customer coupon defaults keyed by CRM customer_status atom. This
+# is intentionally atom-level — one customer's status drives one coupon
+# decision. Cohort-level decisions (audience targeting) live in
+# `services.nahla_segments` instead.
+#
+# String values are pulled from `services.crm_atoms.CrmStatus` so a typo
+# here would be a NameError at import time, not a silent missing key
+# at run time.
+from services.crm_atoms import (  # noqa: E402 — kept after Tenant imports above
+    STATUS_ALIASES as SEGMENT_ALIASES,
+    CrmStatus,
+    canonical_status as _canonical_segment,
+)
+
 SEGMENT_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "new":     {"discount_pct": 15, "expiry_days": 1, "label": "عميل جديد"},
-    "active":  {"discount_pct": 5,  "expiry_days": 3, "label": "عميل نشط"},
-    "vip":     {"discount_pct": 20, "expiry_days": 3, "label": "عميل مميز"},
-    "at_risk": {"discount_pct": 25, "expiry_days": 1, "label": "في خطر المغادرة"},
-    "inactive": {"discount_pct": 30, "expiry_days": 1, "label": "عميل غير نشط"},
+    CrmStatus.NEW:      {"discount_pct": 15, "expiry_days": 1, "label": "عميل جديد"},
+    CrmStatus.ACTIVE:   {"discount_pct": 5,  "expiry_days": 3, "label": "عميل نشط"},
+    CrmStatus.VIP:      {"discount_pct": 20, "expiry_days": 3, "label": "عميل مميز"},
+    CrmStatus.AT_RISK:  {"discount_pct": 25, "expiry_days": 1, "label": "في خطر المغادرة"},
+    CrmStatus.INACTIVE: {"discount_pct": 30, "expiry_days": 1, "label": "عميل غير نشط"},
 }
 
 # Segments for which we auto-generate a coupon on a customer status change.
-EVENT_DRIVEN_SEGMENTS = frozenset({"new", "active", "vip", "at_risk"})
+EVENT_DRIVEN_SEGMENTS = frozenset({
+    CrmStatus.NEW,
+    CrmStatus.ACTIVE,
+    CrmStatus.VIP,
+    CrmStatus.AT_RISK,
+})
 
-SEGMENT_ALIASES: Dict[str, str] = {
-    "churned": "inactive",
-}
-
-
-def _canonical_segment(segment: str) -> str:
-    raw = str(segment or "").strip().lower()
-    return SEGMENT_ALIASES.get(raw, raw or "active")
+# `_canonical_segment` is re-exported above (back-compat shim used by
+# offer_decision_service.py and several tests). It now delegates to
+# `services.crm_atoms.canonical_status`, which knows about the same
+# aliases (`churned` → `inactive`) plus full validation. The old
+# behavior of returning `"active"` for an empty/None input is preserved
+# because `canonical_status` uses `default="active"` by default.
 
 
 def _is_short_coupon_code(code: Optional[str]) -> bool:

@@ -58,6 +58,15 @@ PROVIDER_SEND_ALLOWLIST = {
     # remains observable, and the COD funnel does not affect SmartAutomation
     # metrics (which is correct — it's not a SmartAutomation).
     BACKEND_DIR / "services" / "cod_confirmation.py",
+    # Campaign-wizard test-message orchestrator. Sends a one-off
+    # "this is what your campaign will look like" message to the
+    # merchant's own number BEFORE a campaign is launched. Explicitly
+    # marked test_send=True at the engine layer so it never lands in
+    # AutomationExecution accounting and never inflates campaign
+    # statistics. Bypasses the engine on purpose: the merchant is in a
+    # synchronous wizard step and needs the message in seconds, not
+    # after the next 60-second engine tick.
+    BACKEND_DIR / "services" / "campaign_wizard" / "test_send.py",
 }
 
 # Directories we never scan (tests, migrations, cached bytecode, vendored).

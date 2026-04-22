@@ -37,6 +37,13 @@ from models import WhatsAppTemplate
 from .goals import CampaignGoal, get_goal
 from .segments import CustomerSegment, get_segment
 
+# Template library lives outside campaign_wizard but its `cohort_keys`
+# field (auto-derived from the official Nahla segments registry via
+# `services.crm_atoms`) is the single highest-signal indicator that a
+# given template was designed for the segment the merchant just picked.
+# We import lazily inside `_score_one` to avoid a circular import on
+# `routers.templates` (which itself imports goal helpers).
+
 
 # Score band → badge mapping. Centralised so the frontend doesn't have
 # to recompute thresholds.
@@ -124,7 +131,36 @@ def _score_one(
             score += 18
 
     # ── Segment-aware boosts ───────────────────────────────────────────────
+    #
+    # Two complementary signals:
+    #
+    # (a) **Cohort-level intent** (highest signal). If the template
+    #     library declares this template targets the merchant's chosen
+    #     cohort, that's an unambiguous +20 — much more reliable than
+    #     the keyword heuristics below.
+    #
+    # (b) **Keyword fallback** (legacy heuristic, kept). For ad-hoc
+    #     templates created by the merchant outside the library we
+    #     have no cohort_keys, so we still need the body/name regex
+    #     boosts to surface obvious matches like "vip exclusive" /
+    #     "welcome".
     if segment is not None:
+        # (a) cohort-level
+        try:
+            from routers.templates import (  # noqa: PLC0415
+                DEFAULT_TEMPLATE_LIBRARY,
+                _enrich_library_meta,
+            )
+            lib_meta = _enrich_library_meta(
+                DEFAULT_TEMPLATE_LIBRARY.get(template.name, {})
+            )
+            cohort_keys = (lib_meta or {}).get("cohort_keys") or []
+            if segment.key in cohort_keys:
+                score += 20
+        except Exception:  # noqa: silent-ok — recommender stays useful even if library import fails
+            pass
+
+        # (b) keyword fallback for non-library templates
         if segment.key == "abandoned_cart" and ("cart" in name_lower or "abandon" in objective):
             score += 15
         if segment.key == "vip" and ("vip" in name_lower or template.category == "MARKETING" and "exclusive" in body_lower):
