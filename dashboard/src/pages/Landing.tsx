@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import LegalFooter from '../components/LegalFooter'
 import WhatsAppDemo from '../components/landing/WhatsAppDemo'
+import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 import {
   MessageCircle,
   ShoppingBag,
@@ -346,10 +347,10 @@ export default function Landing() {
   }
 
   const navLinks = [
+    { label: 'لماذا نحلة', id: 'why' },
     { label: 'كيف تعمل', id: 'how' },
     { label: 'شاهد نحلة', id: 'demo' },
     { label: 'المميزات', id: 'features' },
-    { label: 'آراء التجار', id: 'testimonials' },
     { label: 'الأسعار', id: 'pricing' },
     { label: 'الأسئلة الشائعة', id: 'faq' },
   ]
@@ -549,6 +550,13 @@ export default function Landing() {
           </p>
         </div>
       </section>
+
+      {/* ══════════════════════════════════════════════════════════
+          WHY NAHLA — Sales Intelligence
+          (moved here from the registration / login pages so it sits
+           on the marketing flow before "how it works".)
+      ══════════════════════════════════════════════════════════ */}
+      <SalesIntelligenceSection lang="ar" />
 
       {/* ══════════════════════════════════════════════════════════
           HOW IT WORKS
@@ -912,7 +920,7 @@ export default function Landing() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
             <div>
-              <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-4">لماذا نحلة؟</p>
+              <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-4">نتائج حقيقية</p>
               <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-6">
                 ليست أداة — بل شريك نمو لمتجرك
               </h2>

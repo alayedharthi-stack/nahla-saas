@@ -1,20 +1,24 @@
 /**
  * SalesIntelligenceSection.tsx
  * ─────────────────────────────
- * Marketing section appended below the registration form.
- * Explains the collective sales-learning value proposition
- * to merchants without altering the existing form layout.
+ * Marketing section explaining Nahla's collective sales-learning value.
+ *
+ * Lives on the Landing page (between the "Problem strip" and the
+ * "How does Nahla work?" section). It used to be appended below the
+ * registration / login forms — that placement distracted from the
+ * primary form CTA, so it now belongs on the landing page where it
+ * helps convert visitors before they reach the sign-up flow.
  *
  * Notes
  * ─────
- * * Bilingual (ar/en) — content is intentionally inlined here
- *   instead of going through the i18n dictionary because it is
- *   bespoke marketing copy.
- * * Dark theme to match the slate-900 page background; cards use
- *   subtle white/transparent surfaces so the form remains the
- *   visual focal point.
- * * RTL-safe: uses logical Tailwind utilities (ms-*, me-*) and
- *   relies on the parent's ``dir`` attribute.
+ * * Bilingual (ar/en) — content is intentionally inlined here instead of
+ *   going through the i18n dictionary because it is bespoke marketing copy.
+ * * Visual style mirrors the landing-page section conventions:
+ *   small amber "kicker" label → big white headline → supporting subtitle
+ *   → cards. Each card uses a subtly different accent tone (amber, blue,
+ *   emerald, violet) to add variety without breaking the brand identity.
+ * * RTL-safe: uses logical Tailwind utilities and relies on the parent's
+ *   ``dir`` attribute (the landing page sets ``dir="rtl"``).
  */
 import {
   Users,
@@ -27,8 +31,12 @@ import {
 } from 'lucide-react'
 
 interface Props {
-  lang: 'ar' | 'en'
+  /** UI language. Landing page is Arabic-only today, but the component
+   *  remains bilingual in case it is reused elsewhere later. */
+  lang?: 'ar' | 'en'
 }
+
+type Accent = 'amber' | 'blue' | 'emerald' | 'violet'
 
 interface Card {
   icon:    LucideIcon
@@ -36,22 +44,24 @@ interface Card {
   body:    string
   /** Optional callout line rendered in a highlighted pill below the body. */
   callout?: string
+  accent:   Accent
 }
 
 const CONTENT: Record<'ar' | 'en', {
-  badge:    string
+  kicker:   string
   title:    string
   subtitle: string
   cards:    Card[]
   privacy:  string
 }> = {
   ar: {
-    badge:    'لماذا نحلة؟',
+    kicker:   'ميزة نحلة الفريدة',
     title:    'كيف تساعد نحلة متجرك على البيع أكثر؟',
     subtitle: 'خبرة مبيعات جماعية تتعلم من آلاف المحادثات لتزيد مبيعات متجرك.',
     cards: [
       {
         icon:  Users,
+        accent: 'amber',
         title: 'خبرة مبيعات من آلاف المحادثات',
         body:
           'موظف المبيعات يتعلم عادةً من عشرات أو مئات العملاء فقط، ' +
@@ -62,6 +72,7 @@ const CONTENT: Record<'ar' | 'en', {
       },
       {
         icon:  FlaskConical,
+        accent: 'blue',
         title: 'تجربة مستمرة لتحسين المبيعات',
         body:
           'بدلاً من استخدام طريقة واحدة في البيع، نحلة تجرّب طرقًا مختلفة:\n' +
@@ -74,6 +85,7 @@ const CONTENT: Record<'ar' | 'en', {
       },
       {
         icon:  Clock,
+        accent: 'emerald',
         title: 'تعمل 24 ساعة بدون توقف',
         body:
           'نحلة لا تتعب ولا تنشغل:\n' +
@@ -85,6 +97,7 @@ const CONTENT: Record<'ar' | 'en', {
       },
       {
         icon:  UserRoundCog,
+        accent: 'violet',
         title: 'أسلوب بيع مختلف لكل عميل',
         body:
           'ليس كل العملاء متشابهين: بعضهم يريد الشراء بسرعة، ' +
@@ -93,6 +106,7 @@ const CONTENT: Record<'ar' | 'en', {
       },
       {
         icon:  Network,
+        accent: 'amber',
         title: 'شبكة تعلم المبيعات',
         body:
           'كل متجر يستخدم نحلة يضيف معرفة جديدة للنظام، ' +
@@ -109,12 +123,13 @@ const CONTENT: Record<'ar' | 'en', {
       'نحلة تتعلم من الأنماط العامة للمبيعات فقط دون الكشف عن أي بيانات خاصة بالمتاجر.',
   },
   en: {
-    badge:    'Why Nahla?',
+    kicker:   "Nahla's Edge",
     title:    'How does Nahla help your store sell more?',
     subtitle: 'Collective sales intelligence learning from thousands of conversations to grow your store.',
     cards: [
       {
         icon:  Users,
+        accent: 'amber',
         title: 'Sales experience from thousands of conversations',
         body:
           'A sales agent typically learns from tens or hundreds of customers. ' +
@@ -125,6 +140,7 @@ const CONTENT: Record<'ar' | 'en', {
       },
       {
         icon:  FlaskConical,
+        accent: 'blue',
         title: 'Continuous experimentation to grow sales',
         body:
           'Instead of using a single sales playbook, Nahla tries different approaches:\n' +
@@ -137,6 +153,7 @@ const CONTENT: Record<'ar' | 'en', {
       },
       {
         icon:  Clock,
+        accent: 'emerald',
         title: 'Works 24 hours, never tires',
         body:
           'Nahla does not get tired or distracted:\n' +
@@ -148,6 +165,7 @@ const CONTENT: Record<'ar' | 'en', {
       },
       {
         icon:  UserRoundCog,
+        accent: 'violet',
         title: 'A different sales style for every customer',
         body:
           'Not all customers are alike: some buy quickly, ' +
@@ -157,6 +175,7 @@ const CONTENT: Record<'ar' | 'en', {
       },
       {
         icon:  Network,
+        accent: 'amber',
         title: 'A sales-learning network',
         body:
           'Every store using Nahla adds new knowledge to the system, ' +
@@ -175,82 +194,149 @@ const CONTENT: Record<'ar' | 'en', {
   },
 }
 
-export default function SalesIntelligenceSection({ lang }: Props) {
+// Tailwind class lookup table — keeps every utility a literal string so
+// the JIT compiler does not strip them. Each accent has matching
+// background, border, icon, glow and hover-border tokens.
+const ACCENT: Record<Accent, {
+  iconBg:   string
+  iconRing: string
+  iconText: string
+  hoverBorder: string
+  glow:     string
+}> = {
+  amber: {
+    iconBg:      'bg-amber-500/15',
+    iconRing:    'ring-amber-400/30',
+    iconText:    'text-amber-300',
+    hoverBorder: 'hover:border-amber-400/40',
+    glow:        'group-hover:shadow-amber-500/15',
+  },
+  blue: {
+    iconBg:      'bg-blue-500/15',
+    iconRing:    'ring-blue-400/30',
+    iconText:    'text-blue-300',
+    hoverBorder: 'hover:border-blue-400/40',
+    glow:        'group-hover:shadow-blue-500/15',
+  },
+  emerald: {
+    iconBg:      'bg-emerald-500/15',
+    iconRing:    'ring-emerald-400/30',
+    iconText:    'text-emerald-300',
+    hoverBorder: 'hover:border-emerald-400/40',
+    glow:        'group-hover:shadow-emerald-500/15',
+  },
+  violet: {
+    iconBg:      'bg-violet-500/15',
+    iconRing:    'ring-violet-400/30',
+    iconText:    'text-violet-300',
+    hoverBorder: 'hover:border-violet-400/40',
+    glow:        'group-hover:shadow-violet-500/15',
+  },
+}
+
+export default function SalesIntelligenceSection({ lang = 'ar' }: Props) {
   const c = CONTENT[lang]
 
   return (
     <section
+      id="why"
       aria-label={c.title}
-      className="relative bg-slate-900 px-4 pt-12 pb-16 sm:pt-16 sm:pb-20"
+      className="relative bg-slate-900 py-24 overflow-hidden"
     >
-      {/* subtle radial glow at top to visually separate from the form above */}
+      {/* Faint honeycomb texture — matches sibling landing sections. */}
+      <svg
+        aria-hidden
+        className="absolute inset-0 w-full h-full opacity-[0.04] pointer-events-none select-none"
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <defs>
+          <pattern id="why-hex" x="0" y="0" width="60" height="52" patternUnits="userSpaceOnUse">
+            <polygon points="30,2 58,17 58,47 30,62 2,47 2,17" fill="none" stroke="#F59E0B" strokeWidth="1" />
+          </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#why-hex)" />
+      </svg>
+
+      {/* Soft ambient glow */}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 -top-px h-px
-                   bg-gradient-to-r from-transparent via-amber-500/40 to-transparent"
+        className="absolute top-1/3 right-1/4 w-[480px] h-[480px] bg-amber-500/8 rounded-full blur-[100px] pointer-events-none"
       />
 
-      <div className="mx-auto max-w-5xl">
-        {/* Header */}
-        <div className="text-center mb-10 sm:mb-14">
-          <span
-            className="inline-flex items-center gap-1.5 ps-1 pe-3 py-1 rounded-full
-                       bg-amber-500/15 border border-amber-500/40
-                       text-amber-300 text-xs font-semibold tracking-wide mb-4"
-          >
-            <img
-              src="/logo.png"
-              alt=""
-              aria-hidden="true"
-              className="w-5 h-5 object-contain drop-shadow"
-            />
-            {c.badge}
-          </span>
-          <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-white leading-tight">
+      <div className="relative z-10 mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
+        {/* Section header — same kicker/title/subtitle pattern used
+            elsewhere on the landing page for visual consistency. */}
+        <div className="text-center mb-14">
+          <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">
+            {c.kicker}
+          </p>
+          <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-4 tracking-tight">
             {c.title}
           </h2>
-          <p className="mt-3 text-slate-400 text-sm sm:text-base max-w-2xl mx-auto">
+          <p className="text-slate-300 max-w-2xl mx-auto leading-relaxed text-base sm:text-lg">
             {c.subtitle}
           </p>
         </div>
 
-        {/* Cards grid */}
-        <div className="grid gap-4 sm:gap-5 sm:grid-cols-2">
+        {/* Cards grid — first card spans both columns to give the
+            "60,000 conversations daily" stat extra visual weight. */}
+        <div className="grid gap-5 sm:gap-6 sm:grid-cols-2">
           {c.cards.map((card, idx) => {
-            const Icon = card.icon
-            // The first card spans both columns on sm+ screens to give the
-            // hero "60,000 conversations daily" stat extra visual weight.
-            const span = idx === 0 ? 'sm:col-span-2' : ''
+            const Icon  = card.icon
+            const tone  = ACCENT[card.accent]
+            const span  = idx === 0 ? 'sm:col-span-2' : ''
+
             return (
               <article
                 key={card.title}
-                className={`group relative rounded-2xl border border-white/10
-                            bg-white/5 hover:bg-white/[0.07] transition-colors
-                            p-5 sm:p-6 ${span}`}
+                className={[
+                  'group relative rounded-2xl p-6 sm:p-7',
+                  'bg-slate-800/60 backdrop-blur-sm',
+                  'border border-white/8',
+                  'shadow-lg shadow-black/10',
+                  'transition-all duration-300',
+                  'hover:-translate-y-0.5 hover:bg-slate-800/80',
+                  'hover:shadow-xl',
+                  tone.hoverBorder,
+                  tone.glow,
+                  span,
+                ].join(' ')}
               >
-                <div className="flex items-start gap-3 sm:gap-4">
+                <div className="flex items-start gap-4 sm:gap-5">
+                  {/* Accent-tinted icon tile */}
                   <div
-                    className="shrink-0 w-10 h-10 sm:w-11 sm:h-11 rounded-xl
-                               bg-amber-500/15 border border-amber-500/30
-                               flex items-center justify-center
-                               text-amber-400 group-hover:text-amber-300
-                               transition-colors"
+                    className={[
+                      'shrink-0 w-12 h-12 sm:w-[52px] sm:h-[52px] rounded-xl',
+                      'flex items-center justify-center',
+                      'ring-1 transition-colors',
+                      tone.iconBg,
+                      tone.iconRing,
+                      tone.iconText,
+                    ].join(' ')}
                   >
-                    <Icon className="w-5 h-5 sm:w-5.5 sm:h-5.5" strokeWidth={1.8} />
+                    <Icon className="w-5 h-5 sm:w-[22px] sm:h-[22px]" strokeWidth={1.9} />
                   </div>
-                  <div className="min-w-0">
-                    <h3 className="text-white font-semibold text-base sm:text-lg leading-snug">
+
+                  <div className="min-w-0 flex-1">
+                    {/* Card heading — bumped weight + size for clearer hierarchy */}
+                    <h3 className="text-white font-black text-lg sm:text-xl leading-snug mb-3">
                       {card.title}
                     </h3>
-                    <p className="mt-2 text-slate-300/90 text-sm leading-relaxed whitespace-pre-line">
+
+                    {/* Body copy — lighter slate for higher contrast on dark */}
+                    <p className="text-slate-300 text-sm sm:text-[15px] leading-loose whitespace-pre-line">
                       {card.body}
                     </p>
+
                     {card.callout && (
-                      <div className="mt-4 inline-flex items-center
-                                      px-3.5 py-2 rounded-xl
-                                      bg-gradient-to-r from-amber-500/20 to-amber-500/10
-                                      border border-amber-500/40
-                                      text-amber-200 text-sm font-bold tracking-wide">
+                      <div
+                        className="mt-5 inline-flex items-center
+                                   px-4 py-2.5 rounded-xl
+                                   bg-gradient-to-l from-amber-500/25 to-amber-500/10
+                                   border border-amber-400/40
+                                   text-amber-200 text-sm sm:text-base font-black tracking-wide
+                                   shadow-md shadow-amber-500/10"
+                      >
                         {card.callout}
                       </div>
                     )}
@@ -261,15 +347,17 @@ export default function SalesIntelligenceSection({ lang }: Props) {
           })}
         </div>
 
-        {/* Privacy reassurance */}
-        <div className="mt-8 sm:mt-10 rounded-2xl border border-emerald-500/20
-                        bg-emerald-500/5 p-5 sm:p-6 flex items-start gap-3 sm:gap-4">
-          <div className="shrink-0 w-10 h-10 rounded-xl
-                          bg-emerald-500/15 border border-emerald-500/30
-                          flex items-center justify-center text-emerald-400">
-            <ShieldCheck className="w-5 h-5" strokeWidth={1.8} />
+        {/* Privacy reassurance — kept its emerald accent because privacy
+            messaging is universally recognised by green/shield language. */}
+        <div className="mt-10 rounded-2xl border border-emerald-500/25
+                        bg-emerald-500/5 backdrop-blur-sm p-5 sm:p-6
+                        flex items-start gap-4">
+          <div className="shrink-0 w-11 h-11 rounded-xl
+                          bg-emerald-500/15 ring-1 ring-emerald-400/30
+                          flex items-center justify-center text-emerald-300">
+            <ShieldCheck className="w-5 h-5" strokeWidth={1.9} />
           </div>
-          <p className="text-emerald-100/90 text-sm leading-relaxed">
+          <p className="text-emerald-100/90 text-sm sm:text-[15px] leading-loose">
             {c.privacy}
           </p>
         </div>

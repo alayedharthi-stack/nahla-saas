@@ -1,11 +1,10 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
+import { Eye, EyeOff, AlertCircle, Loader2, CheckCircle, ArrowRight } from 'lucide-react'
 import { register, getDefaultRoute } from '../auth'
 import { API_BASE } from '../api/client'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
-import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 
 export default function Register() {
   const navigate = useNavigate()
@@ -84,13 +83,19 @@ export default function Register() {
 
   return (
     <div className="bg-slate-900" dir={dir}>
-      {/* ── Existing registration form (unchanged layout) ────────────── */}
       <div
         className="min-h-dvh flex items-center justify-center px-4 py-safe-top pb-safe-bottom"
       >
         <div className="w-full max-w-sm">
-        {/* Language toggle */}
-        <div className="flex justify-end mb-4">
+        {/* Top bar: back to landing + language toggle */}
+        <div className="flex items-center justify-between mb-4">
+          <Link
+            to="/landing"
+            className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition"
+          >
+            <ArrowRight className="w-3.5 h-3.5 rtl:rotate-180" />
+            {lang === 'ar' ? 'الرئيسية' : 'Home'}
+          </Link>
           <button
             onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
             className="text-xs text-slate-400 hover:text-white border border-slate-600 rounded-lg px-3 py-1.5 transition"
@@ -266,9 +271,6 @@ export default function Register() {
         </div>
         </div>
       </div>
-
-      {/* ── New: collective sales-learning marketing section ─────────── */}
-      <SalesIntelligenceSection lang={lang} />
     </div>
   )
 }
