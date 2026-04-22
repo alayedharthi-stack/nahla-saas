@@ -135,6 +135,22 @@ class MerchantBrain:
 
         # ── 1. Intent ────────────────────────────────────────────────────
         state_for_classify = self._state_store.load(db, tenant_id, customer_phone)
+
+        # ── 1b. Infer greeted from history (catches proactive outbounds) ─
+        # If ANY prior outbound exists in history (cart recovery template,
+        # automation push, manual agent reply, even our own previous turn
+        # when persistence didn't land for some reason), the customer has
+        # already heard from us — never re-introduce. This is the catch-net
+        # for paths that send messages outside the Brain pipeline and forget
+        # to call StateStore.mark_greeted.
+        if not state_for_classify.greeted and _history_has_outbound(history):
+            logger.info(
+                "[BrainPipeline] inferred greeted=True from history "
+                "(prior outbound found) tenant=%s",
+                tenant_id,
+            )
+            state_for_classify.greeted = True
+
         intent: Intent = await self._classifier.classify(message, history, state_for_classify)
 
         # ── 2. Load state + facts ─────────────────────────────────────────
@@ -441,7 +457,43 @@ def _build_reply_state(
         last_recommended_products=list(current_state.last_recommended_products or []),
         tenant_overlay=tenant_overlay,
         explicit_pending_action=current_state.pending_action,
+        intent_name=getattr(ctx.intent, "name", "") or "",
+        response_goal=_compose_response_goal(decision, suggestion),
     )
+
+
+def _compose_response_goal(decision: Decision, suggestion: SuggestionSnapshot) -> str:
+    """Single-line summary of WHY this turn is being composed.
+
+    Surfaced to the LLM in the operating-rules block so the model knows
+    what success looks like instead of inferring it from the message and
+    the persona. Kept short so it fits in the prompt without bloating it.
+    """
+    parts: List[str] = []
+    if decision.reason:
+        parts.append(decision.reason.strip())
+    nxt = (suggestion.suggested_next_step or "").strip() if suggestion else ""
+    if nxt and nxt not in (decision.reason or ""):
+        parts.append(f"next_step={nxt}")
+    if suggestion and suggestion.needs_follow_up_question and suggestion.follow_up_question:
+        parts.append(f"ask_one={suggestion.follow_up_question.strip()}")
+    return " | ".join(parts) or "advance the conversation toward the next sales step"
+
+
+def _history_has_outbound(history: List[Dict[str, Any]]) -> bool:
+    """True when at least one prior outbound message exists in history.
+
+    The webhook persists the inbound message BEFORE calling Brain, but
+    only outbound rows count as "we already greeted" — an inbound from
+    the customer obviously doesn't.
+    """
+    for turn in (history or []):
+        direction = str(turn.get("direction") or "").strip().lower()
+        if direction in {"out", "outbound"}:
+            body = str(turn.get("body") or "").strip()
+            if body:
+                return True
+    return False
 
 
 def _price_sensitivity_label(score: float) -> str:

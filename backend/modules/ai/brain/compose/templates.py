@@ -7,10 +7,35 @@ Templates use Python .format() style placeholders.
 All templates are written in Gulf-dialect Arabic appropriate for a
 professional Saudi e-commerce assistant.
 
+State → template binding (single source of truth)
+────────────────────────────────────────────────
+Each template here is bound to ONE decision branch in the Composer
+(`compose/responder.py`). Adding a template is forbidden unless the
+DecisionEngine actually produces an action that maps to it — this keeps
+the count minimal and prevents the "templates sprout, LLM and templates
+fight" pattern that triggered the simplification request.
+
+  Stage discovery (greeted=False) → greeting
+  Stage discovery/exploring       → product_results, narrow_choices,
+                                    no_products, faq_*, web_search_summary,
+                                    addon_recommendations, coupon_offer
+  Stage deciding                  → coupon_offer, narrow_choices, clarify
+  Stage ordering                  → collect_order_details,
+                                    order_intent_captured, draft_order_created
+  Stage checkout                  → payment_link
+  Stage support                   → handoff
+  Any stage                       → order_status (track), clarify
+
+generic_fallback() exists ONLY as the last-resort safety net inside
+compose() and `_legacy_llm_compose`. It must never be selected by the
+DecisionEngine directly.
+
 Rules:
   - Every template MUST be complete and polite.
   - No placeholders that can render as blank (use .get() with defaults).
   - Emoji are intentionally minimal — one or two per message max.
+  - Templates do not greet or self-introduce mid-conversation; the
+    greeting template is the only one that says "أهلاً، أنا مساعد ...".
 """
 from __future__ import annotations
 

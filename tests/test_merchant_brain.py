@@ -669,3 +669,219 @@ class TestBrainPipeline:
         assert isinstance(reply, dict)
         assert isinstance(reply.get("reply"), str)
         assert len(reply["reply"]) > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Simplification pass — single source of decision (Decision → Composer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestStateDrivenSimplification:
+    """Locks the rules added in the simplification pass.
+
+    Each test maps to one bullet in the user-facing simplification spec:
+      - templates are state-driven (no GREET when greeted=True or mid-order)
+      - no welcome twice in the same conversation
+      - LLM fallback always receives intent / state / product / goal
+      - state survives the order flow (ASK_PRODUCT mid-order doesn't reset)
+    """
+
+    def _ctx(self, intent_name: str, state: MerchantConversationState,
+             facts: CommerceFacts, message: str = "test",
+             slots: Dict[str, Any] | None = None) -> BrainContext:
+        return BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000001",
+            message=message,
+            intent=Intent(
+                name=intent_name, confidence=0.9,
+                raw_message=message, slots=slots or {},
+            ),
+            state=state,
+            facts=facts,
+        )
+
+    # --- DecisionEngine: continuation no longer captures product questions ---
+
+    def test_ask_product_mid_order_routes_to_search_not_continuation(self):
+        """The screenshot bug: customer mid-order asks 'تعرض لي المنتجات بالصور'
+        and the bot replies with 'سجلت اهتمامك بـ فستان'. After the
+        simplification pass, ASK_PRODUCT mid-order must fall through to
+        SEARCH_PRODUCTS, not coerce into propose_draft_order.
+        """
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        eng = DefaultDecisionEngine()
+        state = _make_state(
+            greeted=True,
+            stage="ordering",
+            current_product_focus={"id": 1, "external_id": "ext-1", "title": "فستان"},
+        )
+        ctx = self._ctx(INTENT_ASK_PRODUCT, state, _make_facts(),
+                        message="تعرض لي المنتجات بالصور؟")
+        d = eng.decide(ctx)
+        assert d.action == ACTION_SEARCH_PRODUCTS, (
+            f"ASK_PRODUCT mid-order must go to SEARCH_PRODUCTS, got {d.action}"
+        )
+
+    def test_address_message_mid_order_still_continues_via_slots(self):
+        """The legitimate 'الرياض ABCD1234' case: classified as something
+        else but carries checkout slot data → must still route to
+        propose_draft_order via the slots clause, not get demoted."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        eng = DefaultDecisionEngine()
+        state = _make_state(
+            greeted=True,
+            stage="ordering",
+            current_product_focus={"id": 1, "external_id": "ext-1", "title": "فستان"},
+        )
+        ctx = self._ctx(
+            INTENT_ASK_PRODUCT, state, _make_facts(),
+            message="الرياض وكودي ABCD1234",
+            slots={"city": "الرياض", "short_address_code": "ABCD1234"},
+        )
+        d = eng.decide(ctx)
+        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+
+    # --- Composer: defense-in-depth greet guard ---
+
+    def test_composer_downgrades_greet_when_already_greeted(self):
+        """Even if some upstream layer produces ACTION_GREET against state
+        that says greeted=True, the Composer must downgrade to LLM rather
+        than send the greeting template."""
+        from modules.ai.brain.compose.responder import DefaultComposer
+        composer = DefaultComposer()
+        state = _make_state(greeted=True)
+        ctx = BrainContext(
+            tenant_id=1, customer_phone="+966500000001", message="هلا",
+            intent=Intent(name=INTENT_GREETING, confidence=0.9, raw_message="هلا"),
+            state=state, facts=_make_facts(), profile={},
+        )
+        decision = Decision(action=ACTION_GREET)
+        with patch(
+            "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
+            new_callable=AsyncMock, return_value="contextual reply",
+        ) as mock_llm:
+            reply = _run(composer.compose(decision, ActionResult(success=True), ctx))
+        assert reply == "contextual reply"
+        assert decision.action == ACTION_LLM_REPLY
+        assert "composer_guard" in (decision.reason or "")
+        mock_llm.assert_called_once()
+
+    def test_composer_downgrades_greet_when_mid_order(self):
+        """Greet must also be blocked when the customer is past discovery,
+        regardless of the persisted greeted flag."""
+        from modules.ai.brain.compose.responder import DefaultComposer
+        composer = DefaultComposer()
+        state = _make_state(greeted=False, stage="ordering",
+                            current_product_focus={"id": 1, "title": "X"})
+        ctx = BrainContext(
+            tenant_id=1, customer_phone="+966500000001", message="هلا",
+            intent=Intent(name=INTENT_GREETING, confidence=0.9, raw_message="هلا"),
+            state=state, facts=_make_facts(), profile={},
+        )
+        decision = Decision(action=ACTION_GREET)
+        with patch(
+            "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
+            new_callable=AsyncMock, return_value="ordering reply",
+        ):
+            reply = _run(composer.compose(decision, ActionResult(success=True), ctx))
+        assert reply == "ordering reply"
+        assert decision.action == ACTION_LLM_REPLY
+
+    def test_composer_first_greet_still_fires_template(self):
+        """Sanity: a fresh customer (greeted=False, stage=discovery)
+        must still receive the greeting template — we didn't break the
+        happy path."""
+        from modules.ai.brain.compose.responder import DefaultComposer
+        composer = DefaultComposer()
+        state = _make_state(greeted=False, stage="discovery")
+        ctx = BrainContext(
+            tenant_id=1, customer_phone="+966500000001", message="السلام عليكم",
+            intent=Intent(name=INTENT_GREETING, confidence=0.95,
+                          raw_message="السلام عليكم"),
+            state=state, facts=_make_facts(), profile={},
+        )
+        reply = _run(composer.compose(
+            Decision(action=ACTION_GREET), ActionResult(success=True), ctx,
+        ))
+        assert "متجر تجريبي" in reply or "أهلاً" in reply
+
+    # --- LLM fallback contract: intent + state + product + goal ---
+
+    def test_minimal_reply_state_carries_required_fields(self):
+        """Even the degraded reply_state built when ctx.reply_state is None
+        must surface the four fields the simplification spec requires."""
+        from modules.ai.brain.compose.responder import DefaultComposer
+        composer = DefaultComposer()
+        state = _make_state(
+            greeted=True, stage="ordering",
+            current_product_focus={"id": 7, "title": "عطر العود"},
+            customer_goal="complete_purchase",
+        )
+        ctx = BrainContext(
+            tenant_id=1, customer_phone="+966500000001",
+            message="نعم", intent=Intent(name=INTENT_GENERAL, confidence=0.6,
+                                          raw_message="نعم"),
+            state=state, facts=_make_facts(), profile={},
+        )
+        rs = composer._minimal_reply_state(ctx)
+        assert rs.intent_name == INTENT_GENERAL
+        assert rs.stage == "ordering"
+        assert rs.selected_product == {"id": 7, "title": "عطر العود"}
+        assert rs.response_goal  # non-empty
+
+    # --- Pipeline: greeted inferred from history (catches proactive sends) ---
+
+    def test_pipeline_infers_greeted_from_outbound_history(self):
+        """When the cart-recovery path forgot to stamp brain_state, the
+        next inbound MUST still be treated as 'already greeted' because
+        history shows we already talked to the customer."""
+        from modules.ai.brain.pipeline import MerchantBrain
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.policy import PassThroughPolicyGate
+        from modules.ai.brain.execution.executor import DefaultActionExecutor
+        from modules.ai.brain.compose.responder import DefaultComposer
+
+        intent = Intent(name=INTENT_GREETING, confidence=0.95, raw_message="هلا")
+        state  = _make_state(greeted=False)  # state on disk says not greeted
+        facts  = _make_facts()
+
+        state_store = MagicMock()
+        state_store.load.return_value = state
+        state_store.save.return_value = None
+        state_store.transition.side_effect = lambda s, i, d: s
+
+        classifier = MagicMock()
+        classifier.classify = AsyncMock(return_value=intent)
+
+        facts_loader = MagicMock()
+        facts_loader.load.return_value = facts
+
+        memory_updater = MagicMock()
+        memory_updater.update.return_value = None
+
+        b = MerchantBrain(
+            classifier=classifier, state_store=state_store,
+            facts_loader=facts_loader,
+            decision_engine=DefaultDecisionEngine(),
+            policy_gate=PassThroughPolicyGate(),
+            executor=DefaultActionExecutor(),
+            composer=DefaultComposer(),
+            memory_updater=memory_updater,
+        )
+
+        history = [
+            {"direction": "in",  "body": "السلام عليكم"},
+            {"direction": "out", "body": "صبحًا خصمك جاهز — اضغط الزر تحت لإكمال الطلب"},
+        ]
+
+        with patch(
+            "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
+            new_callable=AsyncMock, return_value="contextual reply",
+        ) as mock_llm:
+            reply = _run(b.process(
+                db=MagicMock(), tenant_id=1, customer_phone="+966500000001",
+                message="هلا", history=history, profile={},
+            ))
+
+        assert reply["reply"] == "contextual reply"
+        mock_llm.assert_called_once()

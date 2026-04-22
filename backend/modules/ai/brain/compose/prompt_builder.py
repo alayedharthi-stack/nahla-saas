@@ -50,18 +50,35 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     if overlay_text:
         parts.append(overlay_text)
 
+    # Surface the four "must-have" fields the decision pipeline guarantees
+    # — intent, stage, current product, response goal — so the LLM never
+    # has to guess WHY it's being asked to compose this turn.
+    selected_title = ""
+    if isinstance(state.selected_product, dict):
+        selected_title = str(state.selected_product.get("title") or "")
+    decision_block = (
+        "## سياق القرار لهذه الجولة (مصدر واحد فقط)\n"
+        f"- الـ intent الحالي: {state.intent_name or 'unknown'}\n"
+        f"- المرحلة (stage): {state.stage}\n"
+        f"- المنتج الحالي: {selected_title or '—'}\n"
+        f"- هدف الرد (response_goal): {state.response_goal or '—'}\n"
+        "هذا السياق هو الحقيقة الرسمية للجولة — لا تتجاوزيه ولا تعيدي "
+        "تشخيص نية العميل من نص الرسالة وحدها."
+    )
+
     parts.append(
+        decision_block + "\n\n"
         "## قواعد تشغيل Brain لهذه الجولة\n"
         f"- النبرة المطلوبة لهذا المتجر: {tone}.\n"
-        "- اتبعي مرحلة العميل الحالية (stage) والخطوة المقترحة التالية "
-        "(recommended_next_step).\n"
-        "- لا تكرّري نفس السؤال إذا كان قد طُرح بالفعل وكان الجواب "
-        "معروفاً أو غير لازم.\n"
+        "- اتبعي المرحلة (stage) والخطوة المقترحة التالية (recommended_next_step) "
+        "وهدف الرد (response_goal) أعلاه — حتى لو شعرتِ أن الرسالة تستحق رداً مختلفاً.\n"
+        "- إذا كانت المرحلة ordering/checkout فلا ترحبي ولا تعيدي التعريف بنفسك "
+        "ولا تعرضي قائمة منتجات جديدة — أكملي الطلب الحالي بسؤال واحد قصير.\n"
+        "- لا تكرّري نفس السؤال إذا كان قد طُرح بالفعل وكان الجواب معروفاً.\n"
         "- لا تعرضي خصماً أو كوبوناً إلا إذا أظهر BrainState أن الوقت "
         "مناسب أو طلب العميل خصماً بوضوح. (عند ذكر الخصم استخدمي 🎁 "
         "بحد أقصى مرة واحدة في الرسالة.)\n"
-        "- إذا كانت المعلومة ناقصة، اسألي سؤال متابعة واحداً فقط، "
-        "قصيراً وواضحاً.\n"
+        "- إذا كانت المعلومة ناقصة، اسألي سؤال متابعة واحداً فقط، قصيراً وواضحاً.\n"
         "- لا تخترعي حقائق غير موجودة في known_facts أو selected_product.\n"
         "- اجعلي ردك قصيراً ومناسباً لواتساب.\n\n"
         "BrainStateJSON:\n"

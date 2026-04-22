@@ -350,6 +350,12 @@ class BrainReplyState:
     last_recommended_products: List[Dict[str, Any]] = field(default_factory=list)
     explicit_pending_action: str = ""
     tenant_overlay: str = ""
+    # Decision-engine context surfaced to the LLM so the model never has to
+    # guess "why am I being asked to compose now?". These two fields close
+    # the loop the user explicitly asked for: the LLM fallback receives
+    # intent + state + current product + response goal in one struct.
+    intent_name: str = ""
+    response_goal: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

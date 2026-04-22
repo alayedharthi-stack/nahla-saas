@@ -3,13 +3,34 @@ brain/compose/responder.py
 ───────────────────────────
 DefaultComposer: maps (Decision, ActionResult, BrainContext) → Arabic reply text.
 
-For deterministic actions (greet, search, order, …) we use templates.
-For ACTION_LLM_REPLY we use a thin MerchantBrain LLM path with explicit
-BrainReplyState, and keep the legacy orchestrator only as an internal
-emergency fallback.
+Single contract: DecisionEngine → Composer. The Composer is the ONLY place
+that turns a Decision into text. It never re-decides — if it disagrees with
+the Decision (e.g. ACTION_GREET arrives but the customer was already
+greeted) it downgrades to LLM with explicit context, never silently sends
+a static template.
 
-This keeps the LLM in a well-defined "composer" role rather than being
-the entire brain.
+State → action → template mapping (authoritative reference):
+
+  ACTION_GREET            → templates.greeting             [discovery, !greeted]
+  ACTION_FAQ_REPLY        → templates.faq_*                [any]
+  ACTION_SEARCH_PRODUCTS  → templates.product_results      [discovery..deciding]
+                          / templates.narrow_choices       [many results]
+                          / templates.no_products          [empty catalog]
+  ACTION_PROPOSE_DRAFT_ORDER
+                          → templates.collect_order_details [needs_collection]
+                          / templates.draft_order_created   [success]
+                          / templates.order_intent_captured [intent_only]
+  ACTION_SEND_PAYMENT_LINK→ templates.payment_link         [checkout]
+  ACTION_TRACK_ORDER      → templates.order_status         [any]
+  ACTION_SUGGEST_COUPON   → templates.coupon_offer         [deciding/exploring]
+  ACTION_RECOMMEND_ADDON  → templates.addon_recommendations[deciding/ordering]
+  ACTION_WEB_SEARCH       → templates.web_search_summary   [discovery]
+  ACTION_CLARIFY          → templates.clarify              [any]
+  ACTION_NARROW           → templates.narrow_choices       [exploring]
+  ACTION_HANDOFF          → templates.handoff              → support
+  ACTION_LLM_REPLY        → _llm_compose (BrainReplyState) [fallback]
+
+Every template returns ONE message; Composer never chains templates.
 """
 from __future__ import annotations
 
@@ -58,6 +79,29 @@ class DefaultComposer:
     ) -> str:
         action = decision.action
         data   = result.data or {}
+
+        # ── State guard (defense-in-depth) ─────────────────────────────────
+        # The DecisionEngine already gates greetings on `state.greeted` and
+        # the in-progress sales stage, but a stray ACTION_GREET produced by
+        # learned-policy layers, partial state loss, or future decoration
+        # would still land here. We refuse to send the greeting template
+        # twice in the same conversation, period — and we refuse to send it
+        # at all once the customer is in deciding/ordering/checkout.
+        if action == ACTION_GREET and self._should_skip_greet(ctx):
+            logger.info(
+                "[Composer] downgrading ACTION_GREET → LLM | "
+                "tenant=%s greeted=%s stage=%s",
+                ctx.tenant_id,
+                getattr(ctx.state, "greeted", False),
+                getattr(ctx.state, "stage", ""),
+            )
+            decision.action = ACTION_LLM_REPLY
+            decision.reason = (
+                f"composer_guard:greet_blocked greeted={ctx.state.greeted} "
+                f"stage={ctx.state.stage}; "
+                "answer the customer's actual message without re-greeting"
+            )
+            action = ACTION_LLM_REPLY
 
         # ── Greet ──────────────────────────────────────────────────────────
         if action == ACTION_GREET:
@@ -211,6 +255,30 @@ class DefaultComposer:
 
         return T.generic_fallback()
 
+    def _should_skip_greet(self, ctx: BrainContext) -> bool:
+        """True when sending the greeting template would be wrong.
+
+        Two cases trigger the skip:
+          - state already says greeted (one greeting per conversation, ever)
+          - the customer is past discovery (deciding/ordering/checkout/etc.)
+            and re-greeting would erase their context
+
+        Kept tiny and pure so the rule is auditable from a log line.
+        """
+        from ..state.stages import (  # noqa: PLC0415 — local import to avoid cycle
+            STAGE_DECIDING, STAGE_ORDERING, STAGE_CHECKOUT,
+            STAGE_COMPLETE, STAGE_SUPPORT,
+        )
+        state = ctx.state
+        if getattr(state, "greeted", False):
+            return True
+        if getattr(state, "stage", "") in (
+            STAGE_DECIDING, STAGE_ORDERING, STAGE_CHECKOUT,
+            STAGE_COMPLETE, STAGE_SUPPORT,
+        ):
+            return True
+        return False
+
     def _with_follow_up(self, text: str, ctx: BrainContext) -> str:
         suggestion = getattr(ctx, "suggestion", None)
         if not suggestion or not suggestion.needs_follow_up_question:
@@ -246,11 +314,20 @@ class DefaultComposer:
 
             reply_state = ctx.reply_state
             if reply_state is None:
-                logger.warning(
-                    "[Composer._llm_compose] missing reply_state | tenant=%s",
+                # The pipeline always builds reply_state before calling us.
+                # If we land here something earlier failed silently. We
+                # rebuild a minimal one from ctx instead of falling back to
+                # a static template — the user's contract is "LLM ALWAYS
+                # gets intent + state + product + goal", and a static
+                # template breaks that contract.
+                logger.error(
+                    "[Composer._llm_compose] reply_state missing — "
+                    "rebuilding minimal one | tenant=%s intent=%s stage=%s",
                     ctx.tenant_id,
+                    getattr(ctx.intent, "name", "?"),
+                    getattr(ctx.state, "stage", "?"),
                 )
-                return T.generic_fallback()
+                reply_state = self._minimal_reply_state(ctx)
 
             prompt = build_brain_reply_prompt(reply_state)
             locale = str(ctx.profile.get("preferred_language") or "ar")
@@ -303,6 +380,25 @@ class DefaultComposer:
         except Exception as exc:
             logger.error("[Composer._llm_compose] thin path error: %s", exc)
             return await self._legacy_llm_compose(ctx, result, timeout_seconds=15)
+
+    def _minimal_reply_state(self, ctx: BrainContext):
+        """Build a degraded BrainReplyState from ctx alone.
+
+        Used only as a safety net when the pipeline did not attach a full
+        reply_state. We still surface the four fields the user demanded
+        (intent, stage, current product, response goal) so the LLM stays
+        grounded.
+        """
+        from ..types import BrainReplyState  # noqa: PLC0415
+        return BrainReplyState(
+            store_name=getattr(ctx.facts, "store_name", "") or "",
+            stage=getattr(ctx.state, "stage", "discovery"),
+            customer_goal=getattr(ctx.state, "customer_goal", "") or "",
+            selected_product=getattr(ctx.state, "current_product_focus", None),
+            recommended_next_step=getattr(ctx.state, "recommended_next_step", "") or "",
+            intent_name=getattr(ctx.intent, "name", "") or "",
+            response_goal="answer the customer's last message in line with the current stage",
+        )
 
     async def _legacy_llm_compose(
         self,

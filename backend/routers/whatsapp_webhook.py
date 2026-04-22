@@ -61,6 +61,7 @@ from core.conversation_engine import (
     StageTransitionEngine,
     TurnLog,
     recommend_plan,
+    HISTORY_WINDOW,
 )
 from services.whatsapp_platform.service import provider_send_message
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
@@ -610,6 +611,28 @@ async def _dispatch_message(
             state = StateManager.load(
                 db, phone=sender, tenant_id=effective_tenant_id,
             )
+
+        # ── Greeting catch-net ────────────────────────────────────────────────
+        # If the persisted state predates the `greeted` flag (or was reset by
+        # a corrupt save), but message history shows we already replied to
+        # this customer at least once, we MUST treat the conversation as
+        # already greeted. Prevents the platform bot from re-introducing
+        # itself on every "هلا" after a redeploy.
+        if not state.greeted:
+            try:
+                _hist = StateManager.load_history(
+                    db, phone=sender, limit=HISTORY_WINDOW,
+                    tenant_id=effective_tenant_id,
+                )
+                if any((m.get("direction") == "outbound") for m in _hist):
+                    state.greeted = True
+                    logger.info(
+                        "[Engine] inferred greeted=True from history phone=%s tenant=%s",
+                        sender, effective_tenant_id,
+                    )
+            except Exception as _exc:  # observability only
+                logger.debug("[Engine] greeted-from-history check failed: %s", _exc)
+
         stage_before = state.stage
         logger.info(
             "[TRACE][3/6] SESSION_LOADED | tenant_id=%s sender=%s stage=%s",
@@ -647,6 +670,9 @@ async def _dispatch_message(
         if action == SHOW_WELCOME_MENU:
             await _send_welcome_menu(phone_id=used_pid, to=sender,
                                      _tenant_id=effective_tenant_id, _db=db)
+            # Lock the greeting so subsequent "هلا" / "مرحبا" don't replay
+            # the welcome menu — they fall through to GENERATE_AI_REPLY.
+            state.greeted = True
 
         elif action == SEND_CHECKOUT_LINK:
             state.stage = "checkout"
@@ -714,7 +740,9 @@ async def _dispatch_message(
             )
             history  = StateManager.load_history(db, phone=sender, tenant_id=effective_tenant_id)
             messages = ContextBuilder.build_messages(history, text)
-            state_ctx = ContextBuilder.build_system_injection(state, action, decision_reason)
+            state_ctx = ContextBuilder.build_system_injection(
+                state, action, decision_reason, intent=intent,
+            )
             response_text = await _call_claude_with_context(
                 messages=messages,
                 state_injection=state_ctx,

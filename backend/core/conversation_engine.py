@@ -155,6 +155,12 @@ class ConversationState:
     tenant_id:        Optional[int]    = field(default=None, compare=False, repr=False)
     # ── Stage (5. Stage Transition) ──────────────────────────────────────────
     stage:            str              = "discovery"
+    # ── Greeting lock — same contract as MerchantBrain ──────────────────────
+    # Set True after the first welcome menu is sent (or inferred from a prior
+    # outbound in history). Flips the platform DecisionEngine away from
+    # `SHOW_WELCOME_MENU` for every subsequent "هلا" so the bot never
+    # re-introduces itself in the same conversation.
+    greeted:          bool             = False
     # ── Slots ────────────────────────────────────────────────────────────────
     slots:            ConversationSlots = field(default_factory=ConversationSlots)
     # ── 2. Semantic Deduplication — keys asked so far ────────────────────────
@@ -472,7 +478,17 @@ class DecisionEngine:
             return ESCALATE_SUPPORT, "support_escalation_rule"
 
         if intent == "greeting":
-            return SHOW_WELCOME_MENU, "greeting_rule"
+            # State-driven greeting: only fire the welcome menu the FIRST
+            # time we see this customer. Re-greetings (state.greeted=True)
+            # OR greetings received mid-funnel (any stage past discovery)
+            # are routed to the LLM with full context so the bot acknowledges
+            # without restarting the conversation. Mirrors the MerchantBrain
+            # composer's defense-in-depth guard.
+            if state.greeted or state.stage != S_DISCOVERY:
+                return GENERATE_AI_REPLY, (
+                    f"greeting_after_first_turn:greeted={state.greeted}:stage={state.stage}"
+                )
+            return SHOW_WELCOME_MENU, "greeting_rule_first_turn"
 
         # ── TIER 4: Slot-filling → deterministic follow-up ───────────────────────
         if intent in ("platform_salla", "platform_zid"):
@@ -579,12 +595,27 @@ class ContextBuilder:
       - Recent message history (last N turns)
     """
 
+    # Human-readable response goals per action — handed to Claude verbatim
+    # so it understands WHY the rule layer punted to it.
+    _ACTION_GOAL = {
+        GENERATE_AI_REPLY: "أجب عن سؤال التاجر بناءً على حالة المحادثة، بدون تكرار الترحيب.",
+        SHOW_WELCOME_MENU: "رحّب بالتاجر للمرة الأولى واعرض قائمة البداية.",
+        SHOW_PLANS: "اعرض الباقات والأسعار الرسمية فقط.",
+        SEND_CHECKOUT_LINK: "وجّه التاجر مباشرة إلى رابط الاشتراك بدون أسئلة إضافية.",
+        SEND_TRIAL_LINK: "أرسل رابط التجربة المجانية وشجّع التاجر على البدء.",
+        SEND_FOUNDER_LINK: "زوّد التاجر برابط التواصل المباشر مع المؤسس.",
+        ESCALATE_SUPPORT: "حوّل التاجر للدعم الفني واترك الرد قصيراً.",
+        FILL_SLOT_PLATFORM: "اسأل عن حجم المتجر بعد تأكيد المنصة.",
+        FILL_SLOT_SIZE: "اقترح الباقة الأنسب بناءً على حجم المتجر.",
+    }
+
     @classmethod
     def build_system_injection(
         cls,
         state: ConversationState,
         next_action: str,
         decision_reason: str,
+        intent: Optional[str] = None,
     ) -> str:
         """
         Returns a block prepended to the system prompt.
@@ -604,6 +635,12 @@ class ContextBuilder:
             for k in state.asked_keys
         ]
 
+        response_goal = cls._ACTION_GOAL.get(
+            next_action, "أجب بشكل مختصر وواضح بناءً على الحالة الحالية."
+        )
+        greeted_label = "نعم — ممنوع تكرار الترحيب" if state.greeted else "لا"
+        intent_label = intent or "غير محدد"
+
         block = f"""
 ══════════════════════════════════════════════
 حالة المحادثة الحالية (لا تتجاهلها)
@@ -611,6 +648,7 @@ class ContextBuilder:
 المرحلة: {state.stage} — {stage_guidance}
 Turn رقم: {state.turn}
 نقاط الشراء: {state.purchase_score}/10
+سبق الترحيب بالتاجر: {greeted_label}
 
 معلومات التاجر المعروفة:
 {state.slots.as_context_block()}
@@ -619,6 +657,16 @@ Turn رقم: {state.turn}
 {', '.join(asked_labels) if asked_labels else 'لا شيء حتى الآن'}
 
 الباقة المقترحة: {state.recommended_plan or 'لم تُحدَّد بعد'}
+
+══════════════════════════════════════════════
+سياق القرار لهذه الجولة (Decision Context)
+══════════════════════════════════════════════
+نية التاجر (intent): {intent_label}
+سبب التوجيه للذكاء (decision_reason): {decision_reason}
+الإجراء المحدد (action): {next_action}
+هدف الرد (response_goal): {response_goal}
+
+قاعدة صارمة: التزم بهدف الرد أعلاه. لا ترحّب من جديد إذا كان "سبق الترحيب = نعم".
 ══════════════════════════════════════════════
 """
         return block
@@ -766,7 +814,7 @@ class StateManager:
     # MerchantBrain state store, "customer_phone" / "phone" written by
     # ``_get_or_create_conversation``) MUST be preserved on save.
     _OWNED_META_KEYS = frozenset({
-        "phone", "stage", "turn", "intent_history", "slots",
+        "phone", "stage", "greeted", "turn", "intent_history", "slots",
         "last_action", "last_message_id", "processed_message_ids",
         "updated_at", "tenant_id",
     })

@@ -61,6 +61,30 @@ def is_cart_recovery_button(button_id: Optional[str]) -> bool:
     return bool(button_id) and button_id.startswith(f"{ACTION_PREFIX}:")
 
 
+def _mark_brain_greeted(db: Any, tenant_id: Optional[int], to_phone: str) -> None:
+    """Best-effort: stamp `greeted=True` on the customer's brain_state.
+
+    Cart recovery sends an outbound text outside the Brain pipeline. Without
+    this stamp, the next inbound from this customer loads `greeted=False`,
+    the DecisionEngine routes to ACTION_GREET, and the bot re-introduces
+    itself even though the customer just clicked one of OUR buttons. This
+    is exactly the "تكرار الترحيب" symptom the simplification pass targets.
+
+    Always swallows errors — a failed brain stamp must never break the
+    user-facing reply.
+    """
+    if tenant_id is None or not to_phone:
+        return
+    try:
+        from modules.ai.brain.state.store import DefaultStateStore  # noqa: PLC0415
+        DefaultStateStore().mark_greeted(db, int(tenant_id), to_phone)
+    except Exception as exc:
+        logger.debug(
+            "[CartRecovery] brain.mark_greeted failed tenant=%s phone=%s err=%s",
+            tenant_id, to_phone, exc,
+        )
+
+
 async def handle_cart_recovery_button(
     *,
     db,
@@ -166,6 +190,12 @@ async def handle_cart_recovery_button(
             db.commit()
         except Exception:
             db.rollback()
+
+        # Single-source-of-truth stamp: every cart recovery tap counts as
+        # an outbound conversation turn, so the next inbound must NOT
+        # trigger the greeting template. Does its own commit, swallows
+        # errors — the customer-facing reply has already been sent.
+        _mark_brain_greeted(db, tenant_id, to_phone)
 
         return True
 

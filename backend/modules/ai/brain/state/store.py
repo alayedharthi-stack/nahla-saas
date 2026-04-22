@@ -320,6 +320,86 @@ class DefaultStateStore:
                 tenant_id, masked, exc,
             )
 
+    # ── Mark greeted (used by proactive senders) ─────────────────────────────
+
+    def mark_greeted(
+        self,
+        db: Any,
+        tenant_id: int,
+        customer_phone: str,
+    ) -> bool:
+        """
+        Stamp `greeted=True` on the brain_state for this customer, idempotently.
+
+        Used by every code path that sends an outbound message OUTSIDE the
+        Brain pipeline (cart recovery taps, automation templates, manual
+        agent replies). Without this, the next inbound from that customer
+        loads `greeted=False`, the DecisionEngine routes to ACTION_GREET,
+        and the bot re-introduces itself mid-conversation — the exact
+        "تكرار الترحيب" symptom production was hitting.
+
+        Returns True when the flag was stamped (or was already True),
+        False when no Customer/Conversation row exists yet (in which case
+        the next Brain turn will create them and persist a fresh state).
+        """
+        masked = _mask_phone(customer_phone)
+        try:
+            customer, _matched, matched_column, _tried = _find_customer(
+                db, tenant_id, customer_phone
+            )
+            if not customer:
+                logger.info(
+                    "[StateStore] mark_greeted tenant=%s phone=%s "
+                    "result=skip reason=no_customer_row",
+                    tenant_id, masked,
+                )
+                return False
+
+            conv = _find_conversation(db, tenant_id, customer.id)
+            if not conv:
+                logger.info(
+                    "[StateStore] mark_greeted tenant=%s phone=%s "
+                    "customer_id=%s result=skip reason=no_conversation_row",
+                    tenant_id, masked, customer.id,
+                )
+                return False
+
+            meta = dict(conv.extra_metadata or {})
+            raw  = meta.get(_STATE_KEY)
+            state = (
+                MerchantConversationState.from_dict(raw)
+                if raw else MerchantConversationState()
+            )
+            if state.greeted:
+                return True
+
+            state.greeted = True
+            state.updated_at = datetime.now(timezone.utc).isoformat()
+            meta[_STATE_KEY] = state.to_dict()
+            conv.extra_metadata = meta
+            try:
+                from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                flag_modified(conv, "extra_metadata")
+            except Exception:
+                pass
+            db.commit()
+            logger.info(
+                "[StateStore] mark_greeted tenant=%s phone=%s "
+                "customer_id=%s conv_id=%s matched_column=%s result=ok",
+                tenant_id, masked, customer.id, conv.id, matched_column,
+            )
+            return True
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "[StateStore] mark_greeted tenant=%s phone=%s ERROR=%s",
+                tenant_id, masked, exc,
+            )
+            return False
+
     # ── Transition ────────────────────────────────────────────────────────────
 
     def transition(

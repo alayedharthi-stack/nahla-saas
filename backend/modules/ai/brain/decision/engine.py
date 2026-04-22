@@ -159,18 +159,29 @@ class DefaultDecisionEngine:
             )
 
         # ── 3.7 Continue order preparation while collecting checkout details ──
-        # CRITICAL: while ordering we treat almost any free-form message as a
-        # potential slot fill (name/city/maps URL/short code). Even a short
-        # polite "هلا" must NOT bounce the customer back to the greeting
-        # template, so INTENT_GREETING is also accepted as continuation here.
-        # The DraftOrderHandler will run extract_address_signals on the raw
-        # text and decide whether the message actually contained data.
+        # While ordering we treat slot-bearing messages and a small set of
+        # "neutral" intents as continuation so the funnel doesn't reset.
+        #
+        # Two rules to keep this from over-firing — the trap that produced
+        # "راجياً سجلت اهتمامك بـ فستان" when the customer actually asked
+        # "تعرض لي المنتجات بالصور؟":
+        #
+        #   a) ASK_PRODUCT / ASK_PRICE are NOT continuation intents on their
+        #      own. A real product/price question mid-order is a request to
+        #      browse, not a slot fill — fall through to SEARCH_PRODUCTS so
+        #      the customer can actually compare. (They WILL still match the
+        #      slots clause below if the message also contains a city /
+        #      name / short_address_code, which is the legitimate
+        #      "الرياض ABCD1234" case.)
+        #   b) Greeting / general / hesitation stay in the list so a polite
+        #      "هلا" or "تمام" doesn't bounce the customer to the greeting
+        #      template. The DraftOrderHandler will run
+        #      extract_address_signals on the raw text and decide whether
+        #      the message actually contained data.
         _CONTINUATION_INTENTS = (
             INTENT_START_ORDER,
             INTENT_GENERAL,
-            INTENT_GREETING,        # see comment above — keep flow locked
-            INTENT_ASK_PRODUCT,     # answers like "فستان" while we still need name/city
-            INTENT_ASK_PRICE,
+            INTENT_GREETING,
             INTENT_HESITATION,
         )
         if (
