@@ -23,6 +23,12 @@ from sqlalchemy.orm import Session
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
 from models import Customer, CustomerProfile
+from services.campaign_wizard.segments import (
+    SEGMENTS as NAHLA_SEGMENTS,
+    build_segment_query,
+    count_segment,
+    get_segment as get_nahla_segment,
+)
 from services.customer_intelligence import (
     CUSTOMER_STATUS_LABELS,
     RFM_SEGMENT_LABELS,
@@ -192,6 +198,14 @@ def _serialize_customer(cust: Customer, profile: Optional[CustomerProfile]) -> D
 async def list_customers(
     request: Request,
     search: str = Query("", description="بحث بالاسم أو الهاتف"),
+    segment: str = Query(
+        "",
+        description=(
+            "Optional Nahla segment key (e.g. 'vip', 'dormant', 'no_purchase_60'). "
+            "Filters the list to ONLY customers belonging to that segment, using "
+            "the same canonical SQL as the campaign wizard."
+        ),
+    ),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -199,7 +213,21 @@ async def list_customers(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    q = db.query(Customer).filter(Customer.tenant_id == tenant_id)
+    seg_key = (segment or "").strip().lower()
+    if seg_key and seg_key != "all":
+        # Reuse the wizard's canonical builder so the count + sample shown
+        # in the wizard exactly matches what the merchant sees in the list
+        # below. `require_reachable=False` here because the customers page
+        # is for management — not sending — and unreachable rows still
+        # need to be visible (so the merchant can fix the phone number).
+        if get_nahla_segment(seg_key) is None:
+            raise HTTPException(status_code=422, detail=f"شريحة غير معروفة: {seg_key}")
+        q = build_segment_query(seg_key, db, tenant_id, require_reachable=False)
+        if q is None:
+            # Defensive — get_nahla_segment said yes but builder said no
+            raise HTTPException(status_code=422, detail=f"شريحة غير معروفة: {seg_key}")
+    else:
+        q = db.query(Customer).filter(Customer.tenant_id == tenant_id)
 
     if search.strip():
         term = f"%{search.strip()}%"
@@ -235,6 +263,37 @@ async def list_customers(
         "per_page": per_page,
         "pages": max(1, (total + per_page - 1) // per_page),
     }
+
+
+@router.get("/segments")
+async def customers_segments(request: Request, db: Session = Depends(get_db)):
+    """
+    The same Nahla segment registry the campaign wizard uses, with a
+    `customer_count` per segment computed for THIS tenant. Counts here
+    intentionally include unreachable customers (no normalized_phone)
+    because the customers page is a management view, not a sending
+    surface — the merchant needs to see "8 VIPs" even if 1 has a
+    bad phone, so they can go fix it.
+
+    Result is identical in shape to /campaigns/wizard/segments so the
+    same frontend chip component can render either view.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    out: List[Dict[str, Any]] = []
+    for seg in NAHLA_SEGMENTS:
+        out.append({
+            "key": seg.key,
+            "label_ar": seg.label_ar,
+            "label_en": seg.label_en,
+            "description_ar": seg.description_ar,
+            "icon": seg.icon,
+            "natural_goals": list(seg.natural_goals),
+            "customer_count": count_segment(
+                seg.key, db, tenant_id, require_reachable=False,
+            ),
+        })
+    return {"segments": out}
 
 
 @router.get("/metrics")

@@ -106,6 +106,15 @@ export interface RecommendedTemplate extends WaTemplate {
   reason_ar: string
 }
 
+export interface NextBestTemplate {
+  id: number
+  name: string
+  language: string | null
+  category: string | null
+  status: string
+  display_name_ar: string | null
+}
+
 export interface TemplateRecommendation {
   goal: { key: string; label_ar: string } | null
   segment: { key: string; label_ar: string } | null
@@ -113,6 +122,11 @@ export interface TemplateRecommendation {
   templates: RecommendedTemplate[]
   best_template_id: number | null
   total: number
+  /** Closest non-APPROVED template — populated only when `total === 0`. */
+  next_best_template: NextBestTemplate | null
+  /** Human-readable hint for the empty-state — Arabic, populated only
+   *  when `total === 0`. */
+  suggestion_ar: string | null
 }
 
 export interface WizardTestSendResult {

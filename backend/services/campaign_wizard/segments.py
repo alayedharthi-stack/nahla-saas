@@ -1,7 +1,16 @@
 """
 campaign_wizard.segments
 ────────────────────────
-Named, reusable customer segments shown as Step 2 of the wizard.
+Named, reusable customer segments — **the canonical Nahla segment
+registry**. Used by:
+
+  * Campaign wizard Step 2 (target audience)
+  * Customers page filter chips (`GET /customers?segment=...`)
+  * Future: Autopilot rule conditions, Analytics dashboards
+
+Single registry, single SQL, single set of definitions — so a count
+shown on the Customers page always equals the count shown in the
+wizard for the same tenant + segment.
 
 Design:
 
@@ -13,15 +22,30 @@ Design:
   * Counts are cheap (`SELECT COUNT(*)`) and the sample helper returns
     five rows with phone/email masked.
 
-Sources of truth used:
+Sources of truth used (matches `services/customer_intelligence.py`):
+
   * `customers.normalized_phone`              — required for any send
-  * `customer_profiles.segment`               — new | active | at_risk |
-                                                churned | vip
-  * `customer_profiles.rfm_segment`           — vip | promising | …
+  * `customer_profiles.segment`               — lead | new | active |
+                                                vip | at_risk | inactive
+                                                (see CUSTOMER_STATUS_ORDER)
+  * `customer_profiles.rfm_segment`           — champions | loyal_customers
+                                                | promising | needs_attention
+                                                | about_to_sleep | at_risk
+                                                | cant_lose_them | hibernating
+                                                | lost_customers | regulars
+                                                (see RFM_SEGMENT_ORDER)
   * `customer_profiles.total_orders`          — one_time / repeat
-  * `customer_profiles.lifetime_value_score`  — high spenders
+  * `customer_profiles.lifetime_value_score`  — high spenders (0–1 normalised)
   * `customer_profiles.last_order_at`         — N-day windows
-  * `orders.is_abandoned` joined via JSONB     — abandoned_cart segment
+  * `orders.is_abandoned`                     — abandoned_cart segment
+
+IMPORTANT: there is NO `"churned"` or `"vip"` value in `rfm_segment`,
+and NO `"churned"` value in `segment`. Earlier drafts of this file
+used those names (mirroring the CustomerProfile column comment) but
+they never matched real data — the CRM canonically uses `"inactive"`
+for churn and `"champions"` / `"cant_lose_them"` for the top RFM
+buckets. Always cross-check against `customer_intelligence.py` before
+adding a new filter here.
 """
 from __future__ import annotations
 
@@ -53,29 +77,79 @@ def _f_all(q: Query, _db: Session, _tid: int) -> Query:
 
 
 def _f_new(q: Query, _db: Session, _tid: int) -> Query:
-    # "new" in nahla = profile.segment == 'new' OR no profile yet (signed
-    # up but never ordered). Both branches are interesting to a welcome
-    # campaign so we union them with OR-on-NULL.
-    return q.filter(or_(CustomerProfile.segment == "new", CustomerProfile.id.is_(None)))
+    # "New" in Nahla's mental model = anyone who joined the tenant but
+    # hasn't built a buying history yet, OR who placed their first
+    # order within the last 30 days. That covers three concrete shapes:
+    #
+    #   1. Imported/registered, no profile row yet            (id IS NULL)
+    #   2. Has profile but `compute_customer_status` returned 'lead'
+    #      (signed up, zero countable orders)
+    #   3. Has profile and was tagged 'new' (first order ≤ 30d ago)
+    #
+    # Earlier this filter only matched (1) + (3) and silently excluded
+    # 'lead' customers — which were exactly the people a welcome
+    # campaign should target. See `compute_customer_status` in
+    # services/customer_intelligence.py for the canonical definitions.
+    return q.filter(or_(
+        CustomerProfile.id.is_(None),
+        CustomerProfile.segment == "lead",
+        CustomerProfile.segment == "new",
+    ))
 
 
 def _f_promising(q: Query, _db: Session, _tid: int) -> Query:
-    return q.filter(CustomerProfile.rfm_segment == "promising")
+    # 'promising' is an RFM bucket from `compute_rfm_segment`: customers
+    # whose recency+frequency suggest growth potential. Also include
+    # `potential_loyalists` because the merchant intent is identical
+    # ("ready to convert into repeat buyers") and the two buckets shift
+    # between recompute runs.
+    return q.filter(or_(
+        CustomerProfile.rfm_segment == "promising",
+        CustomerProfile.rfm_segment == "potential_loyalists",
+    ))
 
 
 def _f_vip(q: Query, _db: Session, _tid: int) -> Query:
-    # CustomerProfile carries two parallel segment columns; either being
-    # "vip" qualifies. This matches what the dashboard CRM page already
-    # surfaces as "VIP" so the merchant's mental model stays consistent.
-    return q.filter(or_(CustomerProfile.segment == "vip", CustomerProfile.rfm_segment == "vip"))
+    # VIP comes from two complementary signals:
+    #   * `compute_customer_status` writes 'vip' on high spend/frequency.
+    #   * `compute_rfm_segment` writes 'champions' (top RFM cell) and
+    #     'cant_lose_them' (high LTV but recency dropping).
+    # There is NO `rfm_segment == 'vip'` bucket — the previous filter
+    # using that value matched zero rows. Union the three real buckets
+    # so the merchant's "VIP customers" chip mirrors the same audience
+    # the CRM page colours gold.
+    return q.filter(or_(
+        CustomerProfile.segment == "vip",
+        CustomerProfile.rfm_segment == "champions",
+        CustomerProfile.rfm_segment == "cant_lose_them",
+    ))
 
 
 def _f_dormant(q: Query, _db: Session, _tid: int) -> Query:
-    return q.filter(CustomerProfile.segment == "at_risk")
+    # "Dormant" = at the edge of churn but not gone yet. Matches both
+    # the explicit CRM `at_risk` status (60–90 days idle in
+    # `compute_customer_status`) and the RFM `at_risk` / `about_to_sleep`
+    # / `needs_attention` buckets which capture the same intent on
+    # accounts whose status hasn't yet flipped to `inactive`.
+    return q.filter(or_(
+        CustomerProfile.segment == "at_risk",
+        CustomerProfile.rfm_segment == "at_risk",
+        CustomerProfile.rfm_segment == "about_to_sleep",
+        CustomerProfile.rfm_segment == "needs_attention",
+    ))
 
 
 def _f_lost(q: Query, _db: Session, _tid: int) -> Query:
-    return q.filter(CustomerProfile.segment == "churned")
+    # The CRM uses 'inactive' (NOT 'churned') for >90-day-idle customers
+    # — the previous filter on 'churned' silently matched zero rows.
+    # Union with the RFM 'lost_customers' / 'hibernating' buckets so the
+    # chip captures the full "lost engagement" cohort the merchant cares
+    # about for a winback campaign.
+    return q.filter(or_(
+        CustomerProfile.segment == "inactive",
+        CustomerProfile.rfm_segment == "lost_customers",
+        CustomerProfile.rfm_segment == "hibernating",
+    ))
 
 
 def _f_one_time(q: Query, _db: Session, _tid: int) -> Query:
@@ -229,8 +303,20 @@ def build_segment_query(
     return q
 
 
-def count_segment(segment_key: str, db: Session, tenant_id: int) -> int:
-    """Reachable customer count for a single segment, scoped to tenant.
+def count_segment(
+    segment_key: str,
+    db: Session,
+    tenant_id: int,
+    *,
+    require_reachable: bool = True,
+) -> int:
+    """Customer count for a single segment, scoped to tenant.
+
+    `require_reachable=True` (default) — counts only customers the
+    merchant can actually message on WhatsApp; this is what the campaign
+    wizard wants. The customers-management page passes `False` so the
+    chip says "VIP (12)" even if one of those 12 has a bad phone, so
+    the merchant can see them in the list and fix the data.
 
     Returns 0 (not None) on unknown segment so the API can render a
     consistent UI even if the frontend ever sends a stale key. Errors
@@ -238,7 +324,9 @@ def count_segment(segment_key: str, db: Session, tenant_id: int) -> int:
     logged, again returning 0 — refusing to show *any* counts because
     one segment misbehaves would be a worse UX than showing 0 here.
     """
-    q = build_segment_query(segment_key, db, tenant_id)
+    q = build_segment_query(
+        segment_key, db, tenant_id, require_reachable=require_reachable,
+    )
     if q is None:
         return 0
     try:

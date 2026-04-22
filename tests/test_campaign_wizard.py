@@ -204,16 +204,88 @@ class TestSegmentQueriesScopeToTenant:
         t = _seed_tenant(db)
         assert count_segment("does-not-exist", db, t.id) == 0
 
-    def test_vip_segment_matches_either_segment_or_rfm_column(self):
+    def test_vip_segment_matches_real_canonical_buckets(self):
+        """Regression: previously the filter looked for `rfm_segment == 'vip'`
+        which is NOT a value `compute_rfm_segment` ever writes — so the
+        whole RFM half of the VIP cohort was silently empty.
+
+        Canonical VIP cohort:
+          * `customer_status / segment == 'vip'`         (compute_customer_status)
+          * `rfm_segment == 'champions'`                 (top RFM cell)
+          * `rfm_segment == 'cant_lose_them'`            (high LTV, falling recency)
+        """
         db, _engine = _make_db()
         t = _seed_tenant(db)
-        _seed_customer(db, t.id, name="VIP via segment",  phone="+966500000001",
-                       profile_segment="vip", profile_rfm="lead")
-        _seed_customer(db, t.id, name="VIP via rfm",      phone="+966500000002",
-                       profile_segment="active", profile_rfm="vip")
-        _seed_customer(db, t.id, name="Not VIP",          phone="+966500000003",
+        _seed_customer(db, t.id, name="VIP via segment", phone="+966500000001",
+                       profile_segment="vip", profile_rfm="regulars")
+        _seed_customer(db, t.id, name="VIP via champions", phone="+966500000002",
+                       profile_segment="active", profile_rfm="champions")
+        _seed_customer(db, t.id, name="VIP via cant_lose", phone="+966500000003",
+                       profile_segment="active", profile_rfm="cant_lose_them")
+        _seed_customer(db, t.id, name="Not VIP", phone="+966500000004",
                        profile_segment="active", profile_rfm="promising")
-        assert count_segment("vip", db, t.id) == 2
+        # Old (buggy) filter used `rfm_segment == 'vip'` — assert that
+        # value is NOT what makes someone count as VIP anymore.
+        _seed_customer(db, t.id, name="Stale VIP marker", phone="+966500000005",
+                       profile_segment="active", profile_rfm="vip")
+        assert count_segment("vip", db, t.id) == 3
+
+    def test_lost_segment_uses_inactive_status_not_churned(self):
+        """Regression: filter previously asked for `segment == 'churned'`
+        but `compute_customer_status` never writes that — it writes
+        'inactive'. The segment was empty for every tenant in production."""
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        _seed_customer(db, t.id, name="Inactive status", phone="+966500000001",
+                       profile_segment="inactive", profile_rfm="regulars")
+        _seed_customer(db, t.id, name="Lost RFM", phone="+966500000002",
+                       profile_segment="active", profile_rfm="lost_customers")
+        _seed_customer(db, t.id, name="Hibernating RFM", phone="+966500000003",
+                       profile_segment="active", profile_rfm="hibernating")
+        _seed_customer(db, t.id, name="Stale churned marker", phone="+966500000004",
+                       profile_segment="churned", profile_rfm="regulars")
+        # Three real lost customers — the old "churned" marker no longer
+        # counts (and shouldn't, because nothing in production writes it).
+        assert count_segment("lost", db, t.id) == 3
+
+    def test_new_segment_includes_lead_status_and_no_profile(self):
+        """Regression: a CRM customer with status 'lead' (signed up, zero
+        orders) is exactly who a welcome campaign should target. The
+        original filter only matched `segment == 'new'` and missed every
+        lead. Now we union with `lead` AND profile-less customers."""
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        # Has profile, status='new'  → matches
+        _seed_customer(db, t.id, name="New buyer", phone="+966500000001",
+                       profile_segment="new", profile_rfm="new_customers")
+        # Has profile, status='lead' → must match (regression)
+        _seed_customer(db, t.id, name="Lead", phone="+966500000002",
+                       profile_segment="lead", profile_rfm="lead")
+        # No profile row at all     → must match
+        bare = Customer(name="Just signed up", phone="+966500000003",
+                        normalized_phone="+966500000003",
+                        tenant_id=t.id, extra_metadata={})
+        db.add(bare)
+        db.commit()
+        # Active customer            → must NOT match
+        _seed_customer(db, t.id, name="Active", phone="+966500000004",
+                       profile_segment="active", profile_rfm="loyal_customers")
+        assert count_segment("new", db, t.id) == 3
+
+    def test_dormant_segment_unions_at_risk_status_and_rfm(self):
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        _seed_customer(db, t.id, name="At risk via status", phone="+966500000001",
+                       profile_segment="at_risk", profile_rfm="regulars")
+        _seed_customer(db, t.id, name="At risk via RFM", phone="+966500000002",
+                       profile_segment="active", profile_rfm="at_risk")
+        _seed_customer(db, t.id, name="About to sleep", phone="+966500000003",
+                       profile_segment="active", profile_rfm="about_to_sleep")
+        _seed_customer(db, t.id, name="Needs attention", phone="+966500000004",
+                       profile_segment="active", profile_rfm="needs_attention")
+        _seed_customer(db, t.id, name="Healthy", phone="+966500000005",
+                       profile_segment="active", profile_rfm="loyal_customers")
+        assert count_segment("dormant", db, t.id) == 4
 
     def test_no_purchase_30_excludes_never_purchased(self):
         db, _engine = _make_db()
@@ -244,6 +316,34 @@ class TestSegmentQueriesScopeToTenant:
         _seed_customer(db, t.id, name="Whale", phone="+966500000001", ltv_score=0.85)
         _seed_customer(db, t.id, name="Mid",   phone="+966500000002", ltv_score=0.5)
         assert count_segment("high_spenders", db, t.id) == 1
+
+    def test_count_segment_can_include_unreachable_for_management_view(self):
+        """The customers-management page passes `require_reachable=False`
+        so the chip says "VIP (12)" even when one of those 12 has a
+        broken phone number — otherwise the merchant can never see and
+        fix that row.
+
+        The campaign wizard keeps the default `True` so the count it
+        shows always equals what would actually be sendable.
+        """
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        # Reachable VIP
+        _seed_customer(db, t.id, name="Reachable", phone="+966500000001",
+                       profile_segment="vip", profile_rfm="champions")
+        # Unreachable VIP — has profile but no normalized_phone
+        c = Customer(name="Bad phone", phone="bogus", normalized_phone=None,
+                     tenant_id=t.id, extra_metadata={})
+        db.add(c)
+        db.commit()
+        db.add(CustomerProfile(
+            customer_id=c.id, tenant_id=t.id,
+            segment="vip", rfm_segment="champions",
+        ))
+        db.commit()
+
+        assert count_segment("vip", db, t.id) == 1                           # default
+        assert count_segment("vip", db, t.id, require_reachable=False) == 2  # mgmt
 
 
 class TestSegmentSampling:
@@ -362,6 +462,39 @@ class TestRecommenderPureScoring:
         result = recommend_templates(db, tenant_id=t.id, goal_key="welcome",
                                      segment_key="new", language="ar")
         assert result["total"] == 0
+
+    def test_empty_state_surfaces_pending_template_as_next_best(self):
+        """When zero APPROVED templates fit, the recommender must hand
+        the frontend the closest PENDING/DRAFT/REJECTED candidate so
+        the empty state can show "your closest template is …" instead
+        of a generic "no templates" wall."""
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        db.add(WhatsAppTemplate(
+            tenant_id=t.id, name="welcome_pending_ar", language="ar",
+            category="UTILITY", status="PENDING",
+            components=[{"type": "BODY", "text": "مرحباً {{1}}"}],
+            is_active=True, is_hidden=False, objective="welcome",
+            display_name_ar="ترحيب بانتظار اعتماد Meta",
+        ))
+        db.commit()
+        result = recommend_templates(db, tenant_id=t.id, goal_key="welcome",
+                                     segment_key="new", language="ar")
+        assert result["total"] == 0
+        assert result["next_best_template"] is not None
+        assert result["next_best_template"]["name"] == "welcome_pending_ar"
+        assert result["next_best_template"]["status"] == "PENDING"
+        assert "بانتظار" in (result["suggestion_ar"] or "")
+
+    def test_empty_state_with_no_templates_at_all_returns_help_text(self):
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        result = recommend_templates(db, tenant_id=t.id, goal_key="welcome",
+                                     segment_key="new", language="ar")
+        assert result["total"] == 0
+        assert result["next_best_template"] is None
+        assert result["suggestion_ar"]
+        assert "أنشئ" in result["suggestion_ar"]
 
 
 # ── test_send.py ────────────────────────────────────────────────────────────
@@ -560,3 +693,61 @@ class TestSendTestMessageOrchestration:
             ))
         assert result["sent"] is False
         assert result["error_code"] == "no_message_id"
+
+    def test_test_send_does_not_create_campaign_or_mutate_counters(self):
+        """Operational guarantee — wizard test sends must NEVER appear in
+        campaign analytics. They are diagnostic, one-off, and should
+        leave zero footprint on Campaign rows.
+
+        This test asserts the orchestrator does not silently insert a
+        Campaign or bump any counter, regardless of whether Meta
+        returned success, an error, or nothing at all.
+        """
+        import asyncio
+        from models import Campaign
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        tpl = WhatsAppTemplate(
+            tenant_id=t.id, name="welcome_ar", language="ar", category="UTILITY",
+            status="APPROVED", components=[{"type": "BODY", "text": "مرحباً {{1}}"}],
+        )
+        conn = WhatsAppConnection(
+            tenant_id=t.id, status="connected", phone_number_id="PID_1",
+            phone_number="+966500000000", sending_enabled=True,
+            webhook_verified=True, connection_type="embedded", provider="meta",
+        )
+        # Pre-existing campaign so we can assert its counters never move.
+        c = Campaign(
+            tenant_id=t.id, name="Pre-existing",
+            campaign_type="broadcast", status="draft",
+            sent_count=0, delivered_count=0, read_count=0,
+            clicked_count=0, converted_count=0,
+        )
+        db.add_all([tpl, conn, c])
+        db.commit()
+        c_id = c.id
+        before = (c.sent_count, c.delivered_count, c.read_count,
+                  c.clicked_count, c.converted_count)
+        before_count = db.query(Campaign).count()
+
+        good_resp = {"messages": [{"id": "wamid.never_in_analytics"}]}
+        with patch(
+            "services.whatsapp_platform.service.provider_send_message",
+            new=AsyncMock(return_value=(good_resp, None)),
+        ):
+            result = asyncio.run(send_test_message(
+                db, tenant_id=t.id, template_db_id=tpl.id,
+                to_phone="+966500000001", merchant_vars={"{{1}}": "نورة"},
+            ))
+        assert result["sent"] is True
+
+        db.expire_all()
+        c2 = db.query(Campaign).filter(Campaign.id == c_id).one()
+        after = (c2.sent_count, c2.delivered_count, c2.read_count,
+                 c2.clicked_count, c2.converted_count)
+        assert before == after, (
+            f"test-send mutated campaign counters: {before} -> {after}"
+        )
+        assert db.query(Campaign).count() == before_count, (
+            "test-send unexpectedly created a Campaign row"
+        )

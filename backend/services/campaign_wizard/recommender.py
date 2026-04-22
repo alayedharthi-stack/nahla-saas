@@ -224,6 +224,62 @@ def recommend_templates(
             scored[0]["badges"].insert(0, _BADGE_BEST)
         best_id = scored[0]["id"]
 
+    # ── Empty-state fallback ────────────────────────────────────────────────
+    # When no APPROVED template fits, surface the closest non-approved
+    # candidate (PENDING / DRAFT / REJECTED) so the merchant sees what's
+    # nearly there instead of just an empty list. This drives the
+    # "create / submit a template" CTA on the frontend.
+    fallback: Optional[Dict[str, Any]] = None
+    suggestion_ar: Optional[str] = None
+    if not scored:
+        near = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.status.in_(["PENDING", "DRAFT", "REJECTED"]),
+                (WhatsAppTemplate.is_hidden.is_(None)) | (WhatsAppTemplate.is_hidden.is_(False)),
+            )
+            .all()
+        )
+        if near:
+            # Re-use the same scoring so the language/category/keyword
+            # signals still rank the closest match first.
+            near_scored = []
+            for tpl in near:
+                s, _, _ = _score_one(tpl, goal, segment, language)
+                near_scored.append((s, tpl))
+            near_scored.sort(key=lambda r: -r[0])
+            top_tpl = near_scored[0][1]
+            fallback = {
+                "id":              top_tpl.id,
+                "name":            top_tpl.name,
+                "language":        top_tpl.language,
+                "category":        top_tpl.category,
+                "status":          top_tpl.status,
+                "display_name_ar": top_tpl.display_name_ar,
+            }
+            status = (top_tpl.status or "").upper()
+            if status == "PENDING":
+                suggestion_ar = (
+                    f"لا يوجد قالب معتمد لهذا الهدف بعد. القالب «{top_tpl.display_name_ar or top_tpl.name}» "
+                    "بانتظار موافقة Meta — تحقّق من حالته في صفحة القوالب."
+                )
+            elif status == "REJECTED":
+                suggestion_ar = (
+                    f"القالب الأقرب «{top_tpl.display_name_ar or top_tpl.name}» مرفوض من Meta — "
+                    "عدّله وأعد إرساله، أو أنشئ قالباً جديداً."
+                )
+            else:  # DRAFT
+                suggestion_ar = (
+                    f"لديك مسودّة قالب «{top_tpl.display_name_ar or top_tpl.name}» — "
+                    "أكملها وأرسلها لـ Meta للحصول على الاعتماد."
+                )
+        else:
+            suggestion_ar = (
+                "لا يوجد لديك أي قالب يناسب هذا الهدف. أنشئ قالباً جديداً وأرسله "
+                "إلى Meta من صفحة قوالب واتساب."
+            )
+
     return {
         "goal":             None if goal is None else {"key": goal.key, "label_ar": goal.label_ar},
         "segment":          None if segment is None else {"key": segment.key, "label_ar": segment.label_ar},
@@ -231,4 +287,10 @@ def recommend_templates(
         "templates":        scored,
         "best_template_id": best_id,
         "total":            len(scored),
+        # New fields for the empty-state UX. `next_best_template` is the
+        # closest non-APPROVED candidate (or None); `suggestion_ar` is
+        # always present when `total == 0` so the frontend can render
+        # something more helpful than "no templates found".
+        "next_best_template": fallback,
+        "suggestion_ar":      suggestion_ar,
     }

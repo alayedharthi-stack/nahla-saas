@@ -18,7 +18,11 @@ import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
-import { customersApi, type CustomerRecord } from '../api/customers'
+import {
+  customersApi,
+  type CustomerRecord,
+  type CustomerSegmentMeta,
+} from '../api/customers'
 
 function segmentVariant(
   seg: string,
@@ -69,6 +73,9 @@ export default function Customers() {
   const [page, setPage] = useState(1)
   const [pages, setPages] = useState(1)
   const [search, setSearch] = useState('')
+  const [segmentKey, setSegmentKey] = useState<string>('all')
+  const [segments, setSegments] = useState<CustomerSegmentMeta[]>([])
+  const [segmentsLoading, setSegmentsLoading] = useState(true)
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
   const [addName, setAddName] = useState('')
@@ -83,7 +90,7 @@ export default function Customers() {
     setLoading(true)
     try {
       const [res, metricsRes] = await Promise.all([
-        customersApi.list(search, page),
+        customersApi.list(search, page, 50, segmentKey),
         customersApi.metrics(),
       ])
       setCustomers(res.customers)
@@ -96,15 +103,31 @@ export default function Customers() {
     } finally {
       setLoading(false)
     }
-  }, [search, page])
+  }, [search, page, segmentKey])
+
+  const loadSegments = useCallback(async () => {
+    setSegmentsLoading(true)
+    try {
+      const res = await customersApi.segments()
+      setSegments(res.segments)
+    } catch {
+      setSegments([])
+    } finally {
+      setSegmentsLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
     load()
   }, [load])
 
   useEffect(() => {
+    loadSegments()
+  }, [loadSegments])
+
+  useEffect(() => {
     setPage(1)
-  }, [search])
+  }, [search, segmentKey])
 
   const handleAdd = async () => {
     if (!addName.trim() || !addPhone.trim()) {
@@ -204,6 +227,16 @@ export default function Customers() {
           iconBg="bg-emerald-50"
         />
       </div>
+
+      {/* Nahla segment chips — same registry as the campaign wizard so a
+          merchant who counts "12 VIPs" here sees exactly 12 reachable
+          (or near-reachable) candidates when they open a campaign. */}
+      <SegmentChips
+        segments={segments}
+        loading={segmentsLoading}
+        active={segmentKey}
+        onSelect={setSegmentKey}
+      />
 
       {/* Search + Refresh */}
       <div className="flex items-center gap-3">
@@ -601,6 +634,71 @@ export default function Customers() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+/**
+ * Horizontal scrollable row of Nahla segment chips.
+ *
+ * Reuses the SAME registry as the campaign wizard
+ * (`/customers/segments` + `/campaigns/wizard/segments`) so the chip
+ * label "VIP عملاء" + count here always equals what the wizard's
+ * Step 2 shows for the same tenant.
+ *
+ * The icon string from the backend is intentionally NOT rendered as an
+ * arbitrary lucide-react component to avoid bundling the entire icon
+ * library — we use a small, fixed visual treatment per chip instead.
+ */
+interface SegmentChipsProps {
+  segments: CustomerSegmentMeta[]
+  loading: boolean
+  active: string
+  onSelect: (key: string) => void
+}
+
+function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps) {
+  if (loading) {
+    return (
+      <div className="flex gap-2 overflow-hidden">
+        {[0, 1, 2, 3, 4].map(i => (
+          <div key={i} className="h-9 w-24 rounded-full bg-slate-100 animate-pulse" />
+        ))}
+      </div>
+    )
+  }
+  if (!segments || segments.length === 0) return null
+
+  return (
+    <div className="flex items-center gap-2 overflow-x-auto pb-1 -mb-1">
+      {segments.map(seg => {
+        const isActive = active === seg.key
+        return (
+          <button
+            key={seg.key}
+            onClick={() => onSelect(seg.key)}
+            title={seg.description_ar}
+            className={
+              'shrink-0 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium transition-colors border ' +
+              (isActive
+                ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
+                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300')
+            }
+          >
+            <span>{seg.label_ar}</span>
+            <span
+              className={
+                'inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold ' +
+                (isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500')
+              }
+            >
+              {seg.customer_count.toLocaleString('ar-SA')}
+            </span>
+          </button>
+        )
+      })}
     </div>
   )
 }

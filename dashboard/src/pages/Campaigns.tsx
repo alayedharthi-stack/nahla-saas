@@ -357,10 +357,27 @@ function Step3Template({
     )
   }
   if (!recommendation || recommendation.templates.length === 0) {
+    const next = recommendation?.next_best_template
+    const hint =
+      recommendation?.suggestion_ar ||
+      'لا توجد قوالب معتمدة مناسبة لهذا الهدف بعد.'
     return (
-      <div className="py-12 text-center space-y-3">
+      <div className="py-12 text-center space-y-4">
         <FileText className="w-10 h-10 text-slate-200 mx-auto" />
-        <p className="text-sm text-slate-500">لا توجد قوالب معتمدة مناسبة لهذا الهدف بعد.</p>
+        <p className="text-sm text-slate-500 max-w-md mx-auto leading-relaxed">{hint}</p>
+        {next && (
+          <div className="max-w-sm mx-auto bg-amber-50 border border-amber-200 rounded-lg p-3 text-start">
+            <p className="text-xs font-semibold text-amber-800 mb-1">
+              أقرب قالب لديك
+            </p>
+            <p className="text-sm text-amber-900 truncate">
+              {next.display_name_ar || next.name}
+            </p>
+            <p className="text-[11px] text-amber-700 mt-1">
+              الحالة: {next.status} · اللغة: {next.language || '—'} · الفئة: {next.category || '—'}
+            </p>
+          </div>
+        )}
         <p className="text-xs text-slate-400">
           انتقل إلى{' '}
           <Link to="/templates" className="text-brand-500 underline font-medium">

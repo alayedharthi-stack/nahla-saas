@@ -75,13 +75,32 @@ export interface CustomerCreatePayload {
   email?: string
 }
 
+export interface CustomerSegmentMeta {
+  key: string
+  label_ar: string
+  label_en: string
+  description_ar: string
+  icon: string
+  natural_goals: string[]
+  customer_count: number
+}
+
+export interface CustomersSegmentsResponse {
+  segments: CustomerSegmentMeta[]
+}
+
 export const customersApi = {
-  list(search = '', page = 1, perPage = 50) {
+  list(search = '', page = 1, perPage = 50, segment = '') {
     const params = new URLSearchParams()
     if (search) params.set('search', search)
+    if (segment && segment !== 'all') params.set('segment', segment)
     params.set('page', String(page))
     params.set('per_page', String(perPage))
     return apiCall<CustomersListResponse>(`/customers?${params}`)
+  },
+
+  segments() {
+    return apiCall<CustomersSegmentsResponse>('/customers/segments')
   },
 
   metrics() {
