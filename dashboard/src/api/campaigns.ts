@@ -68,6 +68,62 @@ export interface CreateCampaignPayload {
 
 import { apiCall } from './client'
 
+// ── Wizard types (new smart-campaign flow) ────────────────────────────────────
+
+export interface CampaignGoal {
+  key: string
+  label_ar: string
+  label_en: string
+  description_ar: string
+  icon: string
+  allowed_meta_categories: string[]
+  default_segment_key: string
+}
+
+export interface CustomerSegmentMeta {
+  key: string
+  label_ar: string
+  label_en: string
+  description_ar: string
+  icon: string
+  natural_goals: string[]
+  customer_count: number
+}
+
+export interface SegmentSampleRow {
+  id: number
+  name: string
+  phone_masked: string
+  email_masked: string
+}
+
+export interface RecommendedTemplate extends WaTemplate {
+  display_name_ar?: string | null
+  objective?: string | null
+  score: number
+  is_best: boolean
+  badges: string[]
+  reason_ar: string
+}
+
+export interface TemplateRecommendation {
+  goal: { key: string; label_ar: string } | null
+  segment: { key: string; label_ar: string } | null
+  language: string
+  templates: RecommendedTemplate[]
+  best_template_id: number | null
+  total: number
+}
+
+export interface WizardTestSendResult {
+  sent: boolean
+  simulated: boolean
+  wa_message_id: string | null
+  to: string
+  error_code: string | null
+  error_message: string | null
+}
+
 export const campaignsApi = {
   getTemplates: () =>
     apiCall<{ templates: WaTemplate[]; source: 'meta' | 'mock' }>('/campaigns/templates'),
@@ -87,11 +143,41 @@ export const campaignsApi = {
       body: JSON.stringify({ status }),
     }),
 
+  // Legacy test-send (still used by older flows). The wizard below now
+  // posts to /campaigns/wizard/test-send for richer error reporting.
   testSend: (phone: string, templateId: string, templateName: string, templateLanguage: string, variables: Record<string, string>) =>
     apiCall<{ success: boolean; simulated: boolean; message: string }>('/campaigns/test-send', {
       method: 'POST',
       body: JSON.stringify({ phone, template_id: templateId, template_name: templateName, template_language: templateLanguage, variables }),
     }),
+
+  // ── Wizard endpoints ───────────────────────────────────────────────────────
+  wizard: {
+    goals: () =>
+      apiCall<{ goals: CampaignGoal[] }>('/campaigns/wizard/goals'),
+
+    segments: () =>
+      apiCall<{ segments: CustomerSegmentMeta[] }>('/campaigns/wizard/segments'),
+
+    segmentSample: (key: string, limit = 5) =>
+      apiCall<{ segment_key: string; customer_count: number; sample: SegmentSampleRow[] }>(
+        `/campaigns/wizard/segments/${encodeURIComponent(key)}/sample?limit=${limit}`,
+      ),
+
+    templates: (goal?: string, segment?: string, language = 'ar') => {
+      const qs = new URLSearchParams()
+      if (goal) qs.set('goal', goal)
+      if (segment) qs.set('segment', segment)
+      qs.set('language', language)
+      return apiCall<TemplateRecommendation>(`/campaigns/wizard/templates?${qs.toString()}`)
+    },
+
+    testSend: (templateId: number, toPhone: string, variables: Record<string, string>) =>
+      apiCall<WizardTestSendResult>('/campaigns/wizard/test-send', {
+        method: 'POST',
+        body: JSON.stringify({ template_id: templateId, to_phone: toPhone, variables }),
+      }),
+  },
 }
 
 /** Extract variable placeholders {{1}}, {{2}}, … from a template body string */

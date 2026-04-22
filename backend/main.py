@@ -106,6 +106,7 @@ from routers.auth         import router as _auth_router          # noqa: E402
 from routers.settings     import router as _settings_router      # noqa: E402
 from routers.templates    import router as _templates_router     # noqa: E402
 from routers.campaigns    import router as _campaigns_router     # noqa: E402
+from routers.campaign_wizard import router as _campaign_wizard_router  # noqa: E402
 from routers.automations  import router as _automations_router   # noqa: E402
 from routers.analytics    import router as _analytics_router     # noqa: E402
 from routers.conversations import router as _conversations_router # noqa: E402
@@ -149,6 +150,7 @@ app.include_router(_auth_router)
 app.include_router(_settings_router)
 app.include_router(_templates_router)
 app.include_router(_campaigns_router)
+app.include_router(_campaign_wizard_router)
 app.include_router(_automations_router)
 app.include_router(_analytics_router)
 app.include_router(_conversations_router)

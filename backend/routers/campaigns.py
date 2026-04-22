@@ -23,13 +23,9 @@ from models import Campaign, WhatsAppTemplate  # noqa: E402
 
 from core.database import get_db
 from core.tenant import (
-    DEFAULT_WHATSAPP,
-    get_or_create_settings,
     get_or_create_tenant,
-    merge_defaults,
     resolve_tenant_id,
 )
-from services.whatsapp_platform.token_manager import get_token_context
 
 router = APIRouter()
 
@@ -196,23 +192,52 @@ async def update_campaign_status(
 
 @router.post("/campaigns/test-send")
 async def test_send(body: TestSendIn, request: Request, db: Session = Depends(get_db)):
-    """Simulate sending a test message to a phone number."""
-    from models import WhatsAppConnection  # noqa: PLC0415
+    """Send a real test WhatsApp message for the chosen template.
+
+    Backwards-compatible wrapper around the wizard's `send_test_message`
+    so the existing frontend (which still posts to /campaigns/test-send
+    with the old payload shape) keeps working while the new wizard
+    moves over to /campaigns/wizard/test-send.
+
+    Behaviour change vs. the previous stub:
+      * Previously this endpoint only *simulated* a send and always
+        returned success. That made the merchant think the campaign
+        worked when nothing had actually been delivered to WhatsApp.
+      * Now it delegates to the same provider_send_message pipeline
+        used by every other transactional template send (COD, cart
+        recovery, etc.). When no live WA connection exists it still
+        returns `simulated=True` so dev/sandbox UX is preserved, but
+        when a connection is live the message is really sent.
+    """
+    from services.campaign_wizard.test_send import send_test_message  # noqa: PLC0415
+
     tenant_id = resolve_tenant_id(request)
-    settings = get_or_create_settings(db, tenant_id)
+    get_or_create_tenant(db, tenant_id)
     db.commit()
-    wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    token_ctx = get_token_context(conn)
-    if not ((conn.phone_number_id if conn else None) or wa.get("phone_number_id")) or not token_ctx.token:
-        return {
-            "success": True,
-            "simulated": True,
-            "message": f"تمت المحاكاة — أرسلنا القالب '{body.template_name}' إلى {body.phone} (وضع تجريبي)",
-        }
-    return {
-        "success": True,
-        "simulated": False,
-        "message": f"تم إرسال رسالة اختبار إلى {body.phone}",
-        "token_status": token_ctx.token_status,
-    }
+
+    try:
+        template_db_id = int(body.template_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="template_id غير صالح")
+
+    result = await send_test_message(
+        db,
+        tenant_id=tenant_id,
+        template_db_id=template_db_id,
+        to_phone=body.phone,
+        merchant_vars=body.variables or {},
+    )
+
+    # Reshape into the legacy `{success, simulated, message}` envelope
+    # the existing frontend expects. The wizard endpoint returns the
+    # richer schema directly; only this legacy route does this mapping.
+    if result["sent"]:
+        if result["simulated"]:
+            msg = result["error_message"] or f"تمت المحاكاة — أرسلنا قالب الاختبار إلى {result['to']}"
+        else:
+            msg = f"تم إرسال رسالة اختبار إلى {result['to']}"
+        return {"success": True, "simulated": result["simulated"], "message": msg}
+    raise HTTPException(
+        status_code=400,
+        detail=result["error_message"] or "فشل إرسال رسالة الاختبار",
+    )
