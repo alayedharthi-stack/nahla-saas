@@ -487,3 +487,76 @@ class TestSendTestMessageOrchestration:
         assert result["simulated"] is False
         assert result["wa_message_id"] == "wamid.test123"
         assert result["error_code"] is None
+
+    def test_meta_error_response_is_reported_as_failure(self):
+        """Regression: Meta returns 200 with `{"error": {...}}` on
+        validation failures (e.g. template-translation-not-found,
+        recipient-not-on-whatsapp). `provider_post_with_context` does
+        not raise on those, so the orchestrator must inspect the body
+        itself or it will lie to the merchant."""
+        import asyncio
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        tpl = WhatsAppTemplate(
+            tenant_id=t.id, name="promo_ar", language="ar", category="MARKETING",
+            status="APPROVED", components=[{"type": "BODY", "text": "عرض {{1}}"}],
+        )
+        conn = WhatsAppConnection(
+            tenant_id=t.id, status="connected", phone_number_id="PID_1",
+            phone_number="+966500000000", sending_enabled=True,
+            webhook_verified=True, connection_type="embedded", provider="meta",
+        )
+        db.add_all([tpl, conn])
+        db.commit()
+
+        meta_error_resp = {
+            "error": {
+                "message": "Template name does not exist in the translation",
+                "code": 132001,
+                "type": "OAuthException",
+            }
+        }
+        with patch(
+            "services.whatsapp_platform.service.provider_send_message",
+            new=AsyncMock(return_value=(meta_error_resp, None)),
+        ):
+            result = asyncio.run(send_test_message(
+                db, tenant_id=t.id, template_db_id=tpl.id,
+                to_phone="+966500000001", merchant_vars={"{{1}}": "خصم"},
+            ))
+        assert result["sent"] is False
+        assert result["simulated"] is False
+        assert result["wa_message_id"] is None
+        assert result["error_code"] == "meta:132001"
+        assert "Template name" in result["error_message"]
+
+    def test_missing_message_id_is_reported_as_failure(self):
+        """Regression: if Meta returns 200 with no `error` and no
+        `messages` array (some sandboxes do this), we must not claim
+        success — the merchant won't receive anything."""
+        import asyncio
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        tpl = WhatsAppTemplate(
+            tenant_id=t.id, name="promo_ar", language="ar", category="MARKETING",
+            status="APPROVED", components=[{"type": "BODY", "text": "عرض {{1}}"}],
+        )
+        conn = WhatsAppConnection(
+            tenant_id=t.id, status="connected", phone_number_id="PID_1",
+            phone_number="+966500000000", sending_enabled=True,
+            webhook_verified=True, connection_type="embedded", provider="meta",
+        )
+        db.add_all([tpl, conn])
+        db.commit()
+
+        empty_resp = {"messaging_product": "whatsapp", "contacts": []}
+        with patch(
+            "services.whatsapp_platform.service.provider_send_message",
+            new=AsyncMock(return_value=(empty_resp, None)),
+        ):
+            result = asyncio.run(send_test_message(
+                db, tenant_id=t.id, template_db_id=tpl.id,
+                to_phone="+966500000001", merchant_vars={"{{1}}": "خصم"},
+            ))
+        assert result["sent"] is False
+        assert result["error_code"] == "no_message_id"

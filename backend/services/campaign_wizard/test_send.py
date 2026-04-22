@@ -199,7 +199,49 @@ async def send_test_message(
             phone_id=wa_conn.phone_number_id,
             payload=payload,
         )
-        wa_msg_id = ((response or {}).get("messages") or [{}])[0].get("id")
+        # NOTE: provider_post_with_context does *not* raise on a non-2xx
+        # response — it just returns the parsed JSON body. That means a
+        # Meta validation error (e.g. "Template name does not exist in
+        # the translation", code 132001) comes back as
+        # `{"error": {...}}` and was previously treated as success
+        # because we only looked for `messages[0].id`. Surface that as
+        # a real failure so the merchant sees the actual reason instead
+        # of a green "تم الإرسال — تحقّق من واتساب" toast for a message
+        # that will never arrive.
+        resp = response or {}
+        meta_err = resp.get("error") if isinstance(resp, dict) else None
+        if meta_err:
+            err_msg = (meta_err.get("error_user_msg")
+                       or meta_err.get("message")
+                       or "فشل الإرسال من Meta.")
+            err_code = meta_err.get("code") or meta_err.get("type") or "meta_error"
+            logger.warning(
+                "[campaign_wizard.test_send] Meta returned error tenant=%s tpl=%s code=%s msg=%s",
+                tenant_id, template.name, err_code, err_msg,
+            )
+            return {
+                "sent": False, "simulated": False, "wa_message_id": None,
+                "to": to_e164, "error_code": f"meta:{err_code}",
+                "error_message": str(err_msg)[:500],
+            }
+
+        messages = resp.get("messages") if isinstance(resp, dict) else None
+        wa_msg_id = (messages or [{}])[0].get("id") if isinstance(messages, list) and messages else None
+        if not wa_msg_id:
+            # Meta accepted no error and gave no message id — treat as
+            # failure so we never lie to the merchant. Include the raw
+            # response keys to help debugging without leaking tokens.
+            logger.warning(
+                "[campaign_wizard.test_send] no message id in Meta response tenant=%s tpl=%s keys=%s",
+                tenant_id, template.name,
+                list(resp.keys()) if isinstance(resp, dict) else type(resp).__name__,
+            )
+            return {
+                "sent": False, "simulated": False, "wa_message_id": None,
+                "to": to_e164, "error_code": "no_message_id",
+                "error_message": "لم يُرجع واتساب معرّف رسالة — قد يكون الرقم غير مسجّل في واتساب أو القالب غير معتمد لهذه اللغة.",
+            }
+
         return {
             "sent": True, "simulated": False, "wa_message_id": wa_msg_id,
             "to": to_e164, "error_code": None, "error_message": None,
