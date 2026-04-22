@@ -37,6 +37,7 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 
 from models import Base, Tenant, WhatsAppTemplate  # noqa: E402
 from core.service_template_resolver import (  # noqa: E402
+    diagnose_service_slot,
     resolve_active_template,
     resolve_template_for_send,
 )
@@ -73,6 +74,7 @@ def _seed_template(
     *,
     name: str = "tpl",
     status: str = "APPROVED",
+    category: str = "MARKETING",
     service_key: str | None = None,
     step_number: int | None = None,
     is_active: bool = True,
@@ -84,7 +86,7 @@ def _seed_template(
         tenant_id=tenant_id,
         name=name,
         language="ar",
-        category="MARKETING",
+        category=category,
         status=status,
         components=[{"type": "BODY", "text": "{{1}}"}],
         service_key=service_key,
@@ -247,6 +249,64 @@ class TestResolveTemplateForSend:
         finally:
             db.close()
 
+    def test_f_keyword_pattern_matches_english_name(self):
+        """Real-world: merchant created template directly in Meta Business
+        Manager named e.g. `cart_reminder_v2_ar`. No service_key, no
+        nahla_source_key, no exact-name match — but the keyword fallback
+        recognises 'cart' and binds it."""
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            tpl = _seed_template(
+                db, tenant.id,
+                name="cart_reminder_v2_ar",
+                category="MARKETING",
+                service_key=None, step_number=None, is_active=False,
+            )
+            got = resolve_template_for_send(db, tenant.id, "cart_recovery", 1)
+            assert got is not None and got.id == tpl.id
+            db.refresh(tpl)
+            assert tpl.service_key == "cart_recovery"
+            assert tpl.step_number == 1
+            assert tpl.is_active is True
+        finally:
+            db.close()
+
+    def test_f_keyword_pattern_matches_arabic_name(self):
+        """Same as above but the merchant's template name is in Arabic
+        (`تذكير_السلة_المتروكة`). The Arabic patterns must also catch it."""
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            tpl = _seed_template(
+                db, tenant.id,
+                name="تذكير_السلة_المتروكة",
+                category="MARKETING",
+                service_key=None, step_number=None, is_active=False,
+            )
+            got = resolve_template_for_send(db, tenant.id, "cart_recovery", 1)
+            assert got is not None and got.id == tpl.id
+        finally:
+            db.close()
+
+    def test_f_keyword_pattern_skips_authentication_category(self):
+        """Safety: an AUTHENTICATION (OTP) template named `verify_cart_otp`
+        must NOT be bound to cart_recovery even though 'cart' is in the
+        name. The keyword fallback is restricted to MARKETING / UTILITY."""
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            _seed_template(
+                db, tenant.id,
+                name="verify_cart_otp",
+                category="AUTHENTICATION",
+                service_key=None, step_number=None,
+            )
+            got = resolve_template_for_send(db, tenant.id, "cart_recovery", 1)
+            assert got is None
+        finally:
+            db.close()
+
     def test_single_active_invariant_holds_after_autobind(self):
         """Auto-bind must enforce the single-active rule by deactivating
         any sibling that previously held the slot."""
@@ -280,5 +340,94 @@ class TestResolveTemplateForSend:
             assert new.is_active is True
             assert new.service_key == "cart_recovery"
             assert new.step_number == 1
+        finally:
+            db.close()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Diagnostic helper (read-only)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestDiagnoseServiceSlot:
+    """The diagnostic snapshot powers the support endpoint and the
+    dashboard's debugging UI. It must NEVER mutate state."""
+
+    def test_empty_tenant_recommends_import(self):
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            report = diagnose_service_slot(db, tenant.id, "cart_recovery", 1)
+            assert report["approved_total"] == 0
+            assert report["would_resolve"] is None
+            assert "استورد" in report["recommendation"]
+        finally:
+            db.close()
+
+    def test_strict_match_classification(self):
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            tpl = _seed_template(
+                db, tenant.id,
+                name="bound_tpl",
+                service_key="cart_recovery", step_number=1, is_active=True,
+            )
+            report = diagnose_service_slot(db, tenant.id, "cart_recovery", 1)
+            assert report["would_resolve"]["id"] == tpl.id
+            assert report["would_resolve"]["via"] == "a"
+            cand = next(c for c in report["candidates"] if c["id"] == tpl.id)
+            assert cand["classification"] == "strict_match"
+        finally:
+            db.close()
+
+    def test_unbound_keyword_match_classification(self):
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            tpl = _seed_template(
+                db, tenant.id,
+                name="my_cart_reminder",
+                service_key=None, step_number=None,
+            )
+            report = diagnose_service_slot(db, tenant.id, "cart_recovery", 1)
+            cand = next(c for c in report["candidates"] if c["id"] == tpl.id)
+            assert cand["classification"] == "would_autobind_keyword"
+            assert report["would_resolve"]["via"] == "f"
+        finally:
+            db.close()
+
+    def test_diagnose_does_not_mutate(self):
+        """Snapshot must NOT auto-bind anything — the caller may invoke
+        it on a read-only DB role."""
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            tpl = _seed_template(
+                db, tenant.id,
+                name="my_cart_reminder",
+                service_key=None, step_number=None, is_active=False,
+            )
+            diagnose_service_slot(db, tenant.id, "cart_recovery", 1)
+            db.refresh(tpl)
+            # Critical: the snapshot must NOT have stamped any binding.
+            assert tpl.service_key is None
+            assert tpl.step_number is None
+            assert tpl.is_active is False
+        finally:
+            db.close()
+
+    def test_unrelated_approved_template_classified_as_no_match(self):
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            tpl = _seed_template(
+                db, tenant.id,
+                name="welcome_message",
+                service_key=None, step_number=None,
+            )
+            report = diagnose_service_slot(db, tenant.id, "cart_recovery", 1)
+            cand = next(c for c in report["candidates"] if c["id"] == tpl.id)
+            assert cand["classification"] == "no_match"
+            assert report["would_resolve"] is None
         finally:
             db.close()

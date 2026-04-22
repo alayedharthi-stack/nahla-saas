@@ -40,11 +40,16 @@ PUBLIC API
 
   list_alternatives(db, tenant_id, service_key, step_number)
       Returns all templates for the same slot (active first, then inactive).
+
+  diagnose_service_slot(db, tenant_id, service_key, step_number=None)
+      Returns a structured report (counts + per-template classification)
+      that the dashboard / support team can use to debug why a slot
+      isn't sending. Read-only; no side effects.
 """
 from __future__ import annotations
 
 import logging
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -137,6 +142,58 @@ def resolve_active_template(
 
 
 # ── Smart fallback resolution (used by the automation engine at send time) ──
+
+# Keyword patterns the resolver uses as the FINAL safety net when no
+# explicit binding, library mapping, or config name matches. Each entry
+# is a service-key → list of substrings (case-folded) that strongly
+# indicate the template's purpose, in EITHER Arabic or English. Order
+# matters: more-specific terms come first so we prefer e.g.
+# "abandoned_cart" over a generic "cart" match.
+#
+# This is the layer that catches merchants who created templates
+# directly in Meta Business Manager with idiosyncratic names — the
+# alternative is `template_not_approved` for every send.
+_SERVICE_NAME_PATTERNS: Dict[str, List[str]] = {
+    "cart_recovery": [
+        # English — most specific first
+        "abandoned_cart", "abandonedcart",
+        "cart_recovery", "cartrecovery",
+        "cart_reminder", "cart_followup",
+        "checkout_abandoned",
+        "abandoned",
+        "cart",
+        # Arabic
+        "متروك", "متروكة",
+        "السلة", "سلة",
+        "تذكير_السلة", "تذكير السلة",
+        "استرجاع",
+    ],
+    "cod_confirmation": [
+        "cod_confirmation", "cod_confirm", "cash_on_delivery",
+        "تأكيد", "الدفع_عند", "عند_الاستلام",
+    ],
+    "order_confirmation": [
+        "order_confirmation", "order_confirm", "order_placed",
+        "تأكيد_الطلب", "تأكيد الطلب",
+    ],
+    "shipping_update": [
+        "shipping", "shipment", "tracking", "delivery",
+        "شحن", "تتبع", "توصيل",
+    ],
+}
+
+
+def _name_matches_service(name: Optional[str], service_key: str) -> bool:
+    """Case-insensitive substring match of the template name against
+    the service's keyword patterns."""
+    if not name:
+        return False
+    n = name.lower()
+    for pattern in _SERVICE_NAME_PATTERNS.get(service_key, []):
+        if pattern.lower() in n:
+            return True
+    return False
+
 
 def _library_keys_for_slot(service_key: str, step_number: int) -> List[str]:
     """Return every Nahla-library `key` that targets this service slot.
@@ -241,16 +298,32 @@ def resolve_template_for_send(
          config-level template name). Auto-binds & activates.
       e. APPROVED + matching service_key (any step_number). Auto-binds
          to the requested step; better than refusing to send.
+      f. APPROVED + name matches a service-specific keyword pattern
+         (e.g. "cart" / "abandoned" / "متروكة" for cart_recovery). Final
+         safety net for merchants who created templates directly in Meta
+         Business Manager with idiosyncratic names. Restricted to
+         MARKETING / UTILITY categories so we never accidentally
+         hijack an AUTHENTICATION template.
 
     Returns ``None`` only when the merchant truly has no APPROVED
     template that could plausibly serve the slot — at which point the
     automation engine surfaces a precise, actionable error."""
     from models import WhatsAppTemplate  # noqa: PLC0415
 
+    log_ctx = (
+        f"tenant={tenant_id} service={service_key} step={step_number} "
+        f"fallback_name={fallback_template_name!r}"
+    )
+
     # (a) strict
     tpl = resolve_active_template(db, tenant_id, service_key, step_number)
     if tpl:
+        logger.info(
+            "[ServiceResolver] LAYER=a (strict) HIT %s → tpl_id=%s name=%s",
+            log_ctx, tpl.id, tpl.name,
+        )
         return tpl
+    logger.info("[ServiceResolver] LAYER=a (strict) MISS %s", log_ctx)
 
     # (b) drop is_active / is_hidden
     tpl = (
@@ -265,11 +338,16 @@ def resolve_template_for_send(
         .first()
     )
     if tpl:
+        logger.info(
+            "[ServiceResolver] LAYER=b (inactive_match) HIT %s → tpl_id=%s name=%s",
+            log_ctx, tpl.id, tpl.name,
+        )
         _autobind(
             db, tpl, tenant_id=tenant_id, service_key=service_key,
             step_number=step_number, reason="strict_match_inactive",
         )
         return tpl
+    logger.info("[ServiceResolver] LAYER=b (inactive_match) MISS %s", log_ctx)
 
     # (c) by nahla_source_key for any library template targeting this slot
     library_keys = _library_keys_for_slot(service_key, step_number)
@@ -285,12 +363,26 @@ def resolve_template_for_send(
             .first()
         )
         if tpl:
+            logger.info(
+                "[ServiceResolver] LAYER=c (nahla_source_key) HIT %s "
+                "library_keys=%s → tpl_id=%s name=%s source_key=%s",
+                log_ctx, library_keys, tpl.id, tpl.name, tpl.nahla_source_key,
+            )
             _autobind(
                 db, tpl, tenant_id=tenant_id, service_key=service_key,
                 step_number=step_number,
                 reason=f"nahla_source_key={tpl.nahla_source_key}",
             )
             return tpl
+        logger.info(
+            "[ServiceResolver] LAYER=c (nahla_source_key) MISS %s library_keys=%s",
+            log_ctx, library_keys,
+        )
+    else:
+        logger.info(
+            "[ServiceResolver] LAYER=c (nahla_source_key) SKIP %s — no library entries for this slot",
+            log_ctx,
+        )
 
     # (d) by config-level template_name (legacy automation seed path)
     if fallback_template_name:
@@ -305,12 +397,17 @@ def resolve_template_for_send(
             .first()
         )
         if tpl:
+            logger.info(
+                "[ServiceResolver] LAYER=d (config_name) HIT %s → tpl_id=%s name=%s",
+                log_ctx, tpl.id, tpl.name,
+            )
             _autobind(
                 db, tpl, tenant_id=tenant_id, service_key=service_key,
                 step_number=step_number,
                 reason=f"config_template_name={fallback_template_name}",
             )
             return tpl
+        logger.info("[ServiceResolver] LAYER=d (config_name) MISS %s", log_ctx)
 
     # (e) any APPROVED template on the same service_key (any step). Useful
     # when the merchant only has ONE recovery template approved and we
@@ -329,12 +426,72 @@ def resolve_template_for_send(
         .first()
     )
     if tpl:
+        logger.info(
+            "[ServiceResolver] LAYER=e (any_step_same_service) HIT %s → tpl_id=%s name=%s was_step=%s",
+            log_ctx, tpl.id, tpl.name, tpl.step_number,
+        )
         _autobind(
             db, tpl, tenant_id=tenant_id, service_key=service_key,
             step_number=step_number,
             reason=f"service_key_any_step (was step={tpl.step_number})",
         )
         return tpl
+    logger.info("[ServiceResolver] LAYER=e (any_step_same_service) MISS %s", log_ctx)
+
+    # (f) FINAL safety net: keyword pattern match on template name. Only
+    # MARKETING / UTILITY templates are considered to avoid grabbing
+    # AUTHENTICATION (OTP) templates. We log every candidate so prod
+    # operators can audit which template ended up serving the slot.
+    patterns = _SERVICE_NAME_PATTERNS.get(service_key, [])
+    if patterns:
+        candidates = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.status    == "APPROVED",
+                WhatsAppTemplate.category.in_(["MARKETING", "UTILITY"]),
+            )
+            .order_by(WhatsAppTemplate.updated_at.desc())
+            .all()
+        )
+        for cand in candidates:
+            if _name_matches_service(cand.name, service_key):
+                logger.info(
+                    "[ServiceResolver] LAYER=f (keyword_pattern) HIT %s → "
+                    "tpl_id=%s name=%s category=%s",
+                    log_ctx, cand.id, cand.name, cand.category,
+                )
+                _autobind(
+                    db, cand, tenant_id=tenant_id, service_key=service_key,
+                    step_number=step_number,
+                    reason=f"keyword_pattern (name={cand.name!r})",
+                )
+                return cand
+        # Final miss — log a count of approved-but-uncategorised templates
+        # so the prod log is enough to diagnose remotely.
+        approved_count = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.status    == "APPROVED",
+            )
+            .count()
+        )
+        approved_names = [
+            t.name for t in
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.status    == "APPROVED",
+            )
+            .limit(20)
+            .all()
+        ]
+        logger.warning(
+            "[ServiceResolver] ALL LAYERS MISS %s — tenant has %d APPROVED "
+            "template(s); none match. names=%s",
+            log_ctx, approved_count, approved_names,
+        )
 
     return None
 
@@ -367,3 +524,150 @@ def list_alternatives(
         WhatsAppTemplate.is_active.desc(),
         WhatsAppTemplate.updated_at.desc(),
     ).all()
+
+
+# ── Diagnostic report (read-only) ────────────────────────────────────────────
+
+def diagnose_service_slot(
+    db: Session,
+    tenant_id: int,
+    service_key: str,
+    step_number: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Read-only inspection of which template (if any) the resolver would
+    pick for ``(service_key, step_number)`` and WHY every other approved
+    template was rejected.
+
+    Returned shape:
+        {
+            "tenant_id":     int,
+            "service_key":   str,
+            "step_number":   int|None,
+            "would_resolve": {"id": ..., "name": ..., "via": "layer"} | None,
+            "approved_total": int,
+            "candidates":    [
+                {
+                    "id":          int,
+                    "name":        str,
+                    "category":    str,
+                    "service_key": str|None,
+                    "step_number": int|None,
+                    "is_active":   bool,
+                    "is_hidden":   bool,
+                    "nahla_source_key": str|None,
+                    "classification":  "strict_match" | "would_autobind_*" | "no_match",
+                    "match_reason":    str,
+                },
+                ...
+            ],
+            "library_keys_for_slot": [str, ...],
+            "name_patterns":         [str, ...],
+            "recommendation":        str,
+        }
+
+    Used by the new ``GET /templates/diagnose-service/...`` endpoint and
+    by support engineers when a tenant reports cart-recovery failures."""
+    from models import WhatsAppTemplate  # noqa: PLC0415
+
+    library_keys: List[str] = []
+    if step_number is not None:
+        library_keys = _library_keys_for_slot(service_key, step_number)
+    patterns = list(_SERVICE_NAME_PATTERNS.get(service_key, []))
+
+    approved_q = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.tenant_id == tenant_id,
+        WhatsAppTemplate.status    == "APPROVED",
+    )
+    approved_total = approved_q.count()
+    approved_rows = approved_q.order_by(
+        WhatsAppTemplate.is_active.desc(),
+        WhatsAppTemplate.updated_at.desc(),
+    ).all()
+
+    candidates: List[Dict[str, Any]] = []
+    for t in approved_rows:
+        classification = "no_match"
+        reason = ""
+        if (
+            t.service_key == service_key
+            and (step_number is None or t.step_number == step_number)
+            and t.is_active
+            and not t.is_hidden
+        ):
+            classification = "strict_match"
+            reason = "active+visible+APPROVED+matching slot"
+        elif t.service_key == service_key and (step_number is None or t.step_number == step_number):
+            classification = "would_autobind_inactive"
+            reason = "matches slot but is_active=False or is_hidden=True"
+        elif t.nahla_source_key and t.nahla_source_key in library_keys:
+            classification = "would_autobind_via_library"
+            reason = f"nahla_source_key={t.nahla_source_key!r} matches library entry for this slot"
+        elif t.service_key == service_key:
+            classification = "would_autobind_other_step"
+            reason = f"same service_key but step_number={t.step_number}"
+        elif t.category in {"MARKETING", "UTILITY"} and _name_matches_service(t.name, service_key):
+            classification = "would_autobind_keyword"
+            reason = "name matches a service keyword pattern"
+
+        candidates.append({
+            "id":               t.id,
+            "name":             t.name,
+            "category":         t.category,
+            "service_key":      t.service_key,
+            "step_number":      t.step_number,
+            "is_active":        bool(t.is_active),
+            "is_hidden":        bool(t.is_hidden),
+            "nahla_source_key": t.nahla_source_key,
+            "classification":   classification,
+            "match_reason":     reason,
+        })
+
+    # First non-"no_match" wins
+    would_resolve: Optional[Dict[str, Any]] = None
+    layer_rank = {
+        "strict_match":              "a",
+        "would_autobind_inactive":   "b",
+        "would_autobind_via_library": "c",
+        "would_autobind_other_step": "e",
+        "would_autobind_keyword":    "f",
+    }
+    for c in candidates:
+        if c["classification"] in layer_rank:
+            would_resolve = {
+                "id":   c["id"],
+                "name": c["name"],
+                "via":  layer_rank[c["classification"]],
+                "classification": c["classification"],
+            }
+            break
+
+    if would_resolve:
+        recommendation = (
+            f"الـ resolver سيختار القالب «{would_resolve['name']}» (id={would_resolve['id']}) "
+            f"عبر الطبقة {would_resolve['via']}. "
+            f"إذا لم يصل الإرسال، تحقق من اتصال WhatsApp وحدود Meta."
+        )
+    elif approved_total == 0:
+        recommendation = (
+            "لا يوجد أي قالب معتمد في هذا الحساب. استورد قالباً من مكتبة نحلة "
+            "أو أنشئ واحداً من صفحة القوالب وقدّمه للاعتماد."
+        )
+    else:
+        recommendation = (
+            f"يوجد {approved_total} قالب معتمد لكن لا واحد منها مرتبط بخدمة "
+            f"«{service_key}» ولا يطابق أنماط الأسماء المتعارف عليها. "
+            f"افتح صفحة القوالب، اختر القالب المناسب، واربطه يدوياً بالخدمة "
+            f"والمرحلة من زر «تعيين كنشط»."
+        )
+
+    return {
+        "tenant_id":             tenant_id,
+        "service_key":           service_key,
+        "step_number":           step_number,
+        "would_resolve":         would_resolve,
+        "approved_total":        approved_total,
+        "candidates":            candidates,
+        "library_keys_for_slot": library_keys,
+        "name_patterns":         patterns,
+        "recommendation":        recommendation,
+    }

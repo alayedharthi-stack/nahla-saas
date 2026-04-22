@@ -1542,6 +1542,36 @@ async def set_template_active(
     }
 
 
+@router.get("/templates/diagnose-service/{service_key}")
+async def diagnose_service_slot(
+    service_key: str,
+    request: Request,
+    step_number: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """Diagnostic snapshot: which template the smart resolver would pick
+    for this ``(service_key, step_number)`` slot, and WHY every other
+    APPROVED template was rejected.
+
+    Use cases:
+      • Cart-recovery automation reports `template_not_approved` even
+        though the merchant says they have an approved template — this
+        endpoint shows exactly which approved templates the tenant has,
+        their bindings, and what the resolver thinks of each one.
+      • Support engineers diagnosing a tenant's cart-recovery slot
+        without needing DB access.
+      • Dashboard "diagnose" button on the smart-automations failure card.
+
+    Read-only — no DB writes, no auto-binding side effects.
+    """
+    from core.service_template_resolver import (  # noqa: PLC0415
+        diagnose_service_slot as _diagnose,
+    )
+
+    tenant_id = resolve_tenant_id(request)
+    return _diagnose(db, tenant_id, service_key, step_number)
+
+
 _AI_REWRITE_MODES: Dict[str, Dict[str, str]] = {
     # Each mode carries a system-prompt instruction in both AR and EN. The AI
     # call uses the language matching the template, so the model is asked to
