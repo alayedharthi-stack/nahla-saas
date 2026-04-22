@@ -995,10 +995,9 @@ export default function Campaigns() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={t.campaigns.title}
+        title={t(tr => tr.pages.campaigns.title)}
         subtitle="حملات واتساب ذكية مبنية على شرائح نحلة وقوالب Meta المعتمدة"
-        icon={<MessageSquare className="w-5 h-5" />}
-        actions={
+        action={
           <button onClick={() => setShowWizard(true)} className="btn-primary text-sm">
             <Plus className="w-4 h-4" /> حملة جديدة
           </button>
@@ -1006,10 +1005,10 @@ export default function Campaigns() {
       />
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="حملات نشطة" value={stats.active.toString()} icon={<Megaphone className="w-5 h-5" />} />
-        <StatCard label="إجمالي المُرسَل" value={stats.totalSent.toLocaleString('ar-SA')} icon={<Send className="w-5 h-5" />} />
-        <StatCard label="معدل القراءة" value={`${stats.openRate}%`} icon={<BarChart2 className="w-5 h-5" />} />
-        <StatCard label="معدل التحويل" value={`${stats.convRate}%`} icon={<Smartphone className="w-5 h-5" />} />
+        <StatCard label="حملات نشطة" value={stats.active.toString()} icon={Megaphone} />
+        <StatCard label="إجمالي المُرسَل" value={stats.totalSent.toLocaleString('ar-SA')} icon={Send} />
+        <StatCard label="معدل القراءة" value={`${stats.openRate}%`} icon={BarChart2} />
+        <StatCard label="معدل التحويل" value={`${stats.convRate}%`} icon={Smartphone} />
       </div>
 
       <div className="card overflow-hidden">
