@@ -423,17 +423,59 @@ export default function Conversations() {
                           </span>
                         )}
 
-                        {/* Bubble */}
-                        <div className={`
-                          relative px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words
-                          shadow-sm
-                          ${isOut
-                            ? 'bg-brand-500 text-white rounded-2xl rounded-ee-sm'
-                            : 'bg-white text-slate-800 rounded-2xl rounded-es-sm border border-slate-100'
-                          }
-                        `}>
-                          {m.body}
-                        </div>
+                        {/* Bubble + Buttons */}
+                        {(() => {
+                          const sep = '━━━━━'
+                          const hasButtons = m.body.includes(sep)
+                          const textPart = hasButtons ? m.body.split(sep)[0].trimEnd() : m.body
+                          const btnLines = hasButtons
+                            ? m.body.split(sep).slice(1).join('').trim().split('\n').filter(Boolean)
+                            : []
+                          return (
+                            <>
+                              <div className={`
+                                relative px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words
+                                shadow-sm
+                                ${isOut
+                                  ? `bg-brand-500 text-white ${btnLines.length ? 'rounded-t-2xl rounded-ee-sm' : 'rounded-2xl rounded-ee-sm'}`
+                                  : `bg-white text-slate-800 ${btnLines.length ? 'rounded-t-2xl rounded-es-sm border-x border-t border-slate-100' : 'rounded-2xl rounded-es-sm border border-slate-100'}`
+                                }
+                              `}>
+                                {textPart}
+                              </div>
+                              {btnLines.length > 0 && (
+                                <div className={`
+                                  overflow-hidden
+                                  ${isOut
+                                    ? 'bg-brand-400/30 rounded-b-2xl border-t border-brand-400/40'
+                                    : 'bg-white rounded-b-2xl border-x border-b border-slate-100'
+                                  }
+                                `}>
+                                  {btnLines.map((line, bi) => {
+                                    const trimmed = line.trim()
+                                    const isCopy = trimmed.startsWith('📋')
+                                    const isUrl = trimmed.startsWith('🔗')
+                                    return (
+                                      <div
+                                        key={bi}
+                                        className={`
+                                          flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-medium
+                                          ${bi > 0 ? (isOut ? 'border-t border-brand-400/30' : 'border-t border-slate-100') : ''}
+                                          ${isOut
+                                            ? 'text-white/90'
+                                            : isCopy ? 'text-brand-600' : isUrl ? 'text-blue-600' : 'text-slate-600'
+                                          }
+                                        `}
+                                      >
+                                        {trimmed}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              )}
+                            </>
+                          )
+                        })()}
 
                         {/* Time + read status */}
                         <div className={`flex items-center gap-1 mt-0.5 px-1 ${isOut ? 'flex-row-reverse' : ''}`}>

@@ -227,11 +227,27 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
         phone = _resolve_customer_phone(convo)
         if not phone:
             continue
+        n = _norm(phone)
         status = _status_for(phone, convo)
-        name = convo.customer.name if convo.customer and convo.customer.name else phone
+        name = convo.customer.name if convo.customer and convo.customer.name else ""
+
+        existing_key = norm_to_key.get(n)
+        if existing_key and existing_key in phone_info:
+            prev = phone_info[existing_key]
+            prev_has_name = prev["customer"] and prev["customer"] != prev["phone"]
+            if name and not prev_has_name:
+                phone_info.pop(existing_key)
+            elif prev_has_name:
+                conv_id_to_phone[convo.id] = existing_key
+                continue
+            else:
+                conv_id_to_phone[convo.id] = existing_key
+                continue
+
+        display_name = name or phone
         phone_info[phone] = {
             "id": str(convo.id),
-            "customer": name,
+            "customer": display_name,
             "phone": phone,
             "lastMsg": "",
             "time": "",
@@ -240,7 +256,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "unread": 0,
             "_conv_id": convo.id,
         }
-        norm_to_key[_norm(phone)] = phone
+        norm_to_key[n] = phone
         conv_id_to_phone[convo.id] = phone
 
     # ── 2. Latest MessageEvent per conversation_id (single query) ────────────
