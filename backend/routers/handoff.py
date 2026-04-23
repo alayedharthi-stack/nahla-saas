@@ -132,6 +132,20 @@ async def resolve_handoff_session_endpoint(
     if not session:
         raise HTTPException(status_code=404, detail="Handoff session not found")
 
+    from database.models import Conversation, Customer  # noqa: PLC0415
+    cust = db.query(Customer).filter(
+        Customer.tenant_id == tenant_id,
+        Customer.phone.contains(session.customer_phone[-9:]),
+    ).first()
+    if cust:
+        convo = db.query(Conversation).filter(
+            Conversation.tenant_id == tenant_id,
+            Conversation.customer_id == cust.id,
+        ).first()
+        if convo:
+            convo.status = "active"
+            convo.is_human_handoff = False
+
     from observability.event_logger import log_event  # noqa: PLC0415
     log_event(
         db, tenant_id,

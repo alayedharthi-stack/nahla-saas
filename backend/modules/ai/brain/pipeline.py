@@ -39,6 +39,7 @@ from .types import (
     INTENT_GENERAL,
     INTENT_PICK_LIST_ITEM,
 )
+from .decision.actions import ACTION_HANDOFF
 from .protocols import (
     IntentClassifier,
     StateStore,
@@ -340,7 +341,11 @@ class MerchantBrain:
         except Exception:
             pass   # trace logging must never break the reply path
 
-        return {"reply": reply, "buttons": pending_buttons}
+        return {
+            "reply": reply,
+            "buttons": pending_buttons,
+            "handoff": decision.action == ACTION_HANDOFF,
+        }
 
 
 # ── Brain state helpers ────────────────────────────────────────────────────────

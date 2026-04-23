@@ -943,9 +943,8 @@ async def _handle_merchant_message(
         # Create/update the visible dashboard conversation first so inbound
         # messages appear even if AI generation or sending fails later.
         convo = _get_or_create_conversation(db, tenant_id, to)
-        convo.status = "active"
-        convo.is_human_handoff = False
-        convo.paused_by_human = False
+        if convo.status != "human" and not convo.is_human_handoff:
+            convo.status = "active"
         db.add(convo)
         db.flush()
 
@@ -1095,15 +1094,33 @@ async def _handle_merchant_message(
                     customer_id=profile.get("id"),
                     conversation_id=convo.id,
                 )
-                # process() returns dict {"reply": str, "buttons": list}
+                # process() returns dict {"reply": str, "buttons": list, "handoff": bool}
                 if isinstance(brain_result, dict):
                     reply   = brain_result.get("reply", "") or ""
                     _brain_buttons = brain_result.get("buttons") or []
+                    _brain_handoff = bool(brain_result.get("handoff"))
                 else:
                     reply          = str(brain_result or "")
                     _brain_buttons = []
-                logger.info("[Merchant/Brain] replied tenant=%s to=%s buttons=%d",
-                            tenant_id, to, len(_brain_buttons))
+                    _brain_handoff = False
+
+                if _brain_handoff:
+                    try:
+                        from handoff.manager import create_handoff_session  # noqa: PLC0415
+                        _cust_name = profile.get("name") or to
+                        create_handoff_session(
+                            db, tenant_id, to, _cust_name, text,
+                            reason="customer_request",
+                        )
+                        convo.status = "human"
+                        convo.is_human_handoff = True
+                        db.flush()
+                        logger.info("[Merchant/Brain] handoff session created for tenant=%s to=%s", tenant_id, to)
+                    except Exception as ho_exc:
+                        logger.error("[Merchant/Brain] failed to create handoff session: %s", ho_exc)
+
+                logger.info("[Merchant/Brain] replied tenant=%s to=%s buttons=%d handoff=%s",
+                            tenant_id, to, len(_brain_buttons), _brain_handoff)
             except Exception as brain_exc:
                 logger.error("[Merchant/Brain] Brain pipeline failed: %s — falling back to legacy", brain_exc)
                 MERCHANT_BRAIN_ENABLED_FALLBACK = True
