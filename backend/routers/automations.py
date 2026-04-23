@@ -1347,7 +1347,7 @@ async def retry_abandoned_cart(
     # ── Idempotency: short-circuit on a recent unprocessed retry ─────────
     from datetime import timedelta
 
-    recent_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=60)
+    recent_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=10)
     existing_retry = (
         db.query(AutomationEvent)
         .filter(
@@ -1391,6 +1391,29 @@ async def retry_abandoned_cart(
             },
         )
 
+    # ── Cancel ALL pending/scheduled events for this cart ────────────────
+    pending_events = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type == "cart_abandoned",
+            AutomationEvent.processed == False,
+        )
+        .all()
+    )
+    cancelled_count = 0
+    for ev in pending_events:
+        ep = ev.payload or {}
+        ev_root = int(ep.get("parent_event_id") or ep.get("recovery_event_id") or ev.id)
+        if ev_root == root_event_id or ev.id == root_event_id:
+            ev.processed = True
+            ep["cancelled_by_retry"] = True
+            ep["cancelled_at"] = datetime.now(timezone.utc).isoformat()
+            ev.payload = ep
+            cancelled_count += 1
+    if cancelled_count:
+        db.flush()
+
     base_payload: Dict[str, Any] = dict(root_event.payload or {})
     base_payload["step_idx"]            = 1
     base_payload["parent_event_id"]     = root_event_id
@@ -1400,6 +1423,7 @@ async def retry_abandoned_cart(
     base_payload["retry_reason"]        = "manual_restart_stage1"
     base_payload.pop("processed_at", None)
     base_payload.pop("result", None)
+    base_payload.pop("cancelled_by_retry", None)
 
     new_event = AutomationEvent(
         tenant_id   = tenant_id,
@@ -1418,6 +1442,7 @@ async def retry_abandoned_cart(
         "deduplicated":   False,
         "retry_event_id": new_event.id,
         "step_idx":       1,
+        "cancelled_old":  cancelled_count,
         "queued_at":      new_event.created_at.replace(tzinfo=timezone.utc).isoformat(),
-        "message":        "تمت إعادة جدولة التذكيرات من المرحلة الأولى — ستُنفّذ خلال دقيقة.",
+        "message":        f"تم إلغاء {cancelled_count} حدث سابق وإعادة الجدولة من المرحلة الأولى.",
     }
