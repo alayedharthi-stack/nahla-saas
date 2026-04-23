@@ -81,14 +81,17 @@ def _customer(db, tid):
     return c
 
 
-def _automation(db, tid):
+def _automation(db, tid, *, num_steps=3):
+    """Create a cart recovery automation with ``num_steps`` stages."""
+    delays = [30, 360, 1425, 4320]  # 30m, 6h, ~24h, 3d
+    steps = [{"delay_minutes": d, "enabled": True} for d in delays[:num_steps]]
     a = SmartAutomation(
         tenant_id=tid,
         automation_type="abandoned_cart",
         name="Cart recovery",
         enabled=True,
         engine="advanced",
-        config={},
+        config={"steps": steps},
         trigger_event="cart_abandoned",
     )
     db.add(a)
@@ -169,7 +172,7 @@ def test_summarise_marks_event_without_execution_as_pending():
     db, tid = _db()
     cust = _customer(db, tid)
     auto = _automation(db, tid)
-    ev = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 1})
+    ev = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
     o = _order(db, tid, recovery_event_id=ev.id)
 
     out = summarise_for_orders(db, tid, [o])
@@ -186,7 +189,7 @@ def test_summarise_in_progress_when_some_sent_some_pending():
     cust = _customer(db, tid)
     auto = _automation(db, tid)
 
-    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 1})
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
     sent_at = datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc)
     _execution(
         db, tid, event_id=root.id, automation_id=auto.id, customer_id=cust.id,
@@ -196,7 +199,7 @@ def test_summarise_in_progress_when_some_sent_some_pending():
 
     follow = _event(
         db, tid, cust.id, automation_id=auto.id,
-        payload={"step_idx": 2, "parent_event_id": root.id},
+        payload={"step_idx": 1, "parent_event_id": root.id},
         created_at=datetime(2026, 4, 20, 18, 0, tzinfo=timezone.utc),
     )
     o = _order(db, tid, recovery_event_id=root.id)
@@ -211,28 +214,33 @@ def test_summarise_in_progress_when_some_sent_some_pending():
     assert s["recovery_event_id"] == root.id
 
 
-# ── 4. Completed: every stage has an execution row, no pending ──────────────
+# ── 4. Completed: ALL configured stages sent, no pending ────────────────────
 def test_summarise_completed_when_all_stages_sent():
     db, tid = _db()
     cust = _customer(db, tid)
-    auto = _automation(db, tid)
+    auto = _automation(db, tid, num_steps=3)
 
-    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 1})
-    follow = _event(
-        db, tid, cust.id, automation_id=auto.id,
-        payload={"step_idx": 2, "parent_event_id": root.id},
-    )
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
+    s2 = _event(db, tid, cust.id, automation_id=auto.id,
+                payload={"step_idx": 1, "parent_event_id": root.id})
+    s3 = _event(db, tid, cust.id, automation_id=auto.id,
+                payload={"step_idx": 2, "parent_event_id": root.id})
+
     _execution(db, tid, event_id=root.id, automation_id=auto.id,
                customer_id=cust.id, status="sent",
-               executed_at=datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc))
-    _execution(db, tid, event_id=follow.id, automation_id=auto.id,
+               executed_at=datetime(2026, 4, 20, 10, 30, tzinfo=timezone.utc))
+    _execution(db, tid, event_id=s2.id, automation_id=auto.id,
                customer_id=cust.id, status="sent",
-               executed_at=datetime(2026, 4, 20, 18, 0, tzinfo=timezone.utc))
-    o = _order(db, tid, recovery_event_id=root.id)
+               executed_at=datetime(2026, 4, 20, 16, 0, tzinfo=timezone.utc))
+    _execution(db, tid, event_id=s3.id, automation_id=auto.id,
+               customer_id=cust.id, status="sent",
+               executed_at=datetime(2026, 4, 21, 9, 45, tzinfo=timezone.utc))
 
+    o = _order(db, tid, recovery_event_id=root.id)
     out = summarise_for_orders(db, tid, [o])
     assert out[o.id]["status"] == RECOVERY_STATUS_COMPLETED
-    assert out[o.id]["steps_sent"] == 2
+    assert out[o.id]["steps_sent"] == 3
+    assert out[o.id]["total_stages"] == 3
 
 
 # ── 5. Failed: latest execution failed with a real error message ────────────
@@ -240,7 +248,7 @@ def test_summarise_failed_when_real_error_and_no_sent_stage():
     db, tid = _db()
     cust = _customer(db, tid)
     auto = _automation(db, tid)
-    ev = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 1})
+    ev = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
     _execution(
         db, tid, event_id=ev.id, automation_id=auto.id, customer_id=cust.id,
         status="failed", error_message="WhatsApp template not approved",
@@ -263,7 +271,7 @@ def test_summarise_converted_when_recovery_converted_at_set():
     ev = _event(
         db, tid, cust.id, automation_id=auto.id,
         payload={
-            "step_idx": 1,
+            "step_idx": 0,
             "recovery_converted_at": converted_at,
             "recovery_cancel_reason": "customer_purchased",
         },
@@ -286,7 +294,7 @@ def test_step_recorded_as_skipped_when_failed_status_carries_metrics_skip_reason
     db, tid = _db()
     cust = _customer(db, tid)
     auto = _automation(db, tid)
-    ev = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 1})
+    ev = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
     _execution(
         db, tid, event_id=ev.id, automation_id=auto.id, customer_id=cust.id,
         status="failed", error_message=None,
@@ -306,13 +314,13 @@ def test_step_recorded_as_skipped_when_failed_status_carries_metrics_skip_reason
 def test_timeline_returns_full_step_chain_in_step_idx_order():
     db, tid = _db()
     cust = _customer(db, tid)
-    auto = _automation(db, tid)
+    auto = _automation(db, tid, num_steps=3)
 
-    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 1})
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
     s2 = _event(db, tid, cust.id, automation_id=auto.id,
-                payload={"step_idx": 2, "parent_event_id": root.id})
+                payload={"step_idx": 1, "parent_event_id": root.id})
     s3 = _event(db, tid, cust.id, automation_id=auto.id,
-                payload={"step_idx": 3, "parent_event_id": root.id})
+                payload={"step_idx": 2, "parent_event_id": root.id})
 
     _execution(db, tid, event_id=root.id, automation_id=auto.id,
                customer_id=cust.id, status="sent",
@@ -354,14 +362,14 @@ def test_summarise_handles_mixed_batch_correctly():
                 customer_name="A", total=10, is_abandoned=True,
                 extra_metadata={"created_at": "2026-04-20T10:00:00+00:00"})
     # Order B: pending (event but no execution)
-    ev_b = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 1})
+    ev_b = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
     o_b = Order(tenant_id=tid, external_id="cart-b", status="abandoned",
                 customer_name="B", total=20, is_abandoned=True,
                 extra_metadata={"recovery_event_id": ev_b.id,
                                 "created_at": "2026-04-20T10:00:00+00:00"})
     # Order C: converted
     ev_c = _event(db, tid, cust.id, automation_id=auto.id,
-                  payload={"step_idx": 1,
+                  payload={"step_idx": 0,
                            "recovery_converted_at": "2026-04-20T14:00:00+00:00",
                            "recovery_cancel_reason": "order_paid"})
     o_c = Order(tenant_id=tid, external_id="cart-c", status="abandoned",
@@ -378,3 +386,128 @@ def test_summarise_handles_mixed_batch_correctly():
     assert out[o_a.id]["status"] == RECOVERY_STATUS_NO_RECOVERY
     assert out[o_b.id]["status"] == RECOVERY_STATUS_PENDING
     assert out[o_c.id]["status"] == RECOVERY_STATUS_CONVERTED
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  REGRESSION: stage 1 only sent → must NOT show "completed"
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_stage1_only_sent_is_in_progress_not_completed():
+    """After Stage 1 is sent but follow-ups haven't been emitted yet,
+    the status MUST be in_progress — never completed."""
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=3)
+
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
+    _execution(db, tid, event_id=root.id, automation_id=auto.id,
+               customer_id=cust.id, status="sent",
+               executed_at=datetime(2026, 4, 20, 10, 30, tzinfo=timezone.utc))
+    o = _order(db, tid, recovery_event_id=root.id)
+
+    s = summarise_for_orders(db, tid, [o])[o.id]
+    assert s["status"] == RECOVERY_STATUS_IN_PROGRESS, \
+        f"Expected in_progress after stage 1 only, got {s['status']}"
+    assert s["steps_sent"] == 1
+    assert s["total_stages"] == 3
+
+
+def test_stage1_and_stage2_sent_is_in_progress_not_completed():
+    """After 2 of 3 stages are sent, still in_progress."""
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=3)
+
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
+    s2 = _event(db, tid, cust.id, automation_id=auto.id,
+                payload={"step_idx": 1, "parent_event_id": root.id})
+    _execution(db, tid, event_id=root.id, automation_id=auto.id,
+               customer_id=cust.id, status="sent",
+               executed_at=datetime(2026, 4, 20, 10, 30, tzinfo=timezone.utc))
+    _execution(db, tid, event_id=s2.id, automation_id=auto.id,
+               customer_id=cust.id, status="sent",
+               executed_at=datetime(2026, 4, 20, 16, 0, tzinfo=timezone.utc))
+    o = _order(db, tid, recovery_event_id=root.id)
+
+    s = summarise_for_orders(db, tid, [o])[o.id]
+    assert s["status"] == RECOVERY_STATUS_IN_PROGRESS
+    assert s["steps_sent"] == 2
+
+
+def test_converted_after_stage1_is_converted_not_completed():
+    """If the customer buys after Stage 1, status = converted."""
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=3)
+
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={
+        "step_idx": 0,
+        "recovery_converted_at": "2026-04-20T11:00:00+00:00",
+        "recovery_cancel_reason": "customer_purchased",
+    })
+    _execution(db, tid, event_id=root.id, automation_id=auto.id,
+               customer_id=cust.id, status="sent",
+               executed_at=datetime(2026, 4, 20, 10, 30, tzinfo=timezone.utc))
+    o = _order(db, tid, recovery_event_id=root.id)
+
+    s = summarise_for_orders(db, tid, [o])[o.id]
+    assert s["status"] == RECOVERY_STATUS_CONVERTED
+
+
+def test_step_idx_conversion_0_based_to_1_based():
+    """Payload step_idx is 0-based; displayed step_idx must be 1-based."""
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=3)
+
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
+    s2 = _event(db, tid, cust.id, automation_id=auto.id,
+                payload={"step_idx": 1, "parent_event_id": root.id})
+    s3 = _event(db, tid, cust.id, automation_id=auto.id,
+                payload={"step_idx": 2, "parent_event_id": root.id})
+    _execution(db, tid, event_id=root.id, automation_id=auto.id,
+               customer_id=cust.id, status="sent")
+    o = _order(db, tid, recovery_event_id=root.id)
+
+    tl = timeline_for_order(db, tid, o)
+    assert [s["step_idx"] for s in tl["steps"]] == [1, 2, 3]
+    assert tl["steps"][0]["status"] == "sent"
+    assert tl["steps"][1]["status"] == "pending"
+    assert tl["steps"][2]["status"] == "pending"
+
+
+def test_timeline_step_sent_shows_correct_status():
+    """A step with an execution status='sent' must report status='sent',
+    not 'pending' or 'no_recovery' (the bug that showed 'لم يبدأ')."""
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=3)
+
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
+    _execution(db, tid, event_id=root.id, automation_id=auto.id,
+               customer_id=cust.id, status="sent",
+               executed_at=datetime(2026, 4, 20, 10, 30, tzinfo=timezone.utc),
+               action_taken={"template_name": "cart_reminder", "wa_message_id": "wamid.abc"})
+    o = _order(db, tid, recovery_event_id=root.id)
+
+    tl = timeline_for_order(db, tid, o)
+    step1 = tl["steps"][0]
+    assert step1["status"] == "sent"
+    assert step1["sent_at"] is not None
+    assert step1["template_name"] == "cart_reminder"
+
+
+def test_total_stages_derived_from_automation_config():
+    """total_stages in the response must match the automation's config."""
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=4)
+
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={"step_idx": 0})
+    _execution(db, tid, event_id=root.id, automation_id=auto.id,
+               customer_id=cust.id, status="sent")
+    o = _order(db, tid, recovery_event_id=root.id)
+
+    s = summarise_for_orders(db, tid, [o])[o.id]
+    assert s["total_stages"] == 4
+    assert s["status"] == RECOVERY_STATUS_IN_PROGRESS

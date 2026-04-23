@@ -287,7 +287,8 @@ function OrderStatusQueue({ items }: { items: OrderStatusUpdateItem[] }) {
 // Maps the backend ``RecoveryStatus`` taxonomy onto the merchant-facing
 // vocabulary the dashboard already uses elsewhere. Always returns
 // something printable — never an empty pill.
-const RECOVERY_BADGE: Record<RecoveryStatus, { label: string; cls: string; tip: string }> = {
+const RECOVERY_BADGE: Record<string, { label: string; cls: string; tip: string }> = {
+  // ── Overall cart statuses ──
   no_recovery: {
     label: 'لم يبدأ',
     cls:   'bg-slate-50 text-slate-500 border-slate-200',
@@ -318,9 +319,20 @@ const RECOVERY_BADGE: Record<RecoveryStatus, { label: string; cls: string; tip: 
     cls:   'bg-red-50 text-red-700 border-red-200',
     tip:   'فشل آخر تذكير في الإرسال — افتح التفاصيل لمعرفة السبب.',
   },
+  // ── Per-step statuses (returned by step-level API) ──
+  sent: {
+    label: 'تم الإرسال',
+    cls:   'bg-green-50 text-green-700 border-green-200',
+    tip:   'تم إرسال هذا التذكير بنجاح.',
+  },
+  skipped: {
+    label: 'تم التخطي',
+    cls:   'bg-slate-50 text-slate-400 border-slate-200',
+    tip:   'تم تخطي هذه المرحلة (تم الشراء أو المرحلة معطلة).',
+  },
 }
 
-function RecoveryStatusBadge({ status }: { status: RecoveryStatus }) {
+function RecoveryStatusBadge({ status }: { status: RecoveryStatus | string }) {
   const meta = RECOVERY_BADGE[status] ?? RECOVERY_BADGE.no_recovery
   return (
     <span
@@ -533,7 +545,7 @@ function RecoveryDrawer({
                             <span className="text-xs font-medium text-slate-700">
                               المرحلة {step.step_idx}{step.is_root ? ' (أساسية)' : ''}
                             </span>
-                            <RecoveryStatusBadge status={step.status as RecoveryStatus} />
+                            <RecoveryStatusBadge status={step.status} />
                           </div>
                           <div className="text-[11px] text-slate-400 mt-0.5">
                             {step.sent_at

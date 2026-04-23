@@ -95,16 +95,21 @@ def _resolve_recovery_event_id(order: Order) -> Optional[int]:
 
 
 def _step_idx(event: AutomationEvent) -> int:
-    """Stage number of this event in the recovery sequence. Stage 1 is
-    the original ``cart_abandoned`` emission; follow-ups carry an
-    explicit ``step_idx`` in the payload."""
+    """Stage number (1-based) of this event in the recovery sequence.
+
+    The payload stores ``step_idx`` as a 0-based index into the
+    automation's ``config.steps`` list:
+      step_idx=0 → Stage 1, step_idx=1 → Stage 2, etc.
+    Original events (no ``step_idx`` key) are always Stage 1.
+    """
     payload = event.payload or {}
     raw = payload.get("step_idx")
+    if raw is None:
+        return 1
     try:
-        idx = int(raw) if raw is not None else 1
+        return int(raw) + 1
     except (TypeError, ValueError):
-        idx = 1
-    return max(1, idx)
+        return 1
 
 
 def _is_purchase_cancel(payload: Dict[str, Any]) -> bool:
@@ -367,32 +372,36 @@ def _load_executions_for_events(
 
 
 # ── Public API: per-cart summary ─────────────────────────────────────────────
+def _get_total_configured_stages(db: Session, tenant_id: int) -> int:
+    """Return the number of stages in the tenant's abandoned-cart automation.
+
+    Falls back to 3 (the standard seed) when no automation is found.
+    """
+    from models import SmartAutomation  # noqa: PLC0415
+
+    auto = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "abandoned_cart",
+        )
+        .first()
+    )
+    if auto and auto.config:
+        steps = auto.config.get("steps") or []
+        if steps:
+            return len(steps)
+    return 3
+
+
 def summarise_for_orders(
     db: Session,
     tenant_id: int,
     orders: Iterable[Order],
 ) -> Dict[int, Dict[str, Any]]:
-    """Return ``{order_id: summary_dict}``.
-
-    The summary contains the few fields the queue list needs to render a
-    status badge and a "آخر تذكير" timestamp without a per-row API call:
-
-      ``status``              — RECOVERY_STATUS_*
-      ``steps_sent``          — count of execution rows with status='sent'
-      ``steps_failed``        — count of execution rows with status='failed'
-                                  (real failures only — skipped does not count)
-      ``last_sent_at``        — ISO UTC of the most recent successful send
-      ``last_status``         — status of the most recent execution row
-      ``last_error``          — error_message of the latest failed execution
-      ``next_pending_at``     — ISO UTC of the next pending event's created_at
-      ``converted_at``        — ISO UTC if the recovery was cancel-on-purchase
-      ``cancel_reason``       — why the flow stopped, if it did
-      ``recovery_event_id``   — root event id (for the timeline endpoint)
-    """
+    """Return ``{order_id: summary_dict}``."""
     out: Dict[int, Dict[str, Any]] = {}
 
-    # Pre-collect all root event ids so we can fetch every event tree in
-    # a small number of round-trips even when the merchant has 50 carts.
     roots_by_order: Dict[int, int] = {}
     for order in orders:
         rid = _resolve_recovery_event_id(order)
@@ -403,10 +412,8 @@ def summarise_for_orders(
     if not roots_by_order:
         return out
 
-    # We still load tree-by-tree (one query for root + one for followups)
-    # because the JSONB followup predicate cannot be batched cleanly. With
-    # at most 50 carts on the queue page this is bounded — and we cap at
-    # 200 to keep the worst case sane.
+    total_stages = _get_total_configured_stages(db, tenant_id)
+
     for order_id, root_id in list(roots_by_order.items())[:200]:
         events = _load_event_tree(db, tenant_id, root_id)
         if not events:
@@ -416,7 +423,9 @@ def summarise_for_orders(
         executions = _load_executions_for_events(
             db, tenant_id, [e.id for e in events]
         )
-        out[order_id] = _summary_from_tree(events, executions)
+        out[order_id] = _summary_from_tree(
+            events, executions, total_configured_stages=total_stages,
+        )
 
     return out
 
@@ -426,6 +435,7 @@ def _empty_summary() -> Dict[str, Any]:
         "status":              RECOVERY_STATUS_NO_RECOVERY,
         "steps_sent":          0,
         "steps_failed":        0,
+        "total_stages":        0,
         "last_sent_at":        None,
         "last_status":         None,
         "last_error":          None,
@@ -441,11 +451,12 @@ def _empty_summary() -> Dict[str, Any]:
 def _summary_from_tree(
     events: List[AutomationEvent],
     executions: Dict[int, AutomationExecution],
+    *,
+    total_configured_stages: int = 3,
 ) -> Dict[str, Any]:
     root = events[0]
     root_payload = root.payload or {}
 
-    # Build the per-step rows once; the summary fields are then trivial.
     steps = [
         _step_for_event(ev, executions.get(ev.id), is_root=(ev.id == root.id))
         for ev in events
@@ -462,6 +473,8 @@ def _summary_from_tree(
     converted_at = root_payload.get("recovery_converted_at")
     cancel_reason = root_payload.get("recovery_cancel_reason")
 
+    max_sent_stage = max((s["step_idx"] for s in sent), default=0) if sent else 0
+
     if converted_at or cancel_reason:
         status = RECOVERY_STATUS_CONVERTED
     elif failed and not sent:
@@ -471,20 +484,24 @@ def _summary_from_tree(
     elif sent and pending:
         status = RECOVERY_STATUS_IN_PROGRESS
     elif sent and not pending:
-        status = RECOVERY_STATUS_COMPLETED
+        # Only mark completed if the highest sent stage covers all
+        # configured stages.  When the follow-up sweeper hasn't run
+        # yet (only stage 1 sent, stages 2-3 not emitted), there are
+        # zero pending events — but the sequence is NOT done.
+        if max_sent_stage >= total_configured_stages:
+            status = RECOVERY_STATUS_COMPLETED
+        else:
+            status = RECOVERY_STATUS_IN_PROGRESS
     else:
-        # Fallback — shouldn't happen but we never want a missing key.
         status = RECOVERY_STATUS_PENDING
 
-    # Pick the latest failed step (if any) so the queue list can show
-    # the localised failure label inline — without forcing the merchant
-    # to open the drawer just to see WHY a reminder failed.
     last_failed = max(failed, key=lambda s: s.get("sent_at") or s.get("scheduled_at") or "", default=None)
 
     return {
         "status":              status,
         "steps_sent":          len(sent),
         "steps_failed":        len(failed),
+        "total_stages":        total_configured_stages,
         "last_sent_at":        last_sent.get("sent_at") if last_sent else None,
         "last_status":         last_step.get("status") if last_step else None,
         "last_error":          last_step.get("error") if last_step else None,
@@ -516,8 +533,11 @@ def timeline_for_order(
     if not events:
         return {**_empty_summary(), "steps": []}
 
+    total_stages = _get_total_configured_stages(db, tenant_id)
     executions = _load_executions_for_events(db, tenant_id, [e.id for e in events])
-    summary = _summary_from_tree(events, executions)
+    summary = _summary_from_tree(
+        events, executions, total_configured_stages=total_stages,
+    )
     steps = [
         _step_for_event(ev, executions.get(ev.id), is_root=(ev.id == events[0].id))
         for ev in events
