@@ -17,7 +17,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -124,7 +124,6 @@ async def list_campaigns(request: Request, db: Session = Depends(get_db)):
 async def create_campaign(
     body: CreateCampaignIn,
     request: Request,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     tenant_id = resolve_tenant_id(request)
@@ -191,7 +190,7 @@ async def create_campaign(
     db.refresh(campaign)
 
     if is_immediate:
-        background_tasks.add_task(_dispatch_campaign_background, campaign.id, tenant_id)
+        asyncio.create_task(_dispatch_campaign_async(campaign.id))
 
     return _campaign_to_dict(campaign)
 
@@ -201,7 +200,6 @@ async def update_campaign_status(
     campaign_id: int,
     body: UpdateCampaignStatusIn,
     request: Request,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     tenant_id = resolve_tenant_id(request)
@@ -221,7 +219,7 @@ async def update_campaign_status(
     db.refresh(campaign)
 
     if body.status == "active" and was_not_active:
-        background_tasks.add_task(_dispatch_campaign_background, campaign.id, tenant_id)
+        asyncio.create_task(_dispatch_campaign_async(campaign.id))
 
     return _campaign_to_dict(campaign)
 
@@ -281,17 +279,21 @@ async def test_send(body: TestSendIn, request: Request, db: Session = Depends(ge
 
 # ── Campaign dispatch (background) ──────────────────────────────────────────
 
-async def _dispatch_campaign_background_async(campaign_id: int) -> None:
-    """Async dispatcher using a fresh DB session."""
+async def _dispatch_campaign_async(campaign_id: int) -> None:
+    """Fire-and-forget async task that dispatches a campaign using a fresh
+    DB session. Runs on the main uvicorn event loop via asyncio.create_task,
+    so all async HTTP calls (provider_send_message → httpx) work natively."""
     from core.database import SessionLocal  # noqa: PLC0415
     from services.campaign_dispatcher import dispatch_campaign  # noqa: PLC0415
 
+    logger.info("[campaigns] dispatching campaign=%d in async task", campaign_id)
     db = SessionLocal()
     try:
         result = await dispatch_campaign(db, campaign_id)
         logger.info(
-            "[campaigns] dispatch done campaign=%d: sent=%s failed=%s",
+            "[campaigns] dispatch done campaign=%d: sent=%s failed=%s errors=%s",
             campaign_id, result.get("sent"), result.get("failed"),
+            result.get("errors", [])[:3],
         )
     except Exception as exc:
         logger.error(
@@ -300,18 +302,3 @@ async def _dispatch_campaign_background_async(campaign_id: int) -> None:
         )
     finally:
         db.close()
-
-
-def _dispatch_campaign_background(campaign_id: int, tenant_id: int) -> None:
-    """Run the async dispatcher from a sync background task context."""
-    logger.info("[campaigns] dispatching campaign=%d tenant=%d in background", campaign_id, tenant_id)
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(_dispatch_campaign_background_async(campaign_id))
-        else:
-            loop.run_until_complete(_dispatch_campaign_background_async(campaign_id))
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(_dispatch_campaign_background_async(campaign_id))

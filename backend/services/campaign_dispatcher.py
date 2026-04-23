@@ -44,8 +44,14 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         return {"sent": 0, "failed": 0, "skipped": 0, "errors": ["Campaign not found"]}
 
     tenant_id = campaign.tenant_id
+    logger.info(
+        "[campaign_dispatcher] starting campaign=%d tenant=%d template_id=%s audience=%s",
+        campaign_id, tenant_id, campaign.template_id, campaign.audience_type,
+    )
+
     template = _load_template(db, campaign)
     if not template:
+        logger.warning("[campaign_dispatcher] campaign=%d: template not found or not APPROVED (id=%s)", campaign_id, campaign.template_id)
         campaign.status = "completed"
         db.commit()
         return {"sent": 0, "failed": 0, "skipped": 0,
@@ -53,15 +59,21 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
 
     wa_conn = _get_wa_connection(db, tenant_id)
     if not wa_conn:
+        logger.warning("[campaign_dispatcher] campaign=%d: no active WhatsApp connection", campaign_id)
         return {"sent": 0, "failed": 0, "skipped": 0,
                 "errors": ["No active WhatsApp connection"]}
 
+    logger.info("[campaign_dispatcher] campaign=%d: WA conn found phone_id=%s", campaign_id, getattr(wa_conn, 'phone_number_id', '?'))
+
     customers = _resolve_audience(db, tenant_id, campaign.audience_type)
     if not customers:
+        logger.warning("[campaign_dispatcher] campaign=%d: no reachable customers for segment=%s", campaign_id, campaign.audience_type)
         campaign.status = "completed"
         db.commit()
         return {"sent": 0, "failed": 0, "skipped": 0,
                 "errors": ["No reachable customers in this segment"]}
+
+    logger.info("[campaign_dispatcher] campaign=%d: found %d customers to send to", campaign_id, len(customers))
 
     campaign.status = "active"
     if not campaign.launched_at:
