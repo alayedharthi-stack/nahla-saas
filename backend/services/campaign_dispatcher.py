@@ -149,14 +149,24 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
                 err_code = meta_err.get("code", "")
                 err_sub = meta_err.get("error_subcode", "")
                 logger.warning(
-                    "[campaign_dispatcher] campaign=%d: Meta error for %s code=%s sub=%s msg=%s payload=%s",
+                    "[campaign_dispatcher] campaign=%d: Meta error for %s code=%s sub=%s msg=%s",
                     campaign_id, phone, err_code, err_sub, err_msg,
-                    payload.get("template", {}).get("components", []),
                 )
-                detail = f"{phone}: ({err_code}) {err_msg[:100]}"
-                if err_code in (131008, "131008"):
-                    sent_comps = payload.get("template", {}).get("components", [])
-                    detail += f" [sent {len(sent_comps)} components]"
+                logger.warning(
+                    "[campaign_dispatcher] campaign=%d: FULL PAYLOAD → %s",
+                    campaign_id, payload,
+                )
+                logger.warning(
+                    "[campaign_dispatcher] campaign=%d: RAW TEMPLATE COMPONENTS → %s",
+                    campaign_id, template.components,
+                )
+                import json as _json
+                sent_comps = payload.get("template", {}).get("components", [])
+                detail = f"{phone}: ({err_code}) {err_msg[:80]}"
+                if failed <= 1:
+                    detail += f" | payload_comps={_json.dumps(sent_comps, ensure_ascii=False)[:300]}"
+                    tpl_comp_types = [c.get('type','?') for c in (template.components or [])]
+                    detail += f" | tpl_types={tpl_comp_types}"
                 if len(errors) < 10:
                     errors.append(detail)
             else:
