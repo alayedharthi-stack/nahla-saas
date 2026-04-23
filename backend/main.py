@@ -571,6 +571,13 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("WhatsApp template sync scheduler could not start: %s", exc)
 
+    try:
+        from core.scheduler import run_campaign_dispatcher_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_campaign_dispatcher_scheduler())
+        logger.info("Campaign dispatcher scheduler started (30s).")
+    except Exception as exc:
+        logger.warning("Campaign dispatcher scheduler could not start: %s", exc)
+
     # 7. Event-driven automation engine (every 60s)
     try:
         from core.scheduler import run_automation_engine_scheduler  # noqa: PLC0415

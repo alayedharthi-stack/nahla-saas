@@ -25,6 +25,65 @@ _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 h
 _SALLA_TOKEN_REFRESH_SECONDS = 6 * 3600  # Salla token refresh every 6 hours
 _AUTOMATION_POLL_SECONDS = 60  # automation engine poll interval
 _TEMPLATE_SYNC_INTERVAL_SECONDS = 30 * 60  # WhatsApp template auto-sync every 30 min
+_CAMPAIGN_POLL_SECONDS = 30  # check for scheduled/delayed campaigns every 30s
+
+
+async def run_campaign_dispatcher_scheduler() -> None:
+    """Poll for scheduled/delayed campaigns that are ready to send."""
+    await asyncio.sleep(10)
+    logger.info("[Campaign Dispatcher] Started — polling every %ss", _CAMPAIGN_POLL_SECONDS)
+    while True:
+        try:
+            await _dispatch_due_campaigns()
+        except Exception as exc:
+            logger.error("[Campaign Dispatcher] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_CAMPAIGN_POLL_SECONDS)
+
+
+async def _dispatch_due_campaigns() -> None:
+    """Find campaigns that are scheduled/delayed and past their due time, then dispatch."""
+    import sys as _sys, os as _os
+    _backend = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _db_dir = _os.path.abspath(_os.path.join(_backend, "..", "database"))
+    for _p in (_backend, _db_dir):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+
+    from core.database import SessionLocal
+    from database.models import Campaign
+
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        due_campaigns = (
+            db.query(Campaign)
+            .filter(
+                Campaign.status.in_(["scheduled", "draft"]),
+                Campaign.schedule_type.in_(["scheduled", "delayed"]),
+            )
+            .all()
+        )
+        for c in due_campaigns:
+            is_due = False
+            if c.schedule_type == "scheduled" and c.schedule_time:
+                is_due = c.schedule_time <= now
+            elif c.schedule_type == "delayed" and c.created_at and c.delay_minutes:
+                due_at = c.created_at + timedelta(minutes=c.delay_minutes)
+                is_due = due_at <= now
+
+            if is_due:
+                logger.info(
+                    "[Campaign Dispatcher] campaign=%d is due (type=%s), dispatching",
+                    c.id, c.schedule_type,
+                )
+                from services.campaign_dispatcher import dispatch_campaign
+                result = await dispatch_campaign(db, c.id)
+                logger.info(
+                    "[Campaign Dispatcher] campaign=%d done: sent=%s failed=%s",
+                    c.id, result.get("sent"), result.get("failed"),
+                )
+    finally:
+        db.close()
 
 
 async def run_scheduler() -> None:

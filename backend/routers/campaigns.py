@@ -11,11 +11,13 @@ Routes:
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -26,6 +28,8 @@ from core.tenant import (
     get_or_create_tenant,
     resolve_tenant_id,
 )
+
+logger = logging.getLogger("nahla-backend")
 
 router = APIRouter()
 
@@ -117,7 +121,12 @@ async def list_campaigns(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/campaigns")
-async def create_campaign(body: CreateCampaignIn, request: Request, db: Session = Depends(get_db)):
+async def create_campaign(
+    body: CreateCampaignIn,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
@@ -155,11 +164,12 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
     if body.discount_percent is not None and body.discount_percent > 0:
         tpl_vars["_discount_percent"] = str(body.discount_percent)
 
+    is_immediate = body.schedule_type == "immediate"
     campaign = Campaign(
         tenant_id=tenant_id,
         name=body.name,
         campaign_type=body.campaign_type,
-        status="scheduled" if body.schedule_type == "scheduled" and schedule_dt else "draft",
+        status="active" if is_immediate else ("scheduled" if body.schedule_type == "scheduled" and schedule_dt else "draft"),
         template_id=str(template.id),
         template_name=template.name,
         template_language=template.language,
@@ -174,10 +184,15 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
         coupon_code=body.coupon_code or None,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
+        launched_at=datetime.now(timezone.utc) if is_immediate else None,
     )
     db.add(campaign)
     db.commit()
     db.refresh(campaign)
+
+    if is_immediate:
+        background_tasks.add(_dispatch_campaign_background, campaign.id, tenant_id)
+
     return _campaign_to_dict(campaign)
 
 
@@ -186,6 +201,7 @@ async def update_campaign_status(
     campaign_id: int,
     body: UpdateCampaignStatusIn,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     tenant_id = resolve_tenant_id(request)
@@ -195,12 +211,18 @@ async def update_campaign_status(
     ).first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
+
+    was_not_active = campaign.status != "active"
     campaign.status = body.status
     if body.status == "active" and not campaign.launched_at:
         campaign.launched_at = datetime.now(timezone.utc)
     campaign.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(campaign)
+
+    if body.status == "active" and was_not_active:
+        background_tasks.add(_dispatch_campaign_background, campaign.id, tenant_id)
+
     return _campaign_to_dict(campaign)
 
 
@@ -255,3 +277,41 @@ async def test_send(body: TestSendIn, request: Request, db: Session = Depends(ge
         status_code=400,
         detail=result["error_message"] or "فشل إرسال رسالة الاختبار",
     )
+
+
+# ── Campaign dispatch (background) ──────────────────────────────────────────
+
+async def _dispatch_campaign_background_async(campaign_id: int) -> None:
+    """Async dispatcher using a fresh DB session."""
+    from core.database import SessionLocal  # noqa: PLC0415
+    from services.campaign_dispatcher import dispatch_campaign  # noqa: PLC0415
+
+    db = SessionLocal()
+    try:
+        result = await dispatch_campaign(db, campaign_id)
+        logger.info(
+            "[campaigns] dispatch done campaign=%d: sent=%s failed=%s",
+            campaign_id, result.get("sent"), result.get("failed"),
+        )
+    except Exception as exc:
+        logger.error(
+            "[campaigns] dispatch failed campaign=%d: %s",
+            campaign_id, exc, exc_info=True,
+        )
+    finally:
+        db.close()
+
+
+def _dispatch_campaign_background(campaign_id: int, tenant_id: int) -> None:
+    """Run the async dispatcher from a sync background task context."""
+    logger.info("[campaigns] dispatching campaign=%d tenant=%d in background", campaign_id, tenant_id)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_dispatch_campaign_background_async(campaign_id))
+        else:
+            loop.run_until_complete(_dispatch_campaign_background_async(campaign_id))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_dispatch_campaign_background_async(campaign_id))
