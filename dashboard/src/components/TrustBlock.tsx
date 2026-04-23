@@ -66,18 +66,6 @@ interface TrustBlockProps {
   className?: string
 }
 
-// ─── Inline Saudi flag (no external assets, never breaks) ─────────────────
-function SaudiFlag({ className = '' }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 30 20" className={className} aria-hidden="true">
-      <rect width="30" height="20" rx="2" fill="#006C35" />
-      <path d="M5 8 L25 8"     stroke="#FFFFFF" strokeWidth="0.9" strokeLinecap="round" />
-      <path d="M5 12 L25 12"   stroke="#FFFFFF" strokeWidth="0.6" strokeLinecap="round" />
-      <path d="M6 14.5 L24 14.5" stroke="#FFFFFF" strokeWidth="0.7" strokeLinecap="round" />
-    </svg>
-  )
-}
-
 // ─── Component ────────────────────────────────────────────────────────────
 export default function TrustBlock({
   variant = 'light',
@@ -117,8 +105,16 @@ export default function TrustBlock({
           onMouseLeave={e => { e.currentTarget.style.boxShadow = '' }}
           aria-label={`السجل التجاري ${COMMERCIAL_REGISTRY_NUMBER} — موثق لدى وزارة التجارة`}
         >
-          <div className="shrink-0 w-12 h-8 rounded-md overflow-hidden ring-1 ring-white/10 shadow-sm">
-            <SaudiFlag className="w-full h-full" />
+          {/* MoC emblem — green Saudi palm-and-swords crest, icon-only PNG */}
+          <div className="shrink-0 w-14 h-14 rounded-xl bg-white flex items-center justify-center ring-1 ring-white/15 overflow-hidden shadow-sm p-1">
+            <img
+              src={MOC_LOGO_SRC}
+              alt="شعار وزارة التجارة"
+              loading="lazy"
+              decoding="async"
+              className="w-full h-full object-contain"
+              onError={e => { e.currentTarget.style.display = 'none' }}
+            />
           </div>
           <div className="flex flex-col text-right leading-tight">
             <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
@@ -161,25 +157,11 @@ export default function TrustBlock({
               href="https://mc.gov.sa/"
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 text-[12px] sm:text-[13px] font-semibold hover:opacity-90 transition-opacity"
+              className="inline-flex items-center gap-1.5 text-[12px] sm:text-[13px] font-semibold hover:opacity-90 transition-opacity"
               style={{ color: '#10B981' }}
             >
-              <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-white ring-1 ring-white/20 overflow-hidden shadow-sm shrink-0">
-                <img
-                  src={MOC_LOGO_SRC}
-                  alt="وزارة التجارة"
-                  className="w-full h-full object-contain"
-                  loading="lazy"
-                  decoding="async"
-                  onError={e => {
-                    e.currentTarget.style.display = 'none'
-                    const parent = e.currentTarget.parentElement
-                    if (parent) parent.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'
-                  }}
-                />
-              </span>
+              <ShieldCheck className="w-4 h-4 shrink-0" />
               موثق لدى وزارة التجارة
-              <ShieldCheck className="w-4 h-4" />
             </a>
           </div>
         </div>
@@ -196,19 +178,15 @@ export default function TrustBlock({
           aria-label="الانتقال إلى منصة توثيق الأعمال للتحقق من نحلة"
           title="اضغط للتحقق من توثيق نحلة لدى منصة توثيق الأعمال"
         >
+          {/* SBC icon-only logo — purple starburst mark, no wordmark text */}
           <div className="shrink-0 w-14 h-14 rounded-xl bg-white flex items-center justify-center ring-1 ring-white/15 overflow-hidden shadow-sm p-1.5">
             <img
               src={BUSINESS_AUTH_LOGO_SRC}
-              alt="المركز السعودي للأعمال — Saudi Business Centre"
+              alt="شعار المركز السعودي للأعمال"
               loading="lazy"
               decoding="async"
               className="w-full h-full object-contain"
-              onError={e => {
-                e.currentTarget.style.display = 'none'
-                const icon = document.createElement('span')
-                icon.className = 'flex items-center justify-center w-full h-full'
-                e.currentTarget.parentElement?.appendChild(icon)
-              }}
+              onError={e => { e.currentTarget.style.display = 'none' }}
             />
           </div>
           <div className="flex flex-col text-right leading-tight">
