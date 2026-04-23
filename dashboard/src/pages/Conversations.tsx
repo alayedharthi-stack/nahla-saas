@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Bot, User, Send, Phone, Search, MoreVertical,
-  UserCheck, RefreshCw, ArrowRight, Check, CheckCheck,
+  UserCheck, ArrowRight, Check, CheckCheck,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle,
 } from 'lucide-react'
 
@@ -174,14 +174,14 @@ export default function Conversations() {
 
   const handleClose = async () => {
     if (!selected) return
-    if (!window.confirm('إغلاق هذه المحادثة؟')) return
+    if (!window.confirm('إعادة هذه المحادثة للذكاء الاصطناعي؟')) return
     try {
       await featureRealityApi.closeConversation({
         customer_phone: selected.phone,
       })
       await loadList()
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر إغلاق المحادثة')
+      alert(e instanceof Error ? e.message : 'تعذّر إعادة المحادثة للذكاء')
     }
   }
 
@@ -381,11 +381,11 @@ export default function Conversations() {
                 )}
                 {selected.status === 'human' && (
                   <button
-                    className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3"
+                    className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-brand-600 border-brand-200 bg-brand-50 hover:bg-brand-100"
                     onClick={handleClose}
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    إغلاق
+                    <Bot className="w-3.5 h-3.5" />
+                    إعادة للذكاء
                   </button>
                 )}
                 <button
@@ -535,10 +535,10 @@ export default function Conversations() {
               )}
               {selected.status === 'human' && (
                 <button
-                  className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg bg-red-50 text-red-500 font-medium active:bg-red-100"
+                  className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg bg-brand-50 text-brand-600 font-medium active:bg-brand-100"
                   onClick={handleClose}
                 >
-                  <RefreshCw className="w-3.5 h-3.5" /> إغلاق المحادثة
+                  <Bot className="w-3.5 h-3.5" /> إعادة للذكاء الاصطناعي
                 </button>
               )}
             </div>

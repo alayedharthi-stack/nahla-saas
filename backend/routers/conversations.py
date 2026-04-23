@@ -584,6 +584,16 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
         event_type="manual_reply",
         extra_metadata={"customer_phone": customer_phone, "is_ai": False},
     ))
+
+    active_session = db.query(HandoffSession).filter(
+        HandoffSession.tenant_id == tenant_id,
+        HandoffSession.customer_phone == customer_phone,
+        HandoffSession.status == "active",
+    ).first()
+    if active_session:
+        from handoff.manager import resolve_handoff_session  # noqa: PLC0415
+        resolve_handoff_session(db, active_session.id, tenant_id, resolved_by="manual_reply")
+
     convo.status = "active"
     convo.is_human_handoff = False
     convo.paused_by_human = False
@@ -631,7 +641,7 @@ async def close_conversation(body: CloseIn, request: Request, db: Session = Depe
         from handoff.manager import resolve_handoff_session  # noqa: PLC0415
         resolve_handoff_session(db, active_session.id, tenant_id, resolved_by="dashboard_close")
 
-    convo.status = "closed"
+    convo.status = "active"
     convo.is_human_handoff = False
     convo.paused_by_human = False
     db.add(convo)
