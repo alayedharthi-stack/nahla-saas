@@ -106,19 +106,14 @@ export default function TrustBlock({
           aria-label={`السجل التجاري ${COMMERCIAL_REGISTRY_NUMBER} — موثق لدى وزارة التجارة`}
         >
           {/* MoC emblem — green Saudi palm-and-swords crest, icon-only PNG */}
-          <div
-            className="shrink-0 w-14 h-14 rounded-xl overflow-hidden shadow-sm ring-1 ring-white/10"
-            style={{ background: '#006C35' }}
-          >
-            <img
-              src={MOC_LOGO_SRC}
-              alt="شعار وزارة التجارة"
-              loading="lazy"
-              decoding="async"
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              onError={e => { e.currentTarget.style.display = 'none' }}
-            />
-          </div>
+          <img
+            src={MOC_LOGO_SRC}
+            alt="شعار وزارة التجارة"
+            loading="lazy"
+            decoding="async"
+            className="shrink-0 w-14 h-14 rounded-xl object-cover shadow-sm"
+            onError={e => { e.currentTarget.style.display = 'none' }}
+          />
           <div className="flex flex-col text-right leading-tight">
             <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
               السجل التجاري
