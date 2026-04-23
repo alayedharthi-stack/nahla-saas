@@ -272,10 +272,10 @@ export default function Register() {
         </div>
         </div>
 
-        {/* Trust block — full-width outside the narrow form column so the
-            3-column grid has enough room on desktop screens */}
-        <div className="w-full max-w-2xl mt-4 mb-8 px-4">
-          <TrustBlock variant="light" />
+        {/* Trust block — same width as the form (max-w-sm) so it looks
+            like a natural continuation of the card on every screen size */}
+        <div className="w-full max-w-sm mt-4 mb-8">
+          <TrustBlock variant="light" compact />
         </div>
       </div>
     </div>

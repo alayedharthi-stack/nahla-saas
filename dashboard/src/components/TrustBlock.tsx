@@ -63,18 +63,30 @@ const CARD_HOVER_SHADOW = '0 20px 60px rgba(0,0,0,0.35)'
 interface TrustBlockProps {
   /** "dark" for landing-style backgrounds, "light" for white panels (login/register). */
   variant?: 'dark' | 'light'
+  /**
+   * compact=true → always single-column (for Login / Register where the
+   * block sits below a narrow form and should match its width).
+   * compact=false (default) → responsive 3-column on desktop (Landing page).
+   */
+  compact?: boolean
   className?: string
 }
 
 // ─── Component ────────────────────────────────────────────────────────────
 export default function TrustBlock({
   variant = 'light',
+  compact = false,
   className = '',
 }: TrustBlockProps) {
-  // Slightly stronger underlying surface for the light-page variant so
-  // the block stays legible against a white form panel beneath.
   const wrapperBaseBg =
     variant === 'dark' ? 'rgba(2,6,23,0.55)' : 'rgba(2,6,23,0.85)'
+
+  // In compact mode the grid is always a single column — no responsive
+  // breakpoint — so the block mirrors the mobile/iPhone look on every
+  // screen size when placed below a narrow form.
+  const gridCols = compact
+    ? 'grid-cols-1'
+    : 'grid-cols-1 md:grid-cols-[minmax(190px,auto)_1fr_minmax(230px,auto)]'
 
   return (
     <div
@@ -88,11 +100,7 @@ export default function TrustBlock({
       }}
       dir="rtl"
     >
-      {/* Top row — three columns:
-            right  → commercial registry card
-            centre → attestation copy (TRULY centred at every breakpoint)
-            left   → business-authentication card */}
-      <div className="grid grid-cols-1 md:grid-cols-[minmax(190px,auto)_1fr_minmax(230px,auto)] items-stretch gap-4 p-5 sm:p-6">
+      <div className={`grid ${gridCols} items-stretch gap-4 p-5 sm:p-6`}>
 
         {/* ── Right: Commercial registry card ─────────────────────────── */}
         <a
