@@ -1249,6 +1249,8 @@ async def retry_all_stale_carts(
     pending (processed=False) but older than 72h, mark it processed,
     and create a fresh immediate retry for each distinct customer.
     """
+    from datetime import timedelta  # noqa: PLC0415
+
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
