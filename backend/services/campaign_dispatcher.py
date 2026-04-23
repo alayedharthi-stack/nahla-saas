@@ -93,6 +93,18 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
 
     store_name = _resolve_store_name(db, tenant_id)
 
+    preflight = validate_template_payload(template, coupon_code="PREFLIGHT")
+    if preflight:
+        errs_text = " / ".join(preflight)
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d: pre-flight validation failed: %s",
+            campaign_id, errs_text,
+        )
+        campaign.status = "failed"
+        _persist_dispatch_result(campaign, 0, 0, 0, preflight)
+        db.commit()
+        return {"sent": 0, "failed": 0, "skipped": 0, "errors": preflight}
+
     sent = 0
     failed = 0
     skipped = 0
@@ -104,7 +116,6 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         phone = getattr(customer, "normalized_phone", None) or ""
         if not phone:
             skipped += 1
-            logger.debug("[campaign_dispatcher] campaign=%d: customer=%d skipped (no phone)", campaign_id, customer.id)
             continue
 
         try:
@@ -122,12 +133,6 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
                 coupon_code=coupon_code,
             )
 
-            logger.info(
-                "[campaign_dispatcher] campaign=%d: sending to %s template=%s payload_components=%s",
-                campaign_id, phone, template.name,
-                payload.get("template", {}).get("components", []),
-            )
-
             response, _ctx = await provider_send_message(
                 db,
                 wa_conn,
@@ -138,37 +143,17 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
             )
 
             resp = response or {}
-            logger.info(
-                "[campaign_dispatcher] campaign=%d: Meta response for %s → %s",
-                campaign_id, phone, str(resp)[:500],
-            )
             meta_err = resp.get("error") if isinstance(resp, dict) else None
             if meta_err:
                 failed += 1
                 err_msg = meta_err.get("message", "Unknown Meta error")
                 err_code = meta_err.get("code", "")
-                err_sub = meta_err.get("error_subcode", "")
                 logger.warning(
-                    "[campaign_dispatcher] campaign=%d: Meta error for %s code=%s sub=%s msg=%s",
-                    campaign_id, phone, err_code, err_sub, err_msg,
+                    "[campaign_dispatcher] campaign=%d: Meta error %s for %s: %s | payload=%s",
+                    campaign_id, err_code, phone, err_msg, payload,
                 )
-                logger.warning(
-                    "[campaign_dispatcher] campaign=%d: FULL PAYLOAD → %s",
-                    campaign_id, payload,
-                )
-                logger.warning(
-                    "[campaign_dispatcher] campaign=%d: RAW TEMPLATE COMPONENTS → %s",
-                    campaign_id, template.components,
-                )
-                import json as _json
-                sent_comps = payload.get("template", {}).get("components", [])
-                detail = f"{phone}: ({err_code}) {err_msg[:80]}"
-                if failed <= 1:
-                    detail += f" | payload_comps={_json.dumps(sent_comps, ensure_ascii=False)[:300]}"
-                    tpl_comp_types = [c.get('type','?') for c in (template.components or [])]
-                    detail += f" | tpl_types={tpl_comp_types}"
                 if len(errors) < 10:
-                    errors.append(detail)
+                    errors.append(f"{phone}: ({err_code}) {err_msg[:120]}")
             else:
                 sent += 1
                 logger.info("[campaign_dispatcher] campaign=%d: sent OK to %s", campaign_id, phone)
@@ -277,6 +262,74 @@ def _resolve_store_name(db: Session, tenant_id: int) -> str:
         return "المتجر"
 
 
+def _extract_param_count(text: str) -> int:
+    """Return the highest {{N}} index found in *text*, or 0."""
+    import re
+    if not text:
+        return 0
+    matches = re.findall(r"\{\{(\d+)\}\}", text)
+    return max((int(m) for m in matches), default=0)
+
+
+def _example_param_count(comp: Dict[str, Any], key: str) -> int:
+    """Fallback: derive parameter count from the example field."""
+    ex = comp.get("example") or {}
+    vals = ex.get(key) or []
+    if isinstance(vals, list) and vals:
+        inner = vals[0] if isinstance(vals[0], list) else vals
+        return len(inner)
+    return 0
+
+
+def _button_needs_param(btn: Dict[str, Any]) -> bool:
+    """Return True if Meta requires a runtime parameter for this button."""
+    btype = (btn.get("type") or "").upper()
+    if btype == "COPY_CODE":
+        return True
+    if btype == "URL":
+        url = btn.get("url") or ""
+        if "{{" in url:
+            return True
+        ex = btn.get("example")
+        if isinstance(ex, list) and ex:
+            return True
+    if btype == "OTP":
+        return True
+    return False
+
+
+class PayloadValidationError(Exception):
+    """Raised when the template payload cannot be built correctly."""
+
+
+def validate_template_payload(
+    template: WhatsAppTemplate,
+    coupon_code: str = "",
+) -> List[str]:
+    """Pre-flight check. Returns a list of human-readable Arabic issues.
+    Empty list = everything OK."""
+    issues: List[str] = []
+    for comp in (template.components or []):
+        ctype = (comp.get("type") or "").upper()
+        if ctype == "BUTTONS":
+            for idx, btn in enumerate(comp.get("buttons") or []):
+                btype = (btn.get("type") or "").upper()
+                if btype == "COPY_CODE" and not coupon_code:
+                    issues.append(
+                        f"الزر رقم {idx} (نسخ كود) يحتاج كود خصم لكن لم يتم تمرير كوبون. "
+                        f"فعّل الكوبون التلقائي أو أضف كوبوناً يدوياً."
+                    )
+                if btype == "URL":
+                    url = btn.get("url") or ""
+                    if "{{" in url:
+                        pass
+                if btype == "OTP":
+                    issues.append(
+                        f"الزر رقم {idx} (OTP) غير مدعوم حالياً في الحملات."
+                    )
+    return issues
+
+
 def _build_send_payload(
     *,
     template: WhatsAppTemplate,
@@ -284,9 +337,13 @@ def _build_send_payload(
     customer_name: str,
     store_name: str,
     coupon_code: str = "",
+    cart_url: str = "",
 ) -> Dict[str, Any]:
-    import re
+    """Build the full Meta Cloud API payload for a template message.
 
+    Handles HEADER, BODY, and ALL button types: URL (dynamic suffix),
+    COPY_CODE, QUICK_REPLY, and OTP.
+    """
     slot_values = [
         customer_name,
         store_name,
@@ -296,22 +353,7 @@ def _build_send_payload(
         store_name,
     ]
 
-    def _extract_param_count(text: str) -> int:
-        if not text:
-            return 0
-        matches = re.findall(r"\{\{(\d+)\}\}", text)
-        return max((int(m) for m in matches), default=0)
-
-    def _example_param_count(comp: Dict[str, Any], key: str) -> int:
-        """Fallback: derive parameter count from the example field."""
-        ex = comp.get("example") or {}
-        vals = ex.get(key) or []
-        if isinstance(vals, list) and vals:
-            inner = vals[0] if isinstance(vals[0], list) else vals
-            return len(inner)
-        return 0
-
-    def _make_params(count: int) -> List[Dict[str, str]]:
+    def _make_text_params(count: int) -> List[Dict[str, str]]:
         params: List[Dict[str, str]] = []
         for i in range(count):
             val = slot_values[i] if i < len(slot_values) else store_name
@@ -329,29 +371,51 @@ def _build_send_payload(
             if fmt == "TEXT":
                 count = _extract_param_count(text) or _example_param_count(comp, "header_text")
                 if count > 0:
-                    components.append({"type": "header", "parameters": _make_params(count)})
+                    components.append({"type": "header", "parameters": _make_text_params(count)})
 
         elif ctype == "BODY":
             count = _extract_param_count(text) or _example_param_count(comp, "body_text")
             if count > 0:
-                components.append({"type": "body", "parameters": _make_params(count)})
+                components.append({"type": "body", "parameters": _make_text_params(count)})
 
         elif ctype == "BUTTONS":
             for idx, btn in enumerate(comp.get("buttons") or []):
-                if (btn.get("type") or "").upper() != "URL":
-                    continue
-                url_tpl = btn.get("url") or ""
-                if "{{1}}" in url_tpl:
+                btype = (btn.get("type") or "").upper()
+
+                if btype == "COPY_CODE":
+                    code = coupon_code or "NAHLA"
+                    components.append({
+                        "type": "button",
+                        "sub_type": "copy_code",
+                        "index": str(idx),
+                        "parameters": [{"type": "coupon_code", "coupon_code": code}],
+                    })
+
+                elif btype == "URL":
+                    url_tpl = btn.get("url") or ""
+                    has_var = "{{" in url_tpl
+                    has_example = bool(btn.get("example"))
+                    if has_var or has_example:
+                        suffix = cart_url or coupon_code or "shop"
+                        components.append({
+                            "type": "button",
+                            "sub_type": "url",
+                            "index": str(idx),
+                            "parameters": [{"type": "text", "text": suffix}],
+                        })
+
+                elif btype == "OTP":
                     components.append({
                         "type": "button",
                         "sub_type": "url",
                         "index": str(idx),
-                        "parameters": [{"type": "text", "text": "shop"}],
+                        "parameters": [{"type": "text", "text": "000000"}],
                     })
 
-    logger.debug(
-        "[_build_send_payload] template=%s to=%s components=%s raw_tpl_components=%s",
-        template.name, to_phone, components, template.components,
+    logger.info(
+        "[_build_send_payload] template=%s → %d components built from %d raw",
+        template.name, len(components),
+        len(template.components or []),
     )
 
     return {

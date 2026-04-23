@@ -235,8 +235,17 @@ async def update_campaign_status(
 
 @router.get("/campaigns/debug-template/{template_id}")
 async def debug_template(template_id: int, request: Request, db: Session = Depends(get_db)):
-    """Diagnostic endpoint: shows raw template components and the payload
-    that _build_send_payload would generate. Helps diagnose Meta #131008."""
+    """Diagnostic endpoint: shows raw template components, the generated
+    payload, and any validation issues. Returns JSON with no-cache headers."""
+    from fastapi.responses import JSONResponse  # noqa: PLC0415
+    from services.campaign_dispatcher import (  # noqa: PLC0415
+        _build_send_payload,
+        _button_needs_param,
+        _extract_param_count,
+        _example_param_count,
+        validate_template_payload,
+    )
+
     tenant_id = resolve_tenant_id(request)
     tpl = db.query(WhatsAppTemplate).filter(
         WhatsAppTemplate.id == template_id,
@@ -245,7 +254,6 @@ async def debug_template(template_id: int, request: Request, db: Session = Depen
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    from services.campaign_dispatcher import _build_send_payload  # noqa: PLC0415
     payload = _build_send_payload(
         template=tpl,
         to_phone="966500000000",
@@ -253,15 +261,51 @@ async def debug_template(template_id: int, request: Request, db: Session = Depen
         store_name="المتجر",
         coupon_code="SAVE10",
     )
-    return {
+
+    validation_issues = validate_template_payload(tpl, coupon_code="SAVE10")
+
+    tpl_types = [(c.get("type") or "?") for c in (tpl.components or [])]
+
+    button_analysis: List[Dict[str, Any]] = []
+    for comp in (tpl.components or []):
+        if (comp.get("type") or "").upper() == "BUTTONS":
+            for idx, btn in enumerate(comp.get("buttons") or []):
+                button_analysis.append({
+                    "index": idx,
+                    "type": btn.get("type"),
+                    "needs_param": _button_needs_param(btn),
+                    "url": btn.get("url"),
+                    "example": btn.get("example"),
+                })
+
+    notes: List[str] = []
+    for comp in (tpl.components or []):
+        ct = (comp.get("type") or "").upper()
+        if ct == "BODY":
+            n = _extract_param_count(comp.get("text") or "") or _example_param_count(comp, "body_text")
+            notes.append(f"BODY needs {n} text params")
+        if ct == "HEADER" and (comp.get("format") or "").upper() == "TEXT":
+            n = _extract_param_count(comp.get("text") or "") or _example_param_count(comp, "header_text")
+            if n > 0:
+                notes.append(f"HEADER needs {n} text params")
+
+    result = {
         "template_id": tpl.id,
         "template_name": tpl.name,
-        "template_language": tpl.language,
-        "template_status": tpl.status,
+        "language": tpl.language,
+        "status": tpl.status,
+        "tpl_types": tpl_types,
         "raw_components": tpl.components,
+        "button_analysis": button_analysis,
         "generated_payload": payload,
-        "generated_components": payload.get("template", {}).get("components", []),
+        "payload_comps": payload.get("template", {}).get("components", []),
+        "validation_issues": validation_issues,
+        "notes": notes,
     }
+    return JSONResponse(
+        content=result,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.post("/campaigns/test-send")
