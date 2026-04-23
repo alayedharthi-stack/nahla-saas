@@ -6,34 +6,60 @@
  * to surface that Nahla is a legally registered Saudi business and
  * authenticated by the Ministry of Commerce platform.
  *
- * To plug in the real authentication badge / URL once issued, just
- * update the two constants below — nothing else needs to change.
+ * Design notes:
+ *   - All icons come from lucide-react so nothing can render as a
+ *     broken image. Once the official Maroof / Business-Centre logo
+ *     files land in `dashboard/public/`, swap them in by updating the
+ *     `BUSINESS_AUTH_LOGO_SRC` constant — no other change is needed.
+ *   - Two variants: dark (Landing) and light (Login / Register). The
+ *     visual treatment is identical; only the underlying base surface
+ *     darkens slightly so the card stays legible over white forms.
  */
 
-import { ExternalLink, Lock } from 'lucide-react'
+import {
+  ShieldCheck,
+  Lock,
+  BadgeCheck,
+  Building2,
+  ExternalLink,
+} from 'lucide-react'
 
+// ─── Verifiable destinations ──────────────────────────────────────────────
 const COMMERCIAL_REGISTRY_NUMBER = '7050202485'
+
+// "الاستعلام عن متجر إلكتروني موثق" on the Saudi Business Centre — visitors
+// who tap the CR number land on the official lookup so trust is verifiable,
+// not just claimed.
 const COMMERCIAL_REGISTRY_URL =
-  // Public CR lookup on the Ministry of Commerce portal. Visitors who tap the
-  // CR number land on the official record so trust is verifiable, not just
-  // claimed.
-  `https://mc.gov.sa/ar/eservices/Pages/ServiceDetails.aspx?sId=24`
+  'https://business.sa/eservices/details/3fd371e5-11de-4078-08cf-08dbf015747a'
 
-// TODO: replace with the dedicated Maroof / Business-Authentication public
-// profile URL the moment it is issued. Until then we link to the Maroof
-// homepage so the click still lands on a real, recognisable destination.
-const BUSINESS_AUTH_URL = 'https://maroof.sa/'
+// "خدمة توثيق التجارة الإلكترونية" on the same Saudi Business Centre. The
+// Business-Authentication card on the left links here.
+const BUSINESS_AUTH_URL =
+  'https://business.sa/ar/eservices/details/4d6e9d30-e989-4940-08ce-08dbf015747a'
 
-// Official, public-domain logos served directly from Wikimedia Commons.
-// These are stable, license-clean, vector assets — they don't bloat the
-// bundle and render crisply on any device. Swap any of them for a local
-// file later by changing the constant; nothing else needs to change.
-const SAUDI_FLAG_SRC =
-  'https://upload.wikimedia.org/wikipedia/commons/0/0d/Flag_of_Saudi_Arabia.svg'
-const MOC_LOGO_SRC =
-  'https://upload.wikimedia.org/wikipedia/commons/6/6b/Ministry_of_Commerce_%28Saudi_Arabia%29_Logo.svg'
-const BUSINESS_AUTH_LOGO_SRC =
-  'https://upload.wikimedia.org/wikipedia/commons/3/36/Checkmark-green.svg'
+// Drop the official Maroof / Business-Authentication badge into
+// `dashboard/public/` (e.g. `business-authentication.png`) and set the
+// constant below to its public path. Until then we render a clean
+// lucide BadgeCheck inside a white chip — never a broken image.
+const BUSINESS_AUTH_LOGO_SRC: string | null = null
+
+// ─── Visual tokens ────────────────────────────────────────────────────────
+const WRAPPER_BG_GRADIENT =
+  'linear-gradient(135deg, rgba(255,255,255,0.045), rgba(16,185,129,0.035))'
+const WRAPPER_BORDER = '1px solid rgba(255,255,255,0.14)'
+const WRAPPER_SHADOW =
+  '0 12px 40px rgba(0,0,0,0.25), inset 0 0 0 1px rgba(255,255,255,0.04)'
+
+const CARD_SURFACE_STYLE: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.045)',
+  border: '1px solid rgba(255,255,255,0.10)',
+  backdropFilter: 'blur(8px)',
+  WebkitBackdropFilter: 'blur(8px)',
+  borderRadius: 14,
+}
+
+const CARD_HOVER_SHADOW = '0 20px 60px rgba(0,0,0,0.35)'
 
 interface TrustBlockProps {
   /** "dark" for landing-style backgrounds, "light" for white panels (login/register). */
@@ -41,41 +67,35 @@ interface TrustBlockProps {
   className?: string
 }
 
-// Premium visual tokens (kept inline so this component remains drop-in
-// portable). Centralised here so any future tweak only happens once.
-const WRAPPER_BG_GRADIENT =
-  'linear-gradient(135deg, rgba(255,255,255,0.03), rgba(16,185,129,0.04))'
-const WRAPPER_SHADOW =
-  '0 10px 40px rgba(0,0,0,0.30), inset 0 0 0 1px rgba(255,255,255,0.05)'
-const CARD_HOVER_SHADOW = '0 20px 60px rgba(0,0,0,0.40)'
-// Frosted glass card surface — translucent white over the dark gradient.
-const CARD_SURFACE_STYLE: React.CSSProperties = {
-  background: 'rgba(255,255,255,0.03)',
-  backdropFilter: 'blur(8px)',
-  WebkitBackdropFilter: 'blur(8px)',
-  border: '1px solid rgba(255,255,255,0.08)',
+// ─── Inline Saudi flag (no external assets, never breaks) ─────────────────
+function SaudiFlag({ className = '' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 30 20" className={className} aria-hidden="true">
+      <rect width="30" height="20" rx="2" fill="#006C35" />
+      <path d="M5 8 L25 8"     stroke="#FFFFFF" strokeWidth="0.9" strokeLinecap="round" />
+      <path d="M5 12 L25 12"   stroke="#FFFFFF" strokeWidth="0.6" strokeLinecap="round" />
+      <path d="M6 14.5 L24 14.5" stroke="#FFFFFF" strokeWidth="0.7" strokeLinecap="round" />
+    </svg>
+  )
 }
 
+// ─── Component ────────────────────────────────────────────────────────────
 export default function TrustBlock({
   variant = 'light',
   className = '',
 }: TrustBlockProps) {
-  // Both variants share the same premium look; the only difference is a
-  // slightly stronger underlying surface for the light-page variant so
+  // Slightly stronger underlying surface for the light-page variant so
   // the block stays legible against a white form panel beneath.
   const wrapperBaseBg =
     variant === 'dark' ? 'rgba(2,6,23,0.55)' : 'rgba(2,6,23,0.85)'
 
   return (
     <div
-      className={[
-        'w-full overflow-hidden',
-        'transition-all duration-300',
-        className,
-      ].join(' ')}
+      className={['w-full overflow-hidden transition-all duration-300', className].join(' ')}
       style={{
         backgroundColor: wrapperBaseBg,
         backgroundImage: WRAPPER_BG_GRADIENT,
+        border: WRAPPER_BORDER,
         borderRadius: 18,
         boxShadow: WRAPPER_SHADOW,
       }}
@@ -84,11 +104,7 @@ export default function TrustBlock({
       {/* Top row — three columns:
             right  → commercial registry card
             centre → attestation copy (TRULY centred at every breakpoint)
-            left   → business-authentication card
-         The centre column gets `1fr` so it is the visual midpoint of the
-         block, and `justify-self-center` on its inner wrapper makes the
-         text column itself centred inside that fr — not pushed to either
-         side by the flanking cards. */}
+            left   → business-authentication card */}
       <div className="grid grid-cols-1 md:grid-cols-[minmax(190px,auto)_1fr_minmax(230px,auto)] items-stretch gap-4 p-5 sm:p-6">
 
         {/* ── Right: Commercial registry card ─────────────────────────── */}
@@ -96,24 +112,14 @@ export default function TrustBlock({
           href={COMMERCIAL_REGISTRY_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="group flex items-center gap-3 px-4 py-3.5 transition-all duration-300 hover:-translate-y-0.5 hover:bg-white/[0.05] hover:border-white/15"
-          style={{ ...CARD_SURFACE_STYLE, borderRadius: 14 }}
-          onMouseEnter={e => {
-            e.currentTarget.style.boxShadow = CARD_HOVER_SHADOW
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.boxShadow = ''
-          }}
+          className="group flex items-center gap-3 px-4 py-3.5 transition-all duration-300 hover:-translate-y-0.5 hover:bg-white/[0.06] hover:border-white/[0.18]"
+          style={CARD_SURFACE_STYLE}
+          onMouseEnter={e => { e.currentTarget.style.boxShadow = CARD_HOVER_SHADOW }}
+          onMouseLeave={e => { e.currentTarget.style.boxShadow = '' }}
           aria-label={`السجل التجاري ${COMMERCIAL_REGISTRY_NUMBER} — موثق لدى وزارة التجارة`}
         >
-          <div className="shrink-0 w-12 h-8 rounded-md overflow-hidden ring-1 ring-white/10 shadow-sm bg-[#006C35]/20">
-            <img
-              src={SAUDI_FLAG_SRC}
-              alt="علم المملكة العربية السعودية"
-              loading="lazy"
-              decoding="async"
-              className="w-full h-full object-cover"
-            />
+          <div className="shrink-0 w-12 h-8 rounded-md overflow-hidden ring-1 ring-white/10 shadow-sm">
+            <SaudiFlag className="w-full h-full" />
           </div>
           <div className="flex flex-col text-right leading-tight">
             <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
@@ -153,23 +159,14 @@ export default function TrustBlock({
               </a>
             </p>
             <a
-              href={COMMERCIAL_REGISTRY_URL}
+              href="https://mc.gov.sa/"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-[12px] sm:text-[13px] font-semibold hover:opacity-90 transition-opacity"
               style={{ color: '#10B981' }}
             >
-              <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-white/95 ring-1 ring-white/10 overflow-hidden shadow-sm">
-                <img
-                  src={MOC_LOGO_SRC}
-                  alt="وزارة التجارة"
-                  loading="lazy"
-                  decoding="async"
-                  className="w-full h-full object-contain p-0.5"
-                />
-              </span>
+              <ShieldCheck className="w-4 h-4" />
               موثق لدى وزارة التجارة
-              <span aria-hidden="true">✔</span>
             </a>
           </div>
         </div>
@@ -179,28 +176,36 @@ export default function TrustBlock({
           href={BUSINESS_AUTH_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="group flex items-center gap-3 px-4 py-3.5 transition-all duration-300 hover:-translate-y-0.5 hover:bg-white/[0.05] hover:border-white/15"
-          style={{ ...CARD_SURFACE_STYLE, borderRadius: 14 }}
-          onMouseEnter={e => {
-            e.currentTarget.style.boxShadow = CARD_HOVER_SHADOW
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.boxShadow = ''
-          }}
+          className="group flex items-center gap-3 px-4 py-3.5 transition-all duration-300 hover:-translate-y-0.5 hover:bg-white/[0.06] hover:border-white/[0.18]"
+          style={CARD_SURFACE_STYLE}
+          onMouseEnter={e => { e.currentTarget.style.boxShadow = CARD_HOVER_SHADOW }}
+          onMouseLeave={e => { e.currentTarget.style.boxShadow = '' }}
           aria-label="الانتقال إلى منصة توثيق الأعمال للتحقق من نحلة"
           title="اضغط للتحقق من توثيق نحلة لدى منصة توثيق الأعمال"
         >
           <div className="shrink-0 w-12 h-12 rounded-lg bg-white flex items-center justify-center ring-1 ring-white/10 overflow-hidden shadow-sm">
-            <img
-              src={BUSINESS_AUTH_LOGO_SRC}
-              alt="منصة توثيق الأعمال — Business Authentication"
-              loading="lazy"
-              decoding="async"
-              className="w-7 h-7 object-contain"
-            />
+            {BUSINESS_AUTH_LOGO_SRC ? (
+              <img
+                src={BUSINESS_AUTH_LOGO_SRC}
+                alt="منصة توثيق الأعمال — Business Authentication"
+                loading="lazy"
+                decoding="async"
+                className="w-7 h-7 object-contain"
+              />
+            ) : (
+              // Lucide BadgeCheck inside a white chip — clean, vector,
+              // and impossible to render as a broken image.
+              <BadgeCheck
+                className="w-7 h-7"
+                strokeWidth={2.2}
+                style={{ color: '#10B981' }}
+                aria-label="موثّق"
+              />
+            )}
           </div>
           <div className="flex flex-col text-right leading-tight">
-            <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
+            <span className="text-slate-300 text-[11px] sm:text-xs font-medium flex items-center gap-1">
+              <Building2 className="w-3 h-3 text-slate-400" />
               موثّق لدى
             </span>
             <span className="text-white font-bold text-[14px] sm:text-[15px] mt-0.5">
@@ -214,9 +219,7 @@ export default function TrustBlock({
         </a>
       </div>
 
-      {/* ── Bottom strip — encryption / privacy reassurance ─────────────
-           Higher-contrast text + slightly stronger divider so the line
-           reads clearly against either dark or light page backgrounds. */}
+      {/* ── Bottom strip — encryption / privacy reassurance ─────────── */}
       <div className="border-t border-white/10 bg-slate-950/40 px-4 sm:px-6 py-3 flex items-center justify-center gap-2 text-slate-100 text-[12px] sm:text-[13px] font-medium text-center">
         <Lock className="w-4 h-4 shrink-0" style={{ color: '#10B981' }} />
         <span>بياناتك آمنة ومشفرة 100% ولا نشاركها مع أي جهة خارجية</span>
