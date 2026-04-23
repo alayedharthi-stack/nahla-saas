@@ -605,22 +605,28 @@ function AbandonedCartsQueue({
     try {
       const res = await autopilotApi.retryAllStaleCarts()
       console.log('[NahlaRetry] response:', JSON.stringify(res, null, 2))
-      const msg = res.message || `retried=${res.retried}, sent=${res.sent_immediately ?? 0}`
-      setStaleNotice(msg)
-      if (res.sent_immediately && res.sent_immediately > 0) {
-        setNoticeKind('ok')
-        setRetryDone(true)
-      } else if (res.engine_error) {
+
+      if (!res.ok && res.engine_error) {
+        setStaleNotice(res.engine_error)
         setNoticeKind('warn')
       } else {
+        const msg = res.message || `تم إعادة جدولة ${res.retried} سلة`
+        setStaleNotice(msg)
         setNoticeKind('ok')
         setRetryDone(true)
       }
-      // Delay refresh so the notice renders first
       setTimeout(() => onRetried?.(), 2000)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'فشل التنظيف'
-      console.error('[NahlaRetry] error:', msg)
+      const raw = e instanceof Error ? e.message : String(e)
+      let msg: string
+      if (raw.includes('انتهت صلاحية الجلسة') || raw.includes('missing_token') || raw.includes('Authentication')) {
+        msg = 'انتهت صلاحية الجلسة — يرجى تسجيل الدخول مجدداً'
+      } else if (raw.includes('تعذر الوصول') || raw.includes('Failed to fetch') || raw.includes('NetworkError')) {
+        msg = 'تعذر الاتصال بالخادم — تحقق من الشبكة وحاول مجدداً'
+      } else {
+        msg = raw || 'حدث خطأ غير متوقع'
+      }
+      console.error('[NahlaRetry] error:', raw)
       setStaleNotice(msg)
       setNoticeKind('err')
     } finally {

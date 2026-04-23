@@ -221,7 +221,6 @@ export const autopilotApi = {
     apiCall<{
       ok: boolean
       retried: number
-      sent_immediately?: number
       engine_error?: string | null
       errors?: string[]
       message: string

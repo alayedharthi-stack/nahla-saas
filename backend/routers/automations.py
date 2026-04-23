@@ -1343,7 +1343,22 @@ async def retry_all_stale_carts(
     hasn't completed yet, wipe old events/executions, and create a
     fresh Stage-1 event linked to the Order so the engine sends
     immediately.
+
+    SAFETY: wrapped in a top-level try/except so it always returns JSON.
     """
+    import logging as _logging
+    _log = _logging.getLogger("nahla.retry_all_stale")
+
+    try:
+        return await _retry_all_stale_impl(request, db)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.error("retry_all_stale CRASHED: %s", exc, exc_info=True)
+        return {"ok": False, "retried": 0, "engine_error": f"خطأ داخلي: {exc}", "errors": [], "message": f"حدث خطأ غير متوقع: {exc}"}
+
+
+async def _retry_all_stale_impl(request: Request, db: Session):
     import logging as _logging
     from sqlalchemy.orm.attributes import flag_modified
 
@@ -1507,17 +1522,14 @@ async def retry_all_stale_carts(
 
     db.commit()
 
-    # Immediately process the new events, bypassing only the autopilot toggle.
-    engine_sent = 0
+    # Pre-flight checks (fast, no network I/O)
     engine_error = None
-    diagnostics: dict = {}
     if new_event_ids:
         try:
             from core.automation_engine import _is_autopilot_enabled
             from core.billing import has_billing_access
 
             diag_billing = has_billing_access(db, tenant_id)
-            diag_autopilot = _is_autopilot_enabled(db, tenant_id)
             diag_automations = (
                 db.query(SmartAutomation)
                 .filter(
@@ -1526,63 +1538,48 @@ async def retry_all_stale_carts(
                 )
                 .all()
             )
-            diagnostics = {
-                "billing_access": diag_billing,
-                "autopilot_enabled": diag_autopilot,
-                "automations": [
-                    {"id": a.id, "name": a.name, "enabled": a.enabled}
-                    for a in diag_automations
-                ],
-                "new_event_ids": new_event_ids,
-            }
-            _log.warning("tenant=%s diagnostics: %s", tenant_id, diagnostics)
 
             if not diag_billing:
                 engine_error = "انتهت التجربة المجانية — يجب الاشتراك لإرسال التذكيرات"
             elif not diag_automations or not any(a.enabled for a in diag_automations):
                 engine_error = "أتمتة استرداد العربة المتروكة غير مفعّلة — فعّلها من إعدادات الطيار الآلي"
             else:
-                from core.automation_engine import process_pending_events
-                engine_sent = await process_pending_events(
-                    db, tenant_id,
-                    skip_autopilot_check=True,
-                    event_ids=new_event_ids,
-                )
-                _log.info("tenant=%s engine sent=%d", tenant_id, engine_sent)
+                # Fire-and-forget: process events in the background so the
+                # endpoint returns immediately instead of hanging for 2+ min
+                # while WhatsApp API calls complete.
+                import asyncio
+                async def _bg_process():
+                    from core.database import SessionLocal
+                    bg_db = SessionLocal()
+                    try:
+                        from core.automation_engine import process_pending_events
+                        sent = await process_pending_events(
+                            bg_db, tenant_id,
+                            skip_autopilot_check=True,
+                            event_ids=new_event_ids,
+                        )
+                        _log.info("tenant=%s bg engine sent=%d", tenant_id, sent)
+                    except Exception as exc:
+                        _log.error("tenant=%s bg engine failed: %s", tenant_id, exc, exc_info=True)
+                    finally:
+                        bg_db.close()
 
-                post_execs = (
-                    db.query(AutomationExecution)
-                    .filter(AutomationExecution.event_id.in_(new_event_ids))
-                    .all()
-                )
-                diagnostics["executions"] = [
-                    {"event_id": x.event_id, "status": x.status,
-                     "error": x.error_message}
-                    for x in post_execs
-                ]
-                if not engine_sent and post_execs:
-                    fails = [x for x in post_execs if x.status == "failed"]
-                    if fails:
-                        engine_error = fails[0].error_message or "فشل الإرسال"
+                asyncio.create_task(_bg_process())
         except Exception as exc:
             engine_error = str(exc)
-            _log.error("tenant=%s engine failed: %s", tenant_id, exc, exc_info=True)
+            _log.error("tenant=%s pre-flight failed: %s", tenant_id, exc, exc_info=True)
 
     msg = f"تم إعادة جدولة {retried} سلة من المرحلة الأولى."
-    if engine_sent:
-        msg += f" تم إرسال {engine_sent} رسالة فوراً."
-    elif engine_error:
+    if engine_error:
         msg += f" ⚠ {engine_error}"
-    elif retried > 0:
-        msg += " ستُرسل خلال دقيقة."
+    elif new_event_ids:
+        msg += " جارٍ الإرسال في الخلفية..."
     if errors:
         msg += f" ({len(errors)} سلة بدون عميل مرتبط)"
     return {
         "ok": True,
         "retried": retried,
-        "sent_immediately": engine_sent,
         "engine_error": engine_error,
-        "diagnostics": diagnostics,
         "errors": errors,
         "message": msg,
     }
@@ -1818,20 +1815,25 @@ async def retry_abandoned_cart(
     db.commit()
     db.refresh(new_event)
 
-    engine_sent = 0
-    try:
-        from core.automation_engine import process_pending_events
-        engine_sent = await process_pending_events(
-            db, tenant_id,
-            skip_autopilot_check=True,
-            event_ids=[new_event.id],
-        )
-    except Exception as exc:
-        logger.error("Immediate engine run failed for order=%s: %s", order_id, exc)
+    import asyncio
+    _eid = new_event.id
+    async def _bg_send():
+        from core.database import SessionLocal
+        bg_db = SessionLocal()
+        try:
+            from core.automation_engine import process_pending_events
+            sent = await process_pending_events(
+                bg_db, tenant_id,
+                skip_autopilot_check=True,
+                event_ids=[_eid],
+            )
+            logger.info("bg engine order=%s sent=%d", order_id, sent)
+        except Exception as exc:
+            logger.error("bg engine order=%s failed: %s", order_id, exc, exc_info=True)
+        finally:
+            bg_db.close()
 
-    msg = f"تم حذف {deleted_count} سجل سابق وإعادة الجدولة من المرحلة الأولى."
-    if engine_sent:
-        msg += f" تم إرسال {engine_sent} رسالة فوراً."
+    asyncio.create_task(_bg_send())
 
     return {
         "ok":             True,
@@ -1839,9 +1841,8 @@ async def retry_abandoned_cart(
         "retry_event_id": new_event.id,
         "step_idx":       0,
         "deleted_old":    deleted_count,
-        "sent_immediately": engine_sent,
         "queued_at":      new_event.created_at.replace(tzinfo=timezone.utc).isoformat(),
-        "message":        msg,
+        "message":        f"تم حذف {deleted_count} سجل سابق وإعادة الجدولة. جارٍ الإرسال...",
     }
 
 
