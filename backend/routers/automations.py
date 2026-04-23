@@ -313,13 +313,16 @@ def _migrate_legacy_abandoned_cart_settings(sub: Dict[str, Any]) -> Dict[str, An
 
 def _save_autopilot_settings(db: Session, tenant_id: int, autopilot: Dict[str, Any]) -> None:
     """Persist autopilot config and keep legacy ai_settings in sync."""
+    from sqlalchemy.orm.attributes import flag_modified
     settings = get_or_create_settings(db, tenant_id)
     extra: Dict[str, Any] = dict(settings.extra_metadata or {})
     extra["autopilot"] = autopilot
     settings.extra_metadata = extra
+    flag_modified(settings, "extra_metadata")
     ai = merge_defaults(settings.ai_settings, DEFAULT_AI)
     ai["autopilot_enabled"] = bool(autopilot.get("enabled", False))
     settings.ai_settings = ai
+    flag_modified(settings, "ai_settings")
     settings.updated_at = datetime.now(timezone.utc)
 
 
@@ -1509,80 +1512,61 @@ async def retry_all_stale_carts(
     engine_error = None
     diagnostics: dict = {}
     if new_event_ids:
-        # Pre-flight diagnostics: check what blocks the engine
-        from core.automation_engine import _is_autopilot_enabled
-        from core.billing import has_billing_access
-        from models import SmartAutomation, WhatsAppConnection
+        try:
+            from core.automation_engine import _is_autopilot_enabled
+            from core.billing import has_billing_access
 
-        diag_billing = has_billing_access(db, tenant_id)
-        diag_autopilot = _is_autopilot_enabled(db, tenant_id)
-        diag_automations = (
-            db.query(SmartAutomation)
-            .filter(
-                SmartAutomation.tenant_id == tenant_id,
-                SmartAutomation.trigger_event == "cart_abandoned",
+            diag_billing = has_billing_access(db, tenant_id)
+            diag_autopilot = _is_autopilot_enabled(db, tenant_id)
+            diag_automations = (
+                db.query(SmartAutomation)
+                .filter(
+                    SmartAutomation.tenant_id == tenant_id,
+                    SmartAutomation.trigger_event == "cart_abandoned",
+                )
+                .all()
             )
-            .all()
-        )
-        diag_wa = (
-            db.query(WhatsAppConnection)
-            .filter(
-                WhatsAppConnection.tenant_id == tenant_id,
-                WhatsAppConnection.status == "connected",
-            )
-            .first()
-        )
-        diagnostics = {
-            "billing_access": diag_billing,
-            "autopilot_enabled": diag_autopilot,
-            "matching_automations": [
-                {"id": a.id, "name": a.name, "enabled": a.enabled,
-                 "trigger_event": a.trigger_event}
-                for a in diag_automations
-            ],
-            "whatsapp_connected": diag_wa is not None,
-            "new_event_ids": new_event_ids,
-        }
-        _log.warning("tenant=%s pre-flight diagnostics: %s", tenant_id, diagnostics)
+            diagnostics = {
+                "billing_access": diag_billing,
+                "autopilot_enabled": diag_autopilot,
+                "automations": [
+                    {"id": a.id, "name": a.name, "enabled": a.enabled}
+                    for a in diag_automations
+                ],
+                "new_event_ids": new_event_ids,
+            }
+            _log.warning("tenant=%s diagnostics: %s", tenant_id, diagnostics)
 
-        if not diag_billing:
-            engine_error = "انتهت التجربة المجانية — يجب الاشتراك لإرسال التذكيرات"
-        elif not diag_automations or not any(a.enabled for a in diag_automations):
-            engine_error = "أتمتة استرداد العربة المتروكة غير مفعّلة — فعّلها من إعدادات الطيار الآلي"
-        elif not diag_wa:
-            engine_error = "واتساب الأعمال غير متصل — اربط واتساب أولاً"
-        else:
-            try:
+            if not diag_billing:
+                engine_error = "انتهت التجربة المجانية — يجب الاشتراك لإرسال التذكيرات"
+            elif not diag_automations or not any(a.enabled for a in diag_automations):
+                engine_error = "أتمتة استرداد العربة المتروكة غير مفعّلة — فعّلها من إعدادات الطيار الآلي"
+            else:
                 from core.automation_engine import process_pending_events
                 engine_sent = await process_pending_events(
                     db, tenant_id,
                     skip_autopilot_check=True,
                     event_ids=new_event_ids,
                 )
-                _log.info("tenant=%s immediate engine sent=%d", tenant_id, engine_sent)
+                _log.info("tenant=%s engine sent=%d", tenant_id, engine_sent)
 
-                # Check what happened to the events after processing
-                post_events = (
-                    db.query(AutomationEvent)
-                    .filter(AutomationEvent.id.in_(new_event_ids))
-                    .all()
-                )
                 post_execs = (
                     db.query(AutomationExecution)
                     .filter(AutomationExecution.event_id.in_(new_event_ids))
                     .all()
                 )
-                diagnostics["post_events"] = [
-                    {"id": e.id, "processed": e.processed} for e in post_events
-                ]
-                diagnostics["post_executions"] = [
+                diagnostics["executions"] = [
                     {"event_id": x.event_id, "status": x.status,
                      "error": x.error_message}
                     for x in post_execs
                 ]
-            except Exception as exc:
-                engine_error = str(exc)
-                _log.error("tenant=%s engine run failed: %s", tenant_id, exc, exc_info=True)
+                if not engine_sent and post_execs:
+                    fails = [x for x in post_execs if x.status == "failed"]
+                    if fails:
+                        engine_error = fails[0].error_message or "فشل الإرسال"
+        except Exception as exc:
+            engine_error = str(exc)
+            _log.error("tenant=%s engine failed: %s", tenant_id, exc, exc_info=True)
 
     msg = f"تم إعادة جدولة {retried} سلة من المرحلة الأولى."
     if engine_sent:
