@@ -19,8 +19,6 @@
 import {
   ShieldCheck,
   Lock,
-  BadgeCheck,
-  Building2,
   ExternalLink,
 } from 'lucide-react'
 
@@ -38,11 +36,12 @@ const COMMERCIAL_REGISTRY_URL =
 const BUSINESS_AUTH_URL =
   'https://business.sa/ar/eservices/details/4d6e9d30-e989-4940-08ce-08dbf015747a'
 
-// Drop the official Maroof / Business-Authentication badge into
-// `dashboard/public/` (e.g. `business-authentication.png`) and set the
-// constant below to its public path. Until then we render a clean
-// lucide BadgeCheck inside a white chip — never a broken image.
-const BUSINESS_AUTH_LOGO_SRC: string | null = null
+// Official logos — both PNGs are served from /public so they are part
+// of the build bundle and can never result in a broken-image error.
+// Ministry of Commerce logo (on white background).
+const MOC_LOGO_SRC = '/logo-moc.png'
+// Saudi Business Centre logo (shown in the business-authentication card).
+const BUSINESS_AUTH_LOGO_SRC = '/logo-sbc.png'
 
 // ─── Visual tokens ────────────────────────────────────────────────────────
 const WRAPPER_BG_GRADIENT =
@@ -162,11 +161,25 @@ export default function TrustBlock({
               href="https://mc.gov.sa/"
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-[12px] sm:text-[13px] font-semibold hover:opacity-90 transition-opacity"
+              className="inline-flex items-center gap-2 text-[12px] sm:text-[13px] font-semibold hover:opacity-90 transition-opacity"
               style={{ color: '#10B981' }}
             >
-              <ShieldCheck className="w-4 h-4" />
+              <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-white ring-1 ring-white/20 overflow-hidden shadow-sm shrink-0">
+                <img
+                  src={MOC_LOGO_SRC}
+                  alt="وزارة التجارة"
+                  className="w-full h-full object-contain"
+                  loading="lazy"
+                  decoding="async"
+                  onError={e => {
+                    e.currentTarget.style.display = 'none'
+                    const parent = e.currentTarget.parentElement
+                    if (parent) parent.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'
+                  }}
+                />
+              </span>
               موثق لدى وزارة التجارة
+              <ShieldCheck className="w-4 h-4" />
             </a>
           </div>
         </div>
@@ -183,36 +196,30 @@ export default function TrustBlock({
           aria-label="الانتقال إلى منصة توثيق الأعمال للتحقق من نحلة"
           title="اضغط للتحقق من توثيق نحلة لدى منصة توثيق الأعمال"
         >
-          <div className="shrink-0 w-12 h-12 rounded-lg bg-white flex items-center justify-center ring-1 ring-white/10 overflow-hidden shadow-sm">
-            {BUSINESS_AUTH_LOGO_SRC ? (
-              <img
-                src={BUSINESS_AUTH_LOGO_SRC}
-                alt="منصة توثيق الأعمال — Business Authentication"
-                loading="lazy"
-                decoding="async"
-                className="w-7 h-7 object-contain"
-              />
-            ) : (
-              // Lucide BadgeCheck inside a white chip — clean, vector,
-              // and impossible to render as a broken image.
-              <BadgeCheck
-                className="w-7 h-7"
-                strokeWidth={2.2}
-                style={{ color: '#10B981' }}
-                aria-label="موثّق"
-              />
-            )}
+          <div className="shrink-0 w-14 h-14 rounded-xl bg-white flex items-center justify-center ring-1 ring-white/15 overflow-hidden shadow-sm p-1.5">
+            <img
+              src={BUSINESS_AUTH_LOGO_SRC}
+              alt="المركز السعودي للأعمال — Saudi Business Centre"
+              loading="lazy"
+              decoding="async"
+              className="w-full h-full object-contain"
+              onError={e => {
+                e.currentTarget.style.display = 'none'
+                const icon = document.createElement('span')
+                icon.className = 'flex items-center justify-center w-full h-full'
+                e.currentTarget.parentElement?.appendChild(icon)
+              }}
+            />
           </div>
           <div className="flex flex-col text-right leading-tight">
-            <span className="text-slate-300 text-[11px] sm:text-xs font-medium flex items-center gap-1">
-              <Building2 className="w-3 h-3 text-slate-400" />
+            <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
               موثّق لدى
             </span>
             <span className="text-white font-bold text-[14px] sm:text-[15px] mt-0.5">
-              منصة توثيق الأعمال
+              المركز السعودي للأعمال
             </span>
             <span className="text-slate-400 text-[10px] sm:text-[11px] tracking-wide flex items-center gap-1 mt-0.5">
-              Business Authentication
+              Saudi Business Centre
               <ExternalLink className="w-3 h-3 opacity-60 group-hover:opacity-100 transition-opacity" />
             </span>
           </div>
