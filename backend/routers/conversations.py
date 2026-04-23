@@ -587,19 +587,28 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
 
     raw = (customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
     suffix = raw[-9:] if len(raw) >= 9 else raw
-    active_sessions = db.query(HandoffSession).filter(
+    has_active_handoff = False
+    for hs in db.query(HandoffSession).filter(
         HandoffSession.tenant_id == tenant_id,
         HandoffSession.status == "active",
-    ).all()
-    for hs in active_sessions:
+    ).all():
         hs_raw = (hs.customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
         if hs_raw == raw or hs_raw.endswith(suffix):
-            from handoff.manager import resolve_handoff_session  # noqa: PLC0415
-            resolve_handoff_session(db, hs.id, tenant_id, resolved_by="manual_reply")
+            has_active_handoff = True
+            break
 
-    convo.status = "active"
-    convo.is_human_handoff = False
-    convo.paused_by_human = False
+    if not has_active_handoff:
+        from handoff.manager import create_handoff_session  # noqa: PLC0415
+        create_handoff_session(
+            db, tenant_id, customer_phone,
+            customer_name=convo.customer.name if convo.customer else customer_phone,
+            last_message=body.message,
+            reason="staff_takeover",
+        )
+
+    convo.status = "human"
+    convo.is_human_handoff = True
+    convo.paused_by_human = True
     db.add(convo)
     db.commit()
     return {"sent": True}

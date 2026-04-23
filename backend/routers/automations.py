@@ -1396,7 +1396,6 @@ async def retry_abandoned_cart(
         db.query(AutomationEvent)
         .filter(
             AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type == "cart_abandoned",
             AutomationEvent.processed == False,
         )
         .all()
@@ -1404,8 +1403,14 @@ async def retry_abandoned_cart(
     cancelled_count = 0
     for ev in pending_events:
         ep = ev.payload or {}
-        ev_root = int(ep.get("parent_event_id") or ep.get("recovery_event_id") or ev.id)
-        if ev_root == root_event_id or ev.id == root_event_id:
+        ev_root = int(ep.get("parent_event_id") or ep.get("recovery_event_id") or ev.id or 0)
+        same_root = (ev_root == root_event_id or ev.id == root_event_id)
+        same_customer = (root_event.customer_id and ev.customer_id == root_event.customer_id)
+        same_order = (
+            ep.get("order_id") and
+            str(ep.get("order_id")) == str((root_event.payload or {}).get("order_id"))
+        )
+        if same_root or same_customer or same_order:
             ev.processed = True
             ep["cancelled_by_retry"] = True
             ep["cancelled_at"] = datetime.now(timezone.utc).isoformat()
