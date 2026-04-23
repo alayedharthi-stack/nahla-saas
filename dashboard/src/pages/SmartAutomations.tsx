@@ -385,8 +385,8 @@ function RecoveryDrawer({
       setRetryNotice({
         kind: 'ok',
         text: res.deduplicated
-          ? 'تم تجاهل النقر — هناك إعادة إرسال قيد التنفيذ بالفعل لهذه المرحلة.'
-          : (res.message || 'تمت جدولة إعادة الإرسال — ستُنفّذ خلال دقيقة.'),
+          ? 'تم تجاهل النقر — هناك إعادة جدولة قيد التنفيذ بالفعل.'
+          : (res.message || 'تمت إعادة جدولة التذكيرات من المرحلة الأولى.'),
       })
       // Re-fetch the timeline so the new pending step shows up.
       refresh()
@@ -492,10 +492,10 @@ function RecoveryDrawer({
                       onClick={handleRetry}
                       disabled={retrying}
                       className="text-xs px-3 py-1.5 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
-                      title="ميزة تجريبية مؤقتة — تعيد إرسال آخر مرحلة فشلت فقط"
+                      title="إعادة جدولة التذكيرات من المرحلة الأولى"
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${retrying ? 'animate-spin' : ''}`} />
-                      {retrying ? 'جارٍ الإرسال…' : 'إعادة الإرسال (تجريبي)'}
+                      {retrying ? 'جارٍ الجدولة…' : 'إعادة التذكيرات من البداية'}
                     </button>
                   )}
                 </div>

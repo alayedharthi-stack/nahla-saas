@@ -1281,41 +1281,19 @@ async def retry_abandoned_cart(
     db: Session = Depends(get_db),
 ):
     """
-    Re-enqueue the **last failed** stage of a cart's recovery sequence.
+    Restart the cart recovery sequence **from Stage 1**.
 
-    Why this exists
-    ───────────────
-    The autopilot is meant to be hands-off — the engine retries on its
-    own cadence. But while the new structured-failure pipeline burns
-    in (template approval gaps, phone-format edge cases, transient
-    Meta 5xx) the merchant occasionally needs to nudge a stuck cart
-    without waiting for an engineer. This endpoint is **gated behind
-    `AUTOPILOT_ENABLE_MANUAL_RETRY=true`** and the dashboard hides
-    its trigger button when the flag is off — so flipping the env to
-    `false` removes the feature entirely with no code redeploy.
+    Creates a fresh automation event starting from step 1, so the
+    entire reminder chain runs again. Useful for testing and for
+    merchants who want to re-trigger reminders after fixing template
+    or configuration issues.
 
-    Safety contract
-    ───────────────
-    * 403 when the feature flag is off — the route is *visible* even
-      then so the dashboard's "this is disabled" hint can render a
-      consistent error instead of a 404 (= ambiguous between "feature
-      off" and "wrong route").
-    * 404 when the order doesn't belong to the current tenant.
-    * 409 when the cart has no recovery event linked, when the latest
-      stage is anything other than `failed`, or when the cart is
-      already converted / cancelled. We treat these as "nothing to
-      retry" rather than 422 because the caller (dashboard button) is
-      synchronous and the merchant wants a clear refusal, not a
-      validation error.
-    * Idempotency: a retry that lands within 60s of an *unprocessed*
-      retry event for the same step short-circuits and returns the
-      existing event id — protecting against double-clicks and
-      accidental tab-spam.
-    * The new event carries `manual_retry=True`,
-      `retry_of=<failed_event_id>` and `parent_event_id=<root>` so the
-      timeline drawer can render the lineage and the engine treats it
-      as a normal pending event (no special path needed in
-      automation_engine).
+    The new event carries ``restart_from_stage1=True`` and
+    ``manual_retry=True`` so the engine treats it as a normal pending
+    event starting from the beginning.
+
+    Idempotency: a retry within 60s of an unprocessed retry for the
+    same cart short-circuits to prevent double-clicks.
     """
     if not _manual_retry_enabled():
         raise HTTPException(
@@ -1364,41 +1342,9 @@ async def retry_abandoned_cart(
             },
         )
 
-    steps: List[Dict[str, Any]] = list(timeline.get("steps") or [])
-    if not steps:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "no_steps_to_retry",
-                "message": "لا توجد مراحل قابلة لإعادة الإرسال في هذه السلة.",
-            },
-        )
-
-    # Walk the chronological tail and pick the latest step that's a
-    # real failure (skip 'pending' / 'sent' / 'skipped'). Steps were
-    # already sorted ascending in timeline_for_order, so reverse-walk.
-    target: Optional[Dict[str, Any]] = None
-    for step in reversed(steps):
-        if step.get("status") == "failed":
-            target = step
-            break
-
-    if target is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "no_failed_step",
-                "message": "لا توجد مرحلة فاشلة لإعادة إرسالها.",
-            },
-        )
-
     root_event_id = int(timeline["recovery_event_id"])
-    failed_event_id = int(target["event_id"])
-    step_idx = int(target.get("step_idx") or 1)
 
     # ── Idempotency: short-circuit on a recent unprocessed retry ─────────
-    # We don't want a frantic merchant double-click to enqueue two
-    # parallel retries that race to send the same WhatsApp.
     from datetime import timedelta
 
     recent_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=60)
@@ -1417,53 +1363,50 @@ async def retry_abandoned_cart(
         if (
             payload.get("manual_retry") is True
             and int(payload.get("parent_event_id") or 0) == root_event_id
-            and int(payload.get("step_idx") or 0) == step_idx
         ):
             return {
                 "ok":               True,
                 "deduplicated":     True,
                 "retry_event_id":   ev.id,
-                "step_idx":         step_idx,
+                "step_idx":         1,
                 "queued_at":        ev.created_at.replace(tzinfo=timezone.utc).isoformat(),
-                "message":          "هناك إعادة إرسال قيد التنفيذ بالفعل لهذه المرحلة.",
+                "message":          "هناك إعادة إرسال قيد التنفيذ بالفعل لهذه السلة.",
             }
 
-    # ── Resolve the customer + payload from the failed event ────────────
-    failed_event = (
+    # ── Find the root event to copy customer + payload ──────────────────
+    root_event = (
         db.query(AutomationEvent)
         .filter(
             AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.id == failed_event_id,
+            AutomationEvent.id == root_event_id,
         )
         .first()
     )
-    if failed_event is None:
+    if root_event is None:
         raise HTTPException(
             status_code=409,
             detail={
-                "error":   "failed_event_missing",
-                "message": "تعذّر العثور على المرحلة الفاشلة الأصلية.",
+                "error":   "root_event_missing",
+                "message": "تعذّر العثور على حدث الاستعادة الأصلي.",
             },
         )
 
-    base_payload: Dict[str, Any] = dict(failed_event.payload or {})
-    base_payload["step_idx"]         = step_idx
-    base_payload["parent_event_id"]  = root_event_id
-    base_payload["manual_retry"]     = True
-    base_payload["retry_of"]         = failed_event_id
-    base_payload["retry_requested_at"] = datetime.now(timezone.utc).isoformat()
-    base_payload["retry_reason"]     = target.get("failure_code") or target.get("error") or "manual_retry"
+    base_payload: Dict[str, Any] = dict(root_event.payload or {})
+    base_payload["step_idx"]            = 1
+    base_payload["parent_event_id"]     = root_event_id
+    base_payload["manual_retry"]        = True
+    base_payload["restart_from_stage1"] = True
+    base_payload["retry_requested_at"]  = datetime.now(timezone.utc).isoformat()
+    base_payload["retry_reason"]        = "manual_restart_stage1"
+    base_payload.pop("processed_at", None)
+    base_payload.pop("result", None)
 
     new_event = AutomationEvent(
         tenant_id   = tenant_id,
-        event_type  = failed_event.event_type or "cart_abandoned",
-        customer_id = failed_event.customer_id,
+        event_type  = root_event.event_type or "cart_abandoned",
+        customer_id = root_event.customer_id,
         payload     = base_payload,
         processed   = False,
-        # ``created_at`` = now → engine picks it up on the next cycle
-        # (within ~60s). We deliberately don't bypass the engine here
-        # so all the existing pre-send guards (already-purchased,
-        # opt-out, quiet hours, idempotency) still protect the send.
         created_at  = datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(new_event)
@@ -1474,7 +1417,7 @@ async def retry_abandoned_cart(
         "ok":             True,
         "deduplicated":   False,
         "retry_event_id": new_event.id,
-        "step_idx":       step_idx,
+        "step_idx":       1,
         "queued_at":      new_event.created_at.replace(tzinfo=timezone.utc).isoformat(),
-        "message":        "تم جدولة إعادة إرسال هذه المرحلة — ستُنفّذ خلال دقيقة.",
+        "message":        "تمت إعادة جدولة التذكيرات من المرحلة الأولى — ستُنفّذ خلال دقيقة.",
     }
