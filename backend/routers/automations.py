@@ -1431,6 +1431,16 @@ async def retry_abandoned_cart(
     ).delete(synchronize_session="fetch")
     deleted_count += old_execs
 
+    # Mark the root event so the sweeper ignores it for future follow-ups.
+    # Without this, both the old root AND the new retry event would look
+    # like Stage-1 parents, causing duplicate Stage 2-4 emissions.
+    root_payload = dict(root_event.payload or {})
+    root_payload["recovery_followups"] = []
+    root_payload["superseded_by_retry"] = True
+    root_event.payload = root_payload
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(root_event, "payload")
+
     db.flush()
 
     base_payload: Dict[str, Any] = dict(root_event.payload or {})
@@ -1444,6 +1454,8 @@ async def retry_abandoned_cart(
     base_payload.pop("processed_at", None)
     base_payload.pop("result", None)
     base_payload.pop("cancelled_by_retry", None)
+    base_payload.pop("superseded_by_retry", None)
+    base_payload.pop("recovery_followups", None)
 
     new_event = AutomationEvent(
         tenant_id   = tenant_id,

@@ -287,11 +287,12 @@ def scan_abandoned_cart_followups(
         # the original event already covers them.
         return 0
 
-    # 48h buffer so the 23h50m stage 4 still has headroom even if the
-    # engine's poll loop fell behind. Anything older than that is past
-    # the WhatsApp service window anyway and chasing it would force a
-    # brand-new (paid) marketing conversation.
-    horizon = now - timedelta(hours=48)
+    # Dynamic horizon: use the maximum step delay + 12h buffer so
+    # multi-day campaigns (e.g. Stage 3 after 3 days) are still picked
+    # up. Falls back to 48h for within-window configs.
+    max_delay_min = max((int(s.get("delay_minutes") or 0) for s in steps), default=0)
+    horizon_hours = max(48, (max_delay_min / 60) + 12)
+    horizon = now - timedelta(hours=horizon_hours)
     candidates: List[Any] = (
         db.query(AutomationEvent)
         .filter(
@@ -312,6 +313,10 @@ def scan_abandoned_cart_followups(
         # use those as a parent (otherwise we'd cascade endlessly).
         original_payload: Dict[str, Any] = dict(original.payload or {})
         if int(original_payload.get("step_idx") or 0) > 0:
+            continue
+        # Skip events that have been superseded by a manual retry —
+        # the retry event is the new parent for follow-ups.
+        if original_payload.get("superseded_by_retry"):
             continue
 
         progress: List[Dict[str, Any]] = list(

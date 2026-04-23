@@ -8,6 +8,9 @@ import {
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
+
+const fmtDelay = (h: number) =>
+  h >= 24 ? `${Math.round(h / 24)} يوم` : h < 1 ? `${Math.round(h * 60)} دقيقة` : `${h} ساعة`
 import StatCard from '../components/ui/StatCard'
 import { useLanguage } from '../i18n/context'
 import {
@@ -232,7 +235,7 @@ function TemplateRow({
         {tpl.step_number != null && (
           <p className="text-[10px] text-slate-500 mt-0.5">
             المرحلة {tpl.step_number}
-            {tpl.trigger_delay_hours != null && ` · بعد ${tpl.trigger_delay_hours >= 24 ? `${Math.round(tpl.trigger_delay_hours / 24)} يوم` : `${tpl.trigger_delay_hours} ساعة`}`}
+            {tpl.trigger_delay_hours != null && ` · بعد ${fmtDelay(tpl.trigger_delay_hours)}`}
             {tpl.has_coupon && ' · مع خصم'}
           </p>
         )}
@@ -489,7 +492,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
                 {tpl.step_number != null && (
                   <p className="text-xs text-slate-500 mt-1.5">
                     المرحلة {tpl.step_number}
-                    {tpl.trigger_delay_hours != null && ` · بعد ${tpl.trigger_delay_hours >= 24 ? `${Math.round(tpl.trigger_delay_hours / 24)} يوم` : `${tpl.trigger_delay_hours} ساعة`}`}
+                    {tpl.trigger_delay_hours != null && ` · بعد ${fmtDelay(tpl.trigger_delay_hours)}`}
                     {tpl.has_coupon && ' · يتضمن كود خصم'}
                   </p>
                 )}
@@ -1375,7 +1378,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
                           </span>
                           {tpl.trigger_delay_hours != null && (
                             <span className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-medium">
-                              {tpl.trigger_delay_hours >= 24 ? `${Math.round(tpl.trigger_delay_hours / 24)} يوم` : `${tpl.trigger_delay_hours} ساعة`}
+                              {fmtDelay(tpl.trigger_delay_hours)}
                             </span>
                           )}
                           {tpl.has_coupon && (
@@ -1460,7 +1463,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
                         </span>
                         {preview.trigger_delay_hours != null && (
                           <span className="text-[10px] bg-white/60 text-slate-600 px-2 py-0.5 rounded-full font-medium">
-                            بعد {preview.trigger_delay_hours >= 24 ? `${Math.round(preview.trigger_delay_hours / 24)} يوم` : `${preview.trigger_delay_hours} ساعة`}
+                            بعد {fmtDelay(preview.trigger_delay_hours)}
                           </span>
                         )}
                         {preview.has_coupon && (

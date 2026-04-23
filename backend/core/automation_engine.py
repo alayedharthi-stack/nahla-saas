@@ -626,6 +626,8 @@ def _resolve_delay(config: Dict[str, Any], *, event: Any = None) -> int:
     if event is not None:
         try:
             payload = getattr(event, "payload", None) or {}
+            if payload.get("manual_retry"):
+                return 0
             step_idx = int(payload.get("step_idx") or 0)
             if step_idx > 0:
                 return 0
@@ -1653,6 +1655,7 @@ def _reschedule_followup_event(
 # Keep in sync with `services.whatsapp_templates.nahla_templates.SERVICE_CATALOG`.
 _AUTOMATION_TYPE_TO_SERVICE_KEY: Dict[str, str] = {
     "cart_abandoned":      "cart_recovery",
+    "abandoned_cart":      "cart_recovery",
     "cod_confirmation":    "cod_confirmation",
     "order_confirmation":  "order_confirmation",
     "shipping_update":     "shipping_update",

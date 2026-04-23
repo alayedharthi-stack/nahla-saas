@@ -288,6 +288,44 @@ def _load_event_tree(
                 followups.append(cand)
 
     rows.extend(followups)
+
+    # Second level: follow-ups of retry events (grandchildren of root).
+    # When a manual retry creates event R with parent=root, and the
+    # sweeper later emits follow-ups F2/F3 with parent=R, those are
+    # still part of this cart's timeline.
+    retry_ids = [f.id for f in followups if f.id != root_event_id]
+    if retry_ids:
+        grandchildren: List[AutomationEvent] = []
+        seen = {r.id for r in rows}
+        try:
+            for rid in retry_ids:
+                gcs = (
+                    db.query(AutomationEvent)
+                    .filter(
+                        AutomationEvent.tenant_id == tenant_id,
+                        AutomationEvent.payload["parent_event_id"].astext == str(rid),
+                    )
+                    .order_by(AutomationEvent.id.asc())
+                    .all()
+                )
+                grandchildren.extend(gcs)
+        except Exception:
+            for cand in (
+                db.query(AutomationEvent)
+                .filter(
+                    AutomationEvent.tenant_id == tenant_id,
+                    AutomationEvent.event_type == "cart_abandoned",
+                )
+                .all()
+            ):
+                p = (cand.payload or {}).get("parent_event_id")
+                if p is not None and int(p) in {int(r) for r in retry_ids}:
+                    grandchildren.append(cand)
+        for gc in grandchildren:
+            if gc.id not in seen:
+                rows.append(gc)
+                seen.add(gc.id)
+
     return rows
 
 
