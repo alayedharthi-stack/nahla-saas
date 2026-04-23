@@ -119,9 +119,9 @@ async def run_template_sync_scheduler() -> None:
     Meta templates and Nahla service slots are auto-created via the same
     library-match logic used by the manual endpoint.
     """
-    await asyncio.sleep(150)  # let app fully start before first sync
+    await asyncio.sleep(30)  # brief wait for DB migrations to settle
     logger.info(
-        "[Template Sync Scheduler] Started — auto-syncing every %ss",
+        "[Template Sync Scheduler] Started — first sync NOW, then every %ss",
         _TEMPLATE_SYNC_INTERVAL_SECONDS,
     )
     while True:

@@ -2124,6 +2124,7 @@ def _record_last_template_sync(
         }
     """
     from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
     try:
         settings_obj = get_or_create_settings(db, tenant_id)
         meta = dict(settings_obj.extra_metadata or {})
@@ -2138,6 +2139,7 @@ def _record_last_template_sync(
             "message":       result.get("message", ""),
         }
         settings_obj.extra_metadata = meta
+        flag_modified(settings_obj, "extra_metadata")
         db.commit()
     except Exception as exc:
         logger.warning(

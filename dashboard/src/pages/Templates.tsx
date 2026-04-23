@@ -14,7 +14,7 @@ import {
   templatesApi, WhatsAppTemplateRecord, CreateTemplatePayload,
   TemplateStatus, TemplateCategory, TemplateComponent, TemplateButton,
   TemplateVarMapRecord, NahlaLibraryTemplate,
-  TemplateSyncStatus, getTemplateSyncErrorMessage,
+  TemplateSyncStatus, TemplateSyncResult, getTemplateSyncErrorMessage,
   getBody, getHeader, getFooter, getButtons,
   extractVars, renderBody, countVars,
   STATUS_COLORS, STATUS_LABELS, CATEGORY_LABELS, LANGUAGE_LABELS,
@@ -1698,6 +1698,8 @@ export default function Templates() {
       .finally(() => setLoading(false))
   }, [])
 
+  const autoSyncTriggered = useState(false)
+
   const loadSyncStatus = useCallback(() => {
     templatesApi.syncStatus()
       .then(setSyncStatus)
@@ -1711,16 +1713,51 @@ export default function Templates() {
     return () => clearInterval(id)
   }, [loadSyncStatus])
 
-  const handleSync = async () => {
+  // Auto-sync on page load when no sync has ever been recorded.
+  // This acts as a safety net: even if the background scheduler is
+  // slow to start (or failed entirely), the merchant sees fresh data
+  // within seconds of opening the Templates page.
+  useEffect(() => {
+    if (!syncStatus || syncing || autoSyncTriggered[0]) return
+    if (!syncStatus.recorded) {
+      autoSyncTriggered[1](true)
+      handleSyncInner()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncStatus])
+
+  /** Build an optimistic TemplateSyncStatus from the POST /sync response
+   *  so the card updates immediately, even if _record_last_template_sync
+   *  on the server side failed (race / JSONB tracking). */
+  const applyOptimisticStatus = useCallback((res: TemplateSyncResult) => {
+    setSyncStatus({
+      recorded:      true,
+      at:            new Date().toISOString(),
+      source:        'manual',
+      synced:        res.synced ?? 0,
+      auto_bound:    res.auto_bound ?? 0,
+      failed:        res.failed ?? 0,
+      deleted_seeds: res.deleted_seeds ?? 0,
+      error:         res.error ?? null,
+      message:       res.message ?? '',
+    })
+  }, [])
+
+  const handleSyncInner = async () => {
     setSyncing(true)
     try {
-      await templatesApi.sync()
+      const res = await templatesApi.sync()
+      applyOptimisticStatus(res)
       loadTemplates()
-      loadSyncStatus()
+      // Also refresh from the backend status (delayed slightly to give
+      // the DB commit time to complete).
+      setTimeout(loadSyncStatus, 2000)
     } finally {
       setSyncing(false)
     }
   }
+
+  const handleSync = handleSyncInner
 
   const [deleteMsg, setDeleteMsg] = useState<string | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<WhatsAppTemplateRecord | null>(null)
