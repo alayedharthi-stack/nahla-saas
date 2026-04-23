@@ -686,15 +686,16 @@ export default function Landing() {
               صندوق الوارد الذكي
             </p>
             <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-4">
-              كأنك في واتساب —
+              واجهة واتساب التي تعرفها
               <br />
               <span className="text-transparent bg-clip-text bg-gradient-to-l from-amber-400 to-orange-500">
-                لكن مع عقل مبيعات كامل
+                بقدرات مبيعات احترافية
               </span>
             </h2>
             <p className="text-slate-400 max-w-2xl mx-auto leading-loose text-base">
-              كل محادثات متجرك في مكان واحد، مع شارات ذكية تخبرك من يرد على من —
-              الذكاء، الموظف، الحملات، أو الطيار الآلي. جرّب الفلاتر بنفسك:
+              كل محادثات متجرك في مكان واحد. شارات ذكية تخبرك دائماً من يرد:
+              الذكاء الاصطناعي، موظفك، حملاتك، أو الطيار الآلي.
+              <span className="block mt-1 text-slate-500 text-sm">جرّب الفلاتر والمحادثات بنفسك 👇</span>
             </p>
           </div>
 
@@ -702,7 +703,7 @@ export default function Landing() {
           <div className="relative">
             <span className="absolute -top-3 right-1/2 translate-x-1/2 z-20 inline-flex items-center gap-1.5 bg-amber-500 text-slate-900 text-[11px] font-black px-3 py-1 rounded-full shadow-lg shadow-amber-500/30">
               <span className="w-1.5 h-1.5 rounded-full bg-slate-900 animate-pulse" />
-              تجربة تفاعلية — اضغط الفلاتر والمحادثات
+              تجربة تفاعلية · اضغط الفلاتر والمحادثات
             </span>
             <InboxDemo />
           </div>
