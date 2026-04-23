@@ -111,7 +111,7 @@ export default function TrustBlock({
             alt="شعار وزارة التجارة"
             loading="lazy"
             decoding="async"
-            className="shrink-0 w-14 h-14 rounded-xl object-cover shadow-sm"
+            className="shrink-0 w-16 h-16 rounded-xl object-cover shadow-sm"
             onError={e => { e.currentTarget.style.display = 'none' }}
           />
           <div className="flex flex-col text-right leading-tight">
