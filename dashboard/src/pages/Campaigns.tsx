@@ -420,16 +420,30 @@ function Step3Template({
 
 // ── Step 4: Variables ─────────────────────────────────────────────────────────
 
+// Variables that are resolved automatically per-customer from CRM data at send
+// time. The merchant should NEVER be asked to type these manually — they are
+// different for each recipient.
+const AUTO_RESOLVE_VARS: Record<string, { label: string; source: string }> = {
+  '{{1}}': { label: 'اسم العميل',   source: 'من بيانات العميل تلقائياً' },
+  '{{4}}': { label: 'اسم المتجر',   source: 'من إعدادات المتجر تلقائياً' },
+}
+
+const MANUAL_VAR_HINTS: Record<string, string> = {
+  '{{2}}': 'رابط أو قيمة',
+  '{{3}}': 'كود الكوبون',
+}
+
+/** Returns true when ALL template body variables are auto-resolved. */
+function allVarsAutoResolved(vars: string[]): boolean {
+  return vars.length > 0 && vars.every(v => v in AUTO_RESOLVE_VARS)
+}
+
 function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispatch<React.SetStateAction<WizardState>> }) {
   const body = getTemplateBody(wiz.template!)
   const vars = extractVariables(body)
 
-  const VAR_HINTS: Record<string, string> = {
-    '{{1}}': 'اسم العميل',
-    '{{2}}': 'رابط أو قيمة',
-    '{{3}}': 'كود الكوبون',
-    '{{4}}': 'اسم المتجر',
-  }
+  const autoVars   = vars.filter(v => v in AUTO_RESOLVE_VARS)
+  const manualVars = vars.filter(v => !(v in AUTO_RESOLVE_VARS))
 
   if (vars.length === 0) {
     return (
@@ -440,21 +454,68 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
     )
   }
 
+  // All variables are auto-resolved — show confirmation, no inputs
+  if (manualVars.length === 0) {
+    return (
+      <div className="space-y-4">
+        <div className="py-6 text-center flex flex-col items-center gap-3">
+          <div className="w-12 h-12 rounded-full bg-emerald-50 flex items-center justify-center">
+            <Sparkles className="w-6 h-6 text-emerald-500" />
+          </div>
+          <p className="text-sm font-semibold text-slate-800">جميع المتغيرات تُعبّأ تلقائياً</p>
+          <p className="text-xs text-slate-500 max-w-sm">
+            سيتم استبدال المتغيرات ببيانات كل عميل تلقائياً عند الإرسال — لا حاجة لإدخال أي شيء.
+          </p>
+        </div>
+        <div className="space-y-2">
+          {autoVars.map(v => {
+            const info = AUTO_RESOLVE_VARS[v]!
+            return (
+              <div key={v} className="flex items-center gap-3 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3">
+                <span className="font-mono text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded text-[11px]">{v}</span>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-emerald-800">{info.label}</p>
+                  <p className="text-[11px] text-emerald-600">{info.source}</p>
+                </div>
+                <CheckCircle className="w-4 h-4 text-emerald-500 ms-auto shrink-0" />
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
+  // Mixed: some auto, some manual
   return (
     <div className="space-y-4">
+      {autoVars.length > 0 && (
+        <div className="space-y-2 mb-2">
+          <p className="text-xs text-emerald-700 font-medium">✓ يتم تعبئتها تلقائياً لكل عميل:</p>
+          {autoVars.map(v => {
+            const info = AUTO_RESOLVE_VARS[v]!
+            return (
+              <div key={v} className="flex items-center gap-2 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2">
+                <span className="font-mono text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded text-[10px]">{v}</span>
+                <span className="text-xs text-emerald-700">{info.label}</span>
+                <CheckCircle className="w-3.5 h-3.5 text-emerald-500 ms-auto" />
+              </div>
+            )
+          })}
+        </div>
+      )}
       <p className="text-xs text-slate-500">
-        حدد القيمة التي ستُستبدل بكل متغير عند إرسال الرسالة للعميل.
-        يمكنك ترك أي حقل فارغاً، وسنستخدم بيانات تجريبية في رسالة الاختبار.
+        أدخل القيم للمتغيرات التالية — ستُستخدم نفس القيمة لجميع المستلمين في هذه الحملة.
       </p>
-      {vars.map(v => (
+      {manualVars.map(v => (
         <div key={v}>
           <label className="label flex items-center gap-2">
             <span className="font-mono text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded text-[11px]">{v}</span>
-            <span className="text-slate-600">{VAR_HINTS[v] ?? 'قيمة ديناميكية'}</span>
+            <span className="text-slate-600">{MANUAL_VAR_HINTS[v] ?? 'قيمة ديناميكية'}</span>
           </label>
           <input
             className="input text-sm"
-            placeholder={`مثال: ${VAR_HINTS[v] ?? v}`}
+            placeholder={`مثال: ${MANUAL_VAR_HINTS[v] ?? v}`}
             value={wiz.variables[v] ?? ''}
             onChange={e => setWiz(w => ({ ...w, variables: { ...w.variables, [v]: e.target.value } }))}
           />
@@ -781,8 +842,26 @@ function CampaignWizard({
     }
   }
 
-  const next = () => setWiz(w => ({ ...w, step: Math.min(w.step + 1, 8) }))
-  const prev = () => setWiz(w => ({ ...w, step: Math.max(w.step - 1, 1) }))
+  // Auto-skip step 4 when all template body vars are auto-resolved from
+  // CRM data (e.g. {{1}} = customer_name). The merchant shouldn't waste
+  // time on a step that says "everything is automatic".
+  const shouldSkipStep4 = useCallback((): boolean => {
+    if (!wiz.template) return false
+    const body = getTemplateBody(wiz.template)
+    const vars = extractVariables(body)
+    return allVarsAutoResolved(vars)
+  }, [wiz.template])
+
+  const next = () => setWiz(w => {
+    let target = Math.min(w.step + 1, 8)
+    if (target === 4 && shouldSkipStep4()) target = 5
+    return { ...w, step: target }
+  })
+  const prev = () => setWiz(w => {
+    let target = Math.max(w.step - 1, 1)
+    if (target === 4 && shouldSkipStep4()) target = 3
+    return { ...w, step: target }
+  })
 
   const handleTestSend = async () => {
     if (!wiz.testPhone || !wiz.template) return
