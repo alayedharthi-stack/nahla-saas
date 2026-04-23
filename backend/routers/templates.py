@@ -2133,6 +2133,7 @@ def _record_last_template_sync(
             "source":        source,
             "synced":        int(result.get("synced", 0) or 0),
             "auto_bound":    int(result.get("auto_bound", 0) or 0),
+            "total_bound":   int(result.get("total_bound", 0) or 0),
             "failed":        int(result.get("failed", 0) or 0),
             "deleted_seeds": int(result.get("deleted_seeds", 0) or 0),
             "error":         result.get("error"),
@@ -2487,25 +2488,39 @@ async def _sync_templates_for_tenant_inner(
             "failed": failed,
         }
 
+    # Count ALL templates currently bound to a Nahla service (not just
+    # newly-bound ones from this sync cycle).
+    total_bound = (
+        db.query(WhatsAppTemplate)
+        .filter(
+            WhatsAppTemplate.tenant_id == tenant_id,
+            WhatsAppTemplate.service_key.isnot(None),
+            WhatsAppTemplate.service_key != "",
+        )
+        .count()
+    )
+    approved_count = _status_summary.get("APPROVED", 0)
+
     logger.info(
-        "[templates/sync] tenant=%s synced=%d auto_bound=%d failed=%d from waba=%s",
-        tenant_id, synced, auto_bound, failed, waba_id,
+        "[templates/sync] tenant=%s synced=%d auto_bound=%d total_bound=%d failed=%d from waba=%s",
+        tenant_id, synced, auto_bound, total_bound, failed, waba_id,
     )
     msg = f"تمت مزامنة {synced} قالب من Meta"
     if auto_bound:
-        msg += f" (تم ربط {auto_bound} قالب تلقائياً بخدمات نحلة)"
+        msg += f" (تم ربط {auto_bound} قالب جديد تلقائياً)"
+    if total_bound:
+        msg += f" — {total_bound} قالب مربوط بخدمات نحلة"
     if deleted:
         msg += f" (وحُذف {deleted} قالب تجريبي)"
     if failed:
         msg += f" — تم تخطّي {failed} قالب بسبب أخطاء (راجع السجلات)"
-
-    approved_count = _status_summary.get("APPROVED", 0)
     if approved_count:
         msg += f" — {approved_count} قالب معتمد"
 
     return {
         "synced":        synced,
         "auto_bound":    auto_bound,
+        "total_bound":   total_bound,
         "deleted_seeds": deleted,
         "failed":        failed,
         "message":       msg,

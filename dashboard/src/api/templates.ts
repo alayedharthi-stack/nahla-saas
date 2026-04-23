@@ -86,6 +86,7 @@ export interface UpdateTemplatePayload {
 export interface TemplateSyncResult {
   synced: number
   auto_bound?: number
+  total_bound?: number
   failed?: number
   deleted_seeds?: number
   message: string
@@ -114,6 +115,8 @@ export interface TemplateSyncStatus {
   source?: 'manual' | 'scheduled' | string
   synced?: number
   auto_bound?: number
+  /** Total templates currently bound to a Nahla service (cumulative). */
+  total_bound?: number
   failed?: number
   deleted_seeds?: number
   error?: string | null

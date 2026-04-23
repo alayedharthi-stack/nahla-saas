@@ -1631,9 +1631,9 @@ function SyncStatusCard({
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <SyncMiniStat label="تم جلبها"    value={status.synced     ?? 0} tone="slate"   />
-        <SyncMiniStat label="مربوطة تلقائياً" value={status.auto_bound ?? 0} tone="emerald" />
+        <SyncMiniStat label="مربوطة بخدمات" value={status.total_bound ?? status.auto_bound ?? 0} tone="emerald" />
         <SyncMiniStat label="فاشلة"       value={status.failed     ?? 0} tone={status.failed ? 'amber' : 'slate'} />
-        <SyncMiniStat label="حُذفت تجريبية" value={status.deleted_seeds ?? 0} tone="slate"   />
+        <SyncMiniStat label="إجمالي"      value={status.synced     ?? 0} tone="slate"   />
       </div>
     </div>
   )
@@ -1736,6 +1736,7 @@ export default function Templates() {
       source:        'manual',
       synced:        res.synced ?? 0,
       auto_bound:    res.auto_bound ?? 0,
+      total_bound:   res.total_bound ?? 0,
       failed:        res.failed ?? 0,
       deleted_seeds: res.deleted_seeds ?? 0,
       error:         res.error ?? null,
