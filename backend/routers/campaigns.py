@@ -233,6 +233,37 @@ async def update_campaign_status(
     return _campaign_to_dict(campaign)
 
 
+@router.get("/campaigns/debug-template/{template_id}")
+async def debug_template(template_id: int, request: Request, db: Session = Depends(get_db)):
+    """Diagnostic endpoint: shows raw template components and the payload
+    that _build_send_payload would generate. Helps diagnose Meta #131008."""
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    from services.campaign_dispatcher import _build_send_payload  # noqa: PLC0415
+    payload = _build_send_payload(
+        template=tpl,
+        to_phone="966500000000",
+        customer_name="أحمد",
+        store_name="المتجر",
+        coupon_code="SAVE10",
+    )
+    return {
+        "template_id": tpl.id,
+        "template_name": tpl.name,
+        "template_language": tpl.language,
+        "template_status": tpl.status,
+        "raw_components": tpl.components,
+        "generated_payload": payload,
+        "generated_components": payload.get("template", {}).get("components", []),
+    }
+
+
 @router.post("/campaigns/test-send")
 async def test_send(body: TestSendIn, request: Request, db: Session = Depends(get_db)):
     """Send a real test WhatsApp message for the chosen template.

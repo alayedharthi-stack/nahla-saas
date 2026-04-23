@@ -1181,6 +1181,16 @@ function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; o
                   </li>
                 ))}
               </ul>
+              {campaign.template_id && (
+                <a
+                  href={`/api/campaigns/debug-template/${campaign.template_id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-block mt-2 text-[10px] text-blue-600 hover:underline"
+                >
+                  🔍 فحص القالب والحمولة المُرسلة (تشخيص)
+                </a>
+              )}
             </div>
           </td>
         </tr>

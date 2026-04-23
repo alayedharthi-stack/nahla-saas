@@ -147,12 +147,18 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
                 failed += 1
                 err_msg = meta_err.get("message", "Unknown Meta error")
                 err_code = meta_err.get("code", "")
+                err_sub = meta_err.get("error_subcode", "")
                 logger.warning(
-                    "[campaign_dispatcher] campaign=%d: Meta error for %s code=%s msg=%s",
-                    campaign_id, phone, err_code, err_msg,
+                    "[campaign_dispatcher] campaign=%d: Meta error for %s code=%s sub=%s msg=%s payload=%s",
+                    campaign_id, phone, err_code, err_sub, err_msg,
+                    payload.get("template", {}).get("components", []),
                 )
+                detail = f"{phone}: ({err_code}) {err_msg[:100]}"
+                if err_code in (131008, "131008"):
+                    sent_comps = payload.get("template", {}).get("components", [])
+                    detail += f" [sent {len(sent_comps)} components]"
                 if len(errors) < 10:
-                    errors.append(f"{phone}: {err_msg[:120]}")
+                    errors.append(detail)
             else:
                 sent += 1
                 logger.info("[campaign_dispatcher] campaign=%d: sent OK to %s", campaign_id, phone)
