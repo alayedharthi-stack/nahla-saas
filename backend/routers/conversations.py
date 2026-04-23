@@ -389,43 +389,72 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    # ── Resolve every phone shape this customer has ever appeared as ──────────
-    # Inbound rows are stored with the raw WhatsApp ``from`` (no plus); outbound
-    # campaign/template rows often carry the normalised E.164 form. Without
-    # matching both we silently lose half the thread the moment a normaliser
-    # behaviour changes.
+    from sqlalchemy import or_  # noqa: PLC0415
+    from core.conversation_engine import PLATFORM_TENANT_ID  # noqa: PLC0415
+
     normalized = normalize_phone(customer_phone) or customer_phone
     phone_variants = {customer_phone, normalized}
+    if normalized.startswith("966"):
+        phone_variants.add("+" + normalized)
+    stripped = normalized.lstrip("+")
+    phone_variants.add(stripped)
     phone_variants.discard("")
 
-    # ── Pull the LATEST ``limit`` messages for THIS customer only ─────────────
-    # The previous query fetched the OLDEST ``limit`` rows for the entire
-    # tenant and filtered by phone in Python. Once the tenant accumulates
-    # more than ``limit`` total ``MessageEvent`` rows (trivial after a few
-    # test conversations) every customer's "today" tail falls outside the
-    # window and the chat panel freezes on the first day of traffic. Filter
-    # at the DB layer against both metadata keys (``phone`` is what
-    # ``StateManager.save_message`` writes; ``customer_phone`` is what the
-    # legacy code path used) and order DESC so we always keep the freshest
-    # ``limit`` rows; reverse afterwards so the chat UI renders in
-    # chronological order.
-    from sqlalchemy import or_  # noqa: PLC0415
+    tenant_ids = list({tenant_id, PLATFORM_TENANT_ID})
 
     phone_filters = []
     for variant in phone_variants:
         phone_filters.append(MessageEvent.extra_metadata["phone"].astext == variant)
         phone_filters.append(MessageEvent.extra_metadata["customer_phone"].astext == variant)
 
+    conv_ids = [
+        c.id for c in db.query(Conversation.id).filter(
+            Conversation.tenant_id.in_(tenant_ids),
+            Conversation.customer_id.in_(
+                db.query(Customer.id).filter(
+                    Customer.tenant_id.in_(tenant_ids),
+                    or_(
+                        Customer.phone.in_(list(phone_variants)),
+                        Customer.normalized_phone.in_(list(phone_variants)),
+                    ),
+                )
+            ),
+        ).all()
+    ]
+
+    me_filter = or_(*phone_filters) if phone_filters else False
+    if conv_ids:
+        me_filter = or_(me_filter, MessageEvent.conversation_id.in_(conv_ids))
+
     me_rows = (
         db.query(MessageEvent)
         .filter(
-            MessageEvent.tenant_id == tenant_id,
-            or_(*phone_filters) if phone_filters else False,
+            MessageEvent.tenant_id.in_(tenant_ids),
+            me_filter,
         )
         .order_by(MessageEvent.created_at.desc())
         .limit(limit)
         .all()
     )
+
+    def _event_type_label(r) -> str:
+        et = (r.event_type or "").lower()
+        meta = r.extra_metadata or {}
+        if et == "campaign":
+            return "campaign"
+        if et == "ai_reply" or meta.get("is_ai"):
+            return "ai"
+        if et in ("automation", "cart_recovery"):
+            return "automation"
+        if et == "cod_confirmation":
+            return "cod"
+        if et == "manual_reply":
+            return "manual"
+        if et == "system":
+            return "system"
+        if (r.direction or "").lower() != "outbound":
+            return "customer"
+        return "system"
 
     messages: List[Dict[str, Any]] = [
         {
@@ -434,6 +463,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             "body": r.body or "",
             "time": r.created_at.isoformat() if r.created_at else "",
             "isAI": bool((r.extra_metadata or {}).get("is_ai")),
+            "eventType": _event_type_label(r),
             "_ts": r.created_at,
         }
         for r in me_rows
@@ -444,7 +474,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
     trace_rows = (
         db.query(ConversationTrace)
         .filter(
-            ConversationTrace.tenant_id == tenant_id,
+            ConversationTrace.tenant_id.in_(tenant_ids),
             ConversationTrace.customer_phone.in_(list(phone_variants)),
         )
         .order_by(ConversationTrace.created_at.desc())
@@ -468,6 +498,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
                 "body": row.message,
                 "time": row.created_at.isoformat() if row.created_at else "",
                 "isAI": False,
+                "eventType": "customer",
                 "_ts": row.created_at,
             })
         if row.response_text and not _near(row.created_at):
@@ -477,6 +508,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
                 "body": row.response_text,
                 "time": row.created_at.isoformat() if row.created_at else "",
                 "isAI": bool(row.orchestrator_used),
+                "eventType": "ai",
                 "_ts": row.created_at,
             })
 

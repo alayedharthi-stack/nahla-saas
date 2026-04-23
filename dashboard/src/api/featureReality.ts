@@ -181,12 +181,15 @@ export interface DashboardConversation {
   unread: number
 }
 
+export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'
+
 export interface DashboardMessage {
   id: string
   direction: 'in' | 'out'
   body: string
   time: string
   isAI?: boolean
+  eventType?: MessageEventType
 }
 
 export const featureRealityApi = {

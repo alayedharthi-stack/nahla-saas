@@ -3,9 +3,20 @@ import { useSearchParams } from 'react-router-dom'
 import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, RefreshCw, ArrowRight, Check, CheckCheck,
+  Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
-import { featureRealityApi, type DashboardConversation, type DashboardMessage } from '../api/featureReality'
+import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType } from '../api/featureReality'
+
+const EVENT_BADGE: Record<MessageEventType, { label: string; icon: React.ReactNode; cls: string }> = {
+  ai:         { label: 'ذكاء اصطناعي', icon: <Bot className="w-3 h-3" />, cls: 'bg-brand-50 text-brand-600 border-brand-200' },
+  campaign:   { label: 'حملة تسويقية', icon: <Megaphone className="w-3 h-3" />, cls: 'bg-blue-50 text-blue-600 border-blue-200' },
+  automation: { label: 'طيار آلي', icon: <Zap className="w-3 h-3" />, cls: 'bg-amber-50 text-amber-600 border-amber-200' },
+  cod:        { label: 'تأكيد طلب COD', icon: <PackageCheck className="w-3 h-3" />, cls: 'bg-emerald-50 text-emerald-600 border-emerald-200' },
+  manual:     { label: 'رد يدوي', icon: <User className="w-3 h-3" />, cls: 'bg-slate-50 text-slate-600 border-slate-200' },
+  system:     { label: 'نظام', icon: <MessageSquare className="w-3 h-3" />, cls: 'bg-purple-50 text-purple-600 border-purple-200' },
+  customer:   { label: '', icon: null, cls: '' },
+}
 import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
 
 interface Conversation extends DashboardConversation {
@@ -416,10 +427,11 @@ export default function Conversations() {
 
                     <div className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1`}>
                       <div className={`flex flex-col ${isOut ? 'items-end' : 'items-start'} max-w-[78%] md:max-w-md`}>
-                        {/* AI label */}
-                        {isOut && m.isAI && (
-                          <span className="text-xs text-brand-500 flex items-center gap-1 px-2 mb-0.5">
-                            <Bot className="w-3 h-3" /> رد نحلة
+                        {/* Smart event badge */}
+                        {isOut && m.eventType && m.eventType !== 'customer' && EVENT_BADGE[m.eventType] && (
+                          <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border mb-0.5 ${EVENT_BADGE[m.eventType].cls}`}>
+                            {EVENT_BADGE[m.eventType].icon}
+                            {EVENT_BADGE[m.eventType].label}
                           </span>
                         )}
 
