@@ -24,10 +24,11 @@ interface Conversation extends DashboardConversation {
 }
 
 const filterLabels: Record<string, string> = {
-  all:    'الكل',
-  active: 'نشطة',
-  human:  'بشري',
-  closed: 'مغلقة',
+  all:       'الكل',
+  active:    'نشطة',
+  human:     'بشري',
+  agent_req: 'طلب موظف',
+  closed:    'مغلقة',
 }
 
 export default function Conversations() {
@@ -35,7 +36,7 @@ export default function Conversations() {
   const requestedPhone = searchParams.get('phone')?.trim() || null
 
   const [selected, setSelected]     = useState<Conversation | null>(null)
-  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'closed'>('all')
+  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'closed'>('all')
   const [reply, setReply]           = useState('')
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -185,7 +186,12 @@ export default function Conversations() {
   }
 
   const filtered = conversations.filter(c => {
-    const matchFilter = filter === 'all' || c.status === filter
+    let matchFilter = false
+    if (filter === 'all') matchFilter = true
+    else if (filter === 'active') matchFilter = c.windowOpen === true
+    else if (filter === 'human') matchFilter = c.status === 'human' && c.handoffReason !== 'customer_request'
+    else if (filter === 'agent_req') matchFilter = c.status === 'human' && c.handoffReason === 'customer_request'
+    else if (filter === 'closed') matchFilter = c.windowOpen === false
     const matchSearch = !searchQuery || c.customer.includes(searchQuery) || c.phone.includes(searchQuery)
     return matchFilter && matchSearch
   })
@@ -243,24 +249,31 @@ export default function Conversations() {
 
         {/* Filter tabs */}
         <div className="flex gap-1 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto scrollbar-none">
-          {(['all', 'active', 'human', 'closed'] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors ${
-                filter === f
-                  ? 'bg-brand-500 text-white shadow-sm'
-                  : 'text-slate-500 hover:bg-slate-100'
-              }`}
-            >
-              {filterLabels[f]}
-              {f !== 'all' && conversations.filter(c => c.status === f).length > 0 && (
-                <span className={`ms-1 ${filter === f ? 'text-white/70' : 'text-slate-400'}`}>
-                  {conversations.filter(c => c.status === f).length}
-                </span>
-              )}
-            </button>
-          ))}
+          {(['all', 'active', 'human', 'agent_req', 'closed'] as const).map((f) => {
+            const count = f === 'all' ? 0
+              : f === 'active' ? conversations.filter(c => c.windowOpen === true).length
+              : f === 'human' ? conversations.filter(c => c.status === 'human' && c.handoffReason !== 'customer_request').length
+              : f === 'agent_req' ? conversations.filter(c => c.status === 'human' && c.handoffReason === 'customer_request').length
+              : conversations.filter(c => c.windowOpen === false).length
+            return (
+              <button
+                key={f}
+                onClick={() => setFilter(f)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors ${
+                  filter === f
+                    ? f === 'agent_req' ? 'bg-red-500 text-white shadow-sm' : 'bg-brand-500 text-white shadow-sm'
+                    : f === 'agent_req' && count > 0 ? 'text-red-600 bg-red-50 hover:bg-red-100' : 'text-slate-500 hover:bg-slate-100'
+                }`}
+              >
+                {filterLabels[f]}
+                {f !== 'all' && count > 0 && (
+                  <span className={`ms-1 ${filter === f ? 'text-white/70' : f === 'agent_req' ? 'text-red-400' : 'text-slate-400'}`}>
+                    {count}
+                  </span>
+                )}
+              </button>
+            )
+          })}
         </div>
 
         {/* Conversation list */}
@@ -301,14 +314,18 @@ export default function Conversations() {
                   )}
                 </div>
                 <div className="flex items-center gap-1.5 mt-1">
-                  {c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
+                  {c.status === 'human' && c.handoffReason === 'customer_request' ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200 animate-pulse">
+                      <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
+                    </span>
+                  ) : c.status === 'human' ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-600 border border-orange-200">
+                      <User className="w-3 h-3" /> رد بشري
+                    </span>
+                  ) : c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
                     <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${EVENT_BADGE[c.lastMsgType].cls}`}>
                       {EVENT_BADGE[c.lastMsgType].icon}
                       {EVENT_BADGE[c.lastMsgType].label}
-                    </span>
-                  ) : c.status === 'human' ? (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200 animate-pulse">
-                      <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
                     </span>
                   ) : c.unread > 0 ? (
                     <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-200">

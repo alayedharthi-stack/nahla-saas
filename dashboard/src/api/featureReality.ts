@@ -180,6 +180,8 @@ export interface DashboardConversation {
   status: 'active' | 'human' | 'closed'
   unread: number
   lastMsgType?: MessageEventType | ''
+  windowOpen?: boolean
+  handoffReason?: string | null
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'

@@ -208,20 +208,37 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     def _norm(p: str) -> str:
         return (p or "").strip().replace("+", "").replace("-", "").replace(" ", "")
 
-    active_handoff_norms: set[str] = {
-        _norm(row.customer_phone)
-        for row in db.query(HandoffSession).filter(
-            HandoffSession.tenant_id == tenant_id,
-            HandoffSession.status == "active",
-        ).all()
-    }
+    active_handoffs: dict[str, str] = {}
+    for row in db.query(HandoffSession).filter(
+        HandoffSession.tenant_id == tenant_id,
+        HandoffSession.status == "active",
+    ).all():
+        active_handoffs[_norm(row.customer_phone)] = row.handoff_reason or "unknown"
+
+    from datetime import timedelta  # noqa: PLC0415
+    from models import WaConversationWindow  # noqa: PLC0415
+    _window_cutoff = datetime.utcnow() - timedelta(hours=24)
+    _open_windows: set[str] = set()
+    for w in db.query(WaConversationWindow).filter(
+        WaConversationWindow.tenant_id == tenant_id,
+        WaConversationWindow.category == "service",
+        WaConversationWindow.window_start >= _window_cutoff,
+    ).all():
+        _open_windows.add(_norm(w.customer_phone))
 
     def _status_for(phone: str, convo: Optional[Conversation]) -> str:
-        if _norm(phone) in active_handoff_norms or (convo and convo.is_human_handoff):
+        n = _norm(phone)
+        if n in active_handoffs or (convo and convo.is_human_handoff):
             return "human"
         if convo and str(convo.status).lower() == "closed":
             return "closed"
         return "active"
+
+    def _handoff_reason_for(phone: str) -> Optional[str]:
+        return active_handoffs.get(_norm(phone))
+
+    def _has_window(phone: str) -> bool:
+        return _norm(phone) in _open_windows
 
     # ── 1. All Conversation records → phone_info map ─────────────────────────
     convo_rows = (
@@ -266,6 +283,8 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "status": status,
             "unread": 0,
             "lastMsgType": "",
+            "windowOpen": _has_window(phone),
+            "handoffReason": _handoff_reason_for(phone),
             "_conv_id": convo.id,
         }
         norm_to_key[n] = phone
@@ -383,6 +402,8 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 "status": _status_for(phone, None),
                 "unread": 0,
                 "lastMsgType": "ai",
+                "windowOpen": _has_window(phone),
+                "handoffReason": _handoff_reason_for(phone),
                 "_conv_id": None,
             }
 
