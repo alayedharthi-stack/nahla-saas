@@ -24,6 +24,9 @@ from services.customer_intelligence import CustomerIntelligenceService, normaliz
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
 
+import logging as _logging  # noqa: E402
+_log = _logging.getLogger("nahla-backend")
+
 
 class ReplyIn(BaseModel):
     customer_phone: str
@@ -121,6 +124,48 @@ def _resolve_customer_phone(convo: Conversation) -> str:
         return str(convo.customer.phone)
     meta = convo.extra_metadata or {}
     return str(meta.get("customer_phone") or meta.get("phone") or "")
+
+
+def record_outbound_message(
+    db: Session,
+    tenant_id: int,
+    phone: str,
+    body: str,
+    event_type: str = "system",
+    customer_name: str = "",
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record an outbound message so it appears in the conversations inbox.
+
+    Safe to call from any context (campaigns, automations, COD, AI
+    fallback, etc.).  Uses a SAVEPOINT so failures never corrupt the
+    caller's transaction.
+    """
+    try:
+        db.begin_nested()
+        convo = _get_or_create_conversation(db, tenant_id, phone, customer_name)
+        meta = {
+            "customer_phone": phone,
+            "phone": phone,
+            "is_ai": False,
+        }
+        if extra:
+            meta.update(extra)
+        db.add(MessageEvent(
+            conversation_id=convo.id,
+            tenant_id=tenant_id,
+            direction="outbound",
+            body=body,
+            event_type=event_type,
+            extra_metadata=meta,
+        ))
+        db.flush()
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _log.warning("[record_outbound_message] %s tenant=%s: %s", phone, tenant_id, exc)
 
 
 @router.get("")

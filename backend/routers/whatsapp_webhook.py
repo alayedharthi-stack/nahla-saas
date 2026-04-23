@@ -1170,12 +1170,22 @@ async def _handle_merchant_message(
             "[Merchant] Error generating reply for tenant=%s: %s\n%s",
             tenant_id, exc, traceback.format_exc(),
         )
+        _fallback_text = "وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت."
         try:
             await _send_whatsapp_message(
                 phone_id=phone_id, to=to,
-                text="وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت.",
+                text=_fallback_text,
                 _tenant_id=tenant_id, _db=db,
             )
+            try:
+                from routers.conversations import record_outbound_message  # noqa: PLC0415
+                record_outbound_message(
+                    db, tenant_id, to, _fallback_text,
+                    event_type="ai_fallback",
+                    extra={"is_ai": True},
+                )
+            except Exception:
+                pass
         except Exception as send_exc:  # noqa: BLE001
             logger.error(
                 "[Merchant] Fallback send also failed for tenant=%s: %s",

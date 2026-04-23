@@ -181,6 +181,28 @@ async def send_cod_confirmation_template(
             payload=payload,
         )
         wa_msg_id = (response or {}).get("messages", [{}])[0].get("id")
+
+        try:
+            from routers.conversations import record_outbound_message  # noqa: PLC0415
+            _body = ""
+            for comp in (template.components or []):
+                if (comp.get("type") or "").upper() == "BODY":
+                    _body = comp.get("text") or ""; break
+            import re
+            _vals = [customer_name, product_name, total_amount]
+            def _sub(m):
+                i = int(m.group(1)) - 1
+                return str(_vals[i]) if i < len(_vals) else m.group(0)
+            _rendered = re.sub(r"\{\{(\d+)\}\}", _sub, _body) if _body else f"[{template_name}]"
+            record_outbound_message(
+                db, tenant_id, to, _rendered,
+                event_type="cod_confirmation",
+                customer_name=customer_name,
+                extra={"template_name": template_name, "order_id": getattr(order, "id", None)},
+            )
+        except Exception:
+            pass
+
         return {"sent": True, "wa_message_id": wa_msg_id, "error": None}
     except Exception as exc:
         logger.error(

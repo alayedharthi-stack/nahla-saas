@@ -69,35 +69,16 @@ def _record_campaign_message(
     template: WhatsAppTemplate,
     rendered_body: str,
 ) -> None:
-    """Create a Conversation (if needed) and a MessageEvent for the sent campaign message.
-
-    Uses a SAVEPOINT so a failure here never corrupts the outer dispatch
-    transaction.
-    """
+    """Create a Conversation (if needed) and a MessageEvent via the shared helper."""
     try:
-        db.begin_nested()
-        from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
-        convo = _get_or_create_conversation(db, tenant_id, phone, customer.name or "")
-        db.add(MessageEvent(
-            conversation_id=convo.id,
-            tenant_id=tenant_id,
-            direction="outbound",
-            body=rendered_body,
+        from routers.conversations import record_outbound_message  # noqa: PLC0415
+        record_outbound_message(
+            db, tenant_id, phone, rendered_body,
             event_type="campaign",
-            extra_metadata={
-                "customer_phone": phone,
-                "phone": phone,
-                "is_ai": False,
-                "campaign_id": campaign_id,
-                "template_name": template.name,
-            },
-        ))
-        db.flush()
+            customer_name=customer.name or "",
+            extra={"campaign_id": campaign_id, "template_name": template.name},
+        )
     except Exception as exc:
-        try:
-            db.rollback()
-        except Exception:
-            pass
         logger.warning(
             "[campaign_dispatcher] failed to record message for %s: %s",
             phone, exc,

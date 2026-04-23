@@ -1262,6 +1262,26 @@ async def _execute_action(
                 "vars":        vars_map,
             }
 
+        try:
+            from routers.conversations import record_outbound_message  # noqa: PLC0415
+            _tpl_body = ""
+            for _c in (template.components or []):
+                if (_c.get("type") or "").upper() == "BODY":
+                    _tpl_body = _c.get("text") or ""; break
+            import re as _re
+            def _sub(m):
+                i = int(m.group(1)) - 1
+                return str(_var_values[i]) if i < len(_var_values) else m.group(0)
+            _rendered = _re.sub(r"\{\{(\d+)\}\}", _sub, _tpl_body) if _tpl_body else f"[{template.name}]"
+            record_outbound_message(
+                db, tenant_id, to_phone, _rendered,
+                event_type="automation",
+                customer_name=customer.name or "",
+                extra={"template_name": template.name, "automation_id": getattr(automation, "id", None)},
+            )
+        except Exception:
+            pass
+
         action_info = {
             "template": template.name,
             "to": to_phone,
@@ -2416,6 +2436,17 @@ async def _execute_interactive_step(
                 "to":            to_phone,
             }
 
+        try:
+            from routers.conversations import record_outbound_message  # noqa: PLC0415
+            record_outbound_message(
+                db, tenant_id, to_phone, body_text,
+                event_type="automation",
+                customer_name=customer_name,
+                extra={"delivery_mode": "interactive", "stage": stage},
+            )
+        except Exception:
+            pass
+
         action_info: Dict[str, Any] = {
             "delivery_mode": "interactive",
             "stage":         stage,
@@ -2584,6 +2615,17 @@ async def _execute_ai_recovery_step(
                 "stage":         stage,
                 "to":            to_phone,
             }
+
+        try:
+            from routers.conversations import record_outbound_message  # noqa: PLC0415
+            record_outbound_message(
+                db, tenant_id, to_phone, ai_text,
+                event_type="automation",
+                customer_name=customer_name,
+                extra={"delivery_mode": "ai_recovery", "stage": stage},
+            )
+        except Exception:
+            pass
 
         return True, {
             "delivery_mode": "ai_recovery",
