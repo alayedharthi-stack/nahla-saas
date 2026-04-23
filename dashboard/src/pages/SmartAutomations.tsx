@@ -586,6 +586,28 @@ function AbandonedCartsQueue({
   onRetried?: () => void
 }) {
   const [openCart, setOpenCart] = useState<AbandonedCartItem | null>(null)
+  const [cleaningStale, setCleaningStale] = useState(false)
+  const [staleNotice, setStaleNotice] = useState<string | null>(null)
+
+  const hasStale = items.some(i => {
+    const r = i.recovery
+    return r && r.status === 'pending' && r.steps_sent === 0
+  })
+
+  const handleCleanStale = async () => {
+    if (!confirm('سيتم تنظيف جميع السلات العالقة وإعادة جدولتها فوراً من المرحلة الأولى. متأكد؟')) return
+    setCleaningStale(true)
+    setStaleNotice(null)
+    try {
+      const res = await autopilotApi.retryAllStaleCarts()
+      setStaleNotice(res.message)
+      onRetried?.()
+    } catch (e) {
+      setStaleNotice(e instanceof Error ? e.message : 'فشل التنظيف')
+    } finally {
+      setCleaningStale(false)
+    }
+  }
 
   if (items.length === 0) {
     return (
@@ -597,6 +619,25 @@ function AbandonedCartsQueue({
   }
   return (
     <>
+      {hasStale && manualRetryEnabled && (
+        <div className="flex items-center justify-between gap-3 px-3 py-2.5 bg-amber-50 border-b border-amber-200 rounded-t-lg">
+          <div className="flex items-center gap-2 text-xs text-amber-700">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+            <span>يوجد سلات عالقة لم تُرسل تذكيراتها — يمكن إعادة جدولتها دفعة واحدة</span>
+          </div>
+          <button
+            onClick={handleCleanStale}
+            disabled={cleaningStale}
+            className="text-xs px-3 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 shrink-0 flex items-center gap-1.5"
+          >
+            <RefreshCw className={`w-3 h-3 ${cleaningStale ? 'animate-spin' : ''}`} />
+            {cleaningStale ? 'جارٍ...' : 'إعادة جدولة الكل'}
+          </button>
+        </div>
+      )}
+      {staleNotice && (
+        <div className="px-3 py-2 text-xs bg-green-50 text-green-700 border-b border-green-200">{staleNotice}</div>
+      )}
       <div className="divide-y divide-slate-100">
         {items.map((item) => {
           // Recovery payload is always present (backend never returns null),

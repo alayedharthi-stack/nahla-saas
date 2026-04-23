@@ -216,6 +216,14 @@ export const autopilotApi = {
       queued_at: string
       message: string
     }>(`/autopilot/abandoned-carts/${orderId}/retry`, { method: 'POST' }),
+
+  retryAllStaleCarts: () =>
+    apiCall<{
+      ok: boolean
+      cleaned: number
+      retried: number
+      message: string
+    }>('/autopilot/abandoned-carts/retry-all-stale', { method: 'POST' }),
 }
 
 // ── Order status labels (Arabic) ──────────────────────────────────────────────

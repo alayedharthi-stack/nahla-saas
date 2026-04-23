@@ -1478,3 +1478,85 @@ async def retry_abandoned_cart(
         "queued_at":      new_event.created_at.replace(tzinfo=timezone.utc).isoformat(),
         "message":        f"تم حذف {deleted_count} سجل سابق وإعادة الجدولة من المرحلة الأولى.",
     }
+
+
+@router.post("/autopilot/abandoned-carts/retry-all-stale")
+async def retry_all_stale_carts(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    One-shot cleanup: find every cart_abandoned event that is still
+    pending (processed=False) but older than 72h, delete it, and
+    create a fresh immediate retry for each distinct order.
+
+    This is the operational fix for carts that got stuck before the
+    manual_retry delay-bypass was deployed.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=72)
+
+    stale_events = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type == "cart_abandoned",
+            AutomationEvent.processed.is_(False),
+            AutomationEvent.created_at < cutoff,
+        )
+        .all()
+    )
+
+    if not stale_events:
+        return {"ok": True, "cleaned": 0, "retried": 0, "message": "لا توجد أحداث عالقة."}
+
+    seen_customers: set = set()
+    cleaned = 0
+    retried = 0
+
+    for ev in stale_events:
+        ev.processed = True
+        payload = dict(ev.payload or {})
+        payload["cleaned_stale"] = True
+        payload["cleaned_at"] = datetime.now(timezone.utc).isoformat()
+        ev.payload = payload
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(ev, "payload")
+        cleaned += 1
+
+        cid = ev.customer_id
+        if cid and cid not in seen_customers:
+            seen_customers.add(cid)
+            new_payload = dict(ev.payload or {})
+            new_payload["step_idx"] = 0
+            new_payload["manual_retry"] = True
+            new_payload["restart_from_stage1"] = True
+            new_payload["retry_reason"] = "stale_cleanup"
+            new_payload["retry_requested_at"] = datetime.now(timezone.utc).isoformat()
+            new_payload.pop("cleaned_stale", None)
+            new_payload.pop("cleaned_at", None)
+            new_payload.pop("recovery_followups", None)
+            new_payload.pop("superseded_by_retry", None)
+            new_payload.pop("processed_at", None)
+            new_payload.pop("result", None)
+
+            fresh = AutomationEvent(
+                tenant_id=tenant_id,
+                event_type="cart_abandoned",
+                customer_id=cid,
+                payload=new_payload,
+                processed=False,
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            db.add(fresh)
+            retried += 1
+
+    db.commit()
+    return {
+        "ok":      True,
+        "cleaned": cleaned,
+        "retried": retried,
+        "message": f"تم تنظيف {cleaned} حدث عالق وإعادة جدولة {retried} سلة من المرحلة الأولى.",
+    }
