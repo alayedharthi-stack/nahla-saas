@@ -156,7 +156,7 @@ async def process_pending_events(
     db: Session,
     tenant_id: int,
     *,
-    skip_guards: bool = False,
+    skip_autopilot_check: bool = False,
     event_ids: Optional[List[int]] = None,
 ) -> int:
     """
@@ -164,7 +164,8 @@ async def process_pending_events(
     Returns the total number of WhatsApp messages sent in this cycle.
 
     Args:
-        skip_guards: bypass billing/autopilot checks (for manual retries)
+        skip_autopilot_check: bypass only the autopilot-enabled toggle
+            (for manual retries). Billing/trial guard is ALWAYS enforced.
         event_ids: if provided, only process these specific events
     """
     from core.automations_seed import (  # noqa: PLC0415
@@ -203,32 +204,31 @@ async def process_pending_events(
             tenant_id, exc, exc_info=True,
         )
 
-    if not skip_guards:
-        # ── Trial / subscription guard ───────────────────────────────────
-        from core.billing import has_billing_access  # noqa: PLC0415
-        if not has_billing_access(db, tenant_id):
-            skipped = _drain_pending_for_reason(db, tenant_id, "trial_expired")
-            if skipped:
-                _log_event(
-                    _EVENTS.AUTOMATION_AUTOPILOT_DISABLED,
-                    level=logging.INFO,
-                    tenant_id=tenant_id,
-                    events_drained=skipped,
-                    reason="trial_expired",
-                )
-            return 0
+    # ── Trial / subscription guard (ALWAYS enforced) ────────────────────
+    from core.billing import has_billing_access  # noqa: PLC0415
+    if not has_billing_access(db, tenant_id):
+        skipped = _drain_pending_for_reason(db, tenant_id, "trial_expired")
+        if skipped:
+            _log_event(
+                _EVENTS.AUTOMATION_AUTOPILOT_DISABLED,
+                level=logging.INFO,
+                tenant_id=tenant_id,
+                events_drained=skipped,
+                reason="trial_expired",
+            )
+        return 0
 
-        # ── Master autopilot switch ──────────────────────────────────────
-        if not _is_autopilot_enabled(db, tenant_id):
-            skipped = _drain_pending_for_disabled_autopilot(db, tenant_id)
-            if skipped:
-                _log_event(
-                    _EVENTS.AUTOMATION_AUTOPILOT_DISABLED,
-                    level=logging.INFO,
-                    tenant_id=tenant_id,
-                    events_drained=skipped,
-                )
-            return 0
+    # ── Master autopilot switch (skipped for manual retries) ──────────
+    if not skip_autopilot_check and not _is_autopilot_enabled(db, tenant_id):
+        skipped = _drain_pending_for_disabled_autopilot(db, tenant_id)
+        if skipped:
+            _log_event(
+                _EVENTS.AUTOMATION_AUTOPILOT_DISABLED,
+                level=logging.INFO,
+                tenant_id=tenant_id,
+                events_drained=skipped,
+            )
+        return 0
 
     now = _utcnow_naive()
     cutoff = now - timedelta(hours=_MAX_EVENT_AGE_HOURS)

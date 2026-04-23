@@ -1513,7 +1513,7 @@ async def retry_all_stale_carts(
             from core.automation_engine import process_pending_events
             engine_sent = await process_pending_events(
                 db, tenant_id,
-                skip_guards=True,
+                skip_autopilot_check=True,
                 event_ids=new_event_ids,
             )
             _log.info("tenant=%s immediate engine run sent=%d", tenant_id, engine_sent)
@@ -1775,7 +1775,7 @@ async def retry_abandoned_cart(
         from core.automation_engine import process_pending_events
         engine_sent = await process_pending_events(
             db, tenant_id,
-            skip_guards=True,
+            skip_autopilot_check=True,
             event_ids=[new_event.id],
         )
     except Exception as exc:
