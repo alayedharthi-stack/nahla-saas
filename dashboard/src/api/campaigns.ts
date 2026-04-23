@@ -64,6 +64,10 @@ export interface CreateCampaignPayload {
   schedule_time?: string
   delay_minutes?: number
   coupon_code: string
+  /** When set, the backend auto-generates a unique coupon per customer at send time. */
+  discount_percent?: number
+  /** True = system generates coupons automatically per customer (no static code). */
+  auto_coupon?: boolean
 }
 
 import { apiCall } from './client'

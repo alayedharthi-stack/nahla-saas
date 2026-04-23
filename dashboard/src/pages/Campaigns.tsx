@@ -39,6 +39,8 @@ interface WizardState {
   scheduleTime: string
   delayMinutes: number
   couponCode: string
+  autoCoupon: boolean
+  discountPercent: number
 }
 
 const INITIAL_WIZARD: WizardState = {
@@ -57,6 +59,8 @@ const INITIAL_WIZARD: WizardState = {
   scheduleTime: '',
   delayMinutes: 30,
   couponCode: '',
+  autoCoupon: true,
+  discountPercent: 10,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -420,17 +424,32 @@ function Step3Template({
 
 // ── Step 4: Variables ─────────────────────────────────────────────────────────
 
-// Variables that are resolved automatically per-customer from CRM data at send
-// time. The merchant should NEVER be asked to type these manually — they are
-// different for each recipient.
+// ALL numbered template variables ({{1}} through {{6}}) are resolved
+// automatically by the backend at send time from customer data, store
+// settings, cart/order context, and the coupon generator. The merchant
+// should NEVER have to type any of them manually.
+//
+// The backend's `field_values` dict (routers/templates.py) and the
+// automation engine's slot resolver (core/automation_engine.py) handle:
+//   {{1}} → customer_name    (from Customer record)
+//   {{2}} → product_name / store_name / cart_url  (context-dependent)
+//   {{3}} → coupon_code / order_amount / discount_pct  (auto-generated)
+//   {{4}} → store_name / tracking_url  (from settings)
+//   {{5}} → coupon_code  (auto-generated)
+//   {{6}} → store_url  (from settings)
 const AUTO_RESOLVE_VARS: Record<string, { label: string; source: string }> = {
-  '{{1}}': { label: 'اسم العميل',   source: 'من بيانات العميل تلقائياً' },
-  '{{4}}': { label: 'اسم المتجر',   source: 'من إعدادات المتجر تلقائياً' },
+  '{{1}}': { label: 'اسم العميل',        source: 'من بيانات العميل تلقائياً' },
+  '{{2}}': { label: 'رابط السلة / المنتج', source: 'رابط ديناميكي لكل عميل حسب السلة أو الطلب' },
+  '{{3}}': { label: 'كود الخصم',          source: 'يُولّد تلقائياً من نظام الكوبونات لكل عميل' },
+  '{{4}}': { label: 'اسم المتجر',         source: 'من إعدادات المتجر تلقائياً' },
+  '{{5}}': { label: 'كوبون إضافي',        source: 'يُولّد تلقائياً من نظام الكوبونات' },
+  '{{6}}': { label: 'رابط المتجر',        source: 'من إعدادات المتجر تلقائياً' },
 }
 
+// Fallback for any var beyond {{6}} that might appear in custom templates.
 const MANUAL_VAR_HINTS: Record<string, string> = {
-  '{{2}}': 'رابط أو قيمة',
-  '{{3}}': 'كود الكوبون',
+  '{{7}}': 'قيمة مخصصة',
+  '{{8}}': 'قيمة مخصصة',
 }
 
 /** Returns true when ALL template body variables are auto-resolved. */
@@ -706,16 +725,65 @@ function Step7Review({
         )}
       </div>
 
-      <div>
-        <label className="label">كوبون مرفق (اختياري)</label>
-        <input
-          className="input text-sm font-mono"
-          placeholder="WELCOME20"
-          dir="ltr"
-          value={wiz.couponCode}
-          onChange={e => setWiz(w => ({ ...w, couponCode: e.target.value.toUpperCase() }))}
-        />
-      </div>
+      {/* Coupon / Discount section — behavior depends on campaign goal */}
+      {wiz.goalKey === 'reminder' ? (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 space-y-1">
+          <p className="text-xs font-semibold text-emerald-700">الكوبونات والروابط تلقائية بالكامل</p>
+          <p className="text-[11px] text-emerald-600 leading-relaxed">
+            رابط السلة المتروكة يُرسل تلقائياً لكل عميل حسب سلته، والكوبون يُولّد فريداً لكل عميل من نظام الكوبونات في نحلة.
+            لا تحتاج لكتابة أي شيء.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="label mb-0">كوبون خصم تلقائي</label>
+            <button
+              type="button"
+              onClick={() => setWiz(w => ({ ...w, autoCoupon: !w.autoCoupon }))}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
+                wiz.autoCoupon ? 'bg-brand-500' : 'bg-slate-300'
+              }`}
+            >
+              <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
+                wiz.autoCoupon ? 'translate-x-[18px]' : 'translate-x-[3px]'
+              }`} />
+            </button>
+          </div>
+
+          {wiz.autoCoupon ? (
+            <div className="space-y-2">
+              <p className="text-[11px] text-slate-500">
+                حدد نسبة الخصم فقط — النظام سيولّد كوبوناً فريداً لكل عميل تلقائياً ويوزعه عند الإرسال.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {[5, 10, 15, 20, 25, 30].map(pct => (
+                  <button
+                    key={pct}
+                    type="button"
+                    onClick={() => setWiz(w => ({ ...w, discountPercent: pct }))}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                      wiz.discountPercent === pct
+                        ? 'border-brand-500 bg-brand-50 text-brand-700 ring-1 ring-brand-200'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                    }`}
+                  >
+                    {pct}%
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-emerald-600 bg-emerald-50 border border-emerald-100 rounded-lg p-2">
+                <CheckCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>سيتم توليد كوبون خصم {wiz.discountPercent}% فريد لكل عميل عند الإرسال</span>
+              </div>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-400">
+              لن يتم إرفاق كوبون مع هذه الحملة.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -755,9 +823,11 @@ function Step8Launch({
             : wiz.scheduleType === 'scheduled' ? wiz.scheduleTime
             : `بعد ${wiz.delayMinutes} دقيقة`}
         </span></div>
-        {wiz.couponCode && (
-          <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="font-mono text-slate-800">{wiz.couponCode}</span></div>
-        )}
+        {wiz.goalKey === 'reminder' ? (
+          <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-emerald-600">تلقائي لكل عميل</span></div>
+        ) : wiz.autoCoupon ? (
+          <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-emerald-600">خصم {wiz.discountPercent}% تلقائي لكل عميل</span></div>
+        ) : null}
       </div>
 
       {error && (
@@ -917,7 +987,9 @@ function CampaignWizard({
         schedule_type: wiz.scheduleType,
         schedule_time: wiz.scheduleType === 'scheduled' ? wiz.scheduleTime : undefined,
         delay_minutes: wiz.scheduleType === 'delayed' ? wiz.delayMinutes : undefined,
-        coupon_code: wiz.couponCode,
+        coupon_code: (wiz.goalKey === 'reminder' || wiz.autoCoupon) ? 'auto' : '',
+        discount_percent: (wiz.goalKey === 'reminder' || wiz.autoCoupon) ? wiz.discountPercent : undefined,
+        auto_coupon: wiz.goalKey === 'reminder' || wiz.autoCoupon,
       }
       const created = await campaignsApi.create(payload)
       onCreated(created)

@@ -47,6 +47,8 @@ class CreateCampaignIn(BaseModel):
     schedule_time: Optional[str] = None
     delay_minutes: Optional[int] = None
     coupon_code: str = ""
+    discount_percent: Optional[int] = None
+    auto_coupon: bool = False
 
 
 class UpdateCampaignStatusIn(BaseModel):
@@ -64,6 +66,10 @@ class TestSendIn(BaseModel):
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
+    tpl_vars = c.template_variables or {}
+    auto_coupon = tpl_vars.get("_auto_coupon") == "true"
+    discount_pct_raw = tpl_vars.get("_discount_percent")
+    discount_pct = int(discount_pct_raw) if discount_pct_raw else None
     return {
         "id": c.id,
         "name": c.name,
@@ -75,13 +81,15 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
         "template_category": c.template_category,
         "template_status": getattr(c, "template_status", None) or "APPROVED",
         "template_body": c.template_body,
-        "template_variables": c.template_variables or {},
+        "template_variables": {k: v for k, v in tpl_vars.items() if not k.startswith("_")},
         "audience_type": c.audience_type,
         "audience_count": c.audience_count,
         "schedule_type": c.schedule_type,
         "schedule_time": c.schedule_time.isoformat() if c.schedule_time else None,
         "delay_minutes": c.delay_minutes,
         "coupon_code": c.coupon_code or "",
+        "auto_coupon": auto_coupon,
+        "discount_percent": discount_pct,
         "sent_count": c.sent_count,
         "delivered_count": c.delivered_count,
         "read_count": c.read_count,
@@ -141,6 +149,12 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
         except ValueError:
             pass
 
+    tpl_vars = dict(body.template_variables or {})
+    if body.auto_coupon:
+        tpl_vars["_auto_coupon"] = "true"
+    if body.discount_percent is not None and body.discount_percent > 0:
+        tpl_vars["_discount_percent"] = str(body.discount_percent)
+
     campaign = Campaign(
         tenant_id=tenant_id,
         name=body.name,
@@ -151,7 +165,7 @@ async def create_campaign(body: CreateCampaignIn, request: Request, db: Session 
         template_language=template.language,
         template_category=template.category,
         template_body=next((c.get("text", "") for c in (template.components or []) if c.get("type") == "BODY"), body.template_body),
-        template_variables=body.template_variables or {},
+        template_variables=tpl_vars,
         audience_type=body.audience_type,
         audience_count=body.audience_count,
         schedule_type=body.schedule_type,
