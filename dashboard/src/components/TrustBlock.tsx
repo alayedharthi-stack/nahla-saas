@@ -107,15 +107,14 @@ export default function TrustBlock({
         >
           {/* MoC emblem — green Saudi palm-and-swords crest, icon-only PNG */}
           <div
-            className="shrink-0 w-14 h-14 rounded-xl bg-white ring-1 ring-white/15 overflow-hidden shadow-sm flex items-center justify-center"
-            style={{ padding: '6px' }}
+            className="shrink-0 w-14 h-14 rounded-xl bg-white ring-1 ring-white/15 overflow-hidden shadow-sm"
           >
             <img
               src={MOC_LOGO_SRC}
               alt="شعار وزارة التجارة"
               loading="lazy"
               decoding="async"
-              style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'scale(1.08)' }}
+              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               onError={e => { e.currentTarget.style.display = 'none' }}
             />
           </div>
@@ -184,14 +183,14 @@ export default function TrustBlock({
           {/* SBC icon-only logo — purple starburst mark, no wordmark text */}
           <div
             className="shrink-0 w-14 h-14 rounded-xl bg-white ring-1 ring-white/15 overflow-hidden shadow-sm flex items-center justify-center"
-            style={{ padding: '6px' }}
+            style={{ padding: '3px' }}
           >
             <img
               src={BUSINESS_AUTH_LOGO_SRC}
               alt="شعار المركز السعودي للأعمال"
               loading="lazy"
               decoding="async"
-              style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'scale(1.1)' }}
+              style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'scale(1.25)' }}
               onError={e => { e.currentTarget.style.display = 'none' }}
             />
           </div>
