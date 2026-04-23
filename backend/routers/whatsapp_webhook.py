@@ -201,6 +201,73 @@ async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
             phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
             for msg in value.get("messages", []):
                 await _dispatch_message(phone_number_id, msg, value)
+            for status in value.get("statuses", []):
+                await _handle_message_status(status)
+
+
+async def _handle_message_status(status: Dict[str, Any]) -> None:
+    """Process delivery/read receipts from Meta Cloud API.
+
+    Updates ``Campaign.delivered_count`` / ``read_count`` when the
+    status webhook carries a wamid that matches a campaign send.
+    """
+    wamid = status.get("id", "")
+    st = (status.get("status") or "").lower()
+    if not wamid or st not in ("delivered", "read"):
+        return
+
+    db = next(get_db(), None)
+    if not db:
+        return
+    try:
+        row = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.extra_metadata["wa_message_id"].astext == wamid,
+            )
+            .first()
+        )
+        if not row:
+            return
+        meta = row.extra_metadata or {}
+        campaign_id = meta.get("campaign_id")
+        if not campaign_id:
+            return
+
+        already_key = f"_status_{st}"
+        if meta.get(already_key):
+            return
+
+        from models import Campaign  # noqa: PLC0415
+        campaign = db.query(Campaign).filter(Campaign.id == int(campaign_id)).first()
+        if not campaign:
+            return
+
+        if st == "delivered":
+            campaign.delivered_count = (campaign.delivered_count or 0) + 1
+        elif st == "read":
+            campaign.read_count = (campaign.read_count or 0) + 1
+            if not meta.get("_status_delivered"):
+                campaign.delivered_count = (campaign.delivered_count or 0) + 1
+                meta["_status_delivered"] = True
+
+        meta[already_key] = True
+        row.extra_metadata = meta
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        flag_modified(row, "extra_metadata")
+        db.commit()
+        logger.info("[StatusWebhook] campaign=%s status=%s wamid=%s", campaign_id, st, wamid[:20])
+    except Exception as exc:
+        logger.warning("[StatusWebhook] error processing status: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None:
@@ -256,6 +323,8 @@ async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None
                 if field == "messages":
                     for msg in value.get("messages", []):
                         await _dispatch_message(phone_number_id, msg, value)
+                    for st_obj in value.get("statuses", []):
+                        await _handle_message_status(st_obj)
                     continue
 
                 if field == "smb_message_echoes":

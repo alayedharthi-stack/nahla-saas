@@ -106,6 +106,7 @@ def _record_campaign_message(
     phone: str,
     template: WhatsAppTemplate,
     rendered_body: str,
+    wa_message_id: str = "",
 ) -> None:
     """Create a Conversation (if needed) and a MessageEvent via the shared helper."""
     try:
@@ -114,7 +115,11 @@ def _record_campaign_message(
             db, tenant_id, phone, rendered_body,
             event_type="campaign",
             customer_name=customer.name or "",
-            extra={"campaign_id": campaign_id, "template_name": template.name},
+            extra={
+                "campaign_id": campaign_id,
+                "template_name": template.name,
+                "wa_message_id": wa_message_id,
+            },
         )
     except Exception as exc:
         logger.warning(
@@ -245,13 +250,15 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
                     errors.append(f"{phone}: ({err_code}) {err_msg[:120]}")
             else:
                 sent += 1
+                wa_msg_id = (resp.get("messages") or [{}])[0].get("id", "")
                 rendered = _reconstruct_template_body(
                     template, customer.name or "العميل", store_name, coupon_code,
                 )
                 _record_campaign_message(
                     db, tenant_id, campaign_id, customer, phone, template, rendered,
+                    wa_message_id=wa_msg_id,
                 )
-                logger.info("[campaign_dispatcher] campaign=%d: sent OK to %s", campaign_id, phone)
+                logger.info("[campaign_dispatcher] campaign=%d: sent OK to %s wamid=%s", campaign_id, phone, wa_msg_id)
         except Exception as exc:
             failed += 1
             logger.error(
