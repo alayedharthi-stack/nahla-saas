@@ -107,7 +107,8 @@ export default function TrustBlock({
         >
           {/* MoC emblem — green Saudi palm-and-swords crest, icon-only PNG */}
           <div
-            className="shrink-0 w-14 h-14 rounded-xl bg-white ring-1 ring-white/15 overflow-hidden shadow-sm"
+            className="shrink-0 w-14 h-14 rounded-xl overflow-hidden shadow-sm ring-1 ring-white/10"
+            style={{ background: '#006C35' }}
           >
             <img
               src={MOC_LOGO_SRC}
