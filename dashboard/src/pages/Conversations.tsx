@@ -302,14 +302,14 @@ export default function Conversations() {
                   )}
                 </div>
                 <div className="flex items-center gap-1.5 mt-1">
-                  {c.status === 'human' ? (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200 animate-pulse">
-                      <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
-                    </span>
-                  ) : c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
+                  {c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
                     <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${EVENT_BADGE[c.lastMsgType].cls}`}>
                       {EVENT_BADGE[c.lastMsgType].icon}
                       {EVENT_BADGE[c.lastMsgType].label}
+                    </span>
+                  ) : c.status === 'human' ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200 animate-pulse">
+                      <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
                     </span>
                   ) : c.unread > 0 ? (
                     <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-200">

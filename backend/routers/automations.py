@@ -1392,6 +1392,8 @@ async def retry_abandoned_cart(
         )
 
     # ── Cancel ALL pending/scheduled events for this cart ────────────────
+    target_order_id = str(order_id)
+    root_customer_id = root_event.customer_id
     pending_events = (
         db.query(AutomationEvent)
         .filter(
@@ -1403,14 +1405,13 @@ async def retry_abandoned_cart(
     cancelled_count = 0
     for ev in pending_events:
         ep = ev.payload or {}
-        ev_root = int(ep.get("parent_event_id") or ep.get("recovery_event_id") or ev.id or 0)
-        same_root = (ev_root == root_event_id or ev.id == root_event_id)
-        same_customer = (root_event.customer_id and ev.customer_id == root_event.customer_id)
-        same_order = (
-            ep.get("order_id") and
-            str(ep.get("order_id")) == str((root_event.payload or {}).get("order_id"))
+        match = (
+            ev.id == root_event_id
+            or str(ep.get("order_id", "")) == target_order_id
+            or str(ep.get("parent_event_id", "")) == str(root_event_id)
+            or (root_customer_id and ev.customer_id == root_customer_id)
         )
-        if same_root or same_customer or same_order:
+        if match:
             ev.processed = True
             ep["cancelled_by_retry"] = True
             ep["cancelled_at"] = datetime.now(timezone.utc).isoformat()
@@ -1421,6 +1422,7 @@ async def retry_abandoned_cart(
 
     base_payload: Dict[str, Any] = dict(root_event.payload or {})
     base_payload["step_idx"]            = 1
+    base_payload["order_id"]            = order_id
     base_payload["parent_event_id"]     = root_event_id
     base_payload["manual_retry"]        = True
     base_payload["restart_from_stage1"] = True
