@@ -270,49 +270,73 @@ def _build_send_payload(
     coupon_code: str = "",
 ) -> Dict[str, Any]:
     import re
-    body = ""
-    for c in (template.components or []):
-        if (c.get("type") or "").upper() == "BODY":
-            body = c.get("text", "") or ""
-            break
 
-    placeholders = sorted(
-        set(re.findall(r"\{\{\d+\}\}", body)),
-        key=lambda s: int(s.strip("{}")),
-    )
+    slot_values = [
+        customer_name,
+        store_name,
+        coupon_code or store_name,
+        store_name,
+        coupon_code or "",
+        store_name,
+    ]
 
-    slot_values = {
-        "{{1}}": customer_name,
-        "{{2}}": store_name,
-        "{{3}}": coupon_code or store_name,
-        "{{4}}": store_name,
-        "{{5}}": coupon_code or "",
-        "{{6}}": store_name,
-    }
+    def _extract_param_count(text: str) -> int:
+        if not text:
+            return 0
+        matches = re.findall(r"\{\{(\d+)\}\}", text)
+        return max((int(m) for m in matches), default=0)
 
-    body_params: List[Dict[str, str]] = []
-    for ph in placeholders:
-        val = slot_values.get(ph, "")
-        body_params.append({"type": "text", "text": str(val) or " "})
+    def _example_param_count(comp: Dict[str, Any], key: str) -> int:
+        """Fallback: derive parameter count from the example field."""
+        ex = comp.get("example") or {}
+        vals = ex.get(key) or []
+        if isinstance(vals, list) and vals:
+            inner = vals[0] if isinstance(vals[0], list) else vals
+            return len(inner)
+        return 0
+
+    def _make_params(count: int) -> List[Dict[str, str]]:
+        params: List[Dict[str, str]] = []
+        for i in range(count):
+            val = slot_values[i] if i < len(slot_values) else store_name
+            params.append({"type": "text", "text": str(val).strip() or " "})
+        return params
 
     components: List[Dict[str, Any]] = []
-    if body_params:
-        components.append({"type": "body", "parameters": body_params})
 
-    for c in (template.components or []):
-        if str(c.get("type") or "").upper() != "BUTTONS":
-            continue
-        for idx, btn in enumerate(c.get("buttons") or []):
-            if str(btn.get("type") or "").upper() != "URL":
-                continue
-            url_tpl = btn.get("url") or ""
-            if "{{1}}" in url_tpl:
-                components.append({
-                    "type": "button",
-                    "sub_type": "url",
-                    "index": str(idx),
-                    "parameters": [{"type": "text", "text": "shop"}],
-                })
+    for comp in (template.components or []):
+        ctype = (comp.get("type") or "").upper()
+        text = comp.get("text") or ""
+
+        if ctype == "HEADER":
+            fmt = (comp.get("format") or "").upper()
+            if fmt == "TEXT":
+                count = _extract_param_count(text) or _example_param_count(comp, "header_text")
+                if count > 0:
+                    components.append({"type": "header", "parameters": _make_params(count)})
+
+        elif ctype == "BODY":
+            count = _extract_param_count(text) or _example_param_count(comp, "body_text")
+            if count > 0:
+                components.append({"type": "body", "parameters": _make_params(count)})
+
+        elif ctype == "BUTTONS":
+            for idx, btn in enumerate(comp.get("buttons") or []):
+                if (btn.get("type") or "").upper() != "URL":
+                    continue
+                url_tpl = btn.get("url") or ""
+                if "{{1}}" in url_tpl:
+                    components.append({
+                        "type": "button",
+                        "sub_type": "url",
+                        "index": str(idx),
+                        "parameters": [{"type": "text", "text": "shop"}],
+                    })
+
+    logger.debug(
+        "[_build_send_payload] template=%s to=%s components=%s raw_tpl_components=%s",
+        template.name, to_phone, components, template.components,
+    )
 
     return {
         "messaging_product": "whatsapp",
