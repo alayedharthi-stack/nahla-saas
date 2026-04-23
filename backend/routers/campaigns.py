@@ -191,7 +191,7 @@ async def create_campaign(
     db.refresh(campaign)
 
     if is_immediate:
-        background_tasks.add(_dispatch_campaign_background, campaign.id, tenant_id)
+        background_tasks.add_task(_dispatch_campaign_background, campaign.id, tenant_id)
 
     return _campaign_to_dict(campaign)
 
@@ -221,7 +221,7 @@ async def update_campaign_status(
     db.refresh(campaign)
 
     if body.status == "active" and was_not_active:
-        background_tasks.add(_dispatch_campaign_background, campaign.id, tenant_id)
+        background_tasks.add_task(_dispatch_campaign_background, campaign.id, tenant_id)
 
     return _campaign_to_dict(campaign)
 

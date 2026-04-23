@@ -1129,6 +1129,9 @@ function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; o
             <Send className="w-3.5 h-3.5" /> إطلاق
           </button>
         )}
+        {campaign.status === 'completed' && (
+          <span className="text-[10px] text-slate-400">مكتملة</span>
+        )}
       </td>
     </tr>
   )
