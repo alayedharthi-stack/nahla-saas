@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import LegalFooter from '../components/LegalFooter'
 import TrustBlock from '../components/TrustBlock'
 import WhatsAppDemo from '../components/landing/WhatsAppDemo'
+import InboxDemo from '../components/landing/InboxDemo'
 import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 import {
   MessageCircle,
@@ -353,6 +354,7 @@ export default function Landing() {
     { label: 'لماذا نحلة', id: 'why' },
     { label: 'كيف تعمل', id: 'how' },
     { label: 'شاهد نحلة', id: 'demo' },
+    { label: 'صندوق الوارد', id: 'inbox' },
     { label: 'المميزات', id: 'features' },
     { label: 'الأسعار', id: 'pricing' },
     { label: 'الأسئلة الشائعة', id: 'faq' },
@@ -664,6 +666,64 @@ export default function Landing() {
               <WhatsAppDemo />
             </div>
 
+          </div>
+        </div>
+      </section>
+
+      {/* ══════════════════════════════════════════════════════════
+          UNIFIED INBOX — interactive merchant-side simulation
+      ══════════════════════════════════════════════════════════ */}
+      <section id="inbox" className="py-24 bg-slate-900 relative overflow-hidden">
+        <HoneycombBg opacity="opacity-[0.03]" />
+
+        {/* Ambient glows */}
+        <div className="absolute -top-20 -right-20 w-[480px] h-[480px] bg-amber-500/8 rounded-full blur-[100px] pointer-events-none" />
+        <div className="absolute bottom-0 left-0 w-[420px] h-[420px] bg-violet-500/8 rounded-full blur-[100px] pointer-events-none" />
+
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
+          <div className="text-center mb-12">
+            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">
+              صندوق الوارد الذكي
+            </p>
+            <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-4">
+              كأنك في واتساب —
+              <br />
+              <span className="text-transparent bg-clip-text bg-gradient-to-l from-amber-400 to-orange-500">
+                لكن مع عقل مبيعات كامل
+              </span>
+            </h2>
+            <p className="text-slate-400 max-w-2xl mx-auto leading-loose text-base">
+              كل محادثات متجرك في مكان واحد، مع شارات ذكية تخبرك من يرد على من —
+              الذكاء، الموظف، الحملات، أو الطيار الآلي. جرّب الفلاتر بنفسك:
+            </p>
+          </div>
+
+          {/* Interactive demo */}
+          <div className="relative">
+            <span className="absolute -top-3 right-1/2 translate-x-1/2 z-20 inline-flex items-center gap-1.5 bg-amber-500 text-slate-900 text-[11px] font-black px-3 py-1 rounded-full shadow-lg shadow-amber-500/30">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-900 animate-pulse" />
+              تجربة تفاعلية — اضغط الفلاتر والمحادثات
+            </span>
+            <InboxDemo />
+          </div>
+
+          {/* Capability strip */}
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-12">
+            {[
+              { dot: 'bg-rose-400 shadow-[0_0_8px_#fb7185]',    title: 'ينبهك حين يطلب موظف', desc: 'بطاقة حمراء فورية لأي عميل يقول "أبغى موظف".' },
+              { dot: 'bg-emerald-400 shadow-[0_0_8px_#34d399]', title: 'يميّز ردّك البشري',     desc: 'حين تتدخل، تتحول البطاقة تلقائياً إلى "ردّ بشري".' },
+              { dot: 'bg-violet-400 shadow-[0_0_8px_#a78bfa]',  title: 'يعرض الحملات بأزرارها', desc: 'القوالب التسويقية تظهر بأزرارها كما يراها العميل.' },
+              { dot: 'bg-sky-400 shadow-[0_0_8px_#38bdf8]',     title: 'الطيار الآلي ينفّذ',    desc: 'تأكيد الطلب، الشحن والمتابعة — تظهر برسائل النظام.' },
+            ].map(c => (
+              <div
+                key={c.title}
+                className="bg-slate-800/40 border border-white/5 rounded-xl p-4 hover:border-white/10 transition-colors"
+              >
+                <div className={`w-2 h-2 rounded-full mb-2.5 ${c.dot}`} />
+                <h4 className="text-white font-bold text-sm mb-1">{c.title}</h4>
+                <p className="text-slate-400 text-xs leading-relaxed">{c.desc}</p>
+              </div>
+            ))}
           </div>
         </div>
       </section>
