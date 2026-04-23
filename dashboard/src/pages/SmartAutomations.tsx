@@ -595,7 +595,6 @@ function AbandonedCartsQueue({
   })
 
   const handleCleanStale = async () => {
-    if (!confirm('سيتم تنظيف جميع السلات العالقة وإعادة جدولتها فوراً من المرحلة الأولى. متأكد؟')) return
     setCleaningStale(true)
     setStaleNotice(null)
     try {

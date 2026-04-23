@@ -1204,7 +1204,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               </button>
             )}
             <button
-              onClick={() => { if (window.confirm('هل تريد حذف هذه الحملة؟')) onDelete(campaign.id) }}
+              onClick={() => onDelete(campaign.id)}
               className="text-xs text-slate-300 hover:text-red-500 transition-colors p-1 rounded"
               title="حذف"
             >
@@ -1277,7 +1277,6 @@ export default function Campaigns() {
 
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) return
-    if (!window.confirm(`هل تريد حذف ${selectedIds.size} حملة؟`)) return
     try {
       await campaignsApi.bulkDelete([...selectedIds])
       setCampaigns(cs => cs.filter(c => !selectedIds.has(c.id)))

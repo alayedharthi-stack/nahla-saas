@@ -174,7 +174,6 @@ export default function Conversations() {
 
   const handleClose = async () => {
     if (!selected) return
-    if (!window.confirm('إعادة هذه المحادثة للذكاء الاصطناعي؟')) return
     try {
       await featureRealityApi.closeConversation({
         customer_phone: selected.phone,
