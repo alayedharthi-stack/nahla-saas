@@ -1115,7 +1115,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   const sm = STATUS_META[campaign.status] ?? STATUS_META['draft']
   const tm = TYPE_META[campaign.campaign_type] ?? TYPE_META['broadcast']
   const openRate = campaign.sent_count > 0 ? Math.round((campaign.read_count / campaign.sent_count) * 100) : 0
-  const deliverRate = campaign.sent_count > 0 ? Math.round((campaign.delivered_count / campaign.sent_count) * 100) : 0
+  const convRate = campaign.sent_count > 0 ? Math.round((campaign.converted_count / campaign.sent_count) * 100) : 0
   const [showErrors, setShowErrors] = useState(false)
 
   const isFailed = campaign.status === 'failed'
@@ -1173,8 +1173,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           </span>
         </td>
         <td className="px-5 py-3.5">
-          <span className={`text-xs font-medium ${campaign.delivered_count > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
-            {campaign.sent_count > 0 ? `${campaign.delivered_count} (${deliverRate}%)` : '—'}
+          <span className={`text-xs font-medium ${campaign.converted_count > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+            {campaign.sent_count > 0 ? `${convRate}%` : '—'}
           </span>
         </td>
         <td className="px-5 py-3.5">
@@ -1241,7 +1241,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-const TABLE_HEADERS = ['', 'الحملة', 'النوع', 'الحالة', 'الجمهور', 'الإرسال', 'معدل القراءة', 'التوصيل', '']
+const TABLE_HEADERS = ['', 'الحملة', 'النوع', 'الحالة', 'الجمهور', 'الإرسال', 'معدل القراءة', 'التحويل', '']
 
 export default function Campaigns() {
   const [showWizard, setShowWizard] = useState(false)
@@ -1307,8 +1307,10 @@ export default function Campaigns() {
     const totalSent = campaigns.reduce((s, c) => s + c.sent_count, 0)
     const totalFailed = campaigns.reduce((s, c) => s + (c.failed_count ?? 0), 0)
     const totalRead = campaigns.reduce((s, c) => s + c.read_count, 0)
+    const totalConv = campaigns.reduce((s, c) => s + c.converted_count, 0)
     const openRate = totalSent > 0 ? Math.round((totalRead / totalSent) * 100) : 0
-    return { completed, failedCampaigns, totalSent, totalFailed, openRate }
+    const convRate = totalSent > 0 ? Math.round((totalConv / totalSent) * 100) : 0
+    return { completed, failedCampaigns, totalSent, totalFailed, openRate, convRate }
   }, [campaigns])
 
   return (
@@ -1327,7 +1329,7 @@ export default function Campaigns() {
         <StatCard label="حملات مكتملة" value={stats.completed.toString()} icon={CheckCircle} />
         <StatCard label="إجمالي المُرسَل" value={`${stats.totalSent.toLocaleString('ar-SA')}${stats.totalFailed > 0 ? ` / ${stats.totalFailed} فشلت` : ''}`} icon={Send} />
         <StatCard label="معدل القراءة" value={`${stats.openRate}%`} icon={BarChart2} />
-        <StatCard label="إجمالي الحملات" value={campaigns.length.toString()} icon={Megaphone} />
+        <StatCard label="معدل التحويل" value={`${stats.convRate}%`} icon={TrendingUp} />
       </div>
 
       {stats.failedCampaigns > 0 && (
