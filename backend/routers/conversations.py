@@ -265,6 +265,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "isAI": status != "human",
             "status": status,
             "unread": 0,
+            "lastMsgType": "",
             "_conv_id": convo.id,
         }
         norm_to_key[n] = phone
@@ -290,11 +291,30 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             .join(latest_sq, MessageEvent.id == latest_sq.c.max_id)
             .all()
         )
+        def _last_msg_hint(msg) -> str:
+            et = (msg.event_type or "").lower()
+            meta = msg.extra_metadata or {}
+            d = (msg.direction or "").lower()
+            if d != "outbound":
+                return "customer"
+            if et == "campaign":
+                return "campaign"
+            if et in ("ai_reply", "ai_fallback", "whatsapp") or meta.get("is_ai"):
+                return "ai"
+            if et in ("automation", "cart_recovery"):
+                return "automation"
+            if et == "cod_confirmation":
+                return "cod"
+            if et == "manual_reply":
+                return "manual"
+            return "system"
+
         for msg in latest_msgs:
             phone = conv_id_to_phone.get(msg.conversation_id)
             if phone and phone in phone_info:
                 phone_info[phone]["lastMsg"] = msg.body or ""
                 phone_info[phone]["time"] = msg.created_at.isoformat() if msg.created_at else ""
+                phone_info[phone]["lastMsgType"] = _last_msg_hint(msg)
 
     # ── 3. Unread count per conversation (inbound after last outbound) ───────
     if conv_ids:
@@ -440,9 +460,12 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
     def _event_type_label(r) -> str:
         et = (r.event_type or "").lower()
         meta = r.extra_metadata or {}
+        direction = (r.direction or "").lower()
+        if direction != "outbound":
+            return "customer"
         if et == "campaign":
             return "campaign"
-        if et == "ai_reply" or meta.get("is_ai"):
+        if et in ("ai_reply", "ai_fallback") or meta.get("is_ai"):
             return "ai"
         if et in ("automation", "cart_recovery"):
             return "automation"
@@ -450,10 +473,8 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             return "cod"
         if et == "manual_reply":
             return "manual"
-        if et == "system":
-            return "system"
-        if (r.direction or "").lower() != "outbound":
-            return "customer"
+        if et == "whatsapp":
+            return "ai"
         return "system"
 
     messages: List[Dict[str, Any]] = [

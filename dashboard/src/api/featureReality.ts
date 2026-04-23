@@ -179,6 +179,7 @@ export interface DashboardConversation {
   isAI: boolean
   status: 'active' | 'human' | 'closed'
   unread: number
+  lastMsgType?: MessageEventType | ''
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'

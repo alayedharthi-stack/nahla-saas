@@ -3,9 +3,9 @@ import { useSearchParams } from 'react-router-dom'
 import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, RefreshCw, ArrowRight, Check, CheckCheck,
-  Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare,
+  Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle,
 } from 'lucide-react'
-import Badge from '../components/ui/Badge'
+
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType } from '../api/featureReality'
 
 const EVENT_BADGE: Record<MessageEventType, { label: string; icon: React.ReactNode; cls: string }> = {
@@ -191,12 +191,6 @@ export default function Conversations() {
     return matchFilter && matchSearch
   })
 
-  const statusVariant = (s: string) =>
-    s === 'active' ? 'green' : s === 'human' ? 'amber' : 'slate'
-
-  const statusLabel = (s: string) =>
-    s === 'active' ? 'ذكاء اصطناعي' : s === 'human' ? 'بشري' : 'مغلقة'
-
   const initials = (name: string) =>
     name.split(' ').map(n => n[0]).join('').slice(0, 2)
 
@@ -308,11 +302,20 @@ export default function Conversations() {
                   )}
                 </div>
                 <div className="flex items-center gap-1.5 mt-1">
-                  {c.isAI ? <Bot className="w-3 h-3 text-brand-400" /> : <User className="w-3 h-3 text-slate-400" />}
-                  <Badge
-                    label={statusLabel(c.status)}
-                    variant={statusVariant(c.status) as 'green' | 'amber' | 'slate'}
-                  />
+                  {c.status === 'human' ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200 animate-pulse">
+                      <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
+                    </span>
+                  ) : c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
+                    <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${EVENT_BADGE[c.lastMsgType].cls}`}>
+                      {EVENT_BADGE[c.lastMsgType].icon}
+                      {EVENT_BADGE[c.lastMsgType].label}
+                    </span>
+                  ) : c.unread > 0 ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-200">
+                      <MessageSquare className="w-2.5 h-2.5" /> رسالة عميل
+                    </span>
+                  ) : null}
                 </div>
               </div>
             </li>
