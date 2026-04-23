@@ -4,7 +4,7 @@ import {
   Megaphone, ChevronRight, ChevronLeft, Tag, Crown, Zap, Clock,
   Smartphone, AlertCircle, RefreshCw, X, MessageSquare, FileText,
   HandHeart, Repeat, Bell, Settings2, Sparkles, Moon, UserPlus, UserX,
-  Calendar, ShoppingBag, TrendingUp, Star, Trash2, SquareCheck, Square,
+  Calendar, ShoppingBag, TrendingUp, Star, Trash2, CheckSquare, Square,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -1127,7 +1127,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       <tr className={`hover:bg-slate-50 transition-colors ${isFailed ? 'bg-red-50/40' : ''} ${checked ? 'bg-brand-50/30' : ''}`}>
         <td className="px-3 py-3.5 w-8">
           <button onClick={() => onCheck(campaign.id, !checked)} className="text-slate-400 hover:text-brand-500">
-            {checked ? <SquareCheck className="w-4 h-4 text-brand-500" /> : <Square className="w-4 h-4" />}
+            {checked ? <CheckSquare className="w-4 h-4 text-brand-500" /> : <Square className="w-4 h-4" />}
           </button>
         </td>
         <td className="px-5 py-3.5">
@@ -1369,7 +1369,7 @@ export default function Campaigns() {
                 <th className="px-3 py-3 w-8">
                   <button onClick={toggleSelectAll} className="text-slate-400 hover:text-brand-500">
                     {selectedIds.size === campaigns.length && campaigns.length > 0
-                      ? <SquareCheck className="w-4 h-4 text-brand-500" />
+                      ? <CheckSquare className="w-4 h-4 text-brand-500" />
                       : <Square className="w-4 h-4" />
                     }
                   </button>
