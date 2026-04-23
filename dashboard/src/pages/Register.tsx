@@ -265,9 +265,20 @@ export default function Register() {
 
         {/* Footer */}
         <div className="mt-5 pb-4 flex flex-col items-center gap-2">
-          <p className="text-slate-500 text-xs font-medium tracking-wide">
-            {t(tr => tr.login.dev)}
-          </p>
+          <div className="flex items-center gap-1.5 text-slate-500 text-xs font-medium tracking-wide">
+            {/* Saudi flag SVG — works on all platforms including Windows */}
+            <svg width="20" height="13" viewBox="0 0 20 13" xmlns="http://www.w3.org/2000/svg" className="shrink-0 rounded-sm">
+              <rect width="20" height="13" fill="#006C35"/>
+              <g fill="white" transform="translate(2,2)">
+                <rect x="2" y="0" width="12" height="1" rx="0.4"/>
+                <rect x="1" y="2" width="14" height="1" rx="0.4"/>
+                <rect x="5" y="4.5" width="6" height="0.8" rx="0.3"/>
+                <polygon points="11,4.5 13,5 11,5.3" />
+                <rect x="6.5" y="5.5" width="3" height="0.6" rx="0.3"/>
+              </g>
+            </svg>
+            <span>{t(tr => tr.login.dev)}</span>
+          </div>
           <LegalFooter variant="light" />
         </div>
         </div>

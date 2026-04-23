@@ -177,7 +177,7 @@ const ar: Translations = {
     noAccount:        'متجر جديد؟',
     registerLink:     'أنشئ حساباً مجاناً',
     invalidCreds:     'البريد الإلكتروني أو كلمة المرور غير صحيحة',
-    dev:              'فريق سعودي 100% 🇸🇦',
+    dev:              'فريق سعودي 100%',
     devRole:          'nahlah.ai',
   },
 
