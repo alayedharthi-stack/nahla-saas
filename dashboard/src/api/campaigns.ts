@@ -175,6 +175,15 @@ export const campaignsApi = {
   debugTemplate: (templateId: string) =>
     apiCall<Record<string, unknown>>(`/campaigns/debug-template/${templateId}`),
 
+  deleteCampaign: (id: number) =>
+    apiCall<{ deleted: boolean; id: number }>(`/campaigns/${id}`, { method: 'DELETE' }),
+
+  bulkDelete: (ids: number[]) =>
+    apiCall<{ deleted: number; ids: number[] }>('/campaigns/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+
   // Legacy test-send (still used by older flows). The wizard below now
   // posts to /campaigns/wizard/test-send for richer error reporting.
   testSend: (phone: string, templateId: string, templateName: string, templateLanguage: string, variables: Record<string, string>) =>

@@ -4,7 +4,7 @@ import {
   Megaphone, ChevronRight, ChevronLeft, Tag, Crown, Zap, Clock,
   Smartphone, AlertCircle, RefreshCw, X, MessageSquare, FileText,
   HandHeart, Repeat, Bell, Settings2, Sparkles, Moon, UserPlus, UserX,
-  Calendar, ShoppingBag, TrendingUp, Star,
+  Calendar, ShoppingBag, TrendingUp, Star, Trash2, SquareCheck, Square,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -1105,11 +1105,17 @@ function DebugTemplateLink({ templateId }: { templateId: string }) {
 
 // ── Campaign list row ─────────────────────────────────────────────────────────
 
-function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; onStatusChange: (id: number, status: string) => void }) {
+function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
+  campaign: CampaignRecord
+  onStatusChange: (id: number, status: string) => void
+  checked: boolean
+  onCheck: (id: number, v: boolean) => void
+  onDelete: (id: number) => void
+}) {
   const sm = STATUS_META[campaign.status] ?? STATUS_META['draft']
   const tm = TYPE_META[campaign.campaign_type] ?? TYPE_META['broadcast']
   const openRate = campaign.sent_count > 0 ? Math.round((campaign.read_count / campaign.sent_count) * 100) : 0
-  const convRate = campaign.sent_count > 0 ? Math.round((campaign.converted_count / campaign.sent_count) * 100) : 0
+  const deliverRate = campaign.sent_count > 0 ? Math.round((campaign.delivered_count / campaign.sent_count) * 100) : 0
   const [showErrors, setShowErrors] = useState(false)
 
   const isFailed = campaign.status === 'failed'
@@ -1118,7 +1124,12 @@ function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; o
 
   return (
     <>
-      <tr className={`hover:bg-slate-50 transition-colors ${isFailed ? 'bg-red-50/40' : ''}`}>
+      <tr className={`hover:bg-slate-50 transition-colors ${isFailed ? 'bg-red-50/40' : ''} ${checked ? 'bg-brand-50/30' : ''}`}>
+        <td className="px-3 py-3.5 w-8">
+          <button onClick={() => onCheck(campaign.id, !checked)} className="text-slate-400 hover:text-brand-500">
+            {checked ? <SquareCheck className="w-4 h-4 text-brand-500" /> : <Square className="w-4 h-4" />}
+          </button>
+        </td>
         <td className="px-5 py-3.5">
           <p className="text-xs font-semibold text-slate-900">{campaign.name}</p>
           <p className="text-[10px] text-slate-400 font-mono mt-0.5">{campaign.template_name?.replace(/_/g, ' ')}</p>
@@ -1162,46 +1173,49 @@ function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; o
           </span>
         </td>
         <td className="px-5 py-3.5">
-          <span className={`text-xs font-medium ${campaign.converted_count > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
-            {campaign.sent_count > 0 ? `${campaign.converted_count} (${convRate}%)` : '—'}
+          <span className={`text-xs font-medium ${campaign.delivered_count > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+            {campaign.sent_count > 0 ? `${campaign.delivered_count} (${deliverRate}%)` : '—'}
           </span>
         </td>
         <td className="px-5 py-3.5">
-          {campaign.status === 'active' && (
+          <div className="flex items-center gap-2">
+            {campaign.status === 'active' && (
+              <button
+                onClick={() => onStatusChange(campaign.id, 'paused')}
+                className="text-xs text-red-400 hover:text-red-600 transition-colors flex items-center gap-1"
+              >
+                <XCircle className="w-3.5 h-3.5" /> إيقاف
+              </button>
+            )}
+            {campaign.status === 'paused' && (
+              <button
+                onClick={() => onStatusChange(campaign.id, 'active')}
+                className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
+              >
+                <Send className="w-3.5 h-3.5" /> استئناف
+              </button>
+            )}
+            {campaign.status === 'draft' && (
+              <button
+                onClick={() => onStatusChange(campaign.id, 'active')}
+                className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
+              >
+                <Send className="w-3.5 h-3.5" /> إطلاق
+              </button>
+            )}
             <button
-              onClick={() => onStatusChange(campaign.id, 'paused')}
-              className="text-xs text-red-400 hover:text-red-600 transition-colors flex items-center gap-1"
+              onClick={() => { if (window.confirm('هل تريد حذف هذه الحملة؟')) onDelete(campaign.id) }}
+              className="text-xs text-slate-300 hover:text-red-500 transition-colors p-1 rounded"
+              title="حذف"
             >
-              <XCircle className="w-3.5 h-3.5" /> إيقاف
+              <Trash2 className="w-3.5 h-3.5" />
             </button>
-          )}
-          {campaign.status === 'paused' && (
-            <button
-              onClick={() => onStatusChange(campaign.id, 'active')}
-              className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
-            >
-              <Send className="w-3.5 h-3.5" /> استئناف
-            </button>
-          )}
-          {campaign.status === 'draft' && (
-            <button
-              onClick={() => onStatusChange(campaign.id, 'active')}
-              className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
-            >
-              <Send className="w-3.5 h-3.5" /> إطلاق
-            </button>
-          )}
-          {campaign.status === 'completed' && failedCount === 0 && (
-            <span className="text-[10px] text-slate-400">مكتملة</span>
-          )}
-          {campaign.status === 'failed' && (
-            <span className="text-[10px] text-red-500 font-medium">فشلت</span>
-          )}
+          </div>
         </td>
       </tr>
       {showErrors && hasErrors && (
         <tr className="bg-red-50/60">
-          <td colSpan={8} className="px-6 py-3">
+          <td colSpan={TABLE_HEADERS.length} className="px-6 py-3">
             <div className="rounded-lg bg-red-100/80 border border-red-200 p-3">
               <p className="text-xs font-semibold text-red-700 mb-1.5 flex items-center gap-1">
                 <AlertCircle className="w-3.5 h-3.5" />
@@ -1227,12 +1241,13 @@ function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; o
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-const TABLE_HEADERS = ['الحملة', 'النوع', 'الحالة', 'الجمهور', 'الإرسال', 'معدل القراءة', 'التحويل', '']
+const TABLE_HEADERS = ['', 'الحملة', 'النوع', 'الحالة', 'الجمهور', 'الإرسال', 'معدل القراءة', 'التوصيل', '']
 
 export default function Campaigns() {
   const [showWizard, setShowWizard] = useState(false)
   const [campaigns, setCampaigns] = useState<CampaignRecord[]>([])
   const [loading, setLoading] = useState(true)
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const { t } = useLanguage()
 
   const loadCampaigns = useCallback(() => {
@@ -1252,16 +1267,48 @@ export default function Campaigns() {
     } catch { /* ignore */ }
   }
 
+  const handleDelete = async (id: number) => {
+    try {
+      await campaignsApi.deleteCampaign(id)
+      setCampaigns(cs => cs.filter(c => c.id !== id))
+      setSelectedIds(s => { const n = new Set(s); n.delete(id); return n })
+    } catch { /* ignore */ }
+  }
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return
+    if (!window.confirm(`هل تريد حذف ${selectedIds.size} حملة؟`)) return
+    try {
+      await campaignsApi.bulkDelete([...selectedIds])
+      setCampaigns(cs => cs.filter(c => !selectedIds.has(c.id)))
+      setSelectedIds(new Set())
+    } catch { /* ignore */ }
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === campaigns.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(campaigns.map(c => c.id)))
+    }
+  }
+
+  const handleCheck = (id: number, v: boolean) => {
+    setSelectedIds(s => {
+      const n = new Set(s)
+      v ? n.add(id) : n.delete(id)
+      return n
+    })
+  }
+
   const stats = useMemo(() => {
-    const active = campaigns.filter(c => c.status === 'active').length
+    const completed = campaigns.filter(c => c.status === 'completed').length
     const failedCampaigns = campaigns.filter(c => c.status === 'failed').length
     const totalSent = campaigns.reduce((s, c) => s + c.sent_count, 0)
     const totalFailed = campaigns.reduce((s, c) => s + (c.failed_count ?? 0), 0)
     const totalRead = campaigns.reduce((s, c) => s + c.read_count, 0)
-    const totalConv = campaigns.reduce((s, c) => s + c.converted_count, 0)
     const openRate = totalSent > 0 ? Math.round((totalRead / totalSent) * 100) : 0
-    const convRate = totalSent > 0 ? Math.round((totalConv / totalSent) * 100) : 0
-    return { active, failedCampaigns, totalSent, totalFailed, openRate, convRate }
+    return { completed, failedCampaigns, totalSent, totalFailed, openRate }
   }, [campaigns])
 
   return (
@@ -1277,10 +1324,10 @@ export default function Campaigns() {
       />
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="حملات نشطة" value={stats.active.toString()} icon={Megaphone} />
+        <StatCard label="حملات مكتملة" value={stats.completed.toString()} icon={CheckCircle} />
         <StatCard label="إجمالي المُرسَل" value={`${stats.totalSent.toLocaleString('ar-SA')}${stats.totalFailed > 0 ? ` / ${stats.totalFailed} فشلت` : ''}`} icon={Send} />
         <StatCard label="معدل القراءة" value={`${stats.openRate}%`} icon={BarChart2} />
-        <StatCard label="معدل التحويل" value={`${stats.convRate}%`} icon={Smartphone} />
+        <StatCard label="إجمالي الحملات" value={campaigns.length.toString()} icon={Megaphone} />
       </div>
 
       {stats.failedCampaigns > 0 && (
@@ -1294,11 +1341,40 @@ export default function Campaigns() {
       )}
 
       <div className="card overflow-hidden">
+        {selectedIds.size > 0 && (
+          <div className="flex items-center justify-between px-5 py-2.5 bg-brand-50 border-b border-brand-100">
+            <span className="text-xs font-medium text-brand-700">
+              تم تحديد {selectedIds.size} حملة
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleBulkDelete}
+                className="flex items-center gap-1.5 text-xs font-medium text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> حذف المحدد
+              </button>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="text-xs text-slate-500 hover:text-slate-700 px-2 py-1.5"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
               <tr>
-                {TABLE_HEADERS.map(h => (
+                <th className="px-3 py-3 w-8">
+                  <button onClick={toggleSelectAll} className="text-slate-400 hover:text-brand-500">
+                    {selectedIds.size === campaigns.length && campaigns.length > 0
+                      ? <SquareCheck className="w-4 h-4 text-brand-500" />
+                      : <Square className="w-4 h-4" />
+                    }
+                  </button>
+                </th>
+                {TABLE_HEADERS.slice(1).map(h => (
                   <th key={h} className="px-5 py-3 text-start font-medium">{h}</th>
                 ))}
               </tr>
@@ -1317,7 +1393,14 @@ export default function Campaigns() {
                 </td></tr>
               )}
               {!loading && campaigns.map(c => (
-                <CampaignRow key={c.id} campaign={c} onStatusChange={handleStatusChange} />
+                <CampaignRow
+                  key={c.id}
+                  campaign={c}
+                  onStatusChange={handleStatusChange}
+                  checked={selectedIds.has(c.id)}
+                  onCheck={handleCheck}
+                  onDelete={handleDelete}
+                />
               ))}
             </tbody>
           </table>

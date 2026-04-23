@@ -233,6 +233,44 @@ async def update_campaign_status(
     return _campaign_to_dict(campaign)
 
 
+@router.delete("/campaigns/{campaign_id}")
+async def delete_campaign(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    tenant_id = resolve_tenant_id(request)
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id,
+        Campaign.tenant_id == tenant_id,
+    ).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    db.delete(campaign)
+    db.commit()
+    return {"deleted": True, "id": campaign_id}
+
+
+class BulkDeleteIn(BaseModel):
+    ids: List[int]
+
+
+@router.post("/campaigns/bulk-delete")
+async def bulk_delete_campaigns(
+    body: BulkDeleteIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    tenant_id = resolve_tenant_id(request)
+    deleted = (
+        db.query(Campaign)
+        .filter(Campaign.tenant_id == tenant_id, Campaign.id.in_(body.ids))
+        .delete(synchronize_session="fetch")
+    )
+    db.commit()
+    return {"deleted": deleted, "ids": body.ids}
+
+
 @router.get("/campaigns/debug-template/{template_id}")
 async def debug_template(template_id: int, request: Request, db: Session = Depends(get_db)):
     """Diagnostic endpoint: shows raw template components, the generated
