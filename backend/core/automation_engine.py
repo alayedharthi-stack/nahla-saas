@@ -1264,15 +1264,31 @@ async def _execute_action(
 
         try:
             from routers.conversations import record_outbound_message  # noqa: PLC0415
-            _tpl_body = ""
-            for _c in (template.components or []):
-                if (_c.get("type") or "").upper() == "BODY":
-                    _tpl_body = _c.get("text") or ""; break
             import re as _re
             def _sub(m):
                 i = int(m.group(1)) - 1
                 return str(_var_values[i]) if i < len(_var_values) else m.group(0)
-            _rendered = _re.sub(r"\{\{(\d+)\}\}", _sub, _tpl_body) if _tpl_body else f"[{template.name}]"
+            _parts: list[str] = []
+            for _c in (template.components or []):
+                _ct = (_c.get("type") or "").upper()
+                if _ct == "HEADER" and (_c.get("format") or "").upper() == "TEXT" and _c.get("text"):
+                    _parts.append(f"*{_re.sub(r'{{(\\d+)}}', _sub, _c['text'])}*")
+                elif _ct == "BODY" and _c.get("text"):
+                    _parts.append(_re.sub(r"\{\{(\d+)\}\}", _sub, _c["text"]))
+                elif _ct == "FOOTER" and _c.get("text"):
+                    _parts.append(_c["text"])
+                elif _ct == "BUTTONS":
+                    _bl = []
+                    for _b in (_c.get("buttons") or []):
+                        _bt = (_b.get("type") or "").upper()
+                        _lbl = _b.get("text") or ""
+                        if _bt == "COPY_CODE": _bl.append(f"📋 {_lbl or 'نسخ الكود'}")
+                        elif _bt == "URL": _bl.append(f"🔗 {_lbl or 'رابط'}")
+                        elif _bt == "QUICK_REPLY": _bl.append(f"↩️ {_lbl}")
+                        elif _lbl: _bl.append(f"▪️ {_lbl}")
+                    if _bl:
+                        _parts.append("━━━━━\n" + "\n".join(_bl))
+            _rendered = "\n\n".join(_parts) if _parts else f"[{template.name}]"
             record_outbound_message(
                 db, tenant_id, to_phone, _rendered,
                 event_type="automation",

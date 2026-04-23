@@ -42,22 +42,60 @@ def _reconstruct_template_body(
     store_name: str,
     coupon_code: str = "",
 ) -> str:
-    """Render the template body text by substituting {{N}} placeholders."""
+    """Render the full template message including buttons, as the customer sees it."""
     slot_values = [customer_name, store_name, coupon_code or store_name,
                    store_name, coupon_code or "", store_name]
-    body_text = ""
-    for comp in (template.components or []):
-        if (comp.get("type") or "").upper() == "BODY":
-            body_text = comp.get("text") or ""
-            break
-    if not body_text:
-        return f"[{template.name}]"
 
     def _sub(m: _re.Match) -> str:
         idx = int(m.group(1)) - 1
         return slot_values[idx] if idx < len(slot_values) else m.group(0)
 
-    return _re.sub(r"\{\{(\d+)\}\}", _sub, body_text)
+    parts: list[str] = []
+
+    for comp in (template.components or []):
+        ctype = (comp.get("type") or "").upper()
+
+        if ctype == "HEADER":
+            fmt = (comp.get("format") or "").upper()
+            if fmt == "TEXT" and comp.get("text"):
+                header = _re.sub(r"\{\{(\d+)\}\}", _sub, comp["text"])
+                parts.append(f"*{header}*")
+
+        elif ctype == "BODY":
+            body = _re.sub(r"\{\{(\d+)\}\}", _sub, comp.get("text") or "")
+            if body:
+                parts.append(body)
+
+        elif ctype == "FOOTER":
+            footer = comp.get("text") or ""
+            if footer:
+                parts.append(footer)
+
+        elif ctype == "BUTTONS":
+            btn_lines: list[str] = []
+            for btn in (comp.get("buttons") or []):
+                btype = (btn.get("type") or "").upper()
+                label = btn.get("text") or ""
+                if btype == "COPY_CODE":
+                    code = coupon_code or "—"
+                    btn_lines.append(f"📋 {label or 'نسخ الكود'}: {code}")
+                elif btype == "URL":
+                    url = btn.get("url") or ""
+                    if "{{" in url:
+                        btn_lines.append(f"🔗 {label or 'رابط'}")
+                    else:
+                        btn_lines.append(f"🔗 {label or url}")
+                elif btype == "QUICK_REPLY":
+                    btn_lines.append(f"↩️ {label}")
+                elif btype == "PHONE_NUMBER":
+                    btn_lines.append(f"📞 {label}")
+                else:
+                    if label:
+                        btn_lines.append(f"▪️ {label}")
+            if btn_lines:
+                parts.append("━━━━━\n" + "\n".join(btn_lines))
+
+    return "\n\n".join(parts) if parts else f"[{template.name}]"
 
 
 def _record_campaign_message(

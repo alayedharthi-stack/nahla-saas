@@ -184,16 +184,29 @@ async def send_cod_confirmation_template(
 
         try:
             from routers.conversations import record_outbound_message  # noqa: PLC0415
-            _body = ""
-            for comp in (template.components or []):
-                if (comp.get("type") or "").upper() == "BODY":
-                    _body = comp.get("text") or ""; break
             import re
             _vals = [customer_name, product_name, total_amount]
             def _sub(m):
                 i = int(m.group(1)) - 1
                 return str(_vals[i]) if i < len(_vals) else m.group(0)
-            _rendered = re.sub(r"\{\{(\d+)\}\}", _sub, _body) if _body else f"[{template_name}]"
+            _parts = []
+            for comp in (template.components or []):
+                _ct = (comp.get("type") or "").upper()
+                if _ct == "BODY" and comp.get("text"):
+                    _parts.append(re.sub(r"\{\{(\d+)\}\}", _sub, comp["text"]))
+                elif _ct == "FOOTER" and comp.get("text"):
+                    _parts.append(comp["text"])
+                elif _ct == "BUTTONS":
+                    _bl = []
+                    for _b in (comp.get("buttons") or []):
+                        _bt = (_b.get("type") or "").upper()
+                        _lbl = _b.get("text") or ""
+                        if _bt == "QUICK_REPLY": _bl.append(f"↩️ {_lbl}")
+                        elif _bt == "URL": _bl.append(f"🔗 {_lbl or 'رابط'}")
+                        elif _lbl: _bl.append(f"▪️ {_lbl}")
+                    if _bl:
+                        _parts.append("━━━━━\n" + "\n".join(_bl))
+            _rendered = "\n\n".join(_parts) if _parts else f"[{template_name}]"
             record_outbound_message(
                 db, tenant_id, to, _rendered,
                 event_type="cod_confirmation",

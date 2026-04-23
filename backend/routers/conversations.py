@@ -140,10 +140,25 @@ def record_outbound_message(
     Safe to call from any context (campaigns, automations, COD, AI
     fallback, etc.).  Uses a SAVEPOINT so failures never corrupt the
     caller's transaction.
+
+    When *customer_name* is empty the existing customer name is kept
+    intact — we never overwrite a real name with a phone number.
     """
     try:
         db.begin_nested()
-        convo = _get_or_create_conversation(db, tenant_id, phone, customer_name)
+        norm_phone = normalize_phone(phone) or phone
+        existing_customer = (
+            db.query(Customer)
+            .filter(Customer.tenant_id == tenant_id)
+            .filter(
+                (Customer.phone == phone)
+                | (Customer.phone == norm_phone)
+                | (Customer.normalized_phone == norm_phone)
+            )
+            .first()
+        )
+        safe_name = customer_name or (existing_customer.name if existing_customer else "") or ""
+        convo = _get_or_create_conversation(db, tenant_id, phone, safe_name)
         meta = {
             "customer_phone": phone,
             "phone": phone,
@@ -196,6 +211,9 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             return "closed"
         return "active"
 
+    def _norm(p: str) -> str:
+        return (p or "").strip().replace("+", "").replace("-", "").replace(" ", "")
+
     # ── 1. All Conversation records → phone_info map ─────────────────────────
     convo_rows = (
         db.query(Conversation)
@@ -203,6 +221,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
         .all()
     )
     phone_info: Dict[str, Dict[str, Any]] = {}
+    norm_to_key: Dict[str, str] = {}
     conv_id_to_phone: Dict[int, str] = {}
     for convo in convo_rows:
         phone = _resolve_customer_phone(convo)
@@ -221,6 +240,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "unread": 0,
             "_conv_id": convo.id,
         }
+        norm_to_key[_norm(phone)] = phone
         conv_id_to_phone[convo.id] = phone
 
     # ── 2. Latest MessageEvent per conversation_id (single query) ────────────
@@ -294,11 +314,13 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     )
     for row in trace_rows:
         phone = row.customer_phone
-        if phone in phone_info:
-            if not phone_info[phone]["lastMsg"] and not phone_info[phone]["time"]:
-                phone_info[phone]["lastMsg"] = row.message or ""
-                phone_info[phone]["time"] = row.created_at.isoformat() if row.created_at else ""
-        else:
+        key = norm_to_key.get(_norm(phone)) or (phone if phone in phone_info else None)
+        if key and key in phone_info:
+            if not phone_info[key]["lastMsg"] and not phone_info[key]["time"]:
+                phone_info[key]["lastMsg"] = row.message or ""
+                phone_info[key]["time"] = row.created_at.isoformat() if row.created_at else ""
+        elif _norm(phone) not in norm_to_key:
+            norm_to_key[_norm(phone)] = phone
             phone_info[phone] = {
                 "id": row.session_id or f"trace-{phone}",
                 "customer": phone,
