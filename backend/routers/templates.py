@@ -2100,9 +2100,61 @@ async def list_template_library(request: Request):
     }
 
 
+def _record_last_template_sync(
+    db: Session,
+    tenant_id: int,
+    *,
+    result: Dict[str, Any],
+    source: str,
+) -> None:
+    """Persist the last sync attempt onto TenantSettings.extra_metadata.
+
+    Stored under key `_last_template_sync` so the dashboard can read it
+    via GET /templates/sync/status without scraping logs. Schema:
+
+        {
+            "at":            "2026-04-22T08:30:11+00:00",
+            "source":        "manual" | "scheduled",
+            "synced":        int,
+            "auto_bound":    int,
+            "failed":        int,
+            "deleted_seeds": int,
+            "error":         str | None,
+            "message":       str,
+        }
+    """
+    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+    try:
+        settings_obj = get_or_create_settings(db, tenant_id)
+        meta = dict(settings_obj.extra_metadata or {})
+        meta["_last_template_sync"] = {
+            "at":            _dt.now(_tz.utc).isoformat(),
+            "source":        source,
+            "synced":        int(result.get("synced", 0) or 0),
+            "auto_bound":    int(result.get("auto_bound", 0) or 0),
+            "failed":        int(result.get("failed", 0) or 0),
+            "deleted_seeds": int(result.get("deleted_seeds", 0) or 0),
+            "error":         result.get("error"),
+            "message":       result.get("message", ""),
+        }
+        settings_obj.extra_metadata = meta
+        db.commit()
+    except Exception as exc:
+        logger.warning(
+            "[templates/sync] tenant=%s failed to record last sync: %s",
+            tenant_id, exc,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 async def _sync_templates_for_tenant(
     db: Session,
     tenant_id: int,
+    *,
+    source: str = "manual",
 ) -> Dict[str, Any]:
     """
     Core template sync logic — pulls Meta templates and upserts them.
@@ -2118,7 +2170,25 @@ async def _sync_templates_for_tenant(
     `error` code so the caller can decide what to do. This is critical
     because the HTTP endpoint must NEVER return a 5xx (which would lose
     CORS headers and break the dashboard UI).
+
+    The `source` parameter is recorded in `_last_template_sync` so the
+    dashboard can show whether the latest result came from a manual click
+    or the background scheduler.
     """
+    result = await _sync_templates_for_tenant_inner(db, tenant_id)
+    # Always record — including soft errors. The dashboard wants to show
+    # the most recent attempt with its outcome, not just the most recent
+    # success.
+    _record_last_template_sync(db, tenant_id, result=result, source=source)
+    return result
+
+
+async def _sync_templates_for_tenant_inner(
+    db: Session,
+    tenant_id: int,
+) -> Dict[str, Any]:
+    """Original sync body. Split out so `_sync_templates_for_tenant` can
+    wrap it with universal `_record_last_template_sync` bookkeeping."""
     from models import WhatsAppConnection  # noqa: PLC0415
 
     # ── Source of truth: WhatsAppConnection row for this tenant ───────────────
@@ -2456,6 +2526,59 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
             "error": "unexpected_failure",
             "detail": str(exc)[:200],
         }
+
+
+@router.get("/templates/sync/status")
+async def get_template_sync_status(request: Request, db: Session = Depends(get_db)):
+    """Return the most recent template sync attempt for this tenant.
+
+    The dashboard surfaces this in a "آخر مزامنة" card so the merchant
+    knows the background scheduler is doing its job and can see counts
+    (synced / auto_bound / failed) without having to click anything.
+
+    When no sync has ever been recorded, returns:
+        {"recorded": false, "next_estimate": "ستبدأ المزامنة التلقائية خلال 30 دقيقة"}
+    """
+    tenant_id = resolve_tenant_id(request)
+    try:
+        settings_obj = get_or_create_settings(db, tenant_id)
+        meta = settings_obj.extra_metadata or {}
+        last = meta.get("_last_template_sync")
+    except Exception as exc:
+        logger.warning(
+            "[templates/sync/status] tenant=%s read failed: %s", tenant_id, exc,
+        )
+        return {"recorded": False, "error": "read_failed"}
+
+    if not last:
+        return {
+            "recorded": False,
+            "next_estimate": "ستتم المزامنة التلقائية خلال 30 دقيقة كحد أقصى",
+        }
+
+    payload: Dict[str, Any] = {
+        "recorded":      True,
+        "at":            last.get("at"),
+        "source":        last.get("source"),
+        "synced":        int(last.get("synced", 0) or 0),
+        "auto_bound":    int(last.get("auto_bound", 0) or 0),
+        "failed":        int(last.get("failed", 0) or 0),
+        "deleted_seeds": int(last.get("deleted_seeds", 0) or 0),
+        "error":         last.get("error"),
+        "message":       last.get("message", ""),
+    }
+
+    # Internal ops snapshot — last full scheduler cycle stats (in-process).
+    # Useful for support to know whether the background job is even running.
+    try:
+        from core.scheduler import get_last_template_sync_cycle  # noqa: PLC0415
+        cycle = get_last_template_sync_cycle()
+        if cycle.get("at"):
+            payload["last_cycle"] = cycle
+    except Exception:
+        pass
+
+    return payload
 
 
 @router.get("/templates/{template_id}/var-map")

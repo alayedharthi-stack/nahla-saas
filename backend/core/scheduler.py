@@ -132,9 +132,30 @@ async def run_template_sync_scheduler() -> None:
         await asyncio.sleep(_TEMPLATE_SYNC_INTERVAL_SECONDS)
 
 
+# ── Last cycle stats (in-process, for ops introspection) ─────────────────────
+# Updated by `_sync_templates_all_tenants` at the end of every run. Exposed
+# via `get_last_template_sync_cycle()` so an admin endpoint or healthcheck
+# can read it without having to scrape logs.
+_last_template_sync_cycle: dict = {
+    "at":              None,
+    "duration_ms":     None,
+    "tenants_total":   0,
+    "tenants_synced":  0,
+    "tenants_failed":  0,
+    "tenants_skipped": 0,
+    "total_templates": 0,
+    "auto_bound":      0,
+}
+
+
+def get_last_template_sync_cycle() -> dict:
+    """Return a copy of the most recent template-sync cycle stats."""
+    return dict(_last_template_sync_cycle)
+
+
 async def _sync_templates_all_tenants() -> None:
     """One full cycle: pull Meta templates for every tenant with a WABA ID."""
-    import sys as _sys, os as _os  # noqa: PLC0415
+    import sys as _sys, os as _os, time as _time  # noqa: PLC0415
     _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
 
     from core.database import SessionLocal  # noqa: PLC0415
@@ -151,6 +172,8 @@ async def _sync_templates_all_tenants() -> None:
     skipped_tenants = 0
     total_templates = 0
     total_bound = 0
+    started = _time.monotonic()
+    started_at = datetime.now(timezone.utc)
     try:
         connections = (
             db.query(WhatsAppConnection)
@@ -174,7 +197,9 @@ async def _sync_templates_all_tenants() -> None:
                 skipped_tenants += 1
                 continue
             try:
-                result = await _sync_templates_for_tenant(db, tenant_id)
+                result = await _sync_templates_for_tenant(
+                    db, tenant_id, source="scheduled",
+                )
                 if result.get("error"):
                     skipped_tenants += 1
                     logger.info(
@@ -196,12 +221,24 @@ async def _sync_templates_all_tenants() -> None:
                 except Exception:
                     pass
 
+        duration_ms = int((_time.monotonic() - started) * 1000)
         logger.info(
-            "[Template Sync Scheduler] Cycle complete — synced_tenants=%d "
+            "[Template Sync Scheduler] Cycle complete in %dms — synced_tenants=%d "
             "failed=%d skipped=%d total_templates=%d auto_bound=%d",
-            synced_tenants, failed_tenants, skipped_tenants,
+            duration_ms, synced_tenants, failed_tenants, skipped_tenants,
             total_templates, total_bound,
         )
+
+        _last_template_sync_cycle.update({
+            "at":              started_at.isoformat(),
+            "duration_ms":     duration_ms,
+            "tenants_total":   len(connections),
+            "tenants_synced":  synced_tenants,
+            "tenants_failed":  failed_tenants,
+            "tenants_skipped": skipped_tenants,
+            "total_templates": total_templates,
+            "auto_bound":      total_bound,
+        })
     finally:
         db.close()
 

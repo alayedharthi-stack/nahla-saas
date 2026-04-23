@@ -14,6 +14,7 @@ import {
   templatesApi, WhatsAppTemplateRecord, CreateTemplatePayload,
   TemplateStatus, TemplateCategory, TemplateComponent, TemplateButton,
   TemplateVarMapRecord, NahlaLibraryTemplate,
+  TemplateSyncStatus, getTemplateSyncErrorMessage,
   getBody, getHeader, getFooter, getButtons,
   extractVars, renderBody, countVars,
   STATUS_COLORS, STATUS_LABELS, CATEGORY_LABELS, LANGUAGE_LABELS,
@@ -235,12 +236,36 @@ function TemplateRow({
             {tpl.has_coupon && ' · مع خصم'}
           </p>
         )}
-        {serviceInfo && !displayName && (
-          <p className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1">
-            <Zap className="w-2.5 h-2.5" />
-            {serviceInfo.name}
-          </p>
-        )}
+        {/* Service link — shown whenever the template is bound to a Nahla
+            service slot, even when the merchant has set a custom display
+            name. Uses the service color palette so the link is visually
+            distinct from generic metadata. */}
+        {(() => {
+          const svcName = tpl.service_name_ar || serviceInfo?.name
+          if (!svcName) return null
+          const c = svcColors(tpl.service_color || serviceInfo?.color || 'amber')
+          const autoBound = !!tpl.nahla_source_key
+          return (
+            <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+              <span
+                className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium border ${c.border} ${c.text} bg-white`}
+                title={`مرتبط بخدمة ${svcName}`}
+              >
+                <Link2 className="w-2.5 h-2.5" />
+                مرتبط بـ {svcName}
+              </span>
+              {autoBound && (
+                <span
+                  className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-violet-50 text-violet-700 border border-violet-200"
+                  title="رُبط هذا القالب تلقائياً بالخدمة عبر مزامنة Meta"
+                >
+                  <Sparkles className="w-2.5 h-2.5" />
+                  مربوط تلقائياً
+                </span>
+              )}
+            </div>
+          )
+        })()}
       </td>
       <td className="px-5 py-3.5 text-xs text-slate-600">{LANGUAGE_LABELS[tpl.language] ?? tpl.language}</td>
       <td className="px-5 py-3.5">
@@ -1514,6 +1539,120 @@ function NahlaLibraryModal({ onClose, onImported }: {
 
 // Filter tabs and table headers are built inside the component using t()
 
+// ── Sync status card ──────────────────────────────────────────────────────────
+
+function formatRelativeArabic(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return '—'
+  const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000))
+  if (diffSec < 60)        return 'قبل لحظات'
+  if (diffSec < 3600)      return `قبل ${Math.floor(diffSec / 60)} دقيقة`
+  if (diffSec < 86400)     return `قبل ${Math.floor(diffSec / 3600)} ساعة`
+  if (diffSec < 86400 * 7) return `قبل ${Math.floor(diffSec / 86400)} يوم`
+  return new Date(iso).toLocaleDateString('ar-SA')
+}
+
+function SyncStatusCard({
+  status,
+  onRefresh,
+}: {
+  status: TemplateSyncStatus | null
+  onRefresh: () => void
+}) {
+  if (!status) {
+    return (
+      <div className="card px-5 py-4">
+        <div className="flex items-center gap-2 text-xs text-slate-400">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+          جاري قراءة حالة المزامنة…
+        </div>
+      </div>
+    )
+  }
+
+  if (!status.recorded) {
+    return (
+      <div className="card px-5 py-4 border-l-4 border-l-slate-300">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
+              <Clock className="w-4 h-4 text-slate-500" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-slate-700">لم تتم أي مزامنة بعد</p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {status.next_estimate || 'ستتم المزامنة التلقائية خلال 30 دقيقة كحد أقصى.'}
+              </p>
+            </div>
+          </div>
+          <button onClick={onRefresh} className="text-slate-400 hover:text-brand-500 transition-colors" title="تحديث">
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const hasError   = !!status.error
+  const sourceLbl  = status.source === 'scheduled' ? 'مزامنة تلقائية' : 'مزامنة يدوية'
+  const accent     = hasError ? 'border-l-amber-400' : 'border-l-emerald-400'
+  const iconBg     = hasError ? 'bg-amber-50'   : 'bg-emerald-50'
+  const iconColor  = hasError ? 'text-amber-600' : 'text-emerald-600'
+  const Icon       = hasError ? AlertCircle : CheckCircle
+  const friendly   = hasError
+    ? getTemplateSyncErrorMessage(status.error, status.message)
+    : (status.message || 'تمت المزامنة بنجاح')
+
+  return (
+    <div className={`card px-5 py-4 border-l-4 ${accent}`}>
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="flex items-start gap-3 min-w-0">
+          <div className={`w-8 h-8 rounded-lg ${iconBg} flex items-center justify-center shrink-0`}>
+            <Icon className={`w-4 h-4 ${iconColor}`} />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-sm font-semibold text-slate-900">آخر مزامنة من Meta</p>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
+                {sourceLbl}
+              </span>
+              <span className="text-[11px] text-slate-500">{formatRelativeArabic(status.at)}</span>
+            </div>
+            <p className={`text-[12px] mt-1 leading-relaxed line-clamp-2 ${hasError ? 'text-amber-700' : 'text-slate-500'}`}>
+              {friendly}
+            </p>
+          </div>
+        </div>
+        <button onClick={onRefresh} className="text-slate-400 hover:text-brand-500 transition-colors shrink-0" title="تحديث">
+          <RefreshCw className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <SyncMiniStat label="تم جلبها"    value={status.synced     ?? 0} tone="slate"   />
+        <SyncMiniStat label="مربوطة تلقائياً" value={status.auto_bound ?? 0} tone="emerald" />
+        <SyncMiniStat label="فاشلة"       value={status.failed     ?? 0} tone={status.failed ? 'amber' : 'slate'} />
+        <SyncMiniStat label="حُذفت تجريبية" value={status.deleted_seeds ?? 0} tone="slate"   />
+      </div>
+    </div>
+  )
+}
+
+function SyncMiniStat({ label, value, tone }: { label: string; value: number; tone: 'slate' | 'emerald' | 'amber' }) {
+  const toneCls = tone === 'emerald'
+    ? 'bg-emerald-50 text-emerald-700 border-emerald-100'
+    : tone === 'amber'
+    ? 'bg-amber-50 text-amber-700 border-amber-100'
+    : 'bg-slate-50 text-slate-600 border-slate-100'
+  return (
+    <div className={`rounded-lg border ${toneCls} px-3 py-2 text-center`}>
+      <p className="text-base font-bold leading-none">{value}</p>
+      <p className="text-[10px] mt-1 opacity-80">{label}</p>
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Templates() {
@@ -1549,6 +1688,8 @@ export default function Templates() {
     '',
   ]
 
+  const [syncStatus, setSyncStatus] = useState<TemplateSyncStatus | null>(null)
+
   const loadTemplates = useCallback(() => {
     setLoading(true)
     templatesApi.list()
@@ -1557,13 +1698,25 @@ export default function Templates() {
       .finally(() => setLoading(false))
   }, [])
 
+  const loadSyncStatus = useCallback(() => {
+    templatesApi.syncStatus()
+      .then(setSyncStatus)
+      .catch(() => setSyncStatus(null))
+  }, [])
+
   useEffect(() => { loadTemplates() }, [loadTemplates])
+  useEffect(() => {
+    loadSyncStatus()
+    const id = setInterval(loadSyncStatus, 60_000)
+    return () => clearInterval(id)
+  }, [loadSyncStatus])
 
   const handleSync = async () => {
     setSyncing(true)
     try {
       await templatesApi.sync()
       loadTemplates()
+      loadSyncStatus()
     } finally {
       setSyncing(false)
     }
@@ -1773,6 +1926,9 @@ export default function Templates() {
         <StatCard label={t(tr => tr.templatesMgmt.statApproved)} value={String(counts.approved)} change={0}  icon={CheckCircle}  iconColor="text-emerald-600" iconBg="bg-emerald-50" />
         <StatCard label={t(tr => tr.templatesMgmt.statPending)}  value={String(counts.pending)}  change={0}  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
       </div>
+
+      {/* Sync status card — surfaces the background scheduler so it isn't silent */}
+      <SyncStatusCard status={syncStatus} onRefresh={loadSyncStatus} />
 
       {/* Compliance notice */}
       <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">

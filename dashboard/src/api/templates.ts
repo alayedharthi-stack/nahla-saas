@@ -80,6 +80,82 @@ export interface UpdateTemplatePayload {
   components?: TemplateComponent[]
 }
 
+// ── Template sync result + status ─────────────────────────────────────────────
+
+/** Result returned by POST /templates/sync */
+export interface TemplateSyncResult {
+  synced: number
+  auto_bound?: number
+  failed?: number
+  deleted_seeds?: number
+  message: string
+  error?: string | null
+  detail?: string | null
+}
+
+/** Last cycle stats (background scheduler), surfaced for ops/debug. */
+export interface TemplateSyncCycleStats {
+  at: string | null
+  duration_ms: number | null
+  tenants_total: number
+  tenants_synced: number
+  tenants_failed: number
+  tenants_skipped: number
+  total_templates: number
+  auto_bound: number
+}
+
+/** Result returned by GET /templates/sync/status */
+export interface TemplateSyncStatus {
+  recorded: boolean
+  next_estimate?: string
+  /** Present only when `recorded === true`. */
+  at?: string
+  source?: 'manual' | 'scheduled' | string
+  synced?: number
+  auto_bound?: number
+  failed?: number
+  deleted_seeds?: number
+  error?: string | null
+  message?: string
+  /** Read-only: last full background cycle across all tenants. */
+  last_cycle?: TemplateSyncCycleStats
+}
+
+/**
+ * Map a stable backend `error` code (returned by /templates/sync or
+ * /templates/sync/status) to a clear Arabic merchant-facing message.
+ *
+ * Keep these in sync with `_sync_templates_for_tenant` in
+ * backend/routers/templates.py.
+ */
+export const TEMPLATE_SYNC_ERROR_MESSAGES: Record<string, string> = {
+  no_waba_id:
+    'لم يتم العثور على رقم WhatsApp Business مرتبط. يجب إكمال ربط واتساب أولاً من صفحة الإعدادات.',
+  no_valid_token:
+    'لا يوجد توكن صالح لمزامنة القوالب. أعد ربط حساب واتساب من إعدادات المنصة لتجديد الصلاحيات.',
+  bad_provider_payload:
+    'استجابة غير متوقعة من Meta. سنعيد المحاولة تلقائياً خلال دقائق دون تدخل منك.',
+  no_provider_data:
+    'تعذّر الاتصال بـ Meta حالياً. تحقّق من بيانات الاعتماد أو حاول لاحقاً.',
+  db_lookup_failed:
+    'تعذّرت قراءة بيانات الاتصال. سيُعاد المحاولة تلقائياً.',
+  db_commit_failed:
+    'تعذّر حفظ القوالب في قاعدة البيانات. ستتم إعادة المحاولة تلقائياً.',
+  unexpected_failure:
+    'حدث خطأ غير متوقّع. ستتم المزامنة تلقائياً خلال دقائق.',
+  read_failed:
+    'تعذّر قراءة سجل آخر مزامنة من قاعدة البيانات.',
+}
+
+export function getTemplateSyncErrorMessage(
+  code: string | null | undefined,
+  fallback?: string,
+): string {
+  if (!code) return fallback || ''
+  return TEMPLATE_SYNC_ERROR_MESSAGES[code] || fallback || code
+}
+
 // ── API client ────────────────────────────────────────────────────────────────
 
 import { apiCall } from './client'
@@ -156,7 +232,11 @@ export const templatesApi = {
     ),
 
   sync: () =>
-    apiCall<{ synced: number; message: string }>('/templates/sync', { method: 'POST' }),
+    apiCall<TemplateSyncResult>('/templates/sync', { method: 'POST' }),
+
+  /** Read the most recent template sync attempt (background or manual). */
+  syncStatus: () =>
+    apiCall<TemplateSyncStatus>('/templates/sync/status'),
 
   /** Fetch the variable → customer-field mapping for a template. */
   getVarMap: (id: number) =>
