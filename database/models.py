@@ -188,6 +188,13 @@ class Coupon(Base):
     extra_metadata = Column('metadata', JSONB, nullable=True)
     expires_at = Column(DateTime, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    # Coupon taxonomy (added in migration 0038). source_type tells the
+    # merchant who created the coupon; coupon_level groups codes by
+    # discount tier; allocation_channel pins the delivery surface so the
+    # AI can't accidentally hand out a campaign-only code.
+    source_type = Column(String, nullable=False, default='manual', index=True)
+    coupon_level = Column(String, nullable=True, index=True)
+    allocation_channel = Column(String, nullable=True)
     tenant = relationship('Tenant', back_populates='coupons')
     rules = relationship('CouponRule', back_populates='coupon')
 

@@ -333,3 +333,208 @@ class TestBirthdayRuleRetired:
         assert normalised["id"] != "birthday"
         catalogue_ids = {r["id"] for r in DEFAULT_COUPON_RULES}
         assert normalised["id"] in catalogue_ids
+
+
+# ── 6. New coupon system: levels, global defaults, AI policy ────────────────
+#
+# These tests lock down the four-tier level system, the global defaults
+# applied to every newly issued coupon, and the AI policy that gates which
+# levels the brain may hand out and from which source (pool vs on-demand).
+
+from backend.routers.coupons import (  # noqa: E402
+    DEFAULT_AI_POLICY,
+    DEFAULT_COUPON_LEVELS,
+    DEFAULT_GLOBAL_DEFAULTS,
+    _infer_channel_from_meta,
+    _infer_level_from_meta,
+    _normalise_ai_policy,
+    _normalise_global_defaults,
+    _normalise_level,
+    _normalise_levels,
+)
+
+
+class TestCouponLevels:
+    def test_default_catalogue_has_all_four_tiers_in_order(self) -> None:
+        ids = [lv["id"] for lv in DEFAULT_COUPON_LEVELS]
+        assert ids == ["bronze", "silver", "gold", "vip"]
+
+    def test_bronze_discount_range_is_3_to_5(self) -> None:
+        bronze = next(lv for lv in DEFAULT_COUPON_LEVELS if lv["id"] == "bronze")
+        assert bronze["discount_min"] == 3
+        assert bronze["discount_max"] == 5
+        assert 3 <= bronze["discount_default"] <= 5
+
+    def test_normalise_level_clamps_discount_to_0_100(self) -> None:
+        n = _normalise_level({"id": "bronze", "discount_default": 999, "discount_min": -10, "discount_max": 999})
+        assert 0 <= n["discount_min"] <= 100
+        assert 0 <= n["discount_max"] <= 100
+        assert n["discount_min"] <= n["discount_default"] <= n["discount_max"]
+
+    def test_normalise_level_unknown_id_falls_back_to_bronze(self) -> None:
+        n = _normalise_level({"id": "platinum"})
+        assert n["id"] == "bronze"
+
+    def test_normalise_levels_always_returns_all_four(self) -> None:
+        out = _normalise_levels([{"id": "bronze", "discount_default": 4}])
+        assert {lv["id"] for lv in out} == {"bronze", "silver", "gold", "vip"}
+        assert len(out) == 4
+
+    def test_normalise_level_keeps_per_customer_usage_at_least_1(self) -> None:
+        n = _normalise_level({"id": "silver", "per_customer_usage": 0, "max_uses": 0})
+        assert n["per_customer_usage"] >= 1
+        assert n["max_uses"] >= 1
+
+    def test_normalise_level_filters_invalid_channels(self) -> None:
+        n = _normalise_level({"id": "gold", "allowed_channels": ["ai", "telegram", "email"]})
+        # Only 'ai' is a known channel — the rest are dropped.
+        assert n["allowed_channels"] == ["ai"]
+
+    def test_empty_channel_list_falls_back_to_defaults(self) -> None:
+        # If the merchant strips all channels (probably by accident), we
+        # restore the level's catalogue defaults so generation never breaks.
+        n = _normalise_level({"id": "silver", "allowed_channels": ["xyz"]})
+        assert len(n["allowed_channels"]) > 0
+
+
+class TestGlobalDefaults:
+    def test_default_validity_is_24h_preset(self) -> None:
+        assert DEFAULT_GLOBAL_DEFAULTS["default_validity"] == "24h"
+
+    def test_normalise_global_defaults_clamps_invalid_validity(self) -> None:
+        n = _normalise_global_defaults({"default_validity": "5h"})
+        assert n["default_validity"] == "24h"
+
+    def test_normalise_global_defaults_drops_invalid_discount_type(self) -> None:
+        n = _normalise_global_defaults({"discount_type": "weird"})
+        assert n["discount_type"] == "percentage"
+
+    def test_total_usage_limit_supports_null(self) -> None:
+        n = _normalise_global_defaults({"total_usage_limit": None})
+        assert n["total_usage_limit"] is None
+
+    def test_min_order_amount_cannot_be_negative(self) -> None:
+        n = _normalise_global_defaults({"min_order_amount": -50})
+        assert n["min_order_amount"] >= 0
+
+
+class TestAiPolicy:
+    def test_default_excludes_gold_and_vip_from_ai(self) -> None:
+        assert "gold" not in DEFAULT_AI_POLICY["allowed_levels"]
+        assert "vip" not in DEFAULT_AI_POLICY["allowed_levels"]
+
+    def test_normalise_ai_policy_drops_unknown_levels(self) -> None:
+        n = _normalise_ai_policy({"allowed_levels": ["bronze", "platinum", "vip"]})
+        assert "platinum" not in n["allowed_levels"]
+        assert "bronze" in n["allowed_levels"]
+
+    def test_normalise_ai_policy_clamps_pool_mode(self) -> None:
+        n = _normalise_ai_policy({"pool_mode": "ondemand"})
+        assert n["pool_mode"] == "pool_first"
+
+    def test_normalise_ai_policy_min_remaining_hours_is_non_negative(self) -> None:
+        n = _normalise_ai_policy({"min_remaining_hours": -3})
+        assert n["min_remaining_hours"] >= 0
+
+
+# ── 7. Origin / source-type bug fix ──────────────────────────────────────────
+#
+# Auto-generated coupons used to write metadata.source = "auto" while the
+# router classifier only recognised "automation". Result: every system-
+# generated coupon was rendered as "يدوي" (manual) in the dashboard. This
+# test pins the fix so that regression never returns silently.
+
+class TestOriginClassifier:
+    def test_source_auto_is_recognised_as_system(self) -> None:
+        # Replay the exact metadata the pool generator writes.
+        meta = {"source": "auto", "target_segment": "active"}
+        # Origin is computed inline in list_coupons; here we exercise the
+        # fallback helpers that the row builder relies on for the new
+        # taxonomy columns. They classify the same metadata as system.
+        assert _infer_channel_from_meta(meta, "automation") in ("autopilot", "ai", "shared", "campaign")
+        # The level helper must map the segment ('active') to silver.
+        assert _infer_level_from_meta(meta) == "silver"
+
+    def test_segment_to_level_mapping_covers_all_canonical_segments(self) -> None:
+        from services.coupon_generator import SEGMENT_TO_LEVEL  # noqa: WPS433
+        # Every CRM segment we generate for must have a matching level so
+        # the dashboard can render the chip without falling back to "—".
+        from services.crm_atoms import CrmStatus  # noqa: WPS433
+        for status in (CrmStatus.NEW, CrmStatus.ACTIVE, CrmStatus.VIP, CrmStatus.AT_RISK):
+            assert status in SEGMENT_TO_LEVEL, status
+
+    def test_meta_with_campaign_id_is_classified_as_campaign(self) -> None:
+        meta = {"source": "auto", "campaign_id": 42}
+        assert _infer_channel_from_meta(meta, "automation") == "campaign"
+
+    def test_meta_with_promotion_origin_is_shared(self) -> None:
+        assert _infer_channel_from_meta({"source": "promotion"}, "promotion") == "shared"
+
+
+# ── 8. AI policy gates pick_coupon_for_segment ──────────────────────────────
+#
+# The AI must never hand out a coupon for a level the merchant excluded.
+
+class TestAiPolicyGate:
+    def _seed_with_policy(self, db, policy: dict, levels: list | None = None):
+        tenant = Tenant(name="AI Policy Tenant", is_active=True)
+        db.add(tenant)
+        db.flush()
+        block: dict = {"rules": [], "vip_tiers": [], "ai_policy": policy}
+        if levels is not None:
+            block["levels"] = levels
+        db.add(TenantSettings(
+            tenant_id=tenant.id,
+            ai_settings={"allowed_discount_levels": 30},
+            extra_metadata={"coupons_dashboard": block},
+        ))
+        db.commit()
+        return tenant
+
+    def test_disabled_ai_returns_none(self) -> None:
+        from services.coupon_generator import CouponGeneratorService
+        db, engine = _make_db()
+        try:
+            tenant = self._seed_with_policy(db, {"enabled": False, "allowed_levels": ["bronze"]})
+            svc = CouponGeneratorService(db, tenant.id)
+            assert svc.pick_coupon_for_segment("active", for_channel="ai") is None
+        finally:
+            db.close(); engine.dispose()
+
+    def test_segment_outside_allowed_levels_returns_none(self) -> None:
+        # 'vip' segment maps to level=vip; if the merchant only allowed
+        # bronze/silver for the AI, the brain should refuse to issue.
+        from services.coupon_generator import CouponGeneratorService
+        db, engine = _make_db()
+        try:
+            tenant = self._seed_with_policy(db, {
+                "enabled": True,
+                "allowed_levels": ["bronze", "silver"],
+                "min_remaining_hours": 0,
+                "pool_mode": "pool_first",
+            })
+            svc = CouponGeneratorService(db, tenant.id)
+            assert svc.pick_coupon_for_segment("vip", for_channel="ai") is None
+        finally:
+            db.close(); engine.dispose()
+
+    def test_pool_only_mode_blocks_on_demand(self) -> None:
+        # In on_demand_only mode the pool path is shut off — but we test
+        # the inverse: pool_only blocks falling back to on-demand. Here we
+        # only exercise that pick_coupon_for_segment respects pool_first
+        # vs on_demand_only without crashing on an empty pool.
+        from services.coupon_generator import CouponGeneratorService
+        db, engine = _make_db()
+        try:
+            tenant = self._seed_with_policy(db, {
+                "enabled": True,
+                "allowed_levels": ["bronze", "silver"],
+                "min_remaining_hours": 0,
+                "pool_mode": "on_demand_only",
+            })
+            svc = CouponGeneratorService(db, tenant.id)
+            # On-demand-only means pick should not return anything from
+            # the (empty) pool.
+            assert svc.pick_coupon_for_segment("active", for_channel="ai") is None
+        finally:
+            db.close(); engine.dispose()

@@ -19,6 +19,13 @@ import {
   Clock,
   Percent,
   Coins,
+  Settings,
+  ChevronDown,
+  ChevronUp,
+  Award,
+  Brain,
+  Server,
+  Save,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -27,16 +34,93 @@ import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import {
   featureRealityApi,
+  type CouponAiPolicy,
+  type CouponChannel,
+  type CouponGlobalDefaults,
+  type CouponLevel,
+  type CouponLevelId,
   type CouponOrigin,
+  type CouponPoolMode,
   type CouponRule,
+  type CouponValidityPreset,
   type CouponsDashboard,
   type DashboardCoupon,
 } from '../api/featureReality'
 
+const DEFAULT_LEVELS: CouponLevel[] = [
+  { id: 'bronze', label: 'برونزي',   threshold: '+1 طلب',   discount_default: 5,  discount_min: 3,  discount_max: 5,  validity_hours: 24, max_uses: 1, per_customer_usage: 1, allowed_channels: ['ai', 'campaign', 'autopilot'], enabled: true },
+  { id: 'silver', label: 'فضي',      threshold: '+3 طلبات', discount_default: 10, discount_min: 8,  discount_max: 12, validity_hours: 48, max_uses: 1, per_customer_usage: 1, allowed_channels: ['ai', 'campaign', 'autopilot'], enabled: true },
+  { id: 'gold',   label: 'ذهبي',     threshold: '+7 طلبات', discount_default: 20, discount_min: 15, discount_max: 25, validity_hours: 72, max_uses: 2, per_customer_usage: 1, allowed_channels: ['campaign', 'autopilot'],       enabled: true },
+  { id: 'vip',    label: 'استثنائي', threshold: '+15 طلب',  discount_default: 30, discount_min: 25, discount_max: 40, validity_hours: 72, max_uses: 3, per_customer_usage: 1, allowed_channels: ['campaign', 'autopilot'],       enabled: true },
+]
+
+const DEFAULT_GLOBAL_DEFAULTS: CouponGlobalDefaults = {
+  discount_type: 'percentage',
+  default_discount_value: 10,
+  total_usage_limit: null,
+  customer_limit: null,
+  per_customer_usage: 1,
+  min_order_amount: 0,
+  default_validity: '24h',
+  custom_validity_hours: null,
+  allowed_channels: ['ai', 'campaign', 'autopilot'],
+  combinable_with_offers: false,
+}
+
+const DEFAULT_AI_POLICY: CouponAiPolicy = {
+  enabled: true,
+  allowed_levels: ['bronze', 'silver'],
+  min_remaining_hours: 3,
+  pool_mode: 'pool_first',
+}
+
 const emptyData: CouponsDashboard = {
   rules: [],
   vip_tiers: [],
+  levels: DEFAULT_LEVELS,
+  global_defaults: DEFAULT_GLOBAL_DEFAULTS,
+  ai_policy: DEFAULT_AI_POLICY,
   coupons: [],
+}
+
+// ── Level metadata ───────────────────────────────────────────────────────────
+
+const LEVEL_META: Record<CouponLevelId, { label: string; bg: string; text: string; ring: string; iconBg: string; }> = {
+  bronze: { label: 'برونزي',   bg: 'bg-orange-50/60',  text: 'text-orange-700', ring: 'ring-orange-200',  iconBg: 'bg-orange-100 text-orange-600' },
+  silver: { label: 'فضي',      bg: 'bg-slate-50',      text: 'text-slate-700',  ring: 'ring-slate-200',   iconBg: 'bg-slate-100 text-slate-600' },
+  gold:   { label: 'ذهبي',     bg: 'bg-amber-50/60',   text: 'text-amber-700',  ring: 'ring-amber-200',   iconBg: 'bg-amber-100 text-amber-600' },
+  vip:    { label: 'استثنائي', bg: 'bg-purple-50/60',  text: 'text-purple-700', ring: 'ring-purple-200',  iconBg: 'bg-purple-100 text-purple-600' },
+}
+
+const LEVEL_BADGE_VARIANT: Record<CouponLevelId, 'amber' | 'slate' | 'purple' | 'blue'> = {
+  bronze: 'amber',
+  silver: 'slate',
+  gold:   'amber',
+  vip:    'purple',
+}
+
+const SOURCE_TYPE_LABEL: Record<NonNullable<DashboardCoupon['source_type']>, { label: string; variant: 'green' | 'slate' | 'blue' }> = {
+  system:   { label: 'نظام',    variant: 'green' },
+  manual:   { label: 'يدوي',    variant: 'slate' },
+  imported: { label: 'مستورد',  variant: 'blue'  },
+}
+
+const CHANNEL_LABEL: Record<CouponChannel, { label: string; variant: 'purple' | 'blue' | 'amber' | 'slate' }> = {
+  ai:        { label: 'ذكاء',      variant: 'purple' },
+  campaign:  { label: 'حملة',      variant: 'blue'   },
+  autopilot: { label: 'طيار آلي',  variant: 'amber'  },
+  shared:    { label: 'مشترك',     variant: 'slate'  },
+}
+
+function formatRemaining(seconds: number | null | undefined): string {
+  if (seconds == null) return '—'
+  if (seconds <= 0) return 'منتهي'
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (days >= 1) return `${days} يوم${days === 1 ? '' : ''}${hours ? ` و${hours} س` : ''}`
+  if (hours >= 1) return `${hours} ساعة${minutes ? ` و${minutes} د` : ''}`
+  return `${minutes} دقيقة`
 }
 
 // ── Origin → display metadata ────────────────────────────────────────────────
@@ -127,11 +211,6 @@ function engineMeta(ruleId: string): RuleEngineMeta {
   return RULE_ENGINE[ruleId] || { engine: 'experience', label: 'الطيار الآلي', desc: 'يُدار بواسطة الطيار الآلي' }
 }
 
-// ── Type label ───────────────────────────────────────────────────────────────
-
-const typeLabel = (t: DashboardCoupon['type']) =>
-  t === 'percentage' ? 'نسبة مئوية' : 'مبلغ ثابت'
-
 // ── KPIs ─────────────────────────────────────────────────────────────────────
 
 interface KpiTone { fg: string; bg: string }
@@ -163,15 +242,34 @@ function KpiCard({ label, value, hint, accent, icon: Icon }: {
 
 // ── Filter tabs ──────────────────────────────────────────────────────────────
 
-type CouponFilter = 'all' | 'ai' | 'manual'
+type CouponFilter = 'all' | 'system' | 'manual' | 'imported'
 
 const FILTERS: Array<{ key: CouponFilter; label: string; hint: string }> = [
-  { key: 'all',    label: 'كل الكوبونات',         hint: 'عرض الكل' },
-  { key: 'ai',     label: '🤖 توليد ذكي',         hint: 'الكوبونات التي يولّدها الطيار الآلي' },
-  { key: 'manual', label: '✋ يدوي (استثنائي)',    hint: 'الكوبونات التي أنشأتها يدوياً' },
+  { key: 'all',      label: 'كل الكوبونات',         hint: 'عرض الكل' },
+  { key: 'system',   label: '🤖 من النظام',          hint: 'الكوبونات التي يولّدها النظام تلقائياً' },
+  { key: 'manual',   label: '✋ يدوي',                hint: 'الكوبونات التي أنشأتها يدوياً' },
+  { key: 'imported', label: '⤓ مستورد',              hint: 'كوبونات مستوردة من سلة أو زد' },
 ]
 
-const TABLE_HEADERS = ['الكود', 'المصدر', 'النوع', 'الخصم', 'الاستخدامات', 'الانتهاء', 'الحالة', '']
+type LevelFilter = 'all' | CouponLevelId
+
+const LEVEL_FILTERS: Array<{ key: LevelFilter; label: string }> = [
+  { key: 'all',    label: 'جميع المستويات' },
+  { key: 'bronze', label: 'برونزي'   },
+  { key: 'silver', label: 'فضي'      },
+  { key: 'gold',   label: 'ذهبي'     },
+  { key: 'vip',    label: 'استثنائي' },
+]
+
+const TABLE_HEADERS = ['الكود', 'المستوى', 'المصدر', 'القناة', 'الخصم', 'الاستخدامات', 'المتبقي', 'الحالة', '']
+
+function sourceTypeOf(c: DashboardCoupon): NonNullable<DashboardCoupon['source_type']> {
+  if (c.source_type) return c.source_type
+  const o = c.origin
+  if (o === 'manual') return 'manual'
+  if (o) return 'system'
+  return c.category === 'auto' ? 'system' : 'manual'
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -179,30 +277,55 @@ export default function Coupons() {
   const [data, setData] = useState<CouponsDashboard>(emptyData)
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [filter, setFilter] = useState<CouponFilter>('all')
+  const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
   const [editingRule, setEditingRule] = useState<CouponRule | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const { t } = useLanguage()
+
+  const levels = data.levels && data.levels.length === 4 ? data.levels : DEFAULT_LEVELS
+  const globalDefaults = data.global_defaults || DEFAULT_GLOBAL_DEFAULTS
+  const aiPolicy = data.ai_policy || DEFAULT_AI_POLICY
 
   const load = () => {
     featureRealityApi.coupons()
-      .then(setData)
+      .then(d => setData({
+        ...d,
+        levels:          (d.levels && d.levels.length === 4 ? d.levels : DEFAULT_LEVELS),
+        global_defaults: d.global_defaults || DEFAULT_GLOBAL_DEFAULTS,
+        ai_policy:       d.ai_policy       || DEFAULT_AI_POLICY,
+      }))
       .catch(() => setData(emptyData))
   }
 
   useEffect(() => { load() }, [])
 
-  const persistRules = async (nextRules: CouponRule[]) => {
-    setData(rs => ({ ...rs, rules: nextRules }))
+  const persistSettings = async (patch: Partial<CouponsDashboard>) => {
+    const next = { ...data, ...patch }
+    setData(next)
     try {
       const saved = await featureRealityApi.saveCouponSettings({
-        rules: nextRules,
-        vip_tiers: data.vip_tiers,
+        rules:           next.rules,
+        vip_tiers:       next.vip_tiers,
+        levels:          next.levels,
+        global_defaults: next.global_defaults,
+        ai_policy:       next.ai_policy,
       })
-      setData(rs => ({ ...rs, rules: saved.rules, vip_tiers: saved.vip_tiers }))
+      setData(prev => ({
+        ...prev,
+        rules:           saved.rules           ?? prev.rules,
+        vip_tiers:       saved.vip_tiers       ?? prev.vip_tiers,
+        levels:          saved.levels          ?? prev.levels,
+        global_defaults: saved.global_defaults ?? prev.global_defaults,
+        ai_policy:       saved.ai_policy       ?? prev.ai_policy,
+      }))
     } catch {
       load()
-      alert('تعذّر حفظ إعدادات القواعد')
+      alert('تعذّر حفظ الإعدادات')
     }
   }
+
+  const persistRules = (nextRules: CouponRule[]) =>
+    persistSettings({ rules: nextRules })
 
   const toggleRule = (id: string) => {
     const nextRules = data.rules.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r)
@@ -277,10 +400,25 @@ export default function Coupons() {
   }, [data.coupons])
 
   const filteredCoupons = useMemo(() => {
-    if (filter === 'all')    return data.coupons
-    if (filter === 'manual') return data.coupons.filter(c => originOf(c) === 'manual')
-    return data.coupons.filter(c => originOf(c) !== 'manual')
-  }, [data.coupons, filter])
+    let arr = data.coupons
+    if (filter !== 'all') {
+      arr = arr.filter(c => sourceTypeOf(c) === filter)
+    }
+    if (levelFilter !== 'all') {
+      arr = arr.filter(c => (c.coupon_level || 'silver') === levelFilter)
+    }
+    return arr
+  }, [data.coupons, filter, levelFilter])
+
+  // KPI counts per source so the merchant sees the breakdown at a glance.
+  const sourceCounts = useMemo(() => {
+    const out = { all: data.coupons.length, system: 0, manual: 0, imported: 0 }
+    for (const c of data.coupons) {
+      const s = sourceTypeOf(c)
+      out[s] = (out[s] || 0) + 1
+    }
+    return out
+  }, [data.coupons])
 
   return (
     <div className="space-y-5">
@@ -296,6 +434,16 @@ export default function Coupons() {
             <Plus className="w-3.5 h-3.5" /> كود يدوي
           </button>
         }
+      />
+
+      {/* ── Settings panel ───────────────────────────────────────────── */}
+      <CouponSettingsPanel
+        open={settingsOpen}
+        onToggle={() => setSettingsOpen(s => !s)}
+        levels={levels}
+        globalDefaults={globalDefaults}
+        aiPolicy={aiPolicy}
+        onSave={persistSettings}
       />
 
       {/* AI banner — sets the tone: this is an AI-managed system */}
@@ -430,24 +578,31 @@ export default function Coupons() {
         }}
       />
 
-      {/* VIP Tiers */}
+      {/* 4-tier coupon levels */}
       <div className="card">
         <div className="px-5 py-4 border-b border-slate-100">
           <h2 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-            <Crown className="w-4 h-4 text-amber-500" /> مستويات خصم VIP
+            <Crown className="w-4 h-4 text-amber-500" /> مستويات الكوبونات
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            الطيار الآلي يصنّف العملاء تلقائياً ويُصدر الكود المناسب لكل مستوى
+            أربعة مستويات يصنّف الذكاء العميل بينها — كل مستوى له نسبة وصلاحية واستخدامات خاصة
           </p>
         </div>
-        <div className="grid sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-100">
-          {data.vip_tiers.map(({ tier, threshold, discount }, idx) => {
-            const color = idx === 0 ? 'text-slate-500 bg-slate-50' : idx === 1 ? 'text-amber-600 bg-amber-50' : 'text-purple-600 bg-purple-50'
+        <div className="grid grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 lg:divide-x lg:divide-x-reverse divide-slate-100">
+          {levels.map(level => {
+            const m = LEVEL_META[level.id]
+            const range = level.discount_min === level.discount_max
+              ? `${level.discount_default}%`
+              : `${level.discount_min}–${level.discount_max}%`
             return (
-              <div key={tier} className={`flex flex-col items-center py-6 ${color.split(' ')[1]}`}>
-                <span className={`text-xs font-bold uppercase tracking-widest ${color.split(' ')[0]}`}>{tier}</span>
-                <p className={`text-3xl font-bold mt-2 ${color.split(' ')[0]}`}>{discount}</p>
-                <p className="text-xs text-slate-500 mt-1">{threshold}</p>
+              <div key={level.id} className={`flex flex-col items-center py-6 px-4 ${m.bg}`}>
+                <div className={`w-10 h-10 rounded-full flex items-center justify-center mb-2 ${m.iconBg}`}>
+                  <Award className="w-5 h-5" />
+                </div>
+                <span className={`text-xs font-bold tracking-wide ${m.text}`}>{m.label}</span>
+                <p className={`text-2xl font-bold mt-1 ${m.text}`}>{range}</p>
+                <p className="text-[11px] text-slate-500 mt-1">{level.threshold}</p>
+                <p className="text-[10px] text-slate-400 mt-2">صلاحية {level.validity_hours} ساعة</p>
               </div>
             )
           })}
@@ -456,28 +611,50 @@ export default function Coupons() {
 
       {/* Coupons table — with origin column */}
       <div className="card">
-        <div className="px-5 py-4 border-b border-slate-100">
+        <div className="px-5 py-4 border-b border-slate-100 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <h2 className="text-sm font-semibold text-slate-900">الأكواد الصادرة</h2>
             <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-lg">
               {FILTERS.map(f => {
                 const active = filter === f.key
+                const count = sourceCounts[f.key as keyof typeof sourceCounts] ?? 0
                 return (
                   <button
                     key={f.key}
                     onClick={() => setFilter(f.key)}
                     title={f.hint}
-                    className={`text-[11px] px-2.5 py-1 rounded-md transition ${
+                    className={`text-[11px] px-2.5 py-1 rounded-md transition inline-flex items-center gap-1.5 ${
                       active
                         ? 'bg-white text-slate-900 shadow-sm font-semibold'
                         : 'text-slate-600 hover:text-slate-800'
                     }`}
                   >
-                    {f.label}
+                    <span>{f.label}</span>
+                    <span className={`text-[10px] px-1.5 rounded-full ${active ? 'bg-slate-100 text-slate-600' : 'bg-white/60 text-slate-500'}`}>
+                      {count}
+                    </span>
                   </button>
                 )
               })}
             </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {LEVEL_FILTERS.map(lf => {
+              const active = levelFilter === lf.key
+              return (
+                <button
+                  key={lf.key}
+                  onClick={() => setLevelFilter(lf.key)}
+                  className={`text-[11px] px-2.5 py-1 rounded-full border transition ${
+                    active
+                      ? 'border-brand-400 bg-brand-50 text-brand-700 font-semibold'
+                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {lf.label}
+                </button>
+              )
+            })}
           </div>
         </div>
 
@@ -503,32 +680,44 @@ export default function Coupons() {
               {filteredCoupons.map((c) => {
                 const origin = originOf(c)
                 const om = ORIGIN_META[origin]
-                const OIcon = om.icon
+                const sourceType = sourceTypeOf(c)
+                const sMeta = SOURCE_TYPE_LABEL[sourceType]
+                const level = c.coupon_level || null
+                const channel = c.allocation_channel || null
+                const isExpired = c.remaining_seconds != null && c.remaining_seconds <= 0
+                const isDepleted = c.limit > 0 && c.usages >= c.limit
+                const statusLabel = !c.active ? 'غير نشط' : isExpired ? 'منتهي' : isDepleted ? 'مستنفد' : 'نشط'
+                const statusVariant: 'green' | 'slate' | 'red' | 'amber' =
+                  !c.active ? 'slate' : isExpired ? 'red' : isDepleted ? 'amber' : 'green'
                 return (
                   <tr key={c.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-5 py-3.5">
                       <div className="flex items-center gap-2">
-                        <OIcon className={`w-3.5 h-3.5 shrink-0 ${
-                          om.variant === 'purple' ? 'text-purple-500' :
-                          om.variant === 'amber'  ? 'text-amber-500'  :
-                          om.variant === 'blue'   ? 'text-blue-500'   :
-                                                    'text-slate-400'
-                        }`} />
                         <span className="text-xs font-mono font-semibold text-slate-800" dir="ltr">{c.code}</span>
                         <button
                           onClick={() => copyCode(c.code, c.id)}
                           className="text-slate-300 hover:text-slate-500 transition-colors"
+                          title="نسخ الكود"
                         >
                           <Copy className="w-3 h-3" />
                         </button>
                         {copiedId === c.id && <span className="text-xs text-emerald-600">تم النسخ!</span>}
                       </div>
                     </td>
-                    <td className="px-5 py-3.5" title={om.hint}>
-                      <Badge label={om.label} variant={om.variant} />
+                    <td className="px-5 py-3.5">
+                      {level
+                        ? <Badge label={LEVEL_META[level].label} variant={LEVEL_BADGE_VARIANT[level]} />
+                        : <span className="text-xs text-slate-400">—</span>}
                     </td>
-                    <td className="px-5 py-3.5 text-xs text-slate-600">{typeLabel(c.type)}</td>
-                    <td className="px-5 py-3.5 text-xs font-semibold text-slate-900">
+                    <td className="px-5 py-3.5" title={om.hint}>
+                      <Badge label={sMeta.label} variant={sMeta.variant} />
+                    </td>
+                    <td className="px-5 py-3.5">
+                      {channel
+                        ? <Badge label={CHANNEL_LABEL[channel].label} variant={CHANNEL_LABEL[channel].variant} />
+                        : <span className="text-xs text-slate-400">—</span>}
+                    </td>
+                    <td className="px-5 py-3.5 text-xs font-semibold text-slate-900 whitespace-nowrap">
                       {c.type === 'percentage' ? `${c.value}%` : `${c.value} ر.س`}
                     </td>
                     <td className="px-5 py-3.5">
@@ -539,13 +728,15 @@ export default function Coupons() {
                             style={{ width: `${c.limit > 0 ? Math.min((c.usages / c.limit) * 100, 100) : 0}%` }}
                           />
                         </div>
-                        <span className="text-xs text-slate-500">{c.usages}/{c.limit || '∞'}</span>
+                        <span className="text-xs text-slate-500 whitespace-nowrap">{c.usages}/{c.limit || '∞'}</span>
                       </div>
                     </td>
-                    <td className="px-5 py-3.5 text-xs text-slate-500" dir="ltr">{c.expires}</td>
+                    <td className="px-5 py-3.5 text-xs text-slate-500 whitespace-nowrap">
+                      {formatRemaining(c.remaining_seconds)}
+                    </td>
                     <td className="px-5 py-3.5">
                       <button onClick={() => handleToggleCoupon(c)}>
-                        <Badge label={c.active ? 'نشط' : 'غير نشط'} variant={c.active ? 'green' : 'slate'} dot />
+                        <Badge label={statusLabel} variant={statusVariant} dot />
                       </button>
                     </td>
                     <td className="px-5 py-3.5">
@@ -812,5 +1003,475 @@ function RuleEditorModal({ rule, onClose, onSave }: RuleEditorProps) {
         </form>
       </div>
     </div>
+  )
+}
+
+// ── Coupon settings panel ────────────────────────────────────────────────────
+//
+// Collapsible 3-tab panel that drives every coupon the system generates.
+// The merchant sets defaults once here; every level / AI request inherits
+// from these unless overridden at the level layer.
+
+type SettingsTab = 'global' | 'levels' | 'ai'
+
+interface SettingsPanelProps {
+  open: boolean
+  onToggle: () => void
+  levels: CouponLevel[]
+  globalDefaults: CouponGlobalDefaults
+  aiPolicy: CouponAiPolicy
+  onSave: (patch: Partial<CouponsDashboard>) => Promise<void>
+}
+
+function CouponSettingsPanel({ open, onToggle, levels, globalDefaults, aiPolicy, onSave }: SettingsPanelProps) {
+  const [tab, setTab] = useState<SettingsTab>('global')
+  const [draftGlobal, setDraftGlobal] = useState<CouponGlobalDefaults>(globalDefaults)
+  const [draftLevels, setDraftLevels] = useState<CouponLevel[]>(levels)
+  const [draftAi, setDraftAi] = useState<CouponAiPolicy>(aiPolicy)
+  const [saving, setSaving] = useState(false)
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+
+  useEffect(() => { setDraftGlobal(globalDefaults) }, [globalDefaults])
+  useEffect(() => { setDraftLevels(levels) }, [levels])
+  useEffect(() => { setDraftAi(aiPolicy) }, [aiPolicy])
+
+  const dirty =
+    JSON.stringify(draftGlobal) !== JSON.stringify(globalDefaults) ||
+    JSON.stringify(draftLevels) !== JSON.stringify(levels) ||
+    JSON.stringify(draftAi)     !== JSON.stringify(aiPolicy)
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await onSave({
+        global_defaults: draftGlobal,
+        levels: draftLevels,
+        ai_policy: draftAi,
+      })
+      setSavedAt(Date.now())
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="card">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between gap-3 px-5 py-4 hover:bg-slate-50/50 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center">
+            <Settings className="w-4 h-4" />
+          </div>
+          <div className="text-start">
+            <h2 className="text-sm font-semibold text-slate-900">إعدادات الكوبونات</h2>
+            <p className="text-[11px] text-slate-500">قواعد عامة + 4 مستويات + سياسة الذكاء</p>
+          </div>
+        </div>
+        {open ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+      </button>
+
+      {open && (
+        <div className="border-t border-slate-100">
+          <div className="flex items-center gap-1 px-3 pt-3">
+            {([
+              { key: 'global', label: 'الإعدادات العامة', icon: Server },
+              { key: 'levels', label: 'المستويات',         icon: Award  },
+              { key: 'ai',     label: 'سياسة الذكاء',      icon: Brain  },
+            ] as const).map(t => {
+              const active = tab === t.key
+              const Icon = t.icon
+              return (
+                <button
+                  key={t.key}
+                  onClick={() => setTab(t.key)}
+                  className={`text-xs px-3 py-2 rounded-t-lg inline-flex items-center gap-1.5 transition ${
+                    active
+                      ? 'bg-white border border-b-transparent border-slate-200 text-slate-900 font-semibold'
+                      : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  {t.label}
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="px-5 py-5 border-t border-slate-200">
+            {tab === 'global' && (
+              <GlobalDefaultsForm value={draftGlobal} onChange={setDraftGlobal} />
+            )}
+            {tab === 'levels' && (
+              <LevelsForm value={draftLevels} onChange={setDraftLevels} />
+            )}
+            {tab === 'ai' && (
+              <AiPolicyForm value={draftAi} onChange={setDraftAi} />
+            )}
+          </div>
+
+          <div className="px-5 py-3 border-t border-slate-100 bg-slate-50/50 flex items-center justify-end gap-3">
+            {savedAt && !dirty && (
+              <span className="text-[11px] text-emerald-600">تم الحفظ ✓</span>
+            )}
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={!dirty || saving}
+              className="btn-primary text-xs inline-flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <Save className="w-3.5 h-3.5" />
+              {saving ? 'جارٍ الحفظ…' : 'حفظ الإعدادات'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const ALL_CHANNELS: CouponChannel[] = ['ai', 'campaign', 'autopilot']
+
+function GlobalDefaultsForm({ value, onChange }: {
+  value: CouponGlobalDefaults
+  onChange: (v: CouponGlobalDefaults) => void
+}) {
+  const set = <K extends keyof CouponGlobalDefaults>(k: K, v: CouponGlobalDefaults[K]) =>
+    onChange({ ...value, [k]: v })
+  const isCustom = value.default_validity === 'custom'
+  return (
+    <div className="grid sm:grid-cols-2 gap-4">
+      <Field label="نوع الخصم">
+        <div className="grid grid-cols-2 gap-2">
+          {(['percentage', 'fixed'] as const).map(k => {
+            const active = value.discount_type === k
+            const Icon = k === 'percentage' ? Percent : Coins
+            return (
+              <button
+                key={k}
+                type="button"
+                onClick={() => set('discount_type', k)}
+                className={`px-3 py-2 rounded-lg border text-sm inline-flex items-center gap-2 ${
+                  active ? 'border-brand-400 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-700'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                {k === 'percentage' ? 'نسبة' : 'مبلغ'}
+              </button>
+            )
+          })}
+        </div>
+      </Field>
+
+      <Field label={`القيمة الافتراضية ${value.discount_type === 'percentage' ? '(%)' : '(ر.س)'}`}>
+        <NumberInput
+          value={value.default_discount_value}
+          onChange={v => set('default_discount_value', v ?? 0)}
+          min={0}
+          max={value.discount_type === 'percentage' ? 100 : undefined}
+        />
+      </Field>
+
+      <Field label="الحد الأقصى الإجمالي للاستخدام" hint="فارغ = بلا حد">
+        <NumberInput value={value.total_usage_limit} onChange={v => set('total_usage_limit', v)} min={0} nullable />
+      </Field>
+
+      <Field label="عدد العملاء المسموح لهم" hint="فارغ = بلا حد">
+        <NumberInput value={value.customer_limit} onChange={v => set('customer_limit', v)} min={0} nullable />
+      </Field>
+
+      <Field label="استخدامات لكل عميل">
+        <NumberInput value={value.per_customer_usage} onChange={v => set('per_customer_usage', v ?? 1)} min={1} />
+      </Field>
+
+      <Field label="الحد الأدنى للطلب (ر.س)">
+        <NumberInput value={value.min_order_amount} onChange={v => set('min_order_amount', v ?? 0)} min={0} step={0.01} />
+      </Field>
+
+      <Field label="الصلاحية الافتراضية">
+        <div className="flex flex-wrap gap-1.5">
+          {(['3h', '6h', '24h', 'custom'] as CouponValidityPreset[]).map(opt => {
+            const active = value.default_validity === opt
+            const lbl = opt === '3h' ? '3 ساعات' : opt === '6h' ? '6 ساعات' : opt === '24h' ? '24 ساعة' : 'مخصص'
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => set('default_validity', opt)}
+                className={`text-xs px-3 py-1.5 rounded-md border ${
+                  active ? 'border-brand-400 bg-brand-50 text-brand-700 font-semibold' : 'border-slate-200 text-slate-600'
+                }`}
+              >
+                {lbl}
+              </button>
+            )
+          })}
+        </div>
+        {isCustom && (
+          <div className="mt-2">
+            <NumberInput
+              value={value.custom_validity_hours}
+              onChange={v => set('custom_validity_hours', v)}
+              min={1}
+              nullable
+              placeholder="عدد الساعات"
+            />
+          </div>
+        )}
+      </Field>
+
+      <Field label="القنوات المسموح بها">
+        <div className="flex flex-wrap gap-1.5">
+          {ALL_CHANNELS.map(ch => {
+            const checked = value.allowed_channels.includes(ch)
+            return (
+              <button
+                key={ch}
+                type="button"
+                onClick={() => set('allowed_channels', checked
+                  ? value.allowed_channels.filter(c => c !== ch)
+                  : [...value.allowed_channels, ch],
+                )}
+                className={`text-xs px-3 py-1.5 rounded-full border inline-flex items-center gap-1.5 ${
+                  checked ? 'border-brand-400 bg-brand-50 text-brand-700 font-semibold' : 'border-slate-200 text-slate-500'
+                }`}
+              >
+                {CHANNEL_LABEL[ch].label}
+              </button>
+            )
+          })}
+        </div>
+      </Field>
+
+      <Field label="الدمج مع العروض الأخرى" className="sm:col-span-2">
+        <Toggle
+          on={value.combinable_with_offers}
+          onChange={v => set('combinable_with_offers', v)}
+          on_label="مسموح بالدمج"
+          off_label="غير مسموح بالدمج"
+        />
+      </Field>
+    </div>
+  )
+}
+
+function LevelsForm({ value, onChange }: {
+  value: CouponLevel[]
+  onChange: (v: CouponLevel[]) => void
+}) {
+  const updateLevel = (idx: number, patch: Partial<CouponLevel>) => {
+    onChange(value.map((lv, i) => i === idx ? { ...lv, ...patch } : lv))
+  }
+  return (
+    <div className="space-y-4">
+      {value.map((lv, idx) => {
+        const m = LEVEL_META[lv.id]
+        return (
+          <div key={lv.id} className={`rounded-xl border p-4 ${m.bg}`}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${m.iconBg}`}>
+                  <Award className="w-4 h-4" />
+                </div>
+                <div>
+                  <p className={`text-sm font-bold ${m.text}`}>{m.label}</p>
+                  <p className="text-[11px] text-slate-500">{lv.threshold}</p>
+                </div>
+              </div>
+              <Toggle
+                on={lv.enabled}
+                onChange={v => updateLevel(idx, { enabled: v })}
+                on_label="مفعّل"
+                off_label="متوقف"
+              />
+            </div>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <Field label="الافتراضي %" small>
+                <NumberInput value={lv.discount_default} onChange={v => updateLevel(idx, { discount_default: v ?? 0 })} min={0} max={100} />
+              </Field>
+              <Field label="من %" small>
+                <NumberInput value={lv.discount_min} onChange={v => updateLevel(idx, { discount_min: v ?? 0 })} min={0} max={100} />
+              </Field>
+              <Field label="إلى %" small>
+                <NumberInput value={lv.discount_max} onChange={v => updateLevel(idx, { discount_max: v ?? 0 })} min={0} max={100} />
+              </Field>
+              <Field label="الصلاحية (ساعة)" small>
+                <NumberInput value={lv.validity_hours} onChange={v => updateLevel(idx, { validity_hours: v ?? 1 })} min={1} />
+              </Field>
+              <Field label="الاستخدامات" small>
+                <NumberInput value={lv.max_uses} onChange={v => updateLevel(idx, { max_uses: v ?? 1 })} min={1} />
+              </Field>
+              <Field label="لكل عميل" small>
+                <NumberInput value={lv.per_customer_usage} onChange={v => updateLevel(idx, { per_customer_usage: v ?? 1 })} min={1} />
+              </Field>
+              <Field label="القنوات" small className="sm:col-span-2">
+                <div className="flex flex-wrap gap-1">
+                  {ALL_CHANNELS.map(ch => {
+                    const checked = lv.allowed_channels.includes(ch)
+                    return (
+                      <button
+                        key={ch}
+                        type="button"
+                        onClick={() => updateLevel(idx, {
+                          allowed_channels: checked
+                            ? lv.allowed_channels.filter(c => c !== ch)
+                            : [...lv.allowed_channels, ch],
+                        })}
+                        className={`text-[11px] px-2 py-1 rounded-full border ${
+                          checked ? 'border-brand-400 bg-white text-brand-700 font-semibold' : 'border-slate-200 text-slate-500'
+                        }`}
+                      >
+                        {CHANNEL_LABEL[ch].label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </Field>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function AiPolicyForm({ value, onChange }: {
+  value: CouponAiPolicy
+  onChange: (v: CouponAiPolicy) => void
+}) {
+  const set = <K extends keyof CouponAiPolicy>(k: K, v: CouponAiPolicy[K]) =>
+    onChange({ ...value, [k]: v })
+  return (
+    <div className="space-y-5">
+      <div className="rounded-lg border border-slate-200 px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-slate-900">تفعيل استخدام الكوبونات للذكاء</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">عند الإيقاف، لن يقدم الذكاء أي كوبون داخل المحادثة</p>
+          </div>
+          <Toggle on={value.enabled} onChange={v => set('enabled', v)} on_label="مفعّل" off_label="متوقف" />
+        </div>
+      </div>
+
+      <Field label="المستويات المسموح للذكاء بإصدارها">
+        <div className="flex flex-wrap gap-1.5">
+          {(['bronze', 'silver', 'gold', 'vip'] as CouponLevelId[]).map(lv => {
+            const checked = value.allowed_levels.includes(lv)
+            return (
+              <button
+                key={lv}
+                type="button"
+                onClick={() => set('allowed_levels', checked
+                  ? value.allowed_levels.filter(x => x !== lv)
+                  : [...value.allowed_levels, lv],
+                )}
+                className={`text-xs px-3 py-1.5 rounded-full border ${
+                  checked ? 'border-brand-400 bg-brand-50 text-brand-700 font-semibold' : 'border-slate-200 text-slate-500'
+                }`}
+              >
+                {LEVEL_META[lv].label}
+              </button>
+            )
+          })}
+        </div>
+      </Field>
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        <Field label="أقل صلاحية متبقية (ساعة)" hint="افتراضياً 3 — لا يقدّم الذكاء كوبوناً سينتهي قبل هذا">
+          <NumberInput value={value.min_remaining_hours} onChange={v => set('min_remaining_hours', v ?? 0)} min={0} />
+        </Field>
+
+        <Field label="مصدر الكوبونات للذكاء">
+          <div className="grid grid-cols-1 gap-1.5">
+            {([
+              { key: 'pool_first',     label: 'يفضل المخزون، يولّد عند الحاجة' },
+              { key: 'pool_only',      label: 'من المخزون فقط' },
+              { key: 'on_demand_only', label: 'يولّد عند الحاجة فقط' },
+            ] as Array<{ key: CouponPoolMode; label: string }>).map(opt => {
+              const active = value.pool_mode === opt.key
+              return (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => set('pool_mode', opt.key)}
+                  className={`text-start text-xs px-3 py-2 rounded-lg border ${
+                    active ? 'border-brand-400 bg-brand-50 text-brand-700 font-semibold' : 'border-slate-200 text-slate-600'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              )
+            })}
+          </div>
+        </Field>
+      </div>
+    </div>
+  )
+}
+
+// ── Tiny form primitives ─────────────────────────────────────────────────────
+
+function Field({ label, hint, children, small, className = '' }: {
+  label: string; hint?: string; children: React.ReactNode; small?: boolean; className?: string
+}) {
+  return (
+    <label className={`block ${className}`}>
+      <span className={`block ${small ? 'text-[10px]' : 'text-xs'} font-medium text-slate-700 mb-1`}>{label}</span>
+      {children}
+      {hint && <span className="block text-[10px] text-slate-400 mt-1">{hint}</span>}
+    </label>
+  )
+}
+
+function NumberInput({ value, onChange, min, max, step, nullable, placeholder }: {
+  value: number | null | undefined
+  onChange: (v: number | null) => void
+  min?: number
+  max?: number
+  step?: number
+  nullable?: boolean
+  placeholder?: string
+}) {
+  return (
+    <input
+      type="number"
+      value={value ?? ''}
+      onChange={e => {
+        const v = e.target.value
+        if (v === '') {
+          onChange(nullable ? null : 0)
+        } else {
+          let n = Number(v)
+          if (Number.isNaN(n)) n = min ?? 0
+          if (typeof min === 'number') n = Math.max(min, n)
+          if (typeof max === 'number') n = Math.min(max, n)
+          onChange(n)
+        }
+      }}
+      min={min}
+      max={max}
+      step={step ?? 1}
+      placeholder={placeholder}
+      className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200 focus:border-brand-400 focus:ring-2 focus:ring-brand-100 outline-none bg-white"
+    />
+  )
+}
+
+function Toggle({ on, onChange, on_label, off_label }: {
+  on: boolean; onChange: (v: boolean) => void; on_label?: string; off_label?: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!on)}
+      className="inline-flex items-center gap-2"
+    >
+      {on
+        ? <ToggleRight className="w-7 h-7 text-brand-500" />
+        : <ToggleLeft  className="w-7 h-7 text-slate-300" />}
+      <span className="text-[11px] text-slate-600">{on ? on_label : off_label}</span>
+    </button>
   )
 }

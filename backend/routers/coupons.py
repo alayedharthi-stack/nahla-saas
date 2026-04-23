@@ -125,6 +125,95 @@ DEFAULT_VIP_TIERS = [
 ]
 
 
+# ── Coupon levels (replaces the legacy 3-tier VIP grid) ───────────────────
+# Four-tier ladder: bronze → silver → gold → vip. Each level acts as an
+# override layer over `global_defaults`; an empty/None field means "use
+# global". Discount min/max bound the AI / pool generator so a "bronze"
+# coupon can never accidentally hand out 30%.
+DEFAULT_COUPON_LEVELS: List[Dict[str, Any]] = [
+    {
+        "id":                "bronze",
+        "label":             "برونزي",
+        "threshold":         "+1 طلب",
+        "discount_default":  5,
+        "discount_min":      3,
+        "discount_max":      5,
+        "validity_hours":    24,
+        "max_uses":          1,
+        "per_customer_usage": 1,
+        "allowed_channels":  ["ai", "campaign", "autopilot"],
+        "enabled":           True,
+    },
+    {
+        "id":                "silver",
+        "label":             "فضي",
+        "threshold":         "+3 طلبات",
+        "discount_default":  10,
+        "discount_min":      8,
+        "discount_max":      12,
+        "validity_hours":    48,
+        "max_uses":          1,
+        "per_customer_usage": 1,
+        "allowed_channels":  ["ai", "campaign", "autopilot"],
+        "enabled":           True,
+    },
+    {
+        "id":                "gold",
+        "label":             "ذهبي",
+        "threshold":         "+7 طلبات",
+        "discount_default":  20,
+        "discount_min":      15,
+        "discount_max":      25,
+        "validity_hours":    72,
+        "max_uses":          2,
+        "per_customer_usage": 1,
+        "allowed_channels":  ["campaign", "autopilot"],
+        "enabled":           True,
+    },
+    {
+        "id":                "vip",
+        "label":             "استثنائي",
+        "threshold":         "+15 طلب",
+        "discount_default":  30,
+        "discount_min":      25,
+        "discount_max":      40,
+        "validity_hours":    72,
+        "max_uses":          3,
+        "per_customer_usage": 1,
+        "allowed_channels":  ["campaign", "autopilot"],
+        "enabled":           True,
+    },
+]
+
+
+DEFAULT_GLOBAL_DEFAULTS: Dict[str, Any] = {
+    "discount_type":          "percentage",
+    "default_discount_value": 10,
+    "total_usage_limit":      None,      # null = unlimited
+    "customer_limit":         None,      # null = no per-coupon customer cap
+    "per_customer_usage":     1,
+    "min_order_amount":       0,
+    "default_validity":       "24h",     # 3h | 6h | 24h | custom
+    "custom_validity_hours":  None,
+    "allowed_channels":       ["ai", "campaign", "autopilot"],
+    "combinable_with_offers": False,
+}
+
+
+DEFAULT_AI_POLICY: Dict[str, Any] = {
+    "enabled":             True,
+    "allowed_levels":      ["bronze", "silver"],
+    "min_remaining_hours": 3,
+    "pool_mode":           "pool_first",  # pool_first | pool_only | on_demand_only
+}
+
+
+_COUPON_LEVEL_IDS = frozenset({"bronze", "silver", "gold", "vip"})
+_ALLOWED_CHANNEL_IDS = frozenset({"ai", "campaign", "autopilot", "shared"})
+_VALIDITY_PRESETS = frozenset({"3h", "6h", "24h", "custom"})
+_POOL_MODES = frozenset({"pool_first", "pool_only", "on_demand_only"})
+
+
 class CouponRuleIn(BaseModel):
     id: str
     label: str
@@ -167,12 +256,164 @@ class CouponPatchIn(BaseModel):
     active: Optional[bool] = None
 
 
+class CouponLevelIn(BaseModel):
+    id: str
+    label: Optional[str] = None
+    threshold: Optional[str] = None
+    discount_default:    Optional[float] = None
+    discount_min:        Optional[float] = None
+    discount_max:        Optional[float] = None
+    validity_hours:      Optional[int]   = None
+    max_uses:            Optional[int]   = None
+    per_customer_usage:  Optional[int]   = None
+    allowed_channels:    Optional[List[str]] = None
+    enabled:             Optional[bool]  = None
+
+
+class GlobalDefaultsIn(BaseModel):
+    discount_type:          Optional[str]   = None
+    default_discount_value: Optional[float] = None
+    total_usage_limit:      Optional[int]   = None
+    customer_limit:         Optional[int]   = None
+    per_customer_usage:     Optional[int]   = None
+    min_order_amount:       Optional[float] = None
+    default_validity:       Optional[str]   = None
+    custom_validity_hours:  Optional[int]   = None
+    allowed_channels:       Optional[List[str]] = None
+    combinable_with_offers: Optional[bool]  = None
+
+
+class AiPolicyIn(BaseModel):
+    enabled:             Optional[bool] = None
+    allowed_levels:      Optional[List[str]] = None
+    min_remaining_hours: Optional[int]  = None
+    pool_mode:           Optional[str]  = None
+
+
 class CouponDashboardSettingsIn(BaseModel):
     rules: List[CouponRuleIn]
-    vip_tiers: List[VipTierIn]
+    vip_tiers: Optional[List[VipTierIn]] = None
+    levels: Optional[List[CouponLevelIn]] = None
+    global_defaults: Optional[GlobalDefaultsIn] = None
+    ai_policy: Optional[AiPolicyIn] = None
 
 
 _ALLOWED_DISCOUNT_TYPES = {"percentage", "fixed"}
+
+
+def _normalise_level(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise a single level dict, falling back to DEFAULT_COUPON_LEVELS
+    so the merchant never loses fields by submitting a partial payload."""
+    rid = str(raw.get("id") or "").strip().lower()
+    if rid not in _COUPON_LEVEL_IDS:
+        rid = "bronze"
+    default = next((l for l in DEFAULT_COUPON_LEVELS if l["id"] == rid), DEFAULT_COUPON_LEVELS[0])
+    base = dict(default)
+
+    def _take(key: str, caster, *, allow_none: bool = False, default_val: Any = None):
+        if key not in raw:
+            return base.get(key, default_val)
+        v = raw.get(key)
+        if v is None and allow_none:
+            return None
+        if v is None:
+            return base.get(key, default_val)
+        try:
+            return caster(v)
+        except (ValueError, TypeError):
+            return base.get(key, default_val)
+
+    base["label"]              = str(raw.get("label") or base["label"])
+    base["threshold"]          = str(raw.get("threshold") or base["threshold"])
+    base["discount_default"]   = max(0, min(100, _take("discount_default", float, default_val=5)))
+    base["discount_min"]       = max(0, min(100, _take("discount_min",     float, default_val=base["discount_default"])))
+    base["discount_max"]       = max(base["discount_min"], min(100, _take("discount_max", float, default_val=base["discount_default"])))
+    if base["discount_default"] < base["discount_min"]:
+        base["discount_default"] = base["discount_min"]
+    if base["discount_default"] > base["discount_max"]:
+        base["discount_default"] = base["discount_max"]
+    base["validity_hours"]     = max(1, _take("validity_hours",     int, default_val=24))
+    base["max_uses"]           = max(1, _take("max_uses",           int, default_val=1))
+    base["per_customer_usage"] = max(1, _take("per_customer_usage", int, default_val=1))
+
+    chans = raw.get("allowed_channels")
+    if isinstance(chans, list):
+        cleaned = [c for c in (str(x).lower() for x in chans) if c in _ALLOWED_CHANNEL_IDS]
+        base["allowed_channels"] = cleaned or list(default["allowed_channels"])
+    base["enabled"] = bool(raw.get("enabled", base.get("enabled", True)))
+    return base
+
+
+def _normalise_levels(levels: Any) -> List[Dict[str, Any]]:
+    seen: Dict[str, Dict[str, Any]] = {}
+    if isinstance(levels, list):
+        for raw in levels:
+            if not isinstance(raw, dict):
+                continue
+            n = _normalise_level(raw)
+            seen[n["id"]] = n
+    for default in DEFAULT_COUPON_LEVELS:
+        if default["id"] not in seen:
+            seen[default["id"]] = dict(default)
+    return [seen[lid] for lid in ("bronze", "silver", "gold", "vip")]
+
+
+def _normalise_global_defaults(raw: Any) -> Dict[str, Any]:
+    base = dict(DEFAULT_GLOBAL_DEFAULTS)
+    if not isinstance(raw, dict):
+        return base
+
+    dt = str(raw.get("discount_type") or base["discount_type"]).lower()
+    base["discount_type"] = dt if dt in _ALLOWED_DISCOUNT_TYPES else "percentage"
+
+    def _num(key: str, allow_none: bool = False) -> Any:
+        if key not in raw:
+            return base.get(key)
+        v = raw.get(key)
+        if v in (None, ""):
+            return None if allow_none else base.get(key)
+        try:
+            return float(v) if isinstance(base.get(key), float) else int(v)
+        except (ValueError, TypeError):
+            return base.get(key)
+
+    base["default_discount_value"] = max(0, _num("default_discount_value") or 0)
+    base["total_usage_limit"]      = _num("total_usage_limit", allow_none=True)
+    base["customer_limit"]         = _num("customer_limit",    allow_none=True)
+    base["per_customer_usage"]     = max(1, _num("per_customer_usage") or 1)
+    base["min_order_amount"]       = max(0, float(_num("min_order_amount") or 0))
+
+    validity = str(raw.get("default_validity") or base["default_validity"]).lower()
+    base["default_validity"] = validity if validity in _VALIDITY_PRESETS else "24h"
+    cust_v = raw.get("custom_validity_hours")
+    base["custom_validity_hours"] = (
+        max(1, int(cust_v)) if cust_v not in (None, "") else None
+    )
+
+    chans = raw.get("allowed_channels")
+    if isinstance(chans, list):
+        cleaned = [c for c in (str(x).lower() for x in chans) if c in _ALLOWED_CHANNEL_IDS]
+        base["allowed_channels"] = cleaned or list(DEFAULT_GLOBAL_DEFAULTS["allowed_channels"])
+    base["combinable_with_offers"] = bool(raw.get("combinable_with_offers", base["combinable_with_offers"]))
+    return base
+
+
+def _normalise_ai_policy(raw: Any) -> Dict[str, Any]:
+    base = dict(DEFAULT_AI_POLICY)
+    if not isinstance(raw, dict):
+        return base
+    base["enabled"] = bool(raw.get("enabled", base["enabled"]))
+    levels = raw.get("allowed_levels")
+    if isinstance(levels, list):
+        cleaned = [l for l in (str(x).lower() for x in levels) if l in _COUPON_LEVEL_IDS]
+        base["allowed_levels"] = cleaned or list(base["allowed_levels"])
+    try:
+        base["min_remaining_hours"] = max(0, int(raw.get("min_remaining_hours", base["min_remaining_hours"])))
+    except (ValueError, TypeError):
+        pass
+    mode = str(raw.get("pool_mode") or base["pool_mode"]).lower()
+    base["pool_mode"] = mode if mode in _POOL_MODES else "pool_first"
+    return base
 
 
 def _normalise_rule(rule: Dict[str, Any]) -> Dict[str, Any]:
@@ -278,6 +519,10 @@ def get_rule_for_automation(
 
 
 def _ensure_coupon_dashboard_config(settings) -> Dict[str, Any]:
+    """Hydrate the coupon dashboard config so every field exists before
+    the GET endpoint serialises it. Run on every read so older tenants
+    pick up new defaults (4-tier levels, AI policy, …) lazily without a
+    one-shot data migration."""
     meta = dict(settings.extra_metadata or {})
     coupon_dash = dict(meta.get("coupons_dashboard") or {})
     changed = False
@@ -291,6 +536,21 @@ def _ensure_coupon_dashboard_config(settings) -> Dict[str, Any]:
             changed = True
     if "vip_tiers" not in coupon_dash:
         coupon_dash["vip_tiers"] = DEFAULT_VIP_TIERS
+        changed = True
+    # New: 4-tier levels (bronze/silver/gold/vip) + global defaults + AI
+    # policy. Always re-normalise so partial historical writes don't break
+    # the merchant's view.
+    levels_norm = _normalise_levels(coupon_dash.get("levels"))
+    if levels_norm != coupon_dash.get("levels"):
+        coupon_dash["levels"] = levels_norm
+        changed = True
+    gd_norm = _normalise_global_defaults(coupon_dash.get("global_defaults"))
+    if gd_norm != coupon_dash.get("global_defaults"):
+        coupon_dash["global_defaults"] = gd_norm
+        changed = True
+    ai_norm = _normalise_ai_policy(coupon_dash.get("ai_policy"))
+    if ai_norm != coupon_dash.get("ai_policy"):
+        coupon_dash["ai_policy"] = ai_norm
         changed = True
     if changed:
         meta["coupons_dashboard"] = coupon_dash
@@ -334,7 +594,7 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
         meta_source = str(meta.get("source") or "").lower()
         if meta_source == "promotion":
             origin = "promotion"
-        elif meta_source == "automation":
+        elif meta_source in ("automation", "auto", "auto_generated", "system", "pool"):
             origin = "automation"
         elif meta_source == "widget":
             origin = "widget"
@@ -342,6 +602,8 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
             origin = "vip"
         elif meta.get("auto_generated") is True:
             origin = "automation"
+        elif meta_source == "dashboard" or meta_source == "manual":
+            origin = "manual"
         else:
             origin = "manual"
 
@@ -355,6 +617,24 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
         if isinstance(active_override, bool):
             active = active_override
 
+        # Prefer the new first-class taxonomy columns; fall back to metadata
+        # for rows written before migration 0038 backfilled them.
+        source_type = (
+            getattr(coupon, "source_type", None)
+            or ("system" if origin in {"automation", "promotion", "vip"} else "manual")
+        )
+        coupon_level = getattr(coupon, "coupon_level", None) or _infer_level_from_meta(meta)
+        allocation_channel = (
+            getattr(coupon, "allocation_channel", None)
+            or _infer_channel_from_meta(meta, origin)
+        )
+
+        # remaining_seconds — handy for the merchant table; UI formats it.
+        remaining_seconds: Optional[int] = None
+        if expires is not None:
+            delta = expires - now
+            remaining_seconds = max(0, int(delta.total_seconds()))
+
         coupons.append({
             "id": str(coupon.id),
             "code": coupon.code,
@@ -363,8 +643,12 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
             "usages": int(meta.get("usage_count", 0)),
             "limit": int(meta.get("usage_limit", 0) or 0),
             "expires": expires.isoformat() if expires else "",
+            "remaining_seconds": remaining_seconds,
             "category": category,
             "origin": origin,
+            "source_type": source_type,
+            "coupon_level": coupon_level,
+            "allocation_channel": allocation_channel,
             "automation_type": meta.get("automation_type") or None,
             "promotion_id":    meta.get("promotion_id") or None,
             "active": active,
@@ -380,8 +664,43 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
     return {
         "rules": rules,
         "vip_tiers": list(coupon_dash.get("vip_tiers") or DEFAULT_VIP_TIERS),
+        "levels":          coupon_dash.get("levels") or _normalise_levels(None),
+        "global_defaults": coupon_dash.get("global_defaults") or dict(DEFAULT_GLOBAL_DEFAULTS),
+        "ai_policy":       coupon_dash.get("ai_policy") or dict(DEFAULT_AI_POLICY),
         "coupons": coupons,
     }
+
+
+def _infer_level_from_meta(meta: Dict[str, Any]) -> Optional[str]:
+    """Best-effort fallback for rows written before migration 0038."""
+    explicit = str(meta.get("coupon_level") or "").lower()
+    if explicit in _COUPON_LEVEL_IDS:
+        return explicit
+    seg = str(meta.get("target_segment") or "").lower()
+    if seg in ("vip", "at_risk"):
+        return "vip"
+    if seg == "gold":
+        return "gold"
+    if seg in ("active", "silver"):
+        return "silver"
+    if seg in ("new", "bronze", "lead"):
+        return "bronze"
+    return None
+
+
+def _infer_channel_from_meta(meta: Dict[str, Any], origin: str) -> Optional[str]:
+    explicit = str(meta.get("allocation_channel") or "").lower()
+    if explicit in _ALLOWED_CHANNEL_IDS:
+        return explicit
+    if meta.get("campaign_id"):
+        return "campaign"
+    if origin == "promotion":
+        return "shared"
+    if origin == "automation":
+        return "autopilot"
+    if str(meta.get("channel") or "").lower() in ("ai", "chat", "brain"):
+        return "ai"
+    return None
 
 
 @router.put("/settings")
@@ -394,15 +713,23 @@ async def save_coupon_dashboard_settings(
     get_or_create_tenant(db, tenant_id)
     settings = get_or_create_settings(db, tenant_id)
     meta = dict(settings.extra_metadata or {})
-    meta["coupons_dashboard"] = {
-        "rules": _normalise_rules([r.dict() for r in body.rules]),
-        "vip_tiers": [t.dict() for t in body.vip_tiers],
+
+    # Merge over any pre-existing block so partial PUTs (e.g. only AI
+    # policy from a future modal) don't wipe other fields.
+    existing = dict(meta.get("coupons_dashboard") or {})
+    new_block: Dict[str, Any] = {
+        "rules":     _normalise_rules([r.dict() for r in body.rules]),
+        "vip_tiers": [t.dict() for t in body.vip_tiers] if body.vip_tiers else (existing.get("vip_tiers") or DEFAULT_VIP_TIERS),
+        "levels":    _normalise_levels([l.dict() for l in body.levels]) if body.levels else _normalise_levels(existing.get("levels")),
+        "global_defaults": _normalise_global_defaults(body.global_defaults.dict() if body.global_defaults else existing.get("global_defaults")),
+        "ai_policy":       _normalise_ai_policy(body.ai_policy.dict() if body.ai_policy else existing.get("ai_policy")),
     }
+    meta["coupons_dashboard"] = new_block
     settings.extra_metadata = meta
     flag_modified(settings, "extra_metadata")
     db.add(settings)
     db.commit()
-    return {"rules": meta["coupons_dashboard"]["rules"], "vip_tiers": meta["coupons_dashboard"]["vip_tiers"]}
+    return new_block
 
 
 @router.post("")

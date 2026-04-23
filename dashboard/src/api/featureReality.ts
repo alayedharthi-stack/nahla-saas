@@ -141,6 +141,54 @@ export interface DashboardCoupon {
   /** When `origin === 'promotion'` — which promotion materialised it. */
   promotion_id?: number | null
   active: boolean
+  /** Who created this code — drives the "نظام / يدوي / مستورد" chip. */
+  source_type?: 'manual' | 'system' | 'imported'
+  /** Bronze / silver / gold / vip — drives the level chip. */
+  coupon_level?: CouponLevelId | null
+  /** Where the code is allowed to be issued from. */
+  allocation_channel?: CouponChannel | null
+  /** Seconds remaining until expiry (null when no expiry). */
+  remaining_seconds?: number | null
+}
+
+export type CouponLevelId = 'bronze' | 'silver' | 'gold' | 'vip'
+export type CouponChannel = 'ai' | 'campaign' | 'autopilot' | 'shared'
+export type CouponValidityPreset = '3h' | '6h' | '24h' | 'custom'
+export type CouponDiscountType = 'percentage' | 'fixed'
+export type CouponPoolMode = 'pool_first' | 'pool_only' | 'on_demand_only'
+
+export interface CouponLevel {
+  id: CouponLevelId
+  label: string
+  threshold: string
+  discount_default: number
+  discount_min: number
+  discount_max: number
+  validity_hours: number
+  max_uses: number
+  per_customer_usage: number
+  allowed_channels: CouponChannel[]
+  enabled: boolean
+}
+
+export interface CouponGlobalDefaults {
+  discount_type: CouponDiscountType
+  default_discount_value: number
+  total_usage_limit: number | null
+  customer_limit: number | null
+  per_customer_usage: number
+  min_order_amount: number
+  default_validity: CouponValidityPreset
+  custom_validity_hours: number | null
+  allowed_channels: CouponChannel[]
+  combinable_with_offers: boolean
+}
+
+export interface CouponAiPolicy {
+  enabled: boolean
+  allowed_levels: CouponLevelId[]
+  min_remaining_hours: number
+  pool_mode: CouponPoolMode
 }
 
 export interface CouponRule {
@@ -162,12 +210,18 @@ export interface CouponRule {
 export interface CouponsDashboard {
   rules: CouponRule[]
   vip_tiers: Array<{ tier: string; threshold: string; discount: string }>
+  levels?: CouponLevel[]
+  global_defaults?: CouponGlobalDefaults
+  ai_policy?: CouponAiPolicy
   coupons: DashboardCoupon[]
 }
 
 export interface CouponDashboardSettings {
   rules: CouponRule[]
-  vip_tiers: Array<{ tier: string; threshold: string; discount: string }>
+  vip_tiers?: Array<{ tier: string; threshold: string; discount: string }>
+  levels?: CouponLevel[]
+  global_defaults?: CouponGlobalDefaults
+  ai_policy?: CouponAiPolicy
 }
 
 export interface DashboardConversation {

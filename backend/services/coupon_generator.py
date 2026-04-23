@@ -109,6 +109,24 @@ EVENT_DRIVEN_SEGMENTS = frozenset({
     CrmStatus.AT_RISK,
 })
 
+
+# CRM segment → coupon_level mapping. Used by the pool generator and the
+# on-demand path to write the taxonomy column on every new coupon so the
+# dashboard can group / filter without re-deriving from extra_metadata.
+SEGMENT_TO_LEVEL: Dict[str, str] = {
+    CrmStatus.NEW:      "bronze",
+    CrmStatus.ACTIVE:   "silver",
+    CrmStatus.VIP:      "gold",
+    CrmStatus.AT_RISK:  "vip",
+    CrmStatus.INACTIVE: "vip",
+}
+
+
+def _segment_to_level(segment: str) -> str:
+    """Return the coupon_level (bronze/silver/gold/vip) for a CRM segment.
+    Unknown segments fall back to ``silver`` so we never write NULL."""
+    return SEGMENT_TO_LEVEL.get(_canonical_segment(segment), "silver")
+
 # `_canonical_segment` is re-exported above (back-compat shim used by
 # offer_decision_service.py and several tests). It now delegates to
 # `services.crm_atoms.canonical_status`, which knows about the same
@@ -229,6 +247,43 @@ def _get_merchant_limits(db: Session, tenant_id: int) -> Dict[str, int]:
     return {"min_discount": 0, "max_discount": _DEFAULT_MAX_DISCOUNT}
 
 
+def _get_coupon_dashboard_block(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Return the merchant's ``coupons_dashboard`` settings block (raw,
+    unnormalised). Empty dict when nothing has been saved yet."""
+    ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+    if not ts:
+        return {}
+    meta = ts.extra_metadata or {}
+    return dict(meta.get("coupons_dashboard") or {})
+
+
+def _get_levels_config(db: Session, tenant_id: int) -> Dict[str, Dict[str, Any]]:
+    """Return ``{level_id: level_dict}`` from the merchant's saved levels
+    so the pool generator can apply per-tier overrides without re-importing
+    the router module."""
+    block = _get_coupon_dashboard_block(db, tenant_id)
+    raw = block.get("levels") or []
+    out: Dict[str, Dict[str, Any]] = {}
+    for entry in raw:
+        if isinstance(entry, dict):
+            lid = str(entry.get("id") or "").lower()
+            if lid in {"bronze", "silver", "gold", "vip"}:
+                out[lid] = entry
+    return out
+
+
+def _get_ai_policy(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Return the merchant's AI coupon policy with safe defaults."""
+    block = _get_coupon_dashboard_block(db, tenant_id)
+    raw = block.get("ai_policy") or {}
+    return {
+        "enabled":             bool(raw.get("enabled", True)),
+        "allowed_levels":      [str(x).lower() for x in (raw.get("allowed_levels") or ["bronze", "silver"])],
+        "min_remaining_hours": int(raw.get("min_remaining_hours") or 3),
+        "pool_mode":           str(raw.get("pool_mode") or "pool_first").lower(),
+    }
+
+
 def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(value, high))
 
@@ -302,6 +357,9 @@ class CouponGeneratorService:
         adapter,
         extra_flags: Optional[Dict[str, Any]] = None,
         label: Optional[str] = None,
+        coupon_level: Optional[str] = None,
+        allocation_channel: Optional[str] = None,
+        source_type: str = "system",
     ) -> Optional[Coupon]:
         """
         Single-coupon creation with:
@@ -383,6 +441,8 @@ class CouponGeneratorService:
                 salla_result if isinstance(salla_result, dict) else None,
                 expiry_days,
             )
+            resolved_level = (coupon_level or _segment_to_level(canonical_segment)).lower()
+            resolved_channel = (allocation_channel or "shared").lower()
             metadata: Dict[str, Any] = {
                 "source": "auto",
                 "target_segment": canonical_segment,
@@ -391,6 +451,8 @@ class CouponGeneratorService:
                 "salla_synced": True,
                 "category": "auto",
                 "active": True,
+                "coupon_level": resolved_level,
+                "allocation_channel": resolved_channel,
             }
             if extra_flags:
                 metadata.update(extra_flags)
@@ -403,6 +465,9 @@ class CouponGeneratorService:
                 discount_value=str(discount),
                 expires_at=expires_at,
                 extra_metadata=metadata,
+                source_type=source_type,
+                coupon_level=resolved_level,
+                allocation_channel=resolved_channel,
             )
             self.db.add(coupon)
             try:
@@ -486,9 +551,15 @@ class CouponGeneratorService:
         return None
 
     async def ensure_coupon_pool(self) -> Dict[str, int]:
-        """Top up the coupon pool for all segments. Returns counts created per segment."""
+        """Top up the coupon pool for all segments. Returns counts created per segment.
+
+        Per-level overrides (discount_default, validity_hours) come from
+        the merchant's coupon dashboard settings (``coupons_dashboard.levels``).
+        Falls back to ``SEGMENT_DEFAULTS`` when no level config exists.
+        """
         limits = _get_merchant_limits(self.db, self.tenant_id)
         adapter = self._get_adapter()
+        levels_cfg = _get_levels_config(self.db, self.tenant_id)
         created: Dict[str, int] = {}
         reserved_codes = self._reserved_codes()
 
@@ -499,12 +570,30 @@ class CouponGeneratorService:
                 created[segment] = 0
                 continue
 
+            level_id = _segment_to_level(segment)
+            level_cfg = levels_cfg.get(level_id) or {}
+            if level_cfg and level_cfg.get("enabled") is False:
+                created[segment] = 0
+                continue
+
+            base_discount = int(level_cfg.get("discount_default") or defaults["discount_pct"])
             discount = _clamp(
-                defaults["discount_pct"],
-                limits["min_discount"],
-                limits["max_discount"],
+                base_discount,
+                int(level_cfg.get("discount_min") or limits["min_discount"]),
+                int(level_cfg.get("discount_max") or limits["max_discount"]),
             )
-            expiry_days = defaults["expiry_days"]
+            validity_hours = int(level_cfg.get("validity_hours") or (defaults["expiry_days"] * 24))
+            expiry_days = max(1, (validity_hours + 23) // 24)
+
+            channel = "shared"
+            allowed = level_cfg.get("allowed_channels") or []
+            if allowed:
+                # Pool coupons are pre-generated for any allowed channel; if
+                # the merchant restricted a level to AI-only, tag the pool
+                # entries accordingly so the campaign dispatcher won't grab
+                # them.
+                channel = allowed[0] if len(allowed) == 1 else "shared"
+
             count = 0
             for _ in range(needed):
                 coupon = await self._create_one_coupon(
@@ -513,6 +602,9 @@ class CouponGeneratorService:
                     expiry_days=expiry_days,
                     reserved_codes=reserved_codes,
                     adapter=adapter,
+                    coupon_level=level_id,
+                    allocation_channel=channel,
+                    source_type="system",
                 )
                 if coupon is not None:
                     count += 1
@@ -526,14 +618,56 @@ class CouponGeneratorService:
             )
         return created
 
-    def pick_coupon_for_segment(self, segment: str) -> Optional[Coupon]:
-        """Pick an available auto-coupon for the given segment."""
+    def pick_coupon_for_segment(
+        self,
+        segment: str,
+        *,
+        for_channel: str = "ai",
+    ) -> Optional[Coupon]:
+        """Pick an available auto-coupon for the given segment.
+
+        When ``for_channel == "ai"`` we honour the merchant's AI policy:
+          • Refuse if the AI is disabled.
+          • Skip levels the merchant excluded from AI use.
+          • Skip coupons whose remaining validity is below the merchant's
+            minimum (default 3h).
+        """
         now = datetime.now(timezone.utc)
-        coupon = (
+        canonical_segment = _canonical_segment(segment)
+
+        if for_channel == "ai":
+            policy = _get_ai_policy(self.db, self.tenant_id)
+            if not policy.get("enabled", True):
+                return None
+            level_id = _segment_to_level(canonical_segment)
+            allowed_levels = policy.get("allowed_levels") or []
+            if allowed_levels and level_id not in allowed_levels:
+                return None
+            if policy.get("pool_mode") == "on_demand_only":
+                return None
+            min_remaining_hours = int(policy.get("min_remaining_hours") or 0)
+        else:
+            min_remaining_hours = 0
+
+        candidates = (
             self.db.query(Coupon)
-            .filter(*self._pool_filter(segment))
-            .first()
+            .filter(*self._pool_filter(canonical_segment))
+            .order_by(Coupon.id.asc())
+            .limit(50)
+            .all()
         )
+
+        coupon: Optional[Coupon] = None
+        for cand in candidates:
+            exp = cand.expires_at
+            if exp is not None:
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if min_remaining_hours and (exp - now) < timedelta(hours=min_remaining_hours):
+                    continue
+            coupon = cand
+            break
+
         if coupon:
             self._mark_coupon_sent(coupon, sent_at=now, commit=True)
         return coupon
@@ -544,6 +678,7 @@ class CouponGeneratorService:
         requested_discount_pct: Optional[int] = None,
         *,
         validity_days_override: Optional[int] = None,
+        allocation_channel: str = "ai",
     ) -> Optional[Coupon]:
         """Create a single coupon on-demand when the pool is empty.
 
@@ -565,6 +700,18 @@ class CouponGeneratorService:
         reserved_codes = self._reserved_codes()
         adapter = self._get_adapter()
 
+        # AI policy gate — when the AI is disabled, or this segment maps
+        # to a level the merchant blocked from AI use, refuse silently so
+        # the conversation engine can fall back to a static incentive.
+        if allocation_channel == "ai":
+            policy = _get_ai_policy(self.db, self.tenant_id)
+            if not policy.get("enabled", True):
+                return None
+            level_id = _segment_to_level(canonical_segment)
+            allowed_levels = policy.get("allowed_levels") or []
+            if allowed_levels and level_id not in allowed_levels:
+                return None
+
         coupon = await self._create_one_coupon(
             segment=canonical_segment,
             discount=discount,
@@ -577,6 +724,9 @@ class CouponGeneratorService:
                 "used_at": datetime.now(timezone.utc).isoformat(),
             },
             label=defaults.get("label"),
+            coupon_level=_segment_to_level(canonical_segment),
+            allocation_channel=allocation_channel,
+            source_type="system",
         )
         if coupon is None:
             return None
@@ -617,11 +767,16 @@ class CouponGeneratorService:
             mode="event_driven",
         )
 
-        coupon = self.pick_coupon_for_segment(canonical_segment)
+        # Event-driven path: triggered by CRM status changes from the
+        # autopilot, not from a live AI conversation. Bypass the AI policy
+        # gate so a customer crossing into VIP still gets their coupon
+        # even if the merchant blocked the AI from issuing VIP codes
+        # mid-chat.
+        coupon = self.pick_coupon_for_segment(canonical_segment, for_channel="autopilot")
         if coupon is not None:
             return coupon
 
-        return await self.create_on_demand(canonical_segment)
+        return await self.create_on_demand(canonical_segment, allocation_channel="autopilot")
 
     def _get_adapter(self):
         try:
