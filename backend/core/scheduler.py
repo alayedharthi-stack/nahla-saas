@@ -24,6 +24,7 @@ _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
 _SALLA_TOKEN_REFRESH_SECONDS = 6 * 3600  # Salla token refresh every 6 hours
 _AUTOMATION_POLL_SECONDS = 60  # automation engine poll interval
+_TEMPLATE_SYNC_INTERVAL_SECONDS = 30 * 60  # WhatsApp template auto-sync every 30 min
 
 
 async def run_scheduler() -> None:
@@ -107,6 +108,102 @@ async def run_salla_token_refresh_scheduler() -> None:
         except Exception as exc:
             logger.error("[Salla Token Refresh] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_SALLA_TOKEN_REFRESH_SECONDS)
+
+
+async def run_template_sync_scheduler() -> None:
+    """Auto-sync WhatsApp templates from Meta for every connected tenant.
+
+    Runs every `_TEMPLATE_SYNC_INTERVAL_SECONDS` (30 min). The merchant should
+    NEVER need to click "Sync from Meta" manually — newly approved or rejected
+    templates will appear in the dashboard automatically, and bindings between
+    Meta templates and Nahla service slots are auto-created via the same
+    library-match logic used by the manual endpoint.
+    """
+    await asyncio.sleep(150)  # let app fully start before first sync
+    logger.info(
+        "[Template Sync Scheduler] Started — auto-syncing every %ss",
+        _TEMPLATE_SYNC_INTERVAL_SECONDS,
+    )
+    while True:
+        try:
+            await _sync_templates_all_tenants()
+        except Exception as exc:
+            logger.error("[Template Sync Scheduler] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_TEMPLATE_SYNC_INTERVAL_SECONDS)
+
+
+async def _sync_templates_all_tenants() -> None:
+    """One full cycle: pull Meta templates for every tenant with a WABA ID."""
+    import sys as _sys, os as _os  # noqa: PLC0415
+    _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    from core.database import SessionLocal  # noqa: PLC0415
+    from database.models import WhatsAppConnection  # noqa: PLC0415
+
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        logger.error("[Template Sync Scheduler] Cannot open DB: %s", exc)
+        return
+
+    synced_tenants = 0
+    failed_tenants = 0
+    skipped_tenants = 0
+    total_templates = 0
+    total_bound = 0
+    try:
+        connections = (
+            db.query(WhatsAppConnection)
+            .filter(
+                WhatsAppConnection.whatsapp_business_account_id.isnot(None),
+                WhatsAppConnection.whatsapp_business_account_id != "",
+            )
+            .all()
+        )
+        logger.info(
+            "[Template Sync Scheduler] Cycle started — %d connection(s) to check",
+            len(connections),
+        )
+
+        # Lazy import to avoid circular dependency with routers package.
+        from routers.templates import _sync_templates_for_tenant  # noqa: PLC0415
+
+        for conn in connections:
+            tenant_id = conn.tenant_id
+            if not tenant_id:
+                skipped_tenants += 1
+                continue
+            try:
+                result = await _sync_templates_for_tenant(db, tenant_id)
+                if result.get("error"):
+                    skipped_tenants += 1
+                    logger.info(
+                        "[Template Sync Scheduler] tenant=%s skipped: %s",
+                        tenant_id, result.get("error"),
+                    )
+                else:
+                    synced_tenants += 1
+                    total_templates += int(result.get("synced", 0) or 0)
+                    total_bound += int(result.get("auto_bound", 0) or 0)
+            except Exception as exc:
+                failed_tenants += 1
+                logger.warning(
+                    "[Template Sync Scheduler] tenant=%s failed: %s",
+                    tenant_id, exc,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+        logger.info(
+            "[Template Sync Scheduler] Cycle complete — synced_tenants=%d "
+            "failed=%d skipped=%d total_templates=%d auto_bound=%d",
+            synced_tenants, failed_tenants, skipped_tenants,
+            total_templates, total_bound,
+        )
+    finally:
+        db.close()
 
 
 async def _refresh_all_wa_tokens() -> None:

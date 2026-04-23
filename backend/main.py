@@ -560,6 +560,17 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("Salla token refresh scheduler could not start: %s", exc)
 
+    # 6c. WhatsApp template auto-sync (every 30 min)
+    # Pulls APPROVED/REJECTED status changes from Meta into the local DB so
+    # merchants don't have to click "Sync from Meta" manually. Also auto-binds
+    # newly approved templates to their Nahla service slots.
+    try:
+        from core.scheduler import run_template_sync_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_template_sync_scheduler())
+        logger.info("WhatsApp template sync scheduler started (30min).")
+    except Exception as exc:
+        logger.warning("WhatsApp template sync scheduler could not start: %s", exc)
+
     # 7. Event-driven automation engine (every 60s)
     try:
         from core.scheduler import run_automation_engine_scheduler  # noqa: PLC0415

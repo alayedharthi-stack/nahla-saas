@@ -2100,35 +2100,50 @@ async def list_template_library(request: Request):
     }
 
 
-@router.post("/templates/sync")
-async def sync_templates_from_meta(request: Request, db: Session = Depends(get_db)):
+async def _sync_templates_for_tenant(
+    db: Session,
+    tenant_id: int,
+) -> Dict[str, Any]:
     """
-    Pull all templates from Meta Graph API and upsert them into the local DB.
+    Core template sync logic — pulls Meta templates and upserts them.
 
-    Source of truth for credentials
-    ─────────────────────────────────
-    Uses WhatsAppConnection (the record created during the number registration
-    wizard) to get the real WABA ID and the platform-level WA_TOKEN.
-    Falls back to tenant settings for backward compatibility.
+    Used by both the manual `/templates/sync` HTTP endpoint and the
+    background `run_template_sync_scheduler()` so behavior stays in lockstep.
+
+    Always returns a dict with keys:
+        synced, auto_bound, deleted_seeds, message,
+        and (on failure) error: <stable_code>
+
+    Never raises — all failures are converted to a soft response with an
+    `error` code so the caller can decide what to do. This is critical
+    because the HTTP endpoint must NEVER return a 5xx (which would lose
+    CORS headers and break the dashboard UI).
     """
     from models import WhatsAppConnection  # noqa: PLC0415
 
-    tenant_id = resolve_tenant_id(request)
-
     # ── Source of truth: WhatsAppConnection row for this tenant ───────────────
-    wa_conn = (
-        db.query(WhatsAppConnection)
-        .filter_by(tenant_id=tenant_id)
-        .first()
-    )
+    try:
+        wa_conn = (
+            db.query(WhatsAppConnection)
+            .filter_by(tenant_id=tenant_id)
+            .first()
+        )
+    except Exception as exc:
+        logger.warning("[templates/sync] tenant=%s DB lookup failed: %s", tenant_id, exc)
+        return {
+            "synced": 0, "auto_bound": 0, "deleted_seeds": 0,
+            "message": "تعذرت قراءة اتصال واتساب. سنحاول مرة أخرى تلقائياً.",
+            "error": "db_lookup_failed",
+        }
 
     sync_conn = wa_conn
     waba_id = (wa_conn.whatsapp_business_account_id if wa_conn else None) or ""
 
     if not waba_id:
         return {
-            "synced":  0,
+            "synced": 0, "auto_bound": 0, "deleted_seeds": 0,
             "message": "لم يتم العثور على WABA ID. تأكد من ربط واتساب أولاً.",
+            "error": "no_waba_id",
         }
 
     try:
@@ -2139,27 +2154,54 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
             waba_id=waba_id,
             prefer_platform=bool(sync_conn and getattr(sync_conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT),
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "[templates/sync] tenant=%s provider call failed: %s", tenant_id, exc,
+        )
         return {
-            "synced": 0,
+            "synced": 0, "auto_bound": 0, "deleted_seeds": 0,
             "message": "لم يتم العثور على توكن تشغيل صالح لمزامنة القوالب. أعد ربط واتساب أو تحقّق من إعدادات المنصة.",
+            "error": "no_valid_token",
         }
 
-    live = _normalize_provider_template_list(sync_conn, live_payload or {})
+    try:
+        live = _normalize_provider_template_list(sync_conn, live_payload or {})
+    except Exception as exc:
+        logger.warning(
+            "[templates/sync] tenant=%s normalize failed: %s", tenant_id, exc,
+        )
+        return {
+            "synced": 0, "auto_bound": 0, "deleted_seeds": 0,
+            "message": "استجابة غير متوقعة من Meta. سنعيد المحاولة تلقائياً.",
+            "error": "bad_provider_payload",
+        }
+
     if live is None:
-        return {"synced": 0, "message": "تعذّر الاتصال بـ Meta. تأكد من صحة بيانات الاعتماد."}
+        return {
+            "synced": 0, "auto_bound": 0, "deleted_seeds": 0,
+            "message": "تعذّر الاتصال بـ Meta. تأكد من صحة بيانات الاعتماد.",
+            "error": "no_provider_data",
+        }
 
     # ── Delete seed/demo templates that were never real ───────────────────────
-    deleted = (
-        db.query(WhatsAppTemplate)
-        .filter(
-            WhatsAppTemplate.tenant_id == tenant_id,
-            WhatsAppTemplate.meta_template_id.like("seed_%"),
+    try:
+        deleted = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.meta_template_id.like("seed_%"),
+            )
+            .delete(synchronize_session=False)
         )
-        .delete(synchronize_session=False)
-    )
-    if deleted:
-        logger.info("[templates/sync] Removed %d seed templates for tenant=%s", deleted, tenant_id)
+        if deleted:
+            logger.info("[templates/sync] Removed %d seed templates for tenant=%s", deleted, tenant_id)
+    except Exception as exc:
+        deleted = 0
+        logger.warning("[templates/sync] tenant=%s seed cleanup failed: %s", tenant_id, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     # ── Upsert real templates from Meta ───────────────────────────────────────
     #
@@ -2200,7 +2242,9 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
 
     synced = 0
     auto_bound = 0
+    failed = 0
     for item in live:
+      try:
         meta_id = str(item.get("id", ""))
         if not meta_id:
             continue
@@ -2214,13 +2258,20 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
         normalized_language = _normalize_template_language(item.get("language", "ar"))
         normalized_category = _normalize_template_category(item.get("category", "MARKETING"))
         rejection = item.get("rejected_reason") or None
-        compatibility = _compute_template_compatibility(
-            item.get("components", []),
-            category=normalized_category,
-            language=normalized_language,
-            status=normalized_status,
-            template_name=item.get("name", ""),
-        )
+        try:
+            compatibility = _compute_template_compatibility(
+                item.get("components", []),
+                category=normalized_category,
+                language=normalized_language,
+                status=normalized_status,
+                template_name=item.get("name", ""),
+            )
+        except Exception as compat_exc:
+            logger.warning(
+                "[templates/sync] tenant=%s compat compute failed for name=%s: %s",
+                tenant_id, item.get("name"), compat_exc,
+            )
+            compatibility = {}
         sync_metadata = {
             "meta_status_raw": raw_status,
             "meta_language_raw": item.get("language", "ar"),
@@ -2320,23 +2371,91 @@ async def sync_templates_from_meta(request: Request, db: Session = Depends(get_d
                 )
 
         synced += 1
+      except Exception as per_tpl_exc:
+        # One bad template must NEVER kill the whole sync. Log and skip.
+        failed += 1
+        logger.warning(
+            "[templates/sync] tenant=%s skipped name=%s id=%s: %s",
+            tenant_id, item.get("name", "?"), item.get("id", "?"), per_tpl_exc,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as commit_exc:
+        logger.error(
+            "[templates/sync] tenant=%s commit failed: %s",
+            tenant_id, commit_exc, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {
+            "synced": 0, "auto_bound": 0, "deleted_seeds": deleted,
+            "message": "تعذّر حفظ القوالب في قاعدة البيانات. سنحاول تلقائياً.",
+            "error": "db_commit_failed",
+            "failed": failed,
+        }
+
     logger.info(
-        "[templates/sync] tenant=%s synced=%d auto_bound=%d from waba=%s",
-        tenant_id, synced, auto_bound, waba_id,
+        "[templates/sync] tenant=%s synced=%d auto_bound=%d failed=%d from waba=%s",
+        tenant_id, synced, auto_bound, failed, waba_id,
     )
     msg = f"تمت مزامنة {synced} قالب من Meta"
     if auto_bound:
         msg += f" (تم ربط {auto_bound} قالب تلقائياً بخدمات نحلة)"
     if deleted:
         msg += f" (وحُذف {deleted} قالب تجريبي)"
+    if failed:
+        msg += f" — تم تخطّي {failed} قالب بسبب أخطاء (راجع السجلات)"
     return {
         "synced":        synced,
         "auto_bound":    auto_bound,
         "deleted_seeds": deleted,
+        "failed":        failed,
         "message":       msg,
     }
+
+
+@router.post("/templates/sync")
+async def sync_templates_from_meta(request: Request, db: Session = Depends(get_db)):
+    """
+    Pull all templates from Meta Graph API and upsert them into the local DB.
+
+    This endpoint is a thin wrapper around `_sync_templates_for_tenant` and
+    is guaranteed to NEVER raise a 5xx — any failure is converted to a soft
+    JSON response so CORS headers are always emitted to the dashboard.
+
+    Source of truth for credentials
+    ─────────────────────────────────
+    Uses WhatsAppConnection (the record created during the number registration
+    wizard) to get the real WABA ID and the platform-level WA_TOKEN.
+    Falls back to tenant settings for backward compatibility.
+    """
+    tenant_id = resolve_tenant_id(request)
+    try:
+        return await _sync_templates_for_tenant(db, tenant_id)
+    except Exception as exc:
+        # Defense in depth — _sync_templates_for_tenant is supposed to
+        # swallow everything, but we belt-and-suspenders here so the
+        # browser never sees a 500 (which would lose CORS headers).
+        logger.exception(
+            "[templates/sync] tenant=%s unexpected failure: %s", tenant_id, exc,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {
+            "synced": 0, "auto_bound": 0, "deleted_seeds": 0,
+            "message": "تعذرت المزامنة مؤقتاً. ستتم المزامنة تلقائياً خلال دقائق.",
+            "error": "unexpected_failure",
+            "detail": str(exc)[:200],
+        }
 
 
 @router.get("/templates/{template_id}/var-map")
