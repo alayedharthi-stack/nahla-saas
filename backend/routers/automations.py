@@ -1367,6 +1367,7 @@ async def retry_all_stale_carts(
 
     retried = 0
     errors = []
+    new_event_ids = []
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     for order in abandoned_orders:
@@ -1491,6 +1492,7 @@ async def retry_all_stale_carts(
         db.add(fresh)
         db.flush()
 
+        new_event_ids.append(fresh.id)
         meta["recovery_event_id"] = fresh.id
         order.extra_metadata = meta
         flag_modified(order, "extra_metadata")
@@ -1502,14 +1504,18 @@ async def retry_all_stale_carts(
 
     db.commit()
 
-    # Immediately trigger the automation engine so the events don't wait
-    # for the next 60-second scheduler cycle.
+    # Immediately process the new events, bypassing autopilot/billing guards
+    # since the merchant explicitly requested the retry.
     engine_sent = 0
     engine_error = None
-    if retried > 0:
+    if new_event_ids:
         try:
             from core.automation_engine import process_pending_events
-            engine_sent = await process_pending_events(db, tenant_id)
+            engine_sent = await process_pending_events(
+                db, tenant_id,
+                skip_guards=True,
+                event_ids=new_event_ids,
+            )
             _log.info("tenant=%s immediate engine run sent=%d", tenant_id, engine_sent)
         except Exception as exc:
             engine_error = str(exc)
@@ -1767,7 +1773,11 @@ async def retry_abandoned_cart(
     engine_sent = 0
     try:
         from core.automation_engine import process_pending_events
-        engine_sent = await process_pending_events(db, tenant_id)
+        engine_sent = await process_pending_events(
+            db, tenant_id,
+            skip_guards=True,
+            event_ids=[new_event.id],
+        )
     except Exception as exc:
         logger.error("Immediate engine run failed for order=%s: %s", order_id, exc)
 
