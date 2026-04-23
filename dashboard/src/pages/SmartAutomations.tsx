@@ -588,8 +588,9 @@ function AbandonedCartsQueue({
   const [openCart, setOpenCart] = useState<AbandonedCartItem | null>(null)
   const [cleaningStale, setCleaningStale] = useState(false)
   const [staleNotice, setStaleNotice] = useState<string | null>(null)
+  const [retryDone, setRetryDone] = useState(false)
 
-  const hasStale = items.some(i => {
+  const hasStale = !retryDone && items.some(i => {
     const r = i.recovery
     if (!r) return true
     return (r.status === 'pending' || r.status === 'failed' || r.status === 'no_recovery')
@@ -602,6 +603,7 @@ function AbandonedCartsQueue({
     try {
       const res = await autopilotApi.retryAllStaleCarts()
       setStaleNotice(res.message)
+      setRetryDone(true)
       onRetried?.()
     } catch (e) {
       setStaleNotice(e instanceof Error ? e.message : 'فشل التنظيف')
