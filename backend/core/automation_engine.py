@@ -1282,13 +1282,15 @@ async def _execute_action(
             def _sub(m):
                 i = int(m.group(1)) - 1
                 return str(_var_values[i]) if i < len(_var_values) else m.group(0)
+            _VAR_RE = _re.compile(r"\{\{(\d+)\}\}")
             _parts: list[str] = []
             for _c in (template.components or []):
                 _ct = (_c.get("type") or "").upper()
                 if _ct == "HEADER" and (_c.get("format") or "").upper() == "TEXT" and _c.get("text"):
-                    _parts.append(f"*{_re.sub(r'{{(\\d+)}}', _sub, _c['text'])}*")
+                    _header = _VAR_RE.sub(_sub, _c["text"])
+                    _parts.append(f"*{_header}*")
                 elif _ct == "BODY" and _c.get("text"):
-                    _parts.append(_re.sub(r"\{\{(\d+)\}\}", _sub, _c["text"]))
+                    _parts.append(_VAR_RE.sub(_sub, _c["text"]))
                 elif _ct == "FOOTER" and _c.get("text"):
                     _parts.append(_c["text"])
                 elif _ct == "BUTTONS":
