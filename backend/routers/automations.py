@@ -1391,37 +1391,50 @@ async def retry_abandoned_cart(
             },
         )
 
-    # ── Cancel ALL pending/scheduled events for this cart ────────────────
+    # ── Delete ALL old events + executions for this cart ─────────────────
     target_order_id = str(order_id)
     root_customer_id = root_event.customer_id
-    pending_events = (
-        db.query(AutomationEvent)
-        .filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.processed == False,
-        )
-        .all()
-    )
-    cancelled_count = 0
-    for ev in pending_events:
+
+    def _matches_cart(ev: AutomationEvent) -> bool:
         ep = ev.payload or {}
-        match = (
+        return (
             ev.id == root_event_id
             or str(ep.get("order_id", "")) == target_order_id
             or str(ep.get("parent_event_id", "")) == str(root_event_id)
             or (root_customer_id and ev.customer_id == root_customer_id)
         )
-        if match:
-            ev.processed = True
-            ep["cancelled_by_retry"] = True
-            ep["cancelled_at"] = datetime.now(timezone.utc).isoformat()
-            ev.payload = ep
-            cancelled_count += 1
-    if cancelled_count:
-        db.flush()
+
+    all_cart_events = (
+        db.query(AutomationEvent)
+        .filter(AutomationEvent.tenant_id == tenant_id)
+        .all()
+    )
+    event_ids_to_delete = []
+    for ev in all_cart_events:
+        if ev.id != root_event_id and _matches_cart(ev):
+            event_ids_to_delete.append(ev.id)
+
+    deleted_count = 0
+    if event_ids_to_delete:
+        db.query(AutomationExecution).filter(
+            AutomationExecution.tenant_id == tenant_id,
+            AutomationExecution.event_id.in_(event_ids_to_delete),
+        ).delete(synchronize_session="fetch")
+        db.query(AutomationEvent).filter(
+            AutomationEvent.id.in_(event_ids_to_delete),
+        ).delete(synchronize_session="fetch")
+        deleted_count = len(event_ids_to_delete)
+
+    old_execs = db.query(AutomationExecution).filter(
+        AutomationExecution.tenant_id == tenant_id,
+        AutomationExecution.event_id == root_event_id,
+    ).delete(synchronize_session="fetch")
+    deleted_count += old_execs
+
+    db.flush()
 
     base_payload: Dict[str, Any] = dict(root_event.payload or {})
-    base_payload["step_idx"]            = 1
+    base_payload["step_idx"]            = 0
     base_payload["order_id"]            = order_id
     base_payload["parent_event_id"]     = root_event_id
     base_payload["manual_retry"]        = True
@@ -1448,8 +1461,8 @@ async def retry_abandoned_cart(
         "ok":             True,
         "deduplicated":   False,
         "retry_event_id": new_event.id,
-        "step_idx":       1,
-        "cancelled_old":  cancelled_count,
+        "step_idx":       0,
+        "deleted_old":    deleted_count,
         "queued_at":      new_event.created_at.replace(tzinfo=timezone.utc).isoformat(),
-        "message":        f"تم إلغاء {cancelled_count} حدث سابق وإعادة الجدولة من المرحلة الأولى.",
+        "message":        f"تم حذف {deleted_count} سجل سابق وإعادة الجدولة من المرحلة الأولى.",
     }

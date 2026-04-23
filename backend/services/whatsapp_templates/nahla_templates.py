@@ -129,14 +129,14 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "key":            "abandoned_cart_reminder",
         "service_key":    "cart_recovery",
         "name_ar":        "تذكير السلة المتروكة — المرحلة الأولى",
-        "description_ar": "تُرسل تلقائياً بعد ساعة من ترك العميل المنتجات في السلة دون إكمال الطلب",
+        "description_ar": "تُرسل تلقائياً بعد 30 دقيقة من ترك العميل المنتجات في السلة دون إكمال الطلب",
         "category":       "MARKETING",
         "filter_tags":    ["recovery", "cart"],
         "smart_trigger":  "cart_abandoned",
-        "smart_label":    "يُرسل تلقائياً: بعد ساعة من ترك السلة",
+        "smart_label":    "يُرسل تلقائياً: بعد 30 دقيقة من ترك السلة",
         "step_number":         1,
         "has_coupon":          False,
-        "trigger_delay_hours": 1,
+        "trigger_delay_hours": 0.5,
         # BODY gets only the customer name; the URL button's {{1}} is fed
         # independently from the event payload (cart_url / checkout_url).
         # The base URL is merchant-agnostic: at import time example.com is
