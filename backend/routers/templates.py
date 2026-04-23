@@ -2327,9 +2327,14 @@ async def _sync_templates_for_tenant_inner(
     auto_bound = 0
     failed = 0
     for item in live:
+      # Use a SAVEPOINT so that a failure on ONE template doesn't rollback
+      # all previously-successful updates in the same transaction. Without
+      # this, db.rollback() would undo every prior template's status change.
+      savepoint = db.begin_nested()
       try:
         meta_id = str(item.get("id", ""))
         if not meta_id:
+            savepoint.rollback()
             continue
         existing = db.query(WhatsAppTemplate).filter(
             WhatsAppTemplate.tenant_id        == tenant_id,
@@ -2341,6 +2346,12 @@ async def _sync_templates_for_tenant_inner(
         normalized_language = _normalize_template_language(item.get("language", "ar"))
         normalized_category = _normalize_template_category(item.get("category", "MARKETING"))
         rejection = item.get("rejected_reason") or None
+
+        logger.info(
+            "[templates/sync] tenant=%s tpl=%s meta_raw_status=%r → normalized=%s",
+            tenant_id, item.get("name", "?"), item.get("status"), normalized_status,
+        )
+
         try:
             compatibility = _compute_template_compatibility(
                 item.get("components", []),
@@ -2384,9 +2395,6 @@ async def _sync_templates_for_tenant_inner(
             }
             existing.synced_at        = now
             existing.updated_at       = now
-            # Backfill bindings from the library if the row never got
-            # them (common when sync ran before the merchant ever opened
-            # the import flow).
             if lib_match:
                 if not existing.service_key and lib_service_key:
                     existing.service_key = lib_service_key
@@ -2415,22 +2423,17 @@ async def _sync_templates_for_tenant_inner(
                 created_at=now,
                 updated_at=now,
                 synced_at=now,
-                # Bindings from the Nahla library when the name matches.
                 service_key=lib_service_key,
                 step_number=lib_step_number,
                 nahla_source_key=lib_source_key,
                 display_name_ar=lib_display_ar,
                 has_coupon=lib_has_coupon,
                 trigger_delay_hours=lib_delay_hours,
-                # New rows are visible by default; activation is decided
-                # below once we know the status is APPROVED.
                 is_active=False,
                 is_hidden=False,
             )
             db.add(row_for_bind)
 
-        # Auto-activate APPROVED rows on a service slot. Single-active
-        # invariant is enforced via `ensure_single_active`.
         if (
             lib_match
             and lib_service_key
@@ -2438,7 +2441,7 @@ async def _sync_templates_for_tenant_inner(
             and normalized_status == "APPROVED"
         ):
             try:
-                db.flush()  # need row_for_bind.id
+                db.flush()
                 from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
                 if not row_for_bind.is_active:
                     row_for_bind.is_active = True
@@ -2453,16 +2456,16 @@ async def _sync_templates_for_tenant_inner(
                     tenant_id, tpl_name_meta, exc,
                 )
 
+        savepoint.commit()
         synced += 1
       except Exception as per_tpl_exc:
-        # One bad template must NEVER kill the whole sync. Log and skip.
         failed += 1
         logger.warning(
             "[templates/sync] tenant=%s skipped name=%s id=%s: %s",
             tenant_id, item.get("name", "?"), item.get("id", "?"), per_tpl_exc,
         )
         try:
-            db.rollback()
+            savepoint.rollback()
         except Exception:
             pass
 
@@ -2495,12 +2498,18 @@ async def _sync_templates_for_tenant_inner(
         msg += f" (وحُذف {deleted} قالب تجريبي)"
     if failed:
         msg += f" — تم تخطّي {failed} قالب بسبب أخطاء (راجع السجلات)"
+
+    approved_count = _status_summary.get("APPROVED", 0)
+    if approved_count:
+        msg += f" — {approved_count} قالب معتمد"
+
     return {
         "synced":        synced,
         "auto_bound":    auto_bound,
         "deleted_seeds": deleted,
         "failed":        failed,
         "message":       msg,
+        "status_breakdown": _status_summary,
     }
 
 
