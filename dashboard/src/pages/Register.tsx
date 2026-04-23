@@ -85,7 +85,7 @@ export default function Register() {
   return (
     <div className="bg-slate-900" dir={dir}>
       <div
-        className="min-h-dvh flex items-center justify-center px-4 py-safe-top pb-safe-bottom"
+        className="min-h-dvh flex flex-col items-center justify-center px-4 py-safe-top pb-safe-bottom"
       >
         <div className="w-full max-w-sm">
         {/* Top bar: back to landing + language toggle */}
@@ -270,11 +270,12 @@ export default function Register() {
           </p>
           <LegalFooter variant="light" />
         </div>
-
-        {/* Saudi commercial registration & business-authentication trust block */}
-        <div className="mt-2 mb-6 max-w-3xl mx-auto w-full">
-          <TrustBlock variant="light" />
         </div>
+
+        {/* Trust block — full-width outside the narrow form column so the
+            3-column grid has enough room on desktop screens */}
+        <div className="w-full max-w-2xl mt-4 mb-8 px-4">
+          <TrustBlock variant="light" />
         </div>
       </div>
     </div>
