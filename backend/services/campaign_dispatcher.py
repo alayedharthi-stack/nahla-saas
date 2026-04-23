@@ -282,17 +282,18 @@ def _example_param_count(comp: Dict[str, Any], key: str) -> int:
 
 
 def _button_needs_param(btn: Dict[str, Any]) -> bool:
-    """Return True if Meta requires a runtime parameter for this button."""
+    """Return True if Meta requires a runtime parameter for this button.
+
+    Only dynamic URL buttons (with ``{{1}}`` in the URL) need a suffix
+    parameter.  Static URL buttons and QUICK_REPLY buttons need nothing.
+    COPY_CODE always needs a coupon_code parameter.
+    """
     btype = (btn.get("type") or "").upper()
     if btype == "COPY_CODE":
         return True
     if btype == "URL":
         url = btn.get("url") or ""
-        if "{{" in url:
-            return True
-        ex = btn.get("example")
-        if isinstance(ex, list) and ex:
-            return True
+        return "{{" in url
     if btype == "OTP":
         return True
     return False
@@ -393,9 +394,7 @@ def _build_send_payload(
 
                 elif btype == "URL":
                     url_tpl = btn.get("url") or ""
-                    has_var = "{{" in url_tpl
-                    has_example = bool(btn.get("example"))
-                    if has_var or has_example:
+                    if "{{" in url_tpl:
                         suffix = cart_url or coupon_code or "shop"
                         components.append({
                             "type": "button",

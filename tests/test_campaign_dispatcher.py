@@ -60,8 +60,8 @@ class TestButtonNeedsParam:
     def test_url_with_var(self):
         assert _button_needs_param({"type": "URL", "url": "https://x.com/{{1}}"}) is True
 
-    def test_url_with_example(self):
-        assert _button_needs_param({"type": "URL", "url": "https://x.com/", "example": ["https://x.com/shop"]}) is True
+    def test_url_with_example_but_static(self):
+        assert _button_needs_param({"type": "URL", "url": "https://x.com/", "example": ["https://x.com/shop"]}) is False
 
     def test_url_static(self):
         assert _button_needs_param({"type": "URL", "url": "https://x.com/"}) is False
@@ -143,7 +143,9 @@ class TestBuildPayloadWithButtons:
         assert btn_comp["sub_type"] == "url"
         assert btn_comp["parameters"][0]["text"] == "cart/123"
 
-    def test_url_button_with_example(self):
+    def test_static_url_with_example_no_param(self):
+        """Static URL button (no {{1}}) should NOT get a parameter even
+        if it has an 'example' field — example is for Meta review only."""
         tpl = _make_template([
             {"type": "BODY", "text": "عرض {{1}} من {{2}}"},
             {"type": "FOOTER", "text": "نحلة"},
@@ -158,10 +160,9 @@ class TestBuildPayloadWithButtons:
             coupon_code="CODE50",
         )
         comps = result["template"]["components"]
-        assert len(comps) == 3  # body + copy_code + url
+        assert len(comps) == 2  # body + copy_code (NO url param for static)
         types = {c.get("sub_type") or c["type"] for c in comps}
         assert "copy_code" in types
-        assert "url" in types
         assert "body" in types
 
     def test_static_url_button_no_param(self):
@@ -272,6 +273,8 @@ class TestVipExclusiveTemplate:
     """Reproduce the exact production template that was failing."""
 
     def test_vip_exclusive_full(self):
+        """Exact reproduction of the production vip_exclusive template.
+        URL is static (no {{1}}) so only BODY + COPY_CODE components."""
         tpl = _make_template([
             {"type": "BODY", "text": (
                 "أنت من عملائنا المميزين يا {{1}} 👑\n\n"
@@ -295,8 +298,7 @@ class TestVipExclusiveTemplate:
         comp_types = [(c.get("sub_type") or c["type"]) for c in comps]
         assert "body" in comp_types, f"Missing body in {comp_types}"
         assert "copy_code" in comp_types, f"Missing copy_code in {comp_types}"
-        assert "url" in comp_types, f"Missing url in {comp_types}"
-        assert len(comps) == 3
+        assert len(comps) == 2  # body + copy_code; static URL gets no param
 
         body = [c for c in comps if c["type"] == "body"][0]
         assert body["parameters"][0]["text"] == "تركي الحارثي"
@@ -306,5 +308,22 @@ class TestVipExclusiveTemplate:
         assert cc["parameters"][0]["coupon_code"] == "VIP30TURKI"
         assert cc["index"] == "0"
 
+    def test_dynamic_url_with_cart(self):
+        """Template with URL containing {{1}} should get the cart_url."""
+        tpl = _make_template([
+            {"type": "BODY", "text": "مرحبا {{1}} سلتك تنتظرك"},
+            {"type": "BUTTONS", "buttons": [
+                {"type": "URL", "text": "أكمل الطلب",
+                 "url": "https://shop.com/cart/{{1}}",
+                 "example": ["https://shop.com/cart/abc"]},
+            ]},
+        ])
+        result = _build_send_payload(
+            template=tpl, to_phone="966500000000",
+            customer_name="أحمد", store_name="المتجر",
+            cart_url="cart/xyz123",
+        )
+        comps = result["template"]["components"]
+        assert len(comps) == 2  # body + url
         url_btn = [c for c in comps if c.get("sub_type") == "url"][0]
-        assert url_btn["index"] == "1"
+        assert url_btn["parameters"][0]["text"] == "cart/xyz123"
