@@ -220,8 +220,8 @@ export const autopilotApi = {
   retryAllStaleCarts: () =>
     apiCall<{
       ok: boolean
-      cleaned: number
       retried: number
+      errors?: string[]
       message: string
     }>('/autopilot/abandoned-carts/retry-all-stale', { method: 'POST' }),
 }

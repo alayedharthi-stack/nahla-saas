@@ -1239,81 +1239,245 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/autopilot/abandoned-carts/debug-events")
+async def debug_abandoned_cart_events(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Diagnostic: dump every cart-related AutomationEvent for this tenant."""
+    tenant_id = resolve_tenant_id(request)
+
+    from sqlalchemy import func as sa_func
+
+    all_events = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type.in_(["cart_abandoned", "abandoned_cart"]),
+        )
+        .order_by(AutomationEvent.created_at.desc())
+        .limit(50)
+        .all()
+    )
+
+    from models import SmartAutomation
+    automations = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.trigger_event.in_(["cart_abandoned", "abandoned_cart"]),
+        )
+        .all()
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "total_events": len(all_events),
+        "events": [
+            {
+                "id": e.id,
+                "event_type": e.event_type,
+                "customer_id": e.customer_id,
+                "processed": e.processed,
+                "created_at": str(e.created_at),
+                "automation_id": e.automation_id,
+                "payload_keys": list((e.payload or {}).keys()),
+                "manual_retry": (e.payload or {}).get("manual_retry"),
+                "step_idx": (e.payload or {}).get("step_idx"),
+                "cleaned_stale": (e.payload or {}).get("cleaned_stale"),
+            }
+            for e in all_events
+        ],
+        "matching_automations": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "trigger_event": a.trigger_event,
+                "automation_type": getattr(a, "automation_type", None),
+                "enabled": a.enabled,
+                "engine": getattr(a, "engine", None),
+            }
+            for a in automations
+        ],
+    }
+
+
 @router.post("/autopilot/abandoned-carts/retry-all-stale")
 async def retry_all_stale_carts(
     request: Request,
     db: Session = Depends(get_db),
 ):
     """
-    One-shot cleanup: find every unprocessed cart_abandoned event,
-    mark it processed, and create a fresh immediate retry for each
-    distinct customer so Stage 1 sends right away.
+    Order-based bulk retry: find every abandoned Order whose recovery
+    hasn't completed yet, wipe old events/executions, and create a
+    fresh Stage-1 event linked to the Order so the engine sends
+    immediately.
     """
+    import logging as _logging
+    from sqlalchemy.orm.attributes import flag_modified
+
+    _log = _logging.getLogger("nahla.retry_all_stale")
+
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    stale_events = (
-        db.query(AutomationEvent)
-        .filter(
-            AutomationEvent.tenant_id == tenant_id,
-            AutomationEvent.event_type == "cart_abandoned",
-            AutomationEvent.processed.is_(False),
-        )
+    abandoned_orders = (
+        db.query(Order)
+        .filter(Order.tenant_id == tenant_id, Order.is_abandoned == True)
         .all()
     )
+    _log.warning(
+        "tenant=%s abandoned orders found=%d", tenant_id, len(abandoned_orders),
+    )
 
-    if not stale_events:
-        return {"ok": True, "cleaned": 0, "retried": 0, "message": "لا توجد أحداث عالقة."}
+    if not abandoned_orders:
+        return {"ok": True, "retried": 0, "message": "لا توجد سلات متروكة."}
 
-    from sqlalchemy.orm.attributes import flag_modified
+    from services.cart_recovery_status import summarise_for_orders
 
-    seen_customers: set = set()
-    cleaned = 0
+    summaries = summarise_for_orders(db, tenant_id, abandoned_orders)
+
     retried = 0
+    errors = []
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    for ev in stale_events:
-        ev.processed = True
-        payload = dict(ev.payload or {})
-        payload["cleaned_stale"] = True
-        payload["cleaned_at"] = datetime.now(timezone.utc).isoformat()
-        ev.payload = payload
-        flag_modified(ev, "payload")
-        cleaned += 1
+    for order in abandoned_orders:
+        summary = summaries.get(order.id, {})
+        status = summary.get("status", "no_recovery")
 
-        cid = ev.customer_id
-        if cid and cid not in seen_customers:
-            seen_customers.add(cid)
-            new_payload = dict(ev.payload or {})
-            new_payload["step_idx"] = 0
-            new_payload["manual_retry"] = True
-            new_payload["restart_from_stage1"] = True
-            new_payload["retry_reason"] = "stale_cleanup"
-            new_payload["retry_requested_at"] = datetime.now(timezone.utc).isoformat()
-            new_payload.pop("cleaned_stale", None)
-            new_payload.pop("cleaned_at", None)
-            new_payload.pop("recovery_followups", None)
-            new_payload.pop("superseded_by_retry", None)
-            new_payload.pop("processed_at", None)
-            new_payload.pop("result", None)
+        if status in ("completed", "converted", "in_progress"):
+            continue
 
-            fresh = AutomationEvent(
-                tenant_id=tenant_id,
-                event_type="cart_abandoned",
-                customer_id=cid,
-                payload=new_payload,
-                processed=False,
-                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        meta = dict(order.extra_metadata or {})
+        root_event_id = None
+        try:
+            raw_rid = meta.get("recovery_event_id")
+            root_event_id = int(raw_rid) if raw_rid is not None else None
+        except (TypeError, ValueError):
+            pass
+
+        root_event = None
+        if root_event_id:
+            root_event = (
+                db.query(AutomationEvent)
+                .filter(AutomationEvent.id == root_event_id,
+                        AutomationEvent.tenant_id == tenant_id)
+                .first()
             )
-            db.add(fresh)
-            retried += 1
+
+        customer_id = root_event.customer_id if root_event else None
+        base_payload: dict = {}
+
+        if root_event:
+            base_payload = dict(root_event.payload or {})
+
+            old_events = (
+                db.query(AutomationEvent)
+                .filter(
+                    AutomationEvent.tenant_id == tenant_id,
+                    AutomationEvent.event_type == "cart_abandoned",
+                )
+                .all()
+            )
+            ids_to_delete = []
+            for ev in old_events:
+                ep = ev.payload or {}
+                if (
+                    ev.id == root_event_id
+                    or str(ep.get("parent_event_id", "")) == str(root_event_id)
+                    or str(ep.get("order_id", "")) == str(order.id)
+                    or (customer_id and ev.customer_id == customer_id)
+                ):
+                    ids_to_delete.append(ev.id)
+
+            if ids_to_delete:
+                db.query(AutomationExecution).filter(
+                    AutomationExecution.tenant_id == tenant_id,
+                    AutomationExecution.event_id.in_(ids_to_delete),
+                ).delete(synchronize_session="fetch")
+                db.query(AutomationEvent).filter(
+                    AutomationEvent.id.in_(ids_to_delete),
+                ).delete(synchronize_session="fetch")
+                db.flush()
+
+            _log.info(
+                "tenant=%s order=%s deleted %d old events/execs",
+                tenant_id, order.id, len(ids_to_delete),
+            )
+        else:
+            ci = order.customer_info or {}
+            phone = ci.get("phone") or ci.get("mobile") or ""
+            base_payload = {
+                "source": "bulk_retry",
+                "checkout_url": order.checkout_url or "",
+                "cart_total": float(order.total or 0),
+                "phone": phone,
+                "customer_name": ci.get("name") or order.customer_name or "",
+            }
+            if not customer_id and phone:
+                try:
+                    from services.customer_intelligence import (
+                        CustomerIntelligenceService,
+                        normalize_phone,
+                    )
+                    np = normalize_phone(phone) or phone
+                    svc = CustomerIntelligenceService(db, tenant_id)
+                    cust = svc.find_customer_by_phone(np)
+                    if cust:
+                        customer_id = cust.id
+                    else:
+                        lead = svc.upsert_lead_customer(
+                            phone=np,
+                            name=base_payload.get("customer_name", np),
+                            source="bulk_retry",
+                            commit=False,
+                        )
+                        customer_id = lead.id if lead else None
+                except Exception as exc:
+                    _log.warning("customer resolve failed order=%s: %s", order.id, exc)
+
+        if not customer_id:
+            errors.append(f"order {order.id}: no customer_id")
+            continue
+
+        new_payload = dict(base_payload)
+        new_payload["step_idx"] = 0
+        new_payload["order_id"] = order.id
+        new_payload["manual_retry"] = True
+        new_payload["restart_from_stage1"] = True
+        new_payload["retry_reason"] = "bulk_stale_cleanup"
+        new_payload["retry_requested_at"] = now.replace(tzinfo=timezone.utc).isoformat()
+        for key in ("cleaned_stale", "cleaned_at", "recovery_followups",
+                     "superseded_by_retry", "processed_at", "result",
+                     "cancelled_by_retry"):
+            new_payload.pop(key, None)
+
+        fresh = AutomationEvent(
+            tenant_id=tenant_id,
+            event_type="cart_abandoned",
+            customer_id=customer_id,
+            payload=new_payload,
+            processed=False,
+            created_at=now,
+        )
+        db.add(fresh)
+        db.flush()
+
+        meta["recovery_event_id"] = fresh.id
+        order.extra_metadata = meta
+        flag_modified(order, "extra_metadata")
+        retried += 1
+        _log.info(
+            "tenant=%s order=%s new event=%s customer=%s",
+            tenant_id, order.id, fresh.id, customer_id,
+        )
 
     db.commit()
-    return {
-        "ok":      True,
-        "cleaned": cleaned,
-        "retried": retried,
-        "message": f"تم تنظيف {cleaned} حدث عالق وإعادة جدولة {retried} سلة من المرحلة الأولى.",
-    }
+
+    msg = f"تم إعادة جدولة {retried} سلة من المرحلة الأولى."
+    if errors:
+        msg += f" ({len(errors)} سلة بدون عميل مرتبط)"
+    return {"ok": True, "retried": retried, "errors": errors, "message": msg}
 
 
 @router.get("/autopilot/abandoned-carts/{order_id}/recovery")
