@@ -205,8 +205,11 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    active_handoffs: set[str] = {
-        row.customer_phone
+    def _norm(p: str) -> str:
+        return (p or "").strip().replace("+", "").replace("-", "").replace(" ", "")
+
+    active_handoff_norms: set[str] = {
+        _norm(row.customer_phone)
         for row in db.query(HandoffSession).filter(
             HandoffSession.tenant_id == tenant_id,
             HandoffSession.status == "active",
@@ -214,14 +217,11 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     }
 
     def _status_for(phone: str, convo: Optional[Conversation]) -> str:
-        if phone in active_handoffs or (convo and convo.is_human_handoff):
+        if _norm(phone) in active_handoff_norms or (convo and convo.is_human_handoff):
             return "human"
         if convo and str(convo.status).lower() == "closed":
             return "closed"
         return "active"
-
-    def _norm(p: str) -> str:
-        return (p or "").strip().replace("+", "").replace("-", "").replace(" ", "")
 
     # ── 1. All Conversation records → phone_info map ─────────────────────────
     convo_rows = (
@@ -382,6 +382,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 "isAI": True,
                 "status": _status_for(phone, None),
                 "unread": 0,
+                "lastMsgType": "ai",
                 "_conv_id": None,
             }
 
