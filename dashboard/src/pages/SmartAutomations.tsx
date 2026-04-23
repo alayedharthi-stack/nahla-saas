@@ -604,7 +604,9 @@ function AbandonedCartsQueue({
     setStaleNotice(null)
     try {
       const res = await autopilotApi.retryAllStaleCarts()
-      setStaleNotice(res.message)
+      console.log('[NahlaRetry] response:', JSON.stringify(res, null, 2))
+      const msg = res.message || `retried=${res.retried}, sent=${res.sent_immediately ?? 0}`
+      setStaleNotice(msg)
       if (res.sent_immediately && res.sent_immediately > 0) {
         setNoticeKind('ok')
         setRetryDone(true)
@@ -614,9 +616,12 @@ function AbandonedCartsQueue({
         setNoticeKind('ok')
         setRetryDone(true)
       }
-      onRetried?.()
+      // Delay refresh so the notice renders first
+      setTimeout(() => onRetried?.(), 2000)
     } catch (e) {
-      setStaleNotice(e instanceof Error ? e.message : 'فشل التنظيف')
+      const msg = e instanceof Error ? e.message : 'فشل التنظيف'
+      console.error('[NahlaRetry] error:', msg)
+      setStaleNotice(msg)
       setNoticeKind('err')
     } finally {
       setCleaningStale(false)
