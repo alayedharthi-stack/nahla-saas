@@ -59,9 +59,18 @@ def _get_or_create_customer(db: Session, tenant_id: int, customer_phone: str, cu
 
     service = CustomerIntelligenceService(db, tenant_id)
     normalized_phone = normalize_phone(customer_phone) or customer_phone
+    resolved_name = customer_name
+    if not resolved_name:
+        existing = db.query(Customer).filter(
+            Customer.tenant_id == tenant_id,
+            (Customer.phone == customer_phone)
+            | (Customer.phone == normalized_phone)
+            | (Customer.normalized_phone == normalized_phone),
+        ).first()
+        resolved_name = (existing.name if existing and existing.name else "") or normalized_phone
     customer = service.upsert_customer_identity(
         phone=normalized_phone,
-        name=customer_name or normalized_phone,
+        name=resolved_name,
         source="whatsapp_inbound",
         extra_metadata={"source": "whatsapp_inbound"},
         seen_at=datetime.now(timezone.utc),
@@ -229,7 +238,9 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             continue
         n = _norm(phone)
         status = _status_for(phone, convo)
-        name = convo.customer.name if convo.customer and convo.customer.name else ""
+        raw_name = convo.customer.name if convo.customer and convo.customer.name else ""
+        name_looks_like_phone = raw_name and raw_name.replace("+", "").replace("-", "").replace(" ", "").isdigit()
+        name = "" if name_looks_like_phone else raw_name
 
         existing_key = norm_to_key.get(n)
         if existing_key and existing_key in phone_info:
@@ -337,9 +348,14 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 phone_info[key]["time"] = row.created_at.isoformat() if row.created_at else ""
         elif _norm(phone) not in norm_to_key:
             norm_to_key[_norm(phone)] = phone
+            trace_customer = db.query(Customer).filter(
+                Customer.tenant_id == tenant_id,
+                (Customer.phone == phone) | (Customer.normalized_phone == (_norm(phone) if _norm(phone) else phone)),
+            ).first()
+            trace_name = (trace_customer.name if trace_customer and trace_customer.name else phone)
             phone_info[phone] = {
                 "id": row.session_id or f"trace-{phone}",
-                "customer": phone,
+                "customer": trace_name,
                 "phone": phone,
                 "lastMsg": row.message or "",
                 "time": row.created_at.isoformat() if row.created_at else "",
@@ -349,7 +365,19 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 "_conv_id": None,
             }
 
-    # ── 5. Build result, strip internal keys ─────────────────────────────────
+    # ── 5. Enrich phone-like names from Customer table ──────────────────────
+    for key, info in phone_info.items():
+        cname = info.get("customer", "")
+        if not cname or cname.replace("+", "").replace("-", "").replace(" ", "").isdigit():
+            real = db.query(Customer).filter(
+                Customer.tenant_id == tenant_id,
+                (Customer.phone == key)
+                | (Customer.normalized_phone == _norm(key)),
+            ).first()
+            if real and real.name and not real.name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
+                info["customer"] = real.name
+
+    # ── 6. Build result, strip internal keys ─────────────────────────────────
     result = sorted(phone_info.values(), key=lambda c: c.get("time") or "", reverse=True)
     for c in result:
         c.pop("_conv_id", None)
@@ -381,14 +409,14 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
     # legacy code path used) and order DESC so we always keep the freshest
     # ``limit`` rows; reverse afterwards so the chat UI renders in
     # chronological order.
-    from sqlalchemy import or_  # noqa: PLC0415  (kept local — used only here)
+    from sqlalchemy import or_  # noqa: PLC0415
 
     phone_filters = []
     for variant in phone_variants:
         phone_filters.append(MessageEvent.extra_metadata["phone"].astext == variant)
         phone_filters.append(MessageEvent.extra_metadata["customer_phone"].astext == variant)
 
-    rows = (
+    me_rows = (
         db.query(MessageEvent)
         .filter(
             MessageEvent.tenant_id == tenant_id,
@@ -398,52 +426,66 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
         .limit(limit)
         .all()
     )
-    rows.reverse()  # oldest → newest for the chat thread view
 
-    if not rows:
-        # Same fix on the trace-fallback path: keep the freshest rows.
-        trace_rows = (
-            db.query(ConversationTrace)
-            .filter(
-                ConversationTrace.tenant_id == tenant_id,
-                ConversationTrace.customer_phone.in_(list(phone_variants)),
-            )
-            .order_by(ConversationTrace.created_at.desc())
-            .limit(limit)
-            .all()
+    messages: List[Dict[str, Any]] = [
+        {
+            "id": str(r.id),
+            "direction": "out" if (r.direction or "").lower() == "outbound" else "in",
+            "body": r.body or "",
+            "time": r.created_at.isoformat() if r.created_at else "",
+            "isAI": bool((r.extra_metadata or {}).get("is_ai")),
+            "_ts": r.created_at,
+        }
+        for r in me_rows
+    ]
+
+    me_times = {r.created_at for r in me_rows if r.created_at}
+
+    trace_rows = (
+        db.query(ConversationTrace)
+        .filter(
+            ConversationTrace.tenant_id == tenant_id,
+            ConversationTrace.customer_phone.in_(list(phone_variants)),
         )
-        trace_rows.reverse()
-        messages: List[Dict[str, Any]] = []
-        for idx, row in enumerate(trace_rows):
+        .order_by(ConversationTrace.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    def _near(ts):
+        if not ts:
+            return False
+        for met in me_times:
+            if met and abs((ts - met).total_seconds()) < 3:
+                return True
+        return False
+
+    for idx, row in enumerate(trace_rows):
+        if row.message and not _near(row.created_at):
             messages.append({
                 "id": f"in-{idx}",
                 "direction": "in",
-                "body": row.message or "",
+                "body": row.message,
                 "time": row.created_at.isoformat() if row.created_at else "",
                 "isAI": False,
+                "_ts": row.created_at,
             })
-            if row.response_text:
-                messages.append({
-                    "id": f"out-{idx}",
-                    "direction": "out",
-                    "body": row.response_text,
-                    "time": row.created_at.isoformat() if row.created_at else "",
-                    "isAI": bool(row.orchestrator_used),
-                })
-        return {"messages": messages}
-
-    return {
-        "messages": [
-            {
-                "id": str(row.id),
-                "direction": "out" if (row.direction or "").lower() == "outbound" else "in",
-                "body": row.body or "",
+        if row.response_text and not _near(row.created_at):
+            messages.append({
+                "id": f"out-{idx}",
+                "direction": "out",
+                "body": row.response_text,
                 "time": row.created_at.isoformat() if row.created_at else "",
-                "isAI": bool((row.extra_metadata or {}).get("is_ai")),
-            }
-            for row in rows
-        ]
-    }
+                "isAI": bool(row.orchestrator_used),
+                "_ts": row.created_at,
+            })
+
+    messages.sort(key=lambda m: m.get("_ts") or "")
+    messages = messages[-limit:]
+    for m in messages:
+        m.pop("_ts", None)
+
+    return {"messages": messages}
 
 
 @router.post("/reply")

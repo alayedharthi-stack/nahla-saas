@@ -423,7 +423,7 @@ export default function Conversations() {
                           </span>
                         )}
 
-                        {/* Bubble + Buttons */}
+                        {/* Bubble + WhatsApp-style Buttons */}
                         {(() => {
                           const sep = '━━━━━'
                           const hasButtons = m.body.includes(sep)
@@ -431,6 +431,15 @@ export default function Conversations() {
                           const btnLines = hasButtons
                             ? m.body.split(sep).slice(1).join('').trim().split('\n').filter(Boolean)
                             : []
+
+                          const parseBtn = (raw: string) => {
+                            const t = raw.trim()
+                            if (t.startsWith('📋')) return { icon: '📋', label: t.replace(/^📋\s*/, ''), type: 'copy' as const }
+                            if (t.startsWith('🔗')) return { icon: '🔗', label: t.replace(/^🔗\s*/, ''), type: 'url' as const }
+                            if (t.startsWith('↩️')) return { icon: '↩️', label: t.replace(/^↩️\s*/, ''), type: 'reply' as const }
+                            return { icon: '', label: t, type: 'reply' as const }
+                          }
+
                           return (
                             <>
                               <div className={`
@@ -438,36 +447,41 @@ export default function Conversations() {
                                 shadow-sm
                                 ${isOut
                                   ? `bg-brand-500 text-white ${btnLines.length ? 'rounded-t-2xl rounded-ee-sm' : 'rounded-2xl rounded-ee-sm'}`
-                                  : `bg-white text-slate-800 ${btnLines.length ? 'rounded-t-2xl rounded-es-sm border-x border-t border-slate-100' : 'rounded-2xl rounded-es-sm border border-slate-100'}`
+                                  : `bg-white text-slate-800 ${btnLines.length ? 'rounded-t-2xl rounded-es-sm' : 'rounded-2xl rounded-es-sm border border-slate-100'}`
                                 }
                               `}>
                                 {textPart}
                               </div>
                               {btnLines.length > 0 && (
-                                <div className={`
-                                  overflow-hidden
-                                  ${isOut
-                                    ? 'bg-brand-400/30 rounded-b-2xl border-t border-brand-400/40'
-                                    : 'bg-white rounded-b-2xl border-x border-b border-slate-100'
-                                  }
-                                `}>
+                                <div className="flex flex-col gap-[3px] mt-[3px] w-full">
                                   {btnLines.map((line, bi) => {
-                                    const trimmed = line.trim()
-                                    const isCopy = trimmed.startsWith('📋')
-                                    const isUrl = trimmed.startsWith('🔗')
+                                    const btn = parseBtn(line)
                                     return (
                                       <div
                                         key={bi}
-                                        className={`
-                                          flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-medium
-                                          ${bi > 0 ? (isOut ? 'border-t border-brand-400/30' : 'border-t border-slate-100') : ''}
-                                          ${isOut
-                                            ? 'text-white/90'
-                                            : isCopy ? 'text-brand-600' : isUrl ? 'text-blue-600' : 'text-slate-600'
-                                          }
-                                        `}
+                                        className="
+                                          flex items-center justify-center gap-2 py-2 px-3
+                                          bg-white rounded-lg shadow-sm border border-slate-100
+                                          text-[13px] font-medium text-[#00a884]
+                                          cursor-default select-none
+                                        "
                                       >
-                                        {trimmed}
+                                        {btn.type === 'url' && (
+                                          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                          </svg>
+                                        )}
+                                        {btn.type === 'copy' && (
+                                          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                          </svg>
+                                        )}
+                                        {btn.type === 'reply' && (
+                                          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+                                          </svg>
+                                        )}
+                                        <span>{btn.label}</span>
                                       </div>
                                     )
                                   })}
