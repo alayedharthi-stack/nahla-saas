@@ -32,6 +32,7 @@ import {
   BadgeCheck,
   LayoutTemplate,
   CalendarHeart,
+  Rocket,
 } from 'lucide-react'
 
 // ── Bee SVG ────────────────────────────────────────────────────────────────────
@@ -108,7 +109,42 @@ function FaqItem({ q, a }: { q: string; a: string }) {
 }
 
 // ── Pricing plan card ─────────────────────────────────────────────────────────
+// Each plan gets its own colour identity — lifted from the in-app Billing page
+// so visitors feel the dashboard look before they even register.
+const PLAN_THEME = {
+  starter: {
+    gradient:   'from-sky-500 to-blue-600',
+    shadow:     'shadow-blue-500/30',
+    ring:       'ring-blue-400/40',
+    glow:       'shadow-[0_8px_30px_-8px_rgba(14,165,233,0.45)]',
+    icon:       Zap,
+    saveBg:     'bg-white/20 text-white',
+    checkColor: 'text-sky-300',
+  },
+  growth: {
+    gradient:   'from-amber-400 to-orange-500',
+    shadow:     'shadow-amber-500/40',
+    ring:       'ring-amber-400/60',
+    glow:       'shadow-[0_8px_40px_-8px_rgba(245,158,11,0.55)]',
+    icon:       TrendingUp,
+    saveBg:     'bg-white/20 text-white',
+    checkColor: 'text-amber-200',
+  },
+  scale: {
+    gradient:   'from-violet-500 to-purple-600',
+    shadow:     'shadow-purple-500/30',
+    ring:       'ring-violet-400/40',
+    glow:       'shadow-[0_8px_30px_-8px_rgba(139,92,246,0.45)]',
+    icon:       Rocket,
+    saveBg:     'bg-white/20 text-white',
+    checkColor: 'text-violet-300',
+  },
+} as const
+
+type PlanSlug = keyof typeof PLAN_THEME
+
 interface PlanProps {
+  slug: PlanSlug
   name: string
   nameAr: string
   price: number
@@ -116,96 +152,94 @@ interface PlanProps {
   tagline: string
   idealFor: string
   features: string[]
-  highlighted?: boolean
-  badge?: string
+  popular?: boolean
   ctaLabel?: string
 }
 
 function PlanCard({
-  name, nameAr, price, launchPrice, tagline, idealFor,
-  features, highlighted, badge, ctaLabel,
+  slug, name, nameAr, price, launchPrice, tagline, idealFor,
+  features, popular, ctaLabel,
 }: PlanProps) {
+  const theme    = PLAN_THEME[slug]
+  const Icon     = theme.icon
   const discount = Math.round(((price - launchPrice) / price) * 100)
+
   return (
     <div
-      className={`relative rounded-3xl p-7 flex flex-col gap-5 transition-all duration-300 hover:-translate-y-1 ${
-        highlighted
-          ? 'bg-gradient-to-br from-amber-400 to-amber-600 shadow-2xl shadow-amber-500/40 ring-2 ring-amber-400/50'
-          : 'bg-slate-800/70 border border-white/10 hover:border-amber-400/30 backdrop-blur-sm'
-      }`}
+      className={[
+        'relative rounded-2xl flex flex-col overflow-hidden',
+        'transition-all duration-300 hover:-translate-y-1.5',
+        popular
+          ? `ring-2 ${theme.ring} ${theme.glow}`
+          : 'ring-1 ring-white/10 hover:ring-white/20',
+      ].join(' ')}
     >
-      {/* Top badge */}
-      {badge && (
-        <div className="absolute -top-4 inset-x-0 flex justify-center">
-          <span className="bg-slate-900 text-amber-400 border border-amber-500/40 text-xs font-black px-4 py-1.5 rounded-full shadow-lg tracking-wide">
-            {badge}
+      {/* Popular badge */}
+      {popular && (
+        <div className="absolute -top-px inset-x-0 flex justify-center">
+          <span className={`bg-gradient-to-r ${theme.gradient} text-white text-[11px] font-black px-4 py-1 rounded-b-xl shadow-md`}>
+            ⭐ الأكثر اختياراً
           </span>
         </div>
       )}
 
-      {/* Plan label */}
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <p className={`text-xs font-bold tracking-widest uppercase ${highlighted ? 'text-amber-900' : 'text-amber-500'}`}>
-            {name}
-          </p>
-          {highlighted && (
-            <span className="text-xs bg-amber-900/30 text-amber-900 font-bold px-2 py-0.5 rounded-full">
+      {/* Gradient header */}
+      <div className={`bg-gradient-to-br ${theme.gradient} p-5 ${popular ? 'pt-8' : 'pt-5'} text-white`}>
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
+            <Icon size={16} className="text-white" />
+          </div>
+          <div>
+            <p className="text-white/70 text-[10px] font-bold uppercase tracking-widest">{name}</p>
+            <h3 className="text-xl font-black leading-tight">{nameAr}</h3>
+          </div>
+          {discount > 0 && (
+            <span className={`ms-auto text-[11px] font-bold px-2 py-0.5 rounded-full ${theme.saveBg}`}>
               وفّر {discount}٪
             </span>
           )}
         </div>
-        <h3 className={`text-2xl font-black mb-1 ${highlighted ? 'text-slate-900' : 'text-white'}`}>
-          {nameAr}
-        </h3>
-        <p className={`text-xs leading-relaxed ${highlighted ? 'text-amber-900/70' : 'text-slate-500'}`}>
-          {idealFor}
-        </p>
-      </div>
+        <p className="text-white/70 text-xs mb-4 leading-relaxed">{idealFor}</p>
 
-      {/* Price block */}
-      <div className={`rounded-2xl p-4 ${highlighted ? 'bg-amber-900/20' : 'bg-white/5'}`}>
-        <div className="flex items-end gap-2 mb-0.5">
-          <span className={`text-4xl font-black leading-none ${highlighted ? 'text-slate-900' : 'text-white'}`}>
+        {/* Price */}
+        <div className="flex items-end gap-2 mb-1">
+          <span className="text-4xl font-black leading-none">
             {launchPrice.toLocaleString('ar-SA')}
           </span>
           <div className="pb-1">
-            <div className={`text-xs line-through ${highlighted ? 'text-amber-900/50' : 'text-slate-600'}`}>
+            <div className="text-white/50 text-xs line-through">
               {price.toLocaleString('ar-SA')} ريال
             </div>
-            <div className={`text-xs font-medium ${highlighted ? 'text-amber-900/60' : 'text-slate-400'}`}>
-              ريال / شهرياً
-            </div>
+            <div className="text-white/70 text-xs font-medium">ريال / شهرياً</div>
           </div>
         </div>
-        <p className={`text-xs ${highlighted ? 'text-amber-900/70' : 'text-slate-500'}`}>
-          {tagline}
-        </p>
+        <p className="text-white/60 text-[11px]">{tagline}</p>
       </div>
 
-      {/* Features */}
-      <ul className="flex flex-col gap-2.5 flex-1">
-        {features.map((f, i) => (
-          <li key={i} className="flex items-start gap-2.5">
-            <Check size={15} className={`mt-0.5 shrink-0 ${highlighted ? 'text-amber-900' : 'text-amber-400'}`} />
-            <span className={`text-sm leading-snug ${highlighted ? 'text-amber-900' : 'text-slate-300'}`}>
-              {f}
-            </span>
-          </li>
-        ))}
-      </ul>
+      {/* Features body */}
+      <div className="bg-slate-800/80 flex-1 p-5 backdrop-blur-sm">
+        <ul className="flex flex-col gap-2.5">
+          {features.map((f, i) => (
+            <li key={i} className="flex items-start gap-2.5">
+              <Check size={14} className={`mt-0.5 shrink-0 ${theme.checkColor}`} />
+              <span className="text-slate-300 text-sm leading-snug">{f}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
 
       {/* CTA */}
-      <Link
-        to="/register"
-        className={`mt-2 text-center py-3.5 rounded-2xl font-black text-sm transition-all duration-200 hover:scale-[1.02] ${
-          highlighted
-            ? 'bg-slate-900 text-amber-400 hover:bg-slate-800 shadow-lg'
-            : 'bg-amber-500/12 text-amber-400 border border-amber-500/25 hover:bg-amber-500/20 hover:border-amber-400/50'
-        }`}
-      >
-        {ctaLabel ?? 'ابدأ مجاناً'}
-      </Link>
+      <div className="bg-slate-800/90 px-5 pb-5 pt-3 backdrop-blur-sm">
+        <Link
+          to="/register"
+          className={`block text-center py-3 rounded-xl font-black text-sm text-white transition-all duration-200 hover:scale-[1.02] active:scale-100 bg-gradient-to-br ${theme.gradient} shadow-md hover:brightness-110`}
+        >
+          {ctaLabel ?? 'ابدأ مجاناً 14 يوم'}
+        </Link>
+        <p className="flex items-center justify-center gap-1 text-[10px] text-slate-500 mt-2">
+          <Shield size={10} /> دفع آمن — لا تُطلب بطاقة للتجربة
+        </p>
+      </div>
     </div>
   )
 }
@@ -906,7 +940,8 @@ export default function Landing() {
           {/* Cards — no scale transform (breaks mobile) */}
           <div className="grid md:grid-cols-3 gap-5 lg:gap-6 items-stretch">
             <PlanCard
-              name="Starter"
+              slug="starter"
+              name="STARTER"
               nameAr="المبتدئ"
               price={899}
               launchPrice={449}
@@ -923,14 +958,14 @@ export default function Landing() {
               ctaLabel="ابدأ مجاناً 14 يوم"
             />
             <PlanCard
-              name="Growth"
+              slug="growth"
+              name="GROWTH"
               nameAr="النمو"
               price={1699}
               launchPrice={849}
               tagline="سعر الإطلاق — وفّر 850 ريال شهرياً"
               idealFor="للمتاجر النشطة التي تريد تحقيق أقصى مبيعات عبر واتساب"
-              highlighted
-              badge="الأكثر اختياراً"
+              popular
               features={[
                 'حتى 5,000 محادثة في الشهر',
                 'ردود ذكاء اصطناعي متقدمة',
@@ -942,7 +977,8 @@ export default function Landing() {
               ctaLabel="جرّب الخطة الأكثر شيوعاً"
             />
             <PlanCard
-              name="Scale"
+              slug="scale"
+              name="SCALE"
               nameAr="التوسع"
               price={2999}
               launchPrice={1499}
