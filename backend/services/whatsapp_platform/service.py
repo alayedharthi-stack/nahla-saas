@@ -330,15 +330,61 @@ async def provider_list_templates(
         prefer_platform=prefer_platform,
     )
     provider = wa_provider(conn)
-    path = "v1/configs/templates" if provider == WHATSAPP_PROVIDER_360DIALOG else f"{waba_id}/message_templates"
+
+    if provider == WHATSAPP_PROVIDER_360DIALOG:
+        path = "v1/configs/templates"
+        params: Optional[Dict[str, Any]] = None
+    else:
+        path = f"{waba_id}/message_templates"
+        # Explicitly request fields including `status` — without this
+        # parameter Meta Graph API v20+ may omit the status field entirely,
+        # causing every template to default to PENDING in the sync loop
+        # (`item.get("status") or "PENDING"`).
+        # `limit=250` avoids missing templates behind pagination.
+        params = {
+            "fields": "name,status,category,language,components,rejected_reason,quality_score,id",
+            "limit": "250",
+        }
+
     data = await provider_get_with_context(
         conn,
         ctx,
         tenant_id=tenant_id,
         operation="template_sync",
         path=path,
+        params=params,
         timeout=timeout,
     )
+
+    # ── Pagination: follow `paging.next` to collect ALL templates ─────────
+    # Meta returns at most `limit` items per page. For accounts with
+    # hundreds of templates we must follow the cursor chain.
+    if provider != WHATSAPP_PROVIDER_360DIALOG:
+        all_items = list(data.get("data") or [])
+        next_url = (data.get("paging") or {}).get("next")
+        pages = 0
+        while next_url and pages < 20:  # safety cap
+            pages += 1
+            try:
+                headers = _provider_headers(conn, ctx)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.get(next_url, headers=headers)
+                    page = resp.json()
+                all_items.extend(page.get("data") or [])
+                next_url = (page.get("paging") or {}).get("next")
+            except Exception as exc:
+                logger.warning(
+                    "[WA template_sync] pagination failed tenant=%s page=%d: %s",
+                    tenant_id, pages, exc,
+                )
+                break
+        if pages:
+            logger.info(
+                "[WA template_sync] tenant=%s fetched %d extra page(s), total=%d templates",
+                tenant_id, pages, len(all_items),
+            )
+        data = {**data, "data": all_items}
+
     return data, ctx
 
 

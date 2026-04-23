@@ -2255,6 +2255,17 @@ async def _sync_templates_for_tenant_inner(
             "error": "no_provider_data",
         }
 
+    # Debug: log raw status values from Meta so template-status mismatches
+    # can be diagnosed from server logs alone.
+    _status_summary = {}
+    for _item in live:
+        _raw = _item.get("status") or "(missing)"
+        _status_summary[_raw] = _status_summary.get(_raw, 0) + 1
+    logger.info(
+        "[templates/sync] tenant=%s Meta returned %d templates — raw status breakdown: %s",
+        tenant_id, len(live), _status_summary,
+    )
+
     # ── Delete seed/demo templates that were never real ───────────────────────
     try:
         deleted = (
