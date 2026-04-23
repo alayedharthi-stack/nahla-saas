@@ -1270,9 +1270,37 @@ async def debug_abandoned_cart_events(
         .all()
     )
 
+    from core.automation_engine import _is_autopilot_enabled
+    from core.billing import has_billing_access
+
+    autopilot_on = _is_autopilot_enabled(db, tenant_id)
+    billing_ok = has_billing_access(db, tenant_id)
+
+    execs = (
+        db.query(AutomationExecution)
+        .filter(AutomationExecution.tenant_id == tenant_id)
+        .order_by(AutomationExecution.executed_at.desc())
+        .limit(20)
+        .all()
+    )
+
     return {
         "tenant_id": tenant_id,
+        "autopilot_enabled": autopilot_on,
+        "billing_access": billing_ok,
         "total_events": len(all_events),
+        "recent_executions": [
+            {
+                "id": x.id,
+                "event_id": x.event_id,
+                "automation_id": x.automation_id,
+                "status": x.status,
+                "error_message": x.error_message,
+                "executed_at": str(x.executed_at),
+                "skip_reason": getattr(x, "skip_reason", None),
+            }
+            for x in execs
+        ],
         "events": [
             {
                 "id": e.id,
@@ -1474,10 +1502,36 @@ async def retry_all_stale_carts(
 
     db.commit()
 
+    # Immediately trigger the automation engine so the events don't wait
+    # for the next 60-second scheduler cycle.
+    engine_sent = 0
+    engine_error = None
+    if retried > 0:
+        try:
+            from core.automation_engine import process_pending_events
+            engine_sent = await process_pending_events(db, tenant_id)
+            _log.info("tenant=%s immediate engine run sent=%d", tenant_id, engine_sent)
+        except Exception as exc:
+            engine_error = str(exc)
+            _log.error("tenant=%s immediate engine run failed: %s", tenant_id, exc, exc_info=True)
+
     msg = f"تم إعادة جدولة {retried} سلة من المرحلة الأولى."
+    if engine_sent:
+        msg += f" تم إرسال {engine_sent} رسالة فوراً."
+    elif engine_error:
+        msg += f" تعذّر الإرسال الفوري: {engine_error}"
+    elif retried > 0:
+        msg += " ستُرسل خلال دقيقة."
     if errors:
         msg += f" ({len(errors)} سلة بدون عميل مرتبط)"
-    return {"ok": True, "retried": retried, "errors": errors, "message": msg}
+    return {
+        "ok": True,
+        "retried": retried,
+        "sent_immediately": engine_sent,
+        "engine_error": engine_error,
+        "errors": errors,
+        "message": msg,
+    }
 
 
 @router.get("/autopilot/abandoned-carts/{order_id}/recovery")
@@ -1710,14 +1764,26 @@ async def retry_abandoned_cart(
     db.commit()
     db.refresh(new_event)
 
+    engine_sent = 0
+    try:
+        from core.automation_engine import process_pending_events
+        engine_sent = await process_pending_events(db, tenant_id)
+    except Exception as exc:
+        logger.error("Immediate engine run failed for order=%s: %s", order_id, exc)
+
+    msg = f"تم حذف {deleted_count} سجل سابق وإعادة الجدولة من المرحلة الأولى."
+    if engine_sent:
+        msg += f" تم إرسال {engine_sent} رسالة فوراً."
+
     return {
         "ok":             True,
         "deduplicated":   False,
         "retry_event_id": new_event.id,
         "step_idx":       0,
         "deleted_old":    deleted_count,
+        "sent_immediately": engine_sent,
         "queued_at":      new_event.created_at.replace(tzinfo=timezone.utc).isoformat(),
-        "message":        f"تم حذف {deleted_count} سجل سابق وإعادة الجدولة من المرحلة الأولى.",
+        "message":        msg,
     }
 
 
