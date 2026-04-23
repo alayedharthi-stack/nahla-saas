@@ -221,7 +221,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     _open_windows: set[str] = set()
     for w in db.query(WaConversationWindow).filter(
         WaConversationWindow.tenant_id == tenant_id,
-        WaConversationWindow.category == "service",
+        WaConversationWindow.category.in_(["service", "marketing"]),
         WaConversationWindow.window_start >= _window_cutoff,
     ).all():
         _open_windows.add(_norm(w.customer_phone))
@@ -419,7 +419,13 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             if real and real.name and not real.name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
                 info["customer"] = real.name
 
-    # ── 6. Build result, strip internal keys ─────────────────────────────────
+    # ── 6. Fallback: if last message is within 24h, mark window open ────────
+    _24h_ago = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    for info in phone_info.values():
+        if not info.get("windowOpen") and info.get("time") and info["time"] >= _24h_ago:
+            info["windowOpen"] = True
+
+    # ── 7. Build result, strip internal keys ─────────────────────────────────
     result = sorted(phone_info.values(), key=lambda c: c.get("time") or "", reverse=True)
     for c in result:
         c.pop("_conv_id", None)
