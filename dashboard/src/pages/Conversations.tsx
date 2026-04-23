@@ -248,7 +248,7 @@ export default function Conversations() {
         </div>
 
         {/* Filter tabs */}
-        <div className="flex gap-1 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto scrollbar-none">
+        <div className="flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
           {(['all', 'active', 'human', 'agent_req', 'closed'] as const).map((f) => {
             const count = f === 'all' ? 0
               : f === 'active' ? conversations.filter(c => c.windowOpen === true).length

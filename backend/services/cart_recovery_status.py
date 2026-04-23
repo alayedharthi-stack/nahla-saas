@@ -372,10 +372,10 @@ def _load_executions_for_events(
 
 
 # ── Public API: per-cart summary ─────────────────────────────────────────────
-def _get_total_configured_stages(db: Session, tenant_id: int) -> int:
-    """Return the number of stages in the tenant's abandoned-cart automation.
+def _get_configured_steps(db: Session, tenant_id: int) -> List[Dict[str, Any]]:
+    """Return the stage configs from the tenant's abandoned-cart automation.
 
-    Falls back to 3 (the standard seed) when no automation is found.
+    Falls back to a 3-stage default when no automation is found.
     """
     from models import SmartAutomation  # noqa: PLC0415
 
@@ -390,8 +390,16 @@ def _get_total_configured_stages(db: Session, tenant_id: int) -> int:
     if auto and auto.config:
         steps = auto.config.get("steps") or []
         if steps:
-            return len(steps)
-    return 3
+            return list(steps)
+    return [
+        {"delay_minutes": 30, "enabled": True},
+        {"delay_minutes": 360, "enabled": True},
+        {"delay_minutes": 1425, "enabled": True},
+    ]
+
+
+def _get_total_configured_stages(db: Session, tenant_id: int) -> int:
+    return len(_get_configured_steps(db, tenant_id))
 
 
 def summarise_for_orders(
@@ -515,6 +523,32 @@ def _summary_from_tree(
 
 
 # ── Public API: full per-cart timeline ───────────────────────────────────────
+_STAGE_LABELS = {
+    1: "تذكير أول",
+    2: "متابعة",
+    3: "تذكير أخير",
+    4: "عرض خاص",
+}
+
+
+def _format_delay(minutes: int) -> str:
+    if minutes < 60:
+        return f"بعد {minutes} دقيقة"
+    hours = minutes / 60
+    if hours == int(hours):
+        h = int(hours)
+        if h == 1:
+            return "بعد ساعة"
+        if h == 2:
+            return "بعد ساعتين"
+        if h <= 10:
+            return f"بعد {h} ساعات"
+        return f"بعد {h} ساعة"
+    h = int(hours)
+    m = minutes - h * 60
+    return f"بعد {h} ساعة و {m} دقيقة"
+
+
 def timeline_for_order(
     db: Session,
     tenant_id: int,
@@ -522,8 +556,8 @@ def timeline_for_order(
 ) -> Dict[str, Any]:
     """Return the full step-by-step recovery timeline for one order.
 
-    Used by the dedicated detail endpoint. Includes the same summary
-    fields as ``summarise_for_orders`` plus a ``steps`` array.
+    Includes all configured stages — even those not yet emitted as
+    events — so the merchant sees the complete recovery plan.
     """
     root_id = _resolve_recovery_event_id(order)
     if root_id is None:
@@ -533,14 +567,66 @@ def timeline_for_order(
     if not events:
         return {**_empty_summary(), "steps": []}
 
-    total_stages = _get_total_configured_stages(db, tenant_id)
+    configured_steps = _get_configured_steps(db, tenant_id)
+    total_stages = len(configured_steps)
     executions = _load_executions_for_events(db, tenant_id, [e.id for e in events])
     summary = _summary_from_tree(
         events, executions, total_configured_stages=total_stages,
     )
-    steps = [
+
+    real_steps = [
         _step_for_event(ev, executions.get(ev.id), is_root=(ev.id == events[0].id))
         for ev in events
     ]
-    steps.sort(key=lambda s: (s["step_idx"], s["event_id"]))
-    return {**summary, "steps": steps}
+    real_steps.sort(key=lambda s: (s["step_idx"], s["event_id"]))
+
+    existing_idxs = {s["step_idx"] for s in real_steps}
+
+    root_created = events[0].created_at
+    if root_created and root_created.tzinfo is None:
+        root_created = root_created.replace(tzinfo=timezone.utc)
+
+    from datetime import timedelta  # noqa: PLC0415
+    for i, cfg in enumerate(configured_steps):
+        stage_num = i + 1
+        if stage_num in existing_idxs:
+            continue
+        if not cfg.get("enabled", True):
+            continue
+        delay = int(cfg.get("delay_minutes") or 0)
+        scheduled = None
+        if root_created:
+            scheduled = root_created + timedelta(minutes=delay)
+
+        real_steps.append({
+            "step_idx":      stage_num,
+            "event_id":      0,
+            "is_root":       False,
+            "status":        "upcoming",
+            "scheduled_at":  _isoformat_utc(scheduled),
+            "sent_at":       None,
+            "error":         None,
+            "failure_code":  None,
+            "failure_label": None,
+            "meta_error":    None,
+            "skip_reason":   None,
+            "wa_message_id": None,
+            "channel":       None,
+            "template_name": None,
+            "label":         _STAGE_LABELS.get(stage_num, f"المرحلة {stage_num}"),
+            "delay_minutes": delay,
+            "delay_label":   _format_delay(delay),
+        })
+
+    real_steps.sort(key=lambda s: (s["step_idx"], s.get("event_id") or 0))
+
+    for s in real_steps:
+        idx = s["step_idx"]
+        if "label" not in s:
+            s["label"] = _STAGE_LABELS.get(idx, f"المرحلة {idx}")
+        if "delay_minutes" not in s and idx - 1 < len(configured_steps):
+            cfg = configured_steps[idx - 1]
+            s["delay_minutes"] = int(cfg.get("delay_minutes") or 0)
+            s["delay_label"] = _format_delay(s["delay_minutes"])
+
+    return {**summary, "steps": real_steps}

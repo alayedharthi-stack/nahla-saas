@@ -84,6 +84,7 @@ export interface AbandonedCartRecoverySummary {
   status: RecoveryStatus
   steps_sent: number
   steps_failed: number
+  total_stages?: number
   last_sent_at: string | null
   last_status: string | null
   /** Raw error_message from AutomationExecution — kept for backward
@@ -104,7 +105,10 @@ export interface AbandonedCartRecoveryStep {
   step_idx: number
   event_id: number
   is_root: boolean
-  status: 'sent' | 'pending' | 'skipped' | 'failed' | string
+  status: 'sent' | 'pending' | 'skipped' | 'failed' | 'upcoming' | string
+  label?: string
+  delay_minutes?: number
+  delay_label?: string
   scheduled_at: string | null
   sent_at: string | null
   /** Raw error_message — kept for engineering, hidden from the merchant

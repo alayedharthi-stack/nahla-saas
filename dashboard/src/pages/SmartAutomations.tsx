@@ -330,6 +330,11 @@ const RECOVERY_BADGE: Record<string, { label: string; cls: string; tip: string }
     cls:   'bg-slate-50 text-slate-400 border-slate-200',
     tip:   'تم تخطي هذه المرحلة (تم الشراء أو المرحلة معطلة).',
   },
+  upcoming: {
+    label: 'قادمة',
+    cls:   'bg-indigo-50 text-indigo-500 border-indigo-200',
+    tip:   'هذه المرحلة ستُرسل تلقائياً في الموعد المحدد.',
+  },
 }
 
 function RecoveryStatusBadge({ status }: { status: RecoveryStatus | string }) {
@@ -527,56 +532,87 @@ function RecoveryDrawer({
 
               {/* Steps timeline */}
               <div>
-                <h4 className="text-xs font-medium text-slate-500 mb-2">سلسلة التذكيرات</h4>
+                <h4 className="text-xs font-medium text-slate-500 mb-2">
+                  خطة سير التذكيرات
+                  {timeline.total_stages ? <span className="text-slate-400 font-normal ms-1">({timeline.steps_sent}/{timeline.total_stages})</span> : ''}
+                </h4>
                 {timeline.steps.length === 0 ? (
                   <p className="text-xs text-slate-400">لا توجد مراحل بعد.</p>
                 ) : (
-                  <ol className="space-y-2">
-                    {timeline.steps.map((step) => (
-                      <li
-                        key={`${step.event_id}-${step.step_idx}`}
-                        className="flex items-start gap-2 rounded-md border border-slate-100 p-2.5"
-                      >
-                        <span className="shrink-0 w-6 h-6 rounded-full bg-slate-100 text-slate-600 text-xs flex items-center justify-center">
-                          {step.step_idx}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs font-medium text-slate-700">
-                              المرحلة {step.step_idx}{step.is_root ? ' (أساسية)' : ''}
-                            </span>
-                            <RecoveryStatusBadge status={step.status} />
-                          </div>
-                          <div className="text-[11px] text-slate-400 mt-0.5">
-                            {step.sent_at
-                              ? <>أُرسلت {formatRiyadh(step.sent_at)}</>
-                              : step.scheduled_at
-                                ? <>مجدولة {formatRiyadh(step.scheduled_at)}</>
-                                : ''}
-                          </div>
-                          {step.template_name && (
-                            <div className="text-[11px] text-slate-500 mt-0.5">
-                              قالب: <span className="font-mono">{step.template_name}</span>
+                  <ol className="relative">
+                    {timeline.steps.map((step, idx) => {
+                      const isLast = idx === timeline.steps.length - 1
+                      const isSent = step.status === 'sent'
+                      const isFailed = step.status === 'failed'
+                      const isUpcoming = step.status === 'upcoming'
+                      const isPending = step.status === 'pending'
+
+                      const dotCls = isSent ? 'bg-green-500 ring-green-100'
+                        : isFailed ? 'bg-red-500 ring-red-100'
+                        : isPending ? 'bg-amber-400 ring-amber-100'
+                        : 'bg-indigo-300 ring-indigo-100'
+
+                      const borderCls = isSent ? 'border-green-200 bg-green-50/30'
+                        : isFailed ? 'border-red-200 bg-red-50/30'
+                        : isPending ? 'border-amber-200 bg-amber-50/30'
+                        : isUpcoming ? 'border-slate-100 bg-slate-50/50'
+                        : 'border-slate-100'
+
+                      return (
+                        <li key={`${step.event_id}-${step.step_idx}`} className="flex gap-3 pb-0">
+                          {/* Vertical line + dot */}
+                          <div className="flex flex-col items-center">
+                            <div className={`shrink-0 w-5 h-5 rounded-full ring-2 flex items-center justify-center text-white text-[10px] font-bold ${dotCls}`}>
+                              {step.step_idx}
                             </div>
-                          )}
-                          {step.skip_reason && (
-                            <div className="text-[11px] text-amber-700 mt-0.5">
-                              تم التخطّي: {step.skip_reason}
+                            {!isLast && <div className="w-0.5 flex-1 min-h-[16px] bg-slate-200 my-0.5" />}
+                          </div>
+
+                          {/* Content */}
+                          <div className={`flex-1 min-w-0 rounded-lg border p-2.5 mb-2 ${borderCls}`}>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className={`text-xs font-medium ${isUpcoming ? 'text-slate-500' : 'text-slate-700'}`}>
+                                {(step as any).label || `المرحلة ${step.step_idx}`}
+                                {step.is_root ? ' (أساسية)' : ''}
+                              </span>
+                              <RecoveryStatusBadge status={step.status} />
                             </div>
-                          )}
-                          {(step.failure_label || step.error) && step.status === 'failed' && (
-                            <div className="text-[11px] text-red-600 mt-0.5">
-                              {step.failure_label || step.error}
-                              {step.failure_code && (
-                                <span className="text-red-400/70 font-mono ms-1">
-                                  ({step.failure_code})
-                                </span>
+
+                            <div className="text-[11px] text-slate-400 mt-0.5">
+                              {step.sent_at
+                                ? <>أُرسلت {formatRiyadh(step.sent_at)}</>
+                                : isPending && step.scheduled_at
+                                  ? <>مجدولة {formatRiyadh(step.scheduled_at)}</>
+                                  : isUpcoming && step.scheduled_at
+                                    ? <>ستُرسل {formatRiyadh(step.scheduled_at)}</>
+                                    : ''}
+                              {(step as any).delay_label && (
+                                <span className="ms-1 text-slate-300">({(step as any).delay_label})</span>
                               )}
                             </div>
-                          )}
-                        </div>
-                      </li>
-                    ))}
+
+                            {step.template_name && (
+                              <div className="text-[11px] text-slate-500 mt-0.5">
+                                قالب: <span className="font-mono">{step.template_name}</span>
+                              </div>
+                            )}
+                            {step.skip_reason && (
+                              <div className="text-[11px] text-amber-700 mt-0.5">
+                                تم التخطّي: {step.skip_reason}
+                              </div>
+                            )}
+                            {(step.failure_label || step.error) && isFailed && (
+                              <div className="text-[11px] text-red-600 mt-0.5">
+                                {step.failure_label || step.error}
+                                {step.failure_code && (
+                                  <span className="text-red-400/70 font-mono ms-1">({step.failure_code})</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </li>
+                      )
+                    })}
                   </ol>
                 )}
               </div>
