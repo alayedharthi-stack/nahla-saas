@@ -27,11 +27,81 @@ for _p in (_BACKEND, _DB):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from models import Campaign, Customer, WhatsAppConnection, WhatsAppTemplate
+import re as _re
+
+from models import Campaign, Conversation, Customer, MessageEvent, WhatsAppConnection, WhatsAppTemplate
 
 logger = logging.getLogger("nahla-backend")
 
 INTER_MESSAGE_DELAY = 1.5
+
+
+def _reconstruct_template_body(
+    template: WhatsAppTemplate,
+    customer_name: str,
+    store_name: str,
+    coupon_code: str = "",
+) -> str:
+    """Render the template body text by substituting {{N}} placeholders."""
+    slot_values = [customer_name, store_name, coupon_code or store_name,
+                   store_name, coupon_code or "", store_name]
+    body_text = ""
+    for comp in (template.components or []):
+        if (comp.get("type") or "").upper() == "BODY":
+            body_text = comp.get("text") or ""
+            break
+    if not body_text:
+        return f"[{template.name}]"
+
+    def _sub(m: _re.Match) -> str:
+        idx = int(m.group(1)) - 1
+        return slot_values[idx] if idx < len(slot_values) else m.group(0)
+
+    return _re.sub(r"\{\{(\d+)\}\}", _sub, body_text)
+
+
+def _record_campaign_message(
+    db: Session,
+    tenant_id: int,
+    campaign_id: int,
+    customer: Customer,
+    phone: str,
+    template: WhatsAppTemplate,
+    rendered_body: str,
+) -> None:
+    """Create a Conversation (if needed) and a MessageEvent for the sent campaign message.
+
+    Uses a SAVEPOINT so a failure here never corrupts the outer dispatch
+    transaction.
+    """
+    try:
+        db.begin_nested()
+        from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+        convo = _get_or_create_conversation(db, tenant_id, phone, customer.name or "")
+        db.add(MessageEvent(
+            conversation_id=convo.id,
+            tenant_id=tenant_id,
+            direction="outbound",
+            body=rendered_body,
+            event_type="campaign",
+            extra_metadata={
+                "customer_phone": phone,
+                "phone": phone,
+                "is_ai": False,
+                "campaign_id": campaign_id,
+                "template_name": template.name,
+            },
+        ))
+        db.flush()
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[campaign_dispatcher] failed to record message for %s: %s",
+            phone, exc,
+        )
 
 
 async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
@@ -156,6 +226,12 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
                     errors.append(f"{phone}: ({err_code}) {err_msg[:120]}")
             else:
                 sent += 1
+                rendered = _reconstruct_template_body(
+                    template, customer.name or "العميل", store_name, coupon_code,
+                )
+                _record_campaign_message(
+                    db, tenant_id, campaign_id, customer, phone, template, rendered,
+                )
                 logger.info("[campaign_dispatcher] campaign=%d: sent OK to %s", campaign_id, phone)
         except Exception as exc:
             failed += 1
