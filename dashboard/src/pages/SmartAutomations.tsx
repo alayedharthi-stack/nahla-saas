@@ -591,7 +591,9 @@ function AbandonedCartsQueue({
 
   const hasStale = items.some(i => {
     const r = i.recovery
-    return r && r.status === 'pending' && r.steps_sent === 0
+    if (!r) return true
+    return (r.status === 'pending' || r.status === 'failed' || r.status === 'no_recovery')
+      && r.steps_sent === 0
   })
 
   const handleCleanStale = async () => {

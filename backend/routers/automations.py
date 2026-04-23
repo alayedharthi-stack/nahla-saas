@@ -1245,16 +1245,12 @@ async def retry_all_stale_carts(
     db: Session = Depends(get_db),
 ):
     """
-    One-shot cleanup: find every cart_abandoned event that is still
-    pending (processed=False) but older than 72h, mark it processed,
-    and create a fresh immediate retry for each distinct customer.
+    One-shot cleanup: find every unprocessed cart_abandoned event,
+    mark it processed, and create a fresh immediate retry for each
+    distinct customer so Stage 1 sends right away.
     """
-    from datetime import timedelta  # noqa: PLC0415
-
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
-
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=72)
 
     stale_events = (
         db.query(AutomationEvent)
@@ -1262,7 +1258,6 @@ async def retry_all_stale_carts(
             AutomationEvent.tenant_id == tenant_id,
             AutomationEvent.event_type == "cart_abandoned",
             AutomationEvent.processed.is_(False),
-            AutomationEvent.created_at < cutoff,
         )
         .all()
     )
