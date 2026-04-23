@@ -106,13 +106,16 @@ export default function TrustBlock({
           aria-label={`السجل التجاري ${COMMERCIAL_REGISTRY_NUMBER} — موثق لدى وزارة التجارة`}
         >
           {/* MoC emblem — green Saudi palm-and-swords crest, icon-only PNG */}
-          <div className="shrink-0 w-14 h-14 rounded-xl bg-white flex items-center justify-center ring-1 ring-white/15 overflow-hidden shadow-sm p-1">
+          <div
+            className="shrink-0 w-14 h-14 rounded-xl bg-white ring-1 ring-white/15 overflow-hidden shadow-sm flex items-center justify-center"
+            style={{ padding: '6px' }}
+          >
             <img
               src={MOC_LOGO_SRC}
               alt="شعار وزارة التجارة"
               loading="lazy"
               decoding="async"
-              className="w-full h-full object-contain"
+              style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'scale(1.08)' }}
               onError={e => { e.currentTarget.style.display = 'none' }}
             />
           </div>
@@ -179,13 +182,16 @@ export default function TrustBlock({
           title="اضغط للتحقق من توثيق نحلة لدى منصة توثيق الأعمال"
         >
           {/* SBC icon-only logo — purple starburst mark, no wordmark text */}
-          <div className="shrink-0 w-14 h-14 rounded-xl bg-white flex items-center justify-center ring-1 ring-white/15 overflow-hidden shadow-sm p-1.5">
+          <div
+            className="shrink-0 w-14 h-14 rounded-xl bg-white ring-1 ring-white/15 overflow-hidden shadow-sm flex items-center justify-center"
+            style={{ padding: '6px' }}
+          >
             <img
               src={BUSINESS_AUTH_LOGO_SRC}
               alt="شعار المركز السعودي للأعمال"
               loading="lazy"
               decoding="async"
-              className="w-full h-full object-contain"
+              style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'scale(1.1)' }}
               onError={e => { e.currentTarget.style.display = 'none' }}
             />
           </div>
