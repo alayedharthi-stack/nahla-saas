@@ -1504,28 +1504,91 @@ async def retry_all_stale_carts(
 
     db.commit()
 
-    # Immediately process the new events, bypassing autopilot/billing guards
-    # since the merchant explicitly requested the retry.
+    # Immediately process the new events, bypassing only the autopilot toggle.
     engine_sent = 0
     engine_error = None
+    diagnostics: dict = {}
     if new_event_ids:
-        try:
-            from core.automation_engine import process_pending_events
-            engine_sent = await process_pending_events(
-                db, tenant_id,
-                skip_autopilot_check=True,
-                event_ids=new_event_ids,
+        # Pre-flight diagnostics: check what blocks the engine
+        from core.automation_engine import _is_autopilot_enabled
+        from core.billing import has_billing_access
+        from models import SmartAutomation, WhatsAppConnection
+
+        diag_billing = has_billing_access(db, tenant_id)
+        diag_autopilot = _is_autopilot_enabled(db, tenant_id)
+        diag_automations = (
+            db.query(SmartAutomation)
+            .filter(
+                SmartAutomation.tenant_id == tenant_id,
+                SmartAutomation.trigger_event == "cart_abandoned",
             )
-            _log.info("tenant=%s immediate engine run sent=%d", tenant_id, engine_sent)
-        except Exception as exc:
-            engine_error = str(exc)
-            _log.error("tenant=%s immediate engine run failed: %s", tenant_id, exc, exc_info=True)
+            .all()
+        )
+        diag_wa = (
+            db.query(WhatsAppConnection)
+            .filter(
+                WhatsAppConnection.tenant_id == tenant_id,
+                WhatsAppConnection.status == "connected",
+            )
+            .first()
+        )
+        diagnostics = {
+            "billing_access": diag_billing,
+            "autopilot_enabled": diag_autopilot,
+            "matching_automations": [
+                {"id": a.id, "name": a.name, "enabled": a.enabled,
+                 "trigger_event": a.trigger_event}
+                for a in diag_automations
+            ],
+            "whatsapp_connected": diag_wa is not None,
+            "new_event_ids": new_event_ids,
+        }
+        _log.warning("tenant=%s pre-flight diagnostics: %s", tenant_id, diagnostics)
+
+        if not diag_billing:
+            engine_error = "انتهت التجربة المجانية — يجب الاشتراك لإرسال التذكيرات"
+        elif not diag_automations or not any(a.enabled for a in diag_automations):
+            engine_error = "أتمتة استرداد العربة المتروكة غير مفعّلة — فعّلها من إعدادات الطيار الآلي"
+        elif not diag_wa:
+            engine_error = "واتساب الأعمال غير متصل — اربط واتساب أولاً"
+        else:
+            try:
+                from core.automation_engine import process_pending_events
+                engine_sent = await process_pending_events(
+                    db, tenant_id,
+                    skip_autopilot_check=True,
+                    event_ids=new_event_ids,
+                )
+                _log.info("tenant=%s immediate engine sent=%d", tenant_id, engine_sent)
+
+                # Check what happened to the events after processing
+                post_events = (
+                    db.query(AutomationEvent)
+                    .filter(AutomationEvent.id.in_(new_event_ids))
+                    .all()
+                )
+                post_execs = (
+                    db.query(AutomationExecution)
+                    .filter(AutomationExecution.event_id.in_(new_event_ids))
+                    .all()
+                )
+                diagnostics["post_events"] = [
+                    {"id": e.id, "processed": e.processed} for e in post_events
+                ]
+                diagnostics["post_executions"] = [
+                    {"event_id": x.event_id, "status": x.status,
+                     "error": x.error_message}
+                    for x in post_execs
+                ]
+            except Exception as exc:
+                engine_error = str(exc)
+                _log.error("tenant=%s engine run failed: %s", tenant_id, exc, exc_info=True)
 
     msg = f"تم إعادة جدولة {retried} سلة من المرحلة الأولى."
     if engine_sent:
         msg += f" تم إرسال {engine_sent} رسالة فوراً."
     elif engine_error:
-        msg += f" تعذّر الإرسال الفوري: {engine_error}"
+        msg += f" ⚠ {engine_error}"
     elif retried > 0:
         msg += " ستُرسل خلال دقيقة."
     if errors:
@@ -1535,6 +1598,7 @@ async def retry_all_stale_carts(
         "retried": retried,
         "sent_immediately": engine_sent,
         "engine_error": engine_error,
+        "diagnostics": diagnostics,
         "errors": errors,
         "message": msg,
     }

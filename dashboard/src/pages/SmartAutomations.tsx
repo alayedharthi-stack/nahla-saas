@@ -597,16 +597,27 @@ function AbandonedCartsQueue({
       && r.steps_sent === 0
   })
 
+  const [noticeKind, setNoticeKind] = useState<'ok' | 'warn' | 'err'>('ok')
+
   const handleCleanStale = async () => {
     setCleaningStale(true)
     setStaleNotice(null)
     try {
       const res = await autopilotApi.retryAllStaleCarts()
       setStaleNotice(res.message)
-      setRetryDone(true)
+      if (res.sent_immediately && res.sent_immediately > 0) {
+        setNoticeKind('ok')
+        setRetryDone(true)
+      } else if (res.engine_error) {
+        setNoticeKind('warn')
+      } else {
+        setNoticeKind('ok')
+        setRetryDone(true)
+      }
       onRetried?.()
     } catch (e) {
       setStaleNotice(e instanceof Error ? e.message : 'فشل التنظيف')
+      setNoticeKind('err')
     } finally {
       setCleaningStale(false)
     }
@@ -623,7 +634,7 @@ function AbandonedCartsQueue({
   return (
     <>
       {hasStale && manualRetryEnabled && (
-        <div className="flex items-center justify-between gap-3 px-3 py-2.5 bg-amber-50 border-b border-amber-200 rounded-t-lg">
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 px-3 py-2.5 bg-amber-50 border-b border-amber-200 rounded-t-lg">
           <div className="flex items-center gap-2 text-xs text-amber-700">
             <AlertCircle className="w-3.5 h-3.5 shrink-0" />
             <span>يوجد سلات عالقة لم تُرسل تذكيراتها — يمكن إعادة جدولتها دفعة واحدة</span>
@@ -639,7 +650,11 @@ function AbandonedCartsQueue({
         </div>
       )}
       {staleNotice && (
-        <div className="px-3 py-2 text-xs bg-green-50 text-green-700 border-b border-green-200">{staleNotice}</div>
+        <div className={`sticky top-10 z-10 px-3 py-2 text-xs border-b ${
+          noticeKind === 'ok'   ? 'bg-green-50 text-green-700 border-green-200' :
+          noticeKind === 'warn' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                                  'bg-red-50 text-red-700 border-red-200'
+        }`}>{staleNotice}</div>
       )}
       <div className="divide-y divide-slate-100">
         {items.map((item) => {
