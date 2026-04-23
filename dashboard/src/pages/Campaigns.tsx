@@ -1070,6 +1070,39 @@ function CampaignWizard({
   )
 }
 
+// ── Debug template link (fetches from API and shows JSON) ─────────────────────
+
+function DebugTemplateLink({ templateId }: { templateId: string }) {
+  const [data, setData] = useState<Record<string, unknown> | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const handleClick = async () => {
+    if (data) { setData(null); return }
+    setLoading(true)
+    try {
+      const result = await campaignsApi.debugTemplate(templateId)
+      setData(result)
+    } catch { setData({ error: 'فشل جلب بيانات التشخيص' }) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <div className="mt-2">
+      <button
+        onClick={handleClick}
+        className="text-[10px] text-blue-600 hover:underline flex items-center gap-1"
+      >
+        🔍 {loading ? 'جارٍ الفحص…' : data ? 'إخفاء التشخيص' : 'فحص القالب والحمولة المُرسلة'}
+      </button>
+      {data && (
+        <pre className="mt-1.5 text-[9px] bg-slate-900 text-green-300 rounded p-2 overflow-x-auto max-h-60 leading-relaxed" dir="ltr">
+          {JSON.stringify(data, null, 2)}
+        </pre>
+      )}
+    </div>
+  )
+}
+
 // ── Campaign list row ─────────────────────────────────────────────────────────
 
 function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; onStatusChange: (id: number, status: string) => void }) {
@@ -1182,14 +1215,7 @@ function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; o
                 ))}
               </ul>
               {campaign.template_id && (
-                <a
-                  href={`/api/campaigns/debug-template/${campaign.template_id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-block mt-2 text-[10px] text-blue-600 hover:underline"
-                >
-                  🔍 فحص القالب والحمولة المُرسلة (تشخيص)
-                </a>
+                <DebugTemplateLink templateId={campaign.template_id} />
               )}
             </div>
           </td>

@@ -172,6 +172,9 @@ export const campaignsApi = {
       body: JSON.stringify({ status }),
     }),
 
+  debugTemplate: (templateId: string) =>
+    apiCall<Record<string, unknown>>(`/campaigns/debug-template/${templateId}`),
+
   // Legacy test-send (still used by older flows). The wizard below now
   // posts to /campaigns/wizard/test-send for richer error reporting.
   testSend: (phone: string, templateId: string, templateName: string, templateLanguage: string, variables: Record<string, string>) =>
