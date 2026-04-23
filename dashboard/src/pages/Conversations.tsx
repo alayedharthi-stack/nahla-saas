@@ -185,12 +185,17 @@ export default function Conversations() {
     }
   }
 
+  const _isAwaitingAgent = (c: DashboardConversation) =>
+    c.status === 'human' && c.handoffReason === 'customer_request' && c.lastMsgType !== 'manual'
+  const _isHumanResponding = (c: DashboardConversation) =>
+    c.status === 'human' && !_isAwaitingAgent(c)
+
   const filtered = conversations.filter(c => {
     let matchFilter = false
     if (filter === 'all') matchFilter = true
     else if (filter === 'active') matchFilter = c.windowOpen === true
-    else if (filter === 'human') matchFilter = c.status === 'human' && c.handoffReason !== 'customer_request'
-    else if (filter === 'agent_req') matchFilter = c.status === 'human' && c.handoffReason === 'customer_request'
+    else if (filter === 'human') matchFilter = _isHumanResponding(c)
+    else if (filter === 'agent_req') matchFilter = _isAwaitingAgent(c)
     else if (filter === 'closed') matchFilter = c.windowOpen === false
     const matchSearch = !searchQuery || c.customer.includes(searchQuery) || c.phone.includes(searchQuery)
     return matchFilter && matchSearch
@@ -252,8 +257,8 @@ export default function Conversations() {
           {(['all', 'active', 'human', 'agent_req', 'closed'] as const).map((f) => {
             const count = f === 'all' ? 0
               : f === 'active' ? conversations.filter(c => c.windowOpen === true).length
-              : f === 'human' ? conversations.filter(c => c.status === 'human' && c.handoffReason !== 'customer_request').length
-              : f === 'agent_req' ? conversations.filter(c => c.status === 'human' && c.handoffReason === 'customer_request').length
+              : f === 'human' ? conversations.filter(c => _isHumanResponding(c)).length
+              : f === 'agent_req' ? conversations.filter(c => _isAwaitingAgent(c)).length
               : conversations.filter(c => c.windowOpen === false).length
             return (
               <button
@@ -314,7 +319,7 @@ export default function Conversations() {
                   )}
                 </div>
                 <div className="flex items-center gap-1.5 mt-1">
-                  {c.status === 'human' && c.handoffReason === 'customer_request' ? (
+                  {c.status === 'human' && c.handoffReason === 'customer_request' && c.lastMsgType !== 'manual' ? (
                     <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200 animate-pulse">
                       <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
                     </span>
