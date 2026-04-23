@@ -585,14 +585,17 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
         extra_metadata={"customer_phone": customer_phone, "is_ai": False},
     ))
 
-    active_session = db.query(HandoffSession).filter(
+    raw = (customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
+    suffix = raw[-9:] if len(raw) >= 9 else raw
+    active_sessions = db.query(HandoffSession).filter(
         HandoffSession.tenant_id == tenant_id,
-        HandoffSession.customer_phone == customer_phone,
         HandoffSession.status == "active",
-    ).first()
-    if active_session:
-        from handoff.manager import resolve_handoff_session  # noqa: PLC0415
-        resolve_handoff_session(db, active_session.id, tenant_id, resolved_by="manual_reply")
+    ).all()
+    for hs in active_sessions:
+        hs_raw = (hs.customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
+        if hs_raw == raw or hs_raw.endswith(suffix):
+            from handoff.manager import resolve_handoff_session  # noqa: PLC0415
+            resolve_handoff_session(db, hs.id, tenant_id, resolved_by="manual_reply")
 
     convo.status = "active"
     convo.is_human_handoff = False
@@ -632,14 +635,16 @@ async def close_conversation(body: CloseIn, request: Request, db: Session = Depe
     get_or_create_tenant(db, tenant_id)
 
     convo = _get_or_create_conversation(db, tenant_id, body.customer_phone)
-    active_session = db.query(HandoffSession).filter(
+    close_raw = (body.customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
+    close_suffix = close_raw[-9:] if len(close_raw) >= 9 else close_raw
+    for hs in db.query(HandoffSession).filter(
         HandoffSession.tenant_id == tenant_id,
-        HandoffSession.customer_phone == body.customer_phone,
         HandoffSession.status == "active",
-    ).first()
-    if active_session:
-        from handoff.manager import resolve_handoff_session  # noqa: PLC0415
-        resolve_handoff_session(db, active_session.id, tenant_id, resolved_by="dashboard_close")
+    ).all():
+        hs_raw = (hs.customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
+        if hs_raw == close_raw or hs_raw.endswith(close_suffix):
+            from handoff.manager import resolve_handoff_session  # noqa: PLC0415
+            resolve_handoff_session(db, hs.id, tenant_id, resolved_by="dashboard_close")
 
     convo.status = "active"
     convo.is_human_handoff = False
