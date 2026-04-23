@@ -4,6 +4,7 @@ import { Eye, EyeOff, AlertCircle, Loader2, ArrowRight } from 'lucide-react'
 import { login, getDefaultRoute } from '../auth'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
+import TrustBlock from '../components/TrustBlock'
 
 export default function Login() {
   const navigate = useNavigate()
@@ -158,6 +159,11 @@ export default function Login() {
             {t(tr => tr.login.dev)}
           </p>
           <LegalFooter variant="light" />
+        </div>
+
+        {/* Saudi commercial registration & business-authentication trust block */}
+        <div className="mt-2 mb-6 max-w-3xl mx-auto w-full">
+          <TrustBlock variant="light" />
         </div>
         </div>
       </div>

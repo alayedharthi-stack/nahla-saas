@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import LegalFooter from '../components/LegalFooter'
+import TrustBlock from '../components/TrustBlock'
 import WhatsAppDemo from '../components/landing/WhatsAppDemo'
 import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 import {
@@ -1240,6 +1241,11 @@ export default function Landing() {
               <span className="text-slate-500">nahlah.ai</span>
             </p>
             <LegalFooter variant="dark" />
+          </div>
+
+          {/* Saudi commercial registration & business-authentication trust block */}
+          <div className="mt-6">
+            <TrustBlock variant="dark" />
           </div>
         </div>
       </footer>
