@@ -125,33 +125,18 @@ def _resolve_customer_phone(convo: Conversation) -> str:
 
 @router.get("")
 async def list_conversations(request: Request, db: Session = Depends(get_db), limit: int = 100):
+    """
+    Build the conversation list from **all** sources:
+    1. ``Conversation`` records (canonical)
+    2. Latest ``MessageEvent`` per conversation (actual last message)
+    3. ``ConversationTrace`` fallback for phones without MessageEvent
+    """
+    from sqlalchemy import func  # noqa: PLC0415
+
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    trace_rows = (
-        db.query(ConversationTrace)
-        .filter(ConversationTrace.tenant_id == tenant_id)
-        .order_by(ConversationTrace.created_at.desc())
-        .limit(limit * 5)
-        .all()
-    )
-
-    grouped: Dict[str, List[ConversationTrace]] = defaultdict(list)
-    for row in trace_rows:
-        grouped[row.customer_phone].append(row)
-
-    convo_rows = (
-        db.query(Conversation)
-        .filter(Conversation.tenant_id == tenant_id)
-        .all()
-    )
-    convo_map: Dict[str, Conversation] = {}
-    for convo in convo_rows:
-        phone = _resolve_customer_phone(convo)
-        if phone:
-            convo_map[phone] = convo
-
-    active_handoffs = {
+    active_handoffs: set[str] = {
         row.customer_phone
         for row in db.query(HandoffSession).filter(
             HandoffSession.tenant_id == tenant_id,
@@ -159,44 +144,133 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
         ).all()
     }
 
-    conversations: List[Dict[str, Any]] = []
-    for phone, rows in grouped.items():
-        latest = rows[0]
-        convo = convo_map.get(phone)
+    def _status_for(phone: str, convo: Optional[Conversation]) -> str:
         if phone in active_handoffs or (convo and convo.is_human_handoff):
-            status = "human"
-        elif convo and str(convo.status).lower() == "closed":
-            status = "closed"
-        else:
-            status = "active"
-        conversations.append({
-            "id": latest.session_id or f"trace-{phone}",
-            "customer": (convo.customer.name if convo and convo.customer and convo.customer.name else phone),
-            "phone": phone,
-            "lastMsg": latest.message or "",
-            "time": latest.created_at.isoformat() if latest.created_at else "",
-            "isAI": status != "human",
-            "status": status,
-            "unread": 0,
-        })
+            return "human"
+        if convo and str(convo.status).lower() == "closed":
+            return "closed"
+        return "active"
 
-    for phone, convo in convo_map.items():
-        if phone in grouped:
+    # ── 1. All Conversation records → phone_info map ─────────────────────────
+    convo_rows = (
+        db.query(Conversation)
+        .filter(Conversation.tenant_id == tenant_id)
+        .all()
+    )
+    phone_info: Dict[str, Dict[str, Any]] = {}
+    conv_id_to_phone: Dict[int, str] = {}
+    for convo in convo_rows:
+        phone = _resolve_customer_phone(convo)
+        if not phone:
             continue
-        status = "human" if (phone in active_handoffs or convo.is_human_handoff) else ("closed" if str(convo.status).lower() == "closed" else "active")
-        conversations.append({
+        status = _status_for(phone, convo)
+        name = convo.customer.name if convo.customer and convo.customer.name else phone
+        phone_info[phone] = {
             "id": str(convo.id),
-            "customer": (convo.customer.name if convo.customer and convo.customer.name else phone),
+            "customer": name,
             "phone": phone,
             "lastMsg": "",
             "time": "",
             "isAI": status != "human",
             "status": status,
             "unread": 0,
-        })
+            "_conv_id": convo.id,
+        }
+        conv_id_to_phone[convo.id] = phone
 
-    conversations.sort(key=lambda c: c["time"], reverse=True)
-    return {"conversations": conversations[:limit]}
+    # ── 2. Latest MessageEvent per conversation_id (single query) ────────────
+    conv_ids = list(conv_id_to_phone.keys())
+    if conv_ids:
+        latest_sq = (
+            db.query(
+                MessageEvent.conversation_id,
+                func.max(MessageEvent.id).label("max_id"),
+            )
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                MessageEvent.conversation_id.in_(conv_ids),
+            )
+            .group_by(MessageEvent.conversation_id)
+            .subquery()
+        )
+        latest_msgs = (
+            db.query(MessageEvent)
+            .join(latest_sq, MessageEvent.id == latest_sq.c.max_id)
+            .all()
+        )
+        for msg in latest_msgs:
+            phone = conv_id_to_phone.get(msg.conversation_id)
+            if phone and phone in phone_info:
+                phone_info[phone]["lastMsg"] = msg.body or ""
+                phone_info[phone]["time"] = msg.created_at.isoformat() if msg.created_at else ""
+
+    # ── 3. Unread count per conversation (inbound after last outbound) ───────
+    if conv_ids:
+        last_out_sq = (
+            db.query(
+                MessageEvent.conversation_id,
+                func.max(MessageEvent.created_at).label("last_out"),
+            )
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                MessageEvent.conversation_id.in_(conv_ids),
+                MessageEvent.direction == "outbound",
+            )
+            .group_by(MessageEvent.conversation_id)
+            .subquery()
+        )
+        unread_rows = (
+            db.query(
+                MessageEvent.conversation_id,
+                func.count(MessageEvent.id).label("cnt"),
+            )
+            .outerjoin(last_out_sq, MessageEvent.conversation_id == last_out_sq.c.conversation_id)
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                MessageEvent.conversation_id.in_(conv_ids),
+                MessageEvent.direction != "outbound",
+                (MessageEvent.created_at > last_out_sq.c.last_out) | (last_out_sq.c.last_out.is_(None)),
+            )
+            .group_by(MessageEvent.conversation_id)
+            .all()
+        )
+        for cid, cnt in unread_rows:
+            phone = conv_id_to_phone.get(cid)
+            if phone and phone in phone_info:
+                phone_info[phone]["unread"] = cnt
+
+    # ── 4. ConversationTrace fallback for gaps ───────────────────────────────
+    trace_rows = (
+        db.query(ConversationTrace)
+        .filter(ConversationTrace.tenant_id == tenant_id)
+        .order_by(ConversationTrace.created_at.desc())
+        .limit(limit * 5)
+        .all()
+    )
+    for row in trace_rows:
+        phone = row.customer_phone
+        if phone in phone_info:
+            if not phone_info[phone]["lastMsg"] and not phone_info[phone]["time"]:
+                phone_info[phone]["lastMsg"] = row.message or ""
+                phone_info[phone]["time"] = row.created_at.isoformat() if row.created_at else ""
+        else:
+            phone_info[phone] = {
+                "id": row.session_id or f"trace-{phone}",
+                "customer": phone,
+                "phone": phone,
+                "lastMsg": row.message or "",
+                "time": row.created_at.isoformat() if row.created_at else "",
+                "isAI": True,
+                "status": _status_for(phone, None),
+                "unread": 0,
+                "_conv_id": None,
+            }
+
+    # ── 5. Build result, strip internal keys ─────────────────────────────────
+    result = sorted(phone_info.values(), key=lambda c: c.get("time") or "", reverse=True)
+    for c in result:
+        c.pop("_conv_id", None)
+    return {"conversations": result[:limit]}
 
 
 @router.get("/messages/{customer_phone}")

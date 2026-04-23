@@ -41,31 +41,63 @@ export default function Conversations() {
     return !!a && !!b && norm(a) === norm(b)
   }
 
-  const load = () => {
-    featureRealityApi.conversations()
-      .then(async ({ conversations }) => {
-        const withMessages = await Promise.all(
-          conversations.map(async (c) => {
-            const msgRes = await featureRealityApi.conversationMessages(c.phone)
-            return { ...c, messages: msgRes.messages }
-          }),
-        )
-        setConversations(withMessages)
-        setSelected((prev) => {
-          if (requestedPhone) {
-            const hit = withMessages.find(c => phonesMatch(c.phone, requestedPhone))
-            if (hit) return hit
-          }
-          return withMessages.find(c => c.phone === prev?.phone) ?? prev
+  const loadList = async () => {
+    try {
+      const { conversations: list } = await featureRealityApi.conversations()
+      setConversations((prev) => {
+        return list.map((c) => {
+          const old = prev.find((p) => p.phone === c.phone)
+          return { ...c, messages: old?.messages ?? [] }
         })
       })
-      .catch(() => setConversations([]))
+      setSelected((prev) => {
+        if (requestedPhone) {
+          const hit = list.find(c => phonesMatch(c.phone, requestedPhone))
+          if (hit) {
+            const old = conversations.find(p => p.phone === hit.phone)
+            return { ...hit, messages: old?.messages ?? prev?.messages ?? [] }
+          }
+        }
+        if (prev) {
+          const fresh = list.find(c => c.phone === prev.phone)
+          if (fresh) return { ...fresh, messages: prev.messages }
+        }
+        return prev
+      })
+    } catch {
+      setConversations([])
+    }
+  }
+
+  const loadMessages = async (phone: string) => {
+    try {
+      const { messages } = await featureRealityApi.conversationMessages(phone)
+      setConversations((prev) =>
+        prev.map((c) => (c.phone === phone ? { ...c, messages } : c)),
+      )
+      setSelected((prev) =>
+        prev && prev.phone === phone ? { ...prev, messages } : prev,
+      )
+    } catch { /* silent */ }
   }
 
   useEffect(() => {
-    load()
+    loadList().then(() => {
+      if (requestedPhone) {
+        loadMessages(requestedPhone)
+      }
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedPhone])
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadList()
+      if (selected) loadMessages(selected.phone)
+    }, 15_000)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.phone])
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -83,6 +115,7 @@ export default function Conversations() {
   const selectConversation = (c: Conversation) => {
     setSelected(c)
     setMobileView('chat')
+    loadMessages(c.phone)
   }
 
   const goBackToList = () => {
@@ -100,7 +133,8 @@ export default function Conversations() {
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto'
       }
-      await load()
+      await loadMessages(selected.phone)
+      await loadList()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر إرسال الرد')
     }
@@ -121,7 +155,7 @@ export default function Conversations() {
         customer_name: selected.customer,
         last_message: selected.lastMsg,
       })
-      await load()
+      await loadList()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر تحويل المحادثة')
     }
@@ -134,7 +168,7 @@ export default function Conversations() {
       await featureRealityApi.closeConversation({
         customer_phone: selected.phone,
       })
-      await load()
+      await loadList()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر إغلاق المحادثة')
     }
