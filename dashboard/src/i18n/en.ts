@@ -51,7 +51,7 @@ const en: Translations = {
     adminTagline: 'Owner Panel',
     adminOwner:   'Platform Owner',
     storeBadge:   { plan: 'Growth Plan' },
-    logoTagline:  'Store Intelligence',
+    logoTagline:  'Sales Autopilot',
   },
 
   topbar: {

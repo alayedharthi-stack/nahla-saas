@@ -121,8 +121,13 @@ interface SidebarProps {
 export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const { t } = useLanguage()
   const [storeName, setStoreName] = useState('نحلة')
-  const [logoUrl,   setLogoUrl]   = useState('/logo.png')
+  // Sidebar-only logo override: use the white-background brand asset here so
+  // the bee mark sits cleanly on the dark sidebar. Other surfaces (login,
+  // landing, register, …) keep using the regular /logo.png.
+  const NAHLA_SIDEBAR_LOGO = '/logo-nahla.png'
+  const [logoUrl,   setLogoUrl]   = useState(NAHLA_SIDEBAR_LOGO)
   const adminMode = isAdmin()
+  const usingDefaultLogo = logoUrl === NAHLA_SIDEBAR_LOGO
 
   useEffect(() => {
     if (adminMode) return  // Admin doesn't need merchant store info
@@ -159,7 +164,13 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       >
         {/* Logo */}
         <div className="flex items-center gap-2.5 px-5 py-5 border-b border-slate-800">
-          <div className={`w-8 h-8 rounded-lg shrink-0 overflow-hidden flex items-center justify-center ${adminMode ? 'bg-amber-500/20' : 'bg-slate-800'}`}>
+          <div className={`w-8 h-8 rounded-lg shrink-0 overflow-hidden flex items-center justify-center ${
+            adminMode
+              ? 'bg-amber-500/20'
+              : usingDefaultLogo
+                ? 'bg-white shadow-[0_0_0_1px_rgba(255,255,255,0.08)]'
+                : 'bg-slate-800'
+          }`}>
             {adminMode
               ? <Crown className="w-4 h-4 text-amber-400" />
               : <img src={logoUrl} alt={storeName} className="w-full h-full object-contain"

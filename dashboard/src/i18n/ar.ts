@@ -55,7 +55,7 @@ const ar: Translations = {
     adminTagline: 'لوحة المالك',
     adminOwner:   'مالك المنصة',
     storeBadge:   { plan: 'خطة النمو' },
-    logoTagline:  'ذكاء المتجر',
+    logoTagline:  'طيار المبيعات الآلي',
   },
 
   topbar: {
