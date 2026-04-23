@@ -74,6 +74,12 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
     auto_coupon = tpl_vars.get("_auto_coupon") == "true"
     discount_pct_raw = tpl_vars.get("_discount_percent")
     discount_pct = int(discount_pct_raw) if discount_pct_raw else None
+
+    failed_count = int(tpl_vars.get("_failed_count", "0") or "0")
+    skipped_count = int(tpl_vars.get("_skipped_count", "0") or "0")
+    raw_errors = tpl_vars.get("_dispatch_errors", "") or ""
+    dispatch_errors = [e for e in raw_errors.split("|") if e] if raw_errors else []
+
     return {
         "id": c.id,
         "name": c.name,
@@ -95,6 +101,9 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
         "auto_coupon": auto_coupon,
         "discount_percent": discount_pct,
         "sent_count": c.sent_count,
+        "failed_count": failed_count,
+        "skipped_count": skipped_count,
+        "dispatch_errors": dispatch_errors,
         "delivered_count": c.delivered_count,
         "read_count": c.read_count,
         "clicked_count": c.clicked_count,
@@ -281,8 +290,8 @@ async def test_send(body: TestSendIn, request: Request, db: Session = Depends(ge
 
 async def _dispatch_campaign_async(campaign_id: int) -> None:
     """Fire-and-forget async task that dispatches a campaign using a fresh
-    DB session. Runs on the main uvicorn event loop via asyncio.create_task,
-    so all async HTTP calls (provider_send_message → httpx) work natively."""
+    DB session.  Runs on the main uvicorn event loop via asyncio.create_task,
+    so all async HTTP calls (provider_send_message -> httpx) work natively."""
     from core.database import SessionLocal  # noqa: PLC0415
     from services.campaign_dispatcher import dispatch_campaign  # noqa: PLC0415
 
@@ -300,5 +309,17 @@ async def _dispatch_campaign_async(campaign_id: int) -> None:
             "[campaigns] dispatch failed campaign=%d: %s",
             campaign_id, exc, exc_info=True,
         )
+        try:
+            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+            campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+            if campaign and campaign.status not in ("completed", "failed"):
+                campaign.status = "failed"
+                tpl_vars = dict(campaign.template_variables or {})
+                tpl_vars["_dispatch_errors"] = f"خطأ داخلي: {str(exc)[:200]}"
+                campaign.template_variables = tpl_vars
+                flag_modified(campaign, "template_variables")
+                db.commit()
+        except Exception:
+            logger.error("[campaigns] could not mark campaign=%d as failed", campaign_id, exc_info=True)
     finally:
         db.close()

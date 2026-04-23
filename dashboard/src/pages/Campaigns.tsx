@@ -96,8 +96,9 @@ const STATUS_META: Record<string, { label: string; variant: 'green' | 'amber' | 
   active:    { label: 'نشطة',    variant: 'green' },
   scheduled: { label: 'مجدولة',  variant: 'amber' },
   completed: { label: 'مكتملة',  variant: 'blue'  },
-  paused:    { label: 'موقوفة',  variant: 'red'   },
+  paused:    { label: 'موقوفة',  variant: 'amber' },
   draft:     { label: 'مسودة',   variant: 'slate' },
+  failed:    { label: 'فشلت',    variant: 'red'   },
 }
 
 // Map the new goal keys back to the legacy `campaign_type` enum the
@@ -1076,70 +1077,121 @@ function CampaignRow({ campaign, onStatusChange }: { campaign: CampaignRecord; o
   const tm = TYPE_META[campaign.campaign_type] ?? TYPE_META['broadcast']
   const openRate = campaign.sent_count > 0 ? Math.round((campaign.read_count / campaign.sent_count) * 100) : 0
   const convRate = campaign.sent_count > 0 ? Math.round((campaign.converted_count / campaign.sent_count) * 100) : 0
+  const [showErrors, setShowErrors] = useState(false)
+
+  const isFailed = campaign.status === 'failed'
+  const hasErrors = (campaign.dispatch_errors?.length ?? 0) > 0
+  const failedCount = campaign.failed_count ?? 0
 
   return (
-    <tr className="hover:bg-slate-50 transition-colors">
-      <td className="px-5 py-3.5">
-        <p className="text-xs font-semibold text-slate-900">{campaign.name}</p>
-        <p className="text-[10px] text-slate-400 font-mono mt-0.5">{campaign.template_name?.replace(/_/g, ' ')}</p>
-      </td>
-      <td className="px-5 py-3.5">
-        <span className="flex items-center gap-1.5 text-xs text-slate-600">{tm.icon} {tm.label}</span>
-      </td>
-      <td className="px-5 py-3.5">
-        <Badge label={sm.label} variant={sm.variant} dot />
-        {campaign.template_status && (
-          <p className="text-[10px] text-slate-400 mt-1">قالب: {campaign.template_status}</p>
-        )}
-      </td>
-      <td className="px-5 py-3.5 text-xs text-slate-700">{campaign.audience_count.toLocaleString('ar-SA')}</td>
-      <td className="px-5 py-3.5 text-xs text-slate-700">{campaign.sent_count.toLocaleString('ar-SA')}</td>
-      <td className="px-5 py-3.5">
-        <span className="text-xs text-slate-700">
-          {campaign.sent_count > 0 ? `${campaign.read_count} (${openRate}%)` : '—'}
-        </span>
-      </td>
-      <td className="px-5 py-3.5">
-        <span className={`text-xs font-medium ${campaign.converted_count > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
-          {campaign.sent_count > 0 ? `${campaign.converted_count} (${convRate}%)` : '—'}
-        </span>
-      </td>
-      <td className="px-5 py-3.5">
-        {campaign.status === 'active' && (
-          <button
-            onClick={() => onStatusChange(campaign.id, 'paused')}
-            className="text-xs text-red-400 hover:text-red-600 transition-colors flex items-center gap-1"
-          >
-            <XCircle className="w-3.5 h-3.5" /> إيقاف
-          </button>
-        )}
-        {campaign.status === 'paused' && (
-          <button
-            onClick={() => onStatusChange(campaign.id, 'active')}
-            className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
-          >
-            <Send className="w-3.5 h-3.5" /> استئناف
-          </button>
-        )}
-        {campaign.status === 'draft' && (
-          <button
-            onClick={() => onStatusChange(campaign.id, 'active')}
-            className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
-          >
-            <Send className="w-3.5 h-3.5" /> إطلاق
-          </button>
-        )}
-        {campaign.status === 'completed' && (
-          <span className="text-[10px] text-slate-400">مكتملة</span>
-        )}
-      </td>
-    </tr>
+    <>
+      <tr className={`hover:bg-slate-50 transition-colors ${isFailed ? 'bg-red-50/40' : ''}`}>
+        <td className="px-5 py-3.5">
+          <p className="text-xs font-semibold text-slate-900">{campaign.name}</p>
+          <p className="text-[10px] text-slate-400 font-mono mt-0.5">{campaign.template_name?.replace(/_/g, ' ')}</p>
+        </td>
+        <td className="px-5 py-3.5">
+          <span className="flex items-center gap-1.5 text-xs text-slate-600">{tm.icon} {tm.label}</span>
+        </td>
+        <td className="px-5 py-3.5">
+          <Badge label={sm.label} variant={sm.variant} dot />
+          {isFailed && hasErrors && (
+            <button
+              onClick={() => setShowErrors(v => !v)}
+              className="flex items-center gap-0.5 text-[10px] text-red-500 hover:text-red-700 mt-1 cursor-pointer"
+            >
+              <AlertCircle className="w-3 h-3" />
+              {showErrors ? 'إخفاء التفاصيل' : 'عرض سبب الفشل'}
+            </button>
+          )}
+          {campaign.status === 'completed' && failedCount > 0 && (
+            <button
+              onClick={() => setShowErrors(v => !v)}
+              className="flex items-center gap-0.5 text-[10px] text-amber-500 hover:text-amber-700 mt-1 cursor-pointer"
+            >
+              <AlertCircle className="w-3 h-3" />
+              {failedCount} فشلت
+            </button>
+          )}
+        </td>
+        <td className="px-5 py-3.5 text-xs text-slate-700">{campaign.audience_count.toLocaleString('ar-SA')}</td>
+        <td className="px-5 py-3.5">
+          <span className="text-xs text-slate-700">{campaign.sent_count.toLocaleString('ar-SA')}</span>
+          {failedCount > 0 && (
+            <span className="text-[10px] text-red-500 block mt-0.5">
+              {failedCount} فشلت
+            </span>
+          )}
+        </td>
+        <td className="px-5 py-3.5">
+          <span className="text-xs text-slate-700">
+            {campaign.sent_count > 0 ? `${campaign.read_count} (${openRate}%)` : '—'}
+          </span>
+        </td>
+        <td className="px-5 py-3.5">
+          <span className={`text-xs font-medium ${campaign.converted_count > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+            {campaign.sent_count > 0 ? `${campaign.converted_count} (${convRate}%)` : '—'}
+          </span>
+        </td>
+        <td className="px-5 py-3.5">
+          {campaign.status === 'active' && (
+            <button
+              onClick={() => onStatusChange(campaign.id, 'paused')}
+              className="text-xs text-red-400 hover:text-red-600 transition-colors flex items-center gap-1"
+            >
+              <XCircle className="w-3.5 h-3.5" /> إيقاف
+            </button>
+          )}
+          {campaign.status === 'paused' && (
+            <button
+              onClick={() => onStatusChange(campaign.id, 'active')}
+              className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
+            >
+              <Send className="w-3.5 h-3.5" /> استئناف
+            </button>
+          )}
+          {campaign.status === 'draft' && (
+            <button
+              onClick={() => onStatusChange(campaign.id, 'active')}
+              className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
+            >
+              <Send className="w-3.5 h-3.5" /> إطلاق
+            </button>
+          )}
+          {campaign.status === 'completed' && failedCount === 0 && (
+            <span className="text-[10px] text-slate-400">مكتملة</span>
+          )}
+          {campaign.status === 'failed' && (
+            <span className="text-[10px] text-red-500 font-medium">فشلت</span>
+          )}
+        </td>
+      </tr>
+      {showErrors && hasErrors && (
+        <tr className="bg-red-50/60">
+          <td colSpan={8} className="px-6 py-3">
+            <div className="rounded-lg bg-red-100/80 border border-red-200 p-3">
+              <p className="text-xs font-semibold text-red-700 mb-1.5 flex items-center gap-1">
+                <AlertCircle className="w-3.5 h-3.5" />
+                تفاصيل فشل الإرسال ({failedCount} من {campaign.audience_count})
+              </p>
+              <ul className="space-y-1">
+                {campaign.dispatch_errors.map((err, i) => (
+                  <li key={i} className="text-[11px] text-red-600 font-mono leading-relaxed">
+                    • {err}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   )
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-const TABLE_HEADERS = ['الحملة', 'النوع', 'الحالة', 'الجمهور', 'المُرسَل', 'معدل القراءة', 'التحويل', '']
+const TABLE_HEADERS = ['الحملة', 'النوع', 'الحالة', 'الجمهور', 'الإرسال', 'معدل القراءة', 'التحويل', '']
 
 export default function Campaigns() {
   const [showWizard, setShowWizard] = useState(false)
@@ -1166,12 +1218,14 @@ export default function Campaigns() {
 
   const stats = useMemo(() => {
     const active = campaigns.filter(c => c.status === 'active').length
+    const failedCampaigns = campaigns.filter(c => c.status === 'failed').length
     const totalSent = campaigns.reduce((s, c) => s + c.sent_count, 0)
+    const totalFailed = campaigns.reduce((s, c) => s + (c.failed_count ?? 0), 0)
     const totalRead = campaigns.reduce((s, c) => s + c.read_count, 0)
     const totalConv = campaigns.reduce((s, c) => s + c.converted_count, 0)
     const openRate = totalSent > 0 ? Math.round((totalRead / totalSent) * 100) : 0
     const convRate = totalSent > 0 ? Math.round((totalConv / totalSent) * 100) : 0
-    return { active, totalSent, openRate, convRate }
+    return { active, failedCampaigns, totalSent, totalFailed, openRate, convRate }
   }, [campaigns])
 
   return (
@@ -1188,10 +1242,20 @@ export default function Campaigns() {
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label="حملات نشطة" value={stats.active.toString()} icon={Megaphone} />
-        <StatCard label="إجمالي المُرسَل" value={stats.totalSent.toLocaleString('ar-SA')} icon={Send} />
+        <StatCard label="إجمالي المُرسَل" value={`${stats.totalSent.toLocaleString('ar-SA')}${stats.totalFailed > 0 ? ` / ${stats.totalFailed} فشلت` : ''}`} icon={Send} />
         <StatCard label="معدل القراءة" value={`${stats.openRate}%`} icon={BarChart2} />
         <StatCard label="معدل التحويل" value={`${stats.convRate}%`} icon={Smartphone} />
       </div>
+
+      {stats.failedCampaigns > 0 && (
+        <div className="rounded-lg bg-red-50 border border-red-200 p-3 flex items-center gap-2">
+          <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+          <p className="text-sm text-red-700">
+            يوجد <strong>{stats.failedCampaigns}</strong> حملة فشلت في الإرسال.
+            اضغط على "عرض سبب الفشل" في العمود لمعرفة التفاصيل.
+          </p>
+        </div>
+      )}
 
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">

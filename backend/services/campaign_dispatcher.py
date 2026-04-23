@@ -51,27 +51,32 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
 
     template = _load_template(db, campaign)
     if not template:
+        err = "لم يتم العثور على القالب أو لم تتم الموافقة عليه"
         logger.warning("[campaign_dispatcher] campaign=%d: template not found or not APPROVED (id=%s)", campaign_id, campaign.template_id)
-        campaign.status = "completed"
+        campaign.status = "failed"
+        _persist_dispatch_result(campaign, 0, 0, 0, [err])
         db.commit()
-        return {"sent": 0, "failed": 0, "skipped": 0,
-                "errors": ["Template not found or not APPROVED"]}
+        return {"sent": 0, "failed": 0, "skipped": 0, "errors": [err]}
 
     wa_conn = _get_wa_connection(db, tenant_id)
     if not wa_conn:
+        err = "لا يوجد اتصال واتساب نشط"
         logger.warning("[campaign_dispatcher] campaign=%d: no active WhatsApp connection", campaign_id)
-        return {"sent": 0, "failed": 0, "skipped": 0,
-                "errors": ["No active WhatsApp connection"]}
+        campaign.status = "failed"
+        _persist_dispatch_result(campaign, 0, 0, 0, [err])
+        db.commit()
+        return {"sent": 0, "failed": 0, "skipped": 0, "errors": [err]}
 
     logger.info("[campaign_dispatcher] campaign=%d: WA conn found phone_id=%s", campaign_id, getattr(wa_conn, 'phone_number_id', '?'))
 
     customers = _resolve_audience(db, tenant_id, campaign.audience_type)
     if not customers:
+        err = "لا يوجد عملاء يمكن الوصول إليهم في هذه الشريحة"
         logger.warning("[campaign_dispatcher] campaign=%d: no reachable customers for segment=%s", campaign_id, campaign.audience_type)
-        campaign.status = "completed"
+        campaign.status = "failed"
+        _persist_dispatch_result(campaign, 0, 0, 0, [err])
         db.commit()
-        return {"sent": 0, "failed": 0, "skipped": 0,
-                "errors": ["No reachable customers in this segment"]}
+        return {"sent": 0, "failed": 0, "skipped": 0, "errors": [err]}
 
     logger.info("[campaign_dispatcher] campaign=%d: found %d customers to send to", campaign_id, len(customers))
 
@@ -93,10 +98,13 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
     skipped = 0
     errors: List[str] = []
 
+    from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+
     for i, customer in enumerate(customers):
         phone = getattr(customer, "normalized_phone", None) or ""
         if not phone:
             skipped += 1
+            logger.debug("[campaign_dispatcher] campaign=%d: customer=%d skipped (no phone)", campaign_id, customer.id)
             continue
 
         try:
@@ -114,7 +122,12 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
                 coupon_code=coupon_code,
             )
 
-            from services.whatsapp_platform.service import provider_send_message
+            logger.info(
+                "[campaign_dispatcher] campaign=%d: sending to %s template=%s payload_components=%s",
+                campaign_id, phone, template.name,
+                payload.get("template", {}).get("components", []),
+            )
+
             response, _ctx = await provider_send_message(
                 db,
                 wa_conn,
@@ -125,18 +138,32 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
             )
 
             resp = response or {}
+            logger.info(
+                "[campaign_dispatcher] campaign=%d: Meta response for %s → %s",
+                campaign_id, phone, str(resp)[:500],
+            )
             meta_err = resp.get("error") if isinstance(resp, dict) else None
             if meta_err:
                 failed += 1
                 err_msg = meta_err.get("message", "Unknown Meta error")
-                if len(errors) < 5:
-                    errors.append(f"{phone}: {err_msg[:100]}")
+                err_code = meta_err.get("code", "")
+                logger.warning(
+                    "[campaign_dispatcher] campaign=%d: Meta error for %s code=%s msg=%s",
+                    campaign_id, phone, err_code, err_msg,
+                )
+                if len(errors) < 10:
+                    errors.append(f"{phone}: {err_msg[:120]}")
             else:
                 sent += 1
+                logger.info("[campaign_dispatcher] campaign=%d: sent OK to %s", campaign_id, phone)
         except Exception as exc:
             failed += 1
-            if len(errors) < 5:
-                errors.append(f"{phone}: {str(exc)[:100]}")
+            logger.error(
+                "[campaign_dispatcher] campaign=%d: exception sending to %s: %s",
+                campaign_id, phone, exc, exc_info=True,
+            )
+            if len(errors) < 10:
+                errors.append(f"{phone}: {str(exc)[:120]}")
 
         campaign.sent_count = sent
         if i % 10 == 0:
@@ -145,16 +172,37 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         if i < len(customers) - 1:
             await asyncio.sleep(INTER_MESSAGE_DELAY)
 
+    final_status = "completed" if sent > 0 else ("failed" if failed > 0 else "completed")
     campaign.sent_count = sent
-    campaign.status = "completed"
+    campaign.status = final_status
     campaign.updated_at = datetime.now(timezone.utc)
+
+    _persist_dispatch_result(campaign, sent, failed, skipped, errors)
     db.commit()
 
     logger.info(
-        "[campaign_dispatcher] campaign=%d tenant=%d sent=%d failed=%d skipped=%d total=%d",
-        campaign_id, tenant_id, sent, failed, skipped, len(customers),
+        "[campaign_dispatcher] campaign=%d tenant=%d status=%s sent=%d failed=%d skipped=%d total=%d errors=%s",
+        campaign_id, tenant_id, final_status, sent, failed, skipped, len(customers), errors[:3],
     )
     return {"sent": sent, "failed": failed, "skipped": skipped, "errors": errors}
+
+
+def _persist_dispatch_result(
+    campaign: Campaign,
+    sent: int,
+    failed: int,
+    skipped: int,
+    errors: List[str],
+) -> None:
+    """Store dispatch metrics in the campaign's JSONB template_variables
+    under private underscore keys so they survive without a migration."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    tpl_vars = dict(campaign.template_variables or {})
+    tpl_vars["_failed_count"] = str(failed)
+    tpl_vars["_skipped_count"] = str(skipped)
+    tpl_vars["_dispatch_errors"] = "|".join(errors[:10]) if errors else ""
+    campaign.template_variables = tpl_vars
+    flag_modified(campaign, "template_variables")
 
 
 def _load_template(db: Session, campaign: Campaign) -> Optional[WhatsAppTemplate]:

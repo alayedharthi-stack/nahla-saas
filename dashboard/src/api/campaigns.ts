@@ -26,7 +26,7 @@ export interface CampaignRecord {
   id: number
   name: string
   campaign_type: string
-  status: 'draft' | 'scheduled' | 'active' | 'completed' | 'paused'
+  status: 'draft' | 'scheduled' | 'active' | 'completed' | 'paused' | 'failed'
   template_id: string
   template_name: string
   template_language: string
@@ -41,6 +41,9 @@ export interface CampaignRecord {
   delay_minutes: number | null
   coupon_code: string
   sent_count: number
+  failed_count: number
+  skipped_count: number
+  dispatch_errors: string[]
   delivered_count: number
   read_count: number
   clicked_count: number
