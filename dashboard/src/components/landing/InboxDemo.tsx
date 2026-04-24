@@ -30,6 +30,7 @@ import {
   Phone,
   Video,
   MoreVertical,
+  ArrowRight,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -241,6 +242,8 @@ function matchesFilter(c: DemoConversation, f: FilterId): boolean {
 export default function InboxDemo() {
   const [filter, setFilter] = useState<FilterId>('all')
   const [selectedId, setSelectedId] = useState<string>('reem')
+  /** On mobile: true = show conversation detail, false = show list */
+  const [mobileShowChat, setMobileShowChat] = useState(false)
 
   const counts = useMemo(() => {
     const out: Record<FilterId, number> = {
@@ -267,6 +270,11 @@ export default function InboxDemo() {
     visible[0] ??
     CONVERSATIONS[0]
 
+  const handleSelectConversation = (id: string) => {
+    setSelectedId(id)
+    setMobileShowChat(true)
+  }
+
   return (
     <div
       dir="rtl"
@@ -286,9 +294,10 @@ export default function InboxDemo() {
         </span>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] min-h-[520px]">
-        {/* ── Conversation list ──────────────────────────────────────── */}
-        <aside className="border-l border-white/5 bg-slate-900/50 flex flex-col">
+      <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] min-h-[420px] md:min-h-[520px]">
+
+        {/* ── Conversation list (hidden on mobile when chat is open) ─── */}
+        <aside className={`border-l border-white/5 bg-slate-900/50 flex flex-col ${mobileShowChat ? 'hidden md:flex' : 'flex'}`}>
           {/* Search bar */}
           <div className="px-3 pt-3 pb-2">
             <div className="flex items-center gap-2 bg-slate-800/70 border border-white/5 rounded-xl px-3 py-2 text-slate-400 text-xs">
@@ -338,7 +347,7 @@ export default function InboxDemo() {
               return (
                 <button
                   key={c.id}
-                  onClick={() => setSelectedId(c.id)}
+                  onClick={() => handleSelectConversation(c.id)}
                   className={[
                     'w-full text-right flex items-start gap-3 px-3 py-3 transition-colors',
                     isSel
@@ -377,12 +386,20 @@ export default function InboxDemo() {
           </div>
         </aside>
 
-        {/* ── Active conversation ────────────────────────────────────── */}
-        <main className="flex flex-col bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22%3E%3Cg fill=%22%23f59e0b%22 fill-opacity=%220.025%22%3E%3Cpolygon points=%2260 0 75 8 75 26 60 34 45 26 45 8%22/%3E%3C/g%3E%3C/svg%3E')] bg-slate-950/70">
+        {/* ── Active conversation (hidden on mobile until selected) ─── */}
+        <main className={`flex flex-col bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22%3E%3Cg fill=%22%23f59e0b%22 fill-opacity=%220.025%22%3E%3Cpolygon points=%2260 0 75 8 75 26 60 34 45 26 45 8%22/%3E%3C/g%3E%3C/svg%3E')] bg-slate-950/70 ${mobileShowChat ? 'flex' : 'hidden md:flex'}`}>
           {selected && (
             <>
               {/* Header */}
               <header className="flex items-center gap-3 px-4 py-3 border-b border-white/5 bg-slate-900/80">
+                {/* Back button — mobile only */}
+                <button
+                  onClick={() => setMobileShowChat(false)}
+                  className="md:hidden p-1.5 -me-1 rounded-lg hover:bg-white/5 transition-colors text-slate-400"
+                  aria-label="رجوع"
+                >
+                  <ArrowRight className="w-5 h-5" />
+                </button>
                 <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${selected.avatarColor} flex items-center justify-center text-white font-bold shadow-md`}>
                   {selected.initials}
                 </div>
