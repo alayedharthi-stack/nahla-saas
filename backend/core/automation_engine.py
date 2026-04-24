@@ -884,46 +884,64 @@ async def _execute_action(
             return False, info
 
     # ── Delivery policy resolution ───────────────────────────────────────────
-    # Replaces the legacy single-`delivery_mode` if-chain with a real
-    # primary/fallback policy that is window-aware AND AI-aware. This
-    # is what lets a merchant pick "interactive" or "ai_recovery" (or
-    # the recommended "auto") in the editor without ever silently
-    # losing a message when the 24h window has closed or the AI turn
-    # isn't eligible — the policy module always picks a legal wire
-    # format and surfaces *why* in the audit trail.
     from core.wa_usage import has_open_service_window  # noqa: PLC0415
     from services.delivery_policy import resolve_delivery_mode  # noqa: PLC0415
 
     window_open = has_open_service_window(db, tenant_id, to_phone)
+
+    # ── Cart recovery: stop follow-up stages if the customer replied ──────
+    # When the customer replies, the conversation is handed to AI/human
+    # support. Template-based reminders should stop so the customer is
+    # not bothered while already in a live conversation.
+    if is_cart_recovery and window_open:
+        step_idx = int((getattr(event, "payload", None) or {}).get("step_idx") or 0)
+        if step_idx > 0:
+            logger.info(
+                "[AutoEngine] cart-recovery stage %d skipped — customer "
+                "replied (service window open). tenant=%s event=%s",
+                step_idx, tenant_id, getattr(event, "id", None),
+            )
+            return False, {
+                "skipped":     True,
+                "skip_reason": "customer_replied",
+                "step_idx":    step_idx,
+            }
+
     ai_eligible = bool(
         (active_step.get("ai_recovery_enabled")
          or config.get("ai_recovery_enabled"))
     )
 
-    # Conversion-layer overrides still win — they encode signals the
-    # static policy can't see (e.g. "customer is actively chatting,
-    # send a softer interactive instead of a template").
-    override = (
-        conversion_decision.delivery_mode_override
-        if conversion_decision else None
-    )
-    if override:
-        # Synthesize a step view so the policy module still applies
-        # window/AI legality on top of the override (defence in depth).
-        decision = resolve_delivery_mode(
-            step={"primary_mode": override,
-                  "fallback_mode": active_step.get("fallback_mode")
-                                   or config.get("fallback_mode") or "template",
-                  "ai_recovery_enabled": ai_eligible},
-            config=config,
-            window_open=window_open,
-            ai_eligible=ai_eligible,
+    # Cart recovery: always use template mode — no interactive/AI.
+    # Templates work regardless of service window state.
+    if is_cart_recovery:
+        from services.delivery_policy import DeliveryDecision  # noqa: PLC0415
+        decision = DeliveryDecision(
+            mode="template", reason="cart_recovery_template_only",
+            primary="template", fallback="template",
+            used_fallback=False, window_open=window_open,
+            ai_eligible=False,
         )
     else:
-        decision = resolve_delivery_mode(
-            step=active_step, config=config,
-            window_open=window_open, ai_eligible=ai_eligible,
+        override = (
+            conversion_decision.delivery_mode_override
+            if conversion_decision else None
         )
+        if override:
+            decision = resolve_delivery_mode(
+                step={"primary_mode": override,
+                      "fallback_mode": active_step.get("fallback_mode")
+                                       or config.get("fallback_mode") or "template",
+                      "ai_recovery_enabled": ai_eligible},
+                config=config,
+                window_open=window_open,
+                ai_eligible=ai_eligible,
+            )
+        else:
+            decision = resolve_delivery_mode(
+                step=active_step, config=config,
+                window_open=window_open, ai_eligible=ai_eligible,
+            )
 
     delivery_mode = decision.mode
     logger.info(

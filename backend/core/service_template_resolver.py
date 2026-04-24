@@ -10,7 +10,7 @@ KEY CONCEPTS
    are just the *current binding* that can be swapped at any time.
 
 2. **Step** (`step_number`):  within a service a multi-step sequence may
-   exist (e.g. cart recovery has steps 1-4).
+   exist (e.g. cart recovery has steps 1-3).
 
 3. **Active Template invariant**:  for every combination of
    `(tenant_id, service_key, step_number)` at most ONE template may be
@@ -409,39 +409,54 @@ def resolve_template_for_send(
             return tpl
         logger.info("[ServiceResolver] LAYER=d (config_name) MISS %s", log_ctx)
 
-    # (e) any APPROVED template on the same service_key (any step). Useful
-    # when the merchant only has ONE recovery template approved and we
-    # need to use it across all stages rather than failing every send.
-    tpl = (
-        db.query(WhatsAppTemplate)
-        .filter(
-            WhatsAppTemplate.tenant_id   == tenant_id,
-            WhatsAppTemplate.service_key == service_key,
-            WhatsAppTemplate.status      == "APPROVED",
-        )
-        .order_by(
-            WhatsAppTemplate.is_active.desc(),
-            WhatsAppTemplate.updated_at.desc(),
-        )
-        .first()
-    )
-    if tpl:
+    # (e) any APPROVED template on the same service_key (any step).
+    # SKIP for cart_recovery — each stage MUST use its own template,
+    # never borrow from another stage.
+    if service_key == "cart_recovery":
         logger.info(
-            "[ServiceResolver] LAYER=e (any_step_same_service) HIT %s → tpl_id=%s name=%s was_step=%s",
-            log_ctx, tpl.id, tpl.name, tpl.step_number,
+            "[ServiceResolver] LAYER=e SKIP %s — cart_recovery does not "
+            "allow cross-step template fallback",
+            log_ctx,
         )
-        _autobind(
-            db, tpl, tenant_id=tenant_id, service_key=service_key,
-            step_number=step_number,
-            reason=f"service_key_any_step (was step={tpl.step_number})",
+    else:
+        tpl = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id   == tenant_id,
+                WhatsAppTemplate.service_key == service_key,
+                WhatsAppTemplate.status      == "APPROVED",
+            )
+            .order_by(
+                WhatsAppTemplate.is_active.desc(),
+                WhatsAppTemplate.updated_at.desc(),
+            )
+            .first()
         )
-        return tpl
-    logger.info("[ServiceResolver] LAYER=e (any_step_same_service) MISS %s", log_ctx)
+        if tpl:
+            logger.info(
+                "[ServiceResolver] LAYER=e (any_step_same_service) HIT %s → tpl_id=%s name=%s was_step=%s",
+                log_ctx, tpl.id, tpl.name, tpl.step_number,
+            )
+            _autobind(
+                db, tpl, tenant_id=tenant_id, service_key=service_key,
+                step_number=step_number,
+                reason=f"service_key_any_step (was step={tpl.step_number})",
+            )
+            return tpl
+        logger.info("[ServiceResolver] LAYER=e (any_step_same_service) MISS %s", log_ctx)
 
-    # (f) FINAL safety net: keyword pattern match on template name. Only
-    # MARKETING / UTILITY templates are considered to avoid grabbing
-    # AUTHENTICATION (OTP) templates. We log every candidate so prod
-    # operators can audit which template ended up serving the slot.
+    # (f) FINAL safety net: keyword pattern match on template name.
+    # SKIP for cart_recovery — if layers a-d didn't find a match,
+    # the stage simply doesn't send (no guessing).
+    if service_key == "cart_recovery":
+        logger.warning(
+            "[ServiceResolver] ALL LAYERS MISS %s — "
+            "No approved template found for cart_recovery step %s. "
+            "The stage will NOT send.",
+            log_ctx, step_number,
+        )
+        return None
+
     patterns = _SERVICE_NAME_PATTERNS.get(service_key, [])
     if patterns:
         candidates = (

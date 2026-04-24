@@ -332,39 +332,29 @@ def scan_abandoned_cart_followups(
         ):
             continue
 
-        # Walk stages 2..N. We never re-emit stage 1 — it was the
-        # original event itself.
-        for step_idx, step in enumerate(steps):
-            if step_idx == 0:
-                continue
+        # Customer-replied guard — if the customer sent a message after
+        # the cart was abandoned, stop follow-up reminders. The
+        # conversation is now live (AI or human) and reminders would
+        # be disruptive.
+        if original.customer_id and _customer_has_replied_since(
+            db, tenant_id=tenant_id, customer_id=original.customer_id,
+            since=_naive(original.created_at),
+        ):
+            continue
+
+        # Walk stages 2..3 only. Stage 1 is the original event.
+        # Cart recovery has exactly 3 stages (indices 0, 1, 2).
+        max_steps = min(len(steps), 3)
+        for step_idx in range(1, max_steps):
+            step = steps[step_idx]
             if step_idx in already_emitted:
                 continue
-            # Honour per-step enable/disable from the merchant editor.
-            # Skipping the emit (vs. emitting + having the engine bail)
-            # keeps the AutomationExecution table clean and avoids paying
-            # for a wake-up that's guaranteed to no-op. Mark the step as
-            # "emitted" anyway so future scans don't re-evaluate it.
             if step.get("enabled") is False:
                 already_emitted.add(step_idx)
                 progress.append({
                     "step_idx":  step_idx,
                     "skipped":   True,
                     "reason":    "step_disabled",
-                    "emitted_at": now.isoformat(),
-                })
-                continue
-            # The AI recovery stage carries an extra `ai_recovery_enabled`
-            # flag so a merchant can keep the step's slot in the timeline
-            # but defer the AI cost. Treat the same way as `enabled=False`.
-            if (
-                step.get("message_type") == "ai_recovery"
-                and step.get("ai_recovery_enabled") is False
-            ):
-                already_emitted.add(step_idx)
-                progress.append({
-                    "step_idx":   step_idx,
-                    "skipped":    True,
-                    "reason":     "ai_recovery_disabled",
                     "emitted_at": now.isoformat(),
                 })
                 continue
@@ -565,6 +555,33 @@ def scan_cod_confirmations(
             "[Emitter] tenant=%s cod_confirmation mutations=%d", tenant_id, mutations,
         )
     return mutations
+
+
+def _customer_has_replied_since(
+    db: Session, *, tenant_id: int, customer_id: int, since: datetime,
+) -> bool:
+    """Return True if the customer sent an inbound WhatsApp message
+    after ``since``. When the customer replies, the abandoned-cart
+    template flow should stop — the conversation is now live."""
+    from models import Conversation, MessageEvent  # noqa: PLC0415
+
+    if not customer_id:
+        return False
+    try:
+        exists = (
+            db.query(MessageEvent.id)
+            .join(Conversation, MessageEvent.conversation_id == Conversation.id)
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                MessageEvent.direction == "inbound",
+                MessageEvent.created_at >= since,
+                Conversation.customer_id == customer_id,
+            )
+            .first()
+        )
+        return exists is not None
+    except Exception:
+        return False
 
 
 def _customer_has_completed_order_since(

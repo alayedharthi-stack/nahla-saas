@@ -91,19 +91,16 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             # AutomationExecution row, its own template/interactive
             # render, and its own coupon decision.
             #
-            # AI gating: stage 4 sets `auto_coupon=true`. For tenants on
-            # OFF, that always issues a coupon from the pool. For tenants
-            # on ADVISORY/ENFORCE the OfferDecisionService takes over and
-            # may return SOURCE_NONE (no coupon) for low-value carts or
-            # customers who already received one this week.
+            # 3 template-only stages, all auto-bound from Nahla's
+            # template library via service_key + step_number.
+            # No interactive / ai_recovery — every stage is a Meta-
+            # approved template so it works regardless of whether the
+            # customer opened a service window.
+            #
+            # If the customer REPLIES to any stage, the flow stops
+            # and the conversation is handed to AI / human support.
             "steps": [
-                # Stage 1 — template, URL button to cart.
-                # `service_key` + `step_number` let `automation_engine`
-                # invoke the smart resolver (`resolve_template_for_send`),
-                # which auto-binds APPROVED templates whose names match
-                # the Nahla library or service keyword patterns. Without
-                # them the engine falls back to a strict name lookup
-                # that only matches the literal `template_name` below.
+                # Stage 1 — first reminder (template)
                 {
                     "delay_minutes":     30,
                     "enabled":           True,
@@ -111,99 +108,28 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
                     "delivery_mode":     "template",
                     "service_key":       "cart_recovery",
                     "step_number":       1,
-                    "template_name":     "abandoned_cart_recovery_ar",
-                    "template_name_en":  "abandoned_cart_recovery_en",
-                    "buttons":           ["resume_cart", "ask_question", "postpone"],
-                    "cta_labels": {
-                        "resume_cart":  "إكمال الطلب",
-                        "ask_question": "عندي استفسار",
-                        "postpone":     "لاحقاً",
-                    },
                 },
-                # Stage 2 — interactive (in-window), 3 dynamic buttons
+                # Stage 2 — follow-up reminder (template)
                 {
-                    "delay_minutes":     360,
+                    "delay_minutes":     360,       # 6 hours
                     "enabled":           True,
                     "message_type":      "reminder",
-                    "delivery_mode":     "interactive",
+                    "delivery_mode":     "template",
                     "service_key":       "cart_recovery",
                     "step_number":       2,
-                    "template_name":     "abandoned_cart_followup_ar",
-                    "template_name_en":  "abandoned_cart_followup_en",
-                    "buttons":           ["resume_cart", "human_help", "postpone"],
-                    "cta_labels": {
-                        "resume_cart": "الرجوع للسلة",
-                        "human_help":  "تحدث مع الدعم",
-                        "postpone":    "ما زلت متردد",
-                    },
-                    "body_text_ar": (
-                        "{{customer_name}} 🌷\n\n"
-                        "السلة في {{store_name}} لا تزال محفوظة لك.\n\n"
-                        "إذا واجهتَ أي عقبة في الدفع أو الشحن، نحن هنا لمساعدتك "
-                        "مباشرة. اختر ما يناسبك:"
-                    ),
-                    "body_text_en": (
-                        "{{customer_name}} 🌷\n\n"
-                        "Your cart at {{store_name}} is still saved.\n\n"
-                        "If anything got in the way — payment, shipping, sizing — "
-                        "we'd love to help. Pick what works for you:"
-                    ),
                 },
-                # Stage 3 — optional AI recovery turn (disabled by default)
+                # Stage 3 — final reminder with coupon (template)
                 {
-                    "delay_minutes":       480,    # 8 h — merchant can edit to 600 / 720
-                    "enabled":             False,
-                    "message_type":        "ai_recovery",
-                    "delivery_mode":       "ai_recovery",
-                    "service_key":         "cart_recovery",
-                    "step_number":         3,
-                    "ai_recovery_enabled": False,
-                    "ai_persona":          "concierge",
-                    "buttons":             ["resume_cart", "ask_question", "postpone"],
-                },
-                # Stage 4 — final coupon CTA (interactive cta_url) at 23h50m
-                {
-                    "delay_minutes":     1430,    # 23 h 50 m — stays inside the 24h window
+                    "delay_minutes":     1425,      # 23h 45m
                     "enabled":           True,
                     "message_type":      "coupon",
-                    "delivery_mode":     "interactive",
+                    "delivery_mode":     "template",
                     "service_key":       "cart_recovery",
-                    "step_number":       4,
+                    "step_number":       3,
                     "auto_coupon":       True,
-                    "template_name":     "abandoned_cart_final_offer_ar",
-                    "template_name_en":  "abandoned_cart_final_offer_en",
-                    "buttons":           ["apply_coupon", "resume_cart", "ask_question"],
-                    "cta_labels": {
-                        "apply_coupon": "استخدم الخصم الآن",
-                        "resume_cart":  "أكمل الطلب",
-                        "ask_question": "عندي سؤال",
-                    },
-                    "body_text_ar": (
-                        "{{customer_name}} 💛\n\n"
-                        "آخر تذكير لطلبك في {{store_name}}.\n"
-                        "حضّرنا لك خصماً صغيراً لتجربة أهدأ:\n\n"
-                        "كود الخصم: {{discount_code}}\n\n"
-                        "زر «استخدم الخصم» يفتح السلة والكود مفعَّل تلقائياً."
-                    ),
-                    "body_text_en": (
-                        "{{customer_name}} 💛\n\n"
-                        "Last nudge for your cart at {{store_name}}.\n"
-                        "We saved a small discount to make this easy:\n\n"
-                        "Code: {{discount_code}}\n\n"
-                        "Tap \"Use discount\" — it opens the cart with the code applied."
-                    ),
                 },
             ],
-            # `template_name` is kept as the default for the legacy
-            # single-template execution path, used as fallback when a
-            # step does not declare its own template_name.
-            "template_name":    "abandoned_cart_recovery_ar",
-            "template_name_en": "abandoned_cart_recovery_en",
             "language":         "ar",
-            # Master toggle for the optional AI recovery stage (mirrors
-            # the per-step flag so the dashboard can flip it from one
-            # place without reaching into the steps array).
-            "ai_recovery_enabled": False,
             # Saudi-time courtesy — when True, sends scheduled between
             # 00:00 and 08:00 KSA are deferred to 08:30 KSA on the same
             # day. Default ON because every Nahla merchant is in KSA.
