@@ -527,6 +527,27 @@ async def debug_abandoned_carts_raw_public(
     )
 
 
+# ── /debug/email-config ─────────────────────────────────────────────────
+@router.get("/debug/email-config")
+async def debug_email_config(
+    debug_token: str = Query(..., description="Shared secret from env"),
+) -> Dict[str, Any]:
+    """Show SMTP config (no send) — diagnose whether EMAIL_ENABLED and credentials are set."""
+    _check_token(debug_token)
+    from core.config import (  # noqa: PLC0415
+        EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, SMTP_USE_TLS,
+    )
+    return {
+        "email_enabled": EMAIL_ENABLED,
+        "smtp_host":     SMTP_HOST,
+        "smtp_port":     SMTP_PORT,
+        "smtp_user":     SMTP_USER or "(not set)",
+        "smtp_pass_set": bool(SMTP_PASS),
+        "smtp_use_tls":  SMTP_USE_TLS,
+        "email_from":    EMAIL_FROM,
+    }
+
+
 # ── /debug/test-email ───────────────────────────────────────────────────
 @router.post("/debug/test-email")
 async def debug_test_email(
@@ -589,7 +610,7 @@ async def debug_test_email(
                 subject=f"نحلة — اختبار قالب {template}",
                 html=html,
             ),
-            timeout=25.0,
+            timeout=8.0,
         )
         return {
             "success":  True,
@@ -601,7 +622,8 @@ async def debug_test_email(
     except _asyncio.TimeoutError:
         return {
             "success":  False,
-            "error":    "SMTP timeout (25s) — الخادم لم يستجب. تحقق من SMTP_HOST و SMTP_PORT",
+            "error":    "SMTP timeout (8s) — الخادم لم يستجب في الوقت المحدد",
+            "hint":     "تحقق من SMTP_HOST و SMTP_PORT في Railway Variables",
             "smtp_host": SMTP_HOST,
             "smtp_port": SMTP_PORT,
         }
