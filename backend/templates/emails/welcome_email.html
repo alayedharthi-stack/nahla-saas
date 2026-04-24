@@ -1,13 +1,13 @@
 {% extends "_base.html" %}
 {% set cta_url = dashboard_url %}
 {% set cta_label = "افتح لوحة التحكم ←" %}
-{% block title %}مرحباً بك في نحلة 🐝{% endblock %}
+{% block title %}مرحباً بك في نحلة{% endblock %}
 
 {% block content %}
 
 <!-- Hero -->
 <h1 style="margin:0 0 10px;color:#1a1a1a;font-size:26px;font-weight:700;line-height:1.3;letter-spacing:-0.4px;">
-  أهلاً {{ merchant_name or "بك" }}! 🎉
+  أهلاً {{ merchant_name or "بك" }}!
 </h1>
 <p style="margin:0 0 28px;color:#6b6b6b;font-size:15px;line-height:1.6;">
   متجرك <strong style="color:#1a1a1a;">{{ store_name or "متجرك" }}</strong> جاهز على نحلة — طيّار مبيعاتك الآلي على واتساب.
@@ -15,12 +15,17 @@
 
 <!-- Trial badge -->
 <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"
-       style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;margin-bottom:28px;">
+       style="background:linear-gradient(135deg,#fffbeb,#fef3c7);border:1px solid #fde68a;border-radius:12px;margin-bottom:28px;">
   <tr>
     <td style="padding:16px 20px;">
-      <p style="margin:0;color:#92400e;font-size:14px;font-weight:500;line-height:1.5;">
-        🎁 لديك <strong>14 يوماً مجاناً</strong> لاستكشاف جميع الميزات — بدون أي التزام.
-      </p>
+      <table cellpadding="0" cellspacing="0" border="0" role="presentation">
+        <tr>
+          <td style="padding-left:12px;font-size:22px;vertical-align:middle;">🎁</td>
+          <td style="color:#92400e;font-size:14px;font-weight:500;line-height:1.5;vertical-align:middle;">
+            <strong>14 يوماً مجاناً</strong> لاستكشاف جميع الميزات — بدون أي التزام.
+          </td>
+        </tr>
+      </table>
     </td>
   </tr>
 </table>
@@ -29,19 +34,25 @@
 <p style="margin:0 0 16px;color:#1a1a1a;font-size:14px;font-weight:600;">ما يمكنك فعله مع نحلة:</p>
 
 <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
-  {% for icon, text in [
-      ("🤖", "ذكاء اصطناعي يرد على عملاءك باللغة العربية"),
-      ("🛒", "استرداد السلات المتروكة تلقائياً"),
-      ("📣", "حملات واتساب موجهة لشرائح محددة"),
-      ("📊", "تقارير مبيعات وتحليلات العملاء"),
-      ("🎫", "كوبونات ذكية بحسب مستوى العميل"),
+  {% for color, icon, title, desc in [
+      ("#3b82f6", "🤖", "ذكاء اصطناعي",        "يرد على عملاءك بالعربية على مدار الساعة"),
+      ("#f59e0b", "🛒", "السلات المتروكة",       "استرداد تلقائي يعيد العملاء لإكمال طلباتهم"),
+      ("#8b5cf6", "📣", "حملات واتساب",          "رسائل موجهة لشرائح محددة من عملاءك"),
+      ("#10b981", "📊", "تقارير ذكية",           "مبيعات وتحليلات لحظية لمتجرك"),
+      ("#ec4899", "🎫", "كوبونات ذكية",          "خصومات مخصصة بحسب مستوى كل عميل"),
   ] %}
   <tr>
-    <td style="padding:8px 0;border-bottom:1px solid #f5f5f5;">
+    <td style="padding:10px 0;border-bottom:1px solid #f5f5f7;">
       <table cellpadding="0" cellspacing="0" border="0" role="presentation">
         <tr>
-          <td style="font-size:18px;padding-left:12px;vertical-align:middle;">{{ icon }}</td>
-          <td style="color:#3a3a3a;font-size:14px;line-height:1.5;vertical-align:middle;">{{ text }}</td>
+          <td style="padding-left:14px;vertical-align:middle;">
+            <div style="background:{{ color }}18;border-radius:8px;width:36px;height:36px;
+                        text-align:center;line-height:36px;font-size:18px;display:inline-block;">{{ icon }}</div>
+          </td>
+          <td style="vertical-align:middle;padding-right:4px;">
+            <span style="color:#1a1a1a;font-size:13px;font-weight:600;display:block;">{{ title }}</span>
+            <span style="color:#8e8e93;font-size:12px;">{{ desc }}</span>
+          </td>
         </tr>
       </table>
     </td>
@@ -49,7 +60,7 @@
   {% endfor %}
 </table>
 
-<p style="margin:28px 0 0;color:#8e8e93;font-size:13px;line-height:1.6;">
+<p style="margin:24px 0 0;color:#8e8e93;font-size:13px;line-height:1.6;">
   أي استفسار؟ فريقنا موجود على مدار الساعة.
 </p>
 
