@@ -538,7 +538,8 @@ async def debug_email_config(
     import socket as _socket  # noqa: PLC0415
     import time as _time  # noqa: PLC0415
     from core.config import (  # noqa: PLC0415
-        EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, SMTP_USE_TLS,
+        EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS,
+        EMAIL_FROM, SMTP_USE_TLS, RESEND_API_KEY,
     )
 
     # Quick TCP reachability check (5s timeout)
@@ -564,16 +565,18 @@ async def debug_email_config(
         tcp_error = str(e)
 
     return {
-        "email_enabled": EMAIL_ENABLED,
-        "smtp_host":     SMTP_HOST,
-        "smtp_port":     SMTP_PORT,
-        "smtp_user":     SMTP_USER or "(not set)",
-        "smtp_pass_set": bool(SMTP_PASS),
-        "smtp_use_tls":  SMTP_USE_TLS,
-        "email_from":    EMAIL_FROM,
-        "tcp_reachable": tcp_ok,
-        "tcp_latency_ms": tcp_ms,
-        "tcp_error":     tcp_error,
+        "email_enabled":    EMAIL_ENABLED,
+        "method":           "resend" if RESEND_API_KEY else "smtp",
+        "resend_key_set":   bool(RESEND_API_KEY),
+        "smtp_host":        SMTP_HOST,
+        "smtp_port":        SMTP_PORT,
+        "smtp_user":        SMTP_USER or "(not set)",
+        "smtp_pass_set":    bool(SMTP_PASS),
+        "smtp_use_tls":     SMTP_USE_TLS,
+        "email_from":       EMAIL_FROM,
+        "tcp_reachable":    tcp_ok,
+        "tcp_latency_ms":   tcp_ms,
+        "tcp_error":        tcp_error,
     }
 
 
