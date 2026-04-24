@@ -1256,14 +1256,18 @@ function NahlaLibraryModal({ onClose, onImported }: {
 
   useEffect(() => { load(activeTag, search) }, [activeTag, search, load])
 
+  const [importError, setImportError] = useState<string | null>(null)
+
   const handleImport = async (key: string) => {
     setImporting(key)
+    setImportError(null)
     try {
       const res = await templatesApi.importNahlaTemplate(key)
       setImported(prev => new Set(prev).add(key))
       onImported(res.template)
-    } catch {
-      /* ignore */
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'فشل استيراد القالب'
+      setImportError(msg)
     } finally {
       setImporting(null)
     }
@@ -1530,7 +1534,13 @@ function NahlaLibraryModal({ onClose, onImported }: {
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-3 border-t border-slate-100 bg-slate-50 rounded-b-2xl">
+        <div className="px-6 py-3 border-t border-slate-100 bg-slate-50 rounded-b-2xl space-y-2">
+          {importError && (
+            <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              <span>{importError}</span>
+            </div>
+          )}
           <p className="text-[11px] text-slate-400 text-center">
             بعد الاستيراد يصبح القالب مسودة قابلة للتعديل — عدّله ثم أرسله لـ Meta للموافقة ← استخدمه في حملاتك
           </p>
@@ -1847,7 +1857,10 @@ export default function Templates() {
       )}
       {showNahlaLibrary && (
         <NahlaLibraryModal
-          onClose={() => setShowNahlaLibrary(false)}
+          onClose={() => {
+            setShowNahlaLibrary(false)
+            loadTemplates()
+          }}
           onImported={tpl => {
             setTemplates(ts => [tpl, ...ts])
           }}
