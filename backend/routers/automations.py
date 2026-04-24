@@ -1036,13 +1036,13 @@ async def update_autopilot_settings(
 async def cart_recovery_readiness(request: Request, db: Session = Depends(get_db)):
     """Check whether all 3 cart_recovery templates are APPROVED.
 
-    Returns per-step status so the dashboard can show exactly which
-    templates are missing or pending and block the autopilot toggle
-    until all three are ready.
+    Uses the full resolver chain (layers a-d) so templates that exist
+    but aren't explicitly bound to a step yet get auto-bound on the
+    fly. This matches exactly what the engine does at send time.
     """
     tenant_id = resolve_tenant_id(request)
 
-    from core.service_template_resolver import resolve_active_template  # noqa: PLC0415
+    from core.service_template_resolver import resolve_template_for_send  # noqa: PLC0415
     from models import WhatsAppTemplate  # noqa: PLC0415
 
     steps_status = []
@@ -1055,7 +1055,13 @@ async def cart_recovery_readiness(request: Request, db: Session = Depends(get_db
     }
 
     for step_num in (1, 2, 3):
-        tpl = resolve_active_template(db, tenant_id, "cart_recovery", step_num)
+        # resolve_template_for_send walks layers a-d: strict binding,
+        # inactive match, nahla_source_key, config template_name.
+        # For cart_recovery it skips cross-step fallback (layers e-f),
+        # so each step must have its own template.
+        tpl = resolve_template_for_send(
+            db, tenant_id, "cart_recovery", step_num,
+        )
 
         if tpl and tpl.status == "APPROVED":
             steps_status.append({
@@ -1068,7 +1074,8 @@ async def cart_recovery_readiness(request: Request, db: Session = Depends(get_db
             })
         else:
             all_ready = False
-            # Check if a template exists but isn't approved
+            # Look for ANY template bound to this step (even non-APPROVED)
+            # so we can tell the merchant what state it's in.
             any_tpl = (
                 db.query(WhatsAppTemplate)
                 .filter(
@@ -1079,6 +1086,27 @@ async def cart_recovery_readiness(request: Request, db: Session = Depends(get_db
                 .order_by(WhatsAppTemplate.updated_at.desc())
                 .first()
             )
+            if not any_tpl:
+                # Also check by name pattern / nahla_source_key without
+                # requiring the binding, so we catch templates that exist
+                # but haven't been auto-bound yet.
+                from services.whatsapp_templates.nahla_templates import NAHLA_TEMPLATES  # noqa: PLC0415
+                lib_keys = [
+                    t["key"] for t in NAHLA_TEMPLATES
+                    if t.get("service_key") == "cart_recovery"
+                    and t.get("step_number") == step_num
+                ]
+                if lib_keys:
+                    any_tpl = (
+                        db.query(WhatsAppTemplate)
+                        .filter(
+                            WhatsAppTemplate.tenant_id == tenant_id,
+                            WhatsAppTemplate.nahla_source_key.in_(lib_keys),
+                        )
+                        .order_by(WhatsAppTemplate.updated_at.desc())
+                        .first()
+                    )
+
             if any_tpl:
                 steps_status.append({
                     "step": step_num,
@@ -1099,6 +1127,11 @@ async def cart_recovery_readiness(request: Request, db: Session = Depends(get_db
                     "status": "MISSING",
                     "reason": "no_template",
                 })
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
 
     return {
         "all_ready": all_ready,
