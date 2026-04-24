@@ -976,6 +976,25 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [toggling, setToggling] = useState(false)
 
+  const isAbandonedCartType = automation.automation_type === 'abandoned_cart'
+
+  // Cart-recovery readiness gate
+  const [cartReadiness, setCartReadiness] = useState<import('../api/autopilot').CartRecoveryReadiness | null>(null)
+  const [readinessLoading, setReadinessLoading] = useState(false)
+
+  useEffect(() => {
+    if (!isAbandonedCartType) return
+    let cancelled = false
+    setReadinessLoading(true)
+    autopilotApi.cartRecoveryReadiness()
+      .then(r => { if (!cancelled) setCartReadiness(r) })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setReadinessLoading(false) })
+    return () => { cancelled = true }
+  }, [isAbandonedCartType])
+
+  const cartReady = !isAbandonedCartType || cartReadiness?.all_ready === true
+
   const meta = AUTOMATION_META[automation.automation_type]
 
   const triggerVariantMap: Record<string, 'amber' | 'blue' | 'purple' | 'green' | 'slate'> = {
@@ -990,6 +1009,7 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
 
   const handleToggle = async (next: boolean) => {
     if (toggling) return
+    if (next && !cartReady) return
     setToggling(true)
     onToggle(automation.id, next)
     try {
@@ -1050,9 +1070,68 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
           <Toggle
             enabled={automation.enabled}
             onChange={handleToggle}
-            disabled={toggling}
+            disabled={toggling || (!cartReady && !automation.enabled)}
           />
         </div>
+
+        {/* Cart recovery readiness gate */}
+        {isAbandonedCartType && !readinessLoading && cartReadiness && !cartReadiness.all_ready && (
+          <div className="mt-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <div className="flex items-start gap-2 mb-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-amber-800">
+                  لا يمكن تفعيل استرجاع السلات المتروكة حتى يتم اعتماد القوالب الثلاثة من WhatsApp.
+                </p>
+                <p className="text-xs text-amber-600 mt-1">
+                  كل مرحلة تحتاج قالب معتمد خاص بها — لا يتم استخدام قالب مرحلة أخرى كبديل.
+                </p>
+              </div>
+            </div>
+            <div className="space-y-1.5 mt-3">
+              {cartReadiness.steps.map(s => (
+                <div key={s.step} className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs ${
+                  s.ready
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                    : 'bg-white border-amber-200 text-amber-700'
+                }`}>
+                  <div className="flex items-center gap-2">
+                    {s.ready ? (
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
+                    ) : (
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+                    )}
+                    <span className="font-medium">المرحلة {s.step}: {s.label}</span>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
+                    s.ready
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : s.status === 'MISSING'
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-amber-100 text-amber-700'
+                  }`}>
+                    {s.ready ? 'معتمد ✓' : s.status === 'MISSING' ? 'غير موجود' : `${s.status}`}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <a
+              href="/templates"
+              className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 hover:text-amber-900 bg-amber-100 hover:bg-amber-200 px-3 py-1.5 rounded-lg transition-colors"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              الانتقال إلى مكتبة القوالب
+            </a>
+          </div>
+        )}
+
+        {/* Readiness OK badge */}
+        {isAbandonedCartType && !readinessLoading && cartReadiness?.all_ready && (
+          <div className="mt-3 flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+            <CheckCircle className="w-4 h-4 text-emerald-500" />
+            <span className="text-xs font-medium text-emerald-700">جاهز للتشغيل — جميع القوالب معتمدة</span>
+          </div>
+        )}
 
         <div className="flex items-center gap-4 mt-4 flex-wrap">
           <div className="flex items-center gap-1.5">

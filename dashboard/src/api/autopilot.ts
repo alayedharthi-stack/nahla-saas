@@ -174,6 +174,21 @@ export interface AutopilotQueues {
 
 import { apiCall } from './client'
 
+export interface CartRecoveryStepReadiness {
+  step: number
+  label: string
+  ready: boolean
+  template_id: number | null
+  template_name: string | null
+  status: string
+  reason?: string
+}
+
+export interface CartRecoveryReadiness {
+  all_ready: boolean
+  steps: CartRecoveryStepReadiness[]
+}
+
 export const autopilotApi = {
   /** Get autopilot settings + today's daily summary. */
   status: () =>
@@ -229,6 +244,10 @@ export const autopilotApi = {
       errors?: string[]
       message: string
     }>('/autopilot/abandoned-carts/retry-all-stale', { method: 'POST' }),
+
+  /** Check whether all 3 cart_recovery templates are APPROVED. */
+  cartRecoveryReadiness: () =>
+    apiCall<CartRecoveryReadiness>('/autopilot/cart-recovery/readiness'),
 }
 
 // ── Order status labels (Arabic) ──────────────────────────────────────────────

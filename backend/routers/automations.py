@@ -1032,6 +1032,80 @@ async def update_autopilot_settings(
     return {"settings": current}
 
 
+@router.get("/autopilot/cart-recovery/readiness")
+async def cart_recovery_readiness(request: Request, db: Session = Depends(get_db)):
+    """Check whether all 3 cart_recovery templates are APPROVED.
+
+    Returns per-step status so the dashboard can show exactly which
+    templates are missing or pending and block the autopilot toggle
+    until all three are ready.
+    """
+    tenant_id = resolve_tenant_id(request)
+
+    from core.service_template_resolver import resolve_active_template  # noqa: PLC0415
+    from models import WhatsAppTemplate  # noqa: PLC0415
+
+    steps_status = []
+    all_ready = True
+
+    step_labels = {
+        1: "التذكير الأول",
+        2: "المتابعة",
+        3: "التذكير الأخير مع كوبون",
+    }
+
+    for step_num in (1, 2, 3):
+        tpl = resolve_active_template(db, tenant_id, "cart_recovery", step_num)
+
+        if tpl and tpl.status == "APPROVED":
+            steps_status.append({
+                "step": step_num,
+                "label": step_labels[step_num],
+                "ready": True,
+                "template_id": tpl.id,
+                "template_name": tpl.name,
+                "status": "APPROVED",
+            })
+        else:
+            all_ready = False
+            # Check if a template exists but isn't approved
+            any_tpl = (
+                db.query(WhatsAppTemplate)
+                .filter(
+                    WhatsAppTemplate.tenant_id == tenant_id,
+                    WhatsAppTemplate.service_key == "cart_recovery",
+                    WhatsAppTemplate.step_number == step_num,
+                )
+                .order_by(WhatsAppTemplate.updated_at.desc())
+                .first()
+            )
+            if any_tpl:
+                steps_status.append({
+                    "step": step_num,
+                    "label": step_labels[step_num],
+                    "ready": False,
+                    "template_id": any_tpl.id,
+                    "template_name": any_tpl.name,
+                    "status": any_tpl.status or "UNKNOWN",
+                    "reason": "not_approved",
+                })
+            else:
+                steps_status.append({
+                    "step": step_num,
+                    "label": step_labels[step_num],
+                    "ready": False,
+                    "template_id": None,
+                    "template_name": None,
+                    "status": "MISSING",
+                    "reason": "no_template",
+                })
+
+    return {
+        "all_ready": all_ready,
+        "steps": steps_status,
+    }
+
+
 @router.post("/autopilot/run")
 async def run_autopilot(request: Request, db: Session = Depends(get_db)):
     """
