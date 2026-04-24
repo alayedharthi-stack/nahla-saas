@@ -532,11 +532,37 @@ async def debug_abandoned_carts_raw_public(
 async def debug_email_config(
     debug_token: str = Query(..., description="Shared secret from env"),
 ) -> Dict[str, Any]:
-    """Show SMTP config (no send) — diagnose whether EMAIL_ENABLED and credentials are set."""
+    """Show SMTP config + TCP reachability test (no email sent)."""
     _check_token(debug_token)
+    import asyncio as _aio  # noqa: PLC0415
+    import socket as _socket  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
     from core.config import (  # noqa: PLC0415
         EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, SMTP_USE_TLS,
     )
+
+    # Quick TCP reachability check (5s timeout)
+    tcp_ok = False
+    tcp_error = None
+    tcp_ms = None
+    try:
+        t0 = _time.monotonic()
+        loop = _aio.get_event_loop()
+        conn = await _aio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: _socket.create_connection((SMTP_HOST, SMTP_PORT), timeout=5),
+            ),
+            timeout=6.0,
+        )
+        conn.close()
+        tcp_ms = round((_time.monotonic() - t0) * 1000)
+        tcp_ok = True
+    except _aio.TimeoutError:
+        tcp_error = f"TCP timeout after 5s — port {SMTP_PORT} unreachable from Railway"
+    except OSError as e:
+        tcp_error = str(e)
+
     return {
         "email_enabled": EMAIL_ENABLED,
         "smtp_host":     SMTP_HOST,
@@ -545,6 +571,9 @@ async def debug_email_config(
         "smtp_pass_set": bool(SMTP_PASS),
         "smtp_use_tls":  SMTP_USE_TLS,
         "email_from":    EMAIL_FROM,
+        "tcp_reachable": tcp_ok,
+        "tcp_latency_ms": tcp_ms,
+        "tcp_error":     tcp_error,
     }
 
 
