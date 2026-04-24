@@ -2937,7 +2937,12 @@ async def import_nahla_template(
         trigger_delay_hours = tpl_def.get("trigger_delay_hours"),
     )
     db.add(new_tpl)
-    db.flush()  # get new_tpl.id before enforcing invariant
+    try:
+        db.flush()
+    except Exception as exc:
+        db.rollback()
+        logger.error("[NahlaImport] flush failed: tenant=%s key=%s err=%s", tenant_id, body.template_key, exc)
+        raise HTTPException(status_code=409, detail=f"فشل حفظ القالب: {exc}")
 
     # Enforce single-active invariant for the service slot
     svc = tpl_def.get("service_key")
@@ -2946,7 +2951,13 @@ async def import_nahla_template(
         from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
         ensure_single_active(db, tenant_id, svc, step, new_tpl.id)
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("[NahlaImport] commit failed: tenant=%s key=%s err=%s", tenant_id, body.template_key, exc)
+        raise HTTPException(status_code=409, detail=f"فشل حفظ القالب: {exc}")
+
     db.refresh(new_tpl)
 
     logger.info(
