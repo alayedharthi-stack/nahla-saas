@@ -265,14 +265,14 @@ export default function Register() {
 
         {/* Footer */}
         <div className="mt-5 pb-4 flex flex-col items-center gap-2">
-          <div className="flex items-center gap-1.5 text-slate-500 text-xs font-medium tracking-wide" dir="ltr">
+          <div className="flex items-center justify-center gap-2 text-slate-500 text-xs font-medium tracking-wide">
             <span>{t(tr => tr.login.dev)}</span>
             <img
               src="/flag-sa.png"
               alt="العلم السعودي"
-              width={24}
-              height={16}
-              className="shrink-0 rounded-sm shadow-sm"
+              width={26}
+              height={17}
+              className="shrink-0 rounded-sm shadow-sm object-cover"
             />
           </div>
           <LegalFooter variant="light" />
