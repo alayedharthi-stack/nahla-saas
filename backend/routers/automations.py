@@ -1139,6 +1139,144 @@ async def cart_recovery_readiness(request: Request, db: Session = Depends(get_db
     }
 
 
+@router.get("/autopilot/readiness")
+async def all_automations_readiness(request: Request, db: Session = Depends(get_db)):
+    """Return template readiness for every automation type in a single call.
+
+    Each entry in the result map has:
+      all_ready: bool   — true only when every required template is APPROVED
+      steps: list       — one entry per template with status details
+    """
+    tenant_id = resolve_tenant_id(request)
+
+    from core.service_template_resolver import resolve_template_for_send  # noqa: PLC0415
+    from models import WhatsAppTemplate  # noqa: PLC0415
+
+    # ── Template requirements per automation type ──────────────────────────
+    # Maps automation_type → list of template names required (from seed config).
+    # "abandoned_cart" is special: it uses service_key + step_number resolution
+    # so we handle it separately below.
+    TEMPLATE_REQUIREMENTS: dict = {
+        "predictive_reorder":    ["predictive_reorder_reminder_ar"],
+        "customer_winback":      ["win_back_ar", "win_back_en"],
+        "vip_upgrade":           ["vip_reward_ar", "vip_reward_en"],
+        "new_product_alert":     ["new_arrivals"],
+        "back_in_stock":         ["back_in_stock_ar", "back_in_stock_en"],
+        "unpaid_order_reminder": ["unpaid_order_reminder_ar", "unpaid_order_reminder_en"],
+        "cod_confirmation":      ["cod_confirmation_reminder_ar", "cod_confirmation_reminder_en"],
+        "seasonal_offer":        ["seasonal_offer_ar", "seasonal_offer_en"],
+        "salary_payday_offer":   ["salary_payday_offer_ar", "salary_payday_offer_en"],
+    }
+
+    STEP_LABELS_AR: dict = {
+        "predictive_reorder_reminder_ar": "قالب تذكير إعادة الطلب (AR)",
+        "win_back_ar":                    "قالب استرجاع العميل (AR)",
+        "win_back_en":                    "قالب استرجاع العميل (EN)",
+        "vip_reward_ar":                  "قالب مكافأة VIP (AR)",
+        "vip_reward_en":                  "قالب مكافأة VIP (EN)",
+        "new_arrivals":                   "قالب المنتجات الجديدة",
+        "back_in_stock_ar":               "قالب عودة المخزون (AR)",
+        "back_in_stock_en":               "قالب عودة المخزون (EN)",
+        "unpaid_order_reminder_ar":       "قالب الطلب غير المدفوع (AR)",
+        "unpaid_order_reminder_en":       "قالب الطلب غير المدفوع (EN)",
+        "cod_confirmation_reminder_ar":   "قالب تأكيد الدفع عند الاستلام (AR)",
+        "cod_confirmation_reminder_en":   "قالب تأكيد الدفع عند الاستلام (EN)",
+        "seasonal_offer_ar":              "قالب العروض الموسمية (AR)",
+        "seasonal_offer_en":              "قالب العروض الموسمية (EN)",
+        "salary_payday_offer_ar":         "قالب عرض الراتب (AR)",
+        "salary_payday_offer_en":         "قالب عرض الراتب (EN)",
+    }
+
+    result: dict = {}
+
+    # ── Handle abandoned_cart (service_key resolver) ───────────────────────
+    cart_steps_status = []
+    cart_all_ready = True
+    cart_step_labels = {
+        1: "التذكير الأول",
+        2: "المتابعة",
+        3: "التذكير الأخير مع كوبون",
+    }
+    for step_num in (1, 2, 3):
+        tpl = resolve_template_for_send(db, tenant_id, "cart_recovery", step_num)
+        if tpl and tpl.status == "APPROVED":
+            cart_steps_status.append({
+                "step": step_num,
+                "label": cart_step_labels[step_num],
+                "ready": True,
+                "template_name": tpl.name,
+                "status": "APPROVED",
+            })
+        else:
+            cart_all_ready = False
+            any_tpl = (
+                db.query(WhatsAppTemplate)
+                .filter(
+                    WhatsAppTemplate.tenant_id == tenant_id,
+                    WhatsAppTemplate.service_key == "cart_recovery",
+                    WhatsAppTemplate.step_number == step_num,
+                )
+                .order_by(WhatsAppTemplate.updated_at.desc())
+                .first()
+            )
+            cart_steps_status.append({
+                "step": step_num,
+                "label": cart_step_labels[step_num],
+                "ready": False,
+                "template_name": any_tpl.name if any_tpl else None,
+                "status": (any_tpl.status or "UNKNOWN") if any_tpl else "MISSING",
+                "reason": "not_approved" if any_tpl else "no_template",
+            })
+
+    result["abandoned_cart"] = {
+        "all_ready": cart_all_ready,
+        "steps": cart_steps_status,
+    }
+
+    # ── Handle all template_name-based automations ──────────────────────────
+    for auto_type, template_names in TEMPLATE_REQUIREMENTS.items():
+        steps = []
+        all_ready = True
+        for name in template_names:
+            tpl = (
+                db.query(WhatsAppTemplate)
+                .filter(
+                    WhatsAppTemplate.tenant_id == tenant_id,
+                    WhatsAppTemplate.name == name,
+                )
+                .order_by(
+                    # prefer APPROVED, then most-recently-updated
+                    WhatsAppTemplate.updated_at.desc()
+                )
+                .first()
+            )
+            label = STEP_LABELS_AR.get(name, name)
+            if tpl and tpl.status == "APPROVED":
+                steps.append({
+                    "label": label,
+                    "template_name": name,
+                    "ready": True,
+                    "status": "APPROVED",
+                })
+            else:
+                all_ready = False
+                steps.append({
+                    "label": label,
+                    "template_name": name,
+                    "ready": False,
+                    "status": (tpl.status or "UNKNOWN") if tpl else "MISSING",
+                    "reason": "not_approved" if tpl else "no_template",
+                })
+        result[auto_type] = {"all_ready": all_ready, "steps": steps}
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return result
+
+
 @router.post("/autopilot/run")
 async def run_autopilot(request: Request, db: Session = Depends(get_db)):
     """

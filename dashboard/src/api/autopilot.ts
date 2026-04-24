@@ -189,6 +189,23 @@ export interface CartRecoveryReadiness {
   steps: CartRecoveryStepReadiness[]
 }
 
+export interface AutomationStepReadiness {
+  label: string
+  template_name: string | null
+  ready: boolean
+  status: string
+  reason?: string
+  step?: number
+}
+
+export interface AutomationReadiness {
+  all_ready: boolean
+  steps: AutomationStepReadiness[]
+}
+
+/** Map from automation_type → readiness */
+export type AllAutomationsReadiness = Record<string, AutomationReadiness>
+
 export const autopilotApi = {
   /** Get autopilot settings + today's daily summary. */
   status: () =>
@@ -248,6 +265,10 @@ export const autopilotApi = {
   /** Check whether all 3 cart_recovery templates are APPROVED. */
   cartRecoveryReadiness: () =>
     apiCall<CartRecoveryReadiness>('/autopilot/cart-recovery/readiness'),
+
+  /** Get template readiness for ALL automation types in one call. */
+  allReadiness: () =>
+    apiCall<AllAutomationsReadiness>('/autopilot/readiness'),
 }
 
 // ── Order status labels (Arabic) ──────────────────────────────────────────────

@@ -970,36 +970,17 @@ function OperationalQueues({ queues, loading, onRefresh, manualRetryEnabled = fa
 interface AutomationCardProps {
   automation: AutomationRecord
   onToggle: (id: number, enabled: boolean) => void
+  readiness: import('../api/autopilot').AutomationReadiness | null
+  readinessLoading: boolean
 }
 
-function AutomationCard({ automation, onToggle }: AutomationCardProps) {
+function AutomationCard({ automation, onToggle, readiness, readinessLoading }: AutomationCardProps) {
   const [expanded, setExpanded] = useState(false)
   const [toggling, setToggling] = useState(false)
 
-  const isAbandonedCartType = automation.automation_type === 'abandoned_cart'
-
-  // Cart-recovery readiness gate
-  const [cartReadiness, setCartReadiness] = useState<import('../api/autopilot').CartRecoveryReadiness | null>(null)
-  const [readinessLoading, setReadinessLoading] = useState(false)
-  const [readinessError, setReadinessError] = useState(false)
-
-  useEffect(() => {
-    if (!isAbandonedCartType) return
-    let cancelled = false
-    setReadinessLoading(true)
-    setReadinessError(false)
-    autopilotApi.cartRecoveryReadiness()
-      .then(r => { if (!cancelled) setCartReadiness(r) })
-      .catch(() => { if (!cancelled) setReadinessError(true) })
-      .finally(() => { if (!cancelled) setReadinessLoading(false) })
-    return () => { cancelled = true }
-  }, [isAbandonedCartType])
-
-  const cartReady = !isAbandonedCartType || cartReadiness?.all_ready === true
-  // Templates not ready: either API confirmed it, or API failed (safe default = not ready)
-  const cartNotReady = isAbandonedCartType && !readinessLoading && (
-    readinessError || (cartReadiness !== null && !cartReadiness.all_ready)
-  )
+  // readiness comes from the page-level allReadiness call (one API call for all automations)
+  const templatesReady = readiness?.all_ready === true
+  const templatesNotReady = !readinessLoading && readiness !== null && !readiness.all_ready
 
   const meta = AUTOMATION_META[automation.automation_type]
 
@@ -1015,7 +996,7 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
 
   const handleToggle = async (next: boolean) => {
     if (toggling) return
-    if (next && !cartReady) return
+    if (next && !templatesReady) return
     setToggling(true)
     onToggle(automation.id, next)
     try {
@@ -1066,12 +1047,12 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
                 <h3 className="text-sm font-semibold text-slate-900">{automation.name || meta.label}</h3>
                 <Badge
                   label={
-                    automation.enabled && cartNotReady
+                    automation.enabled && templatesNotReady
                       ? 'مُفعَّل — القوالب غير معتمدة'
                       : automation.enabled ? 'مُفعَّل' : 'معطّل'
                   }
                   variant={
-                    automation.enabled && cartNotReady ? 'amber'
+                    automation.enabled && templatesNotReady ? 'amber'
                       : automation.enabled ? 'green' : 'slate'
                   }
                   dot
@@ -1083,32 +1064,20 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
           <Toggle
             enabled={automation.enabled}
             onChange={handleToggle}
-            disabled={toggling || (!cartReady && !automation.enabled)}
+            disabled={toggling || (!templatesReady && !automation.enabled)}
           />
         </div>
 
-        {/* Cart recovery readiness — loading */}
-        {isAbandonedCartType && readinessLoading && (
+        {/* Readiness — loading */}
+        {readinessLoading && (
           <div className="mt-3 flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
             <div className="w-3.5 h-3.5 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin shrink-0" />
             <span className="text-xs text-slate-500">جاري التحقق من اعتماد قوالب WhatsApp...</span>
           </div>
         )}
 
-        {/* Cart recovery readiness — API error */}
-        {isAbandonedCartType && !readinessLoading && readinessError && (
-          <div className="mt-3 bg-red-50 border border-red-200 rounded-xl p-3">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
-              <p className="text-xs text-red-700 font-medium">
-                تعذّر التحقق من اعتماد القوالب — الطيار الآلي لن يرسل أي رسائل حتى يُؤكَّد اعتمادها.
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Cart recovery readiness gate — templates NOT ready */}
-        {isAbandonedCartType && !readinessLoading && !readinessError && cartReadiness && !cartReadiness.all_ready && (
+        {/* Readiness gate — templates NOT ready */}
+        {!readinessLoading && templatesNotReady && (
           <div className={`mt-3 rounded-xl p-4 border ${automation.enabled ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
             <div className="flex items-start gap-2 mb-2">
               <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${automation.enabled ? 'text-red-500' : 'text-amber-600'}`} />
@@ -1119,24 +1088,24 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
                       ⚠️ الطيار الآلي مُفعَّل لكنه لن يرسل أي رسائل
                     </p>
                     <p className="text-xs text-red-600 mt-1">
-                      القوالب الثلاثة لم تعتمدها WhatsApp بعد — لن تُرسَل أي تذكيرات حتى اكتمال الاعتماد.
+                      القوالب المطلوبة لم تعتمدها WhatsApp بعد — لن تُرسَل أي رسائل حتى اكتمال الاعتماد.
                     </p>
                   </>
                 ) : (
                   <>
                     <p className="text-sm font-semibold text-amber-800">
-                      لا يمكن تفعيل استرجاع السلات المتروكة حتى يتم اعتماد القوالب الثلاثة من WhatsApp.
+                      يتطلب اعتماد القوالب من WhatsApp قبل التفعيل.
                     </p>
                     <p className="text-xs text-amber-600 mt-1">
-                      كل مرحلة تحتاج قالب معتمد خاص بها — لا يتم استخدام قالب مرحلة أخرى كبديل.
+                      كل قالب يحتاج اعتماد Meta — لا يتم الإرسال بدون قوالب معتمدة.
                     </p>
                   </>
                 )}
               </div>
             </div>
             <div className="space-y-1.5 mt-3">
-              {cartReadiness.steps.map(s => (
-                <div key={s.step} className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs ${
+              {(readiness?.steps ?? []).map((s, i) => (
+                <div key={i} className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs ${
                   s.ready
                     ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
                     : automation.enabled ? 'bg-white border-red-200 text-red-700' : 'bg-white border-amber-200 text-amber-700'
@@ -1147,7 +1116,7 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
                     ) : (
                       <AlertCircle className={`w-3.5 h-3.5 ${automation.enabled ? 'text-red-500' : 'text-amber-500'}`} />
                     )}
-                    <span className="font-medium">المرحلة {s.step}: {s.label}</span>
+                    <span className="font-medium">{s.label}</span>
                   </div>
                   <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
                     s.ready
@@ -1156,14 +1125,18 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
                         ? 'bg-red-100 text-red-700'
                         : 'bg-amber-100 text-amber-700'
                   }`}>
-                    {s.ready ? 'معتمد ✓' : s.status === 'MISSING' ? 'غير موجود' : `${s.status}`}
+                    {s.ready ? 'معتمد ✓' : s.status === 'MISSING' ? 'غير موجود' : s.status}
                   </span>
                 </div>
               ))}
             </div>
             <a
               href="/templates"
-              className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 hover:text-amber-900 bg-amber-100 hover:bg-amber-200 px-3 py-1.5 rounded-lg transition-colors"
+              className={`mt-3 inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg transition-colors ${
+                automation.enabled
+                  ? 'text-red-700 hover:text-red-900 bg-red-100 hover:bg-red-200'
+                  : 'text-amber-700 hover:text-amber-900 bg-amber-100 hover:bg-amber-200'
+              }`}
             >
               <ExternalLink className="w-3.5 h-3.5" />
               الانتقال إلى مكتبة القوالب
@@ -1172,7 +1145,7 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
         )}
 
         {/* Readiness OK badge */}
-        {isAbandonedCartType && !readinessLoading && cartReadiness?.all_ready && (
+        {!readinessLoading && readiness?.all_ready && (
           <div className="mt-3 flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
             <CheckCircle className="w-4 h-4 text-emerald-500" />
             <span className="text-xs font-medium text-emerald-700">جاهز للتشغيل — جميع القوالب معتمدة</span>
@@ -1339,6 +1312,8 @@ interface EngineSectionProps {
   onToggleAutomation: (id: number, enabled: boolean) => void
   onToggleEngine: (engine: EngineKey, enabled: boolean) => Promise<void>
   defaultOpen: boolean
+  allReadiness: import('../api/autopilot').AllAutomationsReadiness | null
+  readinessLoading: boolean
 }
 
 function EngineSection({
@@ -1347,6 +1322,8 @@ function EngineSection({
   onToggleAutomation,
   onToggleEngine,
   defaultOpen,
+  allReadiness,
+  readinessLoading,
 }: EngineSectionProps) {
   const [open, setOpen] = useState(defaultOpen)
   const [toggling, setToggling] = useState(false)
@@ -1464,6 +1441,8 @@ function EngineSection({
                   key={automation.id}
                   automation={automation}
                   onToggle={onToggleAutomation}
+                  readiness={allReadiness?.[automation.automation_type] ?? null}
+                  readinessLoading={readinessLoading}
                 />
               ))}
             </div>
@@ -1523,10 +1502,10 @@ export default function SmartAutomations() {
   const [error, setError] = useState<string | null>(null)
   const [queues, setQueues] = useState<AutopilotQueues | null>(null)
   const [queuesLoading, setQueuesLoading] = useState(false)
-  // Backend-controlled feature flag (env: AUTOPILOT_ENABLE_MANUAL_RETRY).
-  // We default to false so the temporary retry button stays hidden when
-  // the dashboard is ahead of a backend that doesn't expose it yet.
   const [manualRetryEnabled, setManualRetryEnabled] = useState(false)
+  // Readiness for all automation types — loaded once for the whole page
+  const [allReadiness, setAllReadiness] = useState<import('../api/autopilot').AllAutomationsReadiness | null>(null)
+  const [readinessLoading, setReadinessLoading] = useState(false)
 
   const loadQueues = useCallback(async () => {
     setQueuesLoading(true)
@@ -1537,6 +1516,18 @@ export default function SmartAutomations() {
       // non-critical — queues panel just shows empty
     } finally {
       setQueuesLoading(false)
+    }
+  }, [])
+
+  const loadReadiness = useCallback(async () => {
+    setReadinessLoading(true)
+    try {
+      const r = await autopilotApi.allReadiness()
+      setAllReadiness(r)
+    } catch {
+      // non-critical — each card will show a fallback warning
+    } finally {
+      setReadinessLoading(false)
     }
   }, [])
 
@@ -1568,7 +1559,8 @@ export default function SmartAutomations() {
   useEffect(() => {
     loadData()
     loadQueues()
-  }, [loadData, loadQueues])
+    loadReadiness()
+  }, [loadData, loadQueues, loadReadiness])
 
   const handleAutopilot = async (next: boolean) => {
     setAutopilot(next)
@@ -1749,6 +1741,8 @@ export default function SmartAutomations() {
               onToggleAutomation={handleToggleAutomation}
               onToggleEngine={handleToggleEngine}
               defaultOpen={engine.available && engine.automations_count > 0}
+              allReadiness={allReadiness}
+              readinessLoading={readinessLoading}
             />
           ))}
         </div>
