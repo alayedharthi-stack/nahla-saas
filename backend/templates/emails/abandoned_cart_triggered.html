@@ -1,0 +1,51 @@
+{% extends "_base.html" %}
+{% set cta_url = dashboard_url + "/automations" %}
+{% set cta_label = "عرض السلات المتروكة 🛒" %}
+{% block title %}تم إطلاق تذكير السلة المتروكة{% endblock %}
+
+{% block content %}
+<h1 style="margin:0 0 8px;color:#f59e0b;font-size:20px;font-weight:700;">
+  🛒 تم إرسال تذكير السلة المتروكة
+</h1>
+<p style="margin:0 0 20px;color:#94a3b8;font-size:14px;">
+  نحلة ترسل تذكيراً لعميل تجاهل سلته
+</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background:#0f172a;border-radius:10px;border:1px solid #78350f;padding:20px;margin-bottom:24px;">
+  <tr>
+    <td>
+      <table width="100%" cellpadding="6" cellspacing="0" border="0">
+        <tr>
+          <td style="color:#64748b;font-size:12px;width:40%;">العميل</td>
+          <td style="color:#e2e8f0;font-size:13px;font-weight:600;">
+            {{ customer_name or customer_phone or "—" }}
+          </td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;font-size:12px;">قيمة السلة</td>
+          <td style="color:#f59e0b;font-size:13px;font-weight:700;">
+            {{ cart_value or "—" }} ر.س
+          </td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;font-size:12px;">المرحلة</td>
+          <td style="color:#e2e8f0;font-size:13px;">{{ stage_label or "التذكير الأول" }}</td>
+        </tr>
+        {% if coupon_code %}
+        <tr>
+          <td style="color:#64748b;font-size:12px;">كوبون الخصم</td>
+          <td style="color:#10b981;font-size:13px;font-weight:700;font-family:monospace;">
+            {{ coupon_code }}
+          </td>
+        </tr>
+        {% endif %}
+      </table>
+    </td>
+  </tr>
+</table>
+
+<p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
+  إذا اشترى العميل خلال الساعات القادمة، سيتم تسجيله كتحويل ناجح في تقارير الأتمتة.
+</p>
+{% endblock %}

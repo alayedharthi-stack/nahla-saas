@@ -897,6 +897,32 @@ async def ai_sales_create_order(
         handoff_triggered=False, order_id=order.id,
     )
 
+    # ── Email: notify merchant of new WhatsApp order ─────────────────────────
+    try:
+        from services.email_service import enqueue_email as _enqueue  # noqa: PLC0415
+        from database.models import User as _User                      # noqa: PLC0415
+        _merchant = db.query(_User).filter(
+            _User.tenant_id == tenant_id, _User.role == "merchant",
+        ).first()
+        if _merchant and _merchant.email:
+            _enqueue(
+                to=_merchant.email,
+                subject=f"🛒 طلب جديد عبر واتساب — #{order.id}",
+                template="order_created_from_whatsapp",
+                variables={
+                    "merchant_name":  _merchant.username or "",
+                    "order_number":   str(order.id),
+                    "order_total":    str(body.total or ""),
+                    "customer_name":  body.customer_name or "",
+                    "customer_phone": body.customer_phone or "",
+                    "products":       [product_display] if product_display else [],
+                    "payment_method": body.payment_method or "",
+                    "order_url":      f"{__import__('core.config', fromlist=['DASHBOARD_URL']).DASHBOARD_URL}/orders",
+                },
+            )
+    except Exception as _email_exc:
+        logger.warning("[AISales] order email error: %s", _email_exc)
+
     from observability.event_logger import log_event  # noqa: PLC0415
     log_event(
         db, tenant_id, category="order", event_type="order.created",

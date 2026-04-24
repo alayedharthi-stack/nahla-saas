@@ -48,6 +48,23 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlah.ai>")
 DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlah.ai")
 
+# ── Zoho SMTP (transactional email) ───────────────────────────────────────────
+# Set all four vars in Railway / .env to enable outbound email.
+# Zoho SA:  host=smtp.zoho.sa  port=587  (STARTTLS)
+# Zoho COM: host=smtp.zoho.com port=587  (STARTTLS) or port=465 (SSL)
+SMTP_HOST      = os.environ.get("SMTP_HOST", "smtp.zoho.sa")
+SMTP_PORT      = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER      = os.environ.get("SMTP_USER", "")       # e.g. hello@nahlah.ai
+SMTP_PASS      = os.environ.get("SMTP_PASS", "")       # App-specific password
+SMTP_USE_TLS   = os.environ.get("SMTP_USE_TLS", "true").lower() != "false"
+EMAIL_ENABLED  = bool(SMTP_USER and SMTP_PASS)         # auto-disables if unconfigured
+
+if not EMAIL_ENABLED:
+    _cfg_logger.warning(
+        "[Email] SMTP_USER / SMTP_PASS not set — outbound email is DISABLED. "
+        "Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS in environment variables."
+    )
+
 # WhatsApp Business (Meta Cloud API)
 # WA_TOKEN: platform-level token used as fallback by token_manager and for
 #   platform notifications (wa_notify.py).  NOT used for per-tenant operations.

@@ -604,6 +604,14 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("Webhook Guardian could not start: %s", exc)
 
+    # Daily report email scheduler
+    try:
+        from core.scheduler import run_daily_report_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_daily_report_scheduler())
+        logger.info("Daily report email scheduler started (sends at 08:00 KSA).")
+    except Exception as exc:
+        logger.warning("Daily report scheduler could not start: %s", exc)
+
     # 9. Startup webhook health check — verify all merchant WABAs are subscribed
     try:
         from core.webhook_guardian import run_startup_webhook_health_check  # noqa: PLC0415

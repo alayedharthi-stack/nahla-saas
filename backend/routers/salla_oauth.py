@@ -1359,6 +1359,34 @@ async def salla_oauth_callback(
             pass
         return RedirectResponse(url=_error_url("db_save_failed"), status_code=302)
 
+    # ── Email: welcome (new) or salla_connected (returning) ─────────────────────
+    try:
+        from services.email_service import enqueue_email  # noqa: PLC0415
+        if owner_email and "@" in owner_email:
+            if is_new_merchant:
+                enqueue_email(
+                    to=owner_email,
+                    subject="مرحباً بك في نحلة 🐝 — طيار مبيعاتك الآلي جاهز",
+                    template="welcome_email",
+                    variables={
+                        "merchant_name": store_name or owner_email.split("@")[0],
+                        "store_name":    store_name,
+                    },
+                )
+            else:
+                enqueue_email(
+                    to=owner_email,
+                    subject="✅ تم ربط متجرك بسلة بنجاح",
+                    template="salla_connected",
+                    variables={
+                        "merchant_name": store_name or owner_email.split("@")[0],
+                        "store_name":    store_name,
+                        "connected_at":  __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    },
+                )
+    except Exception as _email_exc:
+        logger.warning("[Salla OAuth] Email trigger error: %s", _email_exc)
+
     # ── Notify merchant (fire-and-forget) ──────────────────────────────────────
     try:
         import asyncio as _asyncio  # noqa: PLC0415

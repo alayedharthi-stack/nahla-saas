@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<title>{% block title %}نحلة{% endblock %}</title>
+<!--[if mso]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]-->
+</head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:'Segoe UI',Tahoma,Arial,sans-serif;direction:rtl;">
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0f172a;">
+  <tr>
+    <td align="center" style="padding:32px 16px;">
+
+      <!-- Email card -->
+      <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;border-radius:16px;overflow:hidden;background:#1e293b;border:1px solid #334155;">
+
+        <!-- ── Header ── -->
+        <tr>
+          <td style="background:linear-gradient(135deg,#1e293b 0%,#0f2027 100%);padding:28px 32px;border-bottom:2px solid #f59e0b;text-align:center;">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td align="center">
+                  <!-- Bee logo mark -->
+                  <div style="display:inline-block;background:#f59e0b;border-radius:50%;width:52px;height:52px;line-height:52px;font-size:26px;text-align:center;margin-bottom:10px;">🐝</div>
+                  <br>
+                  <span style="color:#f59e0b;font-size:22px;font-weight:700;letter-spacing:1px;">نحلة</span>
+                  <span style="color:#64748b;font-size:12px;margin-right:8px;">· طيار المبيعات الآلي</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- ── Content ── -->
+        <tr>
+          <td style="padding:32px;color:#e2e8f0;">
+            {% block content %}{% endblock %}
+          </td>
+        </tr>
+
+        <!-- ── CTA button (optional) ── -->
+        {% if cta_url and cta_label %}
+        <tr>
+          <td style="padding:0 32px 28px;text-align:center;">
+            <a href="{{ cta_url }}"
+               style="display:inline-block;background:#f59e0b;color:#0f172a;font-weight:700;font-size:15px;
+                      padding:14px 36px;border-radius:10px;text-decoration:none;letter-spacing:0.3px;">
+              {{ cta_label }}
+            </a>
+          </td>
+        </tr>
+        {% endif %}
+
+        <!-- ── Footer ── -->
+        <tr>
+          <td style="background:#0f172a;padding:20px 32px;border-top:1px solid #1e293b;text-align:center;">
+            <p style="margin:0 0 6px;color:#475569;font-size:12px;">
+              Built with 🐝 in Saudi Arabia 🇸🇦 &nbsp;·&nbsp; nahlah.ai
+            </p>
+            <p style="margin:0;color:#334155;font-size:11px;">
+              للدعم:
+              <a href="mailto:{{ support_email }}" style="color:#f59e0b;text-decoration:none;">{{ support_email }}</a>
+              &nbsp;·&nbsp;
+              <a href="{{ dashboard_url }}" style="color:#64748b;text-decoration:none;">لوحة التحكم</a>
+            </p>
+            <p style="margin:8px 0 0;color:#1e293b;font-size:10px;">
+              © {{ current_year }} Nahlah AI — جميع الحقوق محفوظة
+            </p>
+          </td>
+        </tr>
+
+      </table>
+      <!-- /Email card -->
+
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>

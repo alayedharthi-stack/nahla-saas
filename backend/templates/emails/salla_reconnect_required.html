@@ -1,0 +1,51 @@
+{% extends "_base.html" %}
+{% set cta_url = reconnect_url or dashboard_url %}
+{% set cta_label = "إعادة الربط الآن 🔗" %}
+{% block title %}⚠️ يلزم إعادة ربط متجرك{% endblock %}
+
+{% block content %}
+<h1 style="margin:0 0 8px;color:#ef4444;font-size:20px;font-weight:700;">
+  ⚠️ انتهت صلاحية ربط متجرك
+</h1>
+<p style="margin:0 0 20px;color:#94a3b8;font-size:14px;">
+  يحتاج متجر <strong style="color:#f59e0b;">{{ store_name or "متجرك" }}</strong> إلى إعادة الربط مع سلة
+</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background:#1a0a0a;border:1px solid #7f1d1d;border-radius:10px;padding:20px;margin-bottom:24px;">
+  <tr>
+    <td>
+      <p style="margin:0 0 12px;color:#fca5a5;font-size:14px;font-weight:600;">
+        🔴 توقفت الخدمة مؤقتاً
+      </p>
+      <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.7;">
+        انتهت صلاحية رمز الوصول (access token) لمتجرك على منصة سلة. هذا يعني أن نحلة لم تعد قادرة على:
+      </p>
+      <ul style="margin:10px 0 0;padding-right:20px;color:#94a3b8;font-size:13px;line-height:2;">
+        <li>استيراد طلباتك الجديدة</li>
+        <li>تحديث معلومات العملاء</li>
+        <li>مزامنة المنتجات</li>
+      </ul>
+    </td>
+  </tr>
+</table>
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background:#0f172a;border-radius:10px;padding:20px;margin-bottom:24px;">
+  <tr>
+    <td>
+      <p style="margin:0 0 8px;color:#94a3b8;font-size:13px;font-weight:600;">للإصلاح:</p>
+      <ol style="margin:0;padding-right:20px;color:#cbd5e1;font-size:13px;line-height:2.2;">
+        <li>اضغط على زر "إعادة الربط الآن" أدناه</li>
+        <li>سجّل دخولك بحساب سلة الخاص بك</li>
+        <li>امنح نحلة الصلاحيات المطلوبة</li>
+        <li>ستعود الخدمة فورياً بعد الإذن ✅</li>
+      </ol>
+    </td>
+  </tr>
+</table>
+
+<p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
+  إذا استمرت المشكلة بعد إعادة الربط، تواصل معنا مباشرة.
+</p>
+{% endblock %}

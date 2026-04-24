@@ -1,0 +1,46 @@
+{% extends "_base.html" %}
+{% set cta_url = dashboard_url %}
+{% set cta_label = "افتح لوحة التحكم 🚀" %}
+{% block title %}مرحباً بك في نحلة 🐝{% endblock %}
+
+{% block content %}
+<h1 style="margin:0 0 8px;color:#f59e0b;font-size:22px;font-weight:700;">
+  مرحباً بك في نحلة، {{ merchant_name or "أستاذ" }}! 🎉
+</h1>
+<p style="margin:0 0 20px;color:#94a3b8;font-size:14px;">طيار مبيعاتك الآلي على واتساب جاهز</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0f172a;border-radius:10px;padding:20px;margin-bottom:24px;">
+  <tr>
+    <td>
+      <p style="margin:0 0 12px;color:#e2e8f0;font-size:14px;line-height:1.7;">
+        🎊 تم إنشاء متجرك <strong style="color:#f59e0b;">{{ store_name or "متجرك" }}</strong> بنجاح على منصة نحلة.
+      </p>
+      <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.7;">
+        لديك الآن <strong style="color:#10b981;">14 يوماً مجاناً</strong> لاستكشاف جميع الميزات:
+      </p>
+    </td>
+  </tr>
+</table>
+
+<!-- Feature list -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
+  {% for feature in [
+      ("🤖", "ذكاء اصطناعي يرد على عملاءك باللغة العربية"),
+      ("🛒", "استرداد السلات المتروكة تلقائياً"),
+      ("📣", "حملات واتساب موجهة لشرائح محددة"),
+      ("📊", "تقارير مبيعات وتحليلات العملاء"),
+      ("🎫", "كوبونات ذكية بحسب مستوى العميل"),
+  ] %}
+  <tr>
+    <td style="padding:6px 0;">
+      <span style="font-size:18px;">{{ feature[0] }}</span>
+      <span style="color:#cbd5e1;font-size:13px;margin-right:8px;">{{ feature[1] }}</span>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
+  إذا واجهت أي مشكلة، فريقنا موجود على مدار الساعة عبر البريد الإلكتروني.
+</p>
+{% endblock %}

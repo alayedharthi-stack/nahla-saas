@@ -98,6 +98,95 @@ async def run_scheduler() -> None:
         await asyncio.sleep(_CHECK_INTERVAL_HOURS * 3600)
 
 
+# ── Daily report email ───────────────────────────────────────────────────────
+_DAILY_REPORT_HOUR_UTC = 5   # 5 AM UTC ≈ 8 AM KSA (UTC+3)
+_DAILY_REPORT_INTERVAL = 24 * 3600
+
+
+async def run_daily_report_scheduler() -> None:
+    """Send daily summary email to each merchant once per day (≈08:00 KSA)."""
+    # Wait until the next scheduled hour before starting the cycle
+    now_utc = datetime.now(timezone.utc)
+    target   = now_utc.replace(hour=_DAILY_REPORT_HOUR_UTC, minute=0, second=0, microsecond=0)
+    if target <= now_utc:
+        target += timedelta(days=1)
+    wait_secs = (target - now_utc).total_seconds()
+    logger.info("[DailyReport] Starts in %.0f s (first dispatch at %s UTC)", wait_secs, target)
+    await asyncio.sleep(wait_secs)
+
+    while True:
+        try:
+            await _send_daily_reports()
+        except Exception as exc:
+            logger.error("[DailyReport] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_DAILY_REPORT_INTERVAL)
+
+
+async def _send_daily_reports() -> None:
+    """Query per-tenant daily metrics and email each merchant."""
+    import sys as _sys, os as _os
+    _backend = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _db_dir  = _os.path.abspath(_os.path.join(_backend, "..", "database"))
+    for _p in (_backend, _db_dir):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+
+    from core.database import SessionLocal          # noqa: PLC0415
+    from database.models import User, Order, Tenant # noqa: PLC0415
+    from services.email_service import send_email   # noqa: PLC0415
+
+    db = SessionLocal()
+    try:
+        merchants = (
+            db.query(User)
+            .filter(User.role == "merchant", User.is_active.is_(True), User.email.isnot(None))
+            .all()
+        )
+        today_utc = datetime.now(timezone.utc).date()
+        yesterday = today_utc - timedelta(days=1)
+
+        for merchant in merchants:
+            try:
+                if not merchant.email or "@" not in merchant.email:
+                    continue
+
+                # Simple metrics: orders created yesterday for this tenant
+                day_orders = (
+                    db.query(Order)
+                    .filter(
+                        Order.tenant_id == merchant.tenant_id,
+                        Order.created_at >= datetime(yesterday.year, yesterday.month, yesterday.day, tzinfo=timezone.utc),
+                        Order.created_at <  datetime(today_utc.year, today_utc.month, today_utc.day, tzinfo=timezone.utc),
+                    )
+                    .all()
+                )
+                revenue = sum(
+                    float(o.total or 0)
+                    for o in day_orders
+                    if o.status not in ("cancelled", "refunded")
+                )
+
+                await send_email(
+                    to=merchant.email,
+                    subject=f"📊 تقرير نحلة اليومي — {yesterday.strftime('%Y-%m-%d')}",
+                    template="daily_report",
+                    variables={
+                        "merchant_name":    merchant.username or "",
+                        "report_date":      yesterday.strftime("%A، %d %B %Y"),
+                        "orders_count":     len(day_orders),
+                        "conversations_count": 0,   # extend later via ConversationMessage query
+                        "revenue":          f"{revenue:,.0f}",
+                        "recovered_carts":  0,
+                        "ai_response_rate": None,
+                    },
+                )
+                logger.info("[DailyReport] Sent to merchant=%d email=%s", merchant.id, merchant.email)
+            except Exception as m_exc:
+                logger.warning("[DailyReport] Failed for merchant=%d: %s", merchant.id, m_exc)
+    finally:
+        db.close()
+
+
 async def run_store_sync_scheduler() -> None:
     """Hourly full sync for all connected stores — runs as a separate background task."""
     await asyncio.sleep(120)  # let the app fully start before first sync

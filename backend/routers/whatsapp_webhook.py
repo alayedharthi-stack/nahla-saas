@@ -552,6 +552,40 @@ async def _dispatch_message(
             )
             if _lead:
                 _inbound_customer_id = _lead.id
+
+            # ── Email: first WhatsApp message received by this tenant ─────────
+            # Only fires on the very first message (total_messages == 1 on lead)
+            try:
+                _is_first = (
+                    _lead is not None
+                    and getattr(_lead, "total_messages", None) in (None, 0, 1)
+                    and not getattr(_lead, "is_returning", False)
+                )
+                if _is_first:
+                    from services.email_service import enqueue_email as _enq  # noqa: PLC0415
+                    from database.models import User as _U                     # noqa: PLC0415
+                    _mu = db.query(_U).filter(
+                        _U.tenant_id == resolved_tenant_id, _U.role == "merchant",
+                    ).first()
+                    if _mu and _mu.email:
+                        _msg_text = ""
+                        if msg_type == "text":
+                            _msg_text = (msg.get("text") or {}).get("body", "")
+                        _enq(
+                            to=_mu.email,
+                            subject="🎉 أول رسالة واتساب وصلت لمتجرك!",
+                            template="first_whatsapp_message",
+                            variables={
+                                "merchant_name":   _mu.username or "",
+                                "customer_name":   contact_name or "",
+                                "customer_phone":  normalized_sender,
+                                "message_preview": _msg_text,
+                                "conversation_url": f"{__import__('core.config', fromlist=['DASHBOARD_URL']).DASHBOARD_URL}/conversations",
+                            },
+                        )
+            except Exception as _em:
+                logger.debug("[Webhook] first-message email error: %s", _em)
+
             track_conversation(
                 db,
                 resolved_tenant_id,

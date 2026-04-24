@@ -1,0 +1,46 @@
+{% extends "_base.html" %}
+{% set cta_url = dashboard_url %}
+{% set cta_label = "عرض لوحة التحكم ✅" %}
+{% block title %}تم ربط متجر سلة بنجاح{% endblock %}
+
+{% block content %}
+<h1 style="margin:0 0 8px;color:#10b981;font-size:20px;font-weight:700;">
+  ✅ تم ربط متجرك بنجاح!
+</h1>
+<p style="margin:0 0 20px;color:#94a3b8;font-size:14px;">
+  {{ store_name or "المتجر" }} أصبح متصلاً بمنصة نحلة
+</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0f172a;border-radius:10px;padding:20px;margin-bottom:24px;">
+  <tr>
+    <td>
+      <p style="margin:0 0 10px;color:#e2e8f0;font-size:14px;line-height:1.7;">
+        مرحباً <strong style="color:#f59e0b;">{{ merchant_name or "أستاذ" }}</strong>،
+      </p>
+      <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.7;">
+        تم الربط مع سلة بنجاح. نحلة الآن تستطيع استيراد طلباتك، منتجاتك، وعملاءك تلقائياً.
+      </p>
+    </td>
+  </tr>
+</table>
+
+<table width="100%" cellpadding="12" cellspacing="0" border="0"
+       style="background:#0f172a;border-radius:10px;margin-bottom:24px;">
+  <tr style="border-bottom:1px solid #1e293b;">
+    <td style="color:#64748b;font-size:12px;">المتجر</td>
+    <td style="color:#e2e8f0;font-size:13px;font-weight:600;text-align:left;">{{ store_name or "—" }}</td>
+  </tr>
+  <tr style="border-bottom:1px solid #1e293b;">
+    <td style="color:#64748b;font-size:12px;">المنصة</td>
+    <td style="color:#e2e8f0;font-size:13px;font-weight:600;text-align:left;">سلة</td>
+  </tr>
+  <tr>
+    <td style="color:#64748b;font-size:12px;">وقت الربط</td>
+    <td style="color:#e2e8f0;font-size:13px;font-weight:600;text-align:left;">{{ connected_at or "الآن" }}</td>
+  </tr>
+</table>
+
+<p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
+  الخطوة التالية: ربط حساب واتساب الخاص بمتجرك من قسم الإعدادات.
+</p>
+{% endblock %}
