@@ -2593,12 +2593,28 @@ async def get_template_sync_status(request: Request, db: Session = Depends(get_d
             "next_estimate": "ستتم المزامنة التلقائية خلال 30 دقيقة كحد أقصى",
         }
 
+    # Live DB count of templates bound to a Nahla service — always
+    # accurate regardless of what the last sync cycle reported.
+    try:
+        live_total_bound = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.service_key.isnot(None),
+                WhatsAppTemplate.service_key != "",
+            )
+            .count()
+        )
+    except Exception:
+        live_total_bound = int(last.get("total_bound", 0) or 0)
+
     payload: Dict[str, Any] = {
         "recorded":      True,
         "at":            last.get("at"),
         "source":        last.get("source"),
         "synced":        int(last.get("synced", 0) or 0),
         "auto_bound":    int(last.get("auto_bound", 0) or 0),
+        "total_bound":   live_total_bound,
         "failed":        int(last.get("failed", 0) or 0),
         "deleted_seeds": int(last.get("deleted_seeds", 0) or 0),
         "error":         last.get("error"),
