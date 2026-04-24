@@ -3401,3 +3401,66 @@ async def debug_abandoned_carts_raw(
         raw_count = out["raw_count"],
     )
     return out
+
+
+# ── Temporary: email system smoke-test ───────────────────────────────────────
+# TODO: remove or gate behind a feature flag once Zoho SMTP is confirmed live.
+
+class _TestEmailBody(BaseModel):
+    to: str = Field(..., description="Recipient email address")
+    template: str = Field("welcome_email", description="Template name (without .html)")
+
+
+@router.post("/admin/test-email")
+async def admin_test_email(
+    body: _TestEmailBody,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    **Temporary smoke-test** — send a sample email via email_service.py.
+
+    Admin-only. Read-only (no DB writes). Remove after SMTP is confirmed.
+    """
+    from services.email_service import send_email  # noqa: PLC0415
+    from core.config import EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER  # noqa: PLC0415
+
+    if not EMAIL_ENABLED:
+        return {
+            "success": False,
+            "error":   "SMTP not configured — set SMTP_USER and SMTP_PASS in environment variables",
+            "smtp": {
+                "host": SMTP_HOST,
+                "port": SMTP_PORT,
+                "user": SMTP_USER or "(not set)",
+            },
+        }
+
+    logger.info("[AdminTestEmail] Sending test '%s' → %s (by admin=%s)",
+                body.template, body.to, _admin.get("sub"))
+
+    ok = await send_email(
+        to=body.to,
+        subject=f"🐝 نحلة — اختبار قالب «{body.template}»",
+        template=body.template,
+        variables={
+            "merchant_name": "مدير نحلة",
+            "store_name":    "متجر الاختبار",
+            "report_date":   "اليوم",
+        },
+    )
+
+    if ok:
+        return {
+            "success": True,
+            "message": f"✅ تم إرسال الإيميل إلى {body.to}",
+            "template": body.template,
+        }
+    return {
+        "success": False,
+        "error":   "فشل الإرسال بعد 3 محاولات — راجع سجلات السيرفر للتفاصيل",
+        "smtp": {
+            "host": SMTP_HOST,
+            "port": SMTP_PORT,
+            "user": SMTP_USER,
+        },
+    }
