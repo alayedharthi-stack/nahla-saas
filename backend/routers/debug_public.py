@@ -616,43 +616,34 @@ async def debug_test_email(
     # Single-attempt send with a 25-second hard timeout so this endpoint
     # never hangs the server even if Zoho is unreachable.
     try:
-        from services.email_service import _render, _smtp_send  # noqa: PLC0415
+        from services.email_service import send_email as _send  # noqa: PLC0415
     except Exception as exc:
         return {"success": False, "error": f"email_service import error: {exc}",
                 "traceback": _tb.format_exc()}
 
     try:
-        from core.config import DASHBOARD_URL, SMTP_USER as _su  # noqa: PLC0415
-        html = _render(template, {
-            "merchant_name": "مدير نحلة",
-            "store_name":    "متجر الاختبار",
-            "report_date":   "اليوم",
-        })
-    except Exception as exc:
-        return {"success": False, "error": f"template render error: {exc}",
-                "traceback": _tb.format_exc()}
-
-    try:
-        await _asyncio.wait_for(
-            _smtp_send(
-                to=to,
-                subject=f"نحلة — اختبار قالب {template}",
-                html=html,
-            ),
-            timeout=8.0,
+        from core.config import RESEND_API_KEY, SMTP_HOST, SMTP_PORT, SMTP_USER  # noqa: PLC0415
+        ok = await _send(
+            to=to,
+            subject=f"نحلة — اختبار قالب {template}",
+            template=template,
+            variables={
+                "merchant_name": "مدير نحلة",
+                "store_name":    "متجر الاختبار",
+                "report_date":   "اليوم",
+            },
         )
+        if ok:
+            return {
+                "success":  True,
+                "message":  f"تم إرسال الإيميل إلى {to}",
+                "template": template,
+                "method":   "resend" if RESEND_API_KEY else "smtp",
+            }
         return {
-            "success":  True,
-            "message":  f"تم إرسال الإيميل إلى {to}",
-            "template": template,
-            "smtp_host": SMTP_HOST,
-            "smtp_port": SMTP_PORT,
-        }
-    except _asyncio.TimeoutError:
-        return {
-            "success":  False,
-            "error":    "SMTP timeout (8s) — الخادم لم يستجب في الوقت المحدد",
-            "hint":     "تحقق من SMTP_HOST و SMTP_PORT في Railway Variables",
+            "success": False,
+            "error":   "فشل الإرسال — راجع logs السيرفر",
+            "method":  "resend" if RESEND_API_KEY else "smtp",
             "smtp_host": SMTP_HOST,
             "smtp_port": SMTP_PORT,
         }
@@ -661,9 +652,6 @@ async def debug_test_email(
             "success":   False,
             "error":     str(exc),
             "traceback": _tb.format_exc(),
-            "smtp_host": SMTP_HOST,
-            "smtp_port": SMTP_PORT,
-            "smtp_user": SMTP_USER,
         }
 
 

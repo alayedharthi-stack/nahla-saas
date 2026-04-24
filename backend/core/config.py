@@ -57,13 +57,17 @@ SMTP_PORT      = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER      = os.environ.get("SMTP_USER", "")       # e.g. hello@nahlah.ai
 SMTP_PASS      = os.environ.get("SMTP_PASS", "")       # App-specific password
 SMTP_USE_TLS   = os.environ.get("SMTP_USE_TLS", "true").lower() != "false"
-EMAIL_ENABLED  = bool(SMTP_USER and SMTP_PASS)         # auto-disables if unconfigured
+EMAIL_ENABLED  = bool(RESEND_API_KEY or (SMTP_USER and SMTP_PASS))
 
 if not EMAIL_ENABLED:
     _cfg_logger.warning(
-        "[Email] SMTP_USER / SMTP_PASS not set — outbound email is DISABLED. "
-        "Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS in environment variables."
+        "[Email] Email is DISABLED — set RESEND_API_KEY (recommended) "
+        "or SMTP_USER + SMTP_PASS in environment variables."
     )
+elif RESEND_API_KEY:
+    _cfg_logger.info("[Email] Using Resend API for outbound email.")
+else:
+    _cfg_logger.info("[Email] Using SMTP for outbound email.")
 
 # WhatsApp Business (Meta Cloud API)
 # WA_TOKEN: platform-level token used as fallback by token_manager and for

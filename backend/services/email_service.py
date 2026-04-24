@@ -68,7 +68,7 @@ async def send_email(
     reply_to: Optional[str] = None,
 ) -> bool:
     """
-    Render *template*.html and send it to *to* via Zoho SMTP.
+    Render *template*.html and send it via Resend API (preferred) or Zoho SMTP.
 
     Returns True on success, False on final failure (after retries).
     Never raises — all errors are caught and logged.
@@ -76,7 +76,7 @@ async def send_email(
     cfg = _cfg()
 
     if not cfg.EMAIL_ENABLED:
-        logger.debug("[Email] Skipped (SMTP not configured): to=%s subject=%s", to, subject)
+        logger.debug("[Email] Skipped (not configured): to=%s subject=%s", to, subject)
         return False
 
     try:
@@ -85,6 +85,11 @@ async def send_email(
         logger.error("[Email] Template render error: template=%s error=%s", template, exc)
         return False
 
+    # Prefer Resend (HTTP API — works on Railway, no SMTP port restrictions)
+    if cfg.RESEND_API_KEY:
+        return await _send_via_resend(to=to, subject=subject, html=html,
+                                      cc=cc, reply_to=reply_to)
+
     return await _send_with_retry(
         to=to,
         subject=subject,
@@ -92,6 +97,50 @@ async def send_email(
         cc=cc,
         reply_to=reply_to,
     )
+
+
+async def _send_via_resend(
+    to: str,
+    subject: str,
+    html: str,
+    cc: Optional[str] = None,
+    reply_to: Optional[str] = None,
+) -> bool:
+    """Send via Resend HTTP API (https://resend.com/docs/api-reference/emails/send-email)."""
+    import httpx  # noqa: PLC0415
+    cfg = _cfg()
+
+    payload: Dict[str, Any] = {
+        "from":    cfg.EMAIL_FROM,
+        "to":      [to],
+        "subject": subject,
+        "html":    html,
+    }
+    if cc:
+        payload["cc"] = [cc]
+    if reply_to:
+        payload["reply_to"] = reply_to
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {cfg.RESEND_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json=payload,
+            )
+        if resp.status_code in (200, 201):
+            logger.info("[Email/Resend] ✅ Sent: to=%s subject=%s id=%s",
+                        to, subject, resp.json().get("id"))
+            return True
+        logger.error("[Email/Resend] ❌ HTTP %s: to=%s body=%s",
+                     resp.status_code, to, resp.text[:300])
+        return False
+    except Exception as exc:
+        logger.error("[Email/Resend] ❌ Exception: to=%s error=%s", to, exc)
+        return False
 
 
 async def _send_with_retry(
