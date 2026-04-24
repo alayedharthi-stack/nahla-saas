@@ -981,19 +981,25 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
   // Cart-recovery readiness gate
   const [cartReadiness, setCartReadiness] = useState<import('../api/autopilot').CartRecoveryReadiness | null>(null)
   const [readinessLoading, setReadinessLoading] = useState(false)
+  const [readinessError, setReadinessError] = useState(false)
 
   useEffect(() => {
     if (!isAbandonedCartType) return
     let cancelled = false
     setReadinessLoading(true)
+    setReadinessError(false)
     autopilotApi.cartRecoveryReadiness()
       .then(r => { if (!cancelled) setCartReadiness(r) })
-      .catch(() => {})
+      .catch(() => { if (!cancelled) setReadinessError(true) })
       .finally(() => { if (!cancelled) setReadinessLoading(false) })
     return () => { cancelled = true }
   }, [isAbandonedCartType])
 
   const cartReady = !isAbandonedCartType || cartReadiness?.all_ready === true
+  // Templates not ready: either API confirmed it, or API failed (safe default = not ready)
+  const cartNotReady = isAbandonedCartType && !readinessLoading && (
+    readinessError || (cartReadiness !== null && !cartReadiness.all_ready)
+  )
 
   const meta = AUTOMATION_META[automation.automation_type]
 
@@ -1059,8 +1065,15 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-sm font-semibold text-slate-900">{automation.name || meta.label}</h3>
                 <Badge
-                  label={automation.enabled ? 'مُفعّل' : 'معطّل'}
-                  variant={automation.enabled ? 'green' : 'slate'}
+                  label={
+                    automation.enabled && cartNotReady
+                      ? 'مُفعَّل — القوالب غير معتمدة'
+                      : automation.enabled ? 'مُفعَّل' : 'معطّل'
+                  }
+                  variant={
+                    automation.enabled && cartNotReady ? 'amber'
+                      : automation.enabled ? 'green' : 'slate'
+                  }
                   dot
                 />
               </div>
@@ -1074,18 +1087,51 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
           />
         </div>
 
-        {/* Cart recovery readiness gate */}
-        {isAbandonedCartType && !readinessLoading && cartReadiness && !cartReadiness.all_ready && (
-          <div className="mt-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
+        {/* Cart recovery readiness — loading */}
+        {isAbandonedCartType && readinessLoading && (
+          <div className="mt-3 flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+            <div className="w-3.5 h-3.5 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin shrink-0" />
+            <span className="text-xs text-slate-500">جاري التحقق من اعتماد قوالب WhatsApp...</span>
+          </div>
+        )}
+
+        {/* Cart recovery readiness — API error */}
+        {isAbandonedCartType && !readinessLoading && readinessError && (
+          <div className="mt-3 bg-red-50 border border-red-200 rounded-xl p-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+              <p className="text-xs text-red-700 font-medium">
+                تعذّر التحقق من اعتماد القوالب — الطيار الآلي لن يرسل أي رسائل حتى يُؤكَّد اعتمادها.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Cart recovery readiness gate — templates NOT ready */}
+        {isAbandonedCartType && !readinessLoading && !readinessError && cartReadiness && !cartReadiness.all_ready && (
+          <div className={`mt-3 rounded-xl p-4 border ${automation.enabled ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
             <div className="flex items-start gap-2 mb-2">
-              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${automation.enabled ? 'text-red-500' : 'text-amber-600'}`} />
               <div>
-                <p className="text-sm font-semibold text-amber-800">
-                  لا يمكن تفعيل استرجاع السلات المتروكة حتى يتم اعتماد القوالب الثلاثة من WhatsApp.
-                </p>
-                <p className="text-xs text-amber-600 mt-1">
-                  كل مرحلة تحتاج قالب معتمد خاص بها — لا يتم استخدام قالب مرحلة أخرى كبديل.
-                </p>
+                {automation.enabled ? (
+                  <>
+                    <p className="text-sm font-semibold text-red-800">
+                      ⚠️ الطيار الآلي مُفعَّل لكنه لن يرسل أي رسائل
+                    </p>
+                    <p className="text-xs text-red-600 mt-1">
+                      القوالب الثلاثة لم تعتمدها WhatsApp بعد — لن تُرسَل أي تذكيرات حتى اكتمال الاعتماد.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-semibold text-amber-800">
+                      لا يمكن تفعيل استرجاع السلات المتروكة حتى يتم اعتماد القوالب الثلاثة من WhatsApp.
+                    </p>
+                    <p className="text-xs text-amber-600 mt-1">
+                      كل مرحلة تحتاج قالب معتمد خاص بها — لا يتم استخدام قالب مرحلة أخرى كبديل.
+                    </p>
+                  </>
+                )}
               </div>
             </div>
             <div className="space-y-1.5 mt-3">
@@ -1093,13 +1139,13 @@ function AutomationCard({ automation, onToggle }: AutomationCardProps) {
                 <div key={s.step} className={`flex items-center justify-between px-3 py-2 rounded-lg border text-xs ${
                   s.ready
                     ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                    : 'bg-white border-amber-200 text-amber-700'
+                    : automation.enabled ? 'bg-white border-red-200 text-red-700' : 'bg-white border-amber-200 text-amber-700'
                 }`}>
                   <div className="flex items-center gap-2">
                     {s.ready ? (
                       <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
                     ) : (
-                      <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+                      <AlertCircle className={`w-3.5 h-3.5 ${automation.enabled ? 'text-red-500' : 'text-amber-500'}`} />
                     )}
                     <span className="font-medium">المرحلة {s.step}: {s.label}</span>
                   </div>
