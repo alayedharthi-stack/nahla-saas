@@ -353,7 +353,7 @@ SEGMENTS: Tuple[NahlaSegment, ...] = (
     ),
     NahlaSegment(
         key="repeat",
-        label_ar="عملاء متكررون",
+        label_ar="عملاء متكررو الشراء",
         label_en="Repeat buyers",
         description_ar="عملاء أكملوا طلبين أو أكثر",
         criteria_ar=(
