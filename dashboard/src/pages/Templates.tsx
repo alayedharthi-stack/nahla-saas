@@ -950,11 +950,29 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                     {btn.type === 'URL' && (
                       <input
                         className="input text-sm"
-                        placeholder="https://example.com أو {{1}}"
+                        placeholder="https://example.com/cart/{{1}}"
                         dir="ltr"
                         value={btn.url ?? ''}
                         onChange={e => updateButton(i, { url: e.target.value })}
                       />
+                    )}
+                    {btn.type === 'COPY_CODE' && (
+                      <div className="space-y-1.5">
+                        <input
+                          className="input text-sm font-mono"
+                          placeholder="PROMO2025"
+                          dir="ltr"
+                          value={btn.example?.[0] ?? ''}
+                          onChange={e => updateButton(i, { example: [e.target.value] })}
+                        />
+                        <div className="flex items-start gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
+                          <span className="text-emerald-500 text-xs mt-0.5">✦</span>
+                          <p className="text-[11px] text-emerald-700 leading-relaxed">
+                            <strong>كود ديناميكي —</strong> هذا مثال لمراجعة Meta فقط.
+                            عند الإرسال، يُحقن كود الخصم الحقيقي تلقائياً من نظام الكوبونات.
+                          </p>
+                        </div>
+                      </div>
                     )}
                     {btn.type === 'PHONE_NUMBER' && (
                       <input
@@ -1172,8 +1190,32 @@ function EditModal({
                     </>
                   )}
                   {btn.type === 'COPY_CODE' && (
-                    <input className="input text-sm font-mono" placeholder="PROMO2025" dir="ltr"
-                      value={btn.example?.[0] ?? ''} onChange={e => updateBtn(i, { example: [e.target.value] })} />
+                    <div className="space-y-1.5">
+                      <div className="relative">
+                        <input
+                          className="input text-sm font-mono pr-3"
+                          placeholder="PROMO2025"
+                          dir="ltr"
+                          value={btn.example?.[0] ?? ''}
+                          onChange={e => updateBtn(i, { example: [e.target.value] })}
+                        />
+                      </div>
+                      <div className="flex items-start gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
+                        <span className="text-emerald-500 text-xs mt-0.5">✦</span>
+                        <p className="text-[11px] text-emerald-700 leading-relaxed">
+                          <strong>كود ديناميكي —</strong> هذا مثال لمراجعة Meta فقط.
+                          عند الإرسال الفعلي، يُحقن كود الخصم الحقيقي تلقائياً من نظام الكوبونات.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {btn.type === 'URL' && btn.url?.includes('{{1}}') && (
+                    <div className="flex items-start gap-1.5 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-2">
+                      <span className="text-blue-500 text-xs mt-0.5">✦</span>
+                      <p className="text-[11px] text-blue-700 leading-relaxed">
+                        <strong>رابط ديناميكي —</strong> <span dir="ltr">{'{{1}}'}</span> يُستبدل برابط سلة العميل تلقائياً عند الإرسال.
+                      </p>
+                    </div>
                   )}
                   {btn.type === 'PHONE_NUMBER' && (
                     <input className="input text-sm" placeholder="+966..." dir="ltr"
@@ -1494,7 +1536,13 @@ function NahlaLibraryModal({ onClose, onImported }: {
                       {preview.buttons.map((btn, i) => (
                         <div key={i} className="text-center text-xs text-blue-600 font-medium py-0.5 flex items-center justify-center gap-1">
                           <span>{BUTTON_TYPE_ICON[btn.type]}</span>
-                          <span>{btn.type === 'COPY_CODE' ? 'انسخ الكود' : btn.text}</span>
+                          <span>
+                            {btn.type === 'COPY_CODE'
+                              ? 'نسخ كود الخصم ✦ ديناميكي'
+                              : btn.type === 'URL' && btn.url?.includes('{{')
+                                ? `${btn.text} ✦ ديناميكي`
+                                : btn.text}
+                          </span>
                         </div>
                       ))}
                     </div>

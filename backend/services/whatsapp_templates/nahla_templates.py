@@ -708,8 +708,8 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "has_coupon":          True,
         "trigger_delay_hours": 24,
         "body_slots":   ["customer_name"],
-        "button_slots": ["cart_url"],
-        "slots":          ["customer_name", "cart_url"],
+        "button_slots": ["coupon_code", "cart_url"],   # coupon_code dynamic at send time
+        "slots":          ["customer_name", "coupon_code", "cart_url"],
         "components": [
             {
                 "type": "BODY",
@@ -724,9 +724,12 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
             {
                 "type": "BUTTONS",
                 "buttons": [
+                    # COPY_CODE: example shown to Meta for review only —
+                    # real coupon code is injected dynamically at send time
                     {"type": "COPY_CODE", "example": ["CART15"]},
                     {
                         "type": "URL", "text": "أكمل طلبك بالخصم",
+                        # {{1}} is replaced with the customer's cart URL at send time
                         "url": "https://example.com/{{1}}",
                         "example": ["https://example.com/cart/abc123"],
                     },
