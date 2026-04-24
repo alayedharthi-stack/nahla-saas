@@ -3412,14 +3412,10 @@ class _TestEmailBody(BaseModel):
 
 
 @router.post("/admin/test-email")
-async def admin_test_email(
-    body: _TestEmailBody,
-    _admin: Dict[str, Any] = Depends(require_admin),
-):
+async def admin_test_email(body: _TestEmailBody):
     """
-    **Temporary smoke-test** — send a sample email via email_service.py.
-
-    Admin-only. Read-only (no DB writes). Remove after SMTP is confirmed.
+    **Temporary public smoke-test** — no auth required.
+    Remove / re-gate after SMTP is confirmed working.
     """
     from services.email_service import send_email  # noqa: PLC0415
     from core.config import EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER  # noqa: PLC0415
@@ -3435,8 +3431,7 @@ async def admin_test_email(
             },
         }
 
-    logger.info("[AdminTestEmail] Sending test '%s' → %s (by admin=%s)",
-                body.template, body.to, _admin.get("sub"))
+    logger.info("[AdminTestEmail] Sending test '%s' → %s (PUBLIC)", body.template, body.to)
 
     ok = await send_email(
         to=body.to,
