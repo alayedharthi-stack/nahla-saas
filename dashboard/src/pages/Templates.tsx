@@ -142,8 +142,16 @@ function WaPreview({
         {buttons.length > 0 && (
           <div className="border-t border-slate-100 pt-2 space-y-1">
             {buttons.map((btn, i) => (
-              <div key={i} className="text-center text-xs text-blue-600 font-medium py-0.5">
-                {btn.text}
+              <div key={i} className="text-center text-xs text-blue-600 font-medium py-0.5 flex items-center justify-center gap-1">
+                {btn.type === 'COPY_CODE' && <span>📋</span>}
+                {btn.type === 'URL' && <span>🔗</span>}
+                {btn.type === 'PHONE_NUMBER' && <span>📞</span>}
+                {btn.type === 'QUICK_REPLY' && <span>💬</span>}
+                <span>
+                  {btn.type === 'COPY_CODE'
+                    ? (btn.text || 'نسخ كود الخصم')
+                    : btn.text || '—'}
+                </span>
               </div>
             ))}
           </div>
@@ -1175,8 +1183,10 @@ function EditModal({
                     <button onClick={() => setButtons(bs => bs.filter((_, idx) => idx !== i))}
                       className="text-slate-300 hover:text-red-500"><X className="w-3.5 h-3.5" /></button>
                   </div>
-                  <input className="input text-sm" placeholder="نص الزر"
-                    value={btn.text} onChange={e => updateBtn(i, { text: e.target.value })} />
+                  {btn.type !== 'COPY_CODE' && (
+                    <input className="input text-sm" placeholder="نص الزر"
+                      value={btn.text ?? ''} onChange={e => updateBtn(i, { text: e.target.value })} />
+                  )}
                   {btn.type === 'URL' && (
                     <>
                       <input className="input text-sm" placeholder="https://example.com/page/{{1}}" dir="ltr"
