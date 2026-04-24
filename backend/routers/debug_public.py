@@ -544,45 +544,76 @@ async def debug_test_email(
 
         POST /debug/test-email?debug_token=XXX&to=you@example.com
     """
+    import asyncio as _asyncio  # noqa: PLC0415
+    import traceback as _tb  # noqa: PLC0415
+
     _check_token(debug_token)
 
-    from core.config import EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER  # noqa: PLC0415
+    try:
+        from core.config import EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER  # noqa: PLC0415
+    except Exception as exc:
+        return {"success": False, "error": f"config import error: {exc}"}
 
     if not EMAIL_ENABLED:
         return {
-            "success": False,
-            "error":   "SMTP not configured — set SMTP_USER and SMTP_PASS in Railway variables",
+            "success":  False,
+            "error":    "SMTP not configured — set SMTP_USER and SMTP_PASS in Railway variables",
             "smtp_host": SMTP_HOST,
             "smtp_port": SMTP_PORT,
             "smtp_user": SMTP_USER or "(not set)",
         }
 
-    from services.email_service import send_email  # noqa: PLC0415
+    # Single-attempt send with a 25-second hard timeout so this endpoint
+    # never hangs the server even if Zoho is unreachable.
+    try:
+        from services.email_service import _render, _smtp_send  # noqa: PLC0415
+    except Exception as exc:
+        return {"success": False, "error": f"email_service import error: {exc}",
+                "traceback": _tb.format_exc()}
 
-    ok = await send_email(
-        to=to,
-        subject=f"🐝 نحلة — اختبار قالب «{template}»",
-        template=template,
-        variables={
+    try:
+        from core.config import DASHBOARD_URL, SMTP_USER as _su  # noqa: PLC0415
+        html = _render(template, {
             "merchant_name": "مدير نحلة",
             "store_name":    "متجر الاختبار",
             "report_date":   "اليوم",
-        },
-    )
+        })
+    except Exception as exc:
+        return {"success": False, "error": f"template render error: {exc}",
+                "traceback": _tb.format_exc()}
 
-    if ok:
+    try:
+        await _asyncio.wait_for(
+            _smtp_send(
+                to=to,
+                subject=f"نحلة — اختبار قالب {template}",
+                html=html,
+            ),
+            timeout=25.0,
+        )
         return {
             "success":  True,
-            "message":  f"✅ تم إرسال الإيميل إلى {to}",
+            "message":  f"تم إرسال الإيميل إلى {to}",
             "template": template,
+            "smtp_host": SMTP_HOST,
+            "smtp_port": SMTP_PORT,
         }
-    return {
-        "success": False,
-        "error":   "فشل الإرسال بعد 3 محاولات — راجع logs السيرفر للتفاصيل",
-        "smtp_host": SMTP_HOST,
-        "smtp_port": SMTP_PORT,
-        "smtp_user": SMTP_USER,
-    }
+    except _asyncio.TimeoutError:
+        return {
+            "success":  False,
+            "error":    "SMTP timeout (25s) — الخادم لم يستجب. تحقق من SMTP_HOST و SMTP_PORT",
+            "smtp_host": SMTP_HOST,
+            "smtp_port": SMTP_PORT,
+        }
+    except Exception as exc:
+        return {
+            "success":   False,
+            "error":     str(exc),
+            "traceback": _tb.format_exc(),
+            "smtp_host": SMTP_HOST,
+            "smtp_port": SMTP_PORT,
+            "smtp_user": SMTP_USER,
+        }
 
 
 # ── /debug/scheduler-status ─────────────────────────────────────────────
