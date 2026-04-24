@@ -580,6 +580,49 @@ async def debug_email_config(
     }
 
 
+# ── /debug/test-resend ──────────────────────────────────────────────────
+@router.post("/debug/test-resend")
+async def debug_test_resend(
+    debug_token: str = Query(...),
+    to: str = Query(...),
+) -> Dict[str, Any]:
+    """Raw Resend API call — no template, no SMTP, just HTTP POST to Resend."""
+    _check_token(debug_token)
+    import httpx as _httpx  # noqa: PLC0415
+    from core.config import RESEND_API_KEY, EMAIL_FROM  # noqa: PLC0415
+
+    if not RESEND_API_KEY:
+        return {"success": False, "error": "RESEND_API_KEY not set in Railway Variables"}
+
+    payload = {
+        "from":    EMAIL_FROM if EMAIL_FROM else "نحلة <support@nahlah.ai>",
+        "to":      [to],
+        "subject": "نحلة — اختبار مباشر",
+        "html":    "<h1>🐝 نحلة</h1><p>اختبار مباشر — Resend API يعمل!</p>",
+    }
+    try:
+        async with _httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json=payload,
+            )
+        return {
+            "success":     resp.status_code in (200, 201),
+            "status_code": resp.status_code,
+            "body":        resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:500],
+            "from":        payload["from"],
+            "to":          to,
+        }
+    except _httpx.TimeoutException:
+        return {"success": False, "error": "Resend API timeout (10s)"}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 # ── /debug/test-email ───────────────────────────────────────────────────
 @router.post("/debug/test-email")
 async def debug_test_email(
