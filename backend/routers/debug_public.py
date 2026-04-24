@@ -527,6 +527,64 @@ async def debug_abandoned_carts_raw_public(
     )
 
 
+# ── /debug/test-email ───────────────────────────────────────────────────
+@router.post("/debug/test-email")
+async def debug_test_email(
+    debug_token: str = Query(..., description="Shared secret from env (DEBUG_ADMIN_TOKEN)"),
+    to: str = Query(..., description="Recipient email address"),
+    template: str = Query("welcome_email", description="Template name without .html"),
+) -> Dict[str, Any]:
+    """
+    **Temporary** — send a test email without requiring a JWT.
+
+    Protected by ``DEBUG_ADMIN_TOKEN`` query param (same as other /debug/* routes).
+    Remove once Zoho SMTP is confirmed working in production.
+
+    Example::
+
+        POST /debug/test-email?debug_token=XXX&to=you@example.com
+    """
+    _check_token(debug_token)
+
+    from core.config import EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER  # noqa: PLC0415
+
+    if not EMAIL_ENABLED:
+        return {
+            "success": False,
+            "error":   "SMTP not configured — set SMTP_USER and SMTP_PASS in Railway variables",
+            "smtp_host": SMTP_HOST,
+            "smtp_port": SMTP_PORT,
+            "smtp_user": SMTP_USER or "(not set)",
+        }
+
+    from services.email_service import send_email  # noqa: PLC0415
+
+    ok = await send_email(
+        to=to,
+        subject=f"🐝 نحلة — اختبار قالب «{template}»",
+        template=template,
+        variables={
+            "merchant_name": "مدير نحلة",
+            "store_name":    "متجر الاختبار",
+            "report_date":   "اليوم",
+        },
+    )
+
+    if ok:
+        return {
+            "success":  True,
+            "message":  f"✅ تم إرسال الإيميل إلى {to}",
+            "template": template,
+        }
+    return {
+        "success": False,
+        "error":   "فشل الإرسال بعد 3 محاولات — راجع logs السيرفر للتفاصيل",
+        "smtp_host": SMTP_HOST,
+        "smtp_port": SMTP_PORT,
+        "smtp_user": SMTP_USER,
+    }
+
+
 # ── /debug/scheduler-status ─────────────────────────────────────────────
 @router.get("/debug/scheduler-status")
 async def debug_scheduler_status(
