@@ -3403,8 +3403,7 @@ async def debug_abandoned_carts_raw(
     return out
 
 
-# ── Temporary: email system smoke-test ───────────────────────────────────────
-# TODO: remove or gate behind a feature flag once Zoho SMTP is confirmed live.
+# ── Admin-only: email system smoke-test ───────────────────────────────────────
 
 class _TestEmailBody(BaseModel):
     to: str = Field(..., description="Recipient email address")
@@ -3412,26 +3411,19 @@ class _TestEmailBody(BaseModel):
 
 
 @router.post("/admin/test-email")
-async def admin_test_email(body: _TestEmailBody):
-    """
-    **Temporary public smoke-test** — no auth required.
-    Remove / re-gate after SMTP is confirmed working.
-    """
+async def admin_test_email(
+    body: _TestEmailBody,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Send a test email — admin-only, requires JWT with role=admin."""
     from services.email_service import send_email  # noqa: PLC0415
-    from core.config import EMAIL_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER  # noqa: PLC0415
+    from core.config import EMAIL_ENABLED  # noqa: PLC0415
 
     if not EMAIL_ENABLED:
-        return {
-            "success": False,
-            "error":   "SMTP not configured — set SMTP_USER and SMTP_PASS in environment variables",
-            "smtp": {
-                "host": SMTP_HOST,
-                "port": SMTP_PORT,
-                "user": SMTP_USER or "(not set)",
-            },
-        }
+        return {"success": False, "error": "Email not configured"}
 
-    logger.info("[AdminTestEmail] Sending test '%s' → %s (PUBLIC)", body.template, body.to)
+    logger.info("[AdminTestEmail] admin=%s sending test '%s' → %s",
+                _admin.get("sub", "?"), body.template, body.to)
 
     ok = await send_email(
         to=body.to,
@@ -3445,17 +3437,5 @@ async def admin_test_email(body: _TestEmailBody):
     )
 
     if ok:
-        return {
-            "success": True,
-            "message": f"✅ تم إرسال الإيميل إلى {body.to}",
-            "template": body.template,
-        }
-    return {
-        "success": False,
-        "error":   "فشل الإرسال بعد 3 محاولات — راجع سجلات السيرفر للتفاصيل",
-        "smtp": {
-            "host": SMTP_HOST,
-            "port": SMTP_PORT,
-            "user": SMTP_USER,
-        },
-    }
+        return {"success": True, "message": f"تم إرسال الإيميل إلى {body.to}", "template": body.template}
+    return {"success": False, "error": "فشل الإرسال — راجع سجلات السيرفر"}
