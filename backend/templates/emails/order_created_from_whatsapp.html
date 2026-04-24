@@ -1,66 +1,76 @@
 {% extends "_base.html" %}
 {% set cta_url = order_url or dashboard_url %}
-{% set cta_label = "عرض الطلب 📦" %}
-{% block title %}طلب جديد عبر واتساب 🛒{% endblock %}
+{% set cta_label = "عرض الطلب ←" %}
+{% block title %}طلب جديد عبر واتساب — نحلة{% endblock %}
 
 {% block content %}
-<h1 style="margin:0 0 8px;color:#10b981;font-size:20px;font-weight:700;">
-  🛒 طلب جديد تم إنشاؤه عبر واتساب!
+
+<h1 style="margin:0 0 10px;color:#1a1a1a;font-size:24px;font-weight:700;letter-spacing:-0.3px;">
+  🛒 طلب جديد عبر واتساب!
 </h1>
-<p style="margin:0 0 20px;color:#94a3b8;font-size:14px;">
-  مساعد نحلة أتم عملية بيع ناجحة
+<p style="margin:0 0 28px;color:#6b6b6b;font-size:15px;line-height:1.6;">
+  مساعد نحلة أتم عملية بيع ناجحة لمتجرك.
 </p>
 
-<!-- Order summary card -->
-<table width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="background:#0a1628;border:1px solid #10b981;border-radius:12px;overflow:hidden;margin-bottom:24px;">
+<!-- Order total highlight -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"
+       style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;margin-bottom:24px;">
   <tr>
-    <td style="background:linear-gradient(135deg,#064e3b,#022c22);padding:16px 20px;border-bottom:1px solid #065f46;">
-      <span style="color:#10b981;font-size:16px;font-weight:700;">
-        💰 {{ order_total or "—" }} ر.س
-      </span>
-      {% if order_number %}
-      <span style="color:#064e3b;font-size:12px;float:left;background:#10b981;padding:2px 8px;border-radius:20px;">
-        #{{ order_number }}
-      </span>
-      {% endif %}
-    </td>
-  </tr>
-  <tr>
-    <td style="padding:16px 20px;">
-      <table width="100%" cellpadding="6" cellspacing="0" border="0">
+    <td style="padding:20px 24px;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
         <tr>
-          <td style="color:#64748b;font-size:12px;width:40%;">العميل</td>
-          <td style="color:#e2e8f0;font-size:13px;font-weight:600;">
-            {{ customer_name or customer_phone or "—" }}
+          <td>
+            <p style="margin:0 0 4px;color:#8e8e93;font-size:12px;">إجمالي الطلب</p>
+            <p style="margin:0;color:#15803d;font-size:28px;font-weight:700;line-height:1;">
+              {{ order_total or "—" }} <span style="font-size:16px;">ر.س</span>
+            </p>
           </td>
-        </tr>
-        <tr>
-          <td style="color:#64748b;font-size:12px;">الهاتف</td>
-          <td style="color:#e2e8f0;font-size:13px;" dir="ltr">{{ customer_phone or "—" }}</td>
-        </tr>
-        {% if products %}
-        <tr>
-          <td style="color:#64748b;font-size:12px;vertical-align:top;">المنتجات</td>
-          <td style="color:#94a3b8;font-size:13px;">
-            {% for p in products %}
-            {{ p }}{% if not loop.last %}، {% endif %}
-            {% endfor %}
+          {% if order_number %}
+          <td style="text-align:left;vertical-align:top;">
+            <span style="background:#dcfce7;color:#15803d;font-size:12px;font-weight:600;padding:4px 12px;border-radius:20px;">
+              #{{ order_number }}
+            </span>
           </td>
+          {% endif %}
         </tr>
-        {% endif %}
-        {% if payment_method %}
-        <tr>
-          <td style="color:#64748b;font-size:12px;">الدفع</td>
-          <td style="color:#e2e8f0;font-size:13px;">{{ payment_method }}</td>
-        </tr>
-        {% endif %}
       </table>
     </td>
   </tr>
 </table>
 
-<p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
+<!-- Order details -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"
+       style="border:1px solid #e5e5ea;border-radius:12px;overflow:hidden;margin-bottom:24px;">
+  <tr>
+    <td style="padding:12px 20px;background:#f9f9fb;color:#8e8e93;font-size:13px;width:35%;border-bottom:1px solid #f0f0f0;">العميل</td>
+    <td style="padding:12px 20px;color:#1a1a1a;font-size:13px;font-weight:500;border-bottom:1px solid #f0f0f0;">
+      {{ customer_name or customer_phone or "—" }}
+    </td>
+  </tr>
+  <tr>
+    <td style="padding:12px 20px;background:#f9f9fb;color:#8e8e93;font-size:13px;border-bottom:1px solid #f0f0f0;">الهاتف</td>
+    <td style="padding:12px 20px;color:#1a1a1a;font-size:13px;border-bottom:1px solid #f0f0f0;" dir="ltr">
+      {{ customer_phone or "—" }}
+    </td>
+  </tr>
+  {% if products %}
+  <tr>
+    <td style="padding:12px 20px;background:#f9f9fb;color:#8e8e93;font-size:13px;vertical-align:top;border-bottom:1px solid #f0f0f0;">المنتجات</td>
+    <td style="padding:12px 20px;color:#3a3a3a;font-size:13px;border-bottom:1px solid #f0f0f0;">
+      {% for p in products %}{{ p }}{% if not loop.last %}، {% endif %}{% endfor %}
+    </td>
+  </tr>
+  {% endif %}
+  {% if payment_method %}
+  <tr>
+    <td style="padding:12px 20px;background:#f9f9fb;color:#8e8e93;font-size:13px;">الدفع</td>
+    <td style="padding:12px 20px;color:#1a1a1a;font-size:13px;">{{ payment_method }}</td>
+  </tr>
+  {% endif %}
+</table>
+
+<p style="margin:0;color:#8e8e93;font-size:13px;line-height:1.6;">
   يمكنك متابعة الطلب وتحديث حالته من لوحة التحكم.
 </p>
+
 {% endblock %}

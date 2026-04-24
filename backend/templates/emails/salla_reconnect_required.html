@@ -1,51 +1,64 @@
 {% extends "_base.html" %}
 {% set cta_url = reconnect_url or dashboard_url %}
-{% set cta_label = "إعادة الربط الآن 🔗" %}
-{% block title %}⚠️ يلزم إعادة ربط متجرك{% endblock %}
+{% set cta_label = "إعادة الربط الآن ←" %}
+{% block title %}يلزم إعادة ربط متجرك — نحلة{% endblock %}
 
 {% block content %}
-<h1 style="margin:0 0 8px;color:#ef4444;font-size:20px;font-weight:700;">
+
+<h1 style="margin:0 0 10px;color:#1a1a1a;font-size:24px;font-weight:700;letter-spacing:-0.3px;">
   ⚠️ انتهت صلاحية ربط متجرك
 </h1>
-<p style="margin:0 0 20px;color:#94a3b8;font-size:14px;">
-  يحتاج متجر <strong style="color:#f59e0b;">{{ store_name or "متجرك" }}</strong> إلى إعادة الربط مع سلة
+<p style="margin:0 0 28px;color:#6b6b6b;font-size:15px;line-height:1.6;">
+  متجر <strong style="color:#1a1a1a;">{{ store_name or "متجرك" }}</strong> يحتاج إلى إعادة الربط مع سلة.
 </p>
 
-<table width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="background:#1a0a0a;border:1px solid #7f1d1d;border-radius:10px;padding:20px;margin-bottom:24px;">
+<!-- Alert card -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"
+       style="background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;margin-bottom:24px;">
   <tr>
-    <td>
-      <p style="margin:0 0 12px;color:#fca5a5;font-size:14px;font-weight:600;">
-        🔴 توقفت الخدمة مؤقتاً
+    <td style="padding:18px 20px;">
+      <p style="margin:0 0 12px;color:#9a3412;font-size:14px;font-weight:600;">🔴 تم إيقاف الخدمة مؤقتاً</p>
+      <p style="margin:0 0 10px;color:#7c2d12;font-size:13px;line-height:1.6;">
+        لم تعد نحلة قادرة على:
       </p>
-      <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.7;">
-        انتهت صلاحية رمز الوصول (access token) لمتجرك على منصة سلة. هذا يعني أن نحلة لم تعد قادرة على:
-      </p>
-      <ul style="margin:10px 0 0;padding-right:20px;color:#94a3b8;font-size:13px;line-height:2;">
-        <li>استيراد طلباتك الجديدة</li>
-        <li>تحديث معلومات العملاء</li>
-        <li>مزامنة المنتجات</li>
-      </ul>
+      <table cellpadding="0" cellspacing="0" border="0" role="presentation">
+        {% for item in ["استيراد طلباتك الجديدة", "تحديث معلومات العملاء", "مزامنة المنتجات"] %}
+        <tr>
+          <td style="padding:3px 0;color:#9a3412;font-size:13px;">
+            <span style="margin-left:6px;">✕</span> {{ item }}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
     </td>
   </tr>
 </table>
 
-<table width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="background:#0f172a;border-radius:10px;padding:20px;margin-bottom:24px;">
+<!-- Steps -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"
+       style="background:#f9f9fb;border:1px solid #e5e5ea;border-radius:12px;margin-bottom:24px;">
   <tr>
-    <td>
-      <p style="margin:0 0 8px;color:#94a3b8;font-size:13px;font-weight:600;">للإصلاح:</p>
-      <ol style="margin:0;padding-right:20px;color:#cbd5e1;font-size:13px;line-height:2.2;">
-        <li>اضغط على زر "إعادة الربط الآن" أدناه</li>
-        <li>سجّل دخولك بحساب سلة الخاص بك</li>
-        <li>امنح نحلة الصلاحيات المطلوبة</li>
-        <li>ستعود الخدمة فورياً بعد الإذن ✅</li>
-      </ol>
+    <td style="padding:18px 20px;">
+      <p style="margin:0 0 14px;color:#1a1a1a;font-size:14px;font-weight:600;">خطوات الإصلاح:</p>
+      {% for step in [
+          "اضغط على زر إعادة الربط أدناه",
+          "سجّل دخولك بحساب سلة الخاص بك",
+          "امنح نحلة الصلاحيات المطلوبة",
+          "ستعود الخدمة فورياً بعد الموافقة ✅",
+      ] %}
+      <table cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin-bottom:8px;">
+        <tr>
+          <td style="color:#fbbf24;font-size:13px;font-weight:700;padding-left:10px;vertical-align:top;">{{ loop.index }}.</td>
+          <td style="color:#3a3a3a;font-size:13px;line-height:1.5;">{{ step }}</td>
+        </tr>
+      </table>
+      {% endfor %}
     </td>
   </tr>
 </table>
 
-<p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
-  إذا استمرت المشكلة بعد إعادة الربط، تواصل معنا مباشرة.
+<p style="margin:0;color:#8e8e93;font-size:13px;line-height:1.6;">
+  إذا استمرت المشكلة، تواصل مع فريق الدعم مباشرة.
 </p>
+
 {% endblock %}

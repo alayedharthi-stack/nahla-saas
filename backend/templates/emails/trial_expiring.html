@@ -1,50 +1,30 @@
 {% extends "_base.html" %}
 {% set cta_url = dashboard_url + "/billing" %}
-{% set cta_label = "اشترك الآن وحافظ على خدمتك ✨" %}
-{% block title %}تجربتك المجانية تنتهي قريباً{% endblock %}
+{% set cta_label = "اشترك الآن واحتفظ بخدمتك ←" %}
+{% block title %}تجربتك المجانية تنتهي قريباً — نحلة{% endblock %}
 
 {% block content %}
-<h1 style="margin:0 0 8px;color:#f59e0b;font-size:20px;font-weight:700;">
-  ⏳ تجربتك المجانية تنتهي خلال {{ days_remaining or "3" }} أيام
+
+<!-- Hero -->
+<h1 style="margin:0 0 10px;color:#1a1a1a;font-size:24px;font-weight:700;line-height:1.3;letter-spacing:-0.3px;">
+  ⏳ تجربتك تنتهي خلال {{ days_remaining or "3" }} أيام
 </h1>
-<p style="margin:0 0 20px;color:#94a3b8;font-size:14px;">
-  لا تدع خدمة واتساب الذكية تتوقف
+<p style="margin:0 0 28px;color:#6b6b6b;font-size:15px;line-height:1.6;">
+  مرحباً <strong style="color:#1a1a1a;">{{ merchant_name or "أستاذ" }}</strong>، لا تدع خدمة واتساب الذكية تتوقف.
 </p>
 
-<table width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="background:#1a1200;border:1px solid #92400e;border-radius:10px;padding:20px;margin-bottom:24px;">
+<!-- Warning card -->
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"
+       style="background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;margin-bottom:24px;">
   <tr>
-    <td>
-      <p style="margin:0 0 12px;color:#fbbf24;font-size:14px;font-weight:600;">
-        ⚠️ بعد انتهاء التجربة ستتوقف:
-      </p>
-      <ul style="margin:0;padding-right:20px;color:#94a3b8;font-size:13px;line-height:2.2;">
-        <li>ردود الذكاء الاصطناعي على العملاء</li>
-        <li>تذكيرات السلات المتروكة</li>
-        <li>الحملات التسويقية</li>
-        <li>تقارير المبيعات</li>
-      </ul>
-    </td>
-  </tr>
-</table>
-
-<table width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="background:#0f172a;border-radius:10px;padding:20px;margin-bottom:24px;">
-  <tr>
-    <td>
-      <p style="margin:0 0 12px;color:#10b981;font-size:14px;font-weight:600;">
-        ✅ عروض الإطلاق — خصم 50% لأول شهرين
-      </p>
-      <table width="100%" cellpadding="8" cellspacing="0" border="0">
-        {% for plan in [
-            ("المبتدئ", "449 ر.س/شهر", "1,000 محادثة · 3 أتمتات"),
-            ("النمو", "849 ر.س/شهر", "5,000 محادثة · أتمتات غير محدودة"),
-            ("التوسع", "1,499 ر.س/شهر", "محادثات غير محدودة · API"),
-        ] %}
-        <tr style="border-bottom:1px solid #1e293b;">
-          <td style="color:#e2e8f0;font-size:13px;font-weight:600;">{{ plan[0] }}</td>
-          <td style="color:#f59e0b;font-size:13px;font-weight:700;text-align:left;">{{ plan[1] }}</td>
-          <td style="color:#64748b;font-size:11px;text-align:left;">{{ plan[2] }}</td>
+    <td style="padding:18px 20px;">
+      <p style="margin:0 0 12px;color:#9a3412;font-size:14px;font-weight:600;">بعد انتهاء التجربة ستتوقف:</p>
+      <table cellpadding="0" cellspacing="0" border="0" role="presentation">
+        {% for item in ["ردود الذكاء الاصطناعي على العملاء", "تذكيرات السلات المتروكة", "الحملات التسويقية", "تقارير المبيعات"] %}
+        <tr>
+          <td style="padding:4px 0;color:#7c2d12;font-size:13px;">
+            <span style="margin-left:6px;color:#ea580c;">✕</span> {{ item }}
+          </td>
         </tr>
         {% endfor %}
       </table>
@@ -52,7 +32,38 @@
   </tr>
 </table>
 
-<p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
-  مرحباً <strong>{{ merchant_name or "أستاذ" }}</strong>، استثمارك في نحلة يعود عليك بمبيعات أكثر على واتساب.
+<!-- Plans -->
+<p style="margin:0 0 14px;color:#1a1a1a;font-size:14px;font-weight:600;">خطط نحلة — اختر ما يناسبك:</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation"
+       style="border:1px solid #e5e5ea;border-radius:12px;overflow:hidden;margin-bottom:24px;">
+  {% for name, price, desc, highlight in [
+      ("المبتدئ",  "449 ر.س/شهر",   "1,000 محادثة · 3 أتمتات",            false),
+      ("النمو",    "849 ر.س/شهر",   "5,000 محادثة · أتمتات غير محدودة",   true),
+      ("التوسع",  "1,499 ر.س/شهر", "محادثات غير محدودة · API",            false),
+  ] %}
+  <tr style="{{ 'background:#fffbeb;' if highlight else 'background:#ffffff;' }}">
+    <td style="padding:14px 20px;border-bottom:1px solid #f0f0f0;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
+        <tr>
+          <td>
+            <span style="color:#1a1a1a;font-size:14px;font-weight:600;">{{ name }}</span>
+            {% if highlight %}<span style="background:#fbbf24;color:#1a1a1a;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;margin-right:6px;">الأكثر شعبية</span>{% endif %}
+            <br>
+            <span style="color:#8e8e93;font-size:12px;">{{ desc }}</span>
+          </td>
+          <td style="text-align:left;white-space:nowrap;">
+            <span style="color:#1a1a1a;font-size:15px;font-weight:700;">{{ price }}</span>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<p style="margin:0;color:#8e8e93;font-size:12px;line-height:1.6;text-align:center;">
+  عرض الإطلاق · خصم 50% لأول شهرين على جميع الخطط
 </p>
+
 {% endblock %}
