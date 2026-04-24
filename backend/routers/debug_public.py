@@ -37,6 +37,7 @@ import os
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from core.database import get_db
@@ -748,4 +749,68 @@ async def debug_scheduler_status(
         "verdict":              verdict,
         "seconds_since_last":   seconds_since_last,
         "scheduler":            snap,
+    }
+
+
+# ── /debug/send-email (public JSON endpoint) ─────────────────────────────────
+
+class _SendEmailBody(BaseModel):
+    to:          str
+    template:    str = "welcome_email"
+    sender_type: Optional[str] = None
+
+
+@router.post("/debug/send-email")
+async def debug_send_email(body: _SendEmailBody) -> Dict[str, Any]:
+    """
+    **Temporary public endpoint** — send a test email via email_service.
+
+    No auth required. Read-only (no DB writes).
+    Remove or re-gate after SMTP/Resend is confirmed working.
+
+    Body::
+
+        {
+            "to":          "you@example.com",
+            "template":    "welcome_email",
+            "sender_type": "welcome"          // optional
+        }
+    """
+    from services.email_service import send_email, SENDER_MAP, TEMPLATE_SENDER  # noqa: PLC0415
+    from core.config import EMAIL_ENABLED, RESEND_API_KEY  # noqa: PLC0415
+
+    if not EMAIL_ENABLED:
+        return {
+            "success": False,
+            "error":   "البريد الإلكتروني غير مفعّل — أضف RESEND_API_KEY في Railway Variables",
+        }
+
+    resolved_sender = body.sender_type or TEMPLATE_SENDER.get(body.template)
+
+    ok = await send_email(
+        to=body.to,
+        subject=f"🐝 نحلة — اختبار قالب «{body.template}»",
+        template=body.template,
+        sender_type=body.sender_type,
+        variables={
+            "merchant_name": "مدير نحلة",
+            "store_name":    "متجر الاختبار",
+            "report_date":   "اليوم",
+        },
+    )
+
+    if ok:
+        return {
+            "success":      True,
+            "message":      f"✅ أُرسل إلى {body.to}",
+            "template":     body.template,
+            "sender_type":  resolved_sender or "default",
+            "from":         SENDER_MAP.get(resolved_sender, SENDER_MAP[None]),
+            "method":       "resend" if RESEND_API_KEY else "smtp",
+        }
+    return {
+        "success":  False,
+        "error":    "فشل الإرسال — راجع logs السيرفر",
+        "template": body.template,
+        "method":   "resend" if RESEND_API_KEY else "smtp",
     }
