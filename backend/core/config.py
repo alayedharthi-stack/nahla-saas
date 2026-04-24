@@ -52,7 +52,7 @@ DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlah.ai")
 # Set all four vars in Railway / .env to enable outbound email.
 # Zoho SA:  host=smtp.zoho.sa  port=587  (STARTTLS)
 # Zoho COM: host=smtp.zoho.com port=587  (STARTTLS) or port=465 (SSL)
-SMTP_HOST      = os.environ.get("SMTP_HOST", "smtp.zoho.sa")
+SMTP_HOST      = os.environ.get("SMTP_HOST", "smtp.zoho.com")
 SMTP_PORT      = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER      = os.environ.get("SMTP_USER", "")       # e.g. hello@nahlah.ai
 SMTP_PASS      = os.environ.get("SMTP_PASS", "")       # App-specific password
