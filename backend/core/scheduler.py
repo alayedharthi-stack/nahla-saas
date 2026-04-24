@@ -170,6 +170,7 @@ async def _send_daily_reports() -> None:
                     to=merchant.email,
                     subject=f"📊 تقرير نحلة اليومي — {yesterday.strftime('%Y-%m-%d')}",
                     template="daily_report",
+                    sender_type="growth",
                     variables={
                         "merchant_name":    merchant.username or "",
                         "report_date":      yesterday.strftime("%A، %d %B %Y"),

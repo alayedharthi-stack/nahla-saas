@@ -1368,6 +1368,7 @@ async def salla_oauth_callback(
                     to=owner_email,
                     subject="مرحباً بك في نحلة 🐝 — طيار مبيعاتك الآلي جاهز",
                     template="welcome_email",
+                    sender_type="welcome",
                     variables={
                         "merchant_name": store_name or owner_email.split("@")[0],
                         "store_name":    store_name,
@@ -1378,6 +1379,7 @@ async def salla_oauth_callback(
                     to=owner_email,
                     subject="✅ تم ربط متجرك بسلة بنجاح",
                     template="salla_connected",
+                    sender_type="system",
                     variables={
                         "merchant_name": store_name or owner_email.split("@")[0],
                         "store_name":    store_name,

@@ -4,14 +4,15 @@ services/email_service.py
 Async transactional email service for Nahla SaaS.
 
 Features:
+  • Multi-sender support via sender_type parameter
+  • Resend HTTP API (primary — no SMTP port restrictions)
+  • Zoho SMTP fallback (aiosmtplib, STARTTLS/SSL)
   • Jinja2 HTML templates from backend/templates/emails/
-  • Zoho SMTP via aiosmtplib (STARTTLS on port 587, or SSL on 465)
   • Automatic retry (3 attempts, exponential back-off via tenacity)
   • Structured logging for every send attempt
   • Fire-and-forget helper (enqueue) — never blocks an HTTP response
 
 Usage:
-    # In any async route / service:
     from services.email_service import enqueue_email
 
     enqueue_email(
@@ -19,6 +20,7 @@ Usage:
         subject="مرحباً بك في نحلة 🐝",
         template="welcome_email",
         variables={"merchant_name": "أحمد", "store_name": "متجر أحمد"},
+        sender_type="welcome",          # optional — auto-resolved from template if omitted
     )
 """
 from __future__ import annotations
@@ -27,16 +29,61 @@ import asyncio
 import email.mime.multipart
 import email.mime.text
 import logging
-import os
 import pathlib
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nahla-email")
 
-# ── Lazy imports (heavy libs — only imported when email is actually needed) ──
+# ── Multi-sender mapping ──────────────────────────────────────────────────────
+# Each key maps to a dedicated @nahlah.ai mailbox.
+# All mailboxes must be verified in Resend under the nahlah.ai domain.
+# None key = default fallback used when sender_type is unknown / not given.
+
+SENDER_MAP: Dict[Optional[str], str] = {
+    "welcome":  "نحلة <welcome@nahlah.ai>",
+    "system":   "نحلة <system@nahlah.ai>",
+    "alerts":   "نحلة <alerts@nahlah.ai>",
+    "billing":  "نحلة <billing@nahlah.ai>",
+    "growth":   "نحلة <growth@nahlah.ai>",
+    "security": "نحلة <security@nahlah.ai>",
+    None:       "نحلة <support@nahlah.ai>",   # default / fallback
+}
+
+# ── Template → sender_type auto-mapping ──────────────────────────────────────
+# When caller doesn't pass sender_type, we look up the template name here.
+
+TEMPLATE_SENDER: Dict[str, str] = {
+    "welcome_email":                 "welcome",
+    "salla_connected":               "system",
+    "salla_reconnect_required":      "alerts",
+    "first_whatsapp_message":        "growth",
+    "order_created_from_whatsapp":   "system",
+    "abandoned_cart_triggered":      "growth",
+    "trial_expiring":                "billing",
+    "trial_expired":                 "alerts",
+    "daily_report":                  "growth",
+}
+
+
+def _resolve_sender(sender_type: Optional[str], template: Optional[str] = None) -> str:
+    """
+    Return the From address for a send operation.
+
+    Priority:
+      1. Explicit *sender_type* argument
+      2. Auto-lookup via *template* name in TEMPLATE_SENDER
+      3. Fallback: support@nahlah.ai
+    """
+    resolved = sender_type or TEMPLATE_SENDER.get(template or "")
+    return SENDER_MAP.get(resolved) or SENDER_MAP[None]
+
+
+# ── Lazy Jinja2 environment ───────────────────────────────────────────────────
+
+_JINJA_ENV = None  # populated on first use
+
 
 def _get_jinja_env():
-    """Return (and lazily build) the shared Jinja2 Environment."""
     global _JINJA_ENV
     if _JINJA_ENV is not None:
         return _JINJA_ENV
@@ -48,15 +95,15 @@ def _get_jinja_env():
     )
     return _JINJA_ENV
 
-_JINJA_ENV = None  # populated on first use
 
-# ── Config ───────────────────────────────────────────────────────────────────
+# ── Config accessor ───────────────────────────────────────────────────────────
 
 def _cfg():
     from core import config  # noqa: PLC0415
     return config
 
-# ── Core send (with tenacity retry) ─────────────────────────────────────────
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 async def send_email(
     to: str,
@@ -64,13 +111,18 @@ async def send_email(
     template: str,
     variables: Optional[Dict[str, Any]] = None,
     *,
+    sender_type: Optional[str] = None,
     cc: Optional[str] = None,
     reply_to: Optional[str] = None,
 ) -> bool:
     """
     Render *template*.html and send it via Resend API (preferred) or Zoho SMTP.
 
-    Returns True on success, False on final failure (after retries).
+    *sender_type* selects the From address (welcome / system / alerts / billing /
+    growth / security).  If omitted, the template name is used to auto-select the
+    sender.  Falls back to support@nahlah.ai when neither resolves.
+
+    Returns True on success, False on final failure.
     Never raises — all errors are caught and logged.
     """
     cfg = _cfg()
@@ -79,39 +131,76 @@ async def send_email(
         logger.debug("[Email] Skipped (not configured): to=%s subject=%s", to, subject)
         return False
 
+    from_address = _resolve_sender(sender_type, template)
+
     try:
         html = _render(template, variables or {})
     except Exception as exc:
         logger.error("[Email] Template render error: template=%s error=%s", template, exc)
         return False
 
-    # Prefer Resend (HTTP API — works on Railway, no SMTP port restrictions)
     if cfg.RESEND_API_KEY:
-        return await _send_via_resend(to=to, subject=subject, html=html,
-                                      cc=cc, reply_to=reply_to)
+        return await _send_via_resend(
+            to=to, subject=subject, html=html,
+            from_address=from_address, cc=cc, reply_to=reply_to,
+        )
 
     return await _send_with_retry(
-        to=to,
-        subject=subject,
-        html=html,
-        cc=cc,
-        reply_to=reply_to,
+        to=to, subject=subject, html=html,
+        from_address=from_address, cc=cc, reply_to=reply_to,
     )
 
+
+def enqueue_email(
+    to: str,
+    subject: str,
+    template: str,
+    variables: Optional[Dict[str, Any]] = None,
+    *,
+    sender_type: Optional[str] = None,
+    cc: Optional[str] = None,
+    reply_to: Optional[str] = None,
+) -> None:
+    """
+    Schedule an email send as a non-blocking asyncio task.
+
+    Call from any sync or async context — never raises, never delays the caller.
+    """
+    if not to or "@" not in to:
+        logger.debug("[Email] Skipped (invalid address): %r", to)
+        return
+
+    coro = send_email(
+        to, subject, template, variables,
+        sender_type=sender_type, cc=cc, reply_to=reply_to,
+    )
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(coro)
+        else:
+            loop.run_until_complete(coro)
+    except RuntimeError:
+        asyncio.run(coro)
+
+
+# ── Internal senders ─────────────────────────────────────────────────────────
 
 async def _send_via_resend(
     to: str,
     subject: str,
     html: str,
+    from_address: str,
     cc: Optional[str] = None,
     reply_to: Optional[str] = None,
 ) -> bool:
-    """Send via Resend HTTP API (https://resend.com/docs/api-reference/emails/send-email)."""
+    """Send via Resend HTTP API."""
     import httpx  # noqa: PLC0415
     cfg = _cfg()
 
     payload: Dict[str, Any] = {
-        "from":    cfg.EMAIL_FROM,
+        "from":    from_address,
         "to":      [to],
         "subject": subject,
         "html":    html,
@@ -132,8 +221,8 @@ async def _send_via_resend(
                 json=payload,
             )
         if resp.status_code in (200, 201):
-            logger.info("[Email/Resend] ✅ Sent: to=%s subject=%s id=%s",
-                        to, subject, resp.json().get("id"))
+            logger.info("[Email/Resend] ✅ Sent: from=%s to=%s subject=%s id=%s",
+                        from_address, to, subject, resp.json().get("id"))
             return True
         logger.error("[Email/Resend] ❌ HTTP %s: to=%s body=%s",
                      resp.status_code, to, resp.text[:300])
@@ -147,15 +236,15 @@ async def _send_with_retry(
     to: str,
     subject: str,
     html: str,
+    from_address: str,
     cc: Optional[str] = None,
     reply_to: Optional[str] = None,
     max_attempts: int = 3,
 ) -> bool:
-    """
-    Attempt SMTP send up to *max_attempts* times with exponential back-off.
-    Delays: 2s → 4s → 8s …
-    """
-    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type  # noqa: PLC0415
+    """SMTP send with exponential back-off (fallback when Resend is unavailable)."""
+    from tenacity import (  # noqa: PLC0415
+        retry, stop_after_attempt, wait_exponential, retry_if_exception_type,
+    )
 
     @retry(
         stop=stop_after_attempt(max_attempts),
@@ -164,17 +253,19 @@ async def _send_with_retry(
         reraise=False,
     )
     async def _attempt() -> None:
-        await _smtp_send(to=to, subject=subject, html=html, cc=cc, reply_to=reply_to)
+        await _smtp_send(
+            to=to, subject=subject, html=html,
+            from_address=from_address, cc=cc, reply_to=reply_to,
+        )
 
     try:
         await _attempt()
-        logger.info("[Email] ✅ Sent: to=%s subject=%s", to, subject)
+        logger.info("[Email/SMTP] ✅ Sent: from=%s to=%s subject=%s",
+                    from_address, to, subject)
         return True
     except Exception as exc:
-        logger.error(
-            "[Email] ❌ All %d attempts failed: to=%s subject=%s error=%s",
-            max_attempts, to, subject, exc,
-        )
+        logger.error("[Email/SMTP] ❌ All %d attempts failed: to=%s error=%s",
+                     max_attempts, to, exc)
         return False
 
 
@@ -182,17 +273,17 @@ async def _smtp_send(
     to: str,
     subject: str,
     html: str,
+    from_address: str,
     cc: Optional[str] = None,
     reply_to: Optional[str] = None,
 ) -> None:
-    """Low-level: build MIME message and send over SMTP."""
+    """Low-level MIME build + SMTP delivery."""
     import aiosmtplib  # noqa: PLC0415
-
     cfg = _cfg()
 
     msg = email.mime.multipart.MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = cfg.EMAIL_FROM
+    msg["From"]    = from_address
     msg["To"]      = to
     if cc:
         msg["Cc"] = cc
@@ -210,28 +301,22 @@ async def _smtp_send(
     }
 
     if cfg.SMTP_PORT == 465:
-        # SSL from the start
         smtp_kwargs["use_tls"] = True
         await aiosmtplib.send(msg, **smtp_kwargs)
     else:
-        # STARTTLS upgrade (port 587)
         smtp_kwargs["start_tls"] = True
         await aiosmtplib.send(msg, **smtp_kwargs)
 
-    logger.debug("[Email] SMTP deliver OK: to=%s subject=%s", to, subject)
 
-
-# ── Template rendering ───────────────────────────────────────────────────────
+# ── Template rendering ────────────────────────────────────────────────────────
 
 def _render(template_name: str, variables: Dict[str, Any]) -> str:
     """Render *template_name*.html with *variables*."""
     env = _get_jinja_env()
-    # normalise — accept "welcome_email" or "welcome_email.html"
     fname = template_name if template_name.endswith(".html") else f"{template_name}.html"
     tpl = env.get_template(fname)
 
     cfg = _cfg()
-    # Inject global context available in every template
     ctx = {
         "dashboard_url": cfg.DASHBOARD_URL,
         "support_email": "support@nahlah.ai",
@@ -239,39 +324,3 @@ def _render(template_name: str, variables: Dict[str, Any]) -> str:
         **variables,
     }
     return tpl.render(**ctx)
-
-
-# ── Fire-and-forget helper ───────────────────────────────────────────────────
-
-def enqueue_email(
-    to: str,
-    subject: str,
-    template: str,
-    variables: Optional[Dict[str, Any]] = None,
-    *,
-    cc: Optional[str] = None,
-    reply_to: Optional[str] = None,
-) -> None:
-    """
-    Schedule an email send as a non-blocking asyncio task.
-
-    Call this from any sync or async context — it never raises and never
-    delays the caller's response.
-    """
-    if not to or "@" not in to:
-        logger.debug("[Email] Skipped (invalid address): %r", to)
-        return
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.create_task(
-                send_email(to, subject, template, variables, cc=cc, reply_to=reply_to)
-            )
-        else:
-            loop.run_until_complete(
-                send_email(to, subject, template, variables, cc=cc, reply_to=reply_to)
-            )
-    except RuntimeError:
-        # No event loop (e.g. called from a sync test) — best-effort
-        asyncio.run(send_email(to, subject, template, variables, cc=cc, reply_to=reply_to))

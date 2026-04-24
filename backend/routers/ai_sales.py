@@ -909,6 +909,7 @@ async def ai_sales_create_order(
                 to=_merchant.email,
                 subject=f"🛒 طلب جديد عبر واتساب — #{order.id}",
                 template="order_created_from_whatsapp",
+                sender_type="system",
                 variables={
                     "merchant_name":  _merchant.username or "",
                     "order_number":   str(order.id),

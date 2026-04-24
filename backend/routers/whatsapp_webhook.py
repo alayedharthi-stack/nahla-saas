@@ -575,6 +575,7 @@ async def _dispatch_message(
                             to=_mu.email,
                             subject="🎉 أول رسالة واتساب وصلت لمتجرك!",
                             template="first_whatsapp_message",
+                            sender_type="growth",
                             variables={
                                 "merchant_name":   _mu.username or "",
                                 "customer_name":   contact_name or "",
