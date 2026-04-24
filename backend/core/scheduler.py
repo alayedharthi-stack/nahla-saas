@@ -90,6 +90,7 @@ async def run_scheduler() -> None:
     """Main scheduler loop — runs forever in background."""
     logger.info("[Scheduler] Started — billing checks every %sh, store sync every %ss",
                 _CHECK_INTERVAL_HOURS, _SYNC_INTERVAL_SECONDS)
+    await asyncio.sleep(120)  # delay first run to avoid spam on rapid re-deploys
     while True:
         try:
             await _run_checks()
@@ -826,6 +827,8 @@ async def _check_subscription_expiry() -> None:
         db.close()
 
 
+_trial_sent_cache: dict[tuple[int, str], float] = {}
+
 async def _check_trial_expiry() -> None:
     """Send WhatsApp warnings for expiring trials."""
     import sys, os  # noqa: PLC0415
@@ -834,6 +837,9 @@ async def _check_trial_expiry() -> None:
     from core.database import SessionLocal  # noqa: PLC0415
     from core.wa_notify import notify_trial_ending  # noqa: PLC0415
     from core.billing import FREE_TRIAL_DAYS  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    DEDUP_WINDOW = 12 * 3600  # seconds — suppress duplicates within 12 hours
 
     try:
         db: Session = SessionLocal()
@@ -849,8 +855,8 @@ async def _check_trial_expiry() -> None:
         )
 
         now = datetime.now(timezone.utc)
+        now_ts = time.time()
 
-        # Tenants with no active subscription = in trial
         subbed_tenants = {
             s.tenant_id for s in db.query(BillingSubscription)
             .filter(BillingSubscription.status == "active").all()
@@ -860,10 +866,9 @@ async def _check_trial_expiry() -> None:
 
         for tenant in tenants:
             if tenant.id in subbed_tenants:
-                continue  # already subscribed, skip
+                continue
 
             _raw = tenant.created_at or now
-            # Ensure trial_start is timezone-aware before subtracting
             if _raw.tzinfo is None:
                 trial_start = _raw.replace(tzinfo=timezone.utc)
             else:
@@ -888,8 +893,21 @@ async def _check_trial_expiry() -> None:
             ).first()
             email_addr = getattr(merchant, "email", "") if merchant else ""
 
+            db.refresh(_s)
             meta = (_s.extra_metadata or {}).get("_scheduler_flags", {})
-            if days_remaining == 7 and not meta.get("trial_warn_7"):
+
+            def _dedup_ok(flag: str) -> bool:
+                key = (tenant.id, flag)
+                last = _trial_sent_cache.get(key, 0)
+                if now_ts - last < DEDUP_WINDOW:
+                    logger.info("[Scheduler] tenant=%s flag=%s suppressed (in-memory dedup)", tenant.id, flag)
+                    return False
+                return True
+
+            def _mark_sent(flag: str) -> None:
+                _trial_sent_cache[(tenant.id, flag)] = now_ts
+
+            if days_remaining == 7 and not meta.get("trial_warn_7") and _dedup_ok("trial_warn_7"):
                 await notify_trial_ending(phone, store_name, 7)
                 if email_addr:
                     await send_email(
@@ -898,7 +916,8 @@ async def _check_trial_expiry() -> None:
                         html=email_subscription_expiring(store_name, "التجربة المجانية", 7, "—"),
                     )
                 _update_tenant_flag(db, tenant.id, _s, "trial_warn_7")
-            elif days_remaining == 3 and not meta.get("trial_warn_3"):
+                _mark_sent("trial_warn_7")
+            elif days_remaining == 3 and not meta.get("trial_warn_3") and _dedup_ok("trial_warn_3"):
                 await notify_trial_ending(phone, store_name, 3)
                 if email_addr:
                     await send_email(
@@ -907,7 +926,8 @@ async def _check_trial_expiry() -> None:
                         html=email_subscription_expiring(store_name, "التجربة المجانية", 3, "—"),
                     )
                 _update_tenant_flag(db, tenant.id, _s, "trial_warn_3")
-            elif days_remaining == 1 and not meta.get("trial_warn_1"):
+                _mark_sent("trial_warn_3")
+            elif days_remaining == 1 and not meta.get("trial_warn_1") and _dedup_ok("trial_warn_1"):
                 await notify_trial_ending(phone, store_name, 1)
                 if email_addr:
                     await send_email(
@@ -916,8 +936,8 @@ async def _check_trial_expiry() -> None:
                         html=email_subscription_expiring(store_name, "التجربة المجانية", 1, "—"),
                     )
                 _update_tenant_flag(db, tenant.id, _s, "trial_warn_1")
-            elif days_remaining <= 0 and not meta.get("trial_expired"):
-                # Trial fully ended — send expired notification
+                _mark_sent("trial_warn_1")
+            elif days_remaining <= 0 and not meta.get("trial_expired") and _dedup_ok("trial_expired"):
                 from core.wa_notify import notify_subscription_expired  # noqa: PLC0415
                 await notify_subscription_expired(phone, store_name)
                 if email_addr:
@@ -927,6 +947,7 @@ async def _check_trial_expiry() -> None:
                         html=email_subscription_expired(store_name, "التجربة المجانية"),
                     )
                 _update_tenant_flag(db, tenant.id, _s, "trial_expired")
+                _mark_sent("trial_expired")
 
     finally:
         db.close()
@@ -940,23 +961,29 @@ def _already_notified(sub: object, flag: str) -> bool:
 
 
 def _mark_notified(db: Session, sub: object, flag: str) -> None:
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
     meta = dict(getattr(sub, "extra_metadata", None) or {})
     meta[f"notified_{flag}"] = True
     sub.extra_metadata = meta  # type: ignore[attr-defined]
+    flag_modified(sub, "extra_metadata")
     db.commit()
 
 
 def _update_tenant_flag(db: Session, tenant_id: int, settings_obj: object, flag: str) -> None:
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
     from core.tenant import get_or_create_settings  # noqa: PLC0415
     _s    = get_or_create_settings(db, tenant_id)
     meta  = dict(_s.extra_metadata or {})
-    flags = meta.get("_scheduler_flags", {})
+    flags = dict(meta.get("_scheduler_flags") or {})
     flags[flag] = True
     meta["_scheduler_flags"] = flags
     _s.extra_metadata = meta
+    flag_modified(_s, "extra_metadata")
     try:
         db.commit()
-    except Exception:
+        logger.info("[Scheduler] tenant=%s flag=%s persisted", tenant_id, flag)
+    except Exception as exc:
+        logger.warning("[Scheduler] tenant=%s flag=%s commit failed: %s", tenant_id, flag, exc)
         db.rollback()
 
 
