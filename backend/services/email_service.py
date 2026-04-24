@@ -185,7 +185,7 @@ def _render(template_name: str, variables: Dict[str, Any]) -> str:
     # Inject global context available in every template
     ctx = {
         "dashboard_url": cfg.DASHBOARD_URL,
-        "support_email": cfg.SMTP_USER or "support@nahlah.ai",
+        "support_email": "support@nahlah.ai",
         "current_year":  2026,
         **variables,
     }

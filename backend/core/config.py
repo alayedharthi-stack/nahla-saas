@@ -45,7 +45,7 @@ ADMIN_PASSWORD = _admin_pass_env or ""
 
 # ── Notification services ──────────────────────────────────────────────────────
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <noreply@nahlah.ai>")
+EMAIL_FROM     = os.environ.get("EMAIL_FROM", "نحلة <support@nahlah.ai>")
 DASHBOARD_URL  = os.environ.get("DASHBOARD_URL", "https://app.nahlah.ai")
 
 # ── Zoho SMTP (transactional email) ───────────────────────────────────────────
