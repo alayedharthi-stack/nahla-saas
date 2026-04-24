@@ -2913,6 +2913,22 @@ async def import_nahla_template(
     if existing:
         template_name = f"{template_name}_{_sec.token_hex(2)}"
 
+    svc = tpl_def.get("service_key")
+    step = tpl_def.get("step_number")
+
+    # Deactivate any existing active template for this service slot BEFORE inserting,
+    # so the unique constraint on (tenant_id, service_key, step_number, is_active)
+    # is never violated during the flush.
+    if svc and step is not None:
+        from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+        from models import WhatsAppTemplate as _WaTpl  # noqa: PLC0415
+        db.query(_WaTpl).filter(
+            _WaTpl.tenant_id   == tenant_id,
+            _WaTpl.service_key == svc,
+            _WaTpl.step_number == step,
+            _WaTpl.is_active   == True,  # noqa: E712
+        ).update({"is_active": False}, synchronize_session="fetch")
+
     now = datetime.now(timezone.utc)
     new_tpl = WhatsAppTemplate(
         tenant_id          = tenant_id,
@@ -2928,11 +2944,11 @@ async def import_nahla_template(
         updated_at         = now,
         synced_at          = now,
         display_name_ar    = tpl_def.get("name_ar", ""),
-        service_key        = tpl_def.get("service_key", ""),
+        service_key        = svc or "",
         nahla_source_key   = body.template_key,
         is_active          = True,
         is_hidden          = False,
-        step_number        = tpl_def.get("step_number"),
+        step_number        = step,
         has_coupon         = tpl_def.get("has_coupon", False),
         trigger_delay_hours = tpl_def.get("trigger_delay_hours"),
     )
@@ -2943,13 +2959,6 @@ async def import_nahla_template(
         db.rollback()
         logger.error("[NahlaImport] flush failed: tenant=%s key=%s err=%s", tenant_id, body.template_key, exc)
         raise HTTPException(status_code=409, detail=f"فشل حفظ القالب: {exc}")
-
-    # Enforce single-active invariant for the service slot
-    svc = tpl_def.get("service_key")
-    step = tpl_def.get("step_number")
-    if svc and step is not None:
-        from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
-        ensure_single_active(db, tenant_id, svc, step, new_tpl.id)
 
     try:
         db.commit()
