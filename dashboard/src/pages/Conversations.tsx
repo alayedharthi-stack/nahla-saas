@@ -160,6 +160,11 @@ export default function Conversations() {
     }
   }
 
+  const _optimisticUpdate = (phone: string, patch: Partial<DashboardConversation>) => {
+    setConversations(prev => prev.map(c => c.phone === phone ? { ...c, ...patch } : c))
+    setSelected(prev => prev && prev.phone === phone ? { ...prev, ...patch } : prev)
+  }
+
   const handleHandoff = async () => {
     if (!selected) return
     try {
@@ -168,6 +173,7 @@ export default function Conversations() {
         customer_name: selected.customer,
         last_message: selected.lastMsg,
       })
+      _optimisticUpdate(selected.phone, { status: 'human', isAI: false, handoffReason: 'customer_request' })
       await loadList()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر تحويل المحادثة')
@@ -180,16 +186,20 @@ export default function Conversations() {
       await featureRealityApi.closeConversation({
         customer_phone: selected.phone,
       })
+      _optimisticUpdate(selected.phone, { status: 'active', isAI: true, handoffReason: null })
       await loadList()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر إعادة المحادثة للذكاء')
     }
   }
 
+  // "يطلب موظف": conversation handed off AND no human has replied yet (lastMsgType !== 'manual')
+  // This catches ALL handoff reasons (customer_request, cart human-help button, etc.)
   const _isAwaitingAgent = (c: DashboardConversation) =>
-    c.status === 'human' && c.handoffReason === 'customer_request' && c.lastMsgType !== 'manual'
+    c.status === 'human' && c.lastMsgType !== 'manual'
+  // "رد بشري": a human agent has actually sent at least one manual reply
   const _isHumanResponding = (c: DashboardConversation) =>
-    c.status === 'human' && !_isAwaitingAgent(c)
+    c.status === 'human' && c.lastMsgType === 'manual'
 
   const _isUnsubscribed = (c: DashboardConversation) =>
     !!(c.isUnsubscribed || c.pendingUnsubscribe)
