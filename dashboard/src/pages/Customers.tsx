@@ -14,6 +14,9 @@ import {
   User,
   Upload,
   Info,
+  Trash2,
+  CheckSquare,
+  Square,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -84,8 +87,13 @@ export default function Customers() {
   const [addEmail, setAddEmail] = useState('')
   const [addError, setAddError] = useState('')
   const [addLoading, setAddLoading] = useState(false)
-  const [selectedCustomer, setSelectedCustomer] =
-    useState<CustomerRecord | null>(null)
+  const [selectedCustomer, setSelectedCustomer] = useState<CustomerRecord | null>(null)
+
+  // Selection & bulk delete
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [deleteModal, setDeleteModal] = useState<'selected' | 'all' | null>(null)
+  const [deleteConfirmText, setDeleteConfirmText] = useState('')
+  const [deleteLoading, setDeleteLoading] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -162,11 +170,51 @@ export default function Customers() {
     try {
       await customersApi.delete(id)
       setSelectedCustomer(null)
+      setSelectedIds(prev => { const s = new Set(prev); s.delete(id); return s })
       load()
     } catch {
       alert('حدث خطأ أثناء الحذف')
     }
   }
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => {
+      const s = new Set(prev)
+      s.has(id) ? s.delete(id) : s.add(id)
+      return s
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === customers.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(customers.map(c => c.id)))
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    setDeleteLoading(true)
+    try {
+      if (deleteModal === 'all') {
+        await customersApi.deleteAll()
+      } else {
+        await customersApi.bulkDelete(Array.from(selectedIds))
+      }
+      setSelectedIds(new Set())
+      setDeleteModal(null)
+      setDeleteConfirmText('')
+      setSelectedCustomer(null)
+      load()
+    } catch {
+      alert('حدث خطأ أثناء الحذف')
+    } finally {
+      setDeleteLoading(false)
+    }
+  }
+
+  const allCurrentSelected = customers.length > 0 && selectedIds.size === customers.length
+  const someSelected = selectedIds.size > 0 && !allCurrentSelected
 
   return (
     <div className="space-y-5">
@@ -239,9 +287,9 @@ export default function Customers() {
         onSelect={setSegmentKey}
       />
 
-      {/* Search + Refresh */}
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1 max-w-sm">
+      {/* Search + Actions */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search className="absolute start-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <input
             type="text"
@@ -256,10 +304,28 @@ export default function Customers() {
           disabled={loading}
           className="btn-secondary text-sm flex items-center gap-2"
         >
-          <RefreshCw
-            className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`}
-          />
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           تحديث
+        </button>
+
+        {/* Bulk actions — only visible when items are selected */}
+        {selectedIds.size > 0 && (
+          <button
+            onClick={() => { setDeleteModal('selected'); setDeleteConfirmText('') }}
+            className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-200 hover:bg-red-100 px-3 py-2 rounded-lg transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+            حذف المحدد ({selectedIds.size})
+          </button>
+        )}
+
+        {/* Delete all — always visible as secondary danger action */}
+        <button
+          onClick={() => { setDeleteModal('all'); setDeleteConfirmText('') }}
+          className="flex items-center gap-2 text-sm text-red-500 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 px-3 py-2 rounded-lg transition-colors"
+        >
+          <Trash2 className="w-4 h-4" />
+          حذف الكل
         </button>
       </div>
 
@@ -274,100 +340,112 @@ export default function Customers() {
             لا يوجد عملاء
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto overflow-y-auto max-h-[60vh]">
             <table className="w-full text-xs">
-              <thead>
+              <thead className="sticky top-0 z-10">
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  <th className="text-start px-5 py-3 font-medium text-slate-500">
-                    الاسم
+                  {/* Select-all checkbox */}
+                  <th className="px-3 py-3 w-10">
+                    <button
+                      onClick={toggleSelectAll}
+                      className="text-slate-400 hover:text-brand-500 transition-colors"
+                      title={allCurrentSelected ? 'إلغاء تحديد الكل' : 'تحديد الكل'}
+                    >
+                      {allCurrentSelected ? (
+                        <CheckSquare className="w-4 h-4 text-brand-500" />
+                      ) : someSelected ? (
+                        <CheckSquare className="w-4 h-4 text-brand-300" />
+                      ) : (
+                        <Square className="w-4 h-4" />
+                      )}
+                    </button>
                   </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    الهاتف
-                  </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    البريد
-                  </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    الحالة
-                  </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    RFM
-                  </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    القطاع الذكي
-                  </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    الطلبات
-                  </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    الإنفاق
-                  </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    آخر طلب
-                  </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">
-                    المصدر
-                  </th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">الاسم</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">الهاتف</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">البريد</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">الحالة</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">RFM</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">القطاع الذكي</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">الطلبات</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">الإنفاق</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">آخر طلب</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">المصدر</th>
+                  <th className="px-3 py-3 w-10" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {customers.map((c) => (
-                  <tr
-                    key={c.id}
-                    className="hover:bg-slate-50 transition-colors cursor-pointer"
-                    onClick={() => setSelectedCustomer(c)}
-                  >
-                    <td className="px-5 py-3">
-                      <span className="font-medium text-slate-900">
-                        {c.name || '—'}
-                      </span>
-                    </td>
-                    <td
-                      dir="ltr"
-                      className="px-3 py-3 text-slate-600 font-mono"
+                {customers.map((c) => {
+                  const isChecked = selectedIds.has(c.id)
+                  return (
+                    <tr
+                      key={c.id}
+                      className={`hover:bg-slate-50 transition-colors ${isChecked ? 'bg-brand-50/60' : ''}`}
                     >
-                      {c.phone || '—'}
-                    </td>
-                    <td className="px-3 py-3 text-slate-500">
-                      {c.email || '—'}
-                    </td>
-                    <td className="px-3 py-3">
-                      <Badge
-                        label={c.status_label}
-                        variant={segmentVariant(c.status)}
-                      />
-                    </td>
-                    <td className="px-3 py-3">
-                      <Badge
-                        label={String(c.rfm_scores?.total ?? c.rfm_total_score ?? 0)}
-                        variant={rfmVariant(c.rfm_scores?.total ?? c.rfm_total_score ?? 0)}
-                      />
-                    </td>
-                    <td className="px-3 py-3 text-slate-600 whitespace-nowrap">
-                      {c.rfm_segment_label || '—'}
-                    </td>
-                    <td className="px-3 py-3 text-slate-700 font-semibold">
-                      {c.orders_count ?? c.total_orders}
-                    </td>
-                    <td className="px-3 py-3 text-slate-700 whitespace-nowrap">
-                      {(c.total_spent ?? c.total_spend).toLocaleString('ar-SA')} ر.س
-                    </td>
-                    <td className="px-3 py-3 text-slate-500 whitespace-nowrap">
-                      {formatDate(c.last_order_date ?? c.last_order_at)}
-                    </td>
-                    <td className="px-3 py-3">
-                      {c.source === 'manual' ? (
-                        <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
-                          {c.source_label}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-slate-500">
-                          {c.source_label}
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      {/* Checkbox */}
+                      <td className="px-3 py-3">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleSelect(c.id) }}
+                          className="text-slate-300 hover:text-brand-500 transition-colors"
+                        >
+                          {isChecked
+                            ? <CheckSquare className="w-4 h-4 text-brand-500" />
+                            : <Square className="w-4 h-4" />
+                          }
+                        </button>
+                      </td>
+                      <td
+                        className="px-3 py-3 cursor-pointer"
+                        onClick={() => setSelectedCustomer(c)}
+                      >
+                        <span className="font-medium text-slate-900">{c.name || '—'}</span>
+                      </td>
+                      <td dir="ltr" className="px-3 py-3 text-slate-600 font-mono cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        {c.phone || '—'}
+                      </td>
+                      <td className="px-3 py-3 text-slate-500 cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        {c.email || '—'}
+                      </td>
+                      <td className="px-3 py-3 cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        <Badge label={c.status_label} variant={segmentVariant(c.status)} />
+                      </td>
+                      <td className="px-3 py-3 cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        <Badge
+                          label={String(c.rfm_scores?.total ?? c.rfm_total_score ?? 0)}
+                          variant={rfmVariant(c.rfm_scores?.total ?? c.rfm_total_score ?? 0)}
+                        />
+                      </td>
+                      <td className="px-3 py-3 text-slate-600 whitespace-nowrap cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        {c.rfm_segment_label || '—'}
+                      </td>
+                      <td className="px-3 py-3 text-slate-700 font-semibold cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        {c.orders_count ?? c.total_orders}
+                      </td>
+                      <td className="px-3 py-3 text-slate-700 whitespace-nowrap cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        {(c.total_spent ?? c.total_spend).toLocaleString('ar-SA')} ر.س
+                      </td>
+                      <td className="px-3 py-3 text-slate-500 whitespace-nowrap cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        {formatDate(c.last_order_date ?? c.last_order_at)}
+                      </td>
+                      <td className="px-3 py-3 cursor-pointer" onClick={() => setSelectedCustomer(c)}>
+                        {c.source === 'manual' ? (
+                          <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">{c.source_label}</span>
+                        ) : (
+                          <span className="text-xs text-slate-500">{c.source_label}</span>
+                        )}
+                      </td>
+                      {/* Quick delete */}
+                      <td className="px-3 py-3">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDelete(c.id) }}
+                          className="text-slate-300 hover:text-red-500 transition-colors"
+                          title="حذف العميل"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -490,6 +568,87 @@ export default function Customers() {
                 )}
                 إضافة
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Bulk / Delete-All Confirmation Modal ─────────────────────────── */}
+      {deleteModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+            {/* Danger header */}
+            <div className="bg-red-600 rounded-t-2xl px-6 py-5 flex items-start gap-3">
+              <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">
+                  {deleteModal === 'all' ? '⚠️ حذف جميع العملاء' : `⚠️ حذف ${selectedIds.size} عميل`}
+                </h3>
+                <p className="text-red-100 text-xs mt-1">
+                  هذا الإجراء لا يمكن التراجع عنه
+                </p>
+              </div>
+            </div>
+
+            <div className="px-6 py-5 space-y-4">
+              {/* Warning message */}
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-2">
+                <p className="text-sm font-semibold text-red-800">
+                  {deleteModal === 'all'
+                    ? `سيتم حذف جميع العملاء (${total.toLocaleString('ar-SA')} عميل) بشكل دائم.`
+                    : `سيتم حذف ${selectedIds.size} عميل محدد بشكل دائم.`
+                  }
+                </p>
+                <ul className="text-xs text-red-700 space-y-1 list-disc list-inside">
+                  <li>لن تتمكن من استعادة هذه البيانات</li>
+                  <li>سيتم حذف جميع معلومات العملاء وبياناتهم</li>
+                  <li>قد تتأثر الحملات والأتمتة المرتبطة بهم</li>
+                </ul>
+              </div>
+
+              {/* Confirmation input */}
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-2">
+                  للتأكيد، اكتب كلمة{' '}
+                  <span className="font-mono font-bold text-red-600 bg-red-50 px-1.5 py-0.5 rounded">
+                    احذف
+                  </span>{' '}
+                  في الحقل أدناه:
+                </label>
+                <input
+                  type="text"
+                  value={deleteConfirmText}
+                  onChange={e => setDeleteConfirmText(e.target.value)}
+                  placeholder="اكتب: احذف"
+                  className="w-full px-3 py-2 text-sm border-2 border-slate-200 rounded-lg focus:ring-0 focus:border-red-400 outline-none transition-colors"
+                  autoFocus
+                />
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-3 pt-1">
+                <button
+                  onClick={() => { setDeleteModal(null); setDeleteConfirmText('') }}
+                  className="flex-1 btn-secondary text-sm"
+                  disabled={deleteLoading}
+                >
+                  إلغاء
+                </button>
+                <button
+                  onClick={handleBulkDelete}
+                  disabled={deleteConfirmText !== 'احذف' || deleteLoading}
+                  className="flex-1 flex items-center justify-center gap-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg py-2 font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {deleteLoading ? (
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <Trash2 className="w-4 h-4" />
+                  )}
+                  {deleteLoading ? 'جارٍ الحذف...' : 'حذف نهائي'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

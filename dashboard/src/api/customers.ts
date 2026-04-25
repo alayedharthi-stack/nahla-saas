@@ -139,4 +139,18 @@ export const customersApi = {
       method: 'DELETE',
     })
   },
+
+  bulkDelete(ids: number[]) {
+    return apiCall<{ deleted: number }>('/customers/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    })
+  },
+
+  deleteAll() {
+    return apiCall<{ deleted: number }>('/customers/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ delete_all: true }),
+    })
+  },
 }

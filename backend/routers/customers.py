@@ -408,3 +408,59 @@ async def delete_customer(customer_id: int, request: Request, db: Session = Depe
     db.delete(cust)
     db.commit()
     return {"deleted": True}
+
+
+# ── Bulk delete ──────────────────────────────────────────────────────────────
+
+class BulkDeleteIn(BaseModel):
+    ids: Optional[List[int]] = None     # specific IDs — empty/omitted = delete ALL
+    delete_all: bool = False            # must be True when deleting all
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_customers(
+    body: BulkDeleteIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Delete a batch of customers (or ALL) for the current tenant.
+
+    • Pass ``ids`` to delete specific customers.
+    • Pass ``delete_all=true`` (and omit or empty ``ids``) to wipe every
+      customer row for this tenant.  A second confirmation guard is handled
+      by the frontend — this endpoint itself performs no extra check so the
+      UI must show the user a strong warning before calling it.
+    """
+    tenant_id = resolve_tenant_id(request)
+
+    if body.delete_all and not body.ids:
+        # Wipe all customers for this tenant
+        profiles_deleted = (
+            db.query(CustomerProfile)
+            .filter(CustomerProfile.tenant_id == tenant_id)
+            .delete(synchronize_session=False)
+        )
+        customers_deleted = (
+            db.query(Customer)
+            .filter(Customer.tenant_id == tenant_id)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return {"deleted": customers_deleted, "profiles_deleted": profiles_deleted}
+
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="لم يتم تحديد أي عملاء للحذف")
+
+    # Delete only the specified IDs (must belong to this tenant)
+    db.query(CustomerProfile).filter(
+        CustomerProfile.customer_id.in_(body.ids),
+        CustomerProfile.tenant_id == tenant_id,
+    ).delete(synchronize_session=False)
+
+    result = db.query(Customer).filter(
+        Customer.id.in_(body.ids),
+        Customer.tenant_id == tenant_id,
+    ).delete(synchronize_session=False)
+
+    db.commit()
+    return {"deleted": result}
