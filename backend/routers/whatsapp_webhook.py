@@ -553,6 +553,42 @@ async def _dispatch_message(
             if _lead:
                 _inbound_customer_id = _lead.id
 
+            # ── Unsubscribe / Re-subscribe gate ──────────────────────────────
+            # Check BEFORE anything else so we don't feed opted-out customers
+            # into automations or AI.
+            try:
+                from services.unsubscribe import (  # noqa: PLC0415
+                    is_customer_unsubscribed,
+                    is_unsubscribe_request,
+                    mark_resubscribed,
+                    mark_unsubscribed,
+                )
+                _inbound_text = ""
+                if msg_type == "text":
+                    _inbound_text = (msg.get("text") or {}).get("body", "")
+
+                if _lead and is_unsubscribe_request(_inbound_text):
+                    # Customer explicitly opted out — mark and stop.
+                    mark_unsubscribed(db, _lead, commit=True)
+                    logger.info(
+                        "[Webhook] UNSUBSCRIBE from %s tenant=%s",
+                        normalized_sender, resolved_tenant_id,
+                    )
+                    # Return early — do not trigger automations or AI.
+                    return
+
+                if _lead and is_customer_unsubscribed(_lead):
+                    # Opted-out customer sent a new message → re-subscribe.
+                    mark_resubscribed(db, _lead, commit=True)
+                    logger.info(
+                        "[Webhook] RE-SUBSCRIBED %s tenant=%s",
+                        normalized_sender, resolved_tenant_id,
+                    )
+                    # Continue processing normally from here.
+
+            except Exception as _unsub_exc:
+                logger.warning("[Webhook] Unsubscribe gate error: %s", _unsub_exc)
+
             # ── Email: first WhatsApp message received by this tenant ─────────
             # Only fires on the very first message (total_messages == 1 on lead)
             try:

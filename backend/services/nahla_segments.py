@@ -89,6 +89,14 @@ def _f_all(q: Query, _db: Session, _tid: int) -> Query:
     return q
 
 
+def _f_unsubscribed(q: Query, _db: Session, _tid: int) -> Query:
+    """Customers who have opted out by sending an unsubscribe keyword."""
+    # JSONB boolean check: extra_metadata->>'is_unsubscribed' = 'true'
+    return q.filter(
+        Customer.extra_metadata.op("->>")("is_unsubscribed") == "true",
+    )
+
+
 def _f_new(q: Query, _db: Session, _tid: int) -> Query:
     return q.filter(or_(
         CustomerProfile.id.is_(None),
@@ -447,6 +455,25 @@ SEGMENTS: Tuple[NahlaSegment, ...] = (
         rfm_buckets=(),
         builder=_f_no_purchase_window(90),
     ),
+    NahlaSegment(
+        key="unsubscribed",
+        label_ar="ألغوا الاشتراك",
+        label_en="Unsubscribed",
+        description_ar="عملاء طلبوا إيقاف الرسائل — مستثنون من كل التواصل",
+        criteria_ar=(
+            "أرسل هؤلاء العملاء كلمة مثل «إلغاء الاشتراك» أو «STOP» فتم "
+            "إيقاف جميع الرسائل الآلية والحملات التسويقية عنهم فوراً. "
+            "إذا أرسل أي منهم رسالة جديدة عاد تلقائياً للقوائم العادية.\n\n"
+            "💡 نصيحة: إذا أردت استعادة هؤلاء العملاء ننصحك بالتواصل "
+            "معهم شخصياً لمعرفة الأسباب ومحاولة استعادتهم — لا ترسل لهم "
+            "رسائل آلية."
+        ),
+        icon="BellOff",
+        natural_goals=(),
+        crm_statuses=(),
+        rfm_buckets=(),
+        builder=_f_unsubscribed,
+    ),
 )
 
 
@@ -501,11 +528,18 @@ def _base_query(db: Session, tenant_id: int) -> Query:
 
 def _reachable_filter(q: Query) -> Query:
     """A campaign can only message customers we can actually reach on
-    WhatsApp. Apply on top of every segment so the wizard's count never
-    includes silently-unreachable rows."""
+    WhatsApp AND who have not opted out.
+
+    Applied on top of every segment so the wizard's count and the
+    dispatcher's recipient list never include:
+      • customers with no normalised phone
+      • customers who sent an unsubscribe keyword
+    """
     return q.filter(
         Customer.normalized_phone.isnot(None),
         Customer.normalized_phone != "",
+        # Exclude opted-out customers: JSONB key is_unsubscribed must NOT be 'true'
+        Customer.extra_metadata.op("->>")("is_unsubscribed") != "true",
     )
 
 

@@ -191,6 +191,7 @@ def _days_since(dt: Optional[datetime]) -> Optional[int]:
 def _serialize_customer(cust: Customer, profile: Optional[CustomerProfile]) -> Dict[str, Any]:
     meta = cust.extra_metadata or {}
     source, source_label = _resolve_customer_source(cust)
+    is_unsubscribed: bool = bool(meta.get("is_unsubscribed"))
     status = str(
         (profile.customer_status if profile and getattr(profile, "customer_status", None) else None)
         or (profile.segment if profile else None)
@@ -208,6 +209,9 @@ def _serialize_customer(cust: Customer, profile: Optional[CustomerProfile]) -> D
         "email": cust.email or "",
         "source": source,
         "source_label": source_label,
+        "is_unsubscribed": is_unsubscribed,
+        "unsubscribed_at": meta.get("unsubscribed_at"),
+        "resubscribed_at": meta.get("resubscribed_at"),
     }
     if profile:
         result.update({

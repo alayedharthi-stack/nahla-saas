@@ -212,6 +212,17 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
             skipped += 1
             continue
 
+        # Hard opt-out guard — in case a customer unsubscribed after the
+        # audience was resolved but before we reached them in the loop.
+        _meta = getattr(customer, "extra_metadata", None) or {}
+        if _meta.get("is_unsubscribed"):
+            skipped += 1
+            logger.debug(
+                "[campaign_dispatcher] skipping opted-out customer %s",
+                getattr(customer, "id", "?"),
+            )
+            continue
+
         try:
             coupon_code = ""
             if auto_coupon and discount_pct:
@@ -349,6 +360,8 @@ def _resolve_audience(
                 Customer.tenant_id == tenant_id,
                 Customer.normalized_phone.isnot(None),
                 Customer.normalized_phone != "",
+                # Safety net: honour opt-outs even for the fallback "all" query
+                Customer.extra_metadata.op("->>")("is_unsubscribed") != "true",
             )
         )
     return q.all()

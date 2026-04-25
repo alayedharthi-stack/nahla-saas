@@ -47,6 +47,9 @@ export interface CustomerRecord {
   churn_risk_score: number
   lifetime_value_score: number
   is_returning: boolean
+  is_unsubscribed: boolean
+  unsubscribed_at: string | null
+  resubscribed_at: string | null
 }
 
 export interface CustomersListResponse {

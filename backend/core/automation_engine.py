@@ -519,6 +519,30 @@ async def _try_execute(
         )
         return "delay"
 
+    # ── Opt-out / unsubscribe guard ───────────────────────────────────────────
+    # Check BEFORE running the automation — an unsubscribed customer must
+    # not receive any message regardless of automation type or stage.
+    if event.customer_id:
+        try:
+            from models import Customer as _Customer  # noqa: PLC0415
+            from services.unsubscribe import is_customer_unsubscribed as _is_unsub  # noqa: PLC0415
+            _cust = db.query(_Customer).filter(
+                _Customer.id == event.customer_id,
+                _Customer.tenant_id == tenant_id,
+            ).first()
+            if _cust and _is_unsub(_cust):
+                _write_execution(
+                    db, event.id, automation.id, event.customer_id, tenant_id,
+                    status="skipped", skip_reason="customer_unsubscribed",
+                )
+                logger.info(
+                    "[AutoEngine] Skipping automation event=%s — customer %s opted out",
+                    event.id, event.customer_id,
+                )
+                return "skipped"
+        except Exception as _unsub_exc:
+            logger.warning("[AutoEngine] Opt-out check failed: %s", _unsub_exc)
+
     # ── Saudi quiet-hours guard ──────────────────────────────────────────────
     # When the merchant has enabled Saudi quiet hours (default ON for the
     # cart-recovery automation), a stage that becomes due between 00:00

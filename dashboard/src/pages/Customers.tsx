@@ -17,6 +17,7 @@ import {
   Trash2,
   CheckSquare,
   Square,
+  BellOff,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -397,7 +398,15 @@ export default function Customers() {
                         className="px-3 py-3 cursor-pointer"
                         onClick={() => setSelectedCustomer(c)}
                       >
-                        <span className="font-medium text-slate-900">{c.name || '—'}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-medium text-slate-900">{c.name || '—'}</span>
+                          {c.is_unsubscribed && (
+                            <span className="inline-flex items-center gap-0.5 bg-red-100 text-red-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-red-200">
+                              <BellOff className="w-2.5 h-2.5" />
+                              ألغى الاشتراك
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td dir="ltr" className="px-3 py-3 text-slate-600 font-mono cursor-pointer" onClick={() => setSelectedCustomer(c)}>
                         {c.phone || '—'}
@@ -676,12 +685,25 @@ export default function Customers() {
 
             <div className="p-5 space-y-5">
               <div className="text-center space-y-2">
-                <div className="w-16 h-16 bg-brand-50 rounded-full flex items-center justify-center mx-auto">
-                  <User className="w-8 h-8 text-brand-500" />
+                <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto ${selectedCustomer.is_unsubscribed ? 'bg-red-50' : 'bg-brand-50'}`}>
+                  {selectedCustomer.is_unsubscribed
+                    ? <BellOff className="w-8 h-8 text-red-400" />
+                    : <User className="w-8 h-8 text-brand-500" />
+                  }
                 </div>
                 <h4 className="text-base font-semibold text-slate-900">
                   {selectedCustomer.name}
                 </h4>
+                {selectedCustomer.is_unsubscribed && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700 text-center space-y-1">
+                    <p className="font-semibold flex items-center justify-center gap-1">
+                      <BellOff className="w-3.5 h-3.5" />
+                      ألغى الاشتراك
+                    </p>
+                    <p className="text-red-500">مستثنى من الحملات والطيار الآلي والذكاء</p>
+                    <p className="text-slate-500 text-[10px]">يعود تلقائياً عند إرساله أي رسالة</p>
+                  </div>
+                )}
                 <Badge
                   label={selectedCustomer.status_label}
                   variant={segmentVariant(selectedCustomer.status)}
@@ -848,16 +870,23 @@ function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps
                 title={seg.description_ar}
                 className={
                   'inline-flex items-center gap-2 ps-3.5 pe-2 py-1.5 rounded-full text-xs font-medium transition-colors border ' +
-                  (isActive
-                    ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
-                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300')
+                  (seg.key === 'unsubscribed'
+                    ? (isActive
+                        ? 'bg-red-500 text-white border-red-500 shadow-sm'
+                        : 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100 hover:border-red-300')
+                    : (isActive
+                        ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300'))
                 }
               >
+                {seg.key === 'unsubscribed' && <BellOff className="w-3 h-3 shrink-0" />}
                 <span>{seg.label_ar}</span>
                 <span
                   className={
                     'inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold ' +
-                    (isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500')
+                    (seg.key === 'unsubscribed'
+                      ? (isActive ? 'bg-white/20 text-white' : 'bg-red-100 text-red-600')
+                      : (isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'))
                   }
                 >
                   {seg.customer_count.toLocaleString('ar-SA')}
@@ -873,7 +902,9 @@ function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps
                     'ms-0.5 inline-flex items-center justify-center w-5 h-5 rounded-full transition-colors ' +
                     (isActive
                       ? 'text-white/80 hover:bg-white/15'
-                      : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600')
+                      : (seg.key === 'unsubscribed'
+                          ? 'text-red-400 hover:bg-red-100 hover:text-red-600'
+                          : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'))
                   }
                 >
                   <Info className="w-3.5 h-3.5" />
@@ -915,10 +946,24 @@ function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps
       )}
 
       {/* Active filter hint — visible even when no info popover is open. */}
-      {activeSeg && active !== 'all' && (
+      {activeSeg && active !== 'all' && active !== 'unsubscribed' && (
         <p className="text-[11px] text-slate-500 ps-1">
           عرض {activeSeg.customer_count.toLocaleString('ar-SA')} عميل ضمن «{activeSeg.label_ar}»
         </p>
+      )}
+
+      {/* Special notice when merchant is viewing the Unsubscribed segment */}
+      {active === 'unsubscribed' && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5 text-xs text-red-700">
+          <BellOff className="w-4 h-4 mt-0.5 shrink-0 text-red-400" />
+          <div className="space-y-0.5">
+            <p className="font-semibold">هؤلاء العملاء ألغوا الاشتراك في التواصل</p>
+            <p className="text-red-600">مستثنون تلقائياً من جميع الحملات والطيار الآلي والذكاء الاصطناعي.</p>
+            <p className="text-slate-500 mt-1">
+              💡 إذا كنت تريد استعادتهم، ننصحك بالتواصل معهم <strong>شخصياً</strong> لمعرفة الأسباب ومحاولة استعادتهم. عند إرسالهم أي رسالة سيعودون تلقائياً للقوائم العادية.
+            </p>
+          </div>
+        </div>
       )}
     </div>
   )
