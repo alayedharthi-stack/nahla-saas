@@ -69,13 +69,108 @@ class CustomerPatchIn(BaseModel):
         return normalized
 
 
-SOURCE_LABELS = {
-    "manual": "مضاف يدوياً",
-    "salla": "سلة",
-    "whatsapp_lead": "واتساب",
+SOURCE_LABELS: Dict[str, str] = {
+    # acquisition_channel values
+    "salla_sync":       "سلة",
+    "zid_sync":         "زد",
+    "customer_webhook": "سلة",
+    "order":            "طلب متجر",
+    "order_sync":       "طلب متجر",
+    "order_webhook":    "طلب متجر",
+    "manual_import":    "مستورد",
+    "manual":           "مضاف يدوياً",
     "whatsapp_inbound": "واتساب",
-    "tracking_lead": "المتجر الإلكتروني",
+    "whatsapp_lead":    "واتساب",
+    "tracking_lead":    "المتجر الإلكتروني",
+    "widget":           "المتجر الإلكتروني",
+    # legacy meta.source values (keep for old rows)
+    "salla":            "سلة",
 }
+
+
+def _resolve_customer_source(cust: "Customer") -> tuple:  # type: ignore[type-arg]
+    """Return (source_key, source_label) that accurately reflects where this
+    customer originally came from and which additional channels have touched them.
+
+    Logic:
+    1. ``acquisition_channel`` — set ONCE at creation, not overwritten by syncs
+       → most trustworthy indicator of the customer's origin.
+    2. ``salla_customer_id`` — if set the customer exists in the Salla store,
+       regardless of origin. We show "سلة" in addition to the origin if different.
+    3. ``source_tags`` (set by the import wizard) — deduped list of every source
+       that has contributed data (e.g. ["manual_import", "salla_sync"]).
+    4. Fallback: ``extra_metadata.source`` → ``extra_metadata.primary_source``.
+
+    When the customer has multiple sources we build a composite label joined by
+    " • " (e.g. "سلة • مستورد") so the merchant sees the full picture.
+    """
+    meta = cust.extra_metadata or {}
+    channel = (cust.acquisition_channel or "").strip()
+    has_salla_id = bool(getattr(cust, "salla_customer_id", None))
+
+    # Gather all sources this customer has been associated with.
+    active: list[str] = []
+
+    # --- primary: acquisition_channel ---
+    if channel:
+        active.append(channel)
+
+    # --- secondary: source_tags from import wizard ---
+    source_tags: list = meta.get("source_tags") or []
+    if isinstance(source_tags, list):
+        for tag in source_tags:
+            if tag and tag not in active:
+                active.append(tag)
+
+    # --- tertiary: salla_customer_id presence ---
+    if has_salla_id and "salla_sync" not in active and "customer_webhook" not in active:
+        active.append("salla_sync")
+
+    # If still empty, fall back to legacy meta.source / primary_source
+    if not active:
+        fallback = (
+            meta.get("source")
+            or meta.get("primary_source")
+            or ""
+        )
+        if fallback:
+            active.append(fallback)
+
+    if not active:
+        return ("unknown", "—")
+
+    # Build display buckets (deduplicated, ordered by priority)
+    seen: set[str] = set()
+    label_parts: list[str] = []
+
+    def _add_label(key: str) -> None:
+        label = SOURCE_LABELS.get(key)
+        if label and label not in seen:
+            seen.add(label)
+            label_parts.append(label)
+
+    # Priority order for display
+    priority_order = [
+        "salla_sync", "customer_webhook",
+        "zid_sync",
+        "order", "order_sync", "order_webhook",
+        "manual",
+        "manual_import",
+        "whatsapp_inbound", "whatsapp_lead",
+        "tracking_lead", "widget",
+    ]
+    # First pass: render in priority order
+    for key in priority_order:
+        if key in active:
+            _add_label(key)
+    # Second pass: anything not in the priority list
+    for key in active:
+        if key not in priority_order:
+            _add_label(key)
+
+    composite_key = "+".join(sorted(set(active)))
+    composite_label = " • ".join(label_parts) if label_parts else active[0]
+    return (composite_key, composite_label)
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -95,7 +190,7 @@ def _days_since(dt: Optional[datetime]) -> Optional[int]:
 
 def _serialize_customer(cust: Customer, profile: Optional[CustomerProfile]) -> Dict[str, Any]:
     meta = cust.extra_metadata or {}
-    source = str(meta.get("source", "salla") or "salla")
+    source, source_label = _resolve_customer_source(cust)
     status = str(
         (profile.customer_status if profile and getattr(profile, "customer_status", None) else None)
         or (profile.segment if profile else None)
@@ -112,7 +207,7 @@ def _serialize_customer(cust: Customer, profile: Optional[CustomerProfile]) -> D
         "phone": cust.phone or "",
         "email": cust.email or "",
         "source": source,
-        "source_label": SOURCE_LABELS.get(source, source),
+        "source_label": source_label,
     }
     if profile:
         result.update({

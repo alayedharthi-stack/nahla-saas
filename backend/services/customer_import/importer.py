@@ -413,8 +413,16 @@ def _build_metadata(
     meta = dict(existing or {})
 
     incoming_source = (normalized.get("source") or "manual_import").strip() or "manual_import"
+
+    # primary_source: set ONCE — first importer wins, Salla sync must not
+    # overwrite it, so the merchant always sees where a customer originally
+    # came from.
     if not meta.get("primary_source"):
         meta["primary_source"] = incoming_source
+
+    # source: set ONCE for legacy compat — same rule as primary_source.
+    if not meta.get("source"):
+        meta["source"] = incoming_source
 
     tags = set(meta.get("source_tags") or [])
     if isinstance(tags, set):

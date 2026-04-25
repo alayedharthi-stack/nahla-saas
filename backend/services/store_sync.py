@@ -1270,14 +1270,8 @@ class StoreSyncService:
                     .first()
                 )
 
-            meta = {
-                "salla_id": ext_id,
-                "source":   "salla_sync",
-                "city":     raw.get("city", ""),
-                "country":  raw.get("country", "SA"),
-            }
-
             if existing:
+                # ── Update existing customer ──────────────────────────────
                 if name:
                     existing.name = name
                 if email:
@@ -1290,9 +1284,25 @@ class StoreSyncService:
                     existing.salla_customer_id = ext_id
                 if not existing.acquisition_channel:
                     existing.acquisition_channel = "salla_sync"
-                existing.extra_metadata = {**(existing.extra_metadata or {}), **meta}
+
+                # Merge metadata carefully:
+                # • DO NOT overwrite "source" — it reflects the customer's
+                #   original acquisition channel (e.g. manual_import). Instead,
+                #   ADD "salla_sync" to the source_tags list so the display
+                #   layer can show composite labels like "سلة • مستورد".
+                prev_meta = dict(existing.extra_metadata or {})
+                tags = set(prev_meta.get("source_tags") or [])
+                tags.add("salla_sync")
+                prev_meta.update({
+                    "salla_id":    ext_id,
+                    "source_tags": sorted(tags),
+                    "city":        raw.get("city", "") or prev_meta.get("city", ""),
+                    "country":     raw.get("country", "SA") or prev_meta.get("country", "SA"),
+                })
+                existing.extra_metadata = prev_meta
                 updated += 1
             else:
+                # ── Create new customer from Salla ────────────────────────
                 from datetime import timezone as _tz  # noqa: PLC0415
                 self.db.add(Customer(
                     tenant_id           = self.tenant_id,
@@ -1300,7 +1310,13 @@ class StoreSyncService:
                     email               = email or None,
                     phone               = phone or None,
                     normalized_phone    = norm_phone,
-                    extra_metadata      = meta,
+                    extra_metadata      = {
+                        "salla_id":    ext_id,
+                        "source":      "salla_sync",
+                        "source_tags": ["salla_sync"],
+                        "city":        raw.get("city", ""),
+                        "country":     raw.get("country", "SA"),
+                    },
                     salla_customer_id   = ext_id or None,
                     acquisition_channel = "salla_sync",
                     first_seen_at       = datetime.now(_tz.utc),
