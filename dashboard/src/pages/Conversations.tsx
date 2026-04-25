@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, ArrowRight, Check, CheckCheck,
-  Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle,
+  Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType } from '../api/featureReality'
@@ -24,11 +24,12 @@ interface Conversation extends DashboardConversation {
 }
 
 const filterLabels: Record<string, string> = {
-  all:       'الكل',
-  active:    'نشطة',
-  human:     'بشري',
-  agent_req: 'طلب موظف',
-  closed:    'مغلقة',
+  all:          'الكل',
+  active:       'نشطة',
+  human:        'بشري',
+  agent_req:    'طلب موظف',
+  unsubscribed: 'ألغى الاشتراك',
+  closed:       'مغلقة',
 }
 
 export default function Conversations() {
@@ -36,7 +37,7 @@ export default function Conversations() {
   const requestedPhone = searchParams.get('phone')?.trim() || null
 
   const [selected, setSelected]     = useState<Conversation | null>(null)
-  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'closed'>('all')
+  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'unsubscribed' | 'closed'>('all')
   const [reply, setReply]           = useState('')
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -190,12 +191,16 @@ export default function Conversations() {
   const _isHumanResponding = (c: DashboardConversation) =>
     c.status === 'human' && !_isAwaitingAgent(c)
 
+  const _isUnsubscribed = (c: DashboardConversation) =>
+    !!(c.isUnsubscribed || c.pendingUnsubscribe)
+
   const filtered = conversations.filter(c => {
     let matchFilter = false
     if (filter === 'all') matchFilter = true
-    else if (filter === 'active') matchFilter = c.windowOpen === true
+    else if (filter === 'active') matchFilter = c.windowOpen === true && !_isUnsubscribed(c)
     else if (filter === 'human') matchFilter = _isHumanResponding(c)
     else if (filter === 'agent_req') matchFilter = _isAwaitingAgent(c)
+    else if (filter === 'unsubscribed') matchFilter = _isUnsubscribed(c)
     else if (filter === 'closed') matchFilter = c.windowOpen === false
     const matchSearch = !searchQuery || c.customer.includes(searchQuery) || c.phone.includes(searchQuery)
     return matchFilter && matchSearch
@@ -254,32 +259,58 @@ export default function Conversations() {
 
         {/* Filter tabs */}
         <div className="flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
-          {(['all', 'active', 'human', 'agent_req', 'closed'] as const).map((f) => {
+          {(['all', 'active', 'human', 'agent_req', 'unsubscribed', 'closed'] as const).map((f) => {
             const count = f === 'all' ? 0
-              : f === 'active' ? conversations.filter(c => c.windowOpen === true).length
+              : f === 'active' ? conversations.filter(c => c.windowOpen === true && !_isUnsubscribed(c)).length
               : f === 'human' ? conversations.filter(c => _isHumanResponding(c)).length
               : f === 'agent_req' ? conversations.filter(c => _isAwaitingAgent(c)).length
+              : f === 'unsubscribed' ? conversations.filter(c => _isUnsubscribed(c)).length
               : conversations.filter(c => c.windowOpen === false).length
+
+            const activeClass =
+              f === 'agent_req'    ? 'bg-red-500 text-white shadow-sm' :
+              f === 'unsubscribed' ? 'bg-slate-600 text-white shadow-sm' :
+              'bg-brand-500 text-white shadow-sm'
+
+            const inactiveClass =
+              f === 'agent_req' && count > 0    ? 'text-red-600 bg-red-50 hover:bg-red-100' :
+              f === 'unsubscribed' && count > 0 ? 'text-slate-600 bg-slate-100 hover:bg-slate-200' :
+              'text-slate-500 hover:bg-slate-100'
+
+            const countClass =
+              filter === f ? 'text-white/70' :
+              f === 'agent_req' ? 'text-red-400' :
+              f === 'unsubscribed' ? 'text-slate-500' :
+              'text-slate-400'
+
             return (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
                 className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors ${
-                  filter === f
-                    ? f === 'agent_req' ? 'bg-red-500 text-white shadow-sm' : 'bg-brand-500 text-white shadow-sm'
-                    : f === 'agent_req' && count > 0 ? 'text-red-600 bg-red-50 hover:bg-red-100' : 'text-slate-500 hover:bg-slate-100'
+                  filter === f ? activeClass : inactiveClass
                 }`}
               >
+                {f === 'unsubscribed' && <BellOff className="inline w-3 h-3 me-1 opacity-70" />}
                 {filterLabels[f]}
                 {f !== 'all' && count > 0 && (
-                  <span className={`ms-1 ${filter === f ? 'text-white/70' : f === 'agent_req' ? 'text-red-400' : 'text-slate-400'}`}>
-                    {count}
-                  </span>
+                  <span className={`ms-1 ${countClass}`}>{count}</span>
                 )}
               </button>
             )
           })}
         </div>
+
+        {/* Unsubscribed filter hint */}
+        {filter === 'unsubscribed' && (
+          <div className="mx-3 my-2 flex items-start gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs text-slate-500">
+            <BellOff className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
+            <span>
+              إذا كنت تريد استعادة هؤلاء العملاء، ننصحك بالتواصل معهم شخصياً لمعرفة أسباب الإلغاء ومحاولة استعادتهم.
+              سيعودون تلقائياً فور إرسالهم أي رسالة.
+            </span>
+          </div>
+        )}
 
         {/* Conversation list */}
         <ul className="flex-1 overflow-y-auto divide-y divide-slate-100">
@@ -318,7 +349,18 @@ export default function Conversations() {
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-1.5 mt-1">
+                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                  {/* Unsubscribe badges — shown first, highest priority */}
+                  {c.isUnsubscribed ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-300">
+                      <BellOff className="w-2.5 h-2.5" /> ألغى الاشتراك
+                    </span>
+                  ) : c.pendingUnsubscribe ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 border border-amber-200">
+                      <BellOff className="w-2.5 h-2.5" /> بانتظار تأكيد الإلغاء
+                    </span>
+                  ) : null}
+                  {/* Status badges */}
                   {c.status === 'human' && c.handoffReason === 'customer_request' && c.lastMsgType !== 'manual' ? (
                     <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200 animate-pulse">
                       <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
@@ -327,12 +369,12 @@ export default function Conversations() {
                     <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-600 border border-orange-200">
                       <User className="w-3 h-3" /> رد بشري
                     </span>
-                  ) : c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
+                  ) : !c.isUnsubscribed && !c.pendingUnsubscribe && c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
                     <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${EVENT_BADGE[c.lastMsgType].cls}`}>
                       {EVENT_BADGE[c.lastMsgType].icon}
                       {EVENT_BADGE[c.lastMsgType].label}
                     </span>
-                  ) : c.unread > 0 ? (
+                  ) : !c.isUnsubscribed && !c.pendingUnsubscribe && c.unread > 0 ? (
                     <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-200">
                       <MessageSquare className="w-2.5 h-2.5" /> رسالة عميل
                     </span>
@@ -419,6 +461,25 @@ export default function Conversations() {
                 </button>
               </div>
             </div>
+
+            {/* Unsubscribe banner */}
+            {selected.isUnsubscribed && (
+              <div className="flex items-center gap-2.5 px-4 py-2.5 bg-slate-100 border-b border-slate-200 text-sm text-slate-600">
+                <BellOff className="w-4 h-4 shrink-0 text-slate-500" />
+                <span>
+                  هذا العميل <strong>ألغى اشتراكه</strong> — لن يتلقى أي رسائل آلية أو حملات.
+                  إذا أرسل رسالة جديدة، سيعود تلقائياً للقوائم العادية.
+                </span>
+              </div>
+            )}
+            {!selected.isUnsubscribed && selected.pendingUnsubscribe && (
+              <div className="flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700">
+                <BellOff className="w-4 h-4 shrink-0 text-amber-500" />
+                <span>
+                  هذا العميل <strong>بانتظار تأكيد إلغاء الاشتراك</strong> — النظام في انتظار رده خلال 24 ساعة.
+                </span>
+              </div>
+            )}
 
             {/* Messages area */}
             <div

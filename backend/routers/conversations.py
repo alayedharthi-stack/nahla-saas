@@ -285,6 +285,8 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "lastMsgType": "",
             "windowOpen": _has_window(phone),
             "handoffReason": _handoff_reason_for(phone),
+            "isUnsubscribed": False,
+            "pendingUnsubscribe": False,
             "_conv_id": convo.id,
         }
         norm_to_key[n] = phone
@@ -404,6 +406,8 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 "lastMsgType": "ai",
                 "windowOpen": _has_window(phone),
                 "handoffReason": _handoff_reason_for(phone),
+                "isUnsubscribed": False,
+                "pendingUnsubscribe": False,
                 "_conv_id": None,
             }
 
@@ -418,6 +422,41 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             ).first()
             if real and real.name and not real.name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
                 info["customer"] = real.name
+
+    # ── 5b. Enrich unsubscribe status from Customer table (bulk) ────────────
+    def _is_pending_active(meta: dict) -> bool:
+        """Return True only when pending_unsubscribe flag is set AND not expired."""
+        if not meta.get("pending_unsubscribe"):
+            return False
+        exp_str = meta.get("pending_unsubscribe_expires_at")
+        if not exp_str:
+            return True
+        try:
+            exp_dt = datetime.fromisoformat(exp_str)
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+            return datetime.now(timezone.utc) < exp_dt
+        except Exception:
+            return True
+
+    all_norms = list(set(_norm(p) for p in phone_info))
+    unsub_customers = (
+        db.query(Customer)
+        .filter(
+            Customer.tenant_id == tenant_id,
+            Customer.normalized_phone.in_(all_norms),
+        )
+        .all()
+    )
+    for cust in unsub_customers:
+        meta = cust.extra_metadata or {}
+        is_unsub = bool(meta.get("is_unsubscribed"))
+        is_pending = _is_pending_active(meta)
+        c_norm = _norm(cust.normalized_phone or cust.phone or "")
+        matching_key = norm_to_key.get(c_norm)
+        if matching_key and matching_key in phone_info:
+            phone_info[matching_key]["isUnsubscribed"] = is_unsub
+            phone_info[matching_key]["pendingUnsubscribe"] = is_pending
 
     # ── 6. Fallback: if last message is within 24h, mark window open ────────
     _24h_ago = (datetime.utcnow() - timedelta(hours=24)).isoformat()

@@ -236,6 +236,8 @@ export interface DashboardConversation {
   lastMsgType?: MessageEventType | ''
   windowOpen?: boolean
   handoffReason?: string | null
+  isUnsubscribed?: boolean
+  pendingUnsubscribe?: boolean
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'
