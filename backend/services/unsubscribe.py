@@ -116,6 +116,9 @@ _STRICT_PATTERNS: tuple[str, ...] = (
     r"لا\s*ترسلوا?\s*لي",
     r"لا\s*ترسلي\s*لي",
     r"لا\s*تراسلني",
+    r"لا\s*عاد\s*ترسل",      # "لاعاد ترسل" / "لا عاد ترسل" — don't send anymore
+    r"أزعجتني",               # "أزعجتني / ازعجتني" — you bothered me (normalisation catches ا/أ)
+    r"ازعجتني",
     r"توقف\s*عن\s*الإرسال",
     r"توقف\s*عن\s*الارسال",
     r"أوقف\s*التواصل",
@@ -131,6 +134,7 @@ _SOLO_PATTERNS: tuple[str, ...] = (
     r"^\s*الغاء\s*$",
     r"^\s*ألغاء\s*$",
     r"^\s*الغ\s*$",           # colloquial imperative without hamza
+    r"^\s*لا\s*ترسل\s*$",    # "لاترسل" / "لا ترسل" standalone
     r"^\s*stop\s*$",
 )
 
