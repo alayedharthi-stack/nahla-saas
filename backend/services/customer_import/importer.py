@@ -9,7 +9,7 @@ merchant's commit options, this module:
     - creates "new" rows as fresh Customers (source: manual_import)
     - non-destructively merges "exact" rows into the existing customer
       (only fills missing/weak fields, never overwrites trusted data
-      from salla_sync, etc.)
+      from salla_sync, zid_sync, order sources, etc.)
     - applies per-row decisions for "suspect" rows:
           merge_into:<id>  → same as exact merge against that id
           create_new       → insert as a new customer
@@ -19,6 +19,13 @@ merchant's commit options, this module:
           extra_metadata.source_tags        (deduped append)
           extra_metadata.last_import_batch  (always overwritten)
 
+Name-source priority (highest first):
+    salla_sync / zid_sync / customer_webhook > order_webhook / order_sync
+    > manual (merchant-typed) > manual_import (file) > whatsapp_inbound
+
+A file-imported name NEVER overwrites a name that came from the merchant's
+connected store (Salla / Zid) or from a real order.
+
 Every Customer write goes through SQLAlchemy directly so we honor the
 existing partial-unique index on (tenant_id, normalized_phone). If a
 race condition produces an IntegrityError we re-fetch and merge.
@@ -26,9 +33,21 @@ race condition produces an IntegrityError we re-fetch and merge.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+# High-trust sources: names from these channels must not be overwritten by
+# a file import (manual_import).
+_STORE_SOURCES = frozenset({
+    "salla_sync", "zid_sync", "customer_webhook",
+    "order_webhook", "order_sync", "order",
+})
+
+# Regex that detects "names" that are actually just phone-number placeholders
+# (e.g. "+966512345678" stored as the name when a real name was unavailable).
+_PHONE_PATTERN = re.compile(r"^[\+\d\s\-\(\)]{7,}$")
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
@@ -311,15 +330,48 @@ def _apply_non_destructive_merge(
     batch_id: int,
 ) -> None:
     """Fill empty / weak fields on the existing customer from the
-    incoming row. NEVER overwrites a value that is already present —
-    salla_sync data and other trusted sources stay authoritative."""
+    incoming file row.
+
+    Name-merge rules (most important):
+    1. Store-sourced customers (salla_sync, zid_sync, order, …): their name
+       is NEVER overwritten by a file import — the store is the single source
+       of truth for the customer's identity.
+    2. If the existing name looks like a phone-number placeholder (e.g.
+       "+966512345678" stored as a name) AND the customer is NOT from a store
+       source, a proper name from the file IS allowed to replace it.
+    3. In all other cases: only fill an empty name field.
+    """
     incoming_name  = (normalized.get("name")  or "").strip()
     incoming_email = (normalized.get("email") or "").strip().lower()
     incoming_phone = (normalized.get("normalized_phone") or "").strip()
     incoming_raw   = (normalized.get("phone_raw") or "").strip()
 
-    if incoming_name and not (existing.name or "").strip():
-        existing.name = incoming_name
+    existing_name    = (existing.name or "").strip()
+    existing_channel = (getattr(existing, "acquisition_channel", None) or "").lower()
+    has_salla_id     = bool(getattr(existing, "salla_customer_id", None))
+    is_store_customer = existing_channel in _STORE_SOURCES or has_salla_id
+
+    if incoming_name:
+        if not existing_name:
+            # Always fill completely empty names.
+            existing.name = incoming_name
+        elif is_store_customer:
+            # Store customers: name is protected — file never wins.
+            logger.debug(
+                "name protected for store customer (channel=%s salla_id=%s): "
+                "keeping '%s', ignoring '%s'",
+                existing_channel, has_salla_id, existing_name, incoming_name,
+            )
+        elif _PHONE_PATTERN.match(existing_name):
+            # Existing "name" is just a phone number placeholder → replace with
+            # the proper name from the file.
+            existing.name = incoming_name
+            logger.debug(
+                "replaced phone-placeholder name '%s' → '%s'",
+                existing_name, incoming_name,
+            )
+        # else: existing has a real name from a non-store source → keep it.
+
     if incoming_email and not (existing.email or "").strip():
         existing.email = incoming_email
     if incoming_phone and not (existing.normalized_phone or "").strip():

@@ -52,6 +52,11 @@ class ClassifiedRow:
     match_customer_id: Optional[int] = None
     match_reason: str = ""
     suspect_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    # Set when there is an exact phone match — carries the existing customer's
+    # acquisition_channel (e.g. "salla_sync") and their current name so the
+    # wizard can tell the merchant "this customer is already in your store".
+    match_acquisition_channel: str = ""
+    match_customer_name: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -61,6 +66,8 @@ class ClassifiedRow:
             "match_customer_id": self.match_customer_id,
             "match_reason": self.match_reason,
             "suspect_candidates": list(self.suspect_candidates),
+            "match_acquisition_channel": self.match_acquisition_channel,
+            "match_customer_name": self.match_customer_name,
         }
 
 
@@ -190,6 +197,8 @@ def _classify_one(
             normalized=row.to_dict(),
             match_customer_id=existing["id"],
             match_reason="phone_match",
+            match_acquisition_channel=existing.get("acquisition_channel") or "",
+            match_customer_name=existing.get("name") or "",
         )
 
     # 2) Strong-suspect: same email or strong name+city overlap.

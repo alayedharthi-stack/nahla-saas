@@ -16,6 +16,58 @@ from utils.phone_utils import normalize_to_e164, normalize_phone_compat
 
 logger = logging.getLogger("nahla.customer_intelligence")
 
+# ── Name-source trust hierarchy ───────────────────────────────────────────────
+# A name from a higher-trust source should never be overwritten by a lower-trust
+# one.  For example, a Salla-synced full Arabic name like "محمد العمري" must not
+# be replaced by the WhatsApp contact alias "Mohammed" that arrives with every
+# inbound message.
+#
+# Scale: 10 = most authoritative, 0 = least.
+_NAME_SOURCE_TRUST: Dict[str, int] = {
+    "salla_sync":       10,  # Official store registry — highest authority
+    "customer_webhook": 10,  # Salla customer.created/updated webhook
+    "zid_sync":         10,  # Zid store sync (when integrated)
+    "order_webhook":     8,  # Name extracted from a real placed order
+    "order_sync":        8,
+    "order":             8,
+    "manual":            5,  # Merchant typed the name themselves
+    "manual_import":     4,  # Uploaded CSV / XLSX
+    "bulk_retry":        2,
+    "whatsapp_inbound":  1,  # WhatsApp contact name — unreliable alias
+    "whatsapp_lead":     1,
+    "widget":            1,
+}
+
+
+def _name_trust_level(source: Optional[str]) -> int:
+    """Return the trust level for a given customer-data source string."""
+    return _NAME_SOURCE_TRUST.get(source or "", 0)
+
+
+def _should_update_name(
+    *,
+    existing_name: Optional[str],
+    existing_source: Optional[str],
+    new_name: str,
+    new_source: Optional[str],
+) -> bool:
+    """Decide whether *new_name* (from *new_source*) should replace
+    *existing_name* (whose data came from *existing_source*).
+
+    Rules:
+    • If there is no existing name → always fill it.
+    • If the new source has strictly lower trust → never overwrite.
+    • Equal or higher trust → overwrite (e.g. Salla re-sync can correct a name).
+    """
+    if not new_name:
+        return False
+    if not (existing_name or "").strip():
+        return True  # fill empty names unconditionally
+    new_trust      = _name_trust_level(new_source)
+    existing_trust = _name_trust_level(existing_source)
+    return new_trust >= existing_trust
+
+
 COUNTABLE_ORDER_STATUSES = frozenset(
     {
         "paid",
@@ -635,8 +687,34 @@ class CustomerIntelligenceService:
             if e164:
                 # Always keep normalized_phone up-to-date (E.164)
                 customer.normalized_phone = e164
+
+            # Name update: respect source trust hierarchy.
+            # Low-trust sources (WhatsApp aliases, widgets) must not overwrite
+            # authoritative names already on file from the store or orders.
             if clean_name:
-                customer.name = clean_name
+                existing_name_source = (
+                    (customer.extra_metadata or {}).get("name_source")
+                    or customer.acquisition_channel
+                )
+                if _should_update_name(
+                    existing_name=customer.name,
+                    existing_source=existing_name_source,
+                    new_name=clean_name,
+                    new_source=source,
+                ):
+                    customer.name = clean_name
+                    # Track which source set the current name so future
+                    # updates can make the same trust comparison.
+                    metadata["name_source"] = source or ""
+                else:
+                    logger.debug(
+                        "[CIS] name NOT updated (trust: %s=%d >= existing %s=%d) "
+                        "| tenant=%s id=%s",
+                        source, _name_trust_level(source),
+                        existing_name_source, _name_trust_level(existing_name_source),
+                        self.tenant_id, customer.id,
+                    )
+
             if clean_email:
                 customer.email = clean_email
             customer.extra_metadata = metadata or None

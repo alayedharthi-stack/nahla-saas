@@ -78,6 +78,10 @@ export interface ClassifiedRow {
   match_customer_id: number | null
   match_reason: string
   suspect_candidates: SuspectCandidate[]
+  /** acquisition_channel of the matched existing customer (e.g. "salla_sync") */
+  match_acquisition_channel: string
+  /** Current name of the matched existing customer */
+  match_customer_name: string
 }
 
 export interface MappingResponse {

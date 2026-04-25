@@ -498,8 +498,32 @@ function PreviewRow({
         )}
 
         {row.classification === 'exact' && row.match_customer_id && (
-          <div className="text-xs text-sky-700">
-            سيتم الدمج مع العميل #{row.match_customer_id}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-sky-700">
+              سيتم الدمج مع العميل #{row.match_customer_id}
+            </span>
+            {/* Show store-origin badge so the merchant knows this customer
+                is already synced from their connected store */}
+            {row.match_acquisition_channel === 'salla_sync' && (
+              <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-2 py-0.5 font-medium">
+                🏪 موجود في سلة
+              </span>
+            )}
+            {row.match_acquisition_channel === 'zid_sync' && (
+              <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-2 py-0.5 font-medium">
+                🏪 موجود في زد
+              </span>
+            )}
+            {['order', 'order_sync', 'order_webhook'].includes(row.match_acquisition_channel) && (
+              <span className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-2 py-0.5 font-medium">
+                📦 من طلبات المتجر
+              </span>
+            )}
+            {row.match_customer_name && (
+              <span className="text-slate-500">
+                (الاسم الحالي: <strong>{row.match_customer_name}</strong> — سيُحفظ كما هو)
+              </span>
+            )}
           </div>
         )}
       </div>
