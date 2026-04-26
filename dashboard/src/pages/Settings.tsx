@@ -607,19 +607,26 @@ interface AccessRequest {
   requested_by: string
   requested_at: string
   store_name: string
+  reason?: string
+  ttl_hours?: number
+  merchant_email?: string
 }
 
-const TTL_OPTS_SMALL = [
-  { value: 1, label: 'ساعة'   },
-  { value: 2, label: 'ساعتان' },
-  { value: 4, label: '4 ساعات'},
+const TTL_OPTS_APPROVE = [
+  { value: 1,  label: 'ساعة'    },
+  { value: 2,  label: 'ساعتان'  },
+  { value: 4,  label: '4 ساعات' },
+  { value: 8,  label: '8 ساعات' },
+  { value: 24, label: '24 ساعة' },
+  { value: 48, label: '48 ساعة' },
 ]
 
 function AccessRequestsPanel({ onApproved }: { onApproved?: () => void }) {
-  const [requests, setRequests]   = useState<AccessRequest[]>([])
-  const [loading, setLoading]     = useState(true)
+  const [requests, setRequests]     = useState<AccessRequest[]>([])
+  const [loading, setLoading]       = useState(true)
   const [responding, setResponding] = useState<string | null>(null)
-  const [ttl, setTtl]             = useState(4)
+  // Per-request TTL (defaults to what admin requested, or 4)
+  const [ttlMap, setTtlMap]         = useState<Record<string, number>>({})
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -629,7 +636,12 @@ function AccessRequestsPanel({ onApproved }: { onApproved?: () => void }) {
       })
       if (res.ok) {
         const d = await res.json()
-        setRequests(d.requests ?? [])
+        const reqs: AccessRequest[] = d.requests ?? []
+        setRequests(reqs)
+        // Init TTL map from requested TTL (or default 4)
+        const init: Record<string, number> = {}
+        reqs.forEach(r => { init[r.id] = r.ttl_hours ?? 4 })
+        setTtlMap(prev => ({ ...init, ...prev }))
       }
     } catch { /* ignore */ }
     finally { setLoading(false) }
@@ -640,6 +652,7 @@ function AccessRequestsPanel({ onApproved }: { onApproved?: () => void }) {
   const respond = async (reqId: string, approve: boolean) => {
     setResponding(reqId)
     try {
+      const ttl = ttlMap[reqId] ?? 4
       const res = await fetch(`${API_BASE}/merchant/access-requests/${reqId}/respond`, {
         method:  'POST',
         headers: {
@@ -662,61 +675,94 @@ function AccessRequestsPanel({ onApproved }: { onApproved?: () => void }) {
   if (loading || requests.length === 0) return null
 
   return (
-    <div className="card p-5 border-amber-200 bg-amber-50">
-      <div className="flex items-center gap-2 mb-3">
+    <div className="card p-5 border-amber-300 bg-amber-50">
+      <div className="flex items-center gap-2 mb-4">
         <Bell className="w-4 h-4 text-amber-600" />
-        <h4 className="text-sm font-semibold text-amber-800">
+        <h4 className="text-sm font-bold text-amber-900">
           طلبات وصول معلّقة ({requests.length})
         </h4>
       </div>
-      <div className="space-y-3">
+      <div className="space-y-4">
         {requests.map(r => (
-          <div key={r.id} className="bg-white rounded-xl p-4 border border-amber-100 space-y-3">
-            <div>
-              <p className="text-sm font-medium text-slate-800">
-                فريق نحلة يطلب الوصول إلى لوحتك
-              </p>
-              <p className="text-xs text-slate-500 mt-0.5">
-                الطلب من: <span className="font-medium">{r.requested_by}</span>
-                {' · '}
-                {new Date(r.requested_at).toLocaleString('ar-SA')}
-              </p>
+          <div key={r.id} className="bg-white rounded-xl border border-amber-200 overflow-hidden">
+            {/* Request header */}
+            <div className="px-4 py-3 border-b border-amber-100 bg-amber-50/60">
+              <div className="flex items-start gap-2">
+                <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-bold text-slate-800">
+                    فريق نحلة يطلب الوصول المؤقت إلى لوحتك
+                  </p>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    بواسطة: <span className="font-medium">{r.requested_by}</span>
+                    {' · '}
+                    {new Date(r.requested_at).toLocaleString('ar-SA')}
+                  </p>
+                </div>
+              </div>
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-slate-500">مدة الوصول عند الموافقة:</span>
-              {TTL_OPTS_SMALL.map(o => (
+
+            {/* Details */}
+            <div className="px-4 py-3 space-y-3">
+              {/* Reason */}
+              {r.reason && (
+                <div className="bg-slate-50 rounded-lg px-3 py-2.5">
+                  <p className="text-xs text-slate-400 mb-0.5">سبب الطلب</p>
+                  <p className="text-sm font-semibold text-slate-800">{r.reason}</p>
+                </div>
+              )}
+
+              {/* Requested TTL */}
+              {r.ttl_hours && (
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <span>المدة المطلوبة من فريق الدعم:</span>
+                  <span className="font-semibold text-amber-700">
+                    {r.ttl_hours} ساعة
+                  </span>
+                </div>
+              )}
+
+              {/* Approve TTL chooser */}
+              <div>
+                <p className="text-xs text-slate-500 mb-2">المدة التي ستمنحها:</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {TTL_OPTS_APPROVE.map(o => (
+                    <button
+                      key={o.value}
+                      onClick={() => setTtlMap(prev => ({ ...prev, [r.id]: o.value }))}
+                      className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${
+                        (ttlMap[r.id] ?? r.ttl_hours ?? 4) === o.value
+                          ? 'bg-amber-500 text-white border-amber-500'
+                          : 'border-slate-200 text-slate-600 hover:bg-amber-50'
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex gap-2 pt-1">
                 <button
-                  key={o.value}
-                  onClick={() => setTtl(o.value)}
-                  className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${
-                    ttl === o.value
-                      ? 'bg-amber-500 text-white border-amber-500'
-                      : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                  }`}
+                  onClick={() => respond(r.id, true)}
+                  disabled={responding === r.id}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-green-600 hover:bg-green-700 text-white rounded-xl text-xs font-bold transition disabled:opacity-60"
                 >
-                  {o.label}
+                  {responding === r.id
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <ShieldCheck className="w-3.5 h-3.5" />}
+                  ✅ موافقة
                 </button>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => respond(r.id, true)}
-                disabled={responding === r.id}
-                className="flex-1 btn-primary flex items-center justify-center gap-1.5 text-xs py-2"
-              >
-                {responding === r.id
-                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  : <ShieldCheck className="w-3.5 h-3.5" />}
-                موافقة
-              </button>
-              <button
-                onClick={() => respond(r.id, false)}
-                disabled={responding === r.id}
-                className="flex-1 btn-secondary flex items-center justify-center gap-1.5 text-xs py-2 border-red-200 text-red-600 hover:bg-red-50"
-              >
-                <ShieldOff className="w-3.5 h-3.5" />
-                رفض
-              </button>
+                <button
+                  onClick={() => respond(r.id, false)}
+                  disabled={responding === r.id}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 border border-red-200 text-red-600 hover:bg-red-50 rounded-xl text-xs font-bold transition disabled:opacity-60"
+                >
+                  <ShieldOff className="w-3.5 h-3.5" />
+                  ❌ رفض
+                </button>
+              </div>
             </div>
           </div>
         ))}

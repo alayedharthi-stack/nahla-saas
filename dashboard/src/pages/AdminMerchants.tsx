@@ -7,8 +7,172 @@ import {
   Users, Search, LogIn, ToggleLeft, ToggleRight,
   Send, Clock, CheckCircle, Bell, X, Plus,
   Loader2, ExternalLink, Wifi, WifiOff,
-  ShieldCheck, Eye, EyeOff, Trash2,
+  ShieldCheck, Eye, EyeOff, Trash2, Shield, AlertTriangle,
 } from 'lucide-react'
+
+// ── Request Access Modal ───────────────────────────────────────────────────────
+
+const TTL_OPTIONS = [
+  { value: 1,  label: 'ساعة واحدة' },
+  { value: 2,  label: 'ساعتان' },
+  { value: 4,  label: '4 ساعات' },
+  { value: 8,  label: '8 ساعات' },
+  { value: 24, label: '24 ساعة' },
+  { value: 48, label: '48 ساعة' },
+]
+
+const REASON_PRESETS = [
+  'فحص ربط واتساب',
+  'مراجعة مشكلة الطيار الآلي',
+  'فحص القوالب',
+  'مشكلة في الحملات',
+  'مراجعة إعدادات المتجر',
+  'تشخيص مشكلة إرسال',
+]
+
+function RequestAccessModal({
+  merchant,
+  onClose,
+  onSent,
+}: {
+  merchant: { id: number; tenant_id: number | null; store_name: string; email: string }
+  onClose: () => void
+  onSent: () => void
+}) {
+  const [reason, setReason]   = useState('')
+  const [ttl, setTtl]         = useState(4)
+  const [busy, setBusy]       = useState(false)
+  const [error, setError]     = useState('')
+
+  const submit = async () => {
+    if (!reason.trim() || reason.trim().length < 5) {
+      setError('سبب الطلب مطلوب (5 أحرف على الأقل)'); return
+    }
+    if (!merchant.tenant_id) { setError('هذا التاجر لا يملك متجراً'); return }
+    setBusy(true); setError('')
+    try {
+      const res = await fetch(`${API_BASE}/admin/request-access/${merchant.tenant_id}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim(), ttl_hours: ttl }),
+      })
+      const data = await res.json()
+      if (res.status === 409 && data.detail?.includes('منح الوصول مسبقاً')) {
+        onSent(); return
+      }
+      if (!res.ok) { setError(data.detail || 'فشل إرسال الطلب'); return }
+      onSent()
+    } catch {
+      setError('خطأ في الاتصال بالخادم')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center" dir="rtl">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6 space-y-5">
+        {/* Header */}
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-amber-100 rounded-xl flex items-center justify-center shrink-0">
+              <Shield className="w-5 h-5 text-amber-600" />
+            </div>
+            <div>
+              <h2 className="text-base font-black text-slate-800">طلب وصول للدعم</h2>
+              <p className="text-xs text-slate-400">{merchant.store_name || merchant.email}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Warning note */}
+        <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl p-3">
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-700">
+            سيُرسل طلب للتاجر ويحتاج موافقته الصريحة قبل أن تتمكن من الدخول.
+            سيظهر السبب والمدة للتاجر.
+          </p>
+        </div>
+
+        {/* Reason */}
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-slate-700">
+            سبب الطلب <span className="text-red-500">*</span>
+          </label>
+          <textarea
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            placeholder="اكتب سبب طلب الوصول بوضوح..."
+            rows={3}
+            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 resize-none"
+            maxLength={300}
+          />
+          {/* Quick presets */}
+          <div className="flex flex-wrap gap-1.5">
+            {REASON_PRESETS.map(p => (
+              <button
+                key={p}
+                onClick={() => setReason(p)}
+                className="text-xs px-2.5 py-1 rounded-full border border-slate-200 text-slate-600 hover:bg-amber-50 hover:border-amber-300 transition"
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Duration */}
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-slate-700">مدة الوصول المطلوبة</label>
+          <div className="grid grid-cols-3 gap-2">
+            {TTL_OPTIONS.map(o => (
+              <button
+                key={o.value}
+                onClick={() => setTtl(o.value)}
+                className={`py-2 rounded-xl text-xs font-medium border transition
+                  ${ttl === o.value
+                    ? 'bg-amber-500 text-white border-amber-500'
+                    : 'border-slate-200 text-slate-600 hover:border-amber-300 hover:bg-amber-50'
+                  }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {error && (
+          <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+            {error}
+          </div>
+        )}
+
+        <div className="flex gap-3 pt-1">
+          <button
+            onClick={onClose}
+            className="flex-1 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50 transition"
+          >
+            إلغاء
+          </button>
+          <button
+            onClick={submit}
+            disabled={busy || !reason.trim()}
+            className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white font-bold rounded-xl text-sm transition"
+          >
+            {busy
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ الإرسال...</>
+              : <><Send className="w-4 h-4" /> إرسال الطلب</>
+            }
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 interface Merchant {
   id: number
@@ -318,6 +482,7 @@ export default function AdminMerchants() {
   const [approvedAlerts, setApprovedAlerts] = useState<{id: number; name: string}[]>([])
   const [selectedMerchant, setSelectedMerchant] = useState<Merchant | null>(null)
   const [showAddModal, setShowAddModal]   = useState(false)
+  const [requestModal, setRequestModal]   = useState<Merchant | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
   const [deleting, setDeleting]           = useState(false)
   const pollingRef                        = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -398,6 +563,7 @@ export default function AdminMerchants() {
 
     setMState(m.id, 'entering')
     try {
+      // Try to enter directly (if access already granted)
       const res = await fetch(`${API_BASE}/admin/impersonate/${tid}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}` },
@@ -409,19 +575,9 @@ export default function AdminMerchants() {
         return
       }
       if (res.status === 403) {
-        setMState(m.id, 'requesting')
-        const reqRes = await fetch(`${API_BASE}/admin/request-access/${tid}`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${getToken()}` },
-        })
-        const reqData = await reqRes.json()
-        if (reqRes.status === 409 && reqData.detail?.includes('منح الوصول مسبقاً')) {
-          setMState(m.id, 'has_access')
-          handleEnter(m)
-          return
-        }
-        if (!reqRes.ok) { alert(reqData.detail || 'فشل إرسال الطلب'); setMState(m.id, 'idle'); return }
-        setMState(m.id, 'requested')
+        // No active grant → open the request modal (reason + duration required)
+        setMState(m.id, 'idle')
+        setRequestModal(m)
       } else {
         alert(data.detail || 'فشل الدخول')
         setMState(m.id, 'idle')
@@ -666,6 +822,18 @@ export default function AdminMerchants() {
           onClose={() => setShowAddModal(false)}
           onCreated={(m) => {
             setMerchants(prev => [m, ...prev])
+          }}
+        />
+      )}
+
+      {/* Request Access modal */}
+      {requestModal && (
+        <RequestAccessModal
+          merchant={requestModal}
+          onClose={() => setRequestModal(null)}
+          onSent={() => {
+            setMState(requestModal.id, 'requested')
+            setRequestModal(null)
           }}
         />
       )}

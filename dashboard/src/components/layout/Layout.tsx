@@ -1,11 +1,82 @@
-import { useState } from 'react'
-import { Outlet, useLocation } from 'react-router-dom'
+import { useState, useEffect, useCallback } from 'react'
+import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import Header from './Header'
 import TrialBanner from '../ui/TrialBanner'
 import ImpersonationBanner from '../ui/ImpersonationBanner'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
+import { API_BASE } from '../../api/client'
+import { Shield, X } from 'lucide-react'
+
+// ── Active Support Access Warning Banner ─────────────────────────────────────
+// Shows in ALL merchant pages when the admin has active access
+
+function SupportAccessWarningBanner() {
+  const navigate = useNavigate()
+  const [access, setAccess] = useState<{
+    enabled: boolean; expires_at: string | null; reason?: string
+  } | null>(null)
+  const [dismissed, setDismissed] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('nahla_token') ?? ''
+      if (!token) return
+      const res = await fetch(`${API_BASE}/merchant/support-access`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (res.ok) setAccess(await res.json())
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => {
+    load()
+    // Poll every 30s to detect expiry
+    const id = setInterval(load, 30_000)
+    return () => clearInterval(id)
+  }, [load])
+
+  if (!access?.enabled || dismissed) return null
+
+  const fmt = (iso: string | null) => {
+    if (!iso) return ''
+    try {
+      return new Intl.DateTimeFormat('ar-SA', {
+        timeStyle: 'short', dateStyle: 'short', timeZone: 'Asia/Riyadh',
+      }).format(new Date(iso))
+    } catch { return iso }
+  }
+
+  return (
+    <div dir="rtl" className="w-full bg-red-600 text-white text-xs px-4 py-2.5 flex items-center justify-between gap-3 sticky top-0 z-40">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="relative flex h-2 w-2 shrink-0">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-60" />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-white" />
+        </span>
+        <Shield className="w-3.5 h-3.5 shrink-0" />
+        <span className="font-semibold">
+          تنبيه: دعم نحلة لديه وصول مؤقت إلى لوحتك
+          {access.expires_at && (
+            <span className="font-normal opacity-90"> حتى {fmt(access.expires_at)}</span>
+          )}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        <button
+          onClick={() => navigate('/settings?tab=security')}
+          className="bg-white/20 hover:bg-white/30 px-2.5 py-1 rounded-lg font-semibold transition"
+        >
+          إدارة الوصول
+        </button>
+        <button onClick={() => setDismissed(true)} className="opacity-70 hover:opacity-100">
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  )
+}
 
 type MetaSelector = (tr: Translations) => { title: string; subtitle: string }
 
@@ -66,6 +137,7 @@ export default function Layout() {
           onMenuClick={() => setSidebarOpen(o => !o)}
         />
         <ImpersonationBanner />
+        <SupportAccessWarningBanner />
         <TrialBanner />
         <main className="flex-1 p-3 md:p-6 overflow-x-auto">
           <Outlet />

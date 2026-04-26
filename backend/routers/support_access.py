@@ -71,9 +71,13 @@ _audit = logging.getLogger("nahla.support_audit")
 
 router = APIRouter()
 
-# Hard cap: merchants can grant at most this many hours regardless of input
-_MAX_TTL_HOURS   = 8
-_VALID_TTL_HOURS = (1, 2, 4, 8)
+# TTL caps:
+#   Merchant-initiated (enable) — shorter cap for safety
+#   Admin-requested (request-access) — merchant can approve up to 48 h
+_MAX_TTL_MERCHANT = 48           # merchant can approve up to 48 h in a request
+_MAX_TTL_HOURS    = 8            # backward-compat: merchant self-enable cap
+_VALID_TTL_HOURS  = (1, 2, 4, 8)     # for merchant self-enable
+_VALID_TTL_ALL    = (1, 2, 4, 8, 24, 48)  # for admin requests / merchant approval
 
 
 # ── Access Request Helpers ──────────────────────────────────────────────────────
@@ -226,6 +230,9 @@ async def enable_support_access(
         "SUPPORT_ENABLED tenant=%s granted_by=%s ttl=%dh expires=%s ip=%s",
         tenant_id, user.get("sub"), body.ttl_hours, expires.isoformat(), ip,
     )
+    _write_audit_log(db, tenant_id=tenant_id, action="support_access_enabled",
+                     details={"ttl_hours": body.ttl_hours, "by": user.get("sub"),
+                              "expires_at": expires.isoformat(), "ip": ip})
     return {
         "enabled":    True,
         "granted_at": sa["granted_at"],
@@ -271,11 +278,144 @@ async def disable_support_access(
         "SUPPORT_REVOKED tenant=%s revoked_by=%s sv_old=%d sv_new=%d ip=%s",
         tenant_id, user.get("sub"), old_ver, new_ver, ip,
     )
+    _write_audit_log(db, tenant_id=tenant_id, action="support_access_revoked",
+                     details={"by": user.get("sub"), "ip": ip,
+                              "session_version_new": new_ver})
     return {
         "enabled":         False,
         "session_version": new_ver,
         "message":         "تم إلغاء وصول الدعم الفني فوراً. أي جلسة دعم نشطة لن تعمل بعد الآن.",
     }
+
+
+# ── Internal helpers: AuditLog, Notifications, Email ──────────────────────────
+
+def _write_audit_log(
+    db: Session,
+    *,
+    tenant_id: int,
+    action: str,
+    details: Dict[str, Any],
+) -> None:
+    """Write a row to the audit_logs table (non-fatal on error)."""
+    try:
+        from models import AuditLog  # noqa: PLC0415
+        row = AuditLog(
+            tenant_id=tenant_id,
+            category="support_access",
+            resource_type="tenant",
+            resource_id=str(tenant_id),
+            action=action,
+            details=details,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(row)
+        db.commit()
+    except Exception as exc:
+        logger.warning("[SupportAccess] AuditLog write failed (non-fatal): %s", exc)
+        db.rollback()
+
+
+def _store_notification(
+    db: Session,
+    *,
+    tenant_id: int,
+    req_id: str,
+    reason: str,
+    actor: str,
+    ttl_hours: int,
+) -> None:
+    """Store an in-platform notification in TenantSettings.extra_metadata.notifications."""
+    try:
+        settings = get_or_create_settings(db, tenant_id)
+        meta = dict(settings.extra_metadata or {})
+        notifications: list = list(meta.get("notifications", []))
+        notifications.append({
+            "id":         f"sa_{req_id}",
+            "type":       "support_access_request",
+            "read":       False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "title":      "طلب وصول من فريق نحلة",
+            "body":       (
+                f"فريق نحلة طلب وصولاً مؤقتاً لمساعدتك في: {reason}. "
+                f"المدة المطلوبة: {ttl_hours} ساعة. "
+                "يمكنك الموافقة أو الرفض من الإعدادات > الأمان."
+            ),
+            "action_url": "/settings?tab=security",
+        })
+        # Keep only last 50 notifications
+        notifications = notifications[-50:]
+        meta["notifications"] = notifications
+        settings.extra_metadata = meta
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        flag_modified(settings, "extra_metadata")
+        db.commit()
+    except Exception as exc:
+        logger.warning("[SupportAccess] store_notification failed (non-fatal): %s", exc)
+
+
+def _send_access_request_email(
+    *,
+    merchant_email: str,
+    store_name: str,
+    actor: str,
+    reason: str,
+    ttl_hours: int,
+) -> None:
+    """Send email to merchant about the new access request (non-fatal)."""
+    try:
+        from services.email_service import send_email  # noqa: PLC0415
+        html = f"""
+        <div dir="rtl" style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;background:#fff;border-radius:12px;border:1px solid #e2e8f0;">
+          <div style="text-align:center;margin-bottom:24px;">
+            <h1 style="color:#d97706;font-size:22px;margin:0;">طلب وصول مؤقت</h1>
+          </div>
+          <div style="background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:16px;margin-bottom:20px;">
+            <p style="margin:0;color:#92400e;font-size:14px;font-weight:bold;">
+              ⚠️ فريق نحلة طلب وصولاً مؤقتاً إلى لوحتك
+            </p>
+          </div>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:10px 0;color:#64748b;font-size:13px;width:40%;">المتجر</td>
+              <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{store_name}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:10px 0;color:#64748b;font-size:13px;">سبب الطلب</td>
+              <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{reason}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:10px 0;color:#64748b;font-size:13px;">المدة المطلوبة</td>
+              <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{ttl_hours} ساعة</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#64748b;font-size:13px;">الطالب</td>
+              <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{actor}</td>
+            </tr>
+          </table>
+          <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:16px;margin-bottom:20px;">
+            <p style="margin:0;color:#166534;font-size:13px;">
+              🔒 <strong>لوحتك محمية:</strong> لا يستطيع أي أحد الدخول بدون موافقتك الصريحة.
+            </p>
+          </div>
+          <div style="text-align:center;margin-bottom:16px;">
+            <a href="https://app.nahlah.ai/settings?tab=security"
+               style="display:inline-block;background:#d97706;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px;">
+              ✅ الموافقة أو الرفض
+            </a>
+          </div>
+          <p style="text-align:center;color:#94a3b8;font-size:11px;margin:0;">
+            الإعدادات ← الأمان ← وصول الدعم الفني
+          </p>
+        </div>
+        """
+        send_email(
+            to=merchant_email,
+            subject=f"[نحلة] طلب وصول مؤقت لمتجرك: {reason[:50]}",
+            html_body=html,
+        )
+    except Exception as exc:
+        logger.warning("[SupportAccess] email send failed (non-fatal): %s", exc)
 
 
 # ── Admin routes ────────────────────────────────────────────────────────────────
@@ -401,6 +541,9 @@ async def admin_impersonate(
         "IMPERSONATE_ISSUED actor=%s → tenant=%d merchant=%s sv=%d ttl=%dh fp=%s ip=%s",
         admin.get("sub"), tenant_id, merchant.email, sv, ttl_hours, fp, ip,
     )
+    _write_audit_log(db, tenant_id=tenant_id, action="support_impersonate_issued",
+                     details={"actor": admin.get("sub"), "ttl_hours": ttl_hours,
+                              "token_fp": fp, "ip": ip, "session_version": sv})
 
     return {
         "access_token":    support_token,
@@ -419,18 +562,39 @@ async def admin_impersonate(
 
 # ── Access Request Flow (Admin requests → Merchant approves) ────────────────────
 
+class RequestAccessIn(BaseModel):
+    reason:    str = Field(..., min_length=5, max_length=300,
+                           description="سبب الطلب — يظهر للتاجر قبل الموافقة (إلزامي)")
+    ttl_hours: int = Field(default=4, ge=1, le=_MAX_TTL_MERCHANT,
+                           description="المدة المطلوبة بالساعات (1-48)")
+
+
 @router.post("/admin/request-access/{tenant_id}")
 async def admin_request_access(
     tenant_id: int,
+    body:      RequestAccessIn,
     request:   Request,
     db:        Session         = Depends(get_db),
     admin:     Dict[str, Any]  = Depends(require_admin),
 ):
     """
     Admin sends an access request to a merchant.
-    A notification is stored; the merchant must approve before admin can enter.
+
+    Fields:
+      reason    — shown to merchant so they know WHY access is requested (required)
+      ttl_hours — requested duration; merchant sees this before approving (1-48 h)
+
+    A notification is stored in extra_metadata; the merchant must approve before
+    admin can enter.  On approval, support_access is enabled with merchant's chosen TTL.
     """
     from models import Tenant, User  # noqa: PLC0415
+
+    # Validate TTL
+    if body.ttl_hours not in _VALID_TTL_ALL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"المدة المقبولة: {_VALID_TTL_ALL} ساعة",
+        )
 
     tenant   = db.query(Tenant).filter_by(id=tenant_id, is_active=True).first()
     merchant = db.query(User).filter_by(tenant_id=tenant_id, is_active=True).first()
@@ -460,18 +624,42 @@ async def admin_request_access(
     req_id  = str(uuid.uuid4())[:8]
     now     = datetime.now(timezone.utc)
     new_req = {
-        "id":           req_id,
-        "requested_by": admin.get("sub"),
-        "requested_at": now.isoformat(),
-        "status":       "pending",
-        "store_name":   tenant.name,
+        "id":            req_id,
+        "requested_by":  admin.get("sub"),
+        "requested_at":  now.isoformat(),
+        "status":        "pending",
+        "store_name":    tenant.name,
+        "reason":        body.reason.strip(),
+        "ttl_hours":     body.ttl_hours,
+        "merchant_email": merchant.email,
     }
     requests.append(new_req)
     _put_requests(db, settings, requests)
 
     _audit.info(
-        "ACCESS_REQUEST_SENT admin=%s → tenant=%d req_id=%s",
-        admin.get("sub"), tenant_id, req_id,
+        "ACCESS_REQUEST_SENT admin=%s → tenant=%d req_id=%s reason=%r ttl=%dh",
+        admin.get("sub"), tenant_id, req_id, body.reason[:60], body.ttl_hours,
+    )
+
+    # ── Write to AuditLog DB ────────────────────────────────────────────────
+    _write_audit_log(db, tenant_id=tenant_id, action="support_access_requested",
+                     details={
+                         "req_id": req_id, "reason": body.reason[:300],
+                         "ttl_hours": body.ttl_hours, "actor": admin.get("sub"),
+                     })
+
+    # ── In-platform notification ────────────────────────────────────────────
+    _store_notification(db, tenant_id=tenant_id, req_id=req_id,
+                        reason=body.reason, actor=admin.get("sub"),
+                        ttl_hours=body.ttl_hours)
+
+    # ── Email to merchant ───────────────────────────────────────────────────
+    _send_access_request_email(
+        merchant_email=merchant.email,
+        store_name=tenant.name,
+        actor=admin.get("sub", "فريق نحلة"),
+        reason=body.reason,
+        ttl_hours=body.ttl_hours,
     )
 
     return {
@@ -497,8 +685,8 @@ async def merchant_get_access_requests(
 
 
 class RespondAccessIn(BaseModel):
-    approve:  bool
-    ttl_hours: int = Field(default=4, ge=1, le=8)
+    approve:   bool
+    ttl_hours: int = Field(default=4, ge=1, le=_MAX_TTL_MERCHANT)
 
 
 @router.post("/merchant/access-requests/{req_id}/respond")
@@ -525,7 +713,7 @@ async def merchant_respond_access_request(
     target["responded_by"] = user.get("sub")
 
     if body.approve:
-        if body.ttl_hours not in _VALID_TTL_HOURS:
+        if body.ttl_hours not in _VALID_TTL_ALL:
             body.ttl_hours = 4
         expires = now + timedelta(hours=body.ttl_hours)
         sa = _get_sa(settings)
@@ -534,6 +722,7 @@ async def merchant_respond_access_request(
             "granted_at": now.isoformat(),
             "expires_at": expires.isoformat(),
             "granted_by": user.get("sub"),
+            "reason":     target.get("reason", ""),   # preserve reason for banner
         })
         # Write both requests list and support_access in a single atomic commit
         meta = dict(settings.extra_metadata or {})
@@ -546,10 +735,17 @@ async def merchant_respond_access_request(
             "ACCESS_APPROVED req=%s tenant=%d by=%s ttl=%dh",
             req_id, tenant_id, user.get("sub"), body.ttl_hours,
         )
+        _write_audit_log(db, tenant_id=tenant_id, action="support_access_approved",
+                         details={
+                             "req_id": req_id, "ttl_hours": body.ttl_hours,
+                             "by": user.get("sub"), "expires_at": expires.isoformat(),
+                             "reason": target.get("reason", ""),
+                         })
         return {
-            "status":   "approved",
+            "status":    "approved",
             "ttl_hours": body.ttl_hours,
-            "message":  f"تم منح الوصول لمدة {body.ttl_hours} ساعة. سيُلغى تلقائياً بعد انتهاء المدة.",
+            "expires_at": expires.isoformat(),
+            "message":   f"تم منح الوصول لمدة {body.ttl_hours} ساعة. سيُلغى تلقائياً بعد انتهاء المدة.",
         }
     else:
         # Persist rejection in a single atomic commit
@@ -562,4 +758,88 @@ async def merchant_respond_access_request(
             "ACCESS_REJECTED req=%s tenant=%d by=%s",
             req_id, tenant_id, user.get("sub"),
         )
+        _write_audit_log(db, tenant_id=tenant_id, action="support_access_rejected",
+                         details={"req_id": req_id, "by": user.get("sub")})
         return {"status": "rejected", "message": "تم رفض طلب الوصول."}
+
+
+# ── Notifications endpoint ──────────────────────────────────────────────────────
+
+@router.get("/merchant/notifications")
+async def merchant_notifications(
+    request: Request,
+    db:      Session         = Depends(get_db),
+    user:    Dict[str, Any]  = Depends(get_current_user),
+):
+    """
+    Return unread in-platform notifications for this tenant.
+    Used by the Header bell icon to show count + list.
+    """
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+    meta          = dict(settings.extra_metadata or {})
+    notifications = list(meta.get("notifications", []))
+    unread        = [n for n in notifications if not n.get("read")]
+    return {"notifications": unread, "count": len(unread)}
+
+
+@router.post("/merchant/notifications/{notif_id}/read")
+async def mark_notification_read(
+    notif_id: str,
+    request: Request,
+    db:      Session         = Depends(get_db),
+    user:    Dict[str, Any]  = Depends(get_current_user),
+):
+    """Mark a notification as read."""
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+    meta          = dict(settings.extra_metadata or {})
+    notifications = list(meta.get("notifications", []))
+    for n in notifications:
+        if n.get("id") == notif_id:
+            n["read"] = True
+    meta["notifications"] = notifications
+    settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
+    db.commit()
+    return {"status": "ok"}
+
+
+# ── Audit log view endpoint (admin) ────────────────────────────────────────────
+
+@router.get("/admin/support-access/audit")
+async def admin_support_audit_log(
+    db:    Session         = Depends(get_db),
+    admin: Dict[str, Any]  = Depends(require_admin),
+    limit: int = 100,
+):
+    """
+    Return recent AuditLog entries for support_access category.
+    Gives admin full visibility into who accessed what and when.
+    """
+    try:
+        from models import AuditLog  # noqa: PLC0415
+        rows = (
+            db.query(AuditLog)
+            .filter(AuditLog.category == "support_access")
+            .order_by(AuditLog.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return {
+            "count": len(rows),
+            "logs": [
+                {
+                    "id":         r.id,
+                    "tenant_id":  r.tenant_id,
+                    "action":     r.action,
+                    "details":    r.details,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in rows
+            ],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
