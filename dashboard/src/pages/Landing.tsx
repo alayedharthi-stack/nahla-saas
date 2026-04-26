@@ -482,8 +482,7 @@ export default function Landing() {
       ══════════════════════════════════════════════════════════ */}
       <section
         ref={heroRef}
-        className="relative min-h-[100svh] flex items-center justify-center overflow-hidden bg-gradient-to-br from-slate-900 via-[#0f1d2e] to-slate-900"
-        style={{ paddingTop: 'calc(4rem + env(safe-area-inset-top, 0px))' }}
+        className="relative min-h-[100svh] flex items-center justify-center overflow-hidden bg-gradient-to-br from-slate-900 via-[#0f1d2e] to-slate-900 pt-16"
       >
         <HoneycombBg />
         {/* Glow */}

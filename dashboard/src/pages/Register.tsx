@@ -85,21 +85,21 @@ export default function Register() {
   return (
     <div className="bg-slate-900" dir={dir}>
       <div
-        className="min-h-dvh flex flex-col items-center justify-center px-4 py-safe-top pb-safe-bottom"
+        className="min-h-dvh flex flex-col items-center justify-center px-4 pt-safe-extra pb-safe-bottom"
       >
         <div className="w-full max-w-sm">
         {/* Top bar: back to landing + language toggle */}
         <div className="flex items-center justify-between mb-4">
           <Link
             to="/landing"
-            className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition"
+            className="pub-top-btn gap-1.5 text-xs text-slate-400 hover:text-white transition rounded-lg"
           >
             <ArrowRight className="w-3.5 h-3.5 rtl:rotate-180" />
             {lang === 'ar' ? 'الرئيسية' : 'Home'}
           </Link>
           <button
             onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
-            className="text-xs text-slate-400 hover:text-white border border-slate-600 rounded-lg px-3 py-1.5 transition"
+            className="pub-top-btn text-xs text-slate-400 hover:text-white border border-slate-600 rounded-lg transition"
           >
             {lang === 'ar' ? 'English' : 'العربية'}
           </button>
