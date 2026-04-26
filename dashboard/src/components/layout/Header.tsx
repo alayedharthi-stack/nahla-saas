@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Bell, Search, ChevronDown, Menu, LogOut, User, Shield, ShieldOff, ShieldCheck, Clock, CheckCircle, XCircle } from 'lucide-react'
+import { Bell, Search, ChevronDown, Menu, LogOut, User, Shield, ShieldOff, ShieldCheck, Clock, CheckCircle, XCircle, Headphones, AlertCircle } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useLanguage } from '../../i18n/context'
 import {
@@ -131,6 +131,80 @@ function useAccessRequests(role: string) {
   return { requests, responding, respond, reload: load, approved }
 }
 
+// ── Admin bell: merchant help requests ────────────────────────────────────────
+interface HelpReq {
+  req_id: string; store_name: string; email: string
+  reason: string; ttl_hours: number; requested_at: string; tenant_id: number
+}
+
+function useAdminBell(role: string) {
+  const [helpReqs, setHelpReqs] = useState<HelpReq[]>([])
+  const navigate = useNavigate()
+
+  const load = useCallback(async () => {
+    if (role !== 'admin' && role !== 'super_admin') return
+    try {
+      const res = await fetch(`${API_BASE}/admin/support-requests`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) {
+        const d = await res.json()
+        setHelpReqs(d.requests ?? [])
+      }
+    } catch { /* ignore */ }
+  }, [role])
+
+  useEffect(() => {
+    load()
+    const id = setInterval(load, 30_000)
+    return () => clearInterval(id)
+  }, [load])
+
+  const goToMerchant = () => navigate('/admin/merchants')
+  return { helpReqs, goToMerchant, reload: load }
+}
+
+// ── Merchant extra notifications (system notifs) ──────────────────────────────
+interface SysNotif {
+  id: string; title: string; body: string; read: boolean
+  type: string; action_url?: string; created_at: string
+}
+
+function useMerchantNotifs(role: string) {
+  const [notifs, setNotifs] = useState<SysNotif[]>([])
+
+  const load = useCallback(async () => {
+    if (role === 'admin' || role === 'super_admin') return
+    try {
+      const res = await fetch(`${API_BASE}/merchant/notifications?unread_only=true`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) {
+        const d = await res.json()
+        setNotifs(d.notifications ?? [])
+      }
+    } catch { /* ignore */ }
+  }, [role])
+
+  useEffect(() => {
+    load()
+    const id = setInterval(load, 60_000)
+    return () => clearInterval(id)
+  }, [load])
+
+  const markRead = async (notifId: string) => {
+    try {
+      await fetch(`${API_BASE}/merchant/notifications/${notifId}/read`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      setNotifs(prev => prev.filter(n => n.id !== notifId))
+    } catch { /* ignore */ }
+  }
+
+  return { notifs, markRead }
+}
+
 export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const { lang, setLang, t } = useLanguage()
   const navigate = useNavigate()
@@ -165,7 +239,9 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   })()
 
   const { requests, responding, respond, approved } = useAccessRequests(role)
-  const notifCount = requests.length
+  const { helpReqs, goToMerchant } = useAdminBell(role)
+  const { notifs, markRead } = useMerchantNotifs(role)
+  const notifCount = requests.length + helpReqs.length + notifs.length
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -286,10 +362,45 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                   </div>
                 ) : (
                   <div className="divide-y divide-slate-50">
+
+                    {/* ── Admin: merchant help requests ── */}
+                    {helpReqs.map(hr => (
+                      <div key={hr.req_id} className="p-4 bg-blue-50/50 space-y-2">
+                        <div className="flex items-start gap-3">
+                          <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center shrink-0">
+                            <Headphones className="w-4 h-4 text-blue-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-slate-800">
+                              طلب مساعدة من تاجر
+                            </p>
+                            <p className="text-xs text-slate-600 font-medium truncate">
+                              {hr.store_name || hr.email}
+                            </p>
+                            <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{hr.reason}</p>
+                            <div className="flex items-center gap-1 mt-0.5 text-slate-400">
+                              <Clock className="w-3 h-3" />
+                              <span className="text-xs">
+                                {new Date(hr.requested_at).toLocaleString('ar-SA', {
+                                  dateStyle: 'short', timeStyle: 'short'
+                                })}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => { setBellOpen(false); goToMerchant() }}
+                          className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition-colors"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          الانتقال لإدارة التجار
+                        </button>
+                      </div>
+                    ))}
+
+                    {/* ── Merchant: admin-initiated access requests (approval needed) ── */}
                     {requests.map(r => (
                       <div key={r.id} className={`p-4 space-y-3 transition-all ${approved === r.id ? 'bg-green-50' : 'bg-amber-50/50'}`}>
-
-                        {/* Approved state */}
                         {approved === r.id ? (
                           <div className="flex items-center gap-3">
                             <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center shrink-0">
@@ -302,7 +413,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                           </div>
                         ) : (
                           <>
-                            {/* Icon + text */}
                             <div className="flex items-start gap-3">
                               <div className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center shrink-0">
                                 <ShieldCheck className="w-4 h-4 text-amber-600" />
@@ -320,8 +430,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                                 </div>
                               </div>
                             </div>
-
-                            {/* TTL selector */}
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span className="text-xs text-slate-500 shrink-0">مدة الوصول:</span>
                               {[1, 2, 4].map(h => (
@@ -338,8 +446,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                                 </button>
                               ))}
                             </div>
-
-                            {/* Actions */}
                             <div className="flex gap-2">
                               <button
                                 onClick={() => respond(r.id, true, getTtl(r.id))}
@@ -364,6 +470,45 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                         )}
                       </div>
                     ))}
+
+                    {/* ── Merchant: system notifications (help request status, etc.) ── */}
+                    {notifs.map(n => (
+                      <div key={n.id} className="p-4 bg-slate-50/50 space-y-2">
+                        <div className="flex items-start gap-3">
+                          <div className="w-8 h-8 bg-brand-100 rounded-lg flex items-center justify-center shrink-0">
+                            <AlertCircle className="w-4 h-4 text-brand-600" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-slate-800">{n.title}</p>
+                            <p className="text-xs text-slate-500 mt-0.5">{n.body}</p>
+                            <div className="flex items-center gap-1 mt-0.5 text-slate-400">
+                              <Clock className="w-3 h-3" />
+                              <span className="text-xs">
+                                {new Date(n.created_at).toLocaleString('ar-SA', {
+                                  dateStyle: 'short', timeStyle: 'short'
+                                })}
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => markRead(n.id)}
+                            className="shrink-0 text-slate-400 hover:text-slate-600"
+                            title="تمييز كمقروء"
+                          >
+                            <XCircle className="w-4 h-4" />
+                          </button>
+                        </div>
+                        {n.action_url && (
+                          <button
+                            onClick={() => { setBellOpen(false); navigate(n.action_url!) }}
+                            className="w-full text-xs text-brand-600 hover:underline text-start"
+                          >
+                            عرض التفاصيل ←
+                          </button>
+                        )}
+                      </div>
+                    ))}
+
                   </div>
                 )}
               </div>

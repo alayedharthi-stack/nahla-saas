@@ -1113,8 +1113,26 @@ async def merchant_request_help(
     requests.append(new_req)
     _put_requests(db, settings, requests)
 
+    # ── Auto-enable support access ────────────────────────────────────────────
+    # The merchant is EXPLICITLY asking for help → treat as implicit approval.
+    # This lets the admin enter the store immediately without needing a separate
+    # approval step from the merchant (they already asked!).
+    try:
+        expires_at = (now + timedelta(hours=body.ttl_hours)).isoformat()
+        sa = _get_sa(settings)
+        sa.update({
+            "enabled":     True,
+            "granted_at":  now.isoformat(),
+            "expires_at":  expires_at,
+            "granted_by":  "merchant_self_request",
+            "reason":      reason,
+        })
+        _put_sa(db, settings, sa)
+    except Exception as sa_exc:
+        logger.warning("[SupportAccess] auto-enable sa failed (non-fatal): %s", sa_exc)
+
     _audit.info(
-        "MERCHANT_HELP_REQUEST tenant=%d sub=%s problem=%s ttl=%dh req_id=%s",
+        "MERCHANT_HELP_REQUEST tenant=%d sub=%s problem=%s ttl=%dh req_id=%s (access auto-enabled)",
         tenant_id, user.get("sub"), body.problem_type, body.ttl_hours, req_id,
     )
 
