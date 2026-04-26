@@ -80,6 +80,34 @@ _SAUDI_CITIES = {
     "الدوادمي": "الدوادمي",
     "رابغ": "رابغ",
     "الليث": "الليث",
+    "الذهب": "الذهب",
+    "ذهبان": "ذهبان",
+    "بحرة": "بحرة",
+    "الزلفي": "الزلفي",
+    "شقراء": "شقراء",
+    "عفيف": "عفيف",
+    "الرس": "الرس",
+    "القويعية": "القويعية",
+    "وادي الدواسر": "وادي الدواسر",
+    "الخفجي": "الخفجي",
+    "بقيق": "بقيق",
+    "الجوف": "الجوف",
+    "طريف": "طريف",
+    "الوجه": "الوجه",
+    "ضباء": "ضباء",
+    "أملج": "أملج",
+    "صبيا": "صبيا",
+    "أبو عريش": "أبو عريش",
+    "الحريق": "الحريق",
+    "المندق": "المندق",
+    "بلجرشي": "بلجرشي",
+    "العقيق": "العقيق",
+    "المخواة": "المخواة",
+    "القنفذه": "القنفذة",
+    "الخرمة": "الخرمة",
+    "رنية": "رنية",
+    "الكامل": "الكامل",
+    "تثليث": "تثليث",
 }
 
 # Tokens that are clearly not a name even when written in Arabic. Used to
@@ -98,6 +126,18 @@ _ARABIC_LETTERS_RE = re.compile(r"^[\u0621-\u064A][\u0621-\u064A\s]*$")
 _LATIN_NAME_RE     = re.compile(r"^[A-Za-z][A-Za-z\.\-\' ]{1,40}$")
 _DIGIT_RE          = re.compile(r"\d")
 
+# Labeled field patterns: customer sends structured data like
+# "الاسم: تركي الحارثي / المدينة: الذهب / العنوان الوطني: TAPA7401"
+# These capture the value after the Arabic label keyword.
+_LABEL_NAME_RE = re.compile(
+    r"(?:^|[\n/،,\-|])\s*(?:الاسم|اسمي|اسمك)\s*[:/\-]?\s*([^\n/،,\-|]{2,40})",
+    re.IGNORECASE | re.UNICODE | re.MULTILINE,
+)
+_LABEL_CITY_RE = re.compile(
+    r"(?:^|[\n/،,\-|])\s*(?:المدينة|المدينه|مدينة التوصيل|مدينة الشحن|مدينة|المنطقة)\s*[:/\-]?\s*([^\n/،,\-|]{2,30})",
+    re.IGNORECASE | re.UNICODE | re.MULTILINE,
+)
+
 
 def extract_ordering_slots(message: str) -> Dict[str, Any]:
     """
@@ -106,6 +146,12 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
     Returns a (possibly empty) dict with any of:
       customer_name, customer_first_name, customer_last_name,
       city, short_address_code, google_maps_url, latitude, longitude.
+
+    Priority order:
+      1. Labeled fields ("الاسم X", "المدينة X") — highest precision
+      2. Address signals (short code, maps URL, GPS)
+      3. Lexicon-based city detection
+      4. Heuristic name detection
     """
     text = (message or "").strip()
     if not text:
@@ -113,7 +159,22 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
 
     slots: Dict[str, Any] = {}
 
-    # ── Address: short code + maps URL + GPS coords ────────────────────
+    # ── Layer 1: Labeled field parsing ────────────────────────────────
+    # Handles: "الاسم تركي الحارثي - المدينة الذهب - العنوان الوطني TAPA7401"
+    labeled_name = _extract_labeled_name(text)
+    if labeled_name:
+        first, last = _split_name(labeled_name)
+        if first:
+            slots["customer_first_name"] = first
+        if last:
+            slots["customer_last_name"] = last
+        slots["customer_name"] = labeled_name
+
+    labeled_city = _extract_labeled_city(text)
+    if labeled_city:
+        slots["city"] = labeled_city
+
+    # ── Layer 2: Address: short code + maps URL + GPS coords ──────────
     address_signals = extract_address_signals(text)
     if address_signals.get("short_address_code"):
         slots["short_address_code"] = address_signals["short_address_code"]
@@ -124,24 +185,56 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
     if address_signals.get("longitude") is not None:
         slots["longitude"] = address_signals["longitude"]
 
-    # ── City detection (multi-line aware) ──────────────────────────────
-    city = _detect_city(text)
-    if city:
-        slots["city"] = city
+    # ── Layer 3: Lexicon-based city detection (if not already found) ──
+    if not slots.get("city"):
+        city = _detect_city(text)
+        if city:
+            slots["city"] = city
 
-    # ── Name detection (only when the message looks like a personal
-    # introduction and isn't a maps URL) ───────────────────────────────
-    name_first, name_last = _detect_name(text, slots)
-    if name_first or name_last:
-        if name_first:
-            slots["customer_first_name"] = name_first
-        if name_last:
-            slots["customer_last_name"] = name_last
-        slots["customer_name"] = " ".join(p for p in (name_first, name_last) if p).strip()
+    # ── Layer 4: Heuristic name detection (if not already found) ─────
+    if not slots.get("customer_first_name"):
+        name_first, name_last = _detect_name(text, slots)
+        if name_first or name_last:
+            if name_first:
+                slots["customer_first_name"] = name_first
+            if name_last:
+                slots["customer_last_name"] = name_last
+            slots["customer_name"] = " ".join(p for p in (name_first, name_last) if p).strip()
 
     if slots:
         logger.debug("[OrderingExtractor] slots=%s", slots)
     return slots
+
+
+def _extract_labeled_name(text: str) -> str:
+    """Extract name from 'الاسم X' pattern. Returns cleaned full name or ''."""
+    m = _LABEL_NAME_RE.search(text)
+    if not m:
+        return ""
+    raw = m.group(1).strip()
+    # Remove trailing label noise (digits, special chars)
+    raw = re.sub(r"[/،,\-|:]+$", "", raw).strip()
+    # Must be 2+ Arabic tokens without digits
+    if _DIGIT_RE.search(raw):
+        return ""
+    tokens = [t for t in raw.split() if len(t) >= 2]
+    if not tokens:
+        return ""
+    return " ".join(tokens)
+
+
+def _extract_labeled_city(text: str) -> str:
+    """Extract city from 'المدينة X' pattern. Returns cleaned city or ''."""
+    m = _LABEL_CITY_RE.search(text)
+    if not m:
+        return ""
+    raw = m.group(1).strip()
+    raw = re.sub(r"[/،,\-|:]+$", "", raw).strip()
+    if not raw or _DIGIT_RE.search(raw):
+        return ""
+    # Normalize and check lexicon first for canonical spelling
+    normalized = _normalize_arabic(raw)
+    return _SAUDI_CITIES.get(normalized, raw)
 
 
 # ── Internals ───────────────────────────────────────────────────────────

@@ -79,11 +79,27 @@ class DraftOrderHandler:
 
         external_id = product_info.get("external_id") or str(product_info.get("id", ""))
         if not external_id:
+            logger.error(
+                "[ORDER FLOW] No product_id | tenant=%s product_info=%s",
+                ctx.tenant_id, product_info,
+            )
             return ActionResult(
                 success=False,
                 error="missing_product_id",
                 data={"message": "product_has_no_external_id"},
             )
+
+        logger.info(
+            "[ORDER FLOW] All data collected → creating order | tenant=%s "
+            "product=%s external_id=%s name=%r city=%r short_code=%r has_maps=%s",
+            ctx.tenant_id,
+            product_info.get("title", "?"),
+            external_id,
+            prep.customer_first_name + " " + prep.customer_last_name,
+            prep.city,
+            prep.short_address_code,
+            bool(prep.google_maps_url),
+        )
 
         runtime = CommerceToolRuntime(
             ctx._db,  # type: ignore[attr-defined]
@@ -119,12 +135,20 @@ class DraftOrderHandler:
         order = runtime_result.payload.get("order")
 
         if order:
+            checkout_url = order.get("payment_link") or order.get("checkout_url") or ""
+            logger.info(
+                "[ORDER FLOW] Order created ✓ | tenant=%s product=%s order_id=%s checkout=%s",
+                ctx.tenant_id,
+                product_info.get("title", "?"),
+                order.get("id"),
+                "YES" if checkout_url else "NO",
+            )
             return ActionResult(
                 success=True,
                 data={
                     "order_id":    order.get("id"),
                     "reference":   order.get("reference_id") or order.get("id"),
-                    "checkout_url": order.get("payment_link") or "",
+                    "checkout_url": checkout_url,
                     "total":       order.get("total"),
                     "currency":    order.get("currency", "SAR"),
                     "product":     product_info,
@@ -133,9 +157,16 @@ class DraftOrderHandler:
             )
 
         # No adapter / adapter failed — record intent for follow-up
-        logger.info(
-            "[DraftOrderHandler] tenant=%s — no adapter or draft failed, recording intent",
+        logger.error(
+            "[ORDER FLOW] Order creation FAILED ✗ | tenant=%s product=%s "
+            "error=%s ok=%s name=%r city=%r short_code=%r",
             ctx.tenant_id,
+            product_info.get("title", "?"),
+            runtime_result.error,
+            runtime_result.ok,
+            prep.customer_first_name,
+            prep.city,
+            prep.short_address_code,
         )
         return ActionResult(
             success=True,   # success=True so composer produces a friendly reply
@@ -144,6 +175,7 @@ class DraftOrderHandler:
                 "checkout_url": "",
                 "product":     product_info,
                 "intent_only": True,
+                "order_creation_error": runtime_result.error,
                 "order_prep":  prep.to_dict(),
             },
         )

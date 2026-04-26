@@ -424,19 +424,65 @@ class SallaAdapter(BaseStoreAdapter):
         }
         if order_input.customer_email:
             body["customer"]["email"] = order_input.customer_email
-        if any([order_input.city, order_input.address, order_input.street,
-                order_input.building_number, order_input.district, order_input.postal_code]):
-            body["address"] = {
-                "city":            order_input.city,
-                "street":          order_input.street or order_input.address,
-                "building_number": order_input.building_number,
-                "district":        order_input.district,
-                "postal_code":     order_input.postal_code,
-            }
+
+        # Build address block — include city and short address code whenever available.
+        # Saudi customers typically provide either:
+        #   a) full address (city + street + district + postal_code)
+        #   b) short national address code (e.g. TAPA7401) with city
+        # We always add the address block when any field is present so Salla
+        # does not reject the order for a missing address section.
+        street_val = order_input.street or order_input.address or ""
+        # Use short_address_code as the street when no explicit street exists.
+        # Salla may still need the actual street for validation, but sending
+        # the national address code is far better than an empty string.
+        if not street_val and order_input.short_address_code:
+            street_val = order_input.short_address_code
+
+        has_any_address = any([
+            order_input.city,
+            street_val,
+            order_input.building_number,
+            order_input.district,
+            order_input.postal_code,
+            order_input.short_address_code,
+        ])
+        if has_any_address:
+            addr: Dict[str, Any] = {}
+            if order_input.city:
+                addr["city"] = order_input.city
+            if street_val:
+                addr["street"] = street_val
+            if order_input.building_number:
+                addr["building_number"] = order_input.building_number
+            if order_input.district:
+                addr["district"] = order_input.district
+            if order_input.postal_code:
+                addr["zip_code"] = order_input.postal_code
+            if order_input.additional_number:
+                addr["additional_number"] = order_input.additional_number
+            body["address"] = addr
+
+        # Build notes — always include short address code so merchant can verify.
+        notes_parts = []
         if order_input.notes:
-            body["notes"] = order_input.notes
+            notes_parts.append(order_input.notes)
+        if order_input.short_address_code and order_input.short_address_code not in (order_input.notes or ""):
+            notes_parts.append(f"العنوان الوطني: {order_input.short_address_code}")
+        if order_input.google_maps_url and order_input.google_maps_url not in (order_input.notes or ""):
+            notes_parts.append(f"خريطة: {order_input.google_maps_url}")
+        if notes_parts:
+            body["notes"] = " | ".join(notes_parts)
+
         if draft:
             body["status"] = "draft"
+
+        logger.info(
+            "[SallaAdapter] _build_order_body | product_id=%s city=%s short_code=%s has_street=%s",
+            items[0]["product_id"] if items else "?",
+            order_input.city or "",
+            order_input.short_address_code or "",
+            bool(order_input.street or order_input.address),
+        )
         return body
 
     async def get_order(self, order_id: str) -> Optional[NormalizedOrder]:

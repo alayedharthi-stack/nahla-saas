@@ -94,7 +94,7 @@ class DefaultDecisionEngine:
                 reason="customer requested human agent",
             )
 
-        # ── 2. Resend payment link ────────────────────────────────────────
+        # ── 2. Resend payment link / retry order ──────────────────────────
         if intent.name == INTENT_PAY_NOW or (
             state.stage == STAGE_CHECKOUT and intent.name in (INTENT_PAY_NOW, INTENT_START_ORDER)
         ):
@@ -103,6 +103,21 @@ class DefaultDecisionEngine:
                     action=ACTION_SEND_PAYMENT_LINK,
                     args={"checkout_url": state.checkout_url},
                     reason="customer in checkout stage — resend payment link",
+                )
+            # No checkout_url yet but we are in ordering/checkout.
+            # If we have a product in focus and the order_prep is complete
+            # (the customer already provided name/city/address), try to
+            # create the order now instead of falling through to LLM.
+            if (
+                state.current_product_focus
+                and state.stage in (STAGE_ORDERING, STAGE_DECIDING, STAGE_CHECKOUT)
+                and facts.orderable
+            ):
+                return Decision(
+                    action=ACTION_PROPOSE_DRAFT_ORDER,
+                    args={"product": state.current_product_focus},
+                    reason="pay_now with product focus + no checkout_url → retry order creation",
+                    confidence=0.92,
                 )
 
         # ── 3. Track order ────────────────────────────────────────────────
