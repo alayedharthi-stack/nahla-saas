@@ -269,6 +269,15 @@ export const autopilotApi = {
   /** Get template readiness for ALL automation types in one call. */
   allReadiness: () =>
     apiCall<AllAutomationsReadiness>('/autopilot/readiness'),
+
+  /** Governor log — كل حالات المنع والتأجيل مع السبب بالعربي */
+  governorLog: (params?: { customer_id?: number; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.customer_id) q.set('customer_id', String(params.customer_id))
+    if (params?.limit)       q.set('limit', String(params.limit))
+    const qs = q.toString()
+    return apiCall<GovernorLogResponse>(`/automations/governor/log${qs ? `?${qs}` : ''}`)
+  },
 }
 
 // ── Order status labels (Arabic) ──────────────────────────────────────────────
@@ -291,6 +300,48 @@ export const ORDER_STATUS_LABELS: Record<string, string> = {
   draft:             'مسودة',
   cod:               'الدفع عند الاستلام',
   abandoned:         'سلة متروكة',
+}
+
+// ── Governor types ─────────────────────────────────────────────────────────
+
+export type GovernorReasonCode =
+  | 'blocked_by_priority'
+  | 'blocked_by_unsubscribe'
+  | 'blocked_by_daily_limit'
+  | 'blocked_by_weekly_limit'
+  | 'blocked_by_6h_limit'
+  | 'blocked_by_cooldown'
+  | 'allowed'
+
+export interface GovernorLogItem {
+  id: number
+  executed_at: string | null
+  automation_type: string | null
+  automation_name: string | null
+  customer_id: number | null
+  customer_name: string | null
+  customer_phone: string | null
+  reason_code: GovernorReasonCode
+  label_ar: string
+  suggestion_ar: string
+}
+
+export interface GovernorLogResponse {
+  items: GovernorLogItem[]
+  count: number
+}
+
+export const GOVERNOR_REASON_META: Record<
+  GovernorReasonCode,
+  { icon: string; color: 'red' | 'amber' | 'slate' | 'emerald' }
+> = {
+  blocked_by_priority:     { icon: '🚫', color: 'red'     },
+  blocked_by_unsubscribe:  { icon: '🔕', color: 'slate'   },
+  blocked_by_daily_limit:  { icon: '⏳', color: 'amber'   },
+  blocked_by_weekly_limit: { icon: '🚫', color: 'red'     },
+  blocked_by_6h_limit:     { icon: '⏰', color: 'amber'   },
+  blocked_by_cooldown:     { icon: '🕐', color: 'amber'   },
+  allowed:                 { icon: '✅', color: 'emerald'  },
 }
 
 export const ORDER_STATUS_COLORS: Record<string, string> = {

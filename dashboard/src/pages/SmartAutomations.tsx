@@ -6,6 +6,7 @@ import {
   Package, RotateCcw,
   Clock, Phone, ExternalLink,
   RefreshCcw, Rocket, HeartHandshake, Brain,
+  ShieldCheck, HelpCircle,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -25,8 +26,10 @@ import {
   type RecoveryStatus,
   type PredictiveReorderItem,
   type OrderStatusUpdateItem,
+  type GovernorLogItem,
   ORDER_STATUS_LABELS,
   ORDER_STATUS_COLORS,
+  GOVERNOR_REASON_META,
 } from '../api/autopilot'
 import AbandonedCartEditor from './AbandonedCartEditor'
 import { formatRiyadh, formatRelativeRiyadh } from '../lib/datetime'
@@ -1493,6 +1496,185 @@ function EngineKpiStrip({ engines }: { engines: EngineSummary[] }) {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
+// ── Governor Log Panel ────────────────────────────────────────────────────────
+
+function GovernorLogPanel() {
+  const [items, setItems]   = useState<GovernorLogItem[]>([])
+  const [loading, setLoading] = useState(false)
+  const [open, setOpen]     = useState(false)
+  const [expandedId, setExpandedId] = useState<number | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await autopilotApi.governorLog({ limit: 50 })
+      setItems(res.items)
+    } catch {
+      // non-critical
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (open && items.length === 0) load()
+  }, [open, items.length, load])
+
+  const AUTOMATION_ICONS: Record<string, string> = {
+    abandoned_cart:        '🛒',
+    unpaid_order_reminder: '💳',
+    cod_confirmation:      '💰',
+    back_in_stock:         '📦',
+    predictive_reorder:    '🔄',
+    vip_upgrade:           '👑',
+    new_product_alert:     '✨',
+    seasonal_offer:        '🎊',
+    salary_payday_offer:   '💵',
+    customer_winback:      '💛',
+  }
+
+  return (
+    <div className="card overflow-hidden">
+      {/* Header */}
+      <button
+        type="button"
+        className="w-full flex items-center justify-between gap-3 px-5 py-4 text-right hover:bg-slate-50 transition-colors"
+        onClick={() => setOpen(p => !p)}
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 bg-violet-50 rounded-xl flex items-center justify-center shrink-0">
+            <ShieldCheck className="w-5 h-5 text-violet-600" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">سجل حماية العملاء — Governor</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              يُظهر كل رسالة مُنعت أو أُجّلت مع السبب الكامل
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {items.length > 0 && (
+            <span className="text-xs font-medium bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">
+              {items.length}
+            </span>
+          )}
+          {open ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+        </div>
+      </button>
+
+      {open && (
+        <div className="border-t border-slate-100">
+          {/* Priority legend */}
+          <div className="px-5 py-3 bg-violet-50/60 border-b border-violet-100">
+            <p className="text-xs text-violet-700 font-medium mb-2">نظام الأولويات المُطبَّق:</p>
+            <div className="flex flex-wrap gap-2 text-[11px]">
+              <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full">🔴 HIGH: سلة متروكة · دفع غير مكتمل · COD</span>
+              <span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">🟡 MEDIUM: عودة مخزون · إعادة طلب تنبؤية</span>
+              <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full">⚪ LOW: VIP · عروض · استرجاع عملاء</span>
+            </div>
+            <div className="flex flex-wrap gap-2 mt-1.5 text-[11px] text-slate-500">
+              <span>⏱ حد 6 ساعات بين الرسائل</span>
+              <span>·</span>
+              <span>📊 حد 2 رسالة / يوم</span>
+              <span>·</span>
+              <span>📅 حد 4 رسائل / أسبوع</span>
+            </div>
+          </div>
+
+          {/* Refresh */}
+          <div className="flex items-center justify-between px-5 py-2 border-b border-slate-100">
+            <span className="text-xs text-slate-400">آخر {items.length} حدث</span>
+            <button
+              type="button"
+              onClick={load}
+              disabled={loading}
+              className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+              تحديث
+            </button>
+          </div>
+
+          {loading && items.length === 0 ? (
+            <div className="py-8 text-center text-sm text-slate-400">جاري التحميل…</div>
+          ) : items.length === 0 ? (
+            <div className="py-10 text-center">
+              <CheckCircle className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
+              <p className="text-sm text-slate-500">لا توجد حالات منع أو تأجيل حتى الآن</p>
+              <p className="text-xs text-slate-400 mt-1">النظام يرسل دون قيود في الوقت الحالي</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-50 max-h-[480px] overflow-y-auto">
+              {items.map(item => {
+                const meta = GOVERNOR_REASON_META[item.reason_code] ?? { icon: '⚠️', color: 'slate' as const }
+                const colorCls = {
+                  red:     'border-red-200   bg-red-50/40   text-red-700',
+                  amber:   'border-amber-200 bg-amber-50/40 text-amber-700',
+                  slate:   'border-slate-200 bg-slate-50/40 text-slate-600',
+                  emerald: 'border-emerald-200 bg-emerald-50/40 text-emerald-700',
+                }[meta.color]
+                const isExpanded = expandedId === item.id
+                const autoIcon = AUTOMATION_ICONS[item.automation_type ?? ''] ?? '⚙️'
+
+                return (
+                  <div key={item.id} className="px-5 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-3 min-w-0">
+                        <span className="text-lg leading-none mt-0.5 shrink-0">{autoIcon}</span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-semibold text-slate-800 truncate">
+                              {item.automation_name ?? item.automation_type}
+                            </span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${colorCls}`}>
+                              {meta.icon} {item.label_ar}
+                            </span>
+                          </div>
+                          {item.customer_name || item.customer_phone ? (
+                            <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                              {item.customer_name ?? item.customer_phone}
+                            </p>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {item.executed_at && (
+                          <span className="text-[10px] text-slate-400 hidden sm:block">
+                            {new Date(item.executed_at).toLocaleString('ar-SA', {
+                              month: 'short', day: 'numeric',
+                              hour: '2-digit', minute: '2-digit',
+                            })}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setExpandedId(isExpanded ? null : item.id)}
+                          className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-600"
+                          title="عرض التفاصيل"
+                        >
+                          <HelpCircle className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Expanded explanation */}
+                    {isExpanded && item.suggestion_ar && (
+                      <div className={`mt-2 ms-8 text-xs rounded-lg px-3 py-2 border ${colorCls} leading-relaxed`}>
+                        {item.suggestion_ar}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export default function SmartAutomations() {
   const [automations, setAutomations] = useState<AutomationRecord[]>([])
   const [engines, setEngines] = useState<EngineSummary[]>([])
@@ -1707,6 +1889,9 @@ export default function SmartAutomations() {
           جميع الرسائل التلقائية تستخدم قوالب واتساب معتمدة من Meta فقط.
         </p>
       </div>
+
+      {/* ── Governor Log ── */}
+      <GovernorLogPanel />
 
       {/* ── Error state ── */}
       {error && (

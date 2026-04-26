@@ -1006,6 +1006,25 @@ class AutomationExecution(Base):
     executed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class GovernorSendLog(Base):
+    """
+    سجل إرسال حقيقي يستخدمه Global Send Governor لحساب الحدود (Limits) بدقة.
+    صف واحد = رسالة واحدة تم إرسالها فعلياً من أي خدمة طيار آلي.
+    """
+    __tablename__ = 'governor_send_logs'
+    id             = Column(Integer, primary_key=True)
+    tenant_id      = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_id    = Column(Integer, ForeignKey('customers.id'), nullable=False)
+    automation_type = Column(String, nullable=False)
+    execution_id   = Column(Integer, ForeignKey('automation_executions.id'), nullable=True)
+    sent_at        = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        # Index سريع لاستعلامات الحدود (per-customer per-tenant)
+        Index('ix_gov_log_tenant_cust_sent', 'tenant_id', 'customer_id', 'sent_at'),
+    )
+
+
 class PredictiveReorderEstimate(Base):
     """
     Predicted reorder date for a customer + product combination,

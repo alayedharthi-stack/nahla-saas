@@ -1392,6 +1392,25 @@ async def all_automations_readiness(request: Request, db: Session = Depends(get_
     return result
 
 
+@router.get("/automations/governor/log")
+async def get_governor_log(
+    request: Request,
+    db: Session = Depends(get_db),
+    customer_id: Optional[int] = None,
+    limit: int = 50,
+):
+    """
+    سجل Global Send Governor — يُظهر للتاجر كل حالة منع أو تأجيل
+    مع السبب بالعربي ومقترح الحل.
+
+    الفلترة الاختيارية: customer_id لعرض سجل عميل بعينه.
+    """
+    tenant_id = resolve_tenant_id(request)
+    from core.send_governor import get_governor_log as _gov_log  # noqa: PLC0415
+    rows = _gov_log(db, tenant_id, customer_id=customer_id, limit=min(limit, 200))
+    return {"items": rows, "count": len(rows)}
+
+
 @router.post("/autopilot/run")
 async def run_autopilot(request: Request, db: Session = Depends(get_db)):
     """

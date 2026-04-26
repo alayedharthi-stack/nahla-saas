@@ -520,24 +520,36 @@ async def _try_execute(
         return "delay"
 
     # ── Opt-out / unsubscribe guard ───────────────────────────────────────────
-    # Check BEFORE running the automation — an unsubscribed customer must
-    # not receive any message regardless of automation type or stage.
+    # Check BEFORE running the automation — an unsubscribed customer (or one
+    # currently in pending-confirmation state) must not receive ANY message
+    # regardless of automation type or stage.
     if event.customer_id:
         try:
             from models import Customer as _Customer  # noqa: PLC0415
-            from services.unsubscribe import is_customer_unsubscribed as _is_unsub  # noqa: PLC0415
+            from services.unsubscribe import (  # noqa: PLC0415
+                expire_pending_if_needed as _expire_pending,
+                is_silenced as _is_silenced,
+            )
             _cust = db.query(_Customer).filter(
                 _Customer.id == event.customer_id,
                 _Customer.tenant_id == tenant_id,
             ).first()
-            if _cust and _is_unsub(_cust):
+            if _cust:
+                _expire_pending(db, _cust, commit=True)
+            if _cust and _is_silenced(_cust):
+                _meta = getattr(_cust, "extra_metadata", None) or {}
+                _reason = (
+                    "customer_unsubscribed"
+                    if _meta.get("is_unsubscribed")
+                    else "customer_pending_unsubscribe"
+                )
                 _write_execution(
                     db, event.id, automation.id, event.customer_id, tenant_id,
-                    status="skipped", skip_reason="customer_unsubscribed",
+                    status="skipped", skip_reason=_reason,
                 )
                 logger.info(
-                    "[AutoEngine] Skipping automation event=%s — customer %s opted out",
-                    event.id, event.customer_id,
+                    "[AutoEngine] Skipping automation event=%s — customer %s state=%s",
+                    event.id, event.customer_id, _reason,
                 )
                 return "skipped"
         except Exception as _unsub_exc:
@@ -583,6 +595,42 @@ async def _try_execute(
             reason=skip_reason,
         )
         return "skipped"
+
+    # ── Global Send Governor ──────────────────────────────────────────────────
+    # يتحقق من الأولوية، حدود الإرسال، cooldown، وإلغاء الاشتراك.
+    # يعمل فقط عندما يوجد customer_id — الأحداث بدون عميل تمر مباشرة.
+    if event.customer_id:
+        try:
+            from core.send_governor import check as _gov_check  # noqa: PLC0415
+            _order_id = (getattr(event, "payload", None) or {}).get("order_id")
+            _gov = _gov_check(
+                db, tenant_id, event.customer_id,
+                automation.automation_type,
+                order_id=_order_id,
+            )
+            if not _gov.allowed:
+                _write_execution(
+                    db, event.id, automation.id, event.customer_id, tenant_id,
+                    status="skipped",
+                    skip_reason=_gov.reason_code,
+                    action_taken={
+                        "governor": True,
+                        "label_ar":      _gov.label_ar,
+                        "suggestion_ar": _gov.suggestion_ar,
+                        "blocked_by":    _gov.blocked_by_type,
+                    },
+                )
+                logger.info(
+                    "[AutoEngine] Governor BLOCK event=%s automation=%s "
+                    "customer=%s reason=%s",
+                    event.id, automation.id, event.customer_id, _gov.reason_code,
+                )
+                # Hard blocks → mark as done; soft delays → retry next cycle
+                if _gov.is_hard_block:
+                    return "skipped"
+                return "delay"
+        except Exception as _gov_exc:
+            logger.warning("[AutoEngine] Governor check failed (non-fatal): %s", _gov_exc)
 
     # ── Execute action ────────────────────────────────────────────────────────
     success, action_info = await _execute_action(db, tenant_id, event, automation, config)
@@ -633,6 +681,29 @@ async def _try_execute(
             template=action_info.get("template"),
             wa_message_id=action_info.get("wa_message_id"),
         )
+        # سجّل في Governor حتى تُحسب الحدود صحيحاً في الدورات القادمة
+        if event.customer_id:
+            try:
+                from core.send_governor import record_sent as _gov_record  # noqa: PLC0415
+                # نحتاج id الـ execution المكتوب — نجلبه من آخر flush
+                from models import AutomationExecution as _AE  # noqa: PLC0415
+                _last_exe = (
+                    db.query(_AE.id)
+                    .filter(
+                        _AE.event_id == event.id,
+                        _AE.automation_id == automation.id,
+                        _AE.customer_id == event.customer_id,
+                    )
+                    .order_by(_AE.id.desc())
+                    .first()
+                )
+                _gov_record(
+                    db, tenant_id, event.customer_id,
+                    automation.automation_type,
+                    execution_id=_last_exe[0] if _last_exe else None,
+                )
+            except Exception as _rec_exc:
+                logger.warning("[AutoEngine] governor record_sent failed (non-fatal): %s", _rec_exc)
     else:
         _log_event(
             _EVENTS.AUTOMATION_EXECUTION_FAILED,
