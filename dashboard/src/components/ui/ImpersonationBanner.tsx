@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { getImpersonation, stopImpersonation } from '../../auth'
 import { ShieldAlert, Settings } from 'lucide-react'
+import { API_BASE } from '../../api/client'
 
 export default function ImpersonationBanner() {
   const info = getImpersonation()
@@ -8,7 +9,19 @@ export default function ImpersonationBanner() {
 
   if (!info) return null
 
-  const handleExit = () => {
+  const handleExit = async () => {
+    // Revoke support access in the backend so the merchant's warning banner
+    // disappears immediately — without this, enabled=true persists in the DB.
+    try {
+      await fetch(`${API_BASE}/merchant/support-access/disable`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}`,
+        },
+        body: JSON.stringify({}),
+      })
+    } catch { /* ignore — we still exit regardless */ }
     stopImpersonation()
     window.location.href = '/admin'
   }

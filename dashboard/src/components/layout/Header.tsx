@@ -261,7 +261,19 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
     navigate('/login')
   }
 
-  const handleStopImpersonation = () => {
+  const handleStopImpersonation = async () => {
+    // Revoke support access in the backend so the merchant's warning banner
+    // disappears immediately on their next poll (or page refresh).
+    try {
+      await fetch(`${API_BASE}/merchant/support-access/disable`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}`,
+        },
+        body: JSON.stringify({}),
+      })
+    } catch { /* ignore — we still exit regardless */ }
     stopImpersonation()
     navigate('/admin')
     setProfileOpen(false)
