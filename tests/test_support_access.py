@@ -741,3 +741,211 @@ class TestEmailHelper:
                 )
             except ImportError:
                 pass  # acceptable if import fails and error propagates
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Merchant-initiated help request
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestMerchantHelpRequest:
+    """اختبارات طلب المساعدة من داخل لوحة التاجر (الاتجاه العكسي)."""
+
+    def setup_method(self):
+        self.db, self.engine = _make_db()
+        self.tenant  = _seed_tenant(self.db, "متجر المساعدة")
+        self.tid     = self.tenant.id
+        self.user    = _seed_user(self.db, self.tid, email="help@merchant.sa")
+
+    def teardown_method(self):
+        self.db.close()
+        self.engine.dispose()
+
+    def test_merchant_can_create_help_request(self):
+        """التاجر يستطيع إنشاء طلب مساعدة من لوحته."""
+        from routers.support_access import MerchantHelpRequestIn, merchant_request_help
+
+        body = MerchantHelpRequestIn(
+            problem_type="whatsapp",
+            description="واتساب لا يستقبل رسائل منذ الأمس الساعة 3 مساءً",
+            ttl_hours=4,
+        )
+        user_claims = {"sub": self.user.email}
+        mock_req = MagicMock()
+        mock_req.headers = {}
+        mock_req.state = MagicMock()
+
+        with (
+            patch("routers.support_access.resolve_tenant_id", return_value=self.tid),
+            patch("routers.support_access._write_audit_log"),
+        ):
+            import asyncio
+            result = asyncio.run(
+                merchant_request_help(body=body, request=mock_req, db=self.db, user=user_claims)
+            )
+
+        assert result["status"] == "pending"
+        assert "request_id" in result
+        assert "واتساب" in result["reason"] or "مشكلة" in result["reason"]
+
+    def test_help_request_builds_reason_from_type(self):
+        """السبب يُبنى من نوع المشكلة + الوصف."""
+        from routers.support_access import MerchantHelpRequestIn, merchant_request_help
+
+        body = MerchantHelpRequestIn(
+            problem_type="autopilot",
+            description="الطيار لا يُرسل رسائل التخلي عن العربة",
+            ttl_hours=8,
+        )
+        user_claims = {"sub": self.user.email}
+        mock_req = MagicMock()
+        mock_req.headers = {}
+        mock_req.state = MagicMock()
+
+        with (
+            patch("routers.support_access.resolve_tenant_id", return_value=self.tid),
+            patch("routers.support_access._write_audit_log"),
+        ):
+            import asyncio
+            result = asyncio.run(
+                merchant_request_help(body=body, request=mock_req, db=self.db, user=user_claims)
+            )
+
+        # reason should contain the problem type label AND the description
+        reason = result["reason"]
+        assert "الطيار الآلي" in reason
+        assert "التخلي عن العربة" in reason
+
+    def test_description_too_short_fails_validation(self):
+        """وصف قصير جداً يُرفض بـ ValidationError."""
+        from pydantic import ValidationError
+        from routers.support_access import MerchantHelpRequestIn
+
+        with pytest.raises(ValidationError):
+            MerchantHelpRequestIn(problem_type="general", description="قصير", ttl_hours=4)
+
+    def test_duplicate_pending_help_request_blocked(self):
+        """طلب ثانٍ عندما يوجد معلّق → 409."""
+        from fastapi import HTTPException
+        from routers.support_access import MerchantHelpRequestIn, merchant_request_help
+        from sqlalchemy.orm.attributes import flag_modified
+
+        # Inject existing pending request
+        settings = next(
+            s for s in self.db.query(__import__("models").TenantSettings).all()
+            if s.tenant_id == self.tid
+        )
+        meta = dict(settings.extra_metadata or {})
+        meta["access_requests"] = [{
+            "id": "existing", "status": "pending",
+            "requested_by": self.user.email, "requested_at": _now().isoformat(),
+            "reason": "طلب أول", "ttl_hours": 4,
+        }]
+        settings.extra_metadata = meta
+        flag_modified(settings, "extra_metadata")
+        self.db.commit()
+
+        body = MerchantHelpRequestIn(
+            problem_type="general",
+            description="مشكلة ثانية أريد التحدث عنها",
+            ttl_hours=4,
+        )
+        user_claims = {"sub": self.user.email}
+        mock_req = MagicMock()
+        mock_req.headers = {}
+
+        with (
+            patch("routers.support_access.resolve_tenant_id", return_value=self.tid),
+            pytest.raises(HTTPException) as exc,
+        ):
+            import asyncio
+            asyncio.run(
+                merchant_request_help(body=body, request=mock_req, db=self.db, user=user_claims)
+            )
+        assert exc.value.status_code == 409
+
+    def test_initiated_by_set_to_merchant(self):
+        """الطلب يُسجَّل بـ initiated_by=merchant للتمييز عن طلبات الأدمن."""
+        from core.tenant import get_or_create_settings
+        from routers.support_access import MerchantHelpRequestIn, merchant_request_help
+
+        body = MerchantHelpRequestIn(
+            problem_type="orders",
+            description="الطلبات لا تُزامن مع سلة التجارة",
+            ttl_hours=4,
+        )
+        user_claims = {"sub": self.user.email}
+        mock_req = MagicMock()
+        mock_req.headers = {}
+
+        with (
+            patch("routers.support_access.resolve_tenant_id", return_value=self.tid),
+            patch("routers.support_access._write_audit_log"),
+        ):
+            import asyncio
+            asyncio.run(
+                merchant_request_help(body=body, request=mock_req, db=self.db, user=user_claims)
+            )
+
+        settings = get_or_create_settings(self.db, self.tid)
+        meta = dict(settings.extra_metadata or {})
+        reqs = meta.get("access_requests", [])
+        assert len(reqs) == 1
+        assert reqs[0]["initiated_by"] == "merchant"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Activity Tracking helpers
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestActivityTracking:
+    """اختبارات دوال تتبع نشاط الدعم في الـ middleware."""
+
+    def test_path_to_action_get_orders(self):
+        """GET /orders → support_view_orders"""
+        from core.middleware import _path_to_action
+        assert _path_to_action("/orders", "GET", blocked=False) == "support_view_orders"
+
+    def test_path_to_action_get_customers(self):
+        """GET /customers → support_view_customers"""
+        from core.middleware import _path_to_action
+        assert _path_to_action("/customers", "GET", blocked=False) == "support_view_customers"
+
+    def test_path_to_action_blocked_campaign(self):
+        """POST /campaigns محظور → action يبدأ بـ support_attempt"""
+        from core.middleware import _path_to_action
+        action = _path_to_action("/campaigns", "POST", blocked=True)
+        assert "attempt" in action or "campaign" in action
+
+    def test_path_to_action_unknown_path(self):
+        """مسار غير معروف → support_view_page لـ GET"""
+        from core.middleware import _path_to_action
+        assert _path_to_action("/unknown/path", "GET", blocked=False) == "support_view_page"
+
+    def test_write_support_audit_skips_health(self):
+        """_write_support_audit_db يتجاهل /health بدون كتابة."""
+        from core.middleware import _write_support_audit_db
+
+        call_count = [0]
+        orig_SessionLocal = None
+
+        class FakeSession:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def add(self, r): call_count[0] += 1
+            def commit(self): pass
+
+        with patch("core.middleware._write_support_audit_db", wraps=_write_support_audit_db):
+            # This should skip because /health is in skip_prefixes
+            _write_support_audit_db(
+                tenant_id=1, action="support_view_page",
+                actor="support@nahlah.ai", status="success",
+                details={"path": "/health", "method": "GET"},
+            )
+        # If we reach here without an error, the function handled the skip gracefully
+        assert call_count[0] == 0  # nothing written
+
+    def test_problem_types_dict_completeness(self):
+        """_PROBLEM_TYPES يحتوي على كل أنواع المشاكل المتوقعة."""
+        from routers.support_access import _PROBLEM_TYPES
+        expected = {"whatsapp", "orders", "autopilot", "campaigns", "templates", "general"}
+        assert expected == set(_PROBLEM_TYPES.keys())

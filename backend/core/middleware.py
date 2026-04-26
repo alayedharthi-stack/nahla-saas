@@ -482,11 +482,20 @@ async def support_session_middleware(request: Request, call_next):
             actor_email, tenant_id, path, _e,
         )
 
-    # ── 2. Block sensitive paths ────────────────────────────────────────────────
+    # ── 2. Block sensitive paths + record attempt ───────────────────────────────
     if any(path.startswith(blocked) for blocked in _SUPPORT_BLOCKED_PATHS):
         _support_middleware_log.warning(
             "SUPPORT_BLOCKED_SENSITIVE actor=%s tenant=%s path=%s ip=%s",
             actor_email, tenant_id, path, ip,
+        )
+        # Map path to semantic action name for audit log
+        _blocked_action = _path_to_action(path, request.method, blocked=True)
+        _write_support_audit_db(
+            tenant_id=int(tenant_id),
+            action=_blocked_action,
+            actor=actor_email,
+            status="blocked",
+            details={"path": path, "method": request.method, "ip": ip},
         )
         return JSONResponse(
             status_code=403,
@@ -500,13 +509,101 @@ async def support_session_middleware(request: Request, call_next):
             headers=_cors_error_headers(request),
         )
 
-    # ── 3. Audit log every support request ─────────────────────────────────────
+    # ── 3. Audit log every support request (logger + DB) ───────────────────────
     _support_middleware_log.info(
         "SUPPORT_ACCESS actor=%s tenant=%s path=%s method=%s ip=%s sv=%d",
         actor_email, tenant_id, path, request.method, ip, token_sv,
     )
+    _action = _path_to_action(path, request.method, blocked=False)
+    _write_support_audit_db(
+        tenant_id=int(tenant_id),
+        action=_action,
+        actor=actor_email,
+        status="success",
+        details={"path": path, "method": request.method, "ip": ip, "sv": token_sv},
+    )
 
     return await call_next(request)
+
+
+# ── Activity Tracking helpers ──────────────────────────────────────────────────
+
+# Maps (path_prefix, method) → semantic action name
+_PATH_ACTION_MAP = [
+    ("/orders",                    "GET",    "support_view_orders"),
+    ("/customers",                 "GET",    "support_view_customers"),
+    ("/smart-automations",         "GET",    "support_view_automations"),
+    ("/autopilot",                 "GET",    "support_view_automations"),
+    ("/settings",                  "GET",    "support_view_settings"),
+    ("/templates",                 "GET",    "support_view_templates"),
+    ("/campaigns",                 "GET",    "support_view_campaigns"),
+    ("/conversations",             "GET",    "support_view_conversations"),
+    ("/merchant/customers",        "PATCH",  "support_edit_customer"),
+    ("/merchant/customers",        "PUT",    "support_edit_customer"),
+    ("/merchant/orders",           "PATCH",  "support_edit_order"),
+    ("/merchant/orders",           "PUT",    "support_edit_order"),
+    ("/smart-automations",         "PATCH",  "support_edit_automation"),
+    ("/smart-automations",         "PUT",    "support_edit_automation"),
+    # Blocked paths (will be appended in blocked=True mode)
+    ("/campaigns",                 "POST",   "support_attempt_send_campaign"),
+    ("/merchant/customers",        "DELETE", "support_attempt_delete_customer"),
+    ("/merchant/orders",           "DELETE", "support_attempt_delete_order"),
+    ("/billing",                   "POST",   "support_attempt_change_billing"),
+    ("/billing",                   "PATCH",  "support_attempt_change_billing"),
+    ("/merchant/support-access",   "POST",   "support_view_settings"),  # accessing own grant
+]
+
+
+def _path_to_action(path: str, method: str, *, blocked: bool) -> str:
+    """Map a request path + method to a semantic audit action name."""
+    for prefix, m, action in _PATH_ACTION_MAP:
+        if path.startswith(prefix) and (m == method or m == "*"):
+            if blocked and not action.startswith("support_attempt"):
+                return f"support_attempt_{path.split('/')[1]}"
+            return action
+    return "support_view_page" if method == "GET" else "support_action"
+
+
+def _write_support_audit_db(
+    *,
+    tenant_id: int,
+    action: str,
+    actor: str,
+    status: str,
+    details: dict,
+) -> None:
+    """
+    Write a row to AuditLog for support session activity.
+    Non-fatal — any DB error is logged and swallowed so the main request continues.
+    Only writes for meaningful actions (skips health checks, static assets, etc.).
+    """
+    # Skip high-frequency noise paths that aren't meaningful for auditing
+    _skip_prefixes = ("/health", "/version", "/merchant/support-access", "/merchant/notifications")
+    path = details.get("path", "")
+    if any(path.startswith(s) for s in _skip_prefixes):
+        return
+
+    try:
+        import os as _os, sys as _sys
+        _sys.path.insert(0, _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+        from core.database import SessionLocal  # noqa: PLC0415
+        from models import AuditLog  # noqa: PLC0415
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        with SessionLocal() as db:
+            row = AuditLog(
+                tenant_id=tenant_id,
+                category="support_activity",
+                resource_type="page",
+                resource_id=path,
+                action=action,
+                details={**details, "actor": actor, "status": status},
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(row)
+            db.commit()
+    except Exception as exc:
+        logger.warning("[support_activity] AuditLog write failed: %s", exc)
 
 
 # ── Per-route rate limit helper ────────────────────────────────────────────────

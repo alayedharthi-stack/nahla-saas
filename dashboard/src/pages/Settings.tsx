@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { isPlatformOwner } from '../auth'
 import {
   Save, Bot, Store, Users, Bell, MessageSquare,
   CheckCircle, AlertCircle, Loader2, Copy,
   Eye, EyeOff, RefreshCw, UserPlus, Shield, ShieldOff, ToggleLeft, ToggleRight,
   Sparkles, BrainCircuit, ShieldCheck, Code2, ChevronRight,
+  HeadphonesIcon, Send, Clock, X, ChevronDown, History,
+  AlertTriangle, Wifi, Zap, Package, Settings,
 } from 'lucide-react'
 import { useLanguage } from '../i18n/context'
 import { settingsApi, type AllSettings, type NotificationSettings } from '../api/settings'
@@ -206,14 +208,23 @@ function QuickAccess() {
 
 // ── Tab IDs ──────────────────────────────────────────────────────────────────
 
-const TAB_IDS = ['team', 'notifications', 'security', 'system'] as const
+const TAB_IDS = ['team', 'notifications', 'support', 'security', 'system'] as const
 type TabId = typeof TAB_IDS[number]
 
 const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
   team:          Users,
   notifications: Bell,
+  support:       HeadphonesIcon,
   security:      ShieldCheck,
   system:        RefreshCw,
+}
+
+const TAB_LABELS: Record<TabId, string> = {
+  team:          'الفريق',
+  notifications: 'الإشعارات',
+  support:       'الدعم والصلاحيات',
+  security:      'الأمان',
+  system:        'النظام',
 }
 
 // ── Tab: Team ────────────────────────────────────────────────────────────────
@@ -602,11 +613,444 @@ function SupportAccessTab() {
   )
 }
 
+// ── Tab: Support & Permissions ────────────────────────────────────────────────
+// (Option B: standalone tab with help request + access management + history)
+
+const PROBLEM_TYPES = [
+  { value: 'whatsapp',  label: 'واتساب',        icon: '📱' },
+  { value: 'orders',    label: 'الطلبات',        icon: '📦' },
+  { value: 'autopilot', label: 'الطيار الآلي',   icon: '🤖' },
+  { value: 'campaigns', label: 'الحملات',         icon: '📣' },
+  { value: 'templates', label: 'القوالب',         icon: '📋' },
+  { value: 'general',   label: 'مشكلة عامة',     icon: '💬' },
+]
+
+const TTL_OPTS_HELP = [
+  { value: 4,  label: '4 ساعات (افتراضي)' },
+  { value: 8,  label: '8 ساعات' },
+  { value: 24, label: '24 ساعة' },
+]
+
+// ── Help Request Modal ─────────────────────────────────────────────────────────
+
+function HelpRequestModal({ onClose, onSent }: { onClose: () => void; onSent: () => void }) {
+  const [problemType, setProblemType] = useState('general')
+  const [description, setDescription] = useState('')
+  const [ttlHours, setTtlHours]       = useState(4)
+  const [busy, setBusy]               = useState(false)
+  const [error, setError]             = useState('')
+
+  const submit = async () => {
+    if (!description.trim() || description.trim().length < 10) {
+      setError('يرجى وصف المشكلة بإيجاز (10 أحرف على الأقل)'); return
+    }
+    setBusy(true); setError('')
+    try {
+      const res = await fetch(`${API_BASE}/merchant/request-help`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}`,
+        },
+        body: JSON.stringify({ problem_type: problemType, description: description.trim(), ttl_hours: ttlHours }),
+      })
+      const data = await res.json()
+      if (res.status === 409) { setError(data.detail || 'يوجد طلب معلّق'); return }
+      if (!res.ok) { setError(data.detail || 'حدث خطأ'); return }
+      onSent()
+    } catch { setError('خطأ في الاتصال') }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" dir="rtl">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 p-6 space-y-5">
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-amber-100 rounded-xl flex items-center justify-center shrink-0">
+              <HeadphonesIcon className="w-5 h-5 text-amber-600" />
+            </div>
+            <div>
+              <h2 className="text-base font-black text-slate-800">طلب مساعدة من نحلة</h2>
+              <p className="text-xs text-slate-400">سيتواصل فريق الدعم معك قريباً داخل المنصة</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Problem type */}
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-slate-700">نوع المشكلة</label>
+          <div className="grid grid-cols-3 gap-2">
+            {PROBLEM_TYPES.map(pt => (
+              <button
+                key={pt.value}
+                onClick={() => setProblemType(pt.value)}
+                className={`flex flex-col items-center gap-1 py-2.5 px-2 rounded-xl border text-xs font-medium transition ${
+                  problemType === pt.value
+                    ? 'bg-amber-500 text-white border-amber-500'
+                    : 'border-slate-200 text-slate-600 hover:border-amber-300 hover:bg-amber-50'
+                }`}
+              >
+                <span className="text-base">{pt.icon}</span>
+                <span>{pt.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Description */}
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold text-slate-700">
+            اشرح مشكلتك <span className="text-red-500">*</span>
+          </label>
+          <textarea
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="مثال: واتساب لا يستقبل رسائل من عملائي منذ أمس الساعة 3 مساءً..."
+            rows={4}
+            maxLength={500}
+            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 resize-none"
+          />
+          <p className="text-xs text-slate-400 text-left" dir="ltr">{description.length}/500</p>
+        </div>
+
+        {/* TTL */}
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-slate-700">مدة الوصول المسموحة</label>
+          <div className="flex gap-2">
+            {TTL_OPTS_HELP.map(o => (
+              <button
+                key={o.value}
+                onClick={() => setTtlHours(o.value)}
+                className={`flex-1 py-2 rounded-xl text-xs font-medium border transition ${
+                  ttlHours === o.value
+                    ? 'bg-amber-500 text-white border-amber-500'
+                    : 'border-slate-200 text-slate-600 hover:bg-amber-50 hover:border-amber-300'
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-blue-50 border border-blue-200 rounded-xl px-3 py-2 text-xs text-blue-700">
+          🔒 لن يتمكن الدعم من الدخول إلا بعد موافقتك. ستصلك إشعار بالطلب.
+        </div>
+
+        {error && (
+          <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-3 py-2">{error}</div>
+        )}
+
+        <div className="flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50 transition">
+            إلغاء
+          </button>
+          <button
+            onClick={submit}
+            disabled={busy || description.trim().length < 10}
+            className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white font-bold rounded-xl text-sm transition"
+          >
+            {busy ? <><Loader2 className="w-4 h-4 animate-spin" /> إرسال...</> : <><Send className="w-4 h-4" /> إرسال الطلب</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Support History Panel ──────────────────────────────────────────────────────
+
+function SupportHistoryPanel() {
+  const [history, setHistory]   = useState<AccessRequest[]>([])
+  const [loading, setLoading]   = useState(true)
+  const [open, setOpen]         = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/merchant/support-history`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) setHistory((await res.json()).requests ?? [])
+    } catch { /* ignore */ }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return null
+  if (history.length === 0) return (
+    <div className="text-center text-xs text-slate-400 py-6">لا يوجد سجل طلبات بعد</div>
+  )
+
+  const statusColor = (s: string) => ({
+    pending:  'bg-yellow-100 text-yellow-700',
+    approved: 'bg-green-100 text-green-700',
+    rejected: 'bg-red-100 text-red-700',
+  }[s] ?? 'bg-slate-100 text-slate-500')
+
+  const statusLabel = (s: string) => ({
+    pending:  'معلّق',
+    approved: 'موافق عليه',
+    rejected: 'مرفوض',
+  }[s] ?? s)
+
+  return (
+    <div className="space-y-2">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-2 text-xs font-semibold text-slate-600 hover:text-slate-800"
+      >
+        <History className="w-3.5 h-3.5" />
+        سجل الطلبات السابقة ({history.length})
+        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+          {history.map(r => (
+            <div key={r.id} className="flex items-start gap-3 bg-slate-50 rounded-xl px-3 py-2.5">
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 mt-0.5 ${statusColor(r.status ?? '')}`}>
+                {statusLabel(r.status ?? '')}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium text-slate-700 truncate">
+                  {r.reason || '—'}
+                </p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {r.ttl_hours ? `${r.ttl_hours} ساعة · ` : ''}
+                  {new Date(r.requested_at).toLocaleString('ar-SA')}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Full Support Tab ───────────────────────────────────────────────────────────
+
+function SupportTab() {
+  const [showModal, setShowModal]   = useState(false)
+  const [sent, setSent]             = useState(false)
+  const [pendingCount, setPending]  = useState(0)
+
+  const checkPending = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/merchant/access-requests`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) setPending((await res.json()).count ?? 0)
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => { checkPending() }, [checkPending])
+
+  const handleSent = () => {
+    setShowModal(false)
+    setSent(true)
+    checkPending()
+    setTimeout(() => setSent(false), 6000)
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Section 1: Request Help */}
+      <div className="card p-5 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 bg-amber-100 rounded-xl flex items-center justify-center shrink-0">
+            <HeadphonesIcon className="w-5 h-5 text-amber-600" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-sm font-bold text-slate-900">طلب مساعدة من نحلة</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              فريق نحلة يساعدك داخل المنصة مباشرة. لا واتساب، لا إيميل — كل شيء موثّق.
+            </p>
+          </div>
+        </div>
+
+        {sent && (
+          <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-xl px-4 py-3 text-sm text-green-700">
+            <CheckCircle className="w-4 h-4 shrink-0" />
+            تم إرسال طلبك! فريق نحلة سيراسلك قريباً.
+          </div>
+        )}
+
+        {pendingCount > 0 && !sent && (
+          <div className="flex items-center gap-2 bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-sm text-yellow-700">
+            <Clock className="w-4 h-4 shrink-0" />
+            يوجد {pendingCount} طلب معلّق — في انتظار فريق الدعم.
+          </div>
+        )}
+
+        <button
+          onClick={() => setShowModal(true)}
+          disabled={pendingCount > 0}
+          className="w-full flex items-center justify-center gap-2 py-3 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition"
+        >
+          <HeadphonesIcon className="w-4 h-4" />
+          {pendingCount > 0 ? 'يوجد طلب معلّق' : 'طلب مساعدة من نحلة'}
+        </button>
+
+        {/* How it works */}
+        <div className="bg-slate-50 rounded-xl p-3 space-y-2">
+          <p className="text-xs font-semibold text-slate-600">كيف يعمل؟</p>
+          <div className="space-y-1.5">
+            {[
+              { n: '١', t: 'تصف مشكلتك وتختار نوعها' },
+              { n: '٢', t: 'يصلك إشعار بالطلب ويُعرض للموافقة' },
+              { n: '٣', t: 'فريق الدعم يدخل مؤقتاً بعد موافقتك' },
+              { n: '٤', t: 'كل نشاط مُسجَّل ومرئي لك' },
+            ].map(s => (
+              <div key={s.n} className="flex items-center gap-2 text-xs text-slate-600">
+                <span className="w-5 h-5 rounded-full bg-amber-100 text-amber-700 font-bold flex items-center justify-center shrink-0 text-xs">
+                  {s.n}
+                </span>
+                {s.t}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Section 2: Incoming Requests (from admin) */}
+      <AccessRequestsPanel />
+
+      {/* Section 3: Active access status */}
+      <SupportAccessStatusSection />
+
+      {/* Section 4: History */}
+      <div className="card p-5 space-y-3">
+        <div className="flex items-center gap-2">
+          <History className="w-4 h-4 text-slate-400" />
+          <h3 className="text-sm font-semibold text-slate-700">سجل الوصول</h3>
+        </div>
+        <SupportHistoryPanel />
+      </div>
+
+      {showModal && (
+        <HelpRequestModal
+          onClose={() => setShowModal(false)}
+          onSent={handleSent}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Compact support access status (for Support tab) ───────────────────────────
+
+function SupportAccessStatusSection() {
+  const [status, setStatus] = useState<{
+    enabled: boolean; expires_at: string | null; granted_at: string | null
+  } | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/merchant/support-access`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) setStatus(await res.json())
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const revoke = async () => {
+    setSaving(true)
+    try {
+      await fetch(`${API_BASE}/merchant/support-access/disable`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      await load()
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  if (!status?.enabled) return null
+
+  const fmt = (iso: string | null) => {
+    if (!iso) return '—'
+    try {
+      return new Intl.DateTimeFormat('ar-SA', { timeStyle: 'short', dateStyle: 'short', timeZone: 'Asia/Riyadh' }).format(new Date(iso))
+    } catch { return iso }
+  }
+
+  return (
+    <div className="rounded-2xl border-2 border-red-400 bg-red-50 overflow-hidden">
+      <div className="flex items-center gap-3 bg-red-600 px-5 py-3">
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-60" />
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white" />
+        </span>
+        <p className="text-white font-bold text-sm flex-1">⚠️ وصول الدعم نشط الآن</p>
+      </div>
+      <div className="px-5 py-4 space-y-3">
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="bg-white rounded-lg p-2.5 border border-red-100">
+            <p className="text-slate-400 mb-0.5">ينتهي في</p>
+            <p className="font-bold text-red-700">{fmt(status.expires_at)}</p>
+          </div>
+          <div className="bg-white rounded-lg p-2.5 border border-red-100">
+            <p className="text-slate-400 mb-0.5">مُفعَّل منذ</p>
+            <p className="font-bold text-slate-700">{fmt(status.granted_at)}</p>
+          </div>
+        </div>
+        <button
+          onClick={revoke}
+          disabled={saving}
+          className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm transition disabled:opacity-60"
+        >
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldOff className="w-4 h-4" />}
+          إلغاء الوصول فوراً
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// Small badge for pending support requests on the tab ─────────────────────────
+
+function SupportTabBadge() {
+  const [count, setCount] = useState(0)
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/merchant/access-requests`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+        })
+        if (res.ok) setCount((await res.json()).count ?? 0)
+      } catch { /* ignore */ }
+    }
+    load()
+    const id = setInterval(load, 30_000)
+    return () => clearInterval(id)
+  }, [])
+
+  if (count === 0) return null
+  return (
+    <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-red-500 text-white text-[10px] font-bold shrink-0">
+      {count}
+    </span>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface AccessRequest {
   id: string
   requested_by: string
   requested_at: string
   store_name: string
+  status?: string
   reason?: string
   ttl_hours?: number
   merchant_email?: string
@@ -847,7 +1291,14 @@ function SystemInfoTab() {
 
 export default function Settings() {
   const { t } = useLanguage()
-  const [activeTab, setActiveTab] = useState<TabId>('team')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const _isOwner = isPlatformOwner()
+
+  // Resolve initial tab from ?tab=... URL param
+  const _tabParam = searchParams.get('tab') as TabId | null
+  const _defaultTab: TabId = (_tabParam && TAB_IDS.includes(_tabParam as TabId)) ? _tabParam : 'team'
+  const [activeTab, setActiveTab] = useState<TabId>(_defaultTab)
+
   const [settings, setSettings] = useState<AllSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -855,14 +1306,23 @@ export default function Settings() {
   const [savedTab, setSavedTab] = useState<TabId | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  const _isOwner = isPlatformOwner()
   const TABS = TAB_IDS
-    .filter(id => !(id === 'security' && _isOwner))
+    // Hide 'support' tab for platform owner (admin), hide 'security' for owner too
+    .filter(id => {
+      if (_isOwner && (id === 'security' || id === 'support')) return false
+      return true
+    })
     .map(id => ({
       id,
-      label: t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]),
+      // Use our own label map for the new 'support' tab, fallback to i18n for others
+      label: TAB_LABELS[id] ?? t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]),
       icon: TAB_ICONS[id],
     }))
+
+  const handleTabChange = (id: TabId) => {
+    setActiveTab(id)
+    setSearchParams(id !== 'team' ? { tab: id } : {})
+  }
 
   useEffect(() => {
     settingsApi.getAll()
@@ -928,7 +1388,7 @@ export default function Settings() {
           {TABS.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
-              onClick={() => setActiveTab(id)}
+              onClick={() => handleTabChange(id)}
               className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
                 activeTab === id
                   ? 'border-brand-500 text-brand-600'
@@ -937,6 +1397,7 @@ export default function Settings() {
             >
               <Icon className="w-4 h-4 shrink-0" />
               {label}
+              {id === 'support' && <SupportTabBadge />}
             </button>
           ))}
         </div>
@@ -954,6 +1415,7 @@ export default function Settings() {
           saveError={activeTab === 'notifications' ? saveError : null}
         />
       )}
+      {activeTab === 'support' && !_isOwner && <SupportTab />}
       {activeTab === 'security' && !_isOwner && <SupportAccessTab />}
       {activeTab === 'system' && <SystemInfoTab />}
     </div>

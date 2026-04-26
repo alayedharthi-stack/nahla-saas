@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import Header from './Header'
@@ -7,10 +7,39 @@ import ImpersonationBanner from '../ui/ImpersonationBanner'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
 import { API_BASE } from '../../api/client'
-import { Shield, X } from 'lucide-react'
+import { X } from 'lucide-react'
+
+// ── Countdown hook ────────────────────────────────────────────────────────────
+function useCountdown(expiresAt: string | null) {
+  const [remaining, setRemaining] = useState<string>('')
+
+  useEffect(() => {
+    if (!expiresAt) { setRemaining(''); return }
+
+    const update = () => {
+      const now  = Date.now()
+      const end  = new Date(expiresAt).getTime()
+      const diff = end - now
+      if (diff <= 0) { setRemaining('انتهى'); return }
+
+      const h = Math.floor(diff / 3_600_000)
+      const m = Math.floor((diff % 3_600_000) / 60_000)
+      const s = Math.floor((diff % 60_000) / 1_000)
+
+      if (h > 0) setRemaining(`${h}س ${m}د`)
+      else if (m > 0) setRemaining(`${m} دقيقة ${s} ثانية`)
+      else setRemaining(`${s} ثانية`)
+    }
+    update()
+    const id = setInterval(update, 1_000)
+    return () => clearInterval(id)
+  }, [expiresAt])
+
+  return remaining
+}
 
 // ── Active Support Access Warning Banner ─────────────────────────────────────
-// Shows in ALL merchant pages when the admin has active access
+// Shows in ALL merchant pages when there is an active approved support access
 
 function SupportAccessWarningBanner() {
   const navigate = useNavigate()
@@ -18,6 +47,7 @@ function SupportAccessWarningBanner() {
     enabled: boolean; expires_at: string | null; reason?: string
   } | null>(null)
   const [dismissed, setDismissed] = useState(false)
+  const countdown = useCountdown(access?.enabled ? (access?.expires_at ?? null) : null)
 
   const load = useCallback(async () => {
     try {
@@ -26,53 +56,73 @@ function SupportAccessWarningBanner() {
       const res = await fetch(`${API_BASE}/merchant/support-access`, {
         headers: { Authorization: `Bearer ${token}` },
       })
-      if (res.ok) setAccess(await res.json())
+      if (res.ok) {
+        const data = await res.json()
+        setAccess(data)
+        // Auto-dismiss if expired
+        if (!data.enabled) setDismissed(false)
+      }
     } catch { /* ignore */ }
   }, [])
 
   useEffect(() => {
     load()
-    // Poll every 30s to detect expiry
     const id = setInterval(load, 30_000)
     return () => clearInterval(id)
   }, [load])
 
+  // Re-show if a new access grant appears after dismissal
+  useEffect(() => {
+    if (access?.enabled) setDismissed(false)
+  }, [access?.enabled])
+
   if (!access?.enabled || dismissed) return null
 
-  const fmt = (iso: string | null) => {
-    if (!iso) return ''
-    try {
-      return new Intl.DateTimeFormat('ar-SA', {
-        timeStyle: 'short', dateStyle: 'short', timeZone: 'Asia/Riyadh',
-      }).format(new Date(iso))
-    } catch { return iso }
-  }
-
   return (
-    <div dir="rtl" className="w-full bg-red-600 text-white text-xs px-4 py-2.5 flex items-center justify-between gap-3 sticky top-0 z-40">
-      <div className="flex items-center gap-2 min-w-0">
-        <span className="relative flex h-2 w-2 shrink-0">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-60" />
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-white" />
-        </span>
-        <Shield className="w-3.5 h-3.5 shrink-0" />
-        <span className="font-semibold">
-          تنبيه: دعم نحلة لديه وصول مؤقت إلى لوحتك
-          {access.expires_at && (
-            <span className="font-normal opacity-90"> حتى {fmt(access.expires_at)}</span>
-          )}
-        </span>
-      </div>
-      <div className="flex items-center gap-2 shrink-0">
-        <button
-          onClick={() => navigate('/settings?tab=security')}
-          className="bg-white/20 hover:bg-white/30 px-2.5 py-1 rounded-lg font-semibold transition"
-        >
-          إدارة الوصول
-        </button>
-        <button onClick={() => setDismissed(true)} className="opacity-70 hover:opacity-100">
-          <X className="w-3.5 h-3.5" />
-        </button>
+    <div dir="rtl" className="w-full bg-red-700 text-white sticky top-0 z-40 shadow-lg">
+      {/* Main row */}
+      <div className="flex items-center justify-between px-4 py-2.5 gap-3">
+        {/* Left: message + countdown */}
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-60" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white" />
+            </span>
+            <span className="text-base">🛡️</span>
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-bold leading-snug">
+              فريق نحلة يساعدك الآن في حل المشكلة
+            </p>
+            <p className="text-xs opacity-85 leading-snug">
+              الوصول سينتهي خلال:{' '}
+              <span className="font-bold">
+                {countdown || (access.expires_at ? new Intl.DateTimeFormat('ar-SA', {
+                  timeStyle: 'short', timeZone: 'Asia/Riyadh',
+                }).format(new Date(access.expires_at)) : '—')}
+              </span>
+              {' '}· يمكنك إيقافه في أي وقت
+            </p>
+          </div>
+        </div>
+
+        {/* Right: actions */}
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => navigate('/settings?tab=support')}
+            className="flex items-center gap-1.5 bg-white text-red-700 font-bold px-3 py-1.5 rounded-lg text-xs hover:bg-red-50 transition"
+          >
+            إدارة الوصول
+          </button>
+          <button
+            onClick={() => setDismissed(true)}
+            className="opacity-70 hover:opacity-100 p-0.5"
+            title="إخفاء التنبيه (سيعود عند تحديث الصفحة)"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
       </div>
     </div>
   )

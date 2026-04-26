@@ -36,13 +36,21 @@ Security model
 6. GET /admin/support-access is admin-only and returns minimal information.
 
 Merchant routes (JWT required — scoped to own tenant):
-  GET  /merchant/support-access          — current permission status
-  POST /merchant/support-access/enable   — grant access (choose TTL 1-8 h)
-  POST /merchant/support-access/disable  — revoke immediately + bump version
+  GET  /merchant/support-access                      — current permission status
+  POST /merchant/support-access/enable               — grant access (choose TTL 1-8 h)
+  POST /merchant/support-access/disable              — revoke immediately + bump version
+  POST /merchant/request-help                        — merchant-initiated help request (NEW)
+  GET  /merchant/access-requests                     — list pending requests
+  POST /merchant/access-requests/{id}/respond        — approve or reject
+  GET  /merchant/notifications                       — unread in-platform notifications
+  POST /merchant/notifications/{id}/read             — mark notification as read
+  GET  /merchant/support-history                     — full request history (NEW)
 
 Admin routes (role=admin required):
-  GET  /admin/support-access             — list tenants with active grants (minimal)
-  POST /admin/impersonate/{tenant_id}    — issue support JWT (blocked if no grant)
+  GET  /admin/support-access                         — list tenants with active grants (minimal)
+  POST /admin/impersonate/{tenant_id}                — issue support JWT (blocked if no grant)
+  GET  /admin/support-access/audit                   — full AuditLog for support events
+  GET  /admin/support-requests                       — list ALL merchant-initiated requests (NEW)
 """
 from __future__ import annotations
 
@@ -843,3 +851,151 @@ async def admin_support_audit_log(
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Merchant-initiated help request ────────────────────────────────────────────
+# Allows merchant to request help from inside their own dashboard
+# (reverse flow: merchant → admin, instead of admin → merchant)
+
+_PROBLEM_TYPES = {
+    "whatsapp":  "مشكلة في ربط واتساب",
+    "orders":    "مشكلة في الطلبات",
+    "autopilot": "مشكلة في الطيار الآلي",
+    "campaigns": "مشكلة في الحملات",
+    "templates": "مشكلة في القوالب",
+    "general":   "مشكلة عامة",
+}
+
+
+class MerchantHelpRequestIn(BaseModel):
+    problem_type: str = Field(
+        default="general",
+        description="نوع المشكلة: whatsapp | orders | autopilot | campaigns | templates | general",
+    )
+    description: str = Field(
+        ..., min_length=10, max_length=500,
+        description="وصف المشكلة بالتفصيل",
+    )
+    ttl_hours: int = Field(
+        default=4, ge=1, le=_MAX_TTL_MERCHANT,
+        description="المدة المطلوبة للوصول (1-48 ساعة)",
+    )
+
+
+@router.post("/merchant/request-help")
+async def merchant_request_help(
+    body:    MerchantHelpRequestIn,
+    request: Request,
+    db:      Session         = Depends(get_db),
+    user:    Dict[str, Any]  = Depends(get_current_user),
+):
+    """
+    Merchant initiates a help request from their own dashboard.
+
+    This is the reverse of admin_request_access — here the merchant is
+    *asking* for support, which creates a pending access request automatically.
+
+    The admin sees it as a pending request labelled "طلب من التاجر".
+    Access is only enabled once the admin actually enters (impersonates).
+    """
+    if body.ttl_hours not in _VALID_TTL_ALL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"المدة المقبولة: {_VALID_TTL_ALL} ساعة",
+        )
+
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+    requests  = _get_requests(settings)
+
+    # Block if already has a pending request
+    pending = [r for r in requests if r.get("status") == "pending"]
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail="يوجد طلب مساعدة معلّق بالفعل — انتظر حتى يستجيب فريق الدعم.",
+        )
+
+    # Build the reason from problem type + description
+    problem_label = _PROBLEM_TYPES.get(body.problem_type, "مشكلة عامة")
+    reason = f"[{problem_label}] {body.description.strip()}"
+
+    req_id  = str(uuid.uuid4())[:8]
+    now     = datetime.now(timezone.utc)
+    new_req = {
+        "id":             req_id,
+        "requested_by":   user.get("sub"),
+        "requested_at":   now.isoformat(),
+        "status":         "pending",
+        "reason":         reason,
+        "ttl_hours":      body.ttl_hours,
+        "problem_type":   body.problem_type,
+        "initiated_by":   "merchant",       # distinguishes from admin-initiated
+    }
+    requests.append(new_req)
+    _put_requests(db, settings, requests)
+
+    _audit.info(
+        "MERCHANT_HELP_REQUEST tenant=%d sub=%s problem=%s ttl=%dh req_id=%s",
+        tenant_id, user.get("sub"), body.problem_type, body.ttl_hours, req_id,
+    )
+
+    _write_audit_log(db, tenant_id=tenant_id, action="merchant_help_requested",
+                     details={
+                         "req_id": req_id, "problem_type": body.problem_type,
+                         "description": body.description[:200], "ttl_hours": body.ttl_hours,
+                     })
+
+    return {
+        "request_id": req_id,
+        "status":     "pending",
+        "reason":     reason,
+        "message":    "تم إرسال طلب المساعدة لفريق نحلة. سيتواصل معك قريباً.",
+    }
+
+
+@router.get("/merchant/support-history")
+async def merchant_support_history(
+    request: Request,
+    db:      Session         = Depends(get_db),
+    user:    Dict[str, Any]  = Depends(get_current_user),
+):
+    """Return full history of access requests (all statuses) for this tenant."""
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+    all_requests = _get_requests(settings)
+    # Return most recent first
+    all_requests = sorted(all_requests, key=lambda r: r.get("requested_at", ""), reverse=True)
+    return {"requests": all_requests, "count": len(all_requests)}
+
+
+@router.get("/admin/support-requests")
+async def admin_list_help_requests(
+    db:    Session         = Depends(get_db),
+    admin: Dict[str, Any]  = Depends(require_admin),
+):
+    """
+    Admin view: list ALL pending merchant-initiated help requests across all tenants.
+    Allows admin to see who needs help at a glance.
+    """
+    from models import Tenant, TenantSettings  # noqa: PLC0415
+
+    rows = db.query(TenantSettings).all()
+    pending_requests = []
+    for s in rows:
+        meta = dict(s.extra_metadata or {})
+        reqs = meta.get("access_requests", [])
+        for r in reqs:
+            if r.get("status") == "pending":
+                tenant = db.query(Tenant).filter_by(id=s.tenant_id).first()
+                pending_requests.append({
+                    **r,
+                    "tenant_id":   s.tenant_id,
+                    "tenant_name": tenant.name if tenant else "—",
+                })
+
+    pending_requests.sort(key=lambda r: r.get("requested_at", ""), reverse=True)
+    _audit.info("ADMIN_LIST_HELP_REQUESTS admin=%s count=%d", admin.get("sub"), len(pending_requests))
+    return {"count": len(pending_requests), "requests": pending_requests}
