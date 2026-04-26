@@ -456,10 +456,15 @@ def test_multiple_automations_same_event_all_executed():
             customer_id=customer.id, payload={"order_id": 1}, commit=True,
         )
 
+        # Bypass the Global Send Governor so both automations execute —
+        # this test covers multi-automation dispatch, not rate-limiting logic.
+        from core.send_governor import GovDecision as _GovDecision
+        _allowed = _GovDecision(allowed=True)
         with patch(
             "core.automation_engine._execute_action",
             new=AsyncMock(return_value=(True, {"template": "tpl_a", "to": "+966555000100", "vars": {}})),
-        ) as mock_send:
+        ) as mock_send, \
+        patch("core.send_governor.check", return_value=_allowed):
             asyncio.run(process_pending_events(db, tenant.id))
 
         # Both automations should have been executed

@@ -609,25 +609,28 @@ async def _try_execute(
                 order_id=_order_id,
             )
             if not _gov.allowed:
-                _write_execution(
-                    db, event.id, automation.id, event.customer_id, tenant_id,
-                    status="skipped",
-                    skip_reason=_gov.reason_code,
-                    action_taken={
-                        "governor": True,
-                        "label_ar":      _gov.label_ar,
-                        "suggestion_ar": _gov.suggestion_ar,
-                        "blocked_by":    _gov.blocked_by_type,
-                    },
-                )
                 logger.info(
-                    "[AutoEngine] Governor BLOCK event=%s automation=%s "
+                    "[AutoEngine] Governor %s event=%s automation=%s "
                     "customer=%s reason=%s",
+                    "HARD_BLOCK" if _gov.is_hard_block else "SOFT_DELAY",
                     event.id, automation.id, event.customer_id, _gov.reason_code,
                 )
-                # Hard blocks → mark as done; soft delays → retry next cycle
                 if _gov.is_hard_block:
+                    # منع دائم: سجّل execution record حتى لا يُعاد تقييمه
+                    _write_execution(
+                        db, event.id, automation.id, event.customer_id, tenant_id,
+                        status="skipped",
+                        skip_reason=_gov.reason_code,
+                        action_taken={
+                            "governor":    True,
+                            "label_ar":    _gov.label_ar,
+                            "suggestion_ar": _gov.suggestion_ar,
+                            "blocked_by":  _gov.blocked_by_type,
+                        },
+                    )
                     return "skipped"
+                # تأجيل مؤقت: لا تكتب execution record لتبقى idempotency سليمة.
+                # event.processed يبقى False → يُعاد تقييمه في الدورة القادمة.
                 return "delay"
         except Exception as _gov_exc:
             logger.warning("[AutoEngine] Governor check failed (non-fatal): %s", _gov_exc)
@@ -659,7 +662,7 @@ async def _try_execute(
     # recovery timeline can render a useful diagnosis without a second
     # round-trip — and the manual-retry endpoint has the context it
     # needs to re-enqueue with the same step_idx.
-    _write_execution(
+    _exec_id = _write_execution(
         db, event.id, automation.id, event.customer_id, tenant_id,
         status=status,
         action_taken=action_info if action_info else None,
@@ -681,26 +684,15 @@ async def _try_execute(
             template=action_info.get("template"),
             wa_message_id=action_info.get("wa_message_id"),
         )
-        # سجّل في Governor حتى تُحسب الحدود صحيحاً في الدورات القادمة
+        # سجّل في Governor حتى تُحسب الحدود صحيحاً في الدورات القادمة.
+        # _write_execution أعاد الـ PK بعد flush مباشرة — لا query ثانية.
         if event.customer_id:
             try:
                 from core.send_governor import record_sent as _gov_record  # noqa: PLC0415
-                # نحتاج id الـ execution المكتوب — نجلبه من آخر flush
-                from models import AutomationExecution as _AE  # noqa: PLC0415
-                _last_exe = (
-                    db.query(_AE.id)
-                    .filter(
-                        _AE.event_id == event.id,
-                        _AE.automation_id == automation.id,
-                        _AE.customer_id == event.customer_id,
-                    )
-                    .order_by(_AE.id.desc())
-                    .first()
-                )
                 _gov_record(
                     db, tenant_id, event.customer_id,
                     automation.automation_type,
-                    execution_id=_last_exe[0] if _last_exe else None,
+                    execution_id=_exec_id,   # PK من _write_execution أعلاه
                 )
             except Exception as _rec_exc:
                 logger.warning("[AutoEngine] governor record_sent failed (non-fatal): %s", _rec_exc)
@@ -2293,7 +2285,8 @@ def _write_execution(
     skip_reason: Optional[str] = None,
     action_taken: Optional[Dict[str, Any]] = None,
     error_message: Optional[str] = None,
-) -> None:
+) -> int:
+    """Write an AutomationExecution row and return its PK (after flush)."""
     from models import AutomationExecution  # noqa: PLC0415
 
     rec = AutomationExecution(
@@ -2308,6 +2301,8 @@ def _write_execution(
         executed_at=_utcnow_naive(),
     )
     db.add(rec)
+    db.flush()   # populate rec.id so record_sent can reference it
+    return rec.id
 
 
 # ── Interactive (in-window) cart-recovery send ───────────────────────────────

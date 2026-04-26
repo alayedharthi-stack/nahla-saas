@@ -95,11 +95,26 @@ class GovDecision:
 
     @property
     def is_hard_block(self) -> bool:
-        """True = لا ترسل نهائياً؛ False = مؤجّل (أعد المحاولة لاحقاً)."""
+        """
+        True  = منع دائم — اكتب AutomationExecution(skipped) وأنهِ الأمر.
+                لن يتغيّر السبب في وقت قريب، لا فائدة من إعادة المحاولة.
+
+        False = مؤجَّل — لا تكتب execution record (لتبقى idempotency سليمة).
+                أعد المحاولة في الدورة القادمة (event.processed يبقى False).
+
+        سبب استثناء blocked_by_priority من Hard:
+          الحدث ذو الأولوية الأعلى ينتهي في ساعات — الرسالة المؤجَّلة يجب
+          أن تُرسَل لاحقاً بمجرد زوال الحدث المانع.
+
+        سبب استثناء blocked_by_daily_limit من Hard:
+          الحد اليومي يتجدد غداً — الرسالة ستُرسَل في الدورة القادمة.
+
+        blocked_by_weekly_limit يبقى Hard لأن الأسبوع طويل والرسالة ستكون
+        قديمة وغير ذات صلة حين يتجدد الحد.
+        """
         return self.reason_code in {
-            "blocked_by_priority",
-            "blocked_by_unsubscribe",
-            "blocked_by_weekly_limit",
+            "blocked_by_unsubscribe",   # دائم: العميل ألغى الاشتراك
+            "blocked_by_weekly_limit",  # طويل جداً: 7 أيام
         }
 
     def to_dict(self) -> Dict[str, Any]:
