@@ -51,7 +51,10 @@ from models import (  # noqa: E402
     TenantSettings,
 )
 from core.send_governor import (  # noqa: E402
+    HARD_BLOCK_REASONS,
+    SOFT_BLOCK_REASONS,
     GovDecision,
+    GovernorDecisionType,
     Priority,
     _count_sent,
     _find_higher_priority_active,
@@ -723,3 +726,174 @@ class TestFullScenarioIntegration:
         for svc, d in results.items():
             status = "✅ أُرسل" if d.allowed else f"⏳ {d.reason_code}"
             print(f"  {svc:<28} → {status}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 8. اختبارات GovernorDecisionType Enum
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestGovernorDecisionTypeEnum:
+    """
+    اختبارات GovernorDecisionType — القلب المنطقي للقانون.
+    كل خاصية في GovDecision يجب أن تُشتق منه بشكل صحيح.
+    """
+
+    def test_enum_values_exist(self):
+        """الـ Enum يحتوي على القيم الثلاث الإلزامية."""
+        assert GovernorDecisionType.SOFT_BLOCK.value == "soft_block"
+        assert GovernorDecisionType.HARD_BLOCK.value == "hard_block"
+        assert GovernorDecisionType.ALLOW_SEND.value == "allow_send"
+
+    def test_allow_send_when_allowed(self):
+        """GovDecision(allowed=True) → ALLOW_SEND."""
+        d = GovDecision(allowed=True, reason_code="allowed")
+        assert d.decision_type == GovernorDecisionType.ALLOW_SEND
+        assert not d.is_hard_block
+
+    def test_soft_block_reasons_return_soft_block(self):
+        """كل reason في SOFT_BLOCK_REASONS → decision_type = SOFT_BLOCK."""
+        for reason in SOFT_BLOCK_REASONS:
+            d = GovDecision(allowed=False, reason_code=reason)
+            assert d.decision_type == GovernorDecisionType.SOFT_BLOCK, (
+                f"{reason} يجب أن يكون SOFT_BLOCK"
+            )
+            assert not d.is_hard_block, f"{reason} يجب ألا يكون hard block"
+
+    def test_hard_block_reasons_return_hard_block(self):
+        """كل reason في HARD_BLOCK_REASONS → decision_type = HARD_BLOCK."""
+        for reason in HARD_BLOCK_REASONS:
+            d = GovDecision(allowed=False, reason_code=reason)
+            assert d.decision_type == GovernorDecisionType.HARD_BLOCK, (
+                f"{reason} يجب أن يكون HARD_BLOCK"
+            )
+            assert d.is_hard_block, f"{reason} يجب أن يكون hard block"
+
+    def test_soft_and_hard_sets_are_disjoint(self):
+        """SOFT_BLOCK_REASONS و HARD_BLOCK_REASONS لا يتقاطعان."""
+        intersection = SOFT_BLOCK_REASONS & HARD_BLOCK_REASONS
+        assert not intersection, (
+            f"الـ sets يجب ألا تتقاطع — تقاطع: {intersection}"
+        )
+
+    def test_all_known_reasons_classified(self):
+        """كل reason في _MESSAGES يجب أن يكون في SOFT أو HARD أو 'allowed'."""
+        from core.send_governor import _MESSAGES
+        all_known = SOFT_BLOCK_REASONS | HARD_BLOCK_REASONS | {"allowed"}
+        for code in _MESSAGES:
+            assert code in all_known, (
+                f"reason_code '{code}' موجود في _MESSAGES لكن غير مُصنَّف "
+                "في SOFT_BLOCK_REASONS أو HARD_BLOCK_REASONS"
+            )
+
+    def test_to_dict_includes_decision_type(self):
+        """to_dict() يجب أن يحتوي على decision_type."""
+        d = GovDecision(allowed=False, reason_code="blocked_by_priority")
+        d_dict = d.to_dict()
+        assert "decision_type" in d_dict
+        assert d_dict["decision_type"] == "soft_block"
+
+        d2 = GovDecision(allowed=False, reason_code="blocked_by_unsubscribe")
+        d2_dict = d2.to_dict()
+        assert d2_dict["decision_type"] == "hard_block"
+
+        d3 = GovDecision(allowed=True, reason_code="allowed")
+        d3_dict = d3.to_dict()
+        assert d3_dict["decision_type"] == "allow_send"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 9. اختبارات Governor Guard في _write_execution
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestWriteExecutionGuard:
+    """
+    اختبار خط الدفاع الأخير:
+    _write_execution يُطلق RuntimeError إذا حاول أحد كتابة
+    execution record لـ soft block reason.
+
+    هذا يضمن أنه حتى لو نسي مطوّر مستقبلي القانون،
+    النظام سيرفض بشكل صريح.
+    """
+
+    def setup_method(self):
+        self.db, _ = _make_db()
+        tenant = _seed_tenant(self.db)
+        self.tid = tenant.id
+        self.cid = _seed_customer(self.db, self.tid).id
+        self.auto = _seed_automation(self.db, self.tid, "abandoned_cart", "cart_abandoned")
+        self.ev   = _seed_event(self.db, self.tid, self.cid, "cart_abandoned")
+
+    def teardown_method(self):
+        self.db.close()
+
+    def _call_write_execution(self, skip_reason: str):
+        """استدعِ _write_execution بشكل مباشر (تجاوز الـ engine)."""
+        import sys
+        from pathlib import Path
+        BACKEND = Path(__file__).resolve().parents[1] / "backend"
+        if str(BACKEND) not in sys.path:
+            sys.path.insert(0, str(BACKEND))
+        from core.automation_engine import _write_execution
+        return _write_execution(
+            self.db, self.ev.id, self.auto.id, self.cid, self.tid,
+            status="skipped",
+            skip_reason=skip_reason,
+        )
+
+    def test_soft_reason_raises_runtime_error(self):
+        """
+        محاولة كتابة execution record لـ soft block → RuntimeError فوري.
+        هذا هو الـ guard الذي يمنع كسر القانون.
+        """
+        for reason in SOFT_BLOCK_REASONS:
+            with pytest.raises(RuntimeError) as exc_info:
+                self._call_write_execution(reason)
+            error_msg = str(exc_info.value)
+            assert "ILLEGAL" in error_msg or "soft" in error_msg.lower(), (
+                f"رسالة الخطأ يجب أن تشرح سبب الرفض لـ {reason}"
+            )
+            assert "execution record" in error_msg.lower() or "write" in error_msg.lower()
+
+    def test_hard_reason_does_not_raise(self):
+        """
+        كتابة execution record لـ hard block → مسموح (لا RuntimeError).
+        """
+        for reason in HARD_BLOCK_REASONS:
+            # كل reason يحتاج event جديد (لتجنب unique constraint)
+            ev = _seed_event(self.db, self.tid, self.cid, f"test_{reason}")
+            import sys
+            from pathlib import Path
+            BACKEND = Path(__file__).resolve().parents[1] / "backend"
+            if str(BACKEND) not in sys.path:
+                sys.path.insert(0, str(BACKEND))
+            from core.automation_engine import _write_execution
+            exec_id = _write_execution(
+                self.db, ev.id, self.auto.id, self.cid, self.tid,
+                status="skipped",
+                skip_reason=reason,
+            )
+            assert isinstance(exec_id, int), (
+                f"_write_execution يجب أن يُعيد int (PK) لـ {reason}"
+            )
+
+    def test_sent_status_does_not_raise(self):
+        """status=sent بدون skip_reason → مسموح."""
+        import sys
+        from pathlib import Path
+        BACKEND = Path(__file__).resolve().parents[1] / "backend"
+        if str(BACKEND) not in sys.path:
+            sys.path.insert(0, str(BACKEND))
+        from core.automation_engine import _write_execution
+        exec_id = _write_execution(
+            self.db, self.ev.id, self.auto.id, self.cid, self.tid,
+            status="sent",
+        )
+        assert isinstance(exec_id, int)
+
+    def test_guard_error_message_guides_developer(self):
+        """رسالة الخطأ يجب أن تحتوي على مرجع للـ GOVERNOR DECISION LAW."""
+        with pytest.raises(RuntimeError) as exc_info:
+            self._call_write_execution("blocked_by_priority")
+        error_msg = str(exc_info.value)
+        # يجب أن تُوجّه المطوّر للملف الصحيح
+        assert "governor" in error_msg.lower() or "send_governor" in error_msg.lower()

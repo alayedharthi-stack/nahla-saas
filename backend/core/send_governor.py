@@ -17,17 +17,90 @@ Public API
 
   record_sent(db, tenant_id, customer_id, automation_type)
       سجّل الإرسال الفعلي حتى تُحسب الـ limits الصحيح.
+
+══════════════════════════════════════════════════════════════════════════════
+📜 GOVERNOR DECISION LAW — قانون أساسي في نحلة لا يُكسر
+══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────┬─────────────────────────────────────────────────────────┐
+│ GovernorDecision│ السلوك المطلوب                                          │
+│ Type            │                                                         │
+├─────────────────┼─────────────────────────────────────────────────────────┤
+│ SOFT_BLOCK      │ • لا تُنشئ AutomationExecution                          │
+│ (مؤقت)          │ • event.processed يبقى False                            │
+│                 │ • يُعاد التقييم في الدورة القادمة تلقائياً               │
+│                 │ أمثلة:                                                  │
+│                 │   blocked_by_priority  → HIGH ينتهي خلال ساعات         │
+│                 │   blocked_by_6h_limit  → يتجدد في < 6 ساعات            │
+│                 │   blocked_by_daily_limit → يتجدد غداً                  │
+│                 │   blocked_by_cooldown  → يتجدد حسب المدة                │
+├─────────────────┼─────────────────────────────────────────────────────────┤
+│ HARD_BLOCK      │ • أنشئ AutomationExecution(status=skipped)              │
+│ (دائم)          │ • event.processed = True — لا إعادة                     │
+│                 │ • سجّل السبب بوضوح                                     │
+│                 │ أمثلة:                                                  │
+│                 │   blocked_by_unsubscribe → العميل ألغى نهائياً          │
+│                 │   blocked_by_weekly_limit → 7 أيام، الرسالة ستكون قديمة│
+├─────────────────┼─────────────────────────────────────────────────────────┤
+│ ALLOW_SEND      │ • نفّذ الإرسال أولاً                                    │
+│ (مسموح)         │ • بعد التأكد من النجاح الفعلي فقط:                     │
+│                 │   - أنشئ AutomationExecution(status=sent)               │
+│                 │   - سجّل في GovernorSendLog عبر record_sent()           │
+│                 │ ❌ لا تُسجَّل أي شيء قبل نجاح الإرسال                  │
+└─────────────────┴─────────────────────────────────────────────────────────┘
+
+⚠️  أي كود يخالف هذا القانون سيُطلق RuntimeError فورياً عبر:
+     _write_execution() → يرفض skip_reason من SOFT_BLOCK_REASONS
+══════════════════════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from enum import Enum
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("nahla.send_governor")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# نوع قرار Governor — يحكم ما يفعله automation_engine بعد كل قرار
+# ══════════════════════════════════════════════════════════════════════════
+
+class GovernorDecisionType(str, Enum):
+    """
+    التصنيف النهائي لقرار Governor.
+
+    automation_engine يقرأ هذا الـ Enum — وليس is_hard_block فقط —
+    ليعرف بدقة ما يجب فعله:
+
+    SOFT_BLOCK → delay (لا record، يُعاد التقييم)
+    HARD_BLOCK → skipped (اكتب record، أغلق الحدث)
+    ALLOW_SEND → نفّذ الإرسال، ثم اكتب sent + record_sent بعد النجاح
+    """
+    SOFT_BLOCK = "soft_block"
+    HARD_BLOCK = "hard_block"
+    ALLOW_SEND = "allow_send"
+
+
+# ── Reason-code sets (مرجع ثابت يُستخدم في GovDecision + _write_execution) ─
+
+SOFT_BLOCK_REASONS: FrozenSet[str] = frozenset({
+    # مؤقت — يزول تلقائياً، يُعاد تقييمه في الدورة القادمة
+    "blocked_by_priority",    # HIGH ينتهي خلال ساعات
+    "blocked_by_6h_limit",    # يتجدد في < 6 ساعات
+    "blocked_by_daily_limit", # يتجدد غداً
+    "blocked_by_cooldown",    # يتجدد حسب مدة الخدمة
+})
+
+HARD_BLOCK_REASONS: FrozenSet[str] = frozenset({
+    # دائم أو طويل جداً — الرسالة لن تكون ذات صلة عند التعافي
+    "blocked_by_unsubscribe",  # العميل ألغى نهائياً
+    "blocked_by_weekly_limit", # 7 أيام، الرسالة ستكون قديمة
+})
 
 
 # ── أولويات الخدمات ────────────────────────────────────────────────────────
@@ -87,6 +160,19 @@ _LIMIT_PER_7D  = 4   # حد أقصى 4/أسبوع
 
 @dataclass
 class GovDecision:
+    """
+    نتيجة استدعاء send_governor.check().
+
+    الخاصية الأهم: decision_type (GovernorDecisionType)
+    ─────────────────────────────────────────────────────
+    automation_engine يقرأها ليحدد السلوك التالي:
+
+      ALLOW_SEND  → نفّذ الإرسال ثم record_sent بعد النجاح فقط
+      SOFT_BLOCK  → أعد "delay" — لا تكتب execution record أبداً
+      HARD_BLOCK  → أعد "skipped" — اكتب execution record ثم أغلق الحدث
+
+    is_hard_block → اختصار لـ (decision_type == HARD_BLOCK)
+    """
     allowed: bool
     reason_code: str = "allowed"
     label_ar: str = ""
@@ -94,33 +180,27 @@ class GovDecision:
     blocked_by_type: Optional[str] = None   # الخدمة ذات الأولوية الأعلى التي منعت
 
     @property
+    def decision_type(self) -> GovernorDecisionType:
+        """
+        يُشتق من reason_code — يُعبّر عن نوع القرار بشكل صريح.
+        استخدم هذا بدل is_hard_block عند كتابة كود جديد.
+        """
+        if self.allowed:
+            return GovernorDecisionType.ALLOW_SEND
+        if self.reason_code in HARD_BLOCK_REASONS:
+            return GovernorDecisionType.HARD_BLOCK
+        return GovernorDecisionType.SOFT_BLOCK
+
+    @property
     def is_hard_block(self) -> bool:
-        """
-        True  = منع دائم — اكتب AutomationExecution(skipped) وأنهِ الأمر.
-                لن يتغيّر السبب في وقت قريب، لا فائدة من إعادة المحاولة.
-
-        False = مؤجَّل — لا تكتب execution record (لتبقى idempotency سليمة).
-                أعد المحاولة في الدورة القادمة (event.processed يبقى False).
-
-        سبب استثناء blocked_by_priority من Hard:
-          الحدث ذو الأولوية الأعلى ينتهي في ساعات — الرسالة المؤجَّلة يجب
-          أن تُرسَل لاحقاً بمجرد زوال الحدث المانع.
-
-        سبب استثناء blocked_by_daily_limit من Hard:
-          الحد اليومي يتجدد غداً — الرسالة ستُرسَل في الدورة القادمة.
-
-        blocked_by_weekly_limit يبقى Hard لأن الأسبوع طويل والرسالة ستكون
-        قديمة وغير ذات صلة حين يتجدد الحد.
-        """
-        return self.reason_code in {
-            "blocked_by_unsubscribe",   # دائم: العميل ألغى الاشتراك
-            "blocked_by_weekly_limit",  # طويل جداً: 7 أيام
-        }
+        """اختصار لـ (decision_type == HARD_BLOCK)."""
+        return self.decision_type == GovernorDecisionType.HARD_BLOCK
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "allowed":         self.allowed,
             "reason_code":     self.reason_code,
+            "decision_type":   self.decision_type.value,
             "label_ar":        self.label_ar,
             "suggestion_ar":   self.suggestion_ar,
             "blocked_by_type": self.blocked_by_type,
@@ -193,10 +273,42 @@ def check(
     order_id: Optional[int] = None,
 ) -> GovDecision:
     """
-    قرار: هل نرسل لهذا العميل من هذه الخدمة الآن؟
+    📜 قرار Governor: هل نرسل لهذا العميل من هذه الخدمة الآن؟
 
-    الاستدعاء يكون من _try_execute في automation_engine مباشرة بعد
-    فحص unsubscribe وقبل _execute_action.
+    يُستدعى من automation_engine._try_execute بعد فحص unsubscribe
+    وقبل _execute_action.
+
+    ── قواعد السلوك (القانون) ─────────────────────────────────────────────
+
+    decision.decision_type = SOFT_BLOCK  →  إعادة "delay" في engine
+      • لا تُنشئ AutomationExecution — المنع مؤقت وسيزول
+      • event.processed يبقى False → يُعاد التقييم تلقائياً
+      • أسباب: blocked_by_priority, blocked_by_6h_limit,
+                blocked_by_daily_limit, blocked_by_cooldown
+
+    decision.decision_type = HARD_BLOCK  →  إعادة "skipped" في engine
+      • أنشئ AutomationExecution(status=skipped, skip_reason=...)
+      • event.processed = True نهائياً — لا إعادة
+      • أسباب: blocked_by_unsubscribe, blocked_by_weekly_limit
+
+    decision.decision_type = ALLOW_SEND  →  نفّذ الإرسال في engine
+      • نفّذ _execute_action أولاً
+      • بعد التأكد من النجاح: أنشئ AutomationExecution(sent)
+                              + record_sent() → GovernorSendLog
+      • ❌ لا تُسجَّل شيئاً قبل نجاح الإرسال الفعلي
+
+    ⚠️  _write_execution() يرفض أي skip_reason من SOFT_BLOCK_REASONS
+        بـ RuntimeError — هذا هو خط الدفاع الأخير ضد كسر القانون.
+    ──────────────────────────────────────────────────────────────────────
+
+    ترتيب الفحوصات:
+      1. إلغاء الاشتراك       → HARD_BLOCK
+      2. أولوية أعلى نشطة     → SOFT_BLOCK
+      3. Cooldown الخدمة       → SOFT_BLOCK
+      4. حد 6 ساعات           → SOFT_BLOCK
+      5. حد يومي (2/يوم)       → SOFT_BLOCK
+      6. حد أسبوعي (4/أسبوع)   → HARD_BLOCK
+      7. مسموح                 → ALLOW_SEND
     """
     # ── 1. فحص إلغاء الاشتراك ──────────────────────────────────────────
     try:

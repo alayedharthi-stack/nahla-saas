@@ -599,39 +599,56 @@ async def _try_execute(
     # ── Global Send Governor ──────────────────────────────────────────────────
     # يتحقق من الأولوية، حدود الإرسال، cooldown، وإلغاء الاشتراك.
     # يعمل فقط عندما يوجد customer_id — الأحداث بدون عميل تمر مباشرة.
+    #
+    # قانون السلوك (راجع send_governor.py → GOVERNOR DECISION LAW):
+    #   ALLOW_SEND  → كمل إلى _execute_action
+    #   SOFT_BLOCK  → أعد "delay"  — لا تكتب execution record أبداً
+    #   HARD_BLOCK  → اكتب execution(skipped) ثم أعد "skipped"
     if event.customer_id:
         try:
-            from core.send_governor import check as _gov_check  # noqa: PLC0415
+            from core.send_governor import (  # noqa: PLC0415
+                GovernorDecisionType as _GDT,
+                check as _gov_check,
+            )
             _order_id = (getattr(event, "payload", None) or {}).get("order_id")
             _gov = _gov_check(
                 db, tenant_id, event.customer_id,
                 automation.automation_type,
                 order_id=_order_id,
             )
-            if not _gov.allowed:
+
+            if _gov.decision_type != _GDT.ALLOW_SEND:
                 logger.info(
-                    "[AutoEngine] Governor %s event=%s automation=%s "
-                    "customer=%s reason=%s",
-                    "HARD_BLOCK" if _gov.is_hard_block else "SOFT_DELAY",
-                    event.id, automation.id, event.customer_id, _gov.reason_code,
+                    "[AutoEngine] Governor decision=%s event=%s automation=%s "
+                    "customer=%s reason=%s label=%r",
+                    _gov.decision_type.value,
+                    event.id, automation.id, event.customer_id,
+                    _gov.reason_code, _gov.label_ar,
                 )
-                if _gov.is_hard_block:
-                    # منع دائم: سجّل execution record حتى لا يُعاد تقييمه
+
+                if _gov.decision_type == _GDT.HARD_BLOCK:
+                    # منع دائم: سجّل execution record → idempotency تمنع الإعادة
                     _write_execution(
                         db, event.id, automation.id, event.customer_id, tenant_id,
                         status="skipped",
-                        skip_reason=_gov.reason_code,
+                        skip_reason=_gov.reason_code,  # لن يكون SOFT_BLOCK_REASON
                         action_taken={
-                            "governor":    True,
-                            "label_ar":    _gov.label_ar,
+                            "governor":      True,
+                            "decision_type": _gov.decision_type.value,
+                            "label_ar":      _gov.label_ar,
                             "suggestion_ar": _gov.suggestion_ar,
-                            "blocked_by":  _gov.blocked_by_type,
+                            "blocked_by":    _gov.blocked_by_type,
                         },
                     )
                     return "skipped"
-                # تأجيل مؤقت: لا تكتب execution record لتبقى idempotency سليمة.
-                # event.processed يبقى False → يُعاد تقييمه في الدورة القادمة.
+
+                # SOFT_BLOCK: لا تكتب execution record — لتبقى idempotency سليمة
+                # event.processed يبقى False → يُعاد تقييمه في الدورة القادمة
+                # _write_execution() ستُطلق RuntimeError لو حاول أحد كتابته خطأً
                 return "delay"
+
+        except RuntimeError:
+            raise  # أعد إطلاق أخطاء Guard الصريحة (لا تبتلعها)
         except Exception as _gov_exc:
             logger.warning("[AutoEngine] Governor check failed (non-fatal): %s", _gov_exc)
 
@@ -2286,7 +2303,36 @@ def _write_execution(
     action_taken: Optional[Dict[str, Any]] = None,
     error_message: Optional[str] = None,
 ) -> int:
-    """Write an AutomationExecution row and return its PK (after flush)."""
+    """
+    Write an AutomationExecution row and return its PK (after flush).
+
+    ⚠️  GOVERNOR GUARD — خط الدفاع الأخير:
+    ────────────────────────────────────────
+    يرفض كتابة أي record إذا كان skip_reason ينتمي إلى SOFT_BLOCK_REASONS.
+
+    الـ SOFT BLOCKs (blocked_by_priority, blocked_by_6h_limit,
+    blocked_by_daily_limit, blocked_by_cooldown) مؤقتة — كتابة record
+    تكسر idempotency check وتمنع إعادة التقييم في الدورة القادمة،
+    مما يُضيع الرسالة نهائياً.
+
+    إذا رأيت هذا الـ RuntimeError، فالكود خالف قانون Governor.
+    راجع: backend/core/send_governor.py → GOVERNOR DECISION LAW
+    """
+    if skip_reason is not None:
+        try:
+            from core.send_governor import SOFT_BLOCK_REASONS as _SOFT  # noqa: PLC0415
+            if skip_reason in _SOFT:
+                raise RuntimeError(
+                    f"[Governor] ILLEGAL: Attempted to write AutomationExecution "
+                    f"for soft-block reason '{skip_reason}'. "
+                    "Soft blocks MUST return 'delay' without creating execution records — "
+                    "otherwise idempotency check will prevent retry and the message is lost. "
+                    "Fix: call _write_execution ONLY for hard blocks and successful sends. "
+                    "See: backend/core/send_governor.py → GOVERNOR DECISION LAW"
+                )
+        except ImportError:
+            pass  # لو فشل import، استمر (fail-safe)
+
     from models import AutomationExecution  # noqa: PLC0415
 
     rec = AutomationExecution(
