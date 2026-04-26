@@ -439,24 +439,43 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
         except Exception:
             return True
 
-    all_norms = list(set(_norm(p) for p in phone_info))
-    unsub_customers = (
-        db.query(Customer)
-        .filter(
-            Customer.tenant_id == tenant_id,
-            Customer.normalized_phone.in_(all_norms),
+    # Build candidate phone formats per conversation (with/without +) so we
+    # match Customer rows regardless of how the phone column is stored.
+    from sqlalchemy import or_  # noqa: PLC0415
+    _all_phone_candidates: set[str] = set()
+    for p in phone_info:
+        n = _norm(p)
+        if n:
+            _all_phone_candidates.add(n)
+            _all_phone_candidates.add(f"+{n}")
+        if p:
+            _all_phone_candidates.add(p)
+
+    if _all_phone_candidates:
+        unsub_customers = (
+            db.query(Customer)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                or_(
+                    Customer.normalized_phone.in_(list(_all_phone_candidates)),
+                    Customer.phone.in_(list(_all_phone_candidates)),
+                ),
+            )
+            .all()
         )
-        .all()
-    )
-    for cust in unsub_customers:
-        meta = cust.extra_metadata or {}
-        is_unsub = bool(meta.get("is_unsubscribed"))
-        is_pending = _is_pending_active(meta)
-        c_norm = _norm(cust.normalized_phone or cust.phone or "")
-        matching_key = norm_to_key.get(c_norm)
-        if matching_key and matching_key in phone_info:
-            phone_info[matching_key]["isUnsubscribed"] = is_unsub
-            phone_info[matching_key]["pendingUnsubscribe"] = is_pending
+        for cust in unsub_customers:
+            meta = cust.extra_metadata or {}
+            if not meta:
+                continue
+            is_unsub = bool(meta.get("is_unsubscribed"))
+            is_pending = _is_pending_active(meta)
+            if not is_unsub and not is_pending:
+                continue
+            c_norm = _norm(cust.normalized_phone or cust.phone or "")
+            matching_key = norm_to_key.get(c_norm)
+            if matching_key and matching_key in phone_info:
+                phone_info[matching_key]["isUnsubscribed"] = is_unsub
+                phone_info[matching_key]["pendingUnsubscribe"] = is_pending
 
     # ── 6. Fallback: if last message is within 24h, mark window open ────────
     _24h_ago = (datetime.utcnow() - timedelta(hours=24)).isoformat()

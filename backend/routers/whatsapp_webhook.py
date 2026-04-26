@@ -553,41 +553,222 @@ async def _dispatch_message(
             if _lead:
                 _inbound_customer_id = _lead.id
 
-            # ── Unsubscribe / Re-subscribe gate ──────────────────────────────
-            # Check BEFORE anything else so we don't feed opted-out customers
-            # into automations or AI.
+            # ── Unsubscribe / Pending / Re-subscribe gate ────────────────────
+            # 3-state flow:
+            #   PENDING_UNSUBSCRIBE → confirmation buttons sent, AI/automation paused
+            #   UNSUBSCRIBED        → final, all sends blocked
+            #   ORDINARY            → normal operation
+            #
+            # This block runs BEFORE the automation_event emit and the AI
+            # routing so the system never wastes work on a customer who
+            # is asking to be left alone.
+            _unsub_short_circuit = False
             try:
                 from services.unsubscribe import (  # noqa: PLC0415
+                    UNSUB_CANCEL_BUTTON_ID,
+                    UNSUB_CONFIRM_BUTTON_ID,
+                    CANCELLED_UNSUB_MSG_AR,
+                    FINAL_UNSUBSCRIBED_MSG_AR,
+                    build_confirmation_fallback_payload,
+                    build_confirmation_payload,
+                    build_text_payload,
+                    classify_confirmation_text,
+                    clear_pending_unsubscribe,
+                    expire_pending_if_needed,
+                    is_customer_pending_unsubscribe,
                     is_customer_unsubscribed,
                     is_unsubscribe_request,
+                    mark_pending_unsubscribe,
+                    mark_pending_prompt_sent,
                     mark_resubscribed,
                     mark_unsubscribed,
+                    should_send_pending_prompt,
                 )
+
                 _inbound_text = ""
                 if msg_type == "text":
                     _inbound_text = (msg.get("text") or {}).get("body", "")
 
-                if _lead and is_unsubscribe_request(_inbound_text):
-                    # Customer explicitly opted out — mark and stop.
-                    mark_unsubscribed(db, _lead, commit=True)
-                    logger.info(
-                        "[Webhook] UNSUBSCRIBE from %s tenant=%s",
-                        normalized_sender, resolved_tenant_id,
-                    )
-                    # Return early — do not trigger automations or AI.
-                    return
+                _btn_id = ""
+                _btn_title = ""
+                if msg_type == "interactive":
+                    _interactive = msg.get("interactive") or {}
+                    if _interactive.get("type") == "button_reply":
+                        _btn_id    = ((_interactive.get("button_reply") or {}).get("id")    or "")
+                        _btn_title = ((_interactive.get("button_reply") or {}).get("title") or "")
 
+                # ── Get/create the visible dashboard conversation so every
+                # unsubscribe message — inbound and outbound — appears in the
+                # merchant inbox just like normal AI conversations.
+                from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+                from core.conversation_engine import StateManager              # noqa: PLC0415
+                _unsub_convo = None
+                try:
+                    _unsub_convo = _get_or_create_conversation(db, resolved_tenant_id, normalized_sender)
+                    if _unsub_convo and _unsub_convo.status != "human" and not _unsub_convo.is_human_handoff:
+                        _unsub_convo.status = "active"
+                        db.add(_unsub_convo)
+                        db.flush()
+                except Exception as _convo_exc:
+                    logger.warning("[Webhook] failed to ensure unsub convo: %s", _convo_exc)
+
+                _convo_id = getattr(_unsub_convo, "id", None)
+
+                def _save_unsub_msg(body: str, direction: str) -> None:
+                    """Persist an unsubscribe-related message to MessageEvent so
+                    it shows up in the merchant inbox."""
+                    if not body:
+                        return
+                    try:
+                        StateManager.save_message(
+                            db, normalized_sender, body, direction,
+                            conversation_id=_convo_id, tenant_id=resolved_tenant_id,
+                        )
+                    except Exception as _save_exc:
+                        logger.debug("[Webhook] save unsub msg failed: %s", _save_exc)
+
+                async def _send_unsub_confirmation_prompt() -> bool:
+                    """Send quick-reply buttons inside the open session window.
+
+                    This is intentionally NOT a Meta template. If interactive
+                    buttons fail for any provider/device reason, fall back to a
+                    short plain-text instruction that accepts `1` / `2`.
+                    """
+                    from services.unsubscribe import CONFIRMATION_BODY_AR, CONFIRMATION_FALLBACK_MSG_AR  # noqa: PLC0415
+                    ok = await _post_wa(
+                        phone_id=phone_number_id,
+                        payload=build_confirmation_payload(normalized_sender),
+                        _tenant_id=resolved_tenant_id, _db=db,
+                    )
+                    if ok:
+                        _save_unsub_msg(CONFIRMATION_BODY_AR, "outbound")
+                    else:
+                        logger.warning(
+                            "[Webhook] interactive unsubscribe prompt failed; sending text fallback"
+                        )
+                        ok = await _post_wa(
+                            phone_id=phone_number_id,
+                            payload=build_confirmation_fallback_payload(normalized_sender),
+                            _tenant_id=resolved_tenant_id, _db=db,
+                        )
+                        if ok:
+                            _save_unsub_msg(CONFIRMATION_FALLBACK_MSG_AR, "outbound")
+                    if ok and _lead:
+                        mark_pending_prompt_sent(db, _lead, commit=True)
+                    return bool(ok)
+
+                # Clear stale pending state on the next inbound message so a
+                # customer never remains suspended forever if they ignored the
+                # buttons. We still honour explicit buttons before this block's
+                # normal routing returns.
+                if _lead and not _btn_id:
+                    expire_pending_if_needed(db, _lead, commit=True)
+
+                _fallback_decision = (
+                    classify_confirmation_text(_inbound_text)
+                    if _lead and is_customer_pending_unsubscribe(_lead) and _inbound_text
+                    else None
+                )
+
+                # ── 1. Final-state customer sent any new inbound → restore ───
+                # Requirement: after final unsubscribe, ANY customer-originated
+                # inbound message brings them back to normal lists. Do this
+                # before keyword detection so a stale "إلغاء" message doesn't
+                # trap an already-unsubscribed customer in a loop.
                 if _lead and is_customer_unsubscribed(_lead):
-                    # Opted-out customer sent a new message → re-subscribe.
                     mark_resubscribed(db, _lead, commit=True)
                     logger.info(
                         "[Webhook] RE-SUBSCRIBED %s tenant=%s",
                         normalized_sender, resolved_tenant_id,
                     )
-                    # Continue processing normally from here.
+                    # Continue processing normally — fall through.
+
+                # ── 2. Confirmation button: "نعم متأكد" ──────────────────────
+                elif _lead and (
+                    _btn_id == UNSUB_CONFIRM_BUTTON_ID
+                    or _fallback_decision == "confirm"
+                ):
+                    # Persist the customer's confirmation reply so it shows in inbox
+                    _save_unsub_msg(_btn_title or _inbound_text or "نعم متأكد", "inbound")
+                    mark_unsubscribed(db, _lead, commit=True)
+                    try:
+                        _ok = await _post_wa(
+                            phone_id=phone_number_id,
+                            payload=build_text_payload(normalized_sender, FINAL_UNSUBSCRIBED_MSG_AR),
+                            _tenant_id=resolved_tenant_id, _db=db,
+                        )
+                        if _ok:
+                            _save_unsub_msg(FINAL_UNSUBSCRIBED_MSG_AR, "outbound")
+                    except Exception as _send_exc:
+                        logger.warning("[Webhook] Failed to send goodbye msg: %s", _send_exc)
+                    logger.info(
+                        "[Webhook] UNSUBSCRIBE CONFIRMED via button | tenant=%s phone=%s",
+                        resolved_tenant_id, normalized_sender,
+                    )
+                    _unsub_short_circuit = True
+
+                # ── 3. Cancel button: "تراجع" ────────────────────────────────
+                elif _lead and (
+                    _btn_id == UNSUB_CANCEL_BUTTON_ID
+                    or _fallback_decision == "cancel"
+                ):
+                    _save_unsub_msg(_btn_title or _inbound_text or "تراجع", "inbound")
+                    clear_pending_unsubscribe(db, _lead, commit=True)
+                    try:
+                        _ok = await _post_wa(
+                            phone_id=phone_number_id,
+                            payload=build_text_payload(normalized_sender, CANCELLED_UNSUB_MSG_AR),
+                            _tenant_id=resolved_tenant_id, _db=db,
+                        )
+                        if _ok:
+                            _save_unsub_msg(CANCELLED_UNSUB_MSG_AR, "outbound")
+                    except Exception as _send_exc:
+                        logger.warning("[Webhook] Failed to send cancel msg: %s", _send_exc)
+                    logger.info(
+                        "[Webhook] UNSUBSCRIBE CANCELLED via button | tenant=%s phone=%s",
+                        resolved_tenant_id, normalized_sender,
+                    )
+                    _unsub_short_circuit = True
+
+                # ── 4. Inbound text matches an unsubscribe keyword ──────────
+                elif _lead and is_unsubscribe_request(_inbound_text):
+                    _save_unsub_msg(_inbound_text, "inbound")
+                    if not is_customer_pending_unsubscribe(_lead):
+                        mark_pending_unsubscribe(db, _lead, commit=True)
+                    # Always (re-)send confirmation prompt so the customer
+                    # never gets stuck without a way to opt out.
+                    try:
+                        await _send_unsub_confirmation_prompt()
+                    except Exception as _send_exc:
+                        logger.warning("[Webhook] Failed to send confirmation prompt: %s", _send_exc)
+                    logger.info(
+                        "[Webhook] UNSUBSCRIBE PENDING (sent confirmation) | tenant=%s phone=%s",
+                        resolved_tenant_id, normalized_sender,
+                    )
+                    _unsub_short_circuit = True
+
+                # ── 5. Customer is already PENDING and sent a non-button msg ─
+                elif _lead and is_customer_pending_unsubscribe(_lead) and not _btn_id:
+                    _save_unsub_msg(_inbound_text, "inbound")
+                    # Don't run AI/automation while pending — just nudge them
+                    # again (throttled) so they see the buttons.
+                    try:
+                        if should_send_pending_prompt(_lead):
+                            await _send_unsub_confirmation_prompt()
+                    except Exception as _send_exc:
+                        logger.warning("[Webhook] Failed to re-send confirmation prompt: %s", _send_exc)
+                    logger.info(
+                        "[Webhook] UNSUBSCRIBE STILL PENDING (resent prompt) | tenant=%s phone=%s",
+                        resolved_tenant_id, normalized_sender,
+                    )
+                    _unsub_short_circuit = True
 
             except Exception as _unsub_exc:
                 logger.warning("[Webhook] Unsubscribe gate error: %s", _unsub_exc)
+
+            if _unsub_short_circuit:
+                # Skip automation / AI for unsubscribe-related events.
+                return
 
             # ── Email: first WhatsApp message received by this tenant ─────────
             # Only fires on the very first message (total_messages == 1 on lead)
@@ -660,6 +841,12 @@ async def _dispatch_message(
             tenant_id=resolved_tenant_id,
             message=msg,
         )
+        logger.info(
+            "[TRACE][3/6] INBOUND_NORMALIZED | tenant_id=%s sender=%s normalized_type=%s should_process=%s",
+            resolved_tenant_id, sender,
+            normalized_inbound.normalized_type,
+            normalized_inbound.should_process,
+        )
 
         # ── Handle interactive button replies ──────────────────────────────────────
         if normalized_inbound.normalized_type == "interactive":
@@ -710,10 +897,18 @@ async def _dispatch_message(
             return
 
         if normalized_inbound.normalized_type not in {"text", "audio"}:
+            logger.info(
+                "[TRACE][4/6] INBOUND_IGNORED_UNSUPPORTED | tenant_id=%s sender=%s normalized_type=%s",
+                resolved_tenant_id, sender, normalized_inbound.normalized_type,
+            )
             return
 
         text = normalized_inbound.text.strip()
         if not text:
+            logger.info(
+                "[TRACE][4/6] INBOUND_IGNORED_EMPTY_TEXT | tenant_id=%s sender=%s normalized_type=%s",
+                resolved_tenant_id, sender, normalized_inbound.normalized_type,
+            )
             return
 
         # ── Merchant vs Platform routing ─────────────────────────────────────────
@@ -727,6 +922,10 @@ async def _dispatch_message(
         # production environment that hasn't explicitly enabled the
         # platform-brain workspace.
         if not _is_platform_tenant(db, resolved_tenant_id):
+            logger.info(
+                "[TRACE][4/6] ROUTE_MERCHANT_AI | tenant_id=%s sender=%s text_len=%s",
+                resolved_tenant_id, sender, len(text),
+            )
             await _handle_merchant_message(
                 phone_id=used_pid, to=sender, text=text,
                 tenant_id=resolved_tenant_id, db=db,
@@ -1111,6 +1310,35 @@ async def _handle_merchant_message(
             )
             return
 
+        # ── Human handoff / support escalation ───────────────────────────────
+        # If the dashboard conversation is flagged for human handoff, do NOT
+        # call the LLM/Brain. Production showed a request hanging after the
+        # mode resolver returned support_escalation, leaving the whole service
+        # unresponsive. This path is deterministic, fast, and respects the
+        # merchant's intent: a human owns the conversation.
+        try:
+            from modules.ai.routing.conversation_mode import MODE_SUPPORT_ESCALATION  # noqa: PLC0415
+        except Exception:
+            MODE_SUPPORT_ESCALATION = "support_escalation"  # type: ignore[assignment]
+        if mode_decision.mode == MODE_SUPPORT_ESCALATION:
+            reply = (
+                "وصلت رسالتك. تم تحويل المحادثة لفريق المتجر، "
+                "وسيرد عليك أحد الموظفين في أقرب وقت."
+            )
+            StateManager.save_message(
+                db, to, reply, "outbound",
+                conversation_id=convo.id, tenant_id=tenant_id,
+            )
+            _send_ok = await _send_whatsapp_message(
+                phone_id=phone_id, to=to, text=reply,
+                _tenant_id=tenant_id, _db=db,
+            )
+            if _send_ok:
+                logger.info("[TRACE][5/6] HUMAN_HANDOFF_ACK_SENT | tenant=%s to=%s", tenant_id, to)
+            else:
+                logger.error("[TRACE][5/6] HUMAN_HANDOFF_ACK_SEND_FAILED | tenant=%s to=%s", tenant_id, to)
+            return
+
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
         # Active when: global flag is on OR this tenant is in the per-tenant list
         _brain_active = MERCHANT_BRAIN_ENABLED or (tenant_id in MERCHANT_BRAIN_TENANT_IDS)
@@ -1301,18 +1529,25 @@ async def _handle_merchant_message(
             pass
 
         if _brain_buttons and reply:
-            await _send_interactive_reply(
+            _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
                 body_text=reply,
                 buttons=_brain_buttons,
                 _tenant_id=tenant_id, _db=db,
             )
         else:
-            await _send_whatsapp_message(
+            _send_ok = await _send_whatsapp_message(
                 phone_id=phone_id, to=to, text=reply,
                 _tenant_id=tenant_id, _db=db,
             )
-        logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
+        if _send_ok:
+            logger.info("[TRACE][5/6] MERCHANT_AI_SENT | tenant=%s to=%s", tenant_id, to)
+            logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
+        else:
+            logger.error(
+                "[TRACE][5/6] MERCHANT_AI_SEND_FAILED | tenant=%s to=%s reply_len=%s",
+                tenant_id, to, len(reply or ""),
+            )
 
     except Exception as exc:
         # Any failure inside the merchant reply pipeline (store_knowledge,
@@ -1435,7 +1670,7 @@ async def _post_wa(
     _tenant_id: Optional[int] = None,
     _store_name: str = "unknown",
     _db=None,
-) -> None:
+) -> bool:
     owns_db = False
     wa_conn = None
     if _tenant_id and _db:
@@ -1483,13 +1718,13 @@ async def _post_wa(
                 "[WA] throttled burst send | tenant_id=%s to=%s phone_number_id=%s",
                 _tenant_id, recipient, phone_id,
             )
-            return
+            return False
         if not check_rate_limit(rate_key, max_count=20, window_seconds=60):
             logger.warning(
                 "[WA] throttled minute send | tenant_id=%s to=%s phone_number_id=%s",
                 _tenant_id, recipient, phone_id,
             )
-            return
+            return False
 
         try:
             resp_data, ctx = await provider_send_message(
@@ -1572,6 +1807,7 @@ async def _post_wa(
                                 _tenant_id, phone_id,
                                 "ok" if "error" not in (retry_data or {}) else "still_failed",
                             )
+                            return "error" not in (retry_data or {})
                         except Exception as retry_exc:  # noqa: BLE001
                             logger.error(
                                 "[WA] retry-after-register failed: %s", retry_exc,
@@ -1583,8 +1819,11 @@ async def _post_wa(
                             "dashboard (active token does not have permission for this WABA)",
                             _tenant_id, phone_id, reg_err,
                         )
+                return False
+            return True
         except Exception as exc:
             logger.error("[WA] post error: %s", exc)
+            return False
     finally:
         if owns_db and _db is not None:
             try:
@@ -1596,8 +1835,8 @@ async def _post_wa(
 async def _send_whatsapp_message(
     phone_id: str, to: str, text: str,
     _tenant_id: Optional[int] = None, _store_name: str = "unknown", _db=None,
-) -> None:
-    await _post_wa(phone_id, {
+) -> bool:
+    return await _post_wa(phone_id, {
         "messaging_product": "whatsapp", "to": to, "type": "text",
         "text": {"body": text},
     }, _tenant_id=_tenant_id, _store_name=_store_name, _db=_db)
@@ -1606,8 +1845,8 @@ async def _send_whatsapp_message(
 async def _send_interactive_reply(
     phone_id: str, to: str, body_text: str, buttons: list,
     _tenant_id: Optional[int] = None, _db=None,
-) -> None:
-    await _post_wa(phone_id, {
+) -> bool:
+    return await _post_wa(phone_id, {
         "messaging_product": "whatsapp", "to": to, "type": "interactive",
         "interactive": {
             "type": "button",
@@ -1621,8 +1860,8 @@ async def _send_cta_url(
     phone_id: str, to: str, body_text: str,
     btn_label: str, btn_url: str,
     _tenant_id: Optional[int] = None, _db=None,
-) -> None:
-    await _post_wa(phone_id, {
+) -> bool:
+    return await _post_wa(phone_id, {
         "messaging_product": "whatsapp", "to": to, "type": "interactive",
         "interactive": {
             "type": "cta_url",
