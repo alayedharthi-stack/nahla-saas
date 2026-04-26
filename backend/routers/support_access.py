@@ -296,6 +296,105 @@ async def disable_support_access(
     }
 
 
+@router.post("/merchant/support-access/resolve")
+async def resolve_support_session(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Called by admin/support at the END of a support session.
+
+    Does everything /disable does PLUS:
+    1. Marks all active help-requests for this tenant as 'resolved'
+    2. Stores an in-app notification for the merchant ("تم حل طلبك ✅")
+    3. Audit-logs the full session duration
+    """
+    ip        = get_client_ip(request)
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+
+    now  = datetime.now(timezone.utc)
+    meta = dict(settings.extra_metadata or {})
+
+    # 1. Mark all pending/approved requests as resolved ─────────────────────
+    requests_list = list(meta.get("access_requests", []))
+    resolved_ids  = []
+    session_started_at: str | None = None
+
+    for r in requests_list:
+        if r.get("status") in ("pending", "approved"):
+            r["status"]      = "resolved"
+            r["resolved_at"] = now.isoformat()
+            r["resolved_by"] = user.get("sub")
+            resolved_ids.append(r.get("id"))
+            if not session_started_at:
+                session_started_at = r.get("requested_at")
+    meta["access_requests"] = requests_list
+
+    # 2. Disable support_access and bump session_version ────────────────────
+    sa      = dict(meta.get("support_access", {}))
+    old_ver = int(sa.get("session_version", 0))
+    new_ver = old_ver + 1
+    sa.update({
+        "enabled":         False,
+        "granted_at":      None,
+        "expires_at":      None,
+        "revoked_at":      now.isoformat(),
+        "revoked_by":      user.get("sub"),
+        "session_version": new_ver,
+    })
+    meta["support_access"] = sa
+
+    # 3. In-app notification for the merchant ────────────────────────────────
+    notifications = list(meta.get("notifications", []))
+    notifications.append({
+        "id":         f"resolved_{uuid.uuid4().hex[:8]}",
+        "type":       "support_resolved",
+        "read":       False,
+        "created_at": now.isoformat(),
+        "title":      "تم حل طلب المساعدة ✅",
+        "body":       "أنهى فريق نحلة جلسة الدعم بنجاح. شكراً لصبرك 🙏",
+        "action_url": "/settings?tab=support",
+    })
+    meta["notifications"] = notifications[-50:]
+
+    settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
+    db.commit()
+
+    # 4. Audit log ────────────────────────────────────────────────────────────
+    duration_sec = None
+    if session_started_at:
+        try:
+            started = datetime.fromisoformat(session_started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            duration_sec = int((now - started).total_seconds())
+        except Exception:
+            pass
+
+    _audit.info(
+        "SUPPORT_SESSION_RESOLVED tenant=%d by=%s resolved_reqs=%s duration_sec=%s ip=%s",
+        tenant_id, user.get("sub"), resolved_ids, duration_sec, ip,
+    )
+    _write_audit_log(db, tenant_id=tenant_id, action="support_session_resolved", details={
+        "by":             user.get("sub"),
+        "ip":             ip,
+        "resolved_reqs":  resolved_ids,
+        "duration_sec":   duration_sec,
+        "session_version_new": new_ver,
+    })
+
+    return {
+        "status":          "resolved",
+        "session_version": new_ver,
+        "resolved_reqs":   resolved_ids,
+        "duration_sec":    duration_sec,
+    }
+
+
 # ── Internal helpers: AuditLog, Notifications, Email ──────────────────────────
 
 def _write_audit_log(
@@ -1193,6 +1292,33 @@ async def merchant_get_my_help_request(
             "requested_at": r.get("requested_at"),
             "status":      "pending",
         }
+    # Also return the most recent resolved request (so UI can show "تمت المساعدة")
+    my_resolved = sorted(
+        [r for r in requests
+         if r.get("initiated_by") == "merchant" and r.get("status") == "resolved"],
+        key=lambda r: r.get("resolved_at", ""),
+        reverse=True,
+    )
+    if my_resolved:
+        r = my_resolved[0]
+        resolved_at = r.get("resolved_at", "")
+        # Only show "resolved" banner for the past 24 hours
+        try:
+            resolved_dt = datetime.fromisoformat(resolved_at)
+            if resolved_dt.tzinfo is None:
+                resolved_dt = resolved_dt.replace(tzinfo=timezone.utc)
+            age_h = (datetime.now(timezone.utc) - resolved_dt).total_seconds() / 3600
+            if age_h <= 24:
+                return {
+                    "has_pending":  False,
+                    "has_resolved": True,
+                    "request_id":   r.get("id"),
+                    "reason":       r.get("reason"),
+                    "resolved_at":  resolved_at,
+                    "status":       "resolved",
+                }
+        except Exception:
+            pass
     return {"has_pending": False}
 
 

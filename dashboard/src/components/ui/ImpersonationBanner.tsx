@@ -10,10 +10,10 @@ export default function ImpersonationBanner() {
   if (!info) return null
 
   const handleExit = async () => {
-    // Revoke support access in the backend so the merchant's warning banner
-    // disappears immediately — without this, enabled=true persists in the DB.
+    // Resolve the support session: marks request as "resolved", disables access,
+    // stores a thank-you notification for the merchant, and writes audit log.
     try {
-      await fetch(`${API_BASE}/merchant/support-access/disable`, {
+      await fetch(`${API_BASE}/merchant/support-access/resolve`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

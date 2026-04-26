@@ -978,7 +978,12 @@ function SupportHistoryPanel() {
 // ── Merchant Help Request Status (shows OWN pending request) ─────────────────
 
 function MerchantHelpStatus({ onCancel }: { onCancel?: () => void }) {
-  const [data, setData]         = useState<null | { has_pending: boolean; reason?: string; ttl_hours?: number; requested_at?: string }>(null)
+  const [data, setData]         = useState<null | {
+    has_pending?: boolean; has_resolved?: boolean
+    reason?: string; ttl_hours?: number
+    requested_at?: string; resolved_at?: string
+    status?: string
+  }>(null)
   const [loading, setLoading]   = useState(true)
   const [cancelling, setCancelling] = useState(false)
   const [cancelled, setCancelled]   = useState(false)
@@ -1020,6 +1025,29 @@ function MerchantHelpStatus({ onCancel }: { onCancel?: () => void }) {
       <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-500">
         <CheckCircle className="w-4 h-4 shrink-0" />
         تم إلغاء طلب المساعدة.
+      </div>
+    )
+  }
+
+  // ── Resolved: session ended by support team ──────────────────────────────
+  if (data?.has_resolved) {
+    return (
+      <div className="bg-green-50 border border-green-200 rounded-xl px-4 py-3" dir="rtl">
+        <div className="flex items-start gap-3">
+          <CheckCircle className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-green-800">تمت المساعدة بنجاح ✅</p>
+            <p className="text-xs text-green-600 mt-0.5 leading-relaxed">
+              أنهى فريق نحلة جلسة الدعم.
+              {data.reason && <> بخصوص: <span className="font-medium">{data.reason}</span></>}
+            </p>
+            {data.resolved_at && (
+              <p className="text-xs text-green-400 mt-1">
+                {new Intl.DateTimeFormat('ar-SA', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(data.resolved_at))}
+              </p>
+            )}
+          </div>
+        </div>
       </div>
     )
   }

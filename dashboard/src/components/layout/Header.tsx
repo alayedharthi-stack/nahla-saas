@@ -262,10 +262,10 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   }
 
   const handleStopImpersonation = async () => {
-    // Revoke support access in the backend so the merchant's warning banner
-    // disappears immediately on their next poll (or page refresh).
+    // Resolve the support session: marks request as "resolved", disables access,
+    // stores a thank-you notification for the merchant, and writes audit log.
     try {
-      await fetch(`${API_BASE}/merchant/support-access/disable`, {
+      await fetch(`${API_BASE}/merchant/support-access/resolve`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
