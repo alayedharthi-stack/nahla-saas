@@ -1025,6 +1025,38 @@ class GovernorSendLog(Base):
     )
 
 
+class NotificationLog(Base):
+    """
+    سجل بسيط لكل إشعار يُرسَل أو يُتجاهَل.
+
+    يُستخدم لـ:
+    1. منع إرسال إيميلات متكررة (spam throttle).
+    2. عرض سجل الإشعارات للتاجر في لوحة التحكم.
+    3. تشخيص سبب عدم إرسال إشعار.
+
+    Rules:
+    - type: 'email' | 'in_app' | 'sms'
+    - event: 'new_whatsapp_message' | 'returning_customer' | 'new_order' | 'support_request'
+    - status: 'sent' | 'skipped'
+    - reason: optional human-readable reason (Arabic) stored when status='skipped'
+    """
+    __tablename__ = 'notification_logs'
+    id          = Column(Integer, primary_key=True)
+    tenant_id   = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=True)
+    type        = Column(String(20), nullable=False)     # email | in_app
+    event       = Column(String(60), nullable=False)     # new_whatsapp_message | ...
+    status      = Column(String(10), nullable=False)     # sent | skipped
+    reason      = Column(String(255), nullable=True)     # Arabic reason for skip
+    details     = Column(JSONB, nullable=True)           # extra context (phone, preview, ...)
+    created_at  = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index('ix_notif_log_tenant_created', 'tenant_id', 'created_at'),
+        Index('ix_notif_log_tenant_cust_event', 'tenant_id', 'customer_id', 'event'),
+    )
+
+
 class PredictiveReorderEstimate(Base):
     """
     Predicted reorder date for a customer + product combination,

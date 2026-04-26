@@ -373,6 +373,148 @@ function NotificationsTab({
       </Section>
 
       <SaveBar onSave={onSave} saving={saving} saved={saved} error={saveError} />
+
+      {/* Notification Log Panel */}
+      <NotificationLogPanel />
+    </div>
+  )
+}
+
+// ── Notification Log Panel ────────────────────────────────────────────────────
+
+interface NotifLogEntry {
+  id: number
+  event: string
+  event_ar: string
+  type: string
+  status: string
+  status_ar: string
+  reason_ar: string
+  details: { phone?: string; preview?: string }
+  created_at: string
+}
+
+function NotificationLogPanel() {
+  const [logs, setLogs]       = useState<NotifLogEntry[]>([])
+  const [summary, setSummary] = useState<{ sent: number; skipped: number; total: number } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [open, setOpen]       = useState(false)
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true)
+      try {
+        const token = localStorage.getItem('nahla_token') ?? ''
+        const [logsRes, sumRes] = await Promise.all([
+          fetch(`${API_BASE}/merchant/notification-logs?limit=30&days=7`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(`${API_BASE}/merchant/notification-logs/summary?days=7`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ])
+        if (logsRes.ok) setLogs((await logsRes.json()).logs ?? [])
+        if (sumRes.ok)  setSummary(await sumRes.json())
+      } catch { /* ignore */ }
+      finally { setLoading(false) }
+    }
+    load()
+  }, [])
+
+  const fmt = (iso: string) => {
+    try {
+      return new Intl.DateTimeFormat('ar-SA', {
+        dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Riyadh',
+      }).format(new Date(iso))
+    } catch { return iso }
+  }
+
+  return (
+    <div className="card">
+      <div className="px-5 py-4 border-b border-slate-100">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">سجل إشعارات الإيميل</h2>
+            <p className="text-xs text-slate-400 mt-0.5">آخر 7 أيام — متى أُرسل الإيميل ومتى لم يُرسل ولماذا</p>
+          </div>
+          {!loading && summary && (
+            <div className="flex items-center gap-3 text-xs">
+              <span className="flex items-center gap-1 text-green-600 font-medium">
+                <CheckCircle className="w-3.5 h-3.5" />
+                {summary.sent} أُرسل
+              </span>
+              <span className="flex items-center gap-1 text-slate-400 font-medium">
+                <AlertCircle className="w-3.5 h-3.5" />
+                {summary.skipped} تجاوز
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="p-5">
+        {loading ? (
+          <div className="flex items-center gap-2 text-slate-400 text-sm">
+            <Loader2 className="w-4 h-4 animate-spin" /> جارٍ التحميل...
+          </div>
+        ) : logs.length === 0 ? (
+          <p className="text-sm text-slate-400 text-center py-4">
+            لا يوجد سجل إشعارات بعد — سيظهر هنا عند أول رسالة واتساب
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {/* Show first 5, toggle rest */}
+            {(open ? logs : logs.slice(0, 5)).map(log => (
+              <div
+                key={log.id}
+                className={`flex items-start gap-3 p-3 rounded-xl text-xs ${
+                  log.status === 'sent'
+                    ? 'bg-green-50 border border-green-100'
+                    : 'bg-slate-50 border border-slate-100'
+                }`}
+              >
+                <div className="shrink-0 mt-0.5">
+                  {log.status === 'sent'
+                    ? <CheckCircle className="w-3.5 h-3.5 text-green-500" />
+                    : <AlertCircle className="w-3.5 h-3.5 text-slate-400" />
+                  }
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2 mb-0.5">
+                    <span className={`font-semibold ${log.status === 'sent' ? 'text-green-700' : 'text-slate-600'}`}>
+                      {log.status_ar} — {log.event_ar}
+                    </span>
+                    <span className="text-slate-400 shrink-0">{fmt(log.created_at)}</span>
+                  </div>
+                  {log.status === 'skipped' && log.reason_ar && (
+                    <p className="text-slate-500">
+                      السبب: {log.reason_ar}
+                    </p>
+                  )}
+                  {log.details?.phone && (
+                    <p className="text-slate-400 mt-0.5 font-mono" dir="ltr">{log.details.phone}</p>
+                  )}
+                  {log.details?.preview && (
+                    <p className="text-slate-400 mt-0.5 truncate" style={{ maxWidth: '24ch' }}>
+                      "{log.details.preview}"
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {logs.length > 5 && (
+              <button
+                onClick={() => setOpen(o => !o)}
+                className="w-full text-xs text-slate-400 hover:text-slate-600 py-2 flex items-center justify-center gap-1"
+              >
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+                {open ? 'عرض أقل' : `عرض ${logs.length - 5} إشعار إضافي`}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

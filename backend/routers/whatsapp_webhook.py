@@ -119,6 +119,122 @@ def _reset_platform_tenant_cache() -> None:
     _PLATFORM_TENANT_CACHE["loaded"] = False
 
 
+# ── Smart notification helpers ────────────────────────────────────────────────
+
+def _should_notify_merchant_email(
+    *,
+    db,
+    tenant_id: int,
+    customer,
+    silence_hours: int = 24,
+) -> dict:
+    """
+    Decide whether to send a merchant email notification for an inbound message.
+
+    Rules (in order):
+    1. No customer record → skip (can't determine context)
+    2. Customer's first_seen_at ≈ now (< 5 min) → SEND (first message ever)
+    3. An email was sent for this customer in the last `silence_hours` → SKIP
+    4. Customer's last_interaction_at was > silence_hours ago → SEND (returning)
+    5. Otherwise → SKIP (active conversation, no need to spam)
+
+    Returns dict: {"send": bool, "reason": str, "reason_ar": str}
+    """
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+    from database.models import NotificationLog        # noqa: PLC0415
+
+    now = datetime.now(timezone.utc)
+
+    # ── 1. No lead ────────────────────────────────────────────────────────────
+    if customer is None:
+        return {"send": False, "reason": "no_customer", "reason_ar": "لا يوجد سجل عميل"}
+
+    # Helper to get tz-aware datetime
+    def _tz(dt):
+        if dt is None:
+            return None
+        if hasattr(dt, "tzinfo") and dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    first_seen   = _tz(getattr(customer, "first_seen_at", None))
+    last_contact = _tz(getattr(customer, "last_interaction_at", None))
+    customer_id  = getattr(customer, "id", None)
+
+    # ── 2. First message ever (first_seen_at < 5 minutes ago) ────────────────
+    if first_seen and (now - first_seen) < timedelta(minutes=5):
+        return {"send": True, "reason": "first_message",
+                "reason_ar": "أول رسالة من هذا العميل"}
+
+    # ── 3. Check if we already sent an email recently ─────────────────────────
+    cutoff = now - timedelta(hours=silence_hours)
+    try:
+        recent_notif = (
+            db.query(NotificationLog)
+            .filter(
+                NotificationLog.tenant_id  == tenant_id,
+                NotificationLog.customer_id == customer_id,
+                NotificationLog.event.in_(["new_whatsapp_message", "returning_customer"]),
+                NotificationLog.status     == "sent",
+                NotificationLog.created_at >= cutoff,
+            )
+            .first()
+        )
+        if recent_notif:
+            return {
+                "send":      False,
+                "reason":    "throttled",
+                "reason_ar": f"تم إرسال إشعار منذ أقل من {silence_hours} ساعة",
+            }
+    except Exception:
+        # DB error → fail-open (allow send) rather than silently skipping
+        pass
+
+    # ── 4. Customer returning after silence ───────────────────────────────────
+    if last_contact and (now - last_contact) > timedelta(hours=silence_hours):
+        return {"send": True, "reason": "returning_customer",
+                "reason_ar": f"العميل عاد بعد أكثر من {silence_hours} ساعة صمت"}
+
+    # ── 5. Active conversation — skip ─────────────────────────────────────────
+    return {
+        "send":      False,
+        "reason":    "active_conversation",
+        "reason_ar": "المحادثة نشطة — تم التواصل مؤخراً",
+    }
+
+
+def _log_notification(
+    *,
+    db,
+    tenant_id: int,
+    customer_id: Optional[int],
+    event: str,
+    status: str,
+    reason: str = "",
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write a NotificationLog row — non-fatal on any error."""
+    try:
+        from database.models import NotificationLog  # noqa: PLC0415
+        row = NotificationLog(
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            type="email",
+            event=event,
+            status=status,
+            reason=reason or None,
+            details=details or {},
+        )
+        db.add(row)
+        db.commit()
+    except Exception as exc:
+        logger.warning("[Webhook] notification_log write failed (non-fatal): %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _extract_contact_name(value: Dict[str, Any], sender: str) -> str:
     sender_digits = "".join(ch for ch in str(sender or "") if ch.isdigit())
     for contact in value.get("contacts", []) or []:
@@ -770,15 +886,20 @@ async def _dispatch_message(
                 # Skip automation / AI for unsubscribe-related events.
                 return
 
-            # ── Email: first WhatsApp message received by this tenant ─────────
-            # Only fires on the very first message (total_messages == 1 on lead)
+            # ── Email: smart notification (first message OR 24h silence) ────
+            # Fixed: old logic used total_messages which doesn't exist on Customer
+            # and fired on every single message. New logic:
+            #   1. Truly first message from this customer ever → send
+            #   2. Customer returns after 24h silence         → send
+            #   3. Anything else                              → skip + log
             try:
-                _is_first = (
-                    _lead is not None
-                    and getattr(_lead, "total_messages", None) in (None, 0, 1)
-                    and not getattr(_lead, "is_returning", False)
+                _notify_result = _should_notify_merchant_email(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    customer=_lead,
+                    silence_hours=24,
                 )
-                if _is_first:
+                if _notify_result["send"]:
                     from services.email_service import enqueue_email as _enq  # noqa: PLC0415
                     from database.models import User as _U                     # noqa: PLC0415
                     _mu = db.query(_U).filter(
@@ -788,9 +909,14 @@ async def _dispatch_message(
                         _msg_text = ""
                         if msg_type == "text":
                             _msg_text = (msg.get("text") or {}).get("body", "")
+                        _is_new   = _notify_result["reason"] == "first_message"
                         _enq(
                             to=_mu.email,
-                            subject="🎉 أول رسالة واتساب وصلت لمتجرك!",
+                            subject=(
+                                "🎉 أول رسالة واتساب وصلت لمتجرك!"
+                                if _is_new else
+                                "💬 عميل عاد ليتواصل معك على واتساب"
+                            ),
                             template="first_whatsapp_message",
                             sender_type="growth",
                             variables={
@@ -801,8 +927,24 @@ async def _dispatch_message(
                                 "conversation_url": f"{__import__('core.config', fromlist=['DASHBOARD_URL']).DASHBOARD_URL}/conversations",
                             },
                         )
+                        _log_notification(
+                            db=db, tenant_id=resolved_tenant_id,
+                            customer_id=getattr(_lead, "id", None),
+                            event="returning_customer" if not _is_new else "new_whatsapp_message",
+                            status="sent",
+                            details={"phone": normalized_sender, "preview": _msg_text[:80]},
+                        )
+                else:
+                    _log_notification(
+                        db=db, tenant_id=resolved_tenant_id,
+                        customer_id=getattr(_lead, "id", None),
+                        event="new_whatsapp_message",
+                        status="skipped",
+                        reason=_notify_result.get("reason_ar", ""),
+                        details={"phone": normalized_sender},
+                    )
             except Exception as _em:
-                logger.debug("[Webhook] first-message email error: %s", _em)
+                logger.debug("[Webhook] smart-notify email error: %s", _em)
 
             track_conversation(
                 db,

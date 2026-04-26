@@ -135,6 +135,7 @@ from routers.store_sync        import router as _store_sync_router        # noqa
 from routers.zid_oauth         import router as _zid_oauth_router         # noqa: E402
 from routers.integrations      import router as _integrations_router       # noqa: E402
 from routers.support_access    import router as _support_access_router     # noqa: E402
+from routers.notification_logs import router as _notification_logs_router  # noqa: E402
 from routers.addons            import router as _addons_router               # noqa: E402
 from routers.widgets           import router as _widgets_router              # noqa: E402
 from routers.product_interests import router as _product_interests_router    # noqa: E402
@@ -177,6 +178,7 @@ app.include_router(_store_sync_router)
 app.include_router(_zid_oauth_router)
 app.include_router(_integrations_router)
 app.include_router(_support_access_router)
+app.include_router(_notification_logs_router)
 app.include_router(_addons_router)
 app.include_router(_widgets_router)
 app.include_router(_product_interests_router)
