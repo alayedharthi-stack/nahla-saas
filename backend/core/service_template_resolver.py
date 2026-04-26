@@ -180,6 +180,18 @@ _SERVICE_NAME_PATTERNS: Dict[str, List[str]] = {
         "shipping", "shipment", "tracking", "delivery",
         "شحن", "تتبع", "توصيل",
     ],
+    "back_in_stock": [
+        "back_in_stock", "backinstock", "restock", "in_stock_again",
+        "متوفر", "عاد", "عودة", "مخزون",
+    ],
+    "seasonal_offers": [
+        "seasonal", "season", "occasion", "holiday",
+        "موسم", "مناسبة", "موسمي", "عيد", "وطني",
+    ],
+    "salary_payday_offers": [
+        "payday", "salary", "monthly_offer",
+        "راتب", "رواتب", "شهري",
+    ],
 }
 
 

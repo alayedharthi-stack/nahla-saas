@@ -116,6 +116,24 @@ SERVICE_CATALOG: Dict[str, Dict[str, str]] = {
         "icon":           "👑",
         "color":          "purple",
     },
+    "back_in_stock": {
+        "name_ar":        "إشعار عودة المنتج للمخزون",
+        "description_ar": "إشعار العملاء المهتمين عند عودة منتج كان نافداً إلى المخزون",
+        "icon":           "📦",
+        "color":          "indigo",
+    },
+    "seasonal_offers": {
+        "name_ar":        "عروض المناسبات الموسمية",
+        "description_ar": "عروض ترويجية لمناسبات السنة (اليوم الوطني، رمضان، العيد، الجمعة البيضاء...)",
+        "icon":           "🎊",
+        "color":          "pink",
+    },
+    "salary_payday_offers": {
+        "name_ar":        "عروض يوم الراتب",
+        "description_ar": "عرض شهري في يوم الراتب لزيادة المبيعات في موسم القوة الشرائية",
+        "icon":           "💵",
+        "color":          "emerald",
+    },
 }
 
 
@@ -1010,7 +1028,126 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # 23. متابعة خدمة العملاء — SUPPORT FOLLOWUP
+    # 23. عودة المنتج للمخزون — BACK IN STOCK ALERT
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "back_in_stock_alert",
+        "service_key":    "back_in_stock",
+        "name_ar":        "إشعار عودة المنتج للمخزون",
+        "description_ar": "تُرسل تلقائياً للعملاء الذين سجّلوا اهتماماً بمنتج نافد عند توفره في المخزون من جديد",
+        "category":       "MARKETING",
+        "filter_tags":    ["marketing", "orders"],
+        "smart_trigger":  "product_back_in_stock",
+        "smart_label":    "يُرسل تلقائياً: عند توفر منتج كان نافداً",
+        "body_slots":   ["customer_name", "product_name"],
+        "button_slots": ["product_url"],
+        "slots":          ["customer_name", "product_name", "product_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "بشرى لك يا {{1}} 🎉\n\n"
+                    "{{2}} الذي كنت مهتماً به متوفر الآن في المخزون!\n\n"
+                    "اطلبه قبل ما يخلص مرة ثانية:"
+                ),
+                "example": {"body_text": [["نوره", "حقيبة الجلد البنية"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "اطلب الآن",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/products/leather-bag-789"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 24. عرض موسمي بمناسبة — SEASONAL OFFER  ← COPY_CODE + URL
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "seasonal_offer_template",
+        "service_key":    "seasonal_offers",
+        "name_ar":        "عرض موسمي بمناسبة",
+        "description_ar": "عرض ترويجي لمناسبات السنة (اليوم الوطني، رمضان، العيد، الجمعة البيضاء...) مع كود خصم قابل للنسخ",
+        "category":       "MARKETING",
+        "filter_tags":    ["marketing", "discounts"],
+        "smart_trigger":  "seasonal_event_due",
+        "smart_label":    "يُرسل تلقائياً: قبل المناسبات الموسمية",
+        "body_slots":   ["customer_name", "occasion_name", "discount_pct"],
+        "button_slots": ["coupon_code", "store_url"],
+        "slots":          ["customer_name", "occasion_name", "discount_pct", "coupon_code", "store_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "مرحباً {{1}} 🎊\n\n"
+                    "بمناسبة {{2}} جهّزنا لك خصم {{3}}% حصري!\n\n"
+                    "انسخ الكود واستمتع بالعرض قبل انتهائه:"
+                ),
+                "example": {"body_text": [["ريم", "اليوم الوطني السعودي", "20"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {"type": "COPY_CODE", "example": ["KSA20"]},
+                    {
+                        "type": "URL", "text": "تسوّق العرض",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/seasonal"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 25. عرض يوم الراتب — SALARY PAYDAY OFFER  ← COPY_CODE + URL
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "salary_payday_offer_template",
+        "service_key":    "salary_payday_offers",
+        "name_ar":        "عرض يوم الراتب",
+        "description_ar": "عرض شهري يُرسل قبيل يوم الراتب لاستثمار موسم القوة الشرائية مع كود خصم قابل للنسخ",
+        "category":       "MARKETING",
+        "filter_tags":    ["marketing", "discounts"],
+        "smart_trigger":  "salary_payday_due",
+        "smart_label":    "يُرسل تلقائياً: قبيل يوم الراتب الشهري",
+        "body_slots":   ["customer_name", "discount_pct"],
+        "button_slots": ["coupon_code", "store_url"],
+        "slots":          ["customer_name", "discount_pct", "coupon_code", "store_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "مرحباً {{1}} 💵\n\n"
+                    "وصل الراتب وعندنا لك خصم {{2}}% للاحتفال!\n\n"
+                    "انسخ الكود وتسوّق ما تحتاجه قبل انتهاء العرض:"
+                ),
+                "example": {"body_text": [["محمد", "10"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {"type": "COPY_CODE", "example": ["PAYDAY10"]},
+                    {
+                        "type": "URL", "text": "تسوّق الآن",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/payday"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 26. متابعة خدمة العملاء — SUPPORT FOLLOWUP
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "support_followup",

@@ -1200,6 +1200,8 @@ async def all_automations_readiness(request: Request, db: Session = Depends(get_
             {
                 "label": "قالب عودة المخزون",
                 "legacy_names": ["back_in_stock_ar", "back_in_stock_en"],
+                "library_keys": ["back_in_stock_alert"],
+                "service_key":  "back_in_stock",
             },
         ],
         "unpaid_order_reminder": [
@@ -1222,12 +1224,16 @@ async def all_automations_readiness(request: Request, db: Session = Depends(get_
             {
                 "label": "قالب العروض الموسمية",
                 "legacy_names": ["seasonal_offer_ar", "seasonal_offer_en"],
+                "library_keys": ["seasonal_offer_template"],
+                "service_key":  "seasonal_offers",
             },
         ],
         "salary_payday_offer": [
             {
                 "label": "قالب عرض الراتب",
                 "legacy_names": ["salary_payday_offer_ar", "salary_payday_offer_en"],
+                "library_keys": ["salary_payday_offer_template"],
+                "service_key":  "salary_payday_offers",
             },
         ],
     }
