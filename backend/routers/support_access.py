@@ -453,54 +453,59 @@ def _notify_admin_of_help_request(
     """
     Notify the Nahla admin team when a merchant submits a help request.
 
-    Two channels:
-    1. Email to ADMIN_EMAIL (configured in Railway env) — the Nahla support inbox.
-    2. Email to all admin/platform_owner users found in DB.
-    3. In-app notification stored in the merchant's TenantSettings.notifications
-       so it shows up when the admin opens that merchant's panel.
+    Uses a direct synchronous httpx call to Resend — no asyncio complexity,
+    no missing templates. Non-fatal: any failure is logged but not raised.
+
+    Channels:
+    1. Email via Resend directly (raw HTML) to ADMIN_EMAIL + admin DB users.
+    2. In-app notification stored in merchant's TenantSettings.notifications.
     """
+    import httpx  # noqa: PLC0415
+    from core.config import ADMIN_EMAIL, DASHBOARD_URL, RESEND_API_KEY  # noqa: PLC0415
+
+    # ── resolve tenant name ───────────────────────────────────────────────────
     try:
-        from core.config import ADMIN_EMAIL, DASHBOARD_URL  # noqa: PLC0415
-        from models import User  # noqa: PLC0415
+        from models import Tenant, User  # noqa: PLC0415
+        tenant      = db.query(Tenant).filter_by(id=tenant_id).first()
+        tenant_name = (tenant.name if tenant else None) or f"tenant#{tenant_id}"
+    except Exception:
+        tenant_name = f"tenant#{tenant_id}"
+        User        = None  # type: ignore[assignment]
 
-        # ── collect admin emails ──────────────────────────────────────────────
-        admin_emails: list[str] = []
-        if ADMIN_EMAIL:
-            admin_emails.append(ADMIN_EMAIL)
-
-        # also find all DB users with admin / platform_owner role
-        try:
-            admin_users = db.query(User).filter(
-                User.role.in_(["admin", "platform_owner"])
-            ).all()
-            for au in admin_users:
+    # ── collect admin emails ──────────────────────────────────────────────────
+    admin_emails: list[str] = []
+    if ADMIN_EMAIL:
+        admin_emails.append(ADMIN_EMAIL)
+    try:
+        if User is not None:
+            for au in db.query(User).filter(User.role.in_(["admin", "platform_owner"])).all():
                 if au.email and au.email not in admin_emails:
                     admin_emails.append(au.email)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
-        # ── get merchant tenant name for context ──────────────────────────────
-        try:
-            from models import Tenant  # noqa: PLC0415
-            tenant = db.query(Tenant).filter_by(id=tenant_id).first()
-            tenant_name = tenant.name if tenant else f"tenant#{tenant_id}"
-        except Exception:
-            tenant_name = f"tenant#{tenant_id}"
+    if not admin_emails:
+        logger.warning("[SupportAccess] no admin email configured — set ADMIN_EMAIL in Railway env")
 
-        # ── build admin notification email (raw HTML, sent to support inbox) ──
-        admin_panel_url = f"{DASHBOARD_URL}/admin/merchants"
-        html = f"""
-        <div dir="rtl" style="font-family:Arial,sans-serif;max-width:600px;margin:auto;
-                              padding:24px;background:#fff;border-radius:12px;border:1px solid #e2e8f0;">
-          <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:16px;margin-bottom:20px;">
-            <h2 style="margin:0 0 8px;color:#1e40af;font-size:18px;">🆘 طلب مساعدة من تاجر</h2>
-            <p style="margin:0;color:#1e3a8a;font-size:13px;">
-              تاجر يحتاج دعم — يمكنك فتح لوحته مباشرة.
-            </p>
-          </div>
-          <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+    # ── build raw HTML email ──────────────────────────────────────────────────
+    admin_panel_url = f"{DASHBOARD_URL}/admin/merchants"
+    html = f"""<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<body style="margin:0;padding:20px;background:#f5f5f7;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0">
+  <tr><td align="center">
+    <table width="600" style="background:#fff;border-radius:12px;border:1px solid #e2e8f0;overflow:hidden;">
+      <tr>
+        <td style="background:#1e40af;padding:20px 28px;">
+          <h1 style="margin:0;color:#fff;font-size:20px;">🆘 طلب مساعدة من تاجر</h1>
+          <p style="margin:6px 0 0;color:#bfdbfe;font-size:13px;">تاجر يحتاج دعم من فريق نحلة</p>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:24px 28px;">
+          <table width="100%" style="border-collapse:collapse;">
             <tr style="border-bottom:1px solid #f1f5f9;">
-              <td style="padding:10px 0;color:#64748b;font-size:13px;width:40%;">المتجر</td>
+              <td style="padding:10px 0;color:#64748b;font-size:13px;width:35%;">المتجر</td>
               <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{tenant_name}</td>
             </tr>
             <tr style="border-bottom:1px solid #f1f5f9;">
@@ -508,7 +513,7 @@ def _notify_admin_of_help_request(
               <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{merchant_sub}</td>
             </tr>
             <tr style="border-bottom:1px solid #f1f5f9;">
-              <td style="padding:10px 0;color:#64748b;font-size:13px;">وصف المشكلة</td>
+              <td style="padding:10px 0;color:#64748b;font-size:13px;">المشكلة</td>
               <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{reason}</td>
             </tr>
             <tr>
@@ -516,63 +521,59 @@ def _notify_admin_of_help_request(
               <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{ttl_hours} ساعة</td>
             </tr>
           </table>
-          <div style="text-align:center;margin-bottom:16px;">
+          <div style="text-align:center;margin-top:24px;">
             <a href="{admin_panel_url}"
-               style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;
-                      border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px;">
+               style="background:#2563eb;color:#fff;padding:12px 28px;border-radius:8px;
+                      text-decoration:none;font-weight:bold;font-size:14px;display:inline-block;">
               🔑 فتح لوحة المتاجر
             </a>
           </div>
-          <p style="text-align:center;color:#94a3b8;font-size:11px;margin:0;">
+          <p style="text-align:center;color:#94a3b8;font-size:11px;margin-top:16px;">
             رقم الطلب: {req_id} — tenant_id: {tenant_id}
           </p>
-        </div>
-        """
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>"""
 
-        # send to all admin emails
+    # ── send via Resend (sync httpx — no asyncio needed) ─────────────────────
+    if RESEND_API_KEY:
+        from_addr = "نحلة <support@nahlah.ai>"
         for email_addr in admin_emails:
             try:
-                import asyncio  # noqa: PLC0415
-                from services.email_service import send_email  # noqa: PLC0415
-
-                async def _send():
-                    await send_email(
-                        to=email_addr,
-                        subject=f"[نحلة دعم] طلب مساعدة من {tenant_name}: {reason[:60]}",
-                        template="support_help_request_admin",
-                        variables={
-                            "tenant_name":    tenant_name,
-                            "tenant_id":      str(tenant_id),
-                            "merchant_sub":   merchant_sub,
-                            "reason":         reason,
-                            "ttl_hours":      str(ttl_hours),
-                            "req_id":         req_id,
-                            "admin_panel_url": admin_panel_url,
-                        },
+                resp = httpx.post(
+                    "https://api.resend.com/emails",
+                    headers={
+                        "Authorization": f"Bearer {RESEND_API_KEY}",
+                        "Content-Type":  "application/json",
+                    },
+                    json={
+                        "from":    from_addr,
+                        "to":      [email_addr],
+                        "subject": f"[نحلة دعم] 🆘 {tenant_name} يطلب مساعدة: {reason[:60]}",
+                        "html":    html,
+                    },
+                    timeout=10.0,
+                )
+                if resp.status_code in (200, 201):
+                    _audit.info(
+                        "ADMIN_HELP_EMAIL_SENT to=%s tenant=%d req_id=%s",
+                        email_addr, tenant_id, req_id,
                     )
-
-                # Fire-and-forget: fall back to raw HTML if template missing
-                async def _send_raw():
-                    await send_email(   # type: ignore[arg-type]
-                        to=email_addr,
-                        subject=f"[نحلة دعم] طلب مساعدة من {tenant_name}: {reason[:60]}",
-                        template="_raw_html_stub",
+                else:
+                    logger.warning(
+                        "[SupportAccess] Resend rejected admin email: status=%d body=%s",
+                        resp.status_code, resp.text[:200],
                     )
-
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.create_task(_send())
-                    else:
-                        loop.run_until_complete(_send())
-                except RuntimeError:
-                    asyncio.run(_send())
-
             except Exception as email_exc:
                 logger.warning("[SupportAccess] admin email failed for %s: %s", email_addr, email_exc)
+    else:
+        logger.warning("[SupportAccess] RESEND_API_KEY not set — skipping admin email notification")
 
-        # ── in-app: store in merchant notifications (visible to admin) ────────
-        # We store it with type "merchant_help_request" so admin can filter it
+    # ── in-app notification for admin visibility ──────────────────────────────
+    try:
         _store_notification(
             db        = db,
             tenant_id = tenant_id,
@@ -582,14 +583,13 @@ def _notify_admin_of_help_request(
             ttl_hours = ttl_hours,
             ntype     = "merchant_help_request",
         )
+    except Exception as notif_exc:
+        logger.warning("[SupportAccess] store_notification failed (non-fatal): %s", notif_exc)
 
-        _audit.info(
-            "ADMIN_NOTIFIED_OF_HELP_REQUEST tenant=%d req_id=%s admin_emails=%s",
-            tenant_id, req_id, admin_emails,
-        )
-
-    except Exception as exc:
-        logger.warning("[SupportAccess] _notify_admin_of_help_request failed (non-fatal): %s", exc)
+    _audit.info(
+        "ADMIN_NOTIFIED_OF_HELP_REQUEST tenant=%d req_id=%s emails=%s",
+        tenant_id, req_id, admin_emails,
+    )
 
 
 # ── Admin routes ────────────────────────────────────────────────────────────────
