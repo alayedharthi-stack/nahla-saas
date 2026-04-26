@@ -497,14 +497,14 @@ export default function Landing() {
       ══════════════════════════════════════════════════════════ */}
       <section
         ref={heroRef}
-        className="relative min-h-[100svh] flex items-start sm:items-center justify-center overflow-hidden bg-gradient-to-br from-slate-900 via-[#0f1d2e] to-slate-900 pt-24 sm:pt-16"
+        className="landing-hero relative min-h-[100svh] flex sm:items-center justify-center overflow-hidden bg-gradient-to-br from-slate-900 via-[#0f1d2e] to-slate-900 sm:pt-16"
       >
         <HoneycombBg />
         {/* Glow */}
         <div className="absolute top-1/3 right-1/4 w-[500px] h-[500px] bg-amber-500/8 rounded-full blur-[100px] pointer-events-none" />
         <div className="absolute bottom-1/4 left-1/4 w-96 h-96 bg-blue-600/5 rounded-full blur-[80px] pointer-events-none" />
 
-        <div className="relative z-10 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center py-20">
+        <div className="landing-hero-content relative z-10 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center sm:py-20">
 
           {/* Urgency badge */}
           <div className="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/25 rounded-full px-4 py-2 mb-8">

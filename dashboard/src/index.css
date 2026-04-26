@@ -35,6 +35,26 @@
 }
 
 /*
+ * ── Landing page hero: precise mobile top clearance ─────────────────────────
+ * The fixed nav height = pt-safe-nav + h-16 content.
+ * On notched iPhones (safe-area ~47px): nav ≈ 37+64 = 101px.
+ * We add a small gap (8px) so the badge has breathing room.
+ *
+ * The inner content div normally has py-20 (80px top) — we zero that on mobile
+ * since the section pt already provides the nav clearance.
+ */
+@media (max-width: 639px) {
+  .landing-hero {
+    padding-top: max(76px, calc(env(safe-area-inset-top, 0px) + 54px)) !important;
+    align-items: flex-start !important;
+  }
+  .landing-hero-content {
+    padding-top: 8px !important;
+    padding-bottom: 2.5rem;
+  }
+}
+
+/*
  * ── Public-page top buttons (44 × 44 px tap target, iPhone-safe) ────────────
  * Applied to every link/button near the top of auth and landing pages so they
  * are always reachable on notched iPhones.  Does not affect layout visually
