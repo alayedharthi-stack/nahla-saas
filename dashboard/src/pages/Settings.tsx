@@ -978,8 +978,10 @@ function SupportHistoryPanel() {
 // ── Merchant Help Request Status (shows OWN pending request) ─────────────────
 
 function MerchantHelpStatus({ onCancel }: { onCancel?: () => void }) {
-  const [data, setData]     = useState<null | { has_pending: boolean; reason?: string; ttl_hours?: number; requested_at?: string }>(null)
-  const [loading, setLoading] = useState(true)
+  const [data, setData]         = useState<null | { has_pending: boolean; reason?: string; ttl_hours?: number; requested_at?: string }>(null)
+  const [loading, setLoading]   = useState(true)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelled, setCancelled]   = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -993,22 +995,60 @@ function MerchantHelpStatus({ onCancel }: { onCancel?: () => void }) {
 
   useEffect(() => { load() }, [load])
 
-  if (loading || !data?.has_pending) return null
+  const handleCancel = async () => {
+    if (!window.confirm('هل تريد إلغاء طلب المساعدة؟ يمكنك إرسال طلب جديد في أي وقت.')) return
+    setCancelling(true)
+    try {
+      const res = await fetch(`${API_BASE}/merchant/my-help-request`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) {
+        setCancelled(true)
+        setData(null)
+        onCancel?.()
+        setTimeout(() => setCancelled(false), 4000)
+      }
+    } catch { /* ignore */ }
+    finally { setCancelling(false) }
+  }
+
+  if (loading) return null
+
+  if (cancelled) {
+    return (
+      <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-500">
+        <CheckCircle className="w-4 h-4 shrink-0" />
+        تم إلغاء طلب المساعدة.
+      </div>
+    )
+  }
+
+  if (!data?.has_pending) return null
 
   return (
-    <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3" dir="rtl">
-      <Clock className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold text-blue-800">طلبك وصل لفريق نحلة ✓</p>
-        <p className="text-xs text-blue-600 mt-0.5 leading-relaxed">
-          {data.reason && <span className="block truncate">{data.reason}</span>}
-          سيتواصل معك الفريق قريباً — لا تحتاج لأي إجراء إضافي.
-        </p>
-        {data.requested_at && (
-          <p className="text-xs text-blue-400 mt-1">
-            {new Intl.DateTimeFormat('ar-SA', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(data.requested_at))}
+    <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3" dir="rtl">
+      <div className="flex items-start gap-3">
+        <Clock className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-blue-800">طلبك وصل لفريق نحلة ✓</p>
+          <p className="text-xs text-blue-600 mt-0.5 leading-relaxed">
+            {data.reason && <span className="block">{data.reason}</span>}
+            سيتواصل معك الفريق قريباً — لا تحتاج لأي إجراء إضافي.
           </p>
-        )}
+          {data.requested_at && (
+            <p className="text-xs text-blue-400 mt-1">
+              {new Intl.DateTimeFormat('ar-SA', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(data.requested_at))}
+            </p>
+          )}
+        </div>
+        <button
+          onClick={handleCancel}
+          disabled={cancelling}
+          className="shrink-0 text-xs text-red-500 hover:text-red-700 hover:underline disabled:opacity-50 mt-0.5"
+        >
+          {cancelling ? 'جارٍ الإلغاء…' : 'إلغاء الطلب'}
+        </button>
       </div>
     </div>
   )
@@ -1066,8 +1106,8 @@ function SupportTab() {
           </div>
         )}
 
-        {/* Status of merchant's own pending request */}
-        <MerchantHelpStatus />
+        {/* Status of merchant's own pending request (with cancel button) */}
+        <MerchantHelpStatus onCancel={() => { setMerchantPending(false); checkMyPending() }} />
 
         <button
           onClick={() => setShowModal(true)}

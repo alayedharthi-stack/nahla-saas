@@ -1178,6 +1178,55 @@ async def merchant_get_my_help_request(
     return {"has_pending": False}
 
 
+@router.delete("/merchant/my-help-request")
+async def merchant_cancel_help_request(
+    request: Request,
+    db:      Session         = Depends(get_db),
+    user:    Dict[str, Any]  = Depends(get_current_user),
+):
+    """
+    Cancel the merchant's own pending help request.
+    Works even on requests created before the fix (no initiated_by field needed —
+    we match all pending requests where requested_by == current user sub).
+    """
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+    requests  = _get_requests(settings)
+    caller_sub = user.get("sub", "")
+
+    cancelled = []
+    updated = []
+    for r in requests:
+        is_mine = (
+            r.get("initiated_by") == "merchant"
+            or r.get("requested_by") == caller_sub
+        )
+        if is_mine and r.get("status") == "pending":
+            r = dict(r)
+            r["status"]       = "cancelled"
+            r["cancelled_at"] = datetime.now(timezone.utc).isoformat()
+            cancelled.append(r["id"])
+            updated.append(r)
+        else:
+            updated.append(r)
+
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="لا يوجد طلب مساعدة معلّق لإلغائه.")
+
+    _put_requests(db, settings, updated)
+
+    _write_audit_log(db, tenant_id=tenant_id, action="merchant_help_cancelled",
+                     details={"cancelled_ids": cancelled, "sub": caller_sub})
+
+    _audit.info(
+        "MERCHANT_HELP_CANCELLED tenant=%d sub=%s ids=%s",
+        tenant_id, caller_sub, cancelled,
+    )
+
+    return {"cancelled": True, "cancelled_ids": cancelled}
+
+
 @router.get("/merchant/support-history")
 async def merchant_support_history(
     request: Request,
@@ -1205,18 +1254,28 @@ async def admin_list_help_requests(
     """
     from models import Tenant, TenantSettings  # noqa: PLC0415
 
+    from models import User  # noqa: PLC0415
+
     rows = db.query(TenantSettings).all()
     pending_requests = []
     for s in rows:
         meta = dict(s.extra_metadata or {})
         reqs = meta.get("access_requests", [])
         for r in reqs:
-            if r.get("status") == "pending":
+            # Show merchant-initiated help requests (and cancelled=False)
+            if r.get("status") == "pending" and r.get("initiated_by") == "merchant":
                 tenant = db.query(Tenant).filter_by(id=s.tenant_id).first()
+                # Try to find merchant email
+                merchant_user = db.query(User).filter_by(
+                    tenant_id=s.tenant_id, role="merchant"
+                ).first()
                 pending_requests.append({
                     **r,
+                    "req_id":      r.get("id"),           # alias for frontend
                     "tenant_id":   s.tenant_id,
+                    "store_name":  (tenant.name if tenant else None) or r.get("requested_by", "—"),
                     "tenant_name": tenant.name if tenant else "—",
+                    "email":       merchant_user.email if merchant_user else r.get("requested_by", ""),
                 })
 
     pending_requests.sort(key=lambda r: r.get("requested_at", ""), reverse=True)
