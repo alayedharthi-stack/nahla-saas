@@ -7,7 +7,7 @@ import {
   Eye, EyeOff, RefreshCw, UserPlus, Shield, ShieldOff, ToggleLeft, ToggleRight,
   Sparkles, BrainCircuit, ShieldCheck, Code2, ChevronRight,
   HeadphonesIcon, Send, Clock, X, ChevronDown, History,
-  AlertTriangle, Wifi, Zap, Package, Settings,
+  AlertTriangle, Wifi, Zap, Package,
 } from 'lucide-react'
 import { useLanguage } from '../i18n/context'
 import { settingsApi, type AllSettings, type NotificationSettings } from '../api/settings'
