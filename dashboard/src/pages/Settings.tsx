@@ -1057,9 +1057,15 @@ function MerchantHelpStatus({ onCancel }: { onCancel?: () => void }) {
 // ── Full Support Tab ───────────────────────────────────────────────────────────
 
 function SupportTab() {
-  const [showModal, setShowModal]   = useState(false)
-  const [sent, setSent]             = useState(false)
+  const [showModal, setShowModal]         = useState(false)
+  const [sent, setSent]                   = useState(false)
   const [hasMerchantPending, setMerchantPending] = useState(false)
+  // Incrementing this forces MerchantHelpStatus to remount + re-fetch immediately
+  const [helpStatusKey, setHelpStatusKey] = useState(0)
+
+  const refreshHelpStatus = useCallback(() => {
+    setHelpStatusKey(k => k + 1)
+  }, [])
 
   // Check if merchant already has a pending help request (their own)
   const checkMyPending = useCallback(async () => {
@@ -1080,6 +1086,7 @@ function SupportTab() {
     setShowModal(false)
     setSent(true)
     setMerchantPending(true)
+    refreshHelpStatus()           // ← force MerchantHelpStatus to re-fetch immediately
     setTimeout(() => setSent(false), 6000)
   }
 
@@ -1107,7 +1114,13 @@ function SupportTab() {
         )}
 
         {/* Status of merchant's own pending request (with cancel button) */}
-        <MerchantHelpStatus onCancel={() => { setMerchantPending(false); checkMyPending() }} />
+        <MerchantHelpStatus
+          key={helpStatusKey}
+          onCancel={() => {
+            setMerchantPending(false)
+            refreshHelpStatus()   // re-fetch after cancel to confirm empty state
+          }}
+        />
 
         <button
           onClick={() => setShowModal(true)}
