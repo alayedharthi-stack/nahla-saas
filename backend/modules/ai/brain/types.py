@@ -72,6 +72,10 @@ class OrderPreparationState:
     address_line: str = ""
     resolution_source: str = ""
     missing_fields: List[str] = field(default_factory=list)
+    # Tracks which product this prep belongs to (used to detect product change)
+    product_id: str = ""
+    # Set to True when a Salla order creation attempt failed with this data
+    last_order_failed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -93,6 +97,8 @@ class OrderPreparationState:
             "address_line": self.address_line,
             "resolution_source": self.resolution_source,
             "missing_fields": list(self.missing_fields or []),
+            "product_id": self.product_id,
+            "last_order_failed": self.last_order_failed,
         }
 
     @staticmethod
@@ -121,6 +127,8 @@ class OrderPreparationState:
                 for item in (raw.get("missing_fields") or [])
                 if str(item).strip()
             ],
+            product_id=str(raw.get("product_id", "") or ""),
+            last_order_failed=bool(raw.get("last_order_failed", False)),
         )
 
 

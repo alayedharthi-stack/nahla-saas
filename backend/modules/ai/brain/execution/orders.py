@@ -50,7 +50,40 @@ class DraftOrderHandler:
                 data={"message": "no_product_selected"},
             )
 
-        prep = OrderPreparationState.from_dict((ctx.state.order_prep or OrderPreparationState()).to_dict())
+        # Load prep from state but reset address when:
+        #   a) product has changed (avoid using an address from a different product's flow)
+        #   b) previous order creation failed (address might have been invalid)
+        prev_prep = ctx.state.order_prep or OrderPreparationState()
+        prep = OrderPreparationState.from_dict(prev_prep.to_dict())
+
+        current_product_id = str(product_info.get("external_id") or product_info.get("id") or "")
+        previous_product_id = str(getattr(prev_prep, "product_id", "") or "")
+        product_changed = bool(current_product_id and previous_product_id and current_product_id != previous_product_id)
+        previous_failed = bool(getattr(prev_prep, "last_order_failed", False))
+
+        if product_changed or previous_failed:
+            logger.info(
+                "[DraftOrderHandler] Resetting address fields | "
+                "tenant=%s product_changed=%s previous_failed=%s",
+                ctx.tenant_id, product_changed, previous_failed,
+            )
+            # Keep name (already known from profile/previous answer) but clear address
+            prep.short_address_code = ""
+            prep.google_maps_url = ""
+            prep.latitude = None
+            prep.longitude = None
+            prep.street = ""
+            prep.district = ""
+            prep.postal_code = ""
+            prep.building_number = ""
+            prep.additional_number = ""
+            prep.address_line = ""
+            prep.resolution_source = ""
+            prep.last_order_failed = False
+
+        # Track which product this prep belongs to
+        prep.product_id = current_product_id
+
         _seed_checkout_state(prep, ctx)
         _merge_message_details(prep, ctx.intent.slots, ctx.message)
         await _resolve_checkout_address(prep)
@@ -156,7 +189,7 @@ class DraftOrderHandler:
                 },
             )
 
-        # No adapter / adapter failed — record intent for follow-up
+        # Order creation failed — decide between re-collecting address or dead-end
         logger.error(
             "[ORDER FLOW] Order creation FAILED ✗ | tenant=%s product=%s "
             "error=%s ok=%s name=%r city=%r short_code=%r",
@@ -168,6 +201,46 @@ class DraftOrderHandler:
             prep.city,
             prep.short_address_code,
         )
+
+        # If we have name + city (data was collected) but Salla failed,
+        # the most likely cause is a bad/missing address. Mark it failed and
+        # re-collect the address instead of dead-ending with intent_only.
+        if prep.customer_first_name and prep.city:
+            prep.last_order_failed = True
+            # Clear address so next turn starts address collection fresh
+            prep.short_address_code = ""
+            prep.google_maps_url = ""
+            prep.latitude = None
+            prep.longitude = None
+            prep.street = ""
+            prep.district = ""
+            prep.postal_code = ""
+            prep.building_number = ""
+            prep.additional_number = ""
+            prep.address_line = ""
+            prep.missing_fields = ["address_location"]
+            error_msg = runtime_result.error or "unknown"
+            question = (
+                "واجهنا مشكلة تقنية في إنشاء الطلب 🙏\n"
+                "هل يمكنك إعادة إرسال الرمز الوطني المختصر للعنوان (مثال: RIYD1234)؟"
+                if "422" not in str(error_msg) and "address" not in str(error_msg).lower()
+                else
+                "يبدو أن هناك مشكلة في العنوان 🙏\n"
+                "هل يمكنك إعادة إرسال الرمز الوطني المختصر (مثال: RIYD1234) أو رابط موقعك من خرائط جوجل؟"
+            )
+            return ActionResult(
+                success=True,
+                data={
+                    "product": product_info,
+                    "needs_collection": True,
+                    "missing_fields": ["address_location"],
+                    "question": question,
+                    "order_prep": prep.to_dict(),
+                    "order_creation_error": error_msg,
+                },
+            )
+
+        # No name/city at all — no adapter or completely fresh start
         return ActionResult(
             success=True,   # success=True so composer produces a friendly reply
             data={

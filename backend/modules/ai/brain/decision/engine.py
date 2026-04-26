@@ -21,6 +21,8 @@ Rule priority (first match wins):
 from __future__ import annotations
 
 import logging
+import re
+from typing import Any, Dict, List, Optional
 
 from ..types import BrainContext, Decision
 from .actions import (
@@ -128,6 +130,42 @@ class DefaultDecisionEngine:
                 reason="customer asked for order status",
             )
 
+        # ── 3.4 Product name match from last search candidates ────────────────
+        # When the customer types a product name instead of a number (e.g.
+        # "بلورة 179 ر" or just "بلورة") after seeing a product list, we should
+        # treat it as a selection and start the order flow immediately.
+        # Guard: only trigger when we are NOT already mid-collection (to avoid
+        # misinterpreting a customer's name as a product name mid-flow).
+        _in_data_collection = (
+            state.stage == STAGE_ORDERING
+            and bool(getattr(state.order_prep, "missing_fields", None))
+        )
+        _candidates = list(state.last_search_candidates or []) or list(state.last_recommended_products or [])
+        if _candidates and not _in_data_collection and intent.name not in (
+            INTENT_TALK_HUMAN, INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO,
+            INTENT_ASK_OWNER_CONTACT,
+        ):
+            _matched_product = _match_product_from_message(ctx.message, _candidates)
+            if _matched_product:
+                logger.info(
+                    "[ORDER FLOW] Product selected from suggestion → starting order flow | "
+                    "product='%s' tenant=%s intent=%s",
+                    _matched_product.get("title"), ctx.tenant_id, intent.name,
+                )
+                if facts.orderable:
+                    return Decision(
+                        action=ACTION_PROPOSE_DRAFT_ORDER,
+                        args={"product": _matched_product},
+                        reason=f"customer message matches candidate '{_matched_product.get('title')}' — start order",
+                        confidence=0.92,
+                    )
+                return Decision(
+                    action=ACTION_SEARCH_PRODUCTS,
+                    args={"query": _matched_product.get("title", ""), "selected_product": _matched_product},
+                    reason="customer picked named product — store not orderable, show details",
+                    confidence=0.88,
+                )
+
         # ── 3.5 Pick from numbered list ───────────────────────────────────────
         # CRITICAL bridging logic: when the customer picks "1" / "2" / "3"
         # we MUST commit to a product and start the order flow. Falling
@@ -148,6 +186,11 @@ class DefaultDecisionEngine:
                 idx = max(1, min(idx, len(candidates)))
                 product = candidates[idx - 1]
                 if product:
+                    logger.info(
+                        "[ORDER FLOW] Product selected from suggestion → starting order flow | "
+                        "product='%s' idx=%d tenant=%s",
+                        product.get("title"), idx, ctx.tenant_id,
+                    )
                     if facts.orderable:
                         return Decision(
                             action=ACTION_PROPOSE_DRAFT_ORDER,
@@ -366,3 +409,69 @@ class DefaultDecisionEngine:
             reason=f"no rule matched for intent={intent.name} — LLM fallback",
             confidence=0.50,
         )
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _normalize_ar(text: str) -> str:
+    """Lightweight Arabic normalization for product title matching."""
+    t = (text or "").strip().lower()
+    t = re.sub(r"[\u064B-\u065F\u0640]", "", t)  # diacritics + tatweel
+    t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    t = t.replace("ى", "ي").replace("ة", "ه")
+    t = re.sub(r"[^\u0621-\u064Aa-z0-9\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _match_product_from_message(
+    message: str,
+    candidates: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return the candidate product whose title best matches the message, or None.
+
+    Matching strategy (in order of priority):
+      1. Exact normalized title match
+      2. Title is a contiguous substring of the message (or vice-versa)
+      3. All title words appear in the message
+
+    Minimum title length: 2 characters (avoids false positives on single-char
+    titles). The message must contain at least the title to avoid matching
+    on irrelevant keywords.
+    """
+    msg_norm = _normalize_ar(message)
+    if not msg_norm:
+        return None
+
+    best: Optional[Dict[str, Any]] = None
+    best_score = 0
+
+    for prod in candidates:
+        title = str(prod.get("title") or "").strip()
+        if len(title) < 2:
+            continue
+        title_norm = _normalize_ar(title)
+        if not title_norm:
+            continue
+
+        score = 0
+        # Exact match
+        if title_norm == msg_norm:
+            score = 100
+        # Title is a substring of message (e.g. "بلورة" inside "بلورة 179.0 ر")
+        elif title_norm in msg_norm:
+            score = 80
+        # Message is a substring of title (customer typed abbreviation)
+        elif msg_norm in title_norm and len(msg_norm) >= 3:
+            score = 60
+        # All title words appear somewhere in the message
+        else:
+            title_words = [w for w in title_norm.split() if len(w) >= 2]
+            if title_words and all(w in msg_norm for w in title_words):
+                score = 40 + len(title_words) * 5
+
+        if score > best_score:
+            best_score = score
+            best = prod
+
+    # Require at least a substring match to avoid false positives
+    return best if best_score >= 40 else None
