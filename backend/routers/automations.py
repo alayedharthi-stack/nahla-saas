@@ -1153,19 +1153,83 @@ async def all_automations_readiness(request: Request, db: Session = Depends(get_
     from models import WhatsAppTemplate  # noqa: PLC0415
 
     # ── Template requirements per automation type ──────────────────────────
-    # Maps automation_type → list of template names required (from seed config).
-    # "abandoned_cart" is special: it uses service_key + step_number resolution
-    # so we handle it separately below.
+    # Maps automation_type → list of "slot" descriptors. Each slot can be
+    # satisfied by ANY of the following (first APPROVED match wins):
+    #   1. legacy_names: exact `WhatsAppTemplate.name` matches (seed names)
+    #   2. library_keys: matches via `nahla_source_key` (Nahla library import)
+    #   3. service_key:  any APPROVED template bound to that service_key
+    #
+    # The legacy seed used hard-coded names like "win_back_ar" — but the
+    # actual library import names are hashed (e.g. `nahla_comeback_discount_c7d3`).
+    # That is why this endpoint used to report "غير موجود" for templates
+    # that were demonstrably APPROVED in the merchant's account.
+    # "abandoned_cart" is handled separately above with full step resolution.
     TEMPLATE_REQUIREMENTS: dict = {
-        "predictive_reorder":    ["predictive_reorder_reminder_ar"],
-        "customer_winback":      ["win_back_ar", "win_back_en"],
-        "vip_upgrade":           ["vip_reward_ar", "vip_reward_en"],
-        "new_product_alert":     ["new_arrivals"],
-        "back_in_stock":         ["back_in_stock_ar", "back_in_stock_en"],
-        "unpaid_order_reminder": ["unpaid_order_reminder_ar", "unpaid_order_reminder_en"],
-        "cod_confirmation":      ["cod_confirmation_reminder_ar", "cod_confirmation_reminder_en"],
-        "seasonal_offer":        ["seasonal_offer_ar", "seasonal_offer_en"],
-        "salary_payday_offer":   ["salary_payday_offer_ar", "salary_payday_offer_en"],
+        "predictive_reorder": [
+            {
+                "label": "قالب تذكير إعادة الطلب",
+                "legacy_names": ["predictive_reorder_reminder_ar"],
+                "library_keys": ["predictive_reorder_reminder", "reorder_quick_link"],
+                "service_key":  "predictive_reorder",
+            },
+        ],
+        "customer_winback": [
+            {
+                "label": "قالب استرجاع العميل",
+                "legacy_names": ["win_back_ar", "win_back_en"],
+                "library_keys": ["comeback_discount"],
+                "service_key":  "customer_retention",
+            },
+        ],
+        "vip_upgrade": [
+            {
+                "label": "قالب مكافأة VIP",
+                "legacy_names": ["vip_reward_ar", "vip_reward_en"],
+                "library_keys": ["vip_exclusive"],
+                "service_key":  "vip_rewards",
+            },
+        ],
+        "new_product_alert": [
+            {
+                "label": "قالب المنتجات الجديدة",
+                "legacy_names": ["new_arrivals"],
+                "library_keys": ["new_arrivals"],
+            },
+        ],
+        "back_in_stock": [
+            {
+                "label": "قالب عودة المخزون",
+                "legacy_names": ["back_in_stock_ar", "back_in_stock_en"],
+            },
+        ],
+        "unpaid_order_reminder": [
+            {
+                "label": "قالب الطلب غير المدفوع",
+                "legacy_names": ["unpaid_order_reminder_ar", "unpaid_order_reminder_en"],
+                "library_keys": ["payment_reminder"],
+                "service_key":  "payment_reminder",
+            },
+        ],
+        "cod_confirmation": [
+            {
+                "label": "قالب تأكيد الدفع عند الاستلام",
+                "legacy_names": ["cod_confirmation_reminder_ar", "cod_confirmation_reminder_en"],
+                "library_keys": ["cod_confirmation", "cod_reminder_before_shipping"],
+                "service_key":  "cod_confirmation",
+            },
+        ],
+        "seasonal_offer": [
+            {
+                "label": "قالب العروض الموسمية",
+                "legacy_names": ["seasonal_offer_ar", "seasonal_offer_en"],
+            },
+        ],
+        "salary_payday_offer": [
+            {
+                "label": "قالب عرض الراتب",
+                "legacy_names": ["salary_payday_offer_ar", "salary_payday_offer_en"],
+            },
+        ],
     }
 
     STEP_LABELS_AR: dict = {
@@ -1234,27 +1298,72 @@ async def all_automations_readiness(request: Request, db: Session = Depends(get_
     }
 
     # ── Handle all template_name-based automations ──────────────────────────
-    for auto_type, template_names in TEMPLATE_REQUIREMENTS.items():
-        steps = []
-        all_ready = True
-        for name in template_names:
-            tpl = (
-                db.query(WhatsAppTemplate)
-                .filter(
-                    WhatsAppTemplate.tenant_id == tenant_id,
-                    WhatsAppTemplate.name == name,
-                )
-                .order_by(
-                    # prefer APPROVED, then most-recently-updated
-                    WhatsAppTemplate.updated_at.desc()
-                )
-                .first()
+    def _find_approved_for_slot(slot: dict) -> Optional["WhatsAppTemplate"]:  # noqa: F821
+        """Try every match strategy for a slot and return the first APPROVED
+        template (or any matching template if none is APPROVED yet, so we
+        can surface its real status to the merchant).
+
+        Strategies tried in order, all scoped to APPROVED first:
+          1. exact `name` match against legacy_names
+          2. `nahla_source_key` match against library_keys
+          3. `service_key` match (any APPROVED template under that service)
+        Falls back to the same lookups without the APPROVED filter so the
+        merchant sees PENDING / REJECTED templates instead of "MISSING".
+        """
+        legacy_names = slot.get("legacy_names") or []
+        library_keys = slot.get("library_keys") or []
+        service_key  = slot.get("service_key")
+
+        def _q():
+            return db.query(WhatsAppTemplate).filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
             )
-            label = STEP_LABELS_AR.get(name, name)
+
+        approved_filter = WhatsAppTemplate.status == "APPROVED"
+
+        for status_filter in (approved_filter, None):
+            if legacy_names:
+                q = _q().filter(WhatsAppTemplate.name.in_(legacy_names))
+                if status_filter is not None:
+                    q = q.filter(status_filter)
+                tpl = q.order_by(WhatsAppTemplate.updated_at.desc()).first()
+                if tpl:
+                    return tpl
+
+            if library_keys:
+                q = _q().filter(WhatsAppTemplate.nahla_source_key.in_(library_keys))
+                if status_filter is not None:
+                    q = q.filter(status_filter)
+                tpl = q.order_by(WhatsAppTemplate.updated_at.desc()).first()
+                if tpl:
+                    return tpl
+
+            if service_key:
+                q = _q().filter(WhatsAppTemplate.service_key == service_key)
+                if status_filter is not None:
+                    q = q.filter(status_filter)
+                tpl = (
+                    q.order_by(
+                        WhatsAppTemplate.is_active.desc(),
+                        WhatsAppTemplate.updated_at.desc(),
+                    )
+                    .first()
+                )
+                if tpl:
+                    return tpl
+
+        return None
+
+    for auto_type, slots in TEMPLATE_REQUIREMENTS.items():
+        steps: List[dict] = []
+        all_ready = True
+        for slot in slots:
+            tpl = _find_approved_for_slot(slot)
+            label = slot.get("label") or (slot.get("legacy_names") or ["—"])[0]
             if tpl and tpl.status == "APPROVED":
                 steps.append({
                     "label": label,
-                    "template_name": name,
+                    "template_name": tpl.name,
                     "ready": True,
                     "status": "APPROVED",
                 })
@@ -1262,7 +1371,7 @@ async def all_automations_readiness(request: Request, db: Session = Depends(get_
                 all_ready = False
                 steps.append({
                     "label": label,
-                    "template_name": name,
+                    "template_name": tpl.name if tpl else (slot.get("legacy_names") or [None])[0],
                     "ready": False,
                     "status": (tpl.status or "UNKNOWN") if tpl else "MISSING",
                     "reason": "not_approved" if tpl else "no_template",
