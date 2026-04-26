@@ -649,8 +649,85 @@ export default function AdminMerchants() {
     }
   }
 
+  // ── Poll merchant help requests ────────────────────────────────────────────
+  const [helpRequests, setHelpRequests] = useState<Array<{
+    tenant_id: number; store_name: string; email: string
+    req_id: string; reason: string; ttl_hours: number; requested_at: string
+  }>>([])
+  const [dismissedHelp, setDismissedHelp] = useState<Set<string>>(new Set())
+
+  const loadHelpRequests = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/admin/support-requests`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      })
+      if (res.ok) {
+        const d = await res.json()
+        setHelpRequests(d.requests ?? [])
+      }
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => {
+    loadHelpRequests()
+    const id = setInterval(loadHelpRequests, 30_000)
+    return () => clearInterval(id)
+  }, [loadHelpRequests])
+
+  const visibleHelp = helpRequests.filter(r => !dismissedHelp.has(r.req_id))
+
   return (
     <div className="p-6 space-y-5" dir="rtl">
+
+      {/* ── Merchant Help Requests Banner ──────────────────────────────── */}
+      {visibleHelp.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <Bell className="w-4 h-4 text-blue-600" />
+            <h3 className="text-sm font-bold text-blue-800">
+              طلبات مساعدة من التجار ({visibleHelp.length})
+            </h3>
+          </div>
+          <div className="space-y-2">
+            {visibleHelp.map(r => (
+              <div key={r.req_id} className="bg-white border border-blue-100 rounded-xl px-4 py-3 flex items-start gap-3">
+                <ShieldCheck className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-slate-800">
+                    {r.store_name || r.email}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
+                    {r.reason}
+                  </p>
+                  <p className="text-xs text-slate-400 mt-1">
+                    {r.ttl_hours} ساعة ·{' '}
+                    {new Intl.DateTimeFormat('ar-SA', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(r.requested_at))}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => {
+                      const m = merchants.find(x => x.tenant_id === r.tenant_id || x.email === r.email)
+                      if (m) handleEnter(m)
+                    }}
+                    className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg font-semibold hover:bg-blue-700 transition flex items-center gap-1"
+                  >
+                    <LogIn className="w-3 h-3" />
+                    دخول
+                  </button>
+                  <button
+                    onClick={() => setDismissedHelp(prev => new Set([...prev, r.req_id]))}
+                    className="text-slate-400 hover:text-slate-600 p-1"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">

@@ -975,28 +975,71 @@ function SupportHistoryPanel() {
   )
 }
 
+// ── Merchant Help Request Status (shows OWN pending request) ─────────────────
+
+function MerchantHelpStatus({ onCancel }: { onCancel?: () => void }) {
+  const [data, setData]     = useState<null | { has_pending: boolean; reason?: string; ttl_hours?: number; requested_at?: string }>(null)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/merchant/my-help-request`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) setData(await res.json())
+    } catch { /* ignore */ }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading || !data?.has_pending) return null
+
+  return (
+    <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3" dir="rtl">
+      <Clock className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-blue-800">طلبك وصل لفريق نحلة ✓</p>
+        <p className="text-xs text-blue-600 mt-0.5 leading-relaxed">
+          {data.reason && <span className="block truncate">{data.reason}</span>}
+          سيتواصل معك الفريق قريباً — لا تحتاج لأي إجراء إضافي.
+        </p>
+        {data.requested_at && (
+          <p className="text-xs text-blue-400 mt-1">
+            {new Intl.DateTimeFormat('ar-SA', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(data.requested_at))}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Full Support Tab ───────────────────────────────────────────────────────────
 
 function SupportTab() {
   const [showModal, setShowModal]   = useState(false)
   const [sent, setSent]             = useState(false)
-  const [pendingCount, setPending]  = useState(0)
+  const [hasMerchantPending, setMerchantPending] = useState(false)
 
-  const checkPending = useCallback(async () => {
+  // Check if merchant already has a pending help request (their own)
+  const checkMyPending = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/merchant/access-requests`, {
+      const res = await fetch(`${API_BASE}/merchant/my-help-request`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
       })
-      if (res.ok) setPending((await res.json()).count ?? 0)
+      if (res.ok) {
+        const d = await res.json()
+        setMerchantPending(d.has_pending ?? false)
+      }
     } catch { /* ignore */ }
   }, [])
 
-  useEffect(() => { checkPending() }, [checkPending])
+  useEffect(() => { checkMyPending() }, [checkMyPending])
 
   const handleSent = () => {
     setShowModal(false)
     setSent(true)
-    checkPending()
+    setMerchantPending(true)
     setTimeout(() => setSent(false), 6000)
   }
 
@@ -1019,24 +1062,20 @@ function SupportTab() {
         {sent && (
           <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-xl px-4 py-3 text-sm text-green-700">
             <CheckCircle className="w-4 h-4 shrink-0" />
-            تم إرسال طلبك! فريق نحلة سيراسلك قريباً.
+            تم إرسال طلبك! أُبلغ فريق نحلة وسيتواصل معك قريباً.
           </div>
         )}
 
-        {pendingCount > 0 && !sent && (
-          <div className="flex items-center gap-2 bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3 text-sm text-yellow-700">
-            <Clock className="w-4 h-4 shrink-0" />
-            يوجد {pendingCount} طلب معلّق — في انتظار فريق الدعم.
-          </div>
-        )}
+        {/* Status of merchant's own pending request */}
+        <MerchantHelpStatus />
 
         <button
           onClick={() => setShowModal(true)}
-          disabled={pendingCount > 0}
+          disabled={hasMerchantPending}
           className="w-full flex items-center justify-center gap-2 py-3 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition"
         >
           <HeadphonesIcon className="w-4 h-4" />
-          {pendingCount > 0 ? 'يوجد طلب معلّق' : 'طلب مساعدة من نحلة'}
+          {hasMerchantPending ? '⏳ طلبك قيد المراجعة من فريق نحلة' : 'طلب مساعدة من نحلة'}
         </button>
 
         {/* How it works */}
@@ -1045,9 +1084,9 @@ function SupportTab() {
           <div className="space-y-1.5">
             {[
               { n: '١', t: 'تصف مشكلتك وتختار نوعها' },
-              { n: '٢', t: 'يصلك إشعار بالطلب ويُعرض للموافقة' },
-              { n: '٣', t: 'فريق الدعم يدخل مؤقتاً بعد موافقتك' },
-              { n: '٤', t: 'كل نشاط مُسجَّل ومرئي لك' },
+              { n: '٢', t: 'يصل إشعار فوري لفريق نحلة بالإيميل ولوحة المالك' },
+              { n: '٣', t: 'فريق الدعم يراجع ويتواصل معك' },
+              { n: '٤', t: 'كل نشاط مُسجَّل ومرئي لك في أي وقت' },
             ].map(s => (
               <div key={s.n} className="flex items-center gap-2 text-xs text-slate-600">
                 <span className="w-5 h-5 rounded-full bg-amber-100 text-amber-700 font-bold flex items-center justify-center shrink-0 text-xs">

@@ -332,24 +332,39 @@ def _store_notification(
     reason: str,
     actor: str,
     ttl_hours: int,
+    ntype: str = "support_access_request",
 ) -> None:
     """Store an in-platform notification in TenantSettings.extra_metadata.notifications."""
     try:
         settings = get_or_create_settings(db, tenant_id)
         meta = dict(settings.extra_metadata or {})
         notifications: list = list(meta.get("notifications", []))
-        notifications.append({
-            "id":         f"sa_{req_id}",
-            "type":       "support_access_request",
-            "read":       False,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "title":      "طلب وصول من فريق نحلة",
-            "body":       (
+
+        if ntype == "merchant_help_request":
+            title      = "طلب مساعدة من التاجر"
+            body_text  = (
+                f"التاجر طلب مساعدة: {reason}. "
+                f"المدة المطلوبة: {ttl_hours} ساعة. "
+                "تحقق من لوحة المتاجر للمتابعة."
+            )
+            action_url = "/settings?tab=support"
+        else:
+            title      = "طلب وصول من فريق نحلة"
+            body_text  = (
                 f"فريق نحلة طلب وصولاً مؤقتاً لمساعدتك في: {reason}. "
                 f"المدة المطلوبة: {ttl_hours} ساعة. "
                 "يمكنك الموافقة أو الرفض من الإعدادات > الأمان."
-            ),
-            "action_url": "/settings?tab=security",
+            )
+            action_url = "/settings?tab=security"
+
+        notifications.append({
+            "id":         f"sa_{req_id}",
+            "type":       ntype,
+            "read":       False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "title":      title,
+            "body":       body_text,
+            "action_url": action_url,
         })
         # Keep only last 50 notifications
         notifications = notifications[-50:]
@@ -424,6 +439,157 @@ def _send_access_request_email(
         )
     except Exception as exc:
         logger.warning("[SupportAccess] email send failed (non-fatal): %s", exc)
+
+
+def _notify_admin_of_help_request(
+    *,
+    db: "Session",
+    tenant_id: int,
+    req_id: str,
+    reason: str,
+    ttl_hours: int,
+    merchant_sub: str,
+) -> None:
+    """
+    Notify the Nahla admin team when a merchant submits a help request.
+
+    Two channels:
+    1. Email to ADMIN_EMAIL (configured in Railway env) — the Nahla support inbox.
+    2. Email to all admin/platform_owner users found in DB.
+    3. In-app notification stored in the merchant's TenantSettings.notifications
+       so it shows up when the admin opens that merchant's panel.
+    """
+    try:
+        from core.config import ADMIN_EMAIL, DASHBOARD_URL  # noqa: PLC0415
+        from models import User  # noqa: PLC0415
+
+        # ── collect admin emails ──────────────────────────────────────────────
+        admin_emails: list[str] = []
+        if ADMIN_EMAIL:
+            admin_emails.append(ADMIN_EMAIL)
+
+        # also find all DB users with admin / platform_owner role
+        try:
+            admin_users = db.query(User).filter(
+                User.role.in_(["admin", "platform_owner"])
+            ).all()
+            for au in admin_users:
+                if au.email and au.email not in admin_emails:
+                    admin_emails.append(au.email)
+        except Exception:
+            pass
+
+        # ── get merchant tenant name for context ──────────────────────────────
+        try:
+            from models import Tenant  # noqa: PLC0415
+            tenant = db.query(Tenant).filter_by(id=tenant_id).first()
+            tenant_name = tenant.name if tenant else f"tenant#{tenant_id}"
+        except Exception:
+            tenant_name = f"tenant#{tenant_id}"
+
+        # ── build admin notification email (raw HTML, sent to support inbox) ──
+        admin_panel_url = f"{DASHBOARD_URL}/admin/merchants"
+        html = f"""
+        <div dir="rtl" style="font-family:Arial,sans-serif;max-width:600px;margin:auto;
+                              padding:24px;background:#fff;border-radius:12px;border:1px solid #e2e8f0;">
+          <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:16px;margin-bottom:20px;">
+            <h2 style="margin:0 0 8px;color:#1e40af;font-size:18px;">🆘 طلب مساعدة من تاجر</h2>
+            <p style="margin:0;color:#1e3a8a;font-size:13px;">
+              تاجر يحتاج دعم — يمكنك فتح لوحته مباشرة.
+            </p>
+          </div>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:10px 0;color:#64748b;font-size:13px;width:40%;">المتجر</td>
+              <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{tenant_name}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:10px 0;color:#64748b;font-size:13px;">حساب التاجر</td>
+              <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{merchant_sub}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #f1f5f9;">
+              <td style="padding:10px 0;color:#64748b;font-size:13px;">وصف المشكلة</td>
+              <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{reason}</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#64748b;font-size:13px;">المدة المطلوبة</td>
+              <td style="padding:10px 0;font-weight:bold;color:#1e293b;font-size:13px;">{ttl_hours} ساعة</td>
+            </tr>
+          </table>
+          <div style="text-align:center;margin-bottom:16px;">
+            <a href="{admin_panel_url}"
+               style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;
+                      border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px;">
+              🔑 فتح لوحة المتاجر
+            </a>
+          </div>
+          <p style="text-align:center;color:#94a3b8;font-size:11px;margin:0;">
+            رقم الطلب: {req_id} — tenant_id: {tenant_id}
+          </p>
+        </div>
+        """
+
+        # send to all admin emails
+        for email_addr in admin_emails:
+            try:
+                import asyncio  # noqa: PLC0415
+                from services.email_service import send_email  # noqa: PLC0415
+
+                async def _send():
+                    await send_email(
+                        to=email_addr,
+                        subject=f"[نحلة دعم] طلب مساعدة من {tenant_name}: {reason[:60]}",
+                        template="support_help_request_admin",
+                        variables={
+                            "tenant_name":    tenant_name,
+                            "tenant_id":      str(tenant_id),
+                            "merchant_sub":   merchant_sub,
+                            "reason":         reason,
+                            "ttl_hours":      str(ttl_hours),
+                            "req_id":         req_id,
+                            "admin_panel_url": admin_panel_url,
+                        },
+                    )
+
+                # Fire-and-forget: fall back to raw HTML if template missing
+                async def _send_raw():
+                    await send_email(   # type: ignore[arg-type]
+                        to=email_addr,
+                        subject=f"[نحلة دعم] طلب مساعدة من {tenant_name}: {reason[:60]}",
+                        template="_raw_html_stub",
+                    )
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(_send())
+                    else:
+                        loop.run_until_complete(_send())
+                except RuntimeError:
+                    asyncio.run(_send())
+
+            except Exception as email_exc:
+                logger.warning("[SupportAccess] admin email failed for %s: %s", email_addr, email_exc)
+
+        # ── in-app: store in merchant notifications (visible to admin) ────────
+        # We store it with type "merchant_help_request" so admin can filter it
+        _store_notification(
+            db        = db,
+            tenant_id = tenant_id,
+            req_id    = req_id,
+            reason    = reason,
+            actor     = merchant_sub,
+            ttl_hours = ttl_hours,
+            ntype     = "merchant_help_request",
+        )
+
+        _audit.info(
+            "ADMIN_NOTIFIED_OF_HELP_REQUEST tenant=%d req_id=%s admin_emails=%s",
+            tenant_id, req_id, admin_emails,
+        )
+
+    except Exception as exc:
+        logger.warning("[SupportAccess] _notify_admin_of_help_request failed (non-fatal): %s", exc)
 
 
 # ── Admin routes ────────────────────────────────────────────────────────────────
@@ -683,12 +849,23 @@ async def merchant_get_access_requests(
     db:      Session         = Depends(get_db),
     user:    Dict[str, Any]  = Depends(get_current_user),
 ):
-    """Return pending access requests for this tenant's merchant."""
+    """
+    Return pending access requests that the merchant needs to APPROVE or REJECT.
+
+    IMPORTANT: Excludes merchant-initiated help requests (initiated_by='merchant')
+    because those don't need merchant approval — the merchant already submitted them.
+    Only admin-initiated requests (initiated_by='admin' or absent) are shown here.
+    """
     tenant_id = resolve_tenant_id(request)
     settings  = get_or_create_settings(db, tenant_id)
     db.commit()
     requests  = _get_requests(settings)
-    pending   = [r for r in requests if r.get("status") == "pending"]
+    # Only show pending requests initiated by admin (not by the merchant themselves)
+    pending   = [
+        r for r in requests
+        if r.get("status") == "pending"
+        and r.get("initiated_by", "admin") != "merchant"
+    ]
     return {"requests": pending, "count": len(pending)}
 
 
@@ -947,12 +1124,58 @@ async def merchant_request_help(
                          "description": body.description[:200], "ttl_hours": body.ttl_hours,
                      })
 
+    # ── Notify admin team ─────────────────────────────────────────────────────
+    # 1. Email to ADMIN_EMAIL (nahla support inbox) + any admin users in DB
+    # 2. In-app: store notification in merchant's own notifications list so
+    #    the admin can see it when they open that tenant's panel.
+    _notify_admin_of_help_request(
+        db         = db,
+        tenant_id  = tenant_id,
+        req_id     = req_id,
+        reason     = reason,
+        ttl_hours  = body.ttl_hours,
+        merchant_sub = user.get("sub", ""),
+    )
+
     return {
         "request_id": req_id,
         "status":     "pending",
         "reason":     reason,
         "message":    "تم إرسال طلب المساعدة لفريق نحلة. سيتواصل معك قريباً.",
     }
+
+
+@router.get("/merchant/my-help-request")
+async def merchant_get_my_help_request(
+    request: Request,
+    db:      Session         = Depends(get_db),
+    user:    Dict[str, Any]  = Depends(get_current_user),
+):
+    """
+    Return the merchant's own pending help request (if any).
+    This is separate from access-requests (which are admin-initiated).
+    """
+    tenant_id = resolve_tenant_id(request)
+    settings  = get_or_create_settings(db, tenant_id)
+    db.commit()
+    requests  = _get_requests(settings)
+    # Find any merchant-initiated pending request
+    my_pending = [
+        r for r in requests
+        if r.get("initiated_by") == "merchant"
+        and r.get("status") == "pending"
+    ]
+    if my_pending:
+        r = my_pending[-1]
+        return {
+            "has_pending": True,
+            "request_id":  r.get("id"),
+            "reason":      r.get("reason"),
+            "ttl_hours":   r.get("ttl_hours"),
+            "requested_at": r.get("requested_at"),
+            "status":      "pending",
+        }
+    return {"has_pending": False}
 
 
 @router.get("/merchant/support-history")
