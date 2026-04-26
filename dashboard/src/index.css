@@ -19,6 +19,13 @@
   /* Extra breathing room above the safe area (used by auth pages) */
   .pt-safe-extra  { padding-top: calc(env(safe-area-inset-top, 0px) + 12px); }
 
+  /*
+   * Landing page nav: keep safe-area clearance but subtract 10px so the nav
+   * doesn't sit too far from the top. Always at least 4px so buttons never
+   * touch the very edge on notched iPhones.
+   */
+  .pt-safe-nav    { padding-top: max(4px, calc(env(safe-area-inset-top, 0px) - 10px)); }
+
   /* Dynamic viewport height — prevents iOS browser-chrome resize jump */
   .min-h-dvh { min-height: 100dvh; }
   .h-dvh     { height:     100dvh; }

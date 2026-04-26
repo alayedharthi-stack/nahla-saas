@@ -369,6 +369,21 @@ export default function Landing() {
     return () => window.removeEventListener('scroll', fn)
   }, [])
 
+  // Dark background on html/body so the iOS safe-area gap above the nav
+  // shows the page colour (#0f172a ≈ slate-900) instead of the default white.
+  useEffect(() => {
+    const html = document.documentElement
+    const body = document.body
+    const prevHtml = html.style.backgroundColor
+    const prevBody = body.style.backgroundColor
+    html.style.backgroundColor = '#0f172a'
+    body.style.backgroundColor = '#0f172a'
+    return () => {
+      html.style.backgroundColor = prevHtml
+      body.style.backgroundColor = prevBody
+    }
+  }, [])
+
   // Signal Salla iframe ready (dismisses skeleton loaders when embedded in Salla)
   useEffect(() => {
     signalSallaReady()
@@ -400,7 +415,7 @@ export default function Landing() {
       {/* ══════════════════════════════════════════════════════════
           NAVBAR
       ══════════════════════════════════════════════════════════ */}
-      <nav className={`fixed top-0 inset-x-0 z-50 transition-all duration-300 pt-safe-top ${
+      <nav className={`fixed top-0 inset-x-0 z-50 transition-all duration-300 pt-safe-nav ${
         scrolled ? 'bg-slate-900/96 backdrop-blur-xl shadow-lg shadow-black/30 border-b border-white/5' : 'bg-transparent'
       }`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
