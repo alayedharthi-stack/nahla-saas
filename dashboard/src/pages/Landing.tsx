@@ -400,7 +400,7 @@ export default function Landing() {
       {/* ══════════════════════════════════════════════════════════
           NAVBAR
       ══════════════════════════════════════════════════════════ */}
-      <nav className={`fixed top-0 inset-x-0 z-50 transition-all duration-300 ${
+      <nav className={`fixed top-0 inset-x-0 z-50 transition-all duration-300 pt-safe-top ${
         scrolled ? 'bg-slate-900/96 backdrop-blur-xl shadow-lg shadow-black/30 border-b border-white/5' : 'bg-transparent'
       }`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -440,8 +440,12 @@ export default function Landing() {
               </Link>
             </div>
 
-            {/* Mobile toggle */}
-            <button className="md:hidden text-slate-400 p-1" onClick={() => setMobile(!mobileMenuOpen)}>
+            {/* Mobile toggle — min 44×44px tap target for iPhone */}
+            <button
+              className="md:hidden text-slate-400 flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl -me-2"
+              onClick={() => setMobile(!mobileMenuOpen)}
+              aria-label={mobileMenuOpen ? 'إغلاق القائمة' : 'فتح القائمة'}
+            >
               {mobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
             </button>
           </div>
@@ -478,7 +482,8 @@ export default function Landing() {
       ══════════════════════════════════════════════════════════ */}
       <section
         ref={heroRef}
-        className="relative min-h-[100svh] flex items-center justify-center overflow-hidden bg-gradient-to-br from-slate-900 via-[#0f1d2e] to-slate-900 pt-16"
+        className="relative min-h-[100svh] flex items-center justify-center overflow-hidden bg-gradient-to-br from-slate-900 via-[#0f1d2e] to-slate-900"
+        style={{ paddingTop: 'calc(4rem + env(safe-area-inset-top, 0px))' }}
       >
         <HoneycombBg />
         {/* Glow */}
@@ -518,7 +523,10 @@ export default function Landing() {
               to="/register"
               className="group flex items-center gap-2.5 bg-amber-500 hover:bg-amber-400 text-slate-900 font-black text-base sm:text-lg px-8 sm:px-10 py-4 rounded-2xl transition-all duration-200 shadow-2xl shadow-amber-500/30 hover:shadow-amber-400/45 hover:scale-[1.03] w-full sm:w-auto justify-center"
             >
-              ابدأ تجربتك المجانية الآن
+              {/* Mobile: emphasise the free trial duration */}
+              <span className="sm:hidden">جرّب مجانًا لمدة 14 يوم</span>
+              {/* Desktop: full motivational copy */}
+              <span className="hidden sm:inline">ابدأ تجربتك المجانية الآن</span>
               <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" />
             </Link>
             <button
