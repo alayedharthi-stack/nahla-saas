@@ -174,6 +174,13 @@ class CommerceToolRuntime:
         _raw_sid = payload.get("shipping_company_id")
         _raw_options = payload.get("options") or []
         _item_options = _raw_options if isinstance(_raw_options, list) else []
+        # Diagnostic: surface what the runtime actually received from the
+        # decision/execution layer. Helps prove that prep.product_options
+        # really propagated all the way down to OrderItemInput.
+        logger.info(
+            "[ORDER FLOW] runtime create_draft_order | tenant=%s product=%s qty=%s options=%s",
+            self.tenant_id, product_id, quantity, _item_options,
+        )
         order_input = OrderInput(
             customer_name=customer_name,
             customer_phone=self.customer_phone,

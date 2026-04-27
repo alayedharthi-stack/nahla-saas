@@ -367,8 +367,54 @@ class SallaAdapter(BaseStoreAdapter):
     async def get_product(self, product_id: str) -> Optional[NormalizedProduct]:
         try:
             data = await self._get(f"/products/{product_id}")
-            raw = data.get("data")
-            return self._normalize_product(raw) if raw else None
+            raw = data.get("data") or {}
+            if not raw:
+                return None
+
+            # Salla's product detail endpoint occasionally returns the
+            # product without its `options` array (depends on store
+            # config / API version). Hit the dedicated `/products/{id}
+            # /options` endpoint to ensure we always know the option
+            # groups before creating the order — Salla rejects the order
+            # with a 422 ("خيارات المنتج مطلوبة") if a required option
+            # value is missing, so this fetch is critical for stores
+            # that use sizes/colors/variants.
+            if not raw.get("options"):
+                try:
+                    opt_data = await self._get(f"/products/{product_id}/options")
+                    fallback_opts = opt_data.get("data") or []
+                    if isinstance(fallback_opts, list) and fallback_opts:
+                        raw["options"] = fallback_opts
+                        logger.info(
+                            "[SallaAdapter] product options fetched via /products/%s/options | count=%d",
+                            product_id, len(fallback_opts),
+                        )
+                except httpx.HTTPStatusError as opt_exc:
+                    # Endpoint not available on every Salla plan/scope.
+                    # Log and continue — order flow will surface this
+                    # later as required-options-missing if applicable.
+                    logger.info(
+                        "[SallaAdapter] /products/%s/options unavailable (%s) — "
+                        "using detail-endpoint options only",
+                        product_id, opt_exc.response.status_code,
+                    )
+                except Exception as opt_exc:
+                    logger.info(
+                        "[SallaAdapter] product options fallback fetch failed | "
+                        "product=%s err=%s",
+                        product_id, opt_exc,
+                    )
+
+            normalized = self._normalize_product(raw)
+            logger.info(
+                "[SallaAdapter] get_product | id=%s title=%r option_groups=%d "
+                "has_required_options=%s",
+                product_id,
+                normalized.title,
+                len(normalized.options or []),
+                normalized.has_required_options,
+            )
+            return normalized
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
@@ -433,7 +479,19 @@ class SallaAdapter(BaseStoreAdapter):
             opt_id = opt.get("id")
             opt_name = (opt.get("name") or "").strip()
             opt_type = (opt.get("type") or "select")
-            opt_required = bool(opt.get("required") or opt.get("is_required") or False)
+            # Salla's product API is inconsistent about the `required`
+            # flag — some payloads omit it entirely, others use
+            # `is_required`. When neither is present we default to
+            # `True` because sending a value that Salla considers
+            # optional is harmless, but skipping a required option
+            # triggers a 422 ("خيارات المنتج مطلوبة"). Erring on the
+            # side of asking the customer is the safer trade-off.
+            if "required" in opt:
+                opt_required = bool(opt.get("required"))
+            elif "is_required" in opt:
+                opt_required = bool(opt.get("is_required"))
+            else:
+                opt_required = True
             values_raw = opt.get("values") or []
             values_out: List[Dict[str, Any]] = []
             for val in values_raw:
@@ -640,6 +698,15 @@ class SallaAdapter(BaseStoreAdapter):
                         opts_payload.append({"id": _oid, "value": sel["value_name"]})
                 if opts_payload:
                     entry["options"] = opts_payload
+                logger.info(
+                    "[SallaAdapter] item options built | product=%s raw=%s payload=%s",
+                    item.product_id, item.options, opts_payload,
+                )
+            else:
+                logger.info(
+                    "[SallaAdapter] item options EMPTY | product=%s",
+                    item.product_id,
+                )
             products.append(entry)
 
         # ── Phone — Salla requires E.164 (+966XXXXXXXXX) ────────────────────────

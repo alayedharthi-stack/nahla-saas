@@ -329,6 +329,47 @@ class DraftOrderHandler:
             tenant_context=ctx.tenant_context,
         )
         _options_payload = _resolve_options_payload(prep)
+
+        # ── Mandatory diagnostic log: ALWAYS emit the final order options
+        # so we can compare what we *think* we collected vs. what Salla
+        # actually receives. Even an empty list is informative — it tells
+        # us at a glance whether the option pipeline ran end-to-end.
+        logger.info(
+            "[ORDER FLOW] final order options | tenant=%s product_id=%s "
+            "has_required=%s state_options=%s payload=%s",
+            ctx.tenant_id,
+            external_id,
+            prep.product_has_required_options,
+            {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+            _options_payload,
+        )
+
+        # ── Hard guard: never POST /orders if the product has required
+        # options and the resolved payload is empty. This protects against
+        # any path that might bypass the earlier `_missing_product_options`
+        # check (e.g. stale state where options_meta was loaded but the
+        # selection map got cleared, or an "أنشئ الطلب" message arriving
+        # before the customer has actually picked size/colour).
+        if prep.product_has_required_options and not _options_payload:
+            logger.error(
+                "[ORDER FLOW] blocking create_order: required options missing in final payload | "
+                "tenant=%s product=%s required_groups=%s selected=%s",
+                ctx.tenant_id, external_id,
+                [g.get("name") for g in (prep.product_options_meta or []) if g.get("required")],
+                list((prep.product_options or {}).keys()),
+            )
+            _missing_now = _missing_product_options(prep) or list(prep.product_options_meta or [])
+            return ActionResult(
+                success=True,
+                data={
+                    "product": product_info,
+                    "needs_options": True,
+                    "missing_option_groups": _missing_now,
+                    "selected_options": prep.product_options,
+                    "order_prep": prep.to_dict(),
+                },
+            )
+
         if _options_payload:
             logger.info(
                 "[ORDER FLOW] creating order with options | tenant=%s product=%s options=%s",
