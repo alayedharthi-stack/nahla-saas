@@ -202,12 +202,14 @@ class SallaAdapter(BaseStoreAdapter):
     async def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
         import json as _json
         url = f"{SALLA_API_BASE}{path}"
-        # Log full request payload for /orders so we can diagnose creation failures
+        # Always emit the request payload for /orders at ERROR level so it
+        # appears alongside any failure in Railway log filters that hide INFO.
+        _payload_str = _json.dumps(body, ensure_ascii=False)
         if path == "/orders":
-            logger.info(
+            logger.error(
                 "[SallaAdapter] POST /orders REQUEST | tenant=%s payload=%s",
                 self._tenant_id,
-                _json.dumps(body, ensure_ascii=False)[:3000],
+                _payload_str,
             )
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
@@ -218,13 +220,41 @@ class SallaAdapter(BaseStoreAdapter):
                     resp = await client.post(url, headers=self._headers(), json=body)
                     logger.info("[Salla API] RETRY POST %s → %d", path, resp.status_code)
             if resp.status_code >= 400:
+                # Emit the FULL response body — DO NOT truncate. Salla's 422
+                # validation messages are nested under `error.fields` and we
+                # need the entire structure to know which field was rejected.
+                _raw_text = resp.text or ""
+                _parsed: Optional[Dict[str, Any]] = None
+                try:
+                    _parsed_obj = resp.json()
+                    if isinstance(_parsed_obj, dict):
+                        _parsed = _parsed_obj
+                except Exception:
+                    _parsed = None
+
                 logger.error(
-                    "[SallaAdapter] POST %s FAILED | tenant=%s salla_status=%d "
-                    "salla_response=%s request_payload=%s",
-                    path, self._tenant_id, resp.status_code,
-                    resp.text[:2000],
-                    _json.dumps(body, ensure_ascii=False)[:1000],
+                    "[SallaAdapter] POST %s FAILED | tenant=%s status=%d response=%s",
+                    path, self._tenant_id, resp.status_code, _raw_text,
                 )
+                logger.error(
+                    "[SallaAdapter] POST %s FAILED | tenant=%s request_payload=%s",
+                    path, self._tenant_id, _payload_str,
+                )
+                # Best-effort field-level breakdown to make root cause obvious.
+                if _parsed is not None:
+                    _err = _parsed.get("error") if isinstance(_parsed.get("error"), dict) else None
+                    _msg = (_parsed.get("message")
+                            or (_err.get("message") if _err else "")
+                            or "")
+                    _fields = (_err or {}).get("fields") if _err else None
+                    if _fields is None:
+                        _fields = _parsed.get("errors") or _parsed.get("fields")
+                    logger.error(
+                        "[SallaAdapter] POST %s FAILED | tenant=%s status=%d "
+                        "salla_message=%r salla_fields=%s",
+                        path, self._tenant_id, resp.status_code,
+                        _msg, _json.dumps(_fields, ensure_ascii=False) if _fields is not None else "<none>",
+                    )
             resp.raise_for_status()
             return resp.json()
 
