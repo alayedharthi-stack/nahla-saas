@@ -609,7 +609,7 @@ def _address_line(prep: OrderPreparationState) -> str:
         suffix = f" - {prep.district}" if prep.district else ""
         return f"{prep.street}{suffix}".strip()
     if prep.short_address_code:
-        return f"الرمز المختصر: {prep.short_address_code}"
+        return prep.short_address_code
     if prep.google_maps_url:
         return "تم تزويد الموقع عبر خرائط Google"
     return ""

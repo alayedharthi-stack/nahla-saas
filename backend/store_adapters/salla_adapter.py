@@ -473,21 +473,12 @@ class SallaAdapter(BaseStoreAdapter):
             if not _last:
                 _last = " ".join(_parts[1:]) if len(_parts) > 1 else ""
 
-        # ── Payment — Salla Admin API v2 valid values:
-        #   status: "pending_payment" | "paid"
-        #   accepted_methods (when pending_payment): ["credit_card","mada","bank","cod"]
-        #   method (when paid): "credit_card" | "mada" | "bank" | "cod" | "subscription"
-        is_cod = order_input.payment_method in ("cod", "cash_on_delivery")
-        if is_cod:
-            payment_block: Dict[str, Any] = {
-                "status": "pending_payment",
-                "accepted_methods": ["cod"],
-            }
-        else:
-            payment_block = {
-                "status": "pending_payment",
-                "accepted_methods": ["credit_card", "mada", "bank", "cod"],
-            }
+        # ── Payment — Salla Admin API v2:
+        #   status "pending_payment" lets the customer pay via Salla checkout.
+        #   We intentionally omit "accepted_methods" and let Salla use the
+        #   store's configured methods — passing explicit slugs like "credit_card"
+        #   or "mada" causes 422 when the merchant hasn't enabled those gateways.
+        payment_block: Dict[str, Any] = {"status": "pending_payment"}
 
         body: Dict[str, Any] = {
             "products": products,
