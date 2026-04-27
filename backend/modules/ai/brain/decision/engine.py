@@ -90,11 +90,37 @@ class DefaultDecisionEngine:
         }
 
         # ── 1. Handoff ────────────────────────────────────────────────────
+        # Guard: never escalate to a human if the customer is mid-order.
+        # The classifier already blocks LLM-suggested INTENT_TALK_HUMAN
+        # while order flow is active; this is a second layer of defence
+        # in case the rules emit it (or a different path constructs the
+        # intent directly). Same guard as in the webhook's order-flow
+        # recovery override — kept symmetrical on purpose.
         if intent.name == INTENT_TALK_HUMAN:
-            return Decision(
-                action=ACTION_HANDOFF,
-                reason="customer requested human agent",
+            try:
+                from modules.ai.routing.conversation_mode import (  # noqa: PLC0415
+                    message_has_order_recovery_signal,
+                )
+            except Exception:
+                message_has_order_recovery_signal = lambda _t: False  # type: ignore
+
+            _has_active_order = bool(
+                getattr(state, "order_prep", None)
+                or getattr(state, "current_product_focus", None)
             )
+            _msg = getattr(ctx, "message", "") or ""
+            if _has_active_order or message_has_order_recovery_signal(_msg):
+                logger.info(
+                    "[ORDER FLOW] continuing order despite previous failure | "
+                    "blocking ACTION_HANDOFF — intent=%s active_order=%s",
+                    intent.name, _has_active_order,
+                )
+                # Fall through to the regular order/checkout decision logic.
+            else:
+                return Decision(
+                    action=ACTION_HANDOFF,
+                    reason="customer requested human agent",
+                )
 
         # ── 2. Resend payment link / retry order ──────────────────────────
         if intent.name == INTENT_PAY_NOW or (

@@ -1478,34 +1478,62 @@ async def _handle_merchant_message(
         if mode_decision.mode == MODE_SUPPORT_ESCALATION:
             # ── Order-flow recovery override ──────────────────────────────────────
             # A customer who keeps sending order data (national short address code,
-            # explicit order intent) is NOT asking for human support. The
-            # handoff flag is often set automatically after a misclassified
-            # intent or a Salla failure; we must not let that trap the customer
-            # forever. Reset the flag and let the Brain resume the order flow.
+            # explicit order intent, numeric pick) is NOT asking for human support.
+            # The handoff flag and/or a non-recovery lease are often left over
+            # from a misclassified intent or a Salla failure — we must not let
+            # them trap the customer. The signal detector is centralised in
+            # `conversation_mode.message_has_order_recovery_signal` so the
+            # human_handoff_flag override, the live_chat_lease_held override,
+            # and the engine's ACTION_HANDOFF guard all stay in sync.
             try:
-                from services.address_resolution import _SHORT_CODE_RE  # noqa: PLC0415
-                _has_short_code = bool(_SHORT_CODE_RE.search((text or "").upper()))
+                from modules.ai.routing.conversation_mode import (  # noqa: PLC0415
+                    message_has_order_recovery_signal,
+                    save_lease as _save_lease,
+                    _build_lease as _mk_lease,
+                    MODE_LIVE_CHAT as _MODE_LIVE_CHAT,
+                    SOURCE_OVERRIDE_FREEFORM as _SRC_OVERRIDE,
+                    DEFAULT_LEASE_MINUTES_LIVE_CHAT as _LEASE_MIN,
+                )
             except Exception:
-                _has_short_code = False
-            _txt_lower = (text or "").strip()
-            _order_keywords = (
-                "أنشئ الطلب", "انشئ الطلب", "اطلب لي", "أبغى أطلب",
-                "أبي أطلب", "ابي اطلب", "ادفع", "رابط الدفع",
-                "اكمل الطلب", "أكمل الطلب", "كمل الطلب",
-                "https://maps.app.goo.gl", "https://goo.gl/maps", "maps.google.com",
-            )
-            _has_order_keyword = any(kw in _txt_lower for kw in _order_keywords)
-            _is_numeric_pick = _txt_lower.isdigit() and 1 <= len(_txt_lower) <= 2
+                message_has_order_recovery_signal = lambda _t: False  # type: ignore
+                _save_lease = None  # type: ignore
+                _mk_lease = None    # type: ignore
 
-            if _has_short_code or _has_order_keyword or _is_numeric_pick:
+            _has_recovery_signal = bool(message_has_order_recovery_signal(text or ""))
+            _was_lease_held = (
+                getattr(mode_decision, "source", "") == "live_chat_lease_held"
+            )
+
+            if _has_recovery_signal:
+                if _was_lease_held:
+                    logger.info(
+                        "[ORDER FLOW] restoring flow after live chat lease | "
+                        "tenant=%s to=%s lease_until=%s",
+                        tenant_id, to, mode_decision.lease.locked_until,
+                    )
+                    logger.info(
+                        "[ORDER FLOW] clearing live chat lease for order recovery | "
+                        "tenant=%s to=%s",
+                        tenant_id, to,
+                    )
+                else:
+                    logger.info(
+                        "[ORDER FLOW] restoring flow after escalation flag | "
+                        "tenant=%s to=%s",
+                        tenant_id, to,
+                    )
                 logger.info(
-                    "[ORDER FLOW] restoring flow after escalation flag | "
-                    "tenant=%s to=%s short_code=%s order_keyword=%s numeric_pick=%s",
-                    tenant_id, to, _has_short_code, _has_order_keyword, _is_numeric_pick,
+                    "[ORDER FLOW] skipping HUMAN_HANDOFF_ACK due to order recovery signal | "
+                    "tenant=%s to=%s text_preview=%r",
+                    tenant_id, to, (text or "")[:40],
                 )
                 logger.info(
                     "[ORDER FLOW] ignoring human handoff flag — clearing on conversation"
                 )
+                # Reset conversation handoff/pause flags. We deliberately
+                # DO NOT touch convo.extra_metadata['brain_state'] here —
+                # the Order Flow's order_prep must survive the lease
+                # reset so the customer doesn't have to re-enter data.
                 try:
                     convo.is_human_handoff = False
                     convo.paused_by_human = False
@@ -1514,6 +1542,22 @@ async def _handle_merchant_message(
                     db.flush()
                 except Exception as _flag_exc:
                     logger.warning("[ORDER FLOW] flag clear failed: %s", _flag_exc)
+
+                # Replace the held escalation/checkout lease with a fresh
+                # live_chat lease so the resolver doesn't re-pin the next
+                # turn back to support_escalation.
+                if _save_lease and _mk_lease:
+                    try:
+                        _new_lease = _mk_lease(
+                            mode=_MODE_LIVE_CHAT,
+                            previous_mode=mode_decision.mode,
+                            reason="order recovery signal — webhook override",
+                            source=_SRC_OVERRIDE,
+                            minutes=_LEASE_MIN,
+                        )
+                        _save_lease(db, convo, _new_lease)
+                    except Exception as _lease_exc:
+                        logger.warning("[ORDER FLOW] lease reset failed: %s", _lease_exc)
                 # Fall through to Brain pipeline below — DO NOT return.
             else:
                 reply = (

@@ -282,6 +282,62 @@ def detect_identity_topic(text: str) -> str:
     return ""
 
 
+# ── Order-flow recovery signal ───────────────────────────────────────────────
+# Customers in the middle of an order frequently keep typing order data
+# (a national short address code, a Google Maps link, a numeric pick from
+# a previous list, or an explicit "complete the order" phrase) AFTER a
+# transient handoff/escalation flag was set. This helper centralises the
+# detection so every layer that might block the customer can yield to
+# the order-flow recovery override consistently:
+#
+#   - human_handoff_flag override         (whatsapp_webhook.py)
+#   - live_chat_lease_held override       (whatsapp_webhook.py + this file)
+#   - ACTION_HANDOFF prevention           (brain.decision.engine)
+#
+# Keep the regex side-by-side with the keyword list so it stays the
+# single source of truth across the codebase.
+_ORDER_RECOVERY_SHORT_CODE_RE = re.compile(r"\b[A-Z]{4}\d{4}\b")
+_ORDER_RECOVERY_KEYWORDS: Tuple[str, ...] = (
+    "أنشئ الطلب", "انشئ الطلب", "اطلب لي", "أطلب لي",
+    "أبغى أطلب", "أبي أطلب", "ابي اطلب", "ابغى اطلب",
+    "ادفع", "أدفع", "رابط الدفع", "اكمل الطلب", "أكمل الطلب",
+    "كمل الطلب", "كمل طلبي", "أكمل طلبي",
+    "https://maps.app.goo.gl", "https://goo.gl/maps", "maps.google.com",
+)
+
+
+def message_has_order_recovery_signal(text: str) -> bool:
+    """True when the inbound message looks like the customer is trying
+    to continue an order (address code, Maps URL, numeric pick, explicit
+    "create the order" phrase). Used by every escalation/lease guard
+    that should yield to the order flow."""
+    if not isinstance(text, str):
+        return False
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+
+    # 1. Saudi national short address code (e.g. TAPA7401).
+    if _ORDER_RECOVERY_SHORT_CODE_RE.search(cleaned.upper()):
+        return True
+
+    # 2. Explicit order keywords / Maps URLs.
+    lowered = cleaned.lower()
+    for kw in _ORDER_RECOVERY_KEYWORDS:
+        if kw in cleaned or kw.lower() in lowered:
+            return True
+
+    # 3. Pure numeric pick from a previous product/options list.
+    if cleaned.isdigit() and 1 <= len(cleaned) <= 2:
+        return True
+    # 3b. Multi-token numeric pick like "2 1" (option-group selection).
+    tokens = cleaned.split()
+    if 1 <= len(tokens) <= 4 and all(t.isdigit() and 1 <= len(t) <= 2 for t in tokens):
+        return True
+
+    return False
+
+
 def is_free_form_message(text: str) -> bool:
     """True for any non-empty inbound that isn't a button payload or
     pure interactive token. Free-form messages are the trigger for
@@ -583,10 +639,40 @@ def resolve_conversation_mode(
         )
 
     # Other sticky leases (checkout, support, post-purchase) also win
-    # over automation recovery while held.
+    # over automation recovery while held — UNLESS the customer is
+    # clearly trying to continue an order (short_code / Maps URL /
+    # numeric pick / explicit order keyword). In that case the
+    # order-flow recovery override breaks the lease and hands back to
+    # live_chat so Brain/Order Flow can take over the turn.
     if prior_lease.is_lease_active(now) and prior_mode in (
         MODE_CHECKOUT_ASSIST, MODE_SUPPORT_ESCALATION, MODE_POST_PURCHASE,
     ):
+        if message_has_order_recovery_signal(text_clean):
+            logger.info(
+                "[ORDER FLOW] restoring flow after live chat lease | "
+                "prior_mode=%s lease_until=%s",
+                prior_mode, prior_lease.locked_until,
+            )
+            target_mode = MODE_LIVE_CHAT
+            lease = _build_lease(
+                mode=target_mode,
+                previous_mode=prior_mode,
+                reason="order recovery signal — releasing non-recovery lease",
+                source=SOURCE_OVERRIDE_FREEFORM,
+                minutes=_lease_minutes_for(target_mode),
+                now=now,
+            )
+            return ModeDecision(
+                mode=target_mode,
+                lease=lease,
+                previous_mode=prior_mode,
+                reason=lease.reason,
+                source=lease.source,
+                transitioned=True,
+                recovery=snapshot,
+                free_form_override=True,
+            )
+
         lease = _build_lease(
             mode=prior_mode,
             previous_mode=prior_mode,
