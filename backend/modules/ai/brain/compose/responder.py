@@ -112,7 +112,10 @@ class DefaultComposer:
             payload = data.get("payload", {}) or {}
             topic = data.get("topic", "")
             if topic == TOPIC_IDENTITY:
-                return T.faq_identity(store_name=ctx.facts.store_name)
+                return self._with_follow_up(
+                    T.faq_identity(store_name=ctx.facts.store_name),
+                    ctx,
+                )
             if topic == TOPIC_SHIPPING:
                 return self._with_follow_up(
                     T.faq_shipping(
@@ -315,6 +318,15 @@ class DefaultComposer:
         return False
 
     def _with_follow_up(self, text: str, ctx: BrainContext) -> str:
+        # Order-flow resume hint takes priority over generic suggestion
+        # follow-ups: when the customer asks a side question ("كم
+        # التوصيل؟") mid-order, we answer the FAQ AND remind them where
+        # we left off so the conversation doesn't lose momentum.
+        resume = self._order_resume_hint(ctx)
+        if resume and resume not in text:
+            text = f"{text}\n\n{resume}"
+            return text
+
         suggestion = getattr(ctx, "suggestion", None)
         if not suggestion or not suggestion.needs_follow_up_question:
             return text
@@ -324,6 +336,66 @@ class DefaultComposer:
             return text
 
         return f"{text}\n\n{follow_up}"
+
+    @staticmethod
+    def _order_resume_hint(ctx: BrainContext) -> str:
+        """Return a short Arabic prompt to resume an in-progress order,
+        or '' when no order is active. Triggered after FAQ replies so
+        customers don't lose track of the order flow when they ask a
+        side question (delivery / store info / etc.)."""
+        try:
+            prep = getattr(ctx.state, "order_prep", None)
+            focus = getattr(ctx.state, "current_product_focus", None) or {}
+            if not prep or not (focus or getattr(prep, "product_id", "")):
+                return ""
+
+            product_title = (focus or {}).get("title") or getattr(prep, "product_name", "") or "المنتج"
+
+            # 1. Pending product options take priority — they're the most
+            # specific blocker.
+            pending_options = []
+            try:
+                meta = list(getattr(prep, "product_options_meta", None) or [])
+                picked = dict(getattr(prep, "product_options", None) or {})
+                for g in meta:
+                    name = (g.get("name") or "").strip()
+                    if not name:
+                        continue
+                    if not g.get("required", True):
+                        continue
+                    if name.lower() in picked:
+                        continue
+                    pending_options.append(name)
+            except Exception:
+                pending_options = []
+
+            if pending_options:
+                if len(pending_options) == 1:
+                    return f"نكمل اختيار {pending_options[0]} لـ *{product_title}*؟ 👇"
+                joined = "، ".join(pending_options[:-1]) + f" و{pending_options[-1]}"
+                return f"نكمل اختيار {joined} لـ *{product_title}*؟ 👇"
+
+            # 2. Otherwise hint the most likely missing checkout slot.
+            missing = list(getattr(prep, "missing_fields", None) or [])
+            slot_labels = {
+                "customer_first_name": "اسمك",
+                "customer_last_name":  "اسمك",
+                "customer_name":       "اسمك",
+                "city":                "المدينة",
+                "address":             "العنوان أو الرمز الوطني",
+                "address_line":        "العنوان أو الرمز الوطني",
+                "short_address_code":  "الرمز الوطني (أو رابط الموقع)",
+                "google_maps_url":     "رابط الموقع",
+            }
+            for slot in missing:
+                label = slot_labels.get(slot)
+                if label:
+                    return f"نكمل بعدها {label} لإتمام طلب *{product_title}*؟"
+
+            # 3. Order ready to create — prompt confirmation.
+            return f"نكمل إنشاء طلب *{product_title}* الآن؟"
+        except Exception:
+            return ""
 
     # ── LLM delegation ───────────────────────────────────────────────────────
 

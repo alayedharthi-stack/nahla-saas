@@ -168,6 +168,31 @@ class DraftOrderHandler:
         await _ensure_product_options_loaded(prep, ctx, external_id)
         _merge_message_options(prep, ctx.message)
 
+        # ── Number-by-stage interpretation (quantity) ────────────────────────
+        # When the customer sends a bare number ("2" / "3") AND the product
+        # is already selected AND no required options are pending, treat it
+        # as a quantity update. The same digits would have been interpreted
+        # as a list-pick (no product yet) or option-pick (options pending)
+        # in the earlier stages — this branch only fires when both prior
+        # interpretations are no longer ambiguous.
+        _msg_clean = (ctx.message or "").strip()
+        if (
+            _msg_clean.isdigit()
+            and 1 <= len(_msg_clean) <= 2
+            and not _missing_product_options(prep)
+        ):
+            try:
+                _qty_from_msg = int(_msg_clean)
+            except ValueError:
+                _qty_from_msg = 0
+            if _qty_from_msg >= 1 and _qty_from_msg != int(prep.quantity or 1):
+                prep.quantity = _qty_from_msg
+                logger.info(
+                    "[ORDER FLOW] number interpreted as quantity | tenant=%s "
+                    "product=%s quantity=%d",
+                    ctx.tenant_id, external_id, _qty_from_msg,
+                )
+
         # If the customer dropped a short_code / Maps URL / city while
         # we were still collecting product options, log it explicitly so
         # we can verify in Railway that data preservation works.
@@ -414,6 +439,12 @@ class DraftOrderHandler:
             if has_address and prep.salla_failure_count <= 1:
                 # First failure with address → silent retry message.
                 # Customer should send any message to trigger another attempt.
+                logger.info(
+                    "[ORDER FLOW] retry attempt | tenant=%s product=%s attempt=%d "
+                    "short_code=%r",
+                    ctx.tenant_id, external_id,
+                    prep.salla_failure_count, prep.short_address_code,
+                )
                 return ActionResult(
                     success=True,
                     data={
@@ -888,18 +919,23 @@ async def _ensure_product_options_loaded(
 def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
     """Match values mentioned in the customer's message against cached options.
 
-    Rule-based, runs against ALL pending groups (multi-option in a single
-    message such as "M أسود" or "2 1"):
+    Rule-based, runs against ALL groups (multi-option in a single message
+    such as "M أسود" or "2 1") with override support:
 
       1. Direct value-name substring match (case-insensitive + Arabic
-         normalised) across every required group that's still missing.
-      2. Multi-token numeric pick — splits the message on whitespace, so
-         "2 1" assigns 2 to the first pending group and 1 to the second.
-         The single-number case "1" still works when exactly one group
-         is pending.
+         normalised) across every required group. If a different value
+         from the SAME group is already selected, this REPLACES it and
+         logs `[ORDER FLOW] option updated` so the customer can change
+         their mind ("M أسود" → "أبيض" updates only the colour).
+      2. Multi-token numeric pick — splits the message on whitespace,
+         so "2 1" assigns 2 to the first pending group and 1 to the
+         second. Numeric picks are positional/ambiguous, so they only
+         operate on groups that are still UNSELECTED to avoid
+         accidentally overriding a deliberate text choice.
 
-    Returns the number of groups newly selected on this turn so callers
-    can emit a `[ORDER FLOW] multi-option parsed` log when ≥2 captured.
+    Returns the number of groups newly selected (or updated) on this
+    turn so callers can emit `[ORDER FLOW] multi-option parsed` when
+    ≥2 captured.
     """
     if not prep.product_options_meta:
         return 0
@@ -910,14 +946,15 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
     text_norm = _norm_ar(text_lower)
     captured = 0
 
-    # ── direct value-name match across all groups ────────────────────────
+    # ── direct value-name match across all groups (with override) ────────
     for group in prep.product_options_meta:
         gname = (group.get("name") or "").strip()
         if not gname:
             continue
         gkey = gname.lower()
-        if gkey in (prep.product_options or {}):
-            continue
+        existing = (prep.product_options or {}).get(gkey)
+        existing_value_id = (existing or {}).get("value_id")
+        existing_value_name = (existing or {}).get("value_name") or ""
         for val in group.get("values") or []:
             vname = (val.get("name") or "").strip()
             if not vname:
@@ -925,6 +962,12 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
             v_lower = vname.lower()
             v_norm = _norm_ar(v_lower)
             if v_lower in text_lower or (v_norm and v_norm in text_norm):
+                # Same value already picked — no-op, no log spam.
+                if existing and (
+                    existing_value_id == val.get("id")
+                    or existing_value_name.lower() == v_lower
+                ):
+                    break
                 prep.product_options[gkey] = {
                     "option_id": group.get("id"),
                     "option_name": gname,
@@ -932,10 +975,16 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
                     "value_name": vname,
                 }
                 captured += 1
-                logger.info(
-                    "[ORDER FLOW] product option selected | group=%r value=%r",
-                    gname, vname,
-                )
+                if existing:
+                    logger.info(
+                        "[ORDER FLOW] option updated | group=%r old=%r new=%r",
+                        gname, existing_value_name, vname,
+                    )
+                else:
+                    logger.info(
+                        "[ORDER FLOW] product option selected | group=%r value=%r",
+                        gname, vname,
+                    )
                 break
 
     # ── multi-token numeric pick across remaining pending groups ──────────
@@ -965,7 +1014,7 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
             }
             captured += 1
             logger.info(
-                "[ORDER FLOW] product option selected (numeric) | group=%r idx=%d value=%r",
+                "[ORDER FLOW] number interpreted as option | group=%r idx=%d value=%r",
                 gname, idx, val.get("name") or "",
             )
 

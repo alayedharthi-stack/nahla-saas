@@ -213,6 +213,11 @@ class DefaultDecisionEngine:
                 product = candidates[idx - 1]
                 if product:
                     logger.info(
+                        "[ORDER FLOW] number interpreted as product | "
+                        "idx=%d title=%r tenant=%s",
+                        idx, product.get("title"), ctx.tenant_id,
+                    )
+                    logger.info(
                         "[ORDER FLOW] Product selected from suggestion → starting order flow | "
                         "product='%s' idx=%d tenant=%s",
                         product.get("title"), idx, ctx.tenant_id,
@@ -238,7 +243,9 @@ class DefaultDecisionEngine:
             # pick — keep the order flow alive instead of breaking it.
             if state.current_product_focus and facts.orderable:
                 logger.info(
-                    "[ORDER FLOW] numeric pick without candidates but product focused → continue order"
+                    "[ORDER FLOW] number interpreted as quantity-or-option | "
+                    "product=%r — continuing order",
+                    (state.current_product_focus or {}).get("title"),
                 )
                 return Decision(
                     action=ACTION_PROPOSE_DRAFT_ORDER,
