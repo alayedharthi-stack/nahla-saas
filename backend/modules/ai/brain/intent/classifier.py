@@ -73,6 +73,11 @@ class DefaultIntentClassifier:
             return rule_intent
 
         # ── Layer 2: LLM slot extraction ───────────────────────────────────
+        logger.info(
+            "[Classifier] calling LLM slot extractor | in_order_flow=%s rule=%s",
+            in_order_flow,
+            rule_intent.name if rule_intent else None,
+        )
         slots = await _slot_mod.extract_slots(message, history)
 
         # Layer 2b: deterministic Arabic ordering-slot extractor. Runs

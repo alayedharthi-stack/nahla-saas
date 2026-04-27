@@ -90,9 +90,14 @@ async def extract_slots(
         return deterministic
 
     try:
+        import asyncio
         import anthropic
 
-        client = anthropic.AsyncAnthropic(api_key=api_key)
+        # 12-second hard timeout: the Anthropic SDK can hang indefinitely
+        # on a stalled TCP connection without raising. We add both the SDK-level
+        # timeout and an asyncio.wait_for guard so the brain never blocks a
+        # full webhook turn beyond this budget.
+        client = anthropic.AsyncAnthropic(api_key=api_key, timeout=12.0)
 
         # Summarise last 2 turns for context (no full history to keep tokens low)
         context_turns = history[-4:] if history else []
@@ -106,11 +111,14 @@ async def extract_slots(
 
         user_content = f"السياق السابق:\n{history_text}\n\nرسالة المستخدم الحالية:\n{message}"
 
-        response = await client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=200,
-            system=_SYSTEM,
-            messages=[{"role": "user", "content": user_content}],
+        response = await asyncio.wait_for(
+            client.messages.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=200,
+                system=_SYSTEM,
+                messages=[{"role": "user", "content": user_content}],
+            ),
+            timeout=12.0,
         )
 
         raw = response.content[0].text.strip()
@@ -130,8 +138,8 @@ async def extract_slots(
     except json.JSONDecodeError as exc:
         logger.warning("[SlotExtractor] JSON parse error: %s", exc)
         return deterministic
-    except Exception as exc:
-        logger.warning("[SlotExtractor] extraction failed: %s", exc)
+    except (TimeoutError, Exception) as exc:
+        logger.warning("[SlotExtractor] extraction failed (type=%s): %s", type(exc).__name__, exc)
         return deterministic
 
 
