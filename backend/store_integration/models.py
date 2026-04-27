@@ -25,12 +25,24 @@ class NormalizedProduct(BaseModel):
     product_url: Optional[str] = None
     tags: List[str] = []
     variants: List[NormalizedVariant] = []
+    # Option groups (Salla "options"): each entry is
+    # {id, name, type, required, values: [{id, name, ...}, ...]}.
+    # Empty list means the product can be ordered without picking options.
+    options: List[Dict[str, Any]] = []
+    # True iff the product has at least one required option group.
+    has_required_options: bool = False
 
 
 class OrderItemInput(BaseModel):
     product_id: str
     variant_id: Optional[str] = None
     quantity: int = 1
+    # Selected option values for products with required options.
+    # Each entry is {"option_id": int|str, "value_id": int|str|None,
+    # "option_name": str, "value_name": str}. The adapter is responsible
+    # for converting this into the platform's per-product "options" payload
+    # (e.g. Salla expects [{"id": option_id, "value": value_id}, ...]).
+    options: List[Dict[str, Any]] = []
 
 
 class OrderInput(BaseModel):

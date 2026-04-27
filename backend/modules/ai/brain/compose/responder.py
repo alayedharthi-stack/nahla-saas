@@ -173,6 +173,12 @@ class DefaultComposer:
         if action == ACTION_PROPOSE_DRAFT_ORDER:
             if not result.success:
                 return T.generic_fallback()
+            if data.get("needs_options"):
+                return T.ask_product_options(
+                    product=data.get("product", {}),
+                    missing_option_groups=data.get("missing_option_groups", []),
+                    selected_options=data.get("selected_options", {}),
+                )
             if data.get("salla_escalate"):
                 return T.salla_escalate_message(product=data.get("product", {}))
             if data.get("salla_retry"):

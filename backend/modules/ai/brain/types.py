@@ -80,6 +80,17 @@ class OrderPreparationState:
     salla_failure_count: int = 0
     # Cached shipping company/zone ID resolved from Salla (avoids re-fetching each turn)
     shipping_company_id: Optional[int] = None
+    # ── Product options (variants) ───────────────────────────────────────
+    # `product_options_meta` holds the option groups fetched once from the
+    # store (id, name, required, values=[{id,name}]). We cache it on the
+    # prep so we don't re-fetch every turn while the customer picks values.
+    # `product_options` holds the customer's selection so far, keyed by the
+    # lowercased option name → {"option_id", "option_name", "value_id",
+    # "value_name"}. When all required option groups are selected the
+    # adapter receives them in OrderItemInput.options.
+    product_options_meta: List[Dict[str, Any]] = field(default_factory=list)
+    product_options: Dict[str, Any] = field(default_factory=dict)
+    product_has_required_options: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -105,6 +116,9 @@ class OrderPreparationState:
             "last_order_failed": self.last_order_failed,
             "salla_failure_count": self.salla_failure_count,
             "shipping_company_id": self.shipping_company_id,
+            "product_options_meta": list(self.product_options_meta or []),
+            "product_options": dict(self.product_options or {}),
+            "product_has_required_options": self.product_has_required_options,
         }
 
     @staticmethod
@@ -138,6 +152,9 @@ class OrderPreparationState:
             last_order_failed=bool(raw.get("last_order_failed", False)),
             salla_failure_count=int(raw.get("salla_failure_count") or 0),
             shipping_company_id=int(_sid) if _sid is not None else None,
+            product_options_meta=list(raw.get("product_options_meta") or []),
+            product_options=dict(raw.get("product_options") or {}),
+            product_has_required_options=bool(raw.get("product_has_required_options", False)),
         )
 
 

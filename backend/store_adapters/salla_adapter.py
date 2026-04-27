@@ -395,6 +395,8 @@ class SallaAdapter(BaseStoreAdapter):
             for v in (raw.get("variants") or [])
         ]
 
+        options, has_required = self._normalize_options(raw.get("options") or [])
+
         return NormalizedProduct(
             id=str(raw.get("id", "")),
             title=raw.get("name") or raw.get("title") or "",
@@ -408,7 +410,53 @@ class SallaAdapter(BaseStoreAdapter):
             product_url=raw.get("url"),
             tags=raw.get("tags") or [],
             variants=variants,
+            options=options,
+            has_required_options=has_required,
         )
+
+    def _normalize_options(
+        self, raw_options: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        """Convert a Salla `options` array into a stable, JSON-friendly shape.
+
+        Salla returns each option group as
+            {id, name, type, required, values: [{id, name, ...}, ...]}.
+        We keep the same structure (so the adapter can refer back to ids
+        when posting an order) and surface `has_required_options` so the
+        Brain knows whether to ask the customer before creating the order.
+        """
+        out: List[Dict[str, Any]] = []
+        has_required = False
+        for opt in raw_options or []:
+            if not isinstance(opt, dict):
+                continue
+            opt_id = opt.get("id")
+            opt_name = (opt.get("name") or "").strip()
+            opt_type = (opt.get("type") or "select")
+            opt_required = bool(opt.get("required") or opt.get("is_required") or False)
+            values_raw = opt.get("values") or []
+            values_out: List[Dict[str, Any]] = []
+            for val in values_raw:
+                if not isinstance(val, dict):
+                    continue
+                values_out.append({
+                    "id": val.get("id"),
+                    "name": (val.get("name") or "").strip(),
+                    "price": val.get("price"),
+                    "image_url": val.get("image_url") or val.get("image"),
+                })
+            if not opt_name:
+                continue
+            out.append({
+                "id": opt_id,
+                "name": opt_name,
+                "type": opt_type,
+                "required": opt_required,
+                "values": values_out,
+            })
+            if opt_required and values_out:
+                has_required = True
+        return out, has_required
 
     def _normalize_variant(self, raw: Dict[str, Any]) -> NormalizedVariant:
         price_block = raw.get("price") or {}
@@ -570,7 +618,28 @@ class SallaAdapter(BaseStoreAdapter):
                 "quantity": item.quantity,
             }
             if item.variant_id:
-                entry["variant_id"] = int(item.variant_id)
+                try:
+                    entry["variant_id"] = int(item.variant_id)
+                except (TypeError, ValueError):
+                    entry["variant_id"] = item.variant_id
+            # Salla expects {"id": option_id, "value": value_id} per option
+            # group. We accept either explicit value_id (preferred) or fall
+            # back to value_name when the merchant uses free-text options.
+            if item.options:
+                opts_payload: List[Dict[str, Any]] = []
+                for sel in item.options:
+                    if not isinstance(sel, dict):
+                        continue
+                    _oid = sel.get("option_id") if "option_id" in sel else sel.get("id")
+                    _vid = sel.get("value_id") if "value_id" in sel else sel.get("value")
+                    if _oid is None:
+                        continue
+                    if _vid is not None:
+                        opts_payload.append({"id": _oid, "value": _vid})
+                    elif sel.get("value_name"):
+                        opts_payload.append({"id": _oid, "value": sel["value_name"]})
+                if opts_payload:
+                    entry["options"] = opts_payload
             products.append(entry)
 
         # ── Phone — Salla requires E.164 (+966XXXXXXXXX) ────────────────────────

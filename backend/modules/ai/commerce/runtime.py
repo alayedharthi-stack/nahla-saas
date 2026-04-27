@@ -172,6 +172,8 @@ class CommerceToolRuntime:
             return ToolExecutionResult(False, "create_draft_order", error="missing_product_id")
 
         _raw_sid = payload.get("shipping_company_id")
+        _raw_options = payload.get("options") or []
+        _item_options = _raw_options if isinstance(_raw_options, list) else []
         order_input = OrderInput(
             customer_name=customer_name,
             customer_phone=self.customer_phone,
@@ -190,7 +192,11 @@ class CommerceToolRuntime:
             latitude=payload.get("latitude"),
             longitude=payload.get("longitude"),
             payment_method=str(payload.get("payment_method") or "online"),
-            items=[OrderItemInput(product_id=product_id, quantity=quantity)],
+            items=[OrderItemInput(
+                product_id=product_id,
+                quantity=quantity,
+                options=_item_options,
+            )],
             notes=str(payload.get("notes") or "").strip() or None,
             shipping_company_id=int(_raw_sid) if _raw_sid else None,
         )

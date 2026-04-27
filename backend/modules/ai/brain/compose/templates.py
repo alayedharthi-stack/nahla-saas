@@ -130,6 +130,55 @@ def collect_order_details(
     return ask
 
 
+def ask_product_options(
+    product: Dict[str, Any],
+    missing_option_groups: List[Dict[str, Any]] | None = None,
+    selected_options: Dict[str, Any] | None = None,
+    **_: Any,
+) -> str:
+    """Ask the customer to pick the next missing option group (size, color…).
+
+    We surface only the FIRST pending group per turn so the conversation
+    stays focused; subsequent groups are asked one at a time on later turns.
+    The list of values is rendered as a numbered list — the customer can
+    reply with the value name or the number (handled in
+    `_merge_message_options`).
+    """
+    title = product.get("title", "المنتج المحدد")
+    groups = list(missing_option_groups or [])
+    if not groups:
+        return f"تمام، سأجهز طلب *{title}*."
+
+    pending = groups[0]
+    pending_name = (pending.get("name") or "").strip() or "خيار المنتج"
+    values = pending.get("values") or []
+
+    # Confirmation summary of already-picked options (e.g. "اللون: أسود").
+    picked_lines: List[str] = []
+    for sel in (selected_options or {}).values():
+        if not isinstance(sel, dict):
+            continue
+        gname = (sel.get("option_name") or "").strip()
+        vname = (sel.get("value_name") or "").strip()
+        if gname and vname:
+            picked_lines.append(f"• {gname}: {vname}")
+
+    lines: List[str] = [f"تمام، *{title}* متوفر بعدة خيارات."]
+    if picked_lines:
+        lines.append("اختياراتك حتى الآن:")
+        lines.extend(picked_lines)
+    lines.append(f"اختر {pending_name}:")
+
+    for idx, val in enumerate(values, 1):
+        vname = (val.get("name") or "").strip()
+        if not vname:
+            continue
+        lines.append(f"{idx}. {vname}")
+
+    lines.append("(يمكنك الرد بالاسم أو رقم الخيار)")
+    return "\n".join(lines)
+
+
 def salla_retry_message(product: Dict[str, Any], code: str = "", **_: Any) -> str:
     title = product.get("title", "المنتج المحدد")
     code_ref = f"الرمز *{code}*" if code else "بيانات عنوانك"

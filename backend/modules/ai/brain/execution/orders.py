@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os, sys
+from typing import Any, Dict, List
 
 logger = logging.getLogger("nahla.brain.execution.orders")
 
@@ -64,7 +65,7 @@ class DraftOrderHandler:
 
         if product_changed:
             logger.info(
-                "[DraftOrderHandler] Product changed — resetting address | "
+                "[DraftOrderHandler] Product changed — resetting address + options | "
                 "tenant=%s old=%s new=%s",
                 ctx.tenant_id, previous_product_id, current_product_id,
             )
@@ -80,6 +81,9 @@ class DraftOrderHandler:
             prep.address_line = ""
             prep.resolution_source = ""
             prep.last_order_failed = False
+            prep.product_options_meta = []
+            prep.product_options = {}
+            prep.product_has_required_options = False
 
         # Track which product this prep belongs to
         prep.product_id = current_product_id
@@ -124,6 +128,48 @@ class DraftOrderHandler:
                 success=False,
                 error="missing_product_id",
                 data={"message": "product_has_no_external_id"},
+            )
+
+        # ── Product options (variants) ────────────────────────────────────────
+        # Salla rejects the order with `options: "خيارات المنتج مطلوبة"` when
+        # the product has required option groups (size, color, …) and the
+        # caller did not pick a value for every group. We fetch the options
+        # once, cache them on `prep`, parse the customer's message for any
+        # value that matches a known group, and either:
+        #   • return needs_options=True (ask the customer for the next group),
+        #   • or pass the resolved selection into create_draft_order.
+        await _ensure_product_options_loaded(prep, ctx, external_id)
+        _merge_message_options(prep, ctx.message)
+        _missing_options = _missing_product_options(prep)
+        if _missing_options:
+            _next_group = _missing_options[0]
+            logger.info(
+                "[ORDER FLOW] product requires options | tenant=%s product=%s "
+                "missing=%s selected=%s",
+                ctx.tenant_id, external_id,
+                [g["name"] for g in _missing_options],
+                list(prep.product_options.keys()),
+            )
+            logger.info(
+                "[ORDER FLOW] missing product options | tenant=%s pending=%s values=%s",
+                ctx.tenant_id, _next_group["name"],
+                [v["name"] for v in _next_group.get("values") or []],
+            )
+            return ActionResult(
+                success=True,
+                data={
+                    "product": product_info,
+                    "needs_options": True,
+                    "missing_option_groups": _missing_options,
+                    "selected_options": prep.product_options,
+                    "order_prep": prep.to_dict(),
+                },
+            )
+        if prep.product_has_required_options:
+            logger.info(
+                "[ORDER FLOW] product options selected | tenant=%s product=%s selection=%s",
+                ctx.tenant_id, external_id,
+                {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
             )
 
         # Log phone resolution — phone is always taken from the WhatsApp conversation,
@@ -194,6 +240,13 @@ class DraftOrderHandler:
             customer_id=ctx.customer_id,
             tenant_context=ctx.tenant_context,
         )
+        _options_payload = _resolve_options_payload(prep)
+        if _options_payload:
+            logger.info(
+                "[ORDER FLOW] creating order with options | tenant=%s product=%s options=%s",
+                ctx.tenant_id, external_id, _options_payload,
+            )
+
         runtime_result = await runtime.execute(
             "create_draft_order",
             {
@@ -217,6 +270,7 @@ class DraftOrderHandler:
                 "payment_method": "online",
                 "notes": _build_order_notes(prep),
                 "shipping_company_id": prep.shipping_company_id,
+                "options": _options_payload,
             },
         )
         order = runtime_result.payload.get("order")
@@ -719,3 +773,178 @@ def _safe_float(value: object) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Product options (variants) helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _ensure_product_options_loaded(
+    prep: OrderPreparationState,
+    ctx: BrainContext,
+    external_id: str,
+) -> None:
+    """Fetch the product's option groups from the store once and cache them.
+
+    Salla products with size/color/etc. variants expose `options` in their
+    detail payload; if this prep already has cached metadata for the same
+    product we skip the network call.
+    """
+    if prep.product_options_meta:
+        return
+    if not external_id:
+        return
+    try:
+        from store_integration.registry import get_adapter  # noqa: PLC0415
+        adapter = get_adapter(ctx.tenant_id)
+        if not adapter:
+            return
+        product = await adapter.get_product(external_id)
+        if not product:
+            return
+        opts = list(getattr(product, "options", None) or [])
+        prep.product_options_meta = opts
+        prep.product_has_required_options = bool(
+            getattr(product, "has_required_options", False)
+            or any(o.get("required") and o.get("values") for o in opts)
+        )
+        logger.info(
+            "[ORDER FLOW] product options loaded | tenant=%s product=%s "
+            "groups=%d required=%s",
+            ctx.tenant_id, external_id, len(opts),
+            prep.product_has_required_options,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ORDER FLOW] product options fetch failed (non-blocking) | "
+            "tenant=%s product=%s err=%s",
+            ctx.tenant_id, external_id, exc,
+        )
+
+
+def _merge_message_options(prep: OrderPreparationState, message: str) -> None:
+    """Match values mentioned in the customer's message against cached options.
+
+    Rule-based: case-insensitive substring match on the value name. The
+    first match per group wins, and we never overwrite a previously
+    selected value (the customer can re-pick by sending a new message —
+    selection is replaced explicitly only when the prior value isn't in
+    the message text). Numeric input is allowed (e.g. "1" → first value)
+    but only when exactly one option group is still missing, so a generic
+    "1" never accidentally overwrites a color/size already chosen.
+    """
+    if not prep.product_options_meta:
+        return
+    text = (message or "").strip()
+    if not text:
+        return
+    text_lower = text.lower()
+    text_norm = _norm_ar(text_lower)
+
+    # ── direct value-name match across all groups ────────────────────────
+    for group in prep.product_options_meta:
+        gname = (group.get("name") or "").strip()
+        if not gname:
+            continue
+        gkey = gname.lower()
+        for val in group.get("values") or []:
+            vname = (val.get("name") or "").strip()
+            if not vname:
+                continue
+            v_lower = vname.lower()
+            v_norm = _norm_ar(v_lower)
+            if v_lower in text_lower or (v_norm and v_norm in text_norm):
+                if gkey in (prep.product_options or {}):
+                    prior = prep.product_options[gkey]
+                    if (prior or {}).get("value_name", "").lower() == v_lower:
+                        continue
+                prep.product_options[gkey] = {
+                    "option_id": group.get("id"),
+                    "option_name": gname,
+                    "value_id": val.get("id"),
+                    "value_name": vname,
+                }
+                logger.info(
+                    "[ORDER FLOW] product option selected | group=%r value=%r",
+                    gname, vname,
+                )
+                break
+
+    # ── numeric pick when exactly one group is still pending ──────────────
+    missing_now = _missing_product_options(prep)
+    if len(missing_now) == 1 and text.isdigit():
+        try:
+            idx = int(text)
+        except ValueError:
+            idx = 0
+        group = missing_now[0]
+        values = group.get("values") or []
+        if 1 <= idx <= len(values):
+            val = values[idx - 1]
+            gname = group.get("name") or ""
+            gkey = gname.lower()
+            prep.product_options[gkey] = {
+                "option_id": group.get("id"),
+                "option_name": gname,
+                "value_id": val.get("id"),
+                "value_name": val.get("name") or "",
+            }
+            logger.info(
+                "[ORDER FLOW] product option selected (numeric) | group=%r idx=%d value=%r",
+                gname, idx, val.get("name") or "",
+            )
+
+
+def _missing_product_options(prep: OrderPreparationState) -> List[Dict[str, Any]]:
+    """List the required option groups that the customer hasn't picked yet."""
+    out: List[Dict[str, Any]] = []
+    for group in prep.product_options_meta or []:
+        if not group.get("required"):
+            continue
+        if not (group.get("values") or []):
+            continue
+        gkey = (group.get("name") or "").strip().lower()
+        if not gkey:
+            continue
+        if gkey in (prep.product_options or {}):
+            continue
+        out.append(group)
+    return out
+
+
+def _resolve_options_payload(prep: OrderPreparationState) -> List[Dict[str, Any]]:
+    """Convert prep.product_options dict into OrderItemInput.options shape."""
+    payload: List[Dict[str, Any]] = []
+    for sel in (prep.product_options or {}).values():
+        if not isinstance(sel, dict):
+            continue
+        if sel.get("option_id") is None:
+            continue
+        payload.append({
+            "option_id": sel.get("option_id"),
+            "option_name": sel.get("option_name"),
+            "value_id": sel.get("value_id"),
+            "value_name": sel.get("value_name"),
+        })
+    return payload
+
+
+def _norm_ar(text: str) -> str:
+    """Lossy normalization for Arabic substring matching: strip diacritics
+    and unify alef/ya forms so 'أبيض' matches 'ابيض'."""
+    if not text:
+        return ""
+    out = []
+    for ch in text:
+        if ch in "ًٌٍَُِّْـ":
+            continue
+        if ch in "أإآ":
+            out.append("ا")
+        elif ch == "ى":
+            out.append("ي")
+        elif ch == "ة":
+            out.append("ه")
+        else:
+            out.append(ch)
+    return "".join(out)
+
