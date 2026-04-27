@@ -392,39 +392,43 @@ class SallaAdapter(BaseStoreAdapter):
             if not raw:
                 return None
 
-            # Salla's product detail endpoint occasionally returns the
-            # product without its `options` array (depends on store
-            # config / API version). Hit the dedicated `/products/{id}
-            # /options` endpoint to ensure we always know the option
-            # groups before creating the order — Salla rejects the order
-            # with a 422 ("خيارات المنتج مطلوبة") if a required option
-            # value is missing, so this fetch is critical for stores
-            # that use sizes/colors/variants.
-            if not raw.get("options"):
-                try:
-                    opt_data = await self._get(f"/products/{product_id}/options")
-                    fallback_opts = opt_data.get("data") or []
-                    if isinstance(fallback_opts, list) and fallback_opts:
-                        raw["options"] = fallback_opts
-                        logger.info(
-                            "[SallaAdapter] product options fetched via /products/%s/options | count=%d",
-                            product_id, len(fallback_opts),
-                        )
-                except httpx.HTTPStatusError as opt_exc:
-                    # Endpoint not available on every Salla plan/scope.
-                    # Log and continue — order flow will surface this
-                    # later as required-options-missing if applicable.
+            # ── Always reconcile against /products/{id}/options ───────────
+            # Salla's product detail endpoint frequently returns the
+            # product without its `options` array (we have observed
+            # this on real merchant stores even after passing
+            # `?include=options`). Hitting the dedicated options
+            # endpoint UNCONDITIONALLY is the only reliable way to
+            # know whether the product has variant option groups —
+            # otherwise we end up posting an order with no options
+            # and Salla rejects it with 422
+            # ("خيارات المنتج مطلوبة"). The endpoint is cheap and
+            # the response is small, so we always reconcile.
+            try:
+                opt_data = await self._get(f"/products/{product_id}/options")
+                fallback_opts = opt_data.get("data") or []
+                detail_opts = raw.get("options") or []
+                if isinstance(fallback_opts, list) and len(fallback_opts) > len(detail_opts or []):
+                    raw["options"] = fallback_opts
                     logger.info(
-                        "[SallaAdapter] /products/%s/options unavailable (%s) — "
-                        "using detail-endpoint options only",
-                        product_id, opt_exc.response.status_code,
+                        "[SallaAdapter] product options reconciled via /products/%s/options | "
+                        "detail=%d dedicated=%d",
+                        product_id,
+                        len(detail_opts or []),
+                        len(fallback_opts),
                     )
-                except Exception as opt_exc:
-                    logger.info(
-                        "[SallaAdapter] product options fallback fetch failed | "
-                        "product=%s err=%s",
-                        product_id, opt_exc,
-                    )
+            except httpx.HTTPStatusError as opt_exc:
+                # Endpoint not available on every Salla plan/scope.
+                logger.info(
+                    "[SallaAdapter] /products/%s/options unavailable (%s) — "
+                    "using detail-endpoint options only",
+                    product_id, opt_exc.response.status_code,
+                )
+            except Exception as opt_exc:
+                logger.info(
+                    "[SallaAdapter] product options fallback fetch failed | "
+                    "product=%s err=%s",
+                    product_id, opt_exc,
+                )
 
             normalized = self._normalize_product(raw)
             logger.info(
@@ -500,19 +504,22 @@ class SallaAdapter(BaseStoreAdapter):
             opt_id = opt.get("id")
             opt_name = (opt.get("name") or "").strip()
             opt_type = (opt.get("type") or "select")
-            # Salla's product API is inconsistent about the `required`
+            # Salla's product API is unreliable about the `required`
             # flag — some payloads omit it entirely, others use
-            # `is_required`. When neither is present we default to
-            # `True` because sending a value that Salla considers
-            # optional is harmless, but skipping a required option
-            # triggers a 422 ("خيارات المنتج مطلوبة"). Erring on the
-            # side of asking the customer is the safer trade-off.
+            # `is_required`, and we have observed Salla return 422
+            # ("خيارات المنتج مطلوبة") for products whose option
+            # objects had `required: false`. Treat EVERY option group
+            # with values as required from the conversation flow's
+            # perspective: sending an option Salla deems optional is
+            # harmless, while skipping one Salla deems required
+            # blocks order creation. The explicit `is_required: true`
+            # / `required: true` paths are kept for completeness but
+            # do not change the default.
+            opt_required = True  # safe default — see comment above
             if "required" in opt:
-                opt_required = bool(opt.get("required"))
-            elif "is_required" in opt:
-                opt_required = bool(opt.get("is_required"))
-            else:
-                opt_required = True
+                opt_required = bool(opt.get("required")) or opt_required
+            if "is_required" in opt:
+                opt_required = bool(opt.get("is_required")) or opt_required
             values_raw = opt.get("values") or []
             values_out: List[Dict[str, Any]] = []
             for val in values_raw:

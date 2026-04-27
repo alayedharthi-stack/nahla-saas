@@ -111,9 +111,14 @@ async def extract_slots(
 
         user_content = f"السياق السابق:\n{history_text}\n\nرسالة المستخدم الحالية:\n{message}"
 
+        # Anthropic deprecated the original `claude-3-haiku-20240307`
+        # alias on 2025-Q1 and the API now returns 404 for it. Use the
+        # current 3.5 Haiku model by default; allow operators to pin
+        # via env if a newer model is rolled out.
+        _slot_model = os.environ.get("ANTHROPIC_SLOT_MODEL") or "claude-3-5-haiku-20241022"
         response = await asyncio.wait_for(
             client.messages.create(
-                model="claude-3-haiku-20240307",
+                model=_slot_model,
                 max_tokens=200,
                 system=_SYSTEM,
                 messages=[{"role": "user", "content": user_content}],

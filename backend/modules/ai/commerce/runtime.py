@@ -207,7 +207,25 @@ class CommerceToolRuntime:
             notes=str(payload.get("notes") or "").strip() or None,
             shipping_company_id=int(_raw_sid) if _raw_sid else None,
         )
-        order = await create_draft_order(self.tenant_id, order_input)
+        try:
+            order = await create_draft_order(self.tenant_id, order_input)
+        except ValueError as _exc:
+            # Pre-flight blocker (e.g. required_product_options_missing).
+            # Surface the exact reason so the brain can react — typically
+            # by asking the customer for product options rather than
+            # showing a generic "Salla failed" retry message.
+            _reason = str(_exc) or "draft_order_blocked"
+            logger.error(
+                "[ORDER FLOW] runtime create_draft_order blocked | tenant=%s product=%s reason=%s",
+                self.tenant_id, product_id, _reason,
+            )
+            return ToolExecutionResult(
+                ok=False,
+                tool_name="create_draft_order",
+                payload={"order": None},
+                error=_reason,
+                audit={"product_id": product_id, "quantity": quantity, "blocked": True},
+            )
         return ToolExecutionResult(
             ok=bool(order),
             tool_name="create_draft_order",

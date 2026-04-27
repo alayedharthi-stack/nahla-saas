@@ -37,7 +37,10 @@ async def create_order(tenant_id: int, order_input: OrderInput) -> Optional[Norm
             "[OrderService] tenant=%s create_order BLOCKED before POST | reason=%s",
             tenant_id, exc,
         )
-        return None
+        # Re-raise so the caller (runtime / brain) can see the specific
+        # reason and react (e.g. ask the customer for product options
+        # instead of treating this as a generic Salla failure).
+        raise
     except Exception as exc:
         logger.error(f"[OrderService] tenant={tenant_id} create_order failed: {exc}")
         return None
@@ -57,12 +60,13 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
         return order
     except ValueError as exc:
         # Adapter-level pre-flight guard (e.g. required_product_options_missing).
-        # No POST /orders was issued — surface the reason loudly.
+        # No POST /orders was issued — surface the reason loudly and
+        # propagate so the runtime/brain can handle it explicitly.
         logger.error(
             "[OrderService] tenant=%s create_draft_order BLOCKED before POST | reason=%s",
             tenant_id, exc,
         )
-        return None
+        raise
     except Exception as exc:
         # Surface Salla's HTTP status + full response body to make Railway logs actionable
         if _httpx and isinstance(exc, _httpx.HTTPStatusError):

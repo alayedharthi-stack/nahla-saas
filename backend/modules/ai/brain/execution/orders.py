@@ -458,6 +458,40 @@ class DraftOrderHandler:
             previous_failed,
         )
 
+        # ── Salla rejected the product because options are missing ────────────
+        # Either our adapter pre-flight caught it, or Salla itself returned
+        # 422 ("خيارات المنتج مطلوبة"). Either way: we now KNOW this product
+        # needs options. Persist the fact, force-reload metadata, and
+        # re-prompt the customer instead of looping the generic retry.
+        _options_missing_signal = (
+            "required_product_options_missing" in error_msg
+            or "options" in error_msg.lower()
+            or "خيارات المنتج" in error_msg
+        )
+        if _options_missing_signal:
+            prep.product_has_required_options = True
+            # Drop cached metadata so the next turn re-fetches from
+            # Salla via the dedicated /products/{id}/options endpoint.
+            prep.product_options_meta = []
+            prep.product_options = {}
+            logger.error(
+                "[ORDER FLOW] options required by Salla — reloading metadata | "
+                "tenant=%s product=%s",
+                ctx.tenant_id, external_id,
+            )
+            await _ensure_product_options_loaded(prep, ctx, external_id)
+            _missing_now = _missing_product_options(prep) or list(prep.product_options_meta or [])
+            return ActionResult(
+                success=True,
+                data={
+                    "product": product_info,
+                    "needs_options": True,
+                    "missing_option_groups": _missing_now,
+                    "selected_options": prep.product_options,
+                    "order_prep": prep.to_dict(),
+                },
+            )
+
         if prep.customer_first_name and prep.city:
             has_address = bool(prep.short_address_code or prep.google_maps_url or prep.latitude)
 
@@ -936,19 +970,45 @@ async def _ensure_product_options_loaded(
             return
         product = await adapter.get_product(external_id)
         if not product:
+            logger.warning(
+                "[ORDER FLOW] product options load returned no product | "
+                "tenant=%s product_id=%s",
+                ctx.tenant_id, external_id,
+            )
             return
         opts = list(getattr(product, "options", None) or [])
         prep.product_options_meta = opts
-        prep.product_has_required_options = bool(
-            getattr(product, "has_required_options", False)
-            or any(o.get("required") and o.get("values") for o in opts)
-        )
+        # ── Defensive default: any product with option groups (size,
+        # colour, …) is treated as REQUIRING a customer choice. Salla
+        # is unreliable about the per-group `required` flag — we have
+        # seen 422 ("خيارات المنتج مطلوبة") for products whose option
+        # objects had `required: false`. Sending an option that Salla
+        # deems optional is harmless; skipping a required one blocks
+        # the order. So: presence of option groups ⇒ ask the
+        # customer.
+        groups_with_values = [o for o in opts if o.get("values")]
+        prep.product_has_required_options = bool(groups_with_values)
         logger.info(
-            "[ORDER FLOW] product options loaded | tenant=%s product=%s "
-            "groups=%d required=%s",
-            ctx.tenant_id, external_id, len(opts),
+            "[ORDER FLOW] product options loaded | tenant=%s product_id=%s "
+            "groups=%d has_required=%s groups_meta=%s",
+            ctx.tenant_id,
+            external_id,
+            len(opts),
             prep.product_has_required_options,
+            [
+                {"id": o.get("id"), "name": o.get("name"),
+                 "values_count": len(o.get("values") or [])}
+                for o in opts
+            ],
         )
+        if prep.product_has_required_options:
+            logger.info(
+                "[ORDER FLOW] product requires options | tenant=%s product_id=%s "
+                "groups=%s",
+                ctx.tenant_id,
+                external_id,
+                [o.get("name") for o in groups_with_values],
+            )
     except Exception as exc:
         logger.warning(
             "[ORDER FLOW] product options fetch failed (non-blocking) | "
@@ -1070,11 +1130,15 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
 
 
 def _missing_product_options(prep: OrderPreparationState) -> List[Dict[str, Any]]:
-    """List the required option groups that the customer hasn't picked yet."""
+    """List the option groups that the customer hasn't picked yet.
+
+    Salla's per-group `required` flag is unreliable — we have seen 422
+    ("خيارات المنتج مطلوبة") for option groups Salla returned with
+    `required: false`. Any group with values is therefore treated as
+    requiring a customer pick.
+    """
     out: List[Dict[str, Any]] = []
     for group in prep.product_options_meta or []:
-        if not group.get("required"):
-            continue
         if not (group.get("values") or []):
             continue
         gkey = (group.get("name") or "").strip().lower()
