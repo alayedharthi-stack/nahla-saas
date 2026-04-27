@@ -399,7 +399,10 @@ class SallaAdapter(BaseStoreAdapter):
     # ── Orders ─────────────────────────────────────────────────────────────────
 
     async def create_order(self, order_input: OrderInput) -> NormalizedOrder:
-        body = self._build_order_body(order_input, draft=False)
+        shipping_company_id = order_input.shipping_company_id
+        if not shipping_company_id:
+            shipping_company_id = await self._get_default_shipping_company_id(order_input.city)
+        body = self._build_order_body(order_input, draft=False, shipping_company_id=shipping_company_id)
         try:
             data = await self._post("/orders", body)
             return self._normalize_order(data.get("data", data), order_input)
@@ -408,13 +411,64 @@ class SallaAdapter(BaseStoreAdapter):
             raise
 
     async def create_draft_order(self, order_input: OrderInput) -> NormalizedOrder:
-        body = self._build_order_body(order_input, draft=True)
+        # ── Shipping resolution ───────────────────────────────────────────────────
+        # Auto-resolve the default shipping company if not already cached.
+        # We never ask the customer for shipping; we just pick Salla's first zone.
+        shipping_company_id = order_input.shipping_company_id
+        if not shipping_company_id:
+            logger.info(
+                "[ORDER FLOW] resolving shipping method | tenant=%s city=%r",
+                self._tenant_id, order_input.city,
+            )
+            shipping_company_id = await self._get_default_shipping_company_id(order_input.city)
+            if shipping_company_id:
+                logger.info(
+                    "[ORDER FLOW] selected default shipping method | company_id=%s tenant=%s",
+                    shipping_company_id, self._tenant_id,
+                )
+            else:
+                logger.info(
+                    "[ORDER FLOW] shipping method unavailable, proceeding without | tenant=%s city=%r",
+                    self._tenant_id, order_input.city,
+                )
+        else:
+            logger.info(
+                "[ORDER FLOW] using cached shipping method | company_id=%s tenant=%s",
+                shipping_company_id, self._tenant_id,
+            )
+
+        body = self._build_order_body(order_input, draft=True, shipping_company_id=shipping_company_id)
         try:
             data = await self._post("/orders", body)
             return self._normalize_order(data.get("data", data), order_input)
         except Exception as exc:
             self._log_error("create_draft_order", exc)
             raise
+
+    async def _get_default_shipping_company_id(self, city: str = "") -> Optional[int]:
+        """Return the Salla zone/company ID of the first available shipping option.
+
+        Tries with the customer's city first, falls back to no filter.
+        Returns None if no zones are configured or the API call fails.
+        """
+        for attempt_city in ([city, ""] if city else [""]):
+            try:
+                params: Dict[str, str] = {}
+                if attempt_city:
+                    params["city"] = attempt_city
+                data = await self._get("/shipping/zones", params)
+                zones = data.get("data") or []
+                if zones:
+                    zone_id = zones[0].get("id")
+                    if zone_id is not None:
+                        return int(zone_id)
+            except Exception as exc:
+                logger.warning(
+                    "[SallaAdapter] _get_default_shipping_company_id failed | "
+                    "city=%r attempt=%r err=%s",
+                    city, attempt_city, exc,
+                )
+        return None
 
     @staticmethod
     def _normalize_mobile(phone: str) -> str:
@@ -444,7 +498,12 @@ class SallaAdapter(BaseStoreAdapter):
             return f"+{raw}"
         return raw
 
-    def _build_order_body(self, order_input: OrderInput, draft: bool) -> Dict[str, Any]:
+    def _build_order_body(
+        self,
+        order_input: OrderInput,
+        draft: bool,
+        shipping_company_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         # ── Products (Salla Admin API v2 requires identifier + identifier_type) ──
         products = []
         for item in order_input.items:
@@ -491,6 +550,13 @@ class SallaAdapter(BaseStoreAdapter):
         }
         if order_input.customer_email:
             body["customer"]["email"] = order_input.customer_email
+
+        # ── Shipping ─────────────────────────────────────────────────────────────
+        # Pass the resolved shipping company/zone ID to Salla.
+        # If no ID was resolved, omit the block and let Salla use store defaults.
+        _sid = shipping_company_id or order_input.shipping_company_id
+        if _sid:
+            body["shipping"] = {"company_id": _sid}
 
         # Build address block — include city and short address code whenever available.
         # ── Address ──────────────────────────────────────────────────────────────
@@ -768,6 +834,7 @@ class SallaAdapter(BaseStoreAdapter):
             for zone in (data.get("data") or []):
                 costs = zone.get("costs") or zone.get("prices") or [{}]
                 cost_entry = costs[0] if costs else {}
+                zone_id = zone.get("id")
                 options.append(ShippingOption(
                     name=zone.get("name") or zone.get("courier_name") or "شحن",
                     cost=float(cost_entry.get("amount", 0) or 0),
@@ -775,6 +842,7 @@ class SallaAdapter(BaseStoreAdapter):
                     estimated_days=str(zone.get("min_days", "")) or None,
                     zone=zone.get("name"),
                     courier=zone.get("courier_name"),
+                    company_id=int(zone_id) if zone_id is not None else None,
                 ))
             return options
         except Exception as exc:

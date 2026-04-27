@@ -7,7 +7,7 @@ When not configured, orders remain as internal Nahla drafts.
 """
 from __future__ import annotations
 import logging, os, sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional  # noqa: F401
 
 try:
     import httpx as _httpx
@@ -73,6 +73,28 @@ async def get_order(tenant_id: int, order_id: str) -> Optional[NormalizedOrder]:
         return await adapter.get_order(order_id)
     except Exception as exc:
         logger.error(f"[OrderService] get_order failed: {exc}")
+        return None
+
+
+async def get_default_shipping_company_id(tenant_id: int, city: str = "") -> Optional[int]:
+    """Return the first available Salla shipping company/zone ID for a tenant.
+
+    Used by the order flow to auto-select a shipping method without asking the
+    customer. Returns None if the adapter is missing or no zones are configured.
+    """
+    adapter = get_adapter(tenant_id)
+    if not adapter:
+        return None
+    _fn = getattr(adapter, "_get_default_shipping_company_id", None)
+    if _fn is None:
+        return None
+    try:
+        return await _fn(city)
+    except Exception as exc:
+        logger.warning(
+            "[OrderService] get_default_shipping_company_id failed | tenant=%s err=%s",
+            tenant_id, exc,
+        )
         return None
 
 

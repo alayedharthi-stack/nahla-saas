@@ -54,6 +54,8 @@ class OrderInput(BaseModel):
     payment_method: str = "cod"
     items: List[OrderItemInput]
     notes: Optional[str] = None
+    # Shipping: resolved automatically before order creation (not asked from customer)
+    shipping_company_id: Optional[int] = None
 
 
 class OrderItem(BaseModel):
@@ -92,6 +94,7 @@ class ShippingOption(BaseModel):
     estimated_days: Optional[str] = None
     zone: Optional[str] = None
     courier: Optional[str] = None
+    company_id: Optional[int] = None   # Salla zone/company ID for order creation
 
 
 class NormalizedOffer(BaseModel):

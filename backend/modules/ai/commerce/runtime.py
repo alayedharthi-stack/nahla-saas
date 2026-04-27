@@ -171,6 +171,7 @@ class CommerceToolRuntime:
         if not product_id:
             return ToolExecutionResult(False, "create_draft_order", error="missing_product_id")
 
+        _raw_sid = payload.get("shipping_company_id")
         order_input = OrderInput(
             customer_name=customer_name,
             customer_phone=self.customer_phone,
@@ -191,6 +192,7 @@ class CommerceToolRuntime:
             payment_method=str(payload.get("payment_method") or "online"),
             items=[OrderItemInput(product_id=product_id, quantity=quantity)],
             notes=str(payload.get("notes") or "").strip() or None,
+            shipping_company_id=int(_raw_sid) if _raw_sid else None,
         )
         order = await create_draft_order(self.tenant_id, order_input)
         return ToolExecutionResult(

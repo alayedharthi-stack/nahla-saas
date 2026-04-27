@@ -76,6 +76,8 @@ class OrderPreparationState:
     product_id: str = ""
     # Set to True when a Salla order creation attempt failed with this data
     last_order_failed: bool = False
+    # Cached shipping company/zone ID resolved from Salla (avoids re-fetching each turn)
+    shipping_company_id: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -99,11 +101,13 @@ class OrderPreparationState:
             "missing_fields": list(self.missing_fields or []),
             "product_id": self.product_id,
             "last_order_failed": self.last_order_failed,
+            "shipping_company_id": self.shipping_company_id,
         }
 
     @staticmethod
     def from_dict(d: Optional[Dict[str, Any]]) -> "OrderPreparationState":
         raw = d or {}
+        _sid = raw.get("shipping_company_id")
         return OrderPreparationState(
             quantity=_as_positive_int(raw.get("quantity"), default=1),
             customer_first_name=str(raw.get("customer_first_name", "") or ""),
@@ -129,6 +133,7 @@ class OrderPreparationState:
             ],
             product_id=str(raw.get("product_id", "") or ""),
             last_order_failed=bool(raw.get("last_order_failed", False)),
+            shipping_company_id=int(_sid) if _sid is not None else None,
         )
 
 

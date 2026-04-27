@@ -133,10 +133,47 @@ class DraftOrderHandler:
             "[ORDER FLOW] phone resolved from conversation | phone=%s tenant=%s",
             _resolved_phone, ctx.tenant_id,
         )
+
+        # ── Shipping resolution ───────────────────────────────────────────────────
+        # Resolve shipping company ID automatically — never ask the customer.
+        # Cache the result in prep so repeated turns don't re-fetch.
+        if not prep.shipping_company_id:
+            logger.info(
+                "[ORDER FLOW] resolving shipping method | tenant=%s city=%r",
+                ctx.tenant_id, prep.city,
+            )
+            try:
+                from store_integration.order_service import (  # noqa: PLC0415
+                    get_default_shipping_company_id as _get_sid,
+                )
+                _sid = await _get_sid(ctx.tenant_id, prep.city)
+                if _sid:
+                    prep.shipping_company_id = _sid
+                    logger.info(
+                        "[ORDER FLOW] selected default shipping method | company_id=%s tenant=%s",
+                        _sid, ctx.tenant_id,
+                    )
+                else:
+                    logger.info(
+                        "[ORDER FLOW] shipping method unavailable, proceeding without | "
+                        "tenant=%s city=%r",
+                        ctx.tenant_id, prep.city,
+                    )
+            except Exception as _exc:
+                logger.warning(
+                    "[ORDER FLOW] shipping resolution error (non-blocking) | tenant=%s err=%s",
+                    ctx.tenant_id, _exc,
+                )
+        else:
+            logger.info(
+                "[ORDER FLOW] using cached shipping method | company_id=%s tenant=%s",
+                prep.shipping_company_id, ctx.tenant_id,
+            )
+
         logger.info(
             "[ORDER FLOW] All data collected → creating order | tenant=%s "
             "product=%s external_id=%s name=%r phone=%s city=%r "
-            "short_code=%r has_maps=%s quantity=%d previous_failed=%s",
+            "short_code=%r has_maps=%s quantity=%d shipping_id=%s previous_failed=%s",
             ctx.tenant_id,
             product_info.get("title", "?"),
             external_id,
@@ -146,6 +183,7 @@ class DraftOrderHandler:
             prep.short_address_code,
             bool(prep.google_maps_url),
             max(int(prep.quantity or 1), 1),
+            prep.shipping_company_id,
             previous_failed,
         )
 
@@ -178,6 +216,7 @@ class DraftOrderHandler:
                 "longitude": _safe_float(prep.longitude),
                 "payment_method": "online",
                 "notes": _build_order_notes(prep),
+                "shipping_company_id": prep.shipping_company_id,
             },
         )
         order = runtime_result.payload.get("order")
