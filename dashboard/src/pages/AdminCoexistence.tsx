@@ -4,6 +4,9 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Copy,
+  Check,
+  Link,
   MessageSquare,
   Phone,
   RefreshCw,
@@ -32,6 +35,34 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
+// ── Webhook URL copy box ───────────────────────────────────────────────────────
+
+const WEBHOOK_URL = 'https://api.nahlah.ai/webhook/whatsapp/360dialog'
+
+function WebhookUrlBox() {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    navigator.clipboard.writeText(WEBHOOK_URL).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+  return (
+    <div className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2.5 flex items-center gap-2">
+      <Link className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+      <span className="flex-1 text-xs font-mono text-emerald-300 truncate" dir="ltr">{WEBHOOK_URL}</span>
+      <button
+        type="button"
+        onClick={copy}
+        title="نسخ الرابط"
+        className="flex-shrink-0 p-1 rounded hover:bg-slate-700 transition text-slate-400 hover:text-white"
+      >
+        {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+      </button>
+    </div>
+  )
+}
+
 // ── Activate form ─────────────────────────────────────────────────────────────
 
 function ActivateForm({
@@ -47,6 +78,8 @@ function ActivateForm({
     tenant_id: req.tenant_id,
     phone_number: req.requested_phone ?? '',
     display_name: req.display_name ?? '',
+    phone_number_id: '',
+    api_key: '',
     configure_webhook: true,
   })
   const [busy, setBusy] = useState(false)
@@ -56,9 +89,28 @@ function ActivateForm({
   const set = (k: keyof CoexistenceActivatePayload, v: string | boolean) =>
     setForm(f => ({ ...f, [k]: v }))
 
+  const _translateError = (msg: string): string => {
+    if (!msg) return 'فشل التفعيل'
+    if (msg.toLowerCase().includes('phone_number_id')) return 'حقل phone_number_id مطلوب — أدخله من صفحة الرقم في 360dialog'
+    if (msg.toLowerCase().includes('api_key'))         return 'حقل مفتاح API مطلوب'
+    if (msg.toLowerCase().includes('phone_number'))    return 'حقل رقم واتساب مطلوب'
+    if (msg.toLowerCase().includes('tenant_id'))       return 'معرّف المتجر (tenant_id) مطلوب'
+    if (msg.toLowerCase().includes('unauthorized') || msg.includes('401')) return 'غير مصرح — يرجى تسجيل الدخول من جديد'
+    if (msg.toLowerCase().includes('not found') || msg.includes('404'))    return 'المتجر غير موجود'
+    return msg
+  }
+
   const submit = async () => {
-    if (!form.phone_number || !form.api_key) {
-      setError('رقم واتساب ومفتاح API مطلوبان.')
+    if (!form.phone_number?.trim()) {
+      setError('رقم واتساب التاجر مطلوب.')
+      return
+    }
+    if (!form.api_key?.trim()) {
+      setError('مفتاح API من 360dialog مطلوب.')
+      return
+    }
+    if (!form.phone_number_id?.trim()) {
+      setError('حقل phone_number_id مطلوب — انسخه من صفحة الرقم في 360dialog.')
       return
     }
     setBusy(true)
@@ -68,7 +120,8 @@ function ActivateForm({
       setResult(res)
       onSuccess()
     } catch (e: any) {
-      setError(e?.message ?? 'فشل التفعيل')
+      const raw: string = e?.message ?? e?.detail ?? String(e)
+      setError(_translateError(raw))
     } finally {
       setBusy(false)
     }
@@ -79,7 +132,7 @@ function ActivateForm({
       <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-4 text-center space-y-2">
         <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto" />
         <p className="font-bold text-emerald-700">تم التفعيل بنجاح</p>
-        <p className="text-xs text-emerald-600">الحالة: {String(result.status)}</p>
+        <p className="text-xs text-emerald-600">الحالة: {String(result.status ?? 'connected')}</p>
       </div>
     )
   }
@@ -93,17 +146,30 @@ function ActivateForm({
 
       {/* Step guide */}
       <div className="rounded-lg bg-white border border-violet-100 p-3 text-xs text-slate-600 space-y-1.5">
-        <p className="font-bold text-slate-700 mb-2">الخطوات:</p>
+        <p className="font-bold text-slate-700 mb-2">خطوات التفعيل:</p>
         <p>① ادخل <a href="https://app.360dialog.io" target="_blank" rel="noreferrer" className="text-violet-600 underline font-semibold">app.360dialog.io</a> → الحساب المرتبط بـ Nahlah AI</p>
         <p>② اضغط <strong>Add Number</strong> → أدخل رقم واتساب التاجر → أكمل التحقق عبر OTP</p>
-        <p>③ بعد إضافة الرقم → افتح الرقم → اضغط <strong>Generate API Key</strong> → انسخ المفتاح</p>
-        <p>④ الصق المفتاح في الحقل أدناه ← الحقل الوحيد المطلوب مع رقم الهاتف</p>
+        <p>③ بعد إضافة الرقم → افتح الرقم → انسخ <strong>Phone Number ID</strong> من الصفحة</p>
+        <p>④ اضغط <strong>Generate API Key</strong> → انسخ المفتاح → الصقه أدناه</p>
+        <p>⑤ إذا لم يُضبط Webhook تلقائيًا → ضع الرابط أدناه يدويًا في 360dialog</p>
+      </div>
+
+      {/* Webhook URL */}
+      <div className="space-y-1">
+        <p className="text-xs font-semibold text-slate-600 flex items-center gap-1">
+          <Link className="w-3 h-3" />
+          Webhook URL لـ 360dialog
+        </p>
+        <WebhookUrlBox />
+        <p className="text-xs text-slate-400">ضع هذا الرابط في إعدادات 360dialog إذا لم يُضبط Webhook تلقائيًا</p>
       </div>
 
       {/* Required fields */}
       <div className="space-y-3">
         <div>
-          <label className="block text-xs font-bold text-slate-700 mb-1">رقم واتساب التاجر <span className="text-red-500">*</span></label>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            رقم واتساب التاجر <span className="text-red-500">*</span>
+          </label>
           <input
             value={form.phone_number ?? ''}
             onChange={e => set('phone_number', e.target.value)}
@@ -112,6 +178,21 @@ function ActivateForm({
             dir="ltr"
           />
         </div>
+
+        <div>
+          <label className="block text-xs font-bold text-slate-700 mb-1">
+            Phone Number ID <span className="text-red-500">*</span>
+          </label>
+          <input
+            value={form.phone_number_id ?? ''}
+            onChange={e => set('phone_number_id', e.target.value)}
+            placeholder="مثال: 123456789012345"
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-mono"
+            dir="ltr"
+          />
+          <p className="text-xs text-slate-400 mt-1">من صفحة الرقم في 360dialog — مطلوب لربط القناة بشكل صحيح</p>
+        </div>
+
         <div>
           <label className="block text-xs font-bold text-slate-700 mb-1">
             مفتاح API من 360dialog <span className="text-red-500">*</span>
@@ -129,52 +210,55 @@ function ActivateForm({
 
       {/* Optional fields (collapsible) */}
       <details className="group">
-        <summary className="cursor-pointer text-xs font-semibold text-slate-500 hover:text-slate-700 list-none flex items-center gap-1">
+        <summary className="cursor-pointer text-xs font-semibold text-slate-500 hover:text-slate-700 list-none flex items-center gap-1 select-none">
           <span className="group-open:hidden">▸</span>
           <span className="hidden group-open:inline">▾</span>
-          حقول اختيارية (WABA ID، Channel ID، Display Name)
+          حقول اختيارية (WABA ID — Channel ID — Client ID — اسم النشاط)
         </summary>
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1">Phone Number ID (اختياري)</label>
-            <input
-              value={form.phone_number_id ?? ''}
-              onChange={e => set('phone_number_id', e.target.value)}
-              placeholder="من صفحة الرقم في 360dialog"
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-              dir="ltr"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1">WABA ID (اختياري)</label>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">WABA ID</label>
             <input
               value={form.waba_id ?? ''}
               onChange={e => set('waba_id', e.target.value)}
               placeholder="WhatsApp Business Account ID"
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-mono"
               dir="ltr"
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1">Channel ID (اختياري)</label>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">Channel ID</label>
             <input
               value={form.channel_id ?? ''}
               onChange={e => set('channel_id', e.target.value)}
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+              placeholder="Channel ID من 360dialog"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-mono"
               dir="ltr"
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1">اسم النشاط (اختياري)</label>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">Client ID</label>
+            <input
+              value={form.client_id ?? ''}
+              onChange={e => set('client_id', e.target.value)}
+              placeholder="Client ID"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-mono"
+              dir="ltr"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1">اسم النشاط (Display Name)</label>
             <input
               value={form.display_name ?? ''}
               onChange={e => set('display_name', e.target.value)}
+              placeholder="اسم المتجر أو النشاط"
               className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
             />
           </div>
         </div>
       </details>
 
+      {/* Webhook toggle */}
       <label className="flex items-center gap-2.5 text-sm text-slate-700 cursor-pointer bg-white border border-violet-100 rounded-lg px-3 py-2.5">
         <input
           type="checkbox"
@@ -184,12 +268,14 @@ function ActivateForm({
         />
         <span>
           <span className="font-semibold">إعداد Webhook تلقائيًا</span>
-          <span className="text-xs text-slate-400 block">نحلة ستُسجّل نفسها تلقائيًا لدى 360dialog لاستقبال الرسائل</span>
+          <span className="text-xs text-slate-400 block">نحلة ستُسجّل الرابط أعلاه تلقائيًا لدى 360dialog لاستقبال الرسائل</span>
         </span>
       </label>
 
       {error && (
-        <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-red-700 text-xs">{error}</div>
+        <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-red-700 text-xs font-semibold">
+          {error}
+        </div>
       )}
 
       <div className="flex gap-3 pt-1">
