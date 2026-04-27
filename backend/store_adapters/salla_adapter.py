@@ -418,43 +418,52 @@ class SallaAdapter(BaseStoreAdapter):
 
     @staticmethod
     def _normalize_mobile(phone: str) -> str:
-        """Convert any common Saudi phone format to Salla's expected local format.
+        """Normalise to E.164 (+966XXXXXXXXX) — Salla Admin API v2 requires this format.
 
-        Salla Admin API requires mobile numbers in LOCAL Saudi format (0XXXXXXXXX).
-        WhatsApp passes them as E.164 (+966XXXXXXXXX) or digits-only (966XXXXXXXXX).
+        Salla's 422 response confirms:
+          "رقم الهاتف يجب ان يبدأ بـ + متبوعا برقم الدولة"
+          (Phone number must start with + followed by country code)
+
+        WhatsApp gives us either +966XXXXXXXXX, 966XXXXXXXXX, or 0XXXXXXXXX.
+        All three must be normalised to +966XXXXXXXXX.
 
         Examples:
-          +966560241815  →  0560241815
-           966560241815  →  0560241815
-           0560241815    →  0560241815  (already correct)
+          +966555906901  →  +966555906901  (already correct)
+           966555906901  →  +966555906901
+           0555906901    →  +966555906901  (Saudi local → E.164)
         """
-        raw = (phone or "").strip()
-        # Remove any spaces / dashes
-        raw = raw.replace(" ", "").replace("-", "")
-        if raw.startswith("+966"):
-            return "0" + raw[4:]
+        raw = (phone or "").strip().replace(" ", "").replace("-", "")
+        if raw.startswith("+"):
+            return raw                          # already E.164
         if raw.startswith("966") and len(raw) >= 12:
-            return "0" + raw[3:]
+            return f"+{raw}"                   # 966XXXXXXXXX → +966XXXXXXXXX
+        if raw.startswith("0") and len(raw) == 10:
+            return f"+966{raw[1:]}"            # 0XXXXXXXXX  → +966XXXXXXXXX
+        # Fallback: prepend + if it looks like digits
+        if raw.isdigit():
+            return f"+{raw}"
         return raw
 
     def _build_order_body(self, order_input: OrderInput, draft: bool) -> Dict[str, Any]:
-        items = []
+        # ── Products (Salla Admin API v2 uses "products", NOT "items") ──────────
+        products = []
         for item in order_input.items:
             entry: Dict[str, Any] = {
-                "product_id": int(item.product_id),
+                "id": int(item.product_id),     # Salla uses "id", not "product_id"
                 "quantity": item.quantity,
             }
             if item.variant_id:
                 entry["variants"] = [{"id": int(item.variant_id)}]
-            items.append(entry)
+            products.append(entry)
 
+        # ── Phone — Salla requires E.164 (+966XXXXXXXXX) ────────────────────────
         mobile = self._normalize_mobile(order_input.customer_phone)
         logger.info(
             "[SallaAdapter] phone normalization | raw=%r normalized=%r tenant=%s",
             order_input.customer_phone, mobile, self._tenant_id,
         )
 
-        # Build first_name / last_name from explicit fields or from full name
+        # ── Customer name ────────────────────────────────────────────────────────
         _first = (order_input.customer_first_name or "").strip()
         _last  = (order_input.customer_last_name  or "").strip()
         if not _first:
@@ -462,43 +471,38 @@ class SallaAdapter(BaseStoreAdapter):
             _first = _parts[0] if _parts else ""
             if not _last:
                 _last = " ".join(_parts[1:]) if len(_parts) > 1 else ""
-        full_name = f"{_first} {_last}".strip() or order_input.customer_name or "عميل"
+
+        # ── Payment — Salla requires payment.method + payment.status ────────────
+        is_cod = order_input.payment_method in ("cod", "cash_on_delivery")
+        payment_method_str = "cod" if is_cod else "online"
 
         body: Dict[str, Any] = {
             "source": "api",
-            "items": items,
+            "products": products,
             "customer": {
-                "first_name": _first or full_name,
+                "first_name": _first or (order_input.customer_name or "عميل"),
                 "last_name":  _last,
                 "mobile":     mobile,
             },
-            "payment_method": "cod" if order_input.payment_method in ("cod", "cash_on_delivery") else "online",
+            "payment": {
+                "method": payment_method_str,
+                "status": "pending",
+            },
         }
         if order_input.customer_email:
             body["customer"]["email"] = order_input.customer_email
 
         # Build address block — include city and short address code whenever available.
-        # Saudi customers typically provide either:
-        #   a) full address (city + street + district + postal_code)
-        #   b) short national address code (e.g. TAPA7401) with city
-        # We always add the address block when any field is present so Salla
-        # does not reject the order for a missing address section.
-        street_val = order_input.street or order_input.address or ""
-        # Use short_address_code as the street when no explicit street exists.
-        # Salla may still need the actual street for validation, but sending
-        # the national address code is far better than an empty string.
+        # ── Address ──────────────────────────────────────────────────────────────
+        # Saudi customers typically supply a national short address code (TAPA7401)
+        # with a city. Use the real street if available, otherwise fall back to the
+        # short code as the street value so Salla doesn't reject for empty street.
+        street_val = (order_input.street or order_input.address or "").strip()
         if not street_val and order_input.short_address_code:
+            # Use just the raw code — do NOT prefix with "الرمز المختصر:" etc.
             street_val = order_input.short_address_code
 
-        has_any_address = any([
-            order_input.city,
-            street_val,
-            order_input.building_number,
-            order_input.district,
-            order_input.postal_code,
-            order_input.short_address_code,
-        ])
-        if has_any_address:
+        if order_input.city or street_val:
             addr: Dict[str, Any] = {}
             if order_input.city:
                 addr["city"] = order_input.city
@@ -514,7 +518,7 @@ class SallaAdapter(BaseStoreAdapter):
                 addr["additional_number"] = order_input.additional_number
             body["address"] = addr
 
-        # Build notes — always include short address code so merchant can verify.
+        # ── Notes (human-readable) ───────────────────────────────────────────────
         notes_parts = []
         if order_input.notes:
             notes_parts.append(order_input.notes)
@@ -523,17 +527,19 @@ class SallaAdapter(BaseStoreAdapter):
         if order_input.google_maps_url and order_input.google_maps_url not in (order_input.notes or ""):
             notes_parts.append(f"خريطة: {order_input.google_maps_url}")
         if notes_parts:
-            body["notes"] = " | ".join(notes_parts)
+            body["note"] = " | ".join(notes_parts)   # Salla uses "note" (singular)
 
         if draft:
-            body["status"] = "draft"
+            body["status"] = "under_review"   # Salla draft-equivalent status
 
         logger.info(
-            "[SallaAdapter] _build_order_body | product_id=%s city=%s short_code=%s has_street=%s",
-            items[0]["product_id"] if items else "?",
+            "[SallaAdapter] _build_order_body | product_id=%s city=%s short_code=%s "
+            "mobile=%s has_street=%s",
+            products[0]["id"] if products else "?",
             order_input.city or "",
             order_input.short_address_code or "",
-            bool(order_input.street or order_input.address),
+            mobile,
+            bool(street_val),
         )
         return body
 
