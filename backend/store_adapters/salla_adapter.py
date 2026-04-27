@@ -416,6 +416,27 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("create_draft_order", exc)
             raise
 
+    @staticmethod
+    def _normalize_mobile(phone: str) -> str:
+        """Convert any common Saudi phone format to Salla's expected local format.
+
+        Salla Admin API requires mobile numbers in LOCAL Saudi format (0XXXXXXXXX).
+        WhatsApp passes them as E.164 (+966XXXXXXXXX) or digits-only (966XXXXXXXXX).
+
+        Examples:
+          +966560241815  →  0560241815
+           966560241815  →  0560241815
+           0560241815    →  0560241815  (already correct)
+        """
+        raw = (phone or "").strip()
+        # Remove any spaces / dashes
+        raw = raw.replace(" ", "").replace("-", "")
+        if raw.startswith("+966"):
+            return "0" + raw[4:]
+        if raw.startswith("966") and len(raw) >= 12:
+            return "0" + raw[3:]
+        return raw
+
     def _build_order_body(self, order_input: OrderInput, draft: bool) -> Dict[str, Any]:
         items = []
         for item in order_input.items:
@@ -427,12 +448,29 @@ class SallaAdapter(BaseStoreAdapter):
                 entry["variants"] = [{"id": int(item.variant_id)}]
             items.append(entry)
 
+        mobile = self._normalize_mobile(order_input.customer_phone)
+        logger.info(
+            "[SallaAdapter] phone normalization | raw=%r normalized=%r tenant=%s",
+            order_input.customer_phone, mobile, self._tenant_id,
+        )
+
+        # Build first_name / last_name from explicit fields or from full name
+        _first = (order_input.customer_first_name or "").strip()
+        _last  = (order_input.customer_last_name  or "").strip()
+        if not _first:
+            _parts = (order_input.customer_name or "").strip().split()
+            _first = _parts[0] if _parts else ""
+            if not _last:
+                _last = " ".join(_parts[1:]) if len(_parts) > 1 else ""
+        full_name = f"{_first} {_last}".strip() or order_input.customer_name or "عميل"
+
         body: Dict[str, Any] = {
             "source": "api",
             "items": items,
             "customer": {
-                "name": order_input.customer_name,
-                "mobile": order_input.customer_phone,
+                "first_name": _first or full_name,
+                "last_name":  _last,
+                "mobile":     mobile,
             },
             "payment_method": "cod" if order_input.payment_method in ("cod", "cash_on_delivery") else "online",
         }

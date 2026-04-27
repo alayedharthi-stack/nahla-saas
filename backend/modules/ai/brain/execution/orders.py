@@ -126,6 +126,13 @@ class DraftOrderHandler:
                 data={"message": "product_has_no_external_id"},
             )
 
+        # Log phone resolution — phone is always taken from the WhatsApp conversation,
+        # never asked from the customer.
+        _resolved_phone = ctx.customer_phone or ""
+        logger.info(
+            "[ORDER FLOW] phone resolved from conversation | phone=%s tenant=%s",
+            _resolved_phone, ctx.tenant_id,
+        )
         logger.info(
             "[ORDER FLOW] All data collected → creating order | tenant=%s "
             "product=%s external_id=%s name=%r phone=%s city=%r "
@@ -133,8 +140,8 @@ class DraftOrderHandler:
             ctx.tenant_id,
             product_info.get("title", "?"),
             external_id,
-            prep.customer_first_name + " " + prep.customer_last_name,
-            ctx.customer_phone[-4:] if ctx.customer_phone else "????",
+            (prep.customer_first_name + " " + prep.customer_last_name).strip(),
+            _resolved_phone[-4:] if _resolved_phone else "????",
             prep.city,
             prep.short_address_code,
             bool(prep.google_maps_url),
