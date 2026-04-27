@@ -36,6 +36,7 @@ from core.config import (
     ORCHESTRATOR_URL,
     WA_VERIFY_TOKEN,
 )
+from core.conversation_lock import conversation_lock
 from core.conversation_engine import (
     # Actions
     DETERMINISTIC_ACTIONS,
@@ -507,10 +508,34 @@ async def _dispatch_message(
     sender   = msg.get("from", "")
     msg_id   = msg.get("id", "")
 
+    # Cheap text preview for the WEBHOOK_IN log — proper normalization
+    # happens later, but we want this snippet in Railway from the very
+    # first line so we can correlate "8 / TAPA7401 / 1" bursts even when
+    # downstream stages bail out early.
+    _text_preview = ""
+    try:
+        if msg_type == "text":
+            _text_preview = ((msg.get("text") or {}).get("body") or "")
+        elif msg_type == "interactive":
+            _ir = (msg.get("interactive") or {})
+            if _ir.get("type") == "button_reply":
+                _text_preview = ((_ir.get("button_reply") or {}).get("title") or "")
+            elif _ir.get("type") == "list_reply":
+                _text_preview = ((_ir.get("list_reply") or {}).get("title") or "")
+        elif msg_type == "button":
+            _text_preview = ((msg.get("button") or {}).get("text") or "")
+    except Exception:
+        _text_preview = ""
+    _text_preview = (_text_preview or "")[:80].replace("\n", " ")
+
     # ── TRACE: log every incoming webhook ─────────────────────────────────────
     logger.info(
         "[TRACE][1/6] INCOMING_WEBHOOK | phone_number_id=%s sender=%s msg_id=%s msg_type=%s",
         phone_number_id, sender, msg_id, msg_type,
+    )
+    logger.info(
+        "[WEBHOOK_IN] phone_number_id=%s from=%s msg_id=%s type=%s text=%r",
+        phone_number_id, sender, msg_id, msg_type, _text_preview,
     )
 
     if not phone_number_id:
@@ -526,6 +551,11 @@ async def _dispatch_message(
     if not db:
         logger.error("[Engine] Cannot open DB session for phone=%s", sender)
         return
+
+    # Lock state-vars: declared before the try so the finally can always
+    # safely test / release them, regardless of how far we got.
+    _conv_lock_cm = None
+    _conv_lock_active = False
 
     try:
         # ── Resolve tenant from phone_number_id (must be exactly 1 match) ────────
@@ -598,6 +628,17 @@ async def _dispatch_message(
             "[TRACE][2/6] TENANT_RESOLVED | phone_number_id=%s tenant_id=%s status=%s",
             used_pid, resolved_tenant_id, wa_conn.status,
         )
+
+        # ── Per-conversation processing lock ──────────────────────────────────
+        # Serialise inbound turns from the same (tenant, phone) so two fast
+        # messages ("8" → "TAPA7401") cannot race on the same brain_state /
+        # order_prep row. See `core/conversation_lock.py` for design notes.
+        _conv_lock_cm = conversation_lock(
+            resolved_tenant_id, sender,
+            msg_id=msg_id, text_snippet=_text_preview,
+        )
+        await _conv_lock_cm.__aenter__()
+        _conv_lock_active = True
 
         # ── Stamp last_webhook_received_at for guardian activity tracking ─────────
         try:
@@ -1081,6 +1122,10 @@ async def _dispatch_message(
                 "[TRACE][4/6] ROUTE_MERCHANT_AI | tenant_id=%s sender=%s text_len=%s",
                 resolved_tenant_id, sender, len(text),
             )
+            logger.info(
+                "[WEBHOOK_ROUTE] route=merchant_ai tenant=%s from=%s msg_id=%s",
+                resolved_tenant_id, sender, msg_id,
+            )
             await _handle_merchant_message(
                 phone_id=used_pid, to=sender, text=text,
                 tenant_id=resolved_tenant_id, db=db,
@@ -1281,6 +1326,20 @@ async def _dispatch_message(
         )
 
     finally:
+        # Release the per-conversation lock BEFORE closing the DB session so
+        # the next queued inbound for this customer can start as soon as
+        # possible. We pass (None, None, None) to __aexit__ since any
+        # exception propagating out of the try body will still be raised
+        # by Python after this finally completes.
+        if _conv_lock_active and _conv_lock_cm is not None:
+            try:
+                await _conv_lock_cm.__aexit__(None, None, None)
+            except Exception as _lock_exc:  # never let lock release block cleanup
+                logger.warning(
+                    "[ORDER FLOW] conversation lock release error | tenant=%s phone=%s err=%s",
+                    locals().get("resolved_tenant_id"), sender, _lock_exc,
+                )
+            _conv_lock_active = False
         try:
             db.close()
         except Exception:
@@ -1622,6 +1681,11 @@ async def _handle_merchant_message(
                     pass
 
                 brain = get_brain()
+                logger.info(
+                    "[BRAIN_IN] tenant=%s to=%s text=%r history_len=%d",
+                    tenant_id, to, (text or "")[:80].replace("\n", " "),
+                    len(history or []),
+                )
                 brain_result = await brain.process(
                     db=db,
                     tenant_id=tenant_id,
@@ -1641,6 +1705,53 @@ async def _handle_merchant_message(
                     reply          = str(brain_result or "")
                     _brain_buttons = []
                     _brain_handoff = False
+
+                # ── BRAIN_RESULT trace ───────────────────────────────────────
+                # Pull the just-saved brain_state out of the conversation row
+                # so the log line tells us what the brain decided AND what
+                # state survived the turn (selected product, pending options,
+                # missing fields). Defensive — never let log-formatting break
+                # the actual response path.
+                _br_action = ""
+                _br_stage  = ""
+                _br_focus  = ""
+                _br_missing: list = []
+                _br_options_pending: list = []
+                _br_unsync = False
+                try:
+                    _bs = ((convo.extra_metadata or {}).get("brain_state") or {})
+                    _br_action = str(_bs.get("last_action") or "")
+                    _br_stage  = str(_bs.get("stage") or "")
+                    _focus = _bs.get("current_product_focus") or {}
+                    _br_focus = (
+                        f"name={_focus.get('title')!r} "
+                        f"salla_id={_focus.get('external_id')} "
+                        f"nahla_id={_focus.get('id')}"
+                    )
+                    _prep = _bs.get("order_prep") or {}
+                    _br_missing = list(_prep.get("missing_fields") or [])
+                    _br_unsync = bool(_prep.get("product_unsyncable"))
+                    # Detect option groups still missing a value pick.
+                    _meta = _prep.get("product_options_meta") or []
+                    _picked = _prep.get("product_options") or {}
+                    for _g in _meta:
+                        if not _g.get("values"):
+                            continue
+                        _name = (_g.get("name") or "").strip()
+                        if _name and _name.lower() not in {k.lower() for k in _picked.keys()}:
+                            _br_options_pending.append(_name)
+                except Exception:
+                    pass
+
+                logger.info(
+                    "[BRAIN_RESULT] tenant=%s to=%s action=%s stage=%s "
+                    "focus=(%s) missing_fields=%s options_pending=%s "
+                    "product_unsyncable=%s reply_len=%d buttons=%d handoff=%s",
+                    tenant_id, to,
+                    _br_action or "?", _br_stage or "?", _br_focus,
+                    _br_missing, _br_options_pending, _br_unsync,
+                    len(reply or ""), len(_brain_buttons), _brain_handoff,
+                )
 
                 if _brain_handoff:
                     # Guard: if there is active order preparation (a focused

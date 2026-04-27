@@ -40,6 +40,11 @@ ACTION_WEB_SEARCH          = "web_search"
 ACTION_CLARIFY             = "clarify"
 # Present 2-3 product choices when search returns too many similar results
 ACTION_NARROW              = "narrow_choices"
+# Customer dropped a TAPA short-code / Maps URL / city BEFORE picking a
+# product. We stash the address on `state.pending_*` and reply asking
+# them to choose a product first; the order flow consumes the stash on
+# the next turn so we never re-ask for the address.
+ACTION_STASH_ADDRESS_PRE_PRODUCT = "stash_address_pre_product"
 
 ALL_ACTIONS = [
     ACTION_GREET,
@@ -55,4 +60,5 @@ ALL_ACTIONS = [
     ACTION_WEB_SEARCH,
     ACTION_CLARIFY,
     ACTION_NARROW,
+    ACTION_STASH_ADDRESS_PRE_PRODUCT,
 ]

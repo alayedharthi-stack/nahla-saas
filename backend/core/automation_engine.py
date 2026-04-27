@@ -439,14 +439,21 @@ async def _process_event(
         # Railway logs, but we still set processed=True because reprocessing
         # on every cycle would only flood the logs with the same failure.
         if not all_matches:
+            # Demoted from WARNING to INFO: this is the *expected* state when
+            # a tenant simply hasn't configured a SmartAutomation for the
+            # given trigger event. It does NOT affect the AI / order flow,
+            # but the WARNING level was confusing operators into thinking
+            # the brain pipeline failed when in fact it never even ran for
+            # this row. Includes a `note` field to make that clear.
             _log_event(
                 _EVENTS.AUTOMATION_UNMATCHED_TRIGGER,
-                level=logging.WARNING,
+                level=logging.INFO,
                 tenant_id=tenant_id,
                 event_id=event.id,
                 event_type=event.event_type,
                 customer_id=event.customer_id,
                 reason="no_smart_automation_row_has_this_trigger_event",
+                note="benign — no automation configured for this trigger; AI / order flow unaffected",
             )
         else:
             _log_event(

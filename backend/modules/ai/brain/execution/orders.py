@@ -113,6 +113,34 @@ class DraftOrderHandler:
         )
 
         _seed_checkout_state(prep, ctx)
+
+        # ── Consume any address signals stashed BEFORE a product was
+        # picked. The customer e.g. typed "TAPA7401" while still
+        # browsing; we saved it on `state.pending_*` and now that they
+        # picked a product we must merge it into prep so we never re-ask.
+        _consumed_pending_address = False
+        _pending_short = (getattr(ctx.state, "pending_short_address_code", "") or "").strip()
+        _pending_maps  = (getattr(ctx.state, "pending_google_maps_url", "") or "").strip()
+        _pending_city  = (getattr(ctx.state, "pending_city", "") or "").strip()
+        if _pending_short and not prep.short_address_code:
+            prep.short_address_code = _pending_short
+            _consumed_pending_address = True
+        if _pending_maps and not prep.google_maps_url:
+            prep.google_maps_url = _pending_maps
+            _consumed_pending_address = True
+        if _pending_city and not prep.city:
+            prep.city = _pending_city
+            _consumed_pending_address = True
+        if _consumed_pending_address:
+            logger.info(
+                "[ORDER FLOW] consumed pending address (captured before product pick) | "
+                "tenant=%s short_code=%r maps=%s city=%r",
+                ctx.tenant_id,
+                prep.short_address_code,
+                bool(prep.google_maps_url),
+                prep.city,
+            )
+
         _merge_message_details(prep, ctx.intent.slots, ctx.message)
         await _resolve_checkout_address(prep)
 

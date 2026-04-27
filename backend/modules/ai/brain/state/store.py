@@ -444,6 +444,10 @@ class DefaultStateStore:
             payment_method=state.payment_method,
             pending_action=state.pending_action,
             last_recommended_products=list(state.last_recommended_products or []),
+            pending_short_address_code=getattr(state, "pending_short_address_code", "") or "",
+            pending_google_maps_url=getattr(state, "pending_google_maps_url", "") or "",
+            pending_city=getattr(state, "pending_city", "") or "",
+            last_action=getattr(state, "last_action", "") or "",
         )
 
         action = decision.action

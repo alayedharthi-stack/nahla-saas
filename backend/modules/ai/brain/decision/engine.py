@@ -36,6 +36,7 @@ from .actions import (
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
+    ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
     ACTION_WEB_SEARCH,
@@ -276,6 +277,48 @@ class DefaultDecisionEngine:
                 args={"question": "أي منتج تقصد؟ اكتب اسمه أو اطلب مني عرض المنتجات مرة ثانية."},
                 reason="pick_list_item with no remembered candidates — ask for clarification",
                 confidence=0.7,
+            )
+
+        # ── 3.6 Address signals BEFORE a product is picked ───────────────────
+        # The customer dropped a national short code / Maps link / city
+        # while we don't have a product in focus yet (e.g. they typed
+        # "TAPA7401" before tapping a product). DON'T:
+        #   • try to create an order (no product → 422),
+        #   • ask for the address again later (we already have it),
+        #   • silently lose the signal in an LLM reply.
+        # DO: stash it in `state.pending_*` and tell the customer to
+        # pick a product. The DraftOrderHandler consumes the pending
+        # values as soon as a product is selected on the next turn.
+        _has_address_signal = any(
+            (intent.slots.get(k) or "").strip()
+            for k in ("short_address_code", "google_maps_url", "location_url")
+        )
+        if (
+            _has_address_signal
+            and not state.current_product_focus
+            and intent.name not in (INTENT_TALK_HUMAN,)
+        ):
+            _sc = (intent.slots.get("short_address_code") or "").strip()
+            _gm = (
+                intent.slots.get("google_maps_url")
+                or intent.slots.get("location_url")
+                or ""
+            ).strip()
+            _ci = (intent.slots.get("city") or "").strip()
+            logger.info(
+                "[ORDER FLOW] address signal received before product pick — "
+                "stashing pending values | short_code=%r maps=%r city=%r tenant=%s",
+                _sc, _gm[:60], _ci, ctx.tenant_id,
+            )
+            return Decision(
+                action=ACTION_STASH_ADDRESS_PRE_PRODUCT,
+                args={
+                    "short_address_code": _sc,
+                    "google_maps_url": _gm,
+                    "city": _ci,
+                },
+                reason="address signal received before any product was picked",
+                confidence=0.95,
             )
 
         # ── 3.7 Continue order preparation while collecting checkout details ──

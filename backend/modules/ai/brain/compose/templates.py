@@ -223,6 +223,30 @@ def salla_retry_message(product: Dict[str, Any], code: str = "", **_: Any) -> st
     )
 
 
+def address_stashed_pre_product(
+    short_code: str = "",
+    google_maps_url: str = "",
+    city: str = "",
+    **_: Any,
+) -> str:
+    """Customer dropped address info before picking a product. Confirm we
+    saved it so they don't repeat themselves, and ask them to choose a
+    product. The order flow consumes the stash on the next turn, so the
+    bot will NOT ask for the address again."""
+    bits: List[str] = []
+    if short_code:
+        bits.append(f"الرمز الوطني *{short_code}*")
+    if google_maps_url:
+        bits.append("موقع Google Maps")
+    if city:
+        bits.append(f"المدينة *{city}*")
+    saved = " و ".join(bits) if bits else "بيانات العنوان"
+    return (
+        f"وصلني {saved} ✅ — محفوظ ولن أعيد سؤالك عنه.\n\n"
+        "قبل ما نكمّل، اختر المنتج اللي تبغاه من القائمة (أرسل رقمه أو اسمه)."
+    )
+
+
 def product_unsyncable(product: Dict[str, Any], **_: Any) -> str:
     """Shown when the product the customer picked is not available on the
     store (wrong / stale identifier, deleted, not synced). Asks the customer

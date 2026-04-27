@@ -753,6 +753,152 @@ async def debug_scheduler_status(
     }
 
 
+# ── /debug/recent-whatsapp-turns ───────────────────────────────────────
+@router.get("/debug/recent-whatsapp-turns")
+async def debug_recent_whatsapp_turns(
+    debug_token: str = Query(..., description="Shared secret from env"),
+    tenant_id: int = Query(..., description="Tenant id (e.g. 1)"),
+    phone: str = Query(..., description="Customer phone (any format — digits-only is enough)"),
+    limit: int = Query(20, ge=1, le=100, description="Max turns to return"),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Compact, operator-friendly view of the last N inbound/outbound turns
+    for one (tenant, phone) — including the brain_state snapshot saved
+    alongside the conversation row.
+
+    Designed to make Order Flow incidents debuggable WITHOUT trawling
+    Railway logs:
+
+      * `text`             — user / bot message body
+      * `direction`        — inbound / outbound
+      * `event_type`       — wa text, button, interactive, …
+      * `created_at`       — server timestamp
+      * `selected_product` — current product focus at save time
+      * `salla_product_id` — focus.external_id (the only id Salla knows)
+      * `nahla_db_id`      — focus.id (internal — should NEVER reach Salla)
+      * `missing_options`  — option groups still pending a value pick
+      * `missing_fields`   — checkout fields still pending
+      * `short_code`       — captured TAPA / national short code
+      * `pending_short_code` — TAPA stashed BEFORE a product was picked
+      * `last_action`      — last brain action
+      * `stage`            — discovery / deciding / ordering / checkout
+
+    Usage::
+
+        GET /debug/recent-whatsapp-turns?debug_token=...&tenant_id=1&phone=966542980511
+    """
+    _check_token(debug_token)
+
+    from models import Conversation, MessageEvent  # noqa: PLC0415
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    norm   = normalize_phone(phone) or phone
+
+    # Find the conversation row — try external_id (which is the customer
+    # phone for WhatsApp tenants) and the customer's normalised number.
+    convo = (
+        db.query(Conversation)
+        .filter(Conversation.tenant_id == tenant_id)
+        .filter(
+            (Conversation.external_id == phone)
+            | (Conversation.external_id == norm)
+            | (Conversation.external_id.like(f"%{digits[-9:]}"))
+        )
+        .order_by(Conversation.id.desc())
+        .first()
+    )
+
+    if not convo:
+        return {
+            "tenant_id": tenant_id,
+            "phone": phone,
+            "found": False,
+            "reason": "no conversation row matched",
+            "turns": [],
+        }
+
+    bstate = (convo.extra_metadata or {}).get("brain_state") or {}
+    focus  = bstate.get("current_product_focus") or {}
+    prep   = bstate.get("order_prep") or {}
+
+    # Compute pending option groups (groups with values whose name isn't
+    # in the picked map) — same logic as the BRAIN_RESULT log.
+    missing_options: list = []
+    try:
+        meta   = prep.get("product_options_meta") or []
+        picked = prep.get("product_options") or {}
+        picked_names_lc = {str(k).lower() for k in picked.keys()}
+        for g in meta:
+            if not g.get("values"):
+                continue
+            name = (g.get("name") or "").strip()
+            if name and name.lower() not in picked_names_lc:
+                missing_options.append(name)
+    except Exception:
+        pass
+
+    # Pull the last N message events
+    rows = (
+        db.query(MessageEvent)
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            MessageEvent.conversation_id == convo.id,
+        )
+        .order_by(MessageEvent.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    turns = []
+    for r in reversed(rows):  # chronological
+        meta = r.extra_metadata or {}
+        turns.append({
+            "id":          r.id,
+            "created_at":  r.created_at.isoformat() if r.created_at else None,
+            "direction":   r.direction,
+            "event_type":  r.event_type,
+            "text":        (r.body or "")[:300],
+            "wa_message_id": meta.get("wa_message_id") or meta.get("message_id"),
+            "normalized":  meta.get("normalized_inbound"),
+        })
+
+    return {
+        "tenant_id": tenant_id,
+        "phone": phone,
+        "phone_digits": digits,
+        "found": True,
+        "conversation_id": convo.id,
+        "status": convo.status,
+        "is_human_handoff": bool(convo.is_human_handoff),
+        "paused_by_human": bool(convo.paused_by_human),
+        "brain_state_summary": {
+            "stage":            bstate.get("stage"),
+            "last_action":      bstate.get("last_action"),
+            "last_intent":      bstate.get("last_intent"),
+            "greeted":          bstate.get("greeted"),
+            "selected_product": (focus.get("title") if focus else None),
+            "salla_product_id": (focus.get("external_id") if focus else None),
+            "nahla_db_id":      (focus.get("id") if focus else None),
+            "draft_order_id":   bstate.get("draft_order_id"),
+            "checkout_url":     bstate.get("checkout_url"),
+            "missing_fields":   list(prep.get("missing_fields") or []),
+            "missing_options":  missing_options,
+            "short_code":       prep.get("short_address_code"),
+            "city":             prep.get("city"),
+            "customer_first_name": prep.get("customer_first_name"),
+            "product_unsyncable":  bool(prep.get("product_unsyncable")),
+            "product_has_required_options": bool(prep.get("product_has_required_options")),
+            "salla_failure_count": prep.get("salla_failure_count"),
+            "pending_short_code":  bstate.get("pending_short_address_code"),
+            "pending_google_maps_url": bstate.get("pending_google_maps_url"),
+            "pending_city":        bstate.get("pending_city"),
+            "last_search_candidates_count": len(bstate.get("last_search_candidates") or []),
+        },
+        "turns": turns,
+    }
+
+
 # ── /debug/send-email — REMOVED (was public, now deleted for security) ────────
 # Endpoint was: POST /debug/send-email — no auth, anyone could send emails.
 # Removed 2026-04-25. Use POST /debug/test-email?debug_token=XXX instead.

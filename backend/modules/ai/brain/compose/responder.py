@@ -54,6 +54,7 @@ from ..decision.actions import (
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
+    ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
     ACTION_WEB_SEARCH,
@@ -230,6 +231,18 @@ class DefaultComposer:
                 checkout_url=data.get("checkout_url", ""),
                 total=float(data.get("total") or 0),
                 currency=data.get("currency", "SAR"),
+            )
+
+        # ── Address stashed before product pick ───────────────────────────
+        # Customer dropped a TAPA / Maps link / city before picking a
+        # product. We saved the value on `state.pending_*`; tell them so
+        # they don't repeat it, then nudge them to choose a product.
+        if action == ACTION_STASH_ADDRESS_PRE_PRODUCT:
+            stash = data.get("stash_address") or {}
+            return T.address_stashed_pre_product(
+                short_code=stash.get("short_address_code", ""),
+                google_maps_url=stash.get("google_maps_url", ""),
+                city=stash.get("city", ""),
             )
 
         # ── Payment link ───────────────────────────────────────────────────

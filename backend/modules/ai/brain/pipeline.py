@@ -198,6 +198,10 @@ class MerchantBrain:
 
         # ── 6. Project next state + suggestion snapshot ───────────────────
         new_state = self._state_store.transition(state, intent, decision)
+        # Record the brain action that produced this turn so the
+        # `BRAIN_RESULT` log line and `/debug/recent-whatsapp-turns`
+        # endpoint can report it without parsing free-form logs.
+        new_state.last_action = str(decision.action or "")
         if result.data.get("checkout_url"):
             new_state.checkout_url  = result.data["checkout_url"]
             new_state.stage = "checkout"
@@ -209,6 +213,46 @@ class MerchantBrain:
             new_state.current_product_focus = result.data["product"]
         if result.data.get("order_prep"):
             new_state.order_prep = OrderPreparationState.from_dict(result.data.get("order_prep"))
+            # Once the order_prep has captured the address values, the
+            # pre-product stash has done its job — clear it so a future
+            # browsing round doesn't accidentally inject stale codes.
+            _op = new_state.order_prep
+            if (
+                (new_state.pending_short_address_code and _op.short_address_code)
+                or (new_state.pending_google_maps_url and _op.google_maps_url)
+                or (new_state.pending_city and _op.city)
+            ):
+                logger.info(
+                    "[ORDER FLOW] clearing pre-product address stash (consumed by order_prep) | "
+                    "had_short=%s had_maps=%s had_city=%s",
+                    bool(new_state.pending_short_address_code),
+                    bool(new_state.pending_google_maps_url),
+                    bool(new_state.pending_city),
+                )
+                new_state.pending_short_address_code = ""
+                new_state.pending_google_maps_url = ""
+                new_state.pending_city = ""
+
+        # Persist address signals captured BEFORE a product was picked
+        # (e.g. customer typed "TAPA7401" while still browsing). The
+        # next-turn DraftOrderHandler consumes these values without
+        # asking for them again. We only OVERWRITE pending_* when the
+        # current message actually carried a value, so an older stash
+        # survives subsequent address-free turns.
+        _stash = result.data.get("stash_address") or {}
+        if _stash:
+            if _stash.get("short_address_code"):
+                new_state.pending_short_address_code = str(_stash["short_address_code"])
+            if _stash.get("google_maps_url"):
+                new_state.pending_google_maps_url = str(_stash["google_maps_url"])
+            if _stash.get("city"):
+                new_state.pending_city = str(_stash["city"])
+            logger.info(
+                "[ORDER FLOW] stashed address pre-product | short_code=%r maps=%r city=%r",
+                new_state.pending_short_address_code,
+                (new_state.pending_google_maps_url or "")[:60],
+                new_state.pending_city,
+            )
 
         # If the executor flagged the focused product as un-syncable on the
         # store (wrong / stale identifier, deleted, no external_id), drop

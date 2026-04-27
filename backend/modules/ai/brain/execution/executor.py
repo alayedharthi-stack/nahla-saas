@@ -26,6 +26,7 @@ from ..decision.actions import (
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
+    ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
     ACTION_WEB_SEARCH,
@@ -191,6 +192,30 @@ class _LLMReplyHandler:
         )
 
 
+class _StashAddressPreProductHandler:
+    """Stash address signals captured BEFORE a product was picked.
+
+    The customer typed e.g. "TAPA7401" while still browsing. We persist
+    the values onto state.pending_* (the pipeline projects this onto the
+    next state). On the next turn — when the customer actually picks a
+    product — DraftOrderHandler reads `state.pending_*`, merges the
+    values into `order_prep`, and clears the pending fields so we never
+    ask for the address again.
+    """
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        return ActionResult(
+            success=True,
+            data={
+                "type": "stash_address_pre_product",
+                "stash_address": {
+                    "short_address_code": str(decision.args.get("short_address_code") or "").strip(),
+                    "google_maps_url":   str(decision.args.get("google_maps_url") or "").strip(),
+                    "city":              str(decision.args.get("city") or "").strip(),
+                },
+            },
+        )
+
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 class DefaultActionExecutor:
@@ -215,6 +240,7 @@ class DefaultActionExecutor:
             ACTION_RECOMMEND_ADDON:     _RecommendAddonHandler(),
             ACTION_WEB_SEARCH:          _WebSearchHandler(),
             ACTION_LLM_REPLY:           _LLMReplyHandler(),
+            ACTION_STASH_ADDRESS_PRE_PRODUCT: _StashAddressPreProductHandler(),
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:

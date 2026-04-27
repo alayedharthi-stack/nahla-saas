@@ -196,6 +196,17 @@ class MerchantConversationState:
     payment_method: str = ""
     pending_action: str = ""
     last_recommended_products: List[Dict[str, Any]] = field(default_factory=list)
+    # Address signals captured BEFORE a product was picked (e.g. customer
+    # sent "TAPA7401" while browsing). Stashed here so we don't ask again
+    # once the product is selected. Cleared once consumed by the order
+    # flow.
+    pending_short_address_code: str = ""
+    pending_google_maps_url: str = ""
+    pending_city: str = ""
+    # Most recent brain action (`propose_draft_order`, `search_products`,
+    # `stash_address_pre_product`, …) — used for the BRAIN_RESULT trace
+    # log and the `/debug/recent-whatsapp-turns` endpoint.
+    last_action: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -220,6 +231,10 @@ class MerchantConversationState:
             "payment_method": self.payment_method,
             "pending_action": self.pending_action,
             "last_recommended_products": self.last_recommended_products,
+            "pending_short_address_code": self.pending_short_address_code,
+            "pending_google_maps_url": self.pending_google_maps_url,
+            "pending_city": self.pending_city,
+            "last_action": self.last_action,
         }
 
     @staticmethod
@@ -246,6 +261,10 @@ class MerchantConversationState:
             payment_method=str(d.get("payment_method", "") or ""),
             pending_action=str(d.get("pending_action", "") or ""),
             last_recommended_products=list(d.get("last_recommended_products") or []),
+            pending_short_address_code=str(d.get("pending_short_address_code", "") or ""),
+            pending_google_maps_url=str(d.get("pending_google_maps_url", "") or ""),
+            pending_city=str(d.get("pending_city", "") or ""),
+            last_action=str(d.get("last_action", "") or ""),
         )
 
 
