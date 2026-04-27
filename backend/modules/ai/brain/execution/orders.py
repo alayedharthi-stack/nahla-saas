@@ -278,12 +278,25 @@ class DraftOrderHandler:
         if prep.customer_first_name and prep.city:
             has_address = bool(prep.short_address_code or prep.google_maps_url or prep.latitude)
 
-            if has_address and not previous_failed:
-                # ── First failure with address present → keep data, show retry message ──
-                # The customer already provided a valid-looking address code.
-                # Don't ask for it again — just tell them we'll retry.
-                prep.last_order_failed = True
-                prep.missing_fields = []
+            # ── CRITICAL: NEVER clear address fields just because Salla failed ──
+            # The customer already provided their address. The failure is Salla-side
+            # (bad payload, shipping issue, etc.) — not a missing-address problem.
+            # Clearing the address and re-asking is a broken UX that loops forever.
+            prep.last_order_failed = True
+            prep.salla_failure_count = (prep.salla_failure_count or 0) + 1
+            prep.missing_fields = []
+
+            logger.error(
+                "[ORDER FLOW] Order creation FAILED #%d | tenant=%s "
+                "short_code=%r google_maps=%s has_address=%s error=%r",
+                prep.salla_failure_count, ctx.tenant_id,
+                prep.short_address_code, bool(prep.google_maps_url),
+                has_address, error_msg,
+            )
+
+            if has_address and prep.salla_failure_count <= 1:
+                # First failure with address → silent retry message.
+                # Customer should send any message to trigger another attempt.
                 return ActionResult(
                     success=True,
                     data={
@@ -295,43 +308,38 @@ class DraftOrderHandler:
                     },
                 )
 
-            # ── Second consecutive failure OR no address → clear address and re-ask ──
-            # This covers: retry-after-first-failure also failed, or address was
-            # never sent and the issue might be something else entirely.
-            prep.last_order_failed = True
-            prep.short_address_code = ""
-            prep.google_maps_url = ""
-            prep.latitude = None
-            prep.longitude = None
-            prep.street = ""
-            prep.district = ""
-            prep.postal_code = ""
-            prep.building_number = ""
-            prep.additional_number = ""
-            prep.address_line = ""
-            prep.missing_fields = ["address_location"]
-            question = (
-                "واجهنا مشكلة مرتين في إنشاء الطلب 🙏\n"
-                "هل يمكنك إعادة إرسال الرمز الوطني المختصر (مثال: RIYD1234) "
-                "أو رابط موقعك من خرائط جوجل؟"
-                if previous_failed
-                else
-                "واجهنا مشكلة تقنية في إنشاء الطلب 🙏\n"
-                "هل يمكنك إرسال الرمز الوطني المختصر للعنوان (مثال: RIYD1234) "
-                "أو رابط موقعك من خرائط جوجل؟"
-            )
-            return ActionResult(
-                success=True,
-                data={
-                    "product": product_info,
-                    "needs_collection": True,
-                    "missing_fields": ["address_location"],
-                    "question": question,
-                    "is_first_ask": False,
-                    "order_prep": prep.to_dict(),
-                    "order_creation_error": error_msg,
-                },
-            )
+            if has_address and prep.salla_failure_count >= 2:
+                # Second+ failure — escalate to human without clearing any data.
+                # Do NOT re-ask for address: the data is already there.
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "salla_escalate": True,
+                        "salla_failure_count": prep.salla_failure_count,
+                        "order_prep": prep.to_dict(),
+                        "order_creation_error": error_msg,
+                    },
+                )
+
+            # No address was provided at all — ask for it once
+            if not has_address:
+                prep.missing_fields = ["address_location"]
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "needs_collection": True,
+                        "missing_fields": ["address_location"],
+                        "question": (
+                            "أرسل لي الرمز الوطني المختصر للعنوان (مثال: RIYD1234) "
+                            "أو رابط موقعك من خرائط جوجل."
+                        ),
+                        "is_first_ask": not previous_failed,
+                        "order_prep": prep.to_dict(),
+                        "order_creation_error": error_msg,
+                    },
+                )
 
         # No name/city at all — adapter missing or completely fresh start
         return ActionResult(

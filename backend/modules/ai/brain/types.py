@@ -76,6 +76,8 @@ class OrderPreparationState:
     product_id: str = ""
     # Set to True when a Salla order creation attempt failed with this data
     last_order_failed: bool = False
+    # Counts consecutive Salla failures for this order (for escalation logic)
+    salla_failure_count: int = 0
     # Cached shipping company/zone ID resolved from Salla (avoids re-fetching each turn)
     shipping_company_id: Optional[int] = None
 
@@ -101,6 +103,7 @@ class OrderPreparationState:
             "missing_fields": list(self.missing_fields or []),
             "product_id": self.product_id,
             "last_order_failed": self.last_order_failed,
+            "salla_failure_count": self.salla_failure_count,
             "shipping_company_id": self.shipping_company_id,
         }
 
@@ -133,6 +136,7 @@ class OrderPreparationState:
             ],
             product_id=str(raw.get("product_id", "") or ""),
             last_order_failed=bool(raw.get("last_order_failed", False)),
+            salla_failure_count=int(raw.get("salla_failure_count") or 0),
             shipping_company_id=int(_sid) if _sid is not None else None,
         )
 

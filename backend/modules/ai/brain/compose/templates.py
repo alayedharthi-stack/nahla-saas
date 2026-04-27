@@ -135,8 +135,18 @@ def salla_retry_message(product: Dict[str, Any], code: str = "", **_: Any) -> st
     code_ref = f"الرمز *{code}*" if code else "بيانات عنوانك"
     return (
         f"وصلني {code_ref} ✅\n"
-        f"واجهنا مشكلة تقنية مؤقتة في إنشاء طلب *{title}* في المتجر.\n"
-        "سأعيد المحاولة تلقائياً. فقط أرسل أي رسالة وسأكمل الطلب. 🔄"
+        f"حصل خطأ تقني أثناء إنشاء طلب *{title}*.\n"
+        "جارٍ المحاولة مرة أخرى — فقط أرسل أي رسالة وسأكمل الطلب. 🔄"
+    )
+
+
+def salla_escalate_message(product: Dict[str, Any], **_: Any) -> str:
+    """Sent after 2+ consecutive Salla creation failures — escalate to human."""
+    title = product.get("title", "المنتج المحدد")
+    return (
+        f"حصل خطأ تقني متكرر أثناء إنشاء طلب *{title}* 🙏\n\n"
+        "بياناتك محفوظة لدينا وسيتواصل معك فريق المتجر لإتمام الطلب يدوياً. "
+        "شكراً لصبرك! 🤝"
     )
 
 
