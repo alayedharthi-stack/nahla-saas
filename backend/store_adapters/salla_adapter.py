@@ -206,6 +206,27 @@ class SallaAdapter(BaseStoreAdapter):
         # appears alongside any failure in Railway log filters that hide INFO.
         _payload_str = _json.dumps(body, ensure_ascii=False)
         if path == "/orders":
+            # Unmissable pre-flight log — this MUST appear on every order
+            # creation attempt regardless of which path triggered it. If
+            # we ever see Salla return 422 without this line, it means a
+            # different process is posting orders (impossible via this
+            # adapter) or the deployment is stale.
+            try:
+                _items_brief = [
+                    {
+                        "identifier": p.get("identifier"),
+                        "quantity": p.get("quantity"),
+                        "options": p.get("options"),
+                    }
+                    for p in (body.get("products") or [])
+                ]
+            except Exception:
+                _items_brief = []
+            logger.error(
+                "[SallaAdapter] ABOUT_TO_POST_ORDER | tenant=%s products=%s",
+                self._tenant_id,
+                _items_brief,
+            )
             logger.error(
                 "[SallaAdapter] POST /orders REQUEST | tenant=%s payload=%s",
                 self._tenant_id,
@@ -534,7 +555,49 @@ class SallaAdapter(BaseStoreAdapter):
 
     # ── Orders ─────────────────────────────────────────────────────────────────
 
+    async def _assert_required_options_present(self, order_input: OrderInput) -> None:
+        """Last-line defence against Salla 422 (`خيارات المنتج مطلوبة`).
+
+        For every order item that arrives WITHOUT any options selected,
+        fetch the product from Salla and check whether it has any
+        required option groups. If yes, abort the order — do NOT call
+        POST /orders. Raises ``ValueError("required_product_options_missing")``.
+
+        We only network-hit Salla when the caller forgot to supply
+        options, so happy-path orders pay no extra cost.
+        """
+        for item in order_input.items or []:
+            if item.options:
+                continue
+            pid = str(item.product_id or "").strip()
+            if not pid:
+                continue
+            try:
+                product = await self.get_product(pid)
+            except Exception as exc:
+                logger.warning(
+                    "[SallaAdapter] options pre-flight: get_product failed | "
+                    "product=%s err=%s — proceeding anyway",
+                    pid, exc,
+                )
+                continue
+            if not product:
+                continue
+            required_groups = [
+                g for g in (product.options or [])
+                if g.get("required") and g.get("values")
+            ]
+            if required_groups:
+                logger.error(
+                    "[SallaAdapter] BLOCKING create_order: product has required options but none supplied | "
+                    "tenant=%s product=%s required_groups=%s",
+                    self._tenant_id, pid,
+                    [g.get("name") for g in required_groups],
+                )
+                raise ValueError("required_product_options_missing")
+
     async def create_order(self, order_input: OrderInput) -> NormalizedOrder:
+        await self._assert_required_options_present(order_input)
         shipping_company_id = order_input.shipping_company_id
         if not shipping_company_id:
             shipping_company_id = await self._get_default_shipping_company_id(order_input.city)
@@ -547,6 +610,7 @@ class SallaAdapter(BaseStoreAdapter):
             raise
 
     async def create_draft_order(self, order_input: OrderInput) -> NormalizedOrder:
+        await self._assert_required_options_present(order_input)
         # ── Shipping resolution ───────────────────────────────────────────────────
         # Auto-resolve the default shipping company if not already cached.
         # We never ask the customer for shipping; we just pick Salla's first zone.

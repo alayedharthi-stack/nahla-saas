@@ -32,6 +32,12 @@ async def create_order(tenant_id: int, order_input: OrderInput) -> Optional[Norm
             f"on {adapter.platform} | status={order.status}"
         )
         return order
+    except ValueError as exc:
+        logger.error(
+            "[OrderService] tenant=%s create_order BLOCKED before POST | reason=%s",
+            tenant_id, exc,
+        )
+        return None
     except Exception as exc:
         logger.error(f"[OrderService] tenant={tenant_id} create_order failed: {exc}")
         return None
@@ -49,6 +55,14 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
             tenant_id, order.id, adapter.platform,
         )
         return order
+    except ValueError as exc:
+        # Adapter-level pre-flight guard (e.g. required_product_options_missing).
+        # No POST /orders was issued — surface the reason loudly.
+        logger.error(
+            "[OrderService] tenant=%s create_draft_order BLOCKED before POST | reason=%s",
+            tenant_id, exc,
+        )
+        return None
     except Exception as exc:
         # Surface Salla's HTTP status + full response body to make Railway logs actionable
         if _httpx and isinstance(exc, _httpx.HTTPStatusError):

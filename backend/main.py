@@ -188,6 +188,36 @@ app.include_router(_product_interests_router)
 @app.on_event("startup")
 async def on_startup() -> None:
     """Run database migrations and start background scheduler."""
+    # ── Deployment fingerprint ────────────────────────────────────────────
+    # Emit the git commit SHA we are running on. Lets us prove from
+    # Railway logs whether a hot-fix actually shipped or if the platform
+    # is still serving an older build.
+    try:
+        import subprocess as _subp
+        _commit_sha = (
+            os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+            or os.environ.get("GIT_COMMIT_SHA")
+            or os.environ.get("COMMIT_SHA")
+            or _subp.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=_REPO_ROOT,
+                stderr=_subp.DEVNULL,
+                timeout=5,
+            ).decode("utf-8").strip()
+        )
+    except Exception:
+        _commit_sha = "unknown"
+    _git_branch = (
+        os.environ.get("RAILWAY_GIT_BRANCH")
+        or os.environ.get("GIT_BRANCH")
+        or "unknown"
+    )
+    logger.warning(
+        "[BOOT] git_commit=%s branch=%s build=%s",
+        _commit_sha,
+        _git_branch,
+        os.environ.get("RAILWAY_DEPLOYMENT_ID", "local"),
+    )
     # 0. Blocking bootstrap — MUST run before any code issues SQL that references
     #    new columns (e.g. integrations.external_store_id).  Railway may start
     #    `uvicorn …` directly without start.sh; background safe_alters are too late.
