@@ -590,11 +590,23 @@ class SallaAdapter(BaseStoreAdapter):
                 _last = " ".join(_parts[1:]) if len(_parts) > 1 else ""
 
         # ── Payment — Salla Admin API v2:
-        #   status "pending_payment" lets the customer pay via Salla checkout.
-        #   We intentionally omit "accepted_methods" and let Salla use the
-        #   store's configured methods — passing explicit slugs like "credit_card"
-        #   or "mada" causes 422 when the merchant hasn't enabled those gateways.
-        payment_block: Dict[str, Any] = {"status": "pending_payment"}
+        #   `payment.accepted_methods` is REQUIRED by Salla (422 otherwise:
+        #   "حقل وسائل الدفع المتاحة مطلوب"). The slugs must be a subset of
+        #   the methods the merchant has enabled in Salla. The only slug
+        #   that is guaranteed to be enabled on every store is `cod` (cash
+        #   on delivery), so that is the safe default. Operators who want
+        #   online payment can override via env (comma-separated):
+        #     SALLA_DEFAULT_PAYMENT_METHODS=mada,cod,credit_card
+        import os as _os
+        _methods_env = (_os.environ.get("SALLA_DEFAULT_PAYMENT_METHODS") or "").strip()
+        if _methods_env:
+            _accepted_methods = [m.strip() for m in _methods_env.split(",") if m.strip()]
+        else:
+            _accepted_methods = ["cod"]
+        payment_block: Dict[str, Any] = {
+            "status": "pending_payment",
+            "accepted_methods": _accepted_methods,
+        }
 
         body: Dict[str, Any] = {
             "products": products,
