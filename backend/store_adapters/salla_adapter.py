@@ -588,12 +588,27 @@ class SallaAdapter(BaseStoreAdapter):
         # Build address block — include city and short address code whenever available.
         # ── Address ──────────────────────────────────────────────────────────────
         # Saudi customers typically supply a national short address code (TAPA7401)
-        # with a city. Use the real street if available, otherwise fall back to the
-        # short code as the street value so Salla doesn't reject for empty street.
+        # with a city. Salla rejects the bare alphanumeric code as a street value
+        # ("street must be a readable address"), so when no real street is
+        # available we synthesise a human-readable fallback such as
+        # "الطائف - الرمز الوطني TAPA7401" or "العنوان عبر الرمز الوطني: TAPA7401".
+        # If a Google Maps URL was provided, it gets a sensible textual fallback
+        # too. The raw code itself is still preserved in the order note for the
+        # merchant to see.
         street_val = (order_input.street or order_input.address or "").strip()
-        if not street_val and order_input.short_address_code:
-            # Use just the raw code — do NOT prefix with "الرمز المختصر:" etc.
-            street_val = order_input.short_address_code
+        _short_code_clean = (order_input.short_address_code or "").strip().upper()
+        _maps_url_clean = (order_input.google_maps_url or "").strip()
+
+        if not street_val and _short_code_clean:
+            if order_input.city:
+                street_val = f"{order_input.city.strip()} - الرمز الوطني {_short_code_clean}"
+            else:
+                street_val = f"العنوان عبر الرمز الوطني {_short_code_clean}"
+        elif not street_val and _maps_url_clean:
+            if order_input.city:
+                street_val = f"{order_input.city.strip()} - الموقع عبر خرائط Google"
+            else:
+                street_val = "الموقع عبر خرائط Google"
 
         if order_input.city or street_val:
             addr: Dict[str, Any] = {}
@@ -609,6 +624,8 @@ class SallaAdapter(BaseStoreAdapter):
                 addr["zip_code"] = order_input.postal_code
             if order_input.additional_number:
                 addr["additional_number"] = order_input.additional_number
+            # Salla expects a country on shipping address; default to Saudi Arabia.
+            addr.setdefault("country", "Saudi Arabia")
             body["address"] = addr
 
         # ── Notes (human-readable) ───────────────────────────────────────────────

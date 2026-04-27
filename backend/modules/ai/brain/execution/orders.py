@@ -666,15 +666,27 @@ def _full_name(prep: OrderPreparationState, fallback: str) -> str:
 
 
 def _address_line(prep: OrderPreparationState) -> str:
+    """Human-readable address text passed to Salla as the order address.
+
+    NEVER return the bare national short code (e.g. TAPA7401) — Salla
+    rejects alphanumeric codes as street values. Always wrap the code or
+    the maps URL with a readable Arabic prefix and the city when known.
+    """
     if prep.address_line:
         return prep.address_line
     if prep.street:
         suffix = f" - {prep.district}" if prep.district else ""
         return f"{prep.street}{suffix}".strip()
+    city = (prep.city or "").strip()
     if prep.short_address_code:
-        return prep.short_address_code
+        code = prep.short_address_code.strip().upper()
+        if city:
+            return f"{city} - الرمز الوطني {code}"
+        return f"العنوان عبر الرمز الوطني {code}"
     if prep.google_maps_url:
-        return "تم تزويد الموقع عبر خرائط Google"
+        if city:
+            return f"{city} - الموقع عبر خرائط Google"
+        return "الموقع عبر خرائط Google"
     return ""
 
 
