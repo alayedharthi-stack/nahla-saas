@@ -70,11 +70,35 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
     except Exception as exc:
         # Surface Salla's HTTP status + full response body to make Railway logs actionable
         if _httpx and isinstance(exc, _httpx.HTTPStatusError):
+            _status = exc.response.status_code
+            _body_text = exc.response.text or ""
             logger.error(
                 "[OrderService] tenant=%s create_draft_order FAILED | "
                 "salla_status=%d salla_response=%s",
-                tenant_id, exc.response.status_code, exc.response.text[:2000],
+                tenant_id, _status, _body_text[:2000],
             )
+            # Parse Salla's structured 422 response so we can react
+            # specifically to options-related rejections instead of
+            # falling through to a generic retry/escalate.
+            if _status == 422:
+                try:
+                    _body_json = exc.response.json()
+                except Exception:
+                    _body_json = {}
+                _err_node = _body_json.get("error") if isinstance(_body_json, dict) else None
+                _fields = (_err_node or {}).get("fields") if isinstance(_err_node, dict) else None
+                if isinstance(_fields, dict):
+                    _options_keys = [
+                        k for k in _fields.keys()
+                        if "option" in str(k).lower() or "خيار" in str(k)
+                    ]
+                    if _options_keys:
+                        logger.error(
+                            "[OrderService] tenant=%s Salla 422 → options field rejected | "
+                            "fields=%s — re-raising as required_product_options_missing",
+                            tenant_id, _options_keys,
+                        )
+                        raise ValueError("required_product_options_missing") from exc
         else:
             logger.error(
                 "[OrderService] tenant=%s create_draft_order FAILED | error=%s",
