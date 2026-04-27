@@ -210,6 +210,19 @@ class MerchantBrain:
         if result.data.get("order_prep"):
             new_state.order_prep = OrderPreparationState.from_dict(result.data.get("order_prep"))
 
+        # If the executor flagged the focused product as un-syncable on the
+        # store (wrong / stale identifier, deleted, no external_id), drop
+        # the focus so the next message lets the user pick a different
+        # product and we don't loop on the same broken id.
+        if result.data.get("product_unsyncable"):
+            logger.warning(
+                "[ORDER FLOW] dropping product focus — product unsyncable on store | "
+                "previous_focus=%s",
+                (new_state.current_product_focus or {}).get("title"),
+            )
+            new_state.current_product_focus = None
+            new_state.order_prep = OrderPreparationState()
+
         # ── 6b. Persist search candidates so user can pick by number ─────────
         # IMPORTANT: the source of truth is the executor (search.py returns
         # `products`). The composer tags a narrower `pending_candidates`

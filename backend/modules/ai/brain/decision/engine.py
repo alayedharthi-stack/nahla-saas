@@ -174,10 +174,20 @@ class DefaultDecisionEngine:
             _matched_product = _match_product_from_message(ctx.message, _candidates)
             if _matched_product:
                 logger.info(
-                    "[ORDER FLOW] Product selected from suggestion → starting order flow | "
-                    "product='%s' tenant=%s intent=%s",
-                    _matched_product.get("title"), ctx.tenant_id, intent.name,
+                    "[ORDER FLOW] product selected (by name) | "
+                    "salla_product_id=%s nahla_db_id=%s name=%r tenant=%s intent=%s",
+                    _matched_product.get("external_id"),
+                    _matched_product.get("id"),
+                    _matched_product.get("title"),
+                    ctx.tenant_id,
+                    intent.name,
                 )
+                if not _matched_product.get("external_id"):
+                    logger.error(
+                        "[ORDER FLOW] matched product has NO external_id — "
+                        "order will be aborted | nahla_db_id=%s name=%r",
+                        _matched_product.get("id"), _matched_product.get("title"),
+                    )
                 if facts.orderable:
                     return Decision(
                         action=ACTION_PROPOSE_DRAFT_ORDER,
@@ -213,15 +223,21 @@ class DefaultDecisionEngine:
                 product = candidates[idx - 1]
                 if product:
                     logger.info(
-                        "[ORDER FLOW] number interpreted as product | "
-                        "idx=%d title=%r tenant=%s",
-                        idx, product.get("title"), ctx.tenant_id,
+                        "[ORDER FLOW] product selected | display_index=%d "
+                        "salla_product_id=%s nahla_db_id=%s name=%r tenant=%s",
+                        idx,
+                        product.get("external_id"),
+                        product.get("id"),
+                        product.get("title"),
+                        ctx.tenant_id,
                     )
-                    logger.info(
-                        "[ORDER FLOW] Product selected from suggestion → starting order flow | "
-                        "product='%s' idx=%d tenant=%s",
-                        product.get("title"), idx, ctx.tenant_id,
-                    )
+                    if not product.get("external_id"):
+                        logger.error(
+                            "[ORDER FLOW] picked product has NO external_id "
+                            "(Salla product id) — order will be aborted | "
+                            "nahla_db_id=%s name=%r",
+                            product.get("id"), product.get("title"),
+                        )
                     if facts.orderable:
                         return Decision(
                             action=ACTION_PROPOSE_DRAFT_ORDER,

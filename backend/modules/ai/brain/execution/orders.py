@@ -58,7 +58,12 @@ class DraftOrderHandler:
         prev_prep = ctx.state.order_prep or OrderPreparationState()
         prep = OrderPreparationState.from_dict(prev_prep.to_dict())
 
-        current_product_id = str(product_info.get("external_id") or product_info.get("id") or "")
+        # CRITICAL: ONLY use external_id (the Salla / store-platform product
+        # identifier). NEVER fall back to `id` — that is the internal Nahla
+        # DB primary key and Salla has no concept of it. Sending Nahla's
+        # `id` to Salla yields a 422 with bogus error messages because the
+        # product simply does not exist on Salla under that ID.
+        current_product_id = str(product_info.get("external_id") or "").strip()
         previous_product_id = str(getattr(prev_prep, "product_id", "") or "")
         product_changed = bool(current_product_id and previous_product_id and current_product_id != previous_product_id)
         previous_failed = bool(getattr(prev_prep, "last_order_failed", False))
@@ -145,17 +150,35 @@ class DraftOrderHandler:
                 },
             )
 
-        external_id = product_info.get("external_id") or str(product_info.get("id", ""))
+        # CRITICAL: external_id MUST be the platform (Salla / Zid / Shopify)
+        # product identifier. Do NOT fall back to product_info["id"] — that
+        # is Nahla's internal DB primary key and is meaningless to Salla.
+        external_id = str(product_info.get("external_id") or "").strip()
         if not external_id:
             logger.error(
-                "[ORDER FLOW] No product_id | tenant=%s product_info=%s",
-                ctx.tenant_id, product_info,
+                "[ORDER FLOW] invalid product — no external_id (Salla product id missing) | "
+                "tenant=%s nahla_db_id=%s title=%r product_info=%s",
+                ctx.tenant_id,
+                product_info.get("id"),
+                product_info.get("title"),
+                product_info,
             )
+            # Drop product focus so a stale, unsyncable product doesn't keep
+            # blocking the flow. The user will be re-prompted to pick again.
             return ActionResult(
-                success=False,
-                error="missing_product_id",
-                data={"message": "product_has_no_external_id"},
+                success=True,
+                data={
+                    "product_unsyncable": True,
+                    "message": "product_missing_external_id",
+                    "order_prep": prep.to_dict(),
+                },
             )
+
+        # Mandatory log: prove the Salla product id we'll use is real.
+        logger.info(
+            "[ORDER FLOW] product selected | nahla_db_id=%s salla_product_id=%s name=%r",
+            product_info.get("id"), external_id, product_info.get("title"),
+        )
 
         # ── Product options (variants) ────────────────────────────────────────
         # Salla rejects the order with `options: "خيارات المنتج مطلوبة"` when
@@ -166,6 +189,28 @@ class DraftOrderHandler:
         #   • return needs_options=True (ask the customer for the next group),
         #   • or pass the resolved selection into create_draft_order.
         await _ensure_product_options_loaded(prep, ctx, external_id)
+
+        # HARD GUARD: if Salla returned no product for `external_id`, the
+        # identifier is invalid (likely we used Nahla's internal DB id). We
+        # MUST NOT continue: there are no options to load, so the eventual
+        # `POST /orders` would crash with a misleading 422
+        # ("خيارات المنتج مطلوبة"). Stop here and ask the customer to pick
+        # a different product.
+        if prep.product_unsyncable:
+            logger.error(
+                "[ORDER FLOW] aborting order — product not found on Salla | "
+                "tenant=%s salla_product_id=%s name=%r",
+                ctx.tenant_id, external_id, product_info.get("title"),
+            )
+            return ActionResult(
+                success=True,
+                data={
+                    "product_unsyncable": True,
+                    "message": "product_not_on_store",
+                    "order_prep": prep.to_dict(),
+                },
+            )
+
         _merge_message_options(prep, ctx.message)
 
         # ── Number-by-stage interpretation (quantity) ────────────────────────
@@ -970,12 +1015,19 @@ async def _ensure_product_options_loaded(
             return
         product = await adapter.get_product(external_id)
         if not product:
-            logger.warning(
-                "[ORDER FLOW] product options load returned no product | "
-                "tenant=%s product_id=%s",
+            # Salla returned nothing for this id → the id is wrong (likely we
+            # accidentally used Nahla's internal DB id instead of the Salla
+            # product id, or the product was deleted on Salla). Mark the prep
+            # as un-syncable so the caller can refuse to create the order and
+            # ask the customer to pick a different product.
+            logger.error(
+                "[ORDER FLOW] invalid product_id for Salla — get_product returned empty | "
+                "tenant=%s product_id=%s (this id does NOT exist on Salla)",
                 ctx.tenant_id, external_id,
             )
+            prep.product_unsyncable = True
             return
+        prep.product_unsyncable = False
         opts = list(getattr(product, "options", None) or [])
         prep.product_options_meta = opts
         # ── Defensive default: any product with option groups (size,

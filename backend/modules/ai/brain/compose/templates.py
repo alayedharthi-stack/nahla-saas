@@ -223,6 +223,17 @@ def salla_retry_message(product: Dict[str, Any], code: str = "", **_: Any) -> st
     )
 
 
+def product_unsyncable(product: Dict[str, Any], **_: Any) -> str:
+    """Shown when the product the customer picked is not available on the
+    store (wrong / stale identifier, deleted, not synced). Asks the customer
+    to choose another item instead of attempting a doomed order."""
+    title = product.get("title", "هذا المنتج")
+    return (
+        f"معذرةً، تعذّر إكمال الطلب لـ *{title}* لأن المنتج غير متاح حالياً في المتجر. 🙏\n"
+        "هل تحب أعرض لك منتجات مشابهة، أو تكتب اسم منتج آخر؟"
+    )
+
+
 def salla_escalate_message(product: Dict[str, Any], **_: Any) -> str:
     """Sent after 2+ consecutive Salla creation failures — escalate to human."""
     title = product.get("title", "المنتج المحدد")

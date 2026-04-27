@@ -176,6 +176,11 @@ class DefaultComposer:
         if action == ACTION_PROPOSE_DRAFT_ORDER:
             if not result.success:
                 return T.generic_fallback()
+            # The product reference we have can't be resolved on the store
+            # (wrong id, deleted, not synced). Ask the customer to choose
+            # again — never silently push a doomed order to Salla.
+            if data.get("product_unsyncable"):
+                return T.product_unsyncable(product=data.get("product", {}))
             if data.get("needs_options"):
                 _missing_groups = data.get("missing_option_groups", []) or []
                 # WhatsApp quick-reply buttons for the FIRST pending group

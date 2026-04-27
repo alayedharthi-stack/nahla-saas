@@ -91,6 +91,10 @@ class OrderPreparationState:
     product_options_meta: List[Dict[str, Any]] = field(default_factory=list)
     product_options: Dict[str, Any] = field(default_factory=dict)
     product_has_required_options: bool = False
+    # Set when the platform (Salla) returns no product for the given id —
+    # i.e. the product identifier we have is wrong / not synced. Order
+    # creation MUST be blocked while this is True.
+    product_unsyncable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -119,6 +123,7 @@ class OrderPreparationState:
             "product_options_meta": list(self.product_options_meta or []),
             "product_options": dict(self.product_options or {}),
             "product_has_required_options": self.product_has_required_options,
+            "product_unsyncable": self.product_unsyncable,
         }
 
     @staticmethod
@@ -155,6 +160,7 @@ class OrderPreparationState:
             product_options_meta=list(raw.get("product_options_meta") or []),
             product_options=dict(raw.get("product_options") or {}),
             product_has_required_options=bool(raw.get("product_has_required_options", False)),
+            product_unsyncable=bool(raw.get("product_unsyncable", False)),
         )
 
 

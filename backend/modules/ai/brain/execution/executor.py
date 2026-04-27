@@ -136,7 +136,10 @@ class _RecommendAddonHandler:
         result = await runtime.execute(
             "recommend_addon",
             {
-                "product_id": (ctx.state.current_product_focus or {}).get("id"),
+                "product_id": (
+                    (ctx.state.current_product_focus or {}).get("external_id")
+                    or (ctx.state.current_product_focus or {}).get("id")
+                ),
                 "query": decision.args.get("query") or "",
             },
         )
