@@ -86,14 +86,28 @@ def draft_order_created(
     **_: Any,
 ) -> str:
     title     = product.get("title", "المنتج المحدد")
-    ref_part  = f" (رقم الطلب: {reference})" if reference else ""
-    total_str = f"\nالإجمالي: {total:.2f} {currency}" if total else ""
-    url_part  = f"\n\nرابط الدفع:\n{checkout_url}" if checkout_url else ""
+    ref_part  = f"رقم الطلب: *{reference}*" if reference else ""
+    total_str = f"المبلغ: *{total:.2f} {currency}*" if total else ""
+
+    header = f"✅ تم إنشاء طلبك بنجاح!"
+    details_lines = [f"المنتج: *{title}*"]
+    if ref_part:
+        details_lines.append(ref_part)
+    if total_str:
+        details_lines.append(total_str)
+    details = "\n".join(details_lines)
+
+    if checkout_url:
+        return (
+            f"{header}\n\n"
+            f"{details}\n\n"
+            f"💳 *ادفع الآن:*\n{checkout_url}"
+        )
+    # No payment URL — order exists but payment link unavailable
     return (
-        f"تم إنشاء طلبك لـ *{title}*{ref_part}! 🎉"
-        f"{total_str}"
-        f"{url_part}\n\n"
-        "هل تريد تأكيد الطلب أو تعديله؟"
+        f"{header}\n\n"
+        f"{details}\n\n"
+        "سيتواصل معك فريق المتجر لإتمام الدفع. 🙏"
     )
 
 
@@ -139,7 +153,10 @@ def order_intent_captured(product: Dict[str, Any], **_: Any) -> str:
 
 def payment_link(checkout_url: str = "", **_: Any) -> str:
     if checkout_url:
-        return f"هذا رابط الدفع لطلبك:\n{checkout_url}\n\nيمكنك إتمام الدفع بشكل آمن من خلاله. 🔒"
+        return (
+            f"💳 *رابط الدفع لطلبك:*\n{checkout_url}\n\n"
+            "يمكنك إتمام الدفع بشكل آمن من خلال الرابط أعلاه. 🔒"
+        )
     return "لا يوجد رابط دفع نشط حالياً. هل تريد إنشاء طلب جديد؟"
 
 

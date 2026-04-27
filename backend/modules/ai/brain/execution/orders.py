@@ -222,19 +222,35 @@ class DraftOrderHandler:
         order = runtime_result.payload.get("order")
 
         if order:
-            checkout_url = order.get("payment_link") or order.get("checkout_url") or ""
-            logger.info(
-                "[ORDER FLOW] Order created ✓ | tenant=%s product=%s order_id=%s checkout=%s",
-                ctx.tenant_id,
-                product_info.get("title", "?"),
-                order.get("id"),
-                "YES" if checkout_url else "NO",
+            order_id = order.get("id") or ""
+            # Extract payment URL — check every field the adapter may populate.
+            checkout_url = (
+                order.get("payment_link")
+                or order.get("payment_url")
+                or order.get("checkout_url")
+                or (order.get("urls") or {}).get("payment")
+                or (order.get("urls") or {}).get("checkout")
+                or ""
             )
+            logger.info(
+                "[ORDER FLOW] order created | order_id=%s tenant=%s",
+                order_id, ctx.tenant_id,
+            )
+            if checkout_url:
+                logger.info(
+                    "[ORDER FLOW] payment url extracted | %s tenant=%s",
+                    checkout_url, ctx.tenant_id,
+                )
+            else:
+                logger.warning(
+                    "[ORDER FLOW] order created but payment url missing | order_id=%s tenant=%s",
+                    order_id, ctx.tenant_id,
+                )
             return ActionResult(
                 success=True,
                 data={
-                    "order_id":    order.get("id"),
-                    "reference":   order.get("reference_id") or order.get("id"),
+                    "order_id":    order_id,
+                    "reference":   order.get("reference_id") or order_id,
                     "checkout_url": checkout_url,
                     "total":       order.get("total"),
                     "currency":    order.get("currency", "SAR"),

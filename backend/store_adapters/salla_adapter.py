@@ -440,7 +440,34 @@ class SallaAdapter(BaseStoreAdapter):
         body = self._build_order_body(order_input, draft=True, shipping_company_id=shipping_company_id)
         try:
             data = await self._post("/orders", body)
-            return self._normalize_order(data.get("data", data), order_input)
+            order = self._normalize_order(data.get("data", data), order_input)
+
+            # ── Payment URL fallback ──────────────────────────────────────────────
+            # Salla does not always embed the payment URL in the create response.
+            # If it is missing, make one extra GET /orders/{id} call to fetch it.
+            if not order.payment_link and order.id:
+                logger.info(
+                    "[ORDER FLOW] payment url absent in create response, fetching separately "
+                    "| order_id=%s tenant=%s",
+                    order.id, self._tenant_id,
+                )
+                try:
+                    fetched_url = await self.generate_payment_link(order.id, order.total)
+                    if fetched_url:
+                        order.payment_link = fetched_url
+                        logger.info(
+                            "[ORDER FLOW] payment url fetched via GET /orders | "
+                            "order_id=%s url=%s tenant=%s",
+                            order.id, fetched_url, self._tenant_id,
+                        )
+                except Exception as _fetch_exc:
+                    logger.warning(
+                        "[ORDER FLOW] payment url fetch failed (non-blocking) | "
+                        "order_id=%s err=%s tenant=%s",
+                        order.id, _fetch_exc, self._tenant_id,
+                    )
+
+            return order
         except Exception as exc:
             self._log_error("create_draft_order", exc)
             raise
@@ -742,7 +769,16 @@ class SallaAdapter(BaseStoreAdapter):
                     total = parsed
                     break
 
-        payment_link = raw.get("payment_url") or raw.get("checkout_url")
+        # Salla returns the payment URL under several possible keys depending on
+        # endpoint version. Check all known shapes before falling back to None.
+        _urls = raw.get("urls") or {}
+        payment_link = (
+            raw.get("payment_url")
+            or raw.get("checkout_url")
+            or _urls.get("payment")
+            or _urls.get("checkout")
+            or _urls.get("pay")
+        )
 
         items = []
         for li in (raw.get("items") or raw.get("line_items") or []):
