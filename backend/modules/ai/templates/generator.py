@@ -27,35 +27,35 @@ _OBJECTIVE_CATALOGUE: Dict[str, Dict[str, Any]] = {
         "category": "MARKETING",
         "body": "مرحباً {{1}} 👋\nلاحظنا أنك تركت بعض المنتجات في سلة التسوق.\nلا تفوّت الفرصة — سلتك في انتظارك! 🛒\n{{2}}",
         "variables": {"{{1}}": "customer_name", "{{2}}": "cart_url"},
-        "footer": "للإلغاء أرسل STOP",
+        "footer": "للإيقاف اكتب: إلغاء الاشتراك",
         "buttons": [{"type": "URL", "text": "أكمل الشراء", "url": "{{2}}"}],
     },
     "reorder": {
         "category": "MARKETING",
         "body": "مرحباً {{1}} 😊\nحان وقت تجديد طلبك من *{{2}}*!\nاطلب الآن وسنوصل إليك بأسرع وقت. ⚡\n{{3}}",
         "variables": {"{{1}}": "customer_name", "{{2}}": "product_name", "{{3}}": "reorder_url"},
-        "footer": "للإلغاء أرسل STOP",
+        "footer": "للإيقاف اكتب: إلغاء الاشتراك",
         "buttons": [{"type": "URL", "text": "أعد الطلب", "url": "{{3}}"}],
     },
     "winback": {
         "category": "MARKETING",
         "body": "نشتاق إليك {{1}} 💙\nمرّ وقت منذ آخر زيارة لنا.\nعُد الآن واستمتع بخصم {{2}}% على طلبك القادم بكود: *{{3}}*",
         "variables": {"{{1}}": "customer_name", "{{2}}": "discount_pct", "{{3}}": "coupon_code"},
-        "footer": "للإلغاء أرسل STOP",
+        "footer": "للإيقاف اكتب: إلغاء الاشتراك",
         "buttons": [],
     },
     "back_in_stock": {
         "category": "MARKETING",
         "body": "بشرى سارة {{1}} 🎉\nالمنتج الذي كنت تبحث عنه *{{2}}* متاح الآن!\nاطلبه قبل نفاد الكمية. 🔥\n{{3}}",
         "variables": {"{{1}}": "customer_name", "{{2}}": "product_name", "{{3}}": "product_url"},
-        "footer": "للإلغاء أرسل STOP",
+        "footer": "للإيقاف اكتب: إلغاء الاشتراك",
         "buttons": [{"type": "URL", "text": "اطلب الآن", "url": "{{3}}"}],
     },
     "price_drop": {
         "category": "MARKETING",
         "body": "انخفض السعر! 📉\nمرحباً {{1}}، منتجك المفضّل *{{2}}* أصبح بسعر أفضل الآن!\nلا تتردد في الطلب. 🛍️\n{{3}}",
         "variables": {"{{1}}": "customer_name", "{{2}}": "product_name", "{{3}}": "product_url"},
-        "footer": "للإلغاء أرسل STOP",
+        "footer": "للإيقاف اكتب: إلغاء الاشتراك",
         "buttons": [{"type": "URL", "text": "اشترِ الآن", "url": "{{3}}"}],
     },
     "order_followup": {
@@ -76,7 +76,7 @@ _OBJECTIVE_CATALOGUE: Dict[str, Dict[str, Any]] = {
         "category": "MARKETING",
         "body": "عرض خاص لك {{1}} 🎁\nاستمتع بخصم {{2}}% على جميع المنتجات باستخدام كود: *{{3}}*\nالعرض محدود — لا تفوّته! ⏳",
         "variables": {"{{1}}": "customer_name", "{{2}}": "discount_pct", "{{3}}": "coupon_code"},
-        "footer": "للإلغاء أرسل STOP",
+        "footer": "للإيقاف اكتب: إلغاء الاشتراك",
         "buttons": [],
     },
     "transactional_update": {
@@ -157,10 +157,24 @@ def _build_components(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
         "text": spec["body"],
     })
 
-    if spec.get("footer"):
+    # Marketing templates ALWAYS carry the Nahla unsubscribe footer so the
+    # customer always knows how to opt out. Utility / authentication
+    # templates skip the footer (they're operational, not marketing, and
+    # Meta discourages opt-out copy on transactional messages).
+    explicit_footer = spec.get("footer")
+    is_marketing    = (spec.get("category") or "").upper() == "MARKETING"
+
+    footer_text: str | None = None
+    if explicit_footer:
+        footer_text = explicit_footer
+    elif is_marketing:
+        from services.unsubscribe import MARKETING_FOOTER_AR  # noqa: PLC0415
+        footer_text = MARKETING_FOOTER_AR
+
+    if footer_text:
         components.append({
             "type": "FOOTER",
-            "text": spec["footer"],
+            "text": footer_text,
         })
 
     if spec.get("buttons"):

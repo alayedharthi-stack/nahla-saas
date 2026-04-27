@@ -1463,23 +1463,63 @@ async def _handle_merchant_message(
         except Exception:
             MODE_SUPPORT_ESCALATION = "support_escalation"  # type: ignore[assignment]
         if mode_decision.mode == MODE_SUPPORT_ESCALATION:
-            reply = (
-                "وصلت رسالتك. تم تحويل المحادثة لفريق المتجر، "
-                "وسيرد عليك أحد الموظفين في أقرب وقت."
+            # ── Order-flow recovery override ──────────────────────────────────────
+            # A customer who keeps sending order data (national short address code,
+            # explicit order intent) is NOT asking for human support. The
+            # handoff flag is often set automatically after a misclassified
+            # intent or a Salla failure; we must not let that trap the customer
+            # forever. Reset the flag and let the Brain resume the order flow.
+            try:
+                from services.address_resolution import _SHORT_CODE_RE  # noqa: PLC0415
+                _has_short_code = bool(_SHORT_CODE_RE.search((text or "").upper()))
+            except Exception:
+                _has_short_code = False
+            _txt_lower = (text or "").strip()
+            _order_keywords = (
+                "أنشئ الطلب", "انشئ الطلب", "اطلب لي", "أبغى أطلب",
+                "أبي أطلب", "ابي اطلب", "ادفع", "رابط الدفع",
+                "اكمل الطلب", "أكمل الطلب", "كمل الطلب",
+                "https://maps.app.goo.gl", "https://goo.gl/maps", "maps.google.com",
             )
-            StateManager.save_message(
-                db, to, reply, "outbound",
-                conversation_id=convo.id, tenant_id=tenant_id,
-            )
-            _send_ok = await _send_whatsapp_message(
-                phone_id=phone_id, to=to, text=reply,
-                _tenant_id=tenant_id, _db=db,
-            )
-            if _send_ok:
-                logger.info("[TRACE][5/6] HUMAN_HANDOFF_ACK_SENT | tenant=%s to=%s", tenant_id, to)
+            _has_order_keyword = any(kw in _txt_lower for kw in _order_keywords)
+            _is_numeric_pick = _txt_lower.isdigit() and 1 <= len(_txt_lower) <= 2
+
+            if _has_short_code or _has_order_keyword or _is_numeric_pick:
+                logger.info(
+                    "[ORDER FLOW] restoring flow after escalation flag | "
+                    "tenant=%s to=%s short_code=%s order_keyword=%s numeric_pick=%s",
+                    tenant_id, to, _has_short_code, _has_order_keyword, _is_numeric_pick,
+                )
+                logger.info(
+                    "[ORDER FLOW] ignoring human handoff flag — clearing on conversation"
+                )
+                try:
+                    convo.is_human_handoff = False
+                    convo.paused_by_human = False
+                    if convo.status == "human":
+                        convo.status = "active"
+                    db.flush()
+                except Exception as _flag_exc:
+                    logger.warning("[ORDER FLOW] flag clear failed: %s", _flag_exc)
+                # Fall through to Brain pipeline below — DO NOT return.
             else:
-                logger.error("[TRACE][5/6] HUMAN_HANDOFF_ACK_SEND_FAILED | tenant=%s to=%s", tenant_id, to)
-            return
+                reply = (
+                    "وصلت رسالتك. تم تحويل المحادثة لفريق المتجر، "
+                    "وسيرد عليك أحد الموظفين في أقرب وقت."
+                )
+                StateManager.save_message(
+                    db, to, reply, "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                )
+                _send_ok = await _send_whatsapp_message(
+                    phone_id=phone_id, to=to, text=reply,
+                    _tenant_id=tenant_id, _db=db,
+                )
+                if _send_ok:
+                    logger.info("[TRACE][5/6] HUMAN_HANDOFF_ACK_SENT | tenant=%s to=%s", tenant_id, to)
+                else:
+                    logger.error("[TRACE][5/6] HUMAN_HANDOFF_ACK_SEND_FAILED | tenant=%s to=%s", tenant_id, to)
+                return
 
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
         # Active when: global flag is on OR this tenant is in the per-tenant list
@@ -1546,6 +1586,24 @@ async def _handle_merchant_message(
                     _brain_handoff = False
 
                 if _brain_handoff:
+                    # Guard: if there is active order preparation (a focused
+                    # product or saved order_state), DO NOT auto-pin the
+                    # conversation to human. Brain would only emit handoff
+                    # when the customer explicitly asked for a human, and
+                    # in that case we still want them to be able to resume
+                    # the order on the next turn just by sending order data.
+                    _has_active_order = False
+                    try:
+                        meta = (convo.extra_metadata or {}) if convo is not None else {}
+                        bstate = (meta or {}).get("brain_state") or {}
+                        prep = (bstate or {}).get("order_prep") or {}
+                        if prep.get("product_id") or prep.get("product_name"):
+                            _has_active_order = True
+                        if bstate.get("current_product_focus"):
+                            _has_active_order = True
+                    except Exception:
+                        _has_active_order = False
+
                     try:
                         from handoff.manager import create_handoff_session  # noqa: PLC0415
                         _cust_name = profile.get("name") or to
@@ -1553,10 +1611,20 @@ async def _handle_merchant_message(
                             db, tenant_id, to, _cust_name, text,
                             reason="customer_request",
                         )
-                        convo.status = "human"
-                        convo.is_human_handoff = True
-                        db.flush()
-                        logger.info("[Merchant/Brain] handoff session created for tenant=%s to=%s", tenant_id, to)
+                        if _has_active_order:
+                            logger.info(
+                                "[ORDER FLOW] continuing order despite handoff request | "
+                                "skipping convo handoff flag | tenant=%s to=%s",
+                                tenant_id, to,
+                            )
+                        else:
+                            convo.status = "human"
+                            convo.is_human_handoff = True
+                            db.flush()
+                            logger.info(
+                                "[Merchant/Brain] handoff session created for tenant=%s to=%s",
+                                tenant_id, to,
+                            )
                     except Exception as ho_exc:
                         logger.error("[Merchant/Brain] failed to create handoff session: %s", ho_exc)
 

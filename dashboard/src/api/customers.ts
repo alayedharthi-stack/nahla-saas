@@ -50,6 +50,8 @@ export interface CustomerRecord {
   is_unsubscribed: boolean
   unsubscribed_at: string | null
   resubscribed_at: string | null
+  pending_unsubscribe: boolean
+  pending_unsubscribe_at: string | null
 }
 
 export interface CustomersListResponse {

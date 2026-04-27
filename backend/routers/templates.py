@@ -953,6 +953,19 @@ async def _submit_template_to_meta(
     import copy as _copy  # noqa: PLC0415
     components = _copy.deepcopy(components)
 
+    # ── Auto-inject Nahla unsubscribe footer for MARKETING templates ─────────
+    # Meta requires marketing messages to make opt-out simple. We append a
+    # short opt-out hint to every MARKETING template that doesn't already
+    # carry a FOOTER component. This runs ONCE here so merchants can't
+    # accidentally publish marketing copy without a way for customers to
+    # silence it.
+    if (category or "").upper() == "MARKETING":
+        try:
+            from services.unsubscribe import ensure_marketing_footer  # noqa: PLC0415
+            components = ensure_marketing_footer(components)
+        except Exception as _foot_exc:
+            logger.warning("[template/submit] could not inject marketing footer: %s", _foot_exc)
+
     # Meta rejects FOOTER text that contains emojis or newlines.
     # Strip them automatically before submission so merchants don't have to
     # worry about this — BODY / button text may still keep emojis.

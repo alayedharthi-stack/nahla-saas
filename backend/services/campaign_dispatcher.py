@@ -18,6 +18,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import String, and_, cast, or_
 from sqlalchemy.orm import Session
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -212,16 +213,30 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
             skipped += 1
             continue
 
-        # Hard opt-out guard — in case a customer unsubscribed after the
-        # audience was resolved but before we reached them in the loop.
+        # Hard opt-out guard — in case a customer unsubscribed (or asked
+        # to unsubscribe and is awaiting confirmation) after the audience
+        # was resolved but before we reached them in the loop.
         _meta = getattr(customer, "extra_metadata", None) or {}
         if _meta.get("is_unsubscribed"):
             skipped += 1
             logger.debug(
-                "[campaign_dispatcher] skipping opted-out customer %s",
+                "[campaign_dispatcher] skipping opted-out customer %s (state=unsubscribed)",
                 getattr(customer, "id", "?"),
             )
             continue
+        if _meta.get("pending_unsubscribe"):
+            try:
+                from services.unsubscribe import expire_pending_if_needed  # noqa: PLC0415
+                if not expire_pending_if_needed(db, customer, commit=True):
+                    skipped += 1
+                    logger.debug(
+                        "[campaign_dispatcher] skipping opted-out customer %s (state=pending)",
+                        getattr(customer, "id", "?"),
+                    )
+                    continue
+            except Exception:
+                skipped += 1
+                continue
 
         try:
             coupon_code = ""
@@ -354,14 +369,35 @@ def _resolve_audience(
     from services.nahla_segments import build_segment_query
     q = build_segment_query(audience_type, db, tenant_id, require_reachable=True)
     if q is None:
+        is_unsubscribed = cast(
+            Customer.extra_metadata.op("->>")("is_unsubscribed"), String,
+        )
+        is_pending = cast(
+            Customer.extra_metadata.op("->>")("pending_unsubscribe"), String,
+        )
+        pending_expires_at = cast(
+            Customer.extra_metadata.op("->>")("pending_unsubscribe_expires_at"), String,
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        not_unsubscribed = or_(
+            is_unsubscribed.is_(None),
+            and_(is_unsubscribed != "true", is_unsubscribed != "1"),
+        )
+        not_pending = or_(
+            is_pending.is_(None),
+            and_(is_pending != "true", is_pending != "1"),
+            pending_expires_at <= now_iso,
+        )
         q = (
             db.query(Customer)
             .filter(
                 Customer.tenant_id == tenant_id,
                 Customer.normalized_phone.isnot(None),
                 Customer.normalized_phone != "",
-                # Safety net: honour opt-outs even for the fallback "all" query
-                Customer.extra_metadata.op("->>")("is_unsubscribed") != "true",
+                # Safety net: honour opt-outs (and pending opt-outs) even
+                # for the fallback "all" query
+                not_unsubscribed,
+                not_pending,
             )
         )
     return q.all()

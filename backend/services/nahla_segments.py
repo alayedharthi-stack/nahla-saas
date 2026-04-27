@@ -63,7 +63,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.orm import Query, Session
 
 from models import Customer, CustomerProfile, Order
@@ -90,11 +90,20 @@ def _f_all(q: Query, _db: Session, _tid: int) -> Query:
 
 
 def _f_unsubscribed(q: Query, _db: Session, _tid: int) -> Query:
-    """Customers who have opted out by sending an unsubscribe keyword."""
-    # JSONB boolean check: extra_metadata->>'is_unsubscribed' = 'true'
-    return q.filter(
-        Customer.extra_metadata.op("->>")("is_unsubscribed") == "true",
+    """Customers who have opted out by sending an unsubscribe keyword.
+
+    Cross-dialect: PostgreSQL `metadata->>'is_unsubscribed'` returns the
+    text `'true'`; SQLite `json_extract(metadata,'$.is_unsubscribed')`
+    returns the integer `1`. We accept both forms so the same code works
+    in production (PostgreSQL/JSONB) and in CI tests (SQLite/JSON).
+    """
+    is_unsubscribed = cast(
+        Customer.extra_metadata.op("->>")("is_unsubscribed"), String,
     )
+    return q.filter(or_(
+        is_unsubscribed == "true",
+        is_unsubscribed == "1",
+    ))
 
 
 def _f_new(q: Query, _db: Session, _tid: int) -> Query:
@@ -528,18 +537,45 @@ def _base_query(db: Session, tenant_id: int) -> Query:
 
 def _reachable_filter(q: Query) -> Query:
     """A campaign can only message customers we can actually reach on
-    WhatsApp AND who have not opted out.
+    WhatsApp AND who have not opted out (or asked to opt out).
 
     Applied on top of every segment so the wizard's count and the
     dispatcher's recipient list never include:
       • customers with no normalised phone
-      • customers who sent an unsubscribe keyword
+      • customers who sent an unsubscribe keyword and confirmed it
+      • customers who are currently in the pending-confirmation state
+
+    Cross-dialect note: NULL means "key absent" (most customers); we want
+    those rows kept. PostgreSQL `metadata->>'k' != 'true'` evaluates to
+    NULL for NULL inputs and would wrongly drop those rows, so we use
+    `IS NOT DISTINCT FROM` semantics via `or_(IS NULL, != 'true')`.
+    The same expression also covers SQLite, where `json_extract` returns
+    NULL for missing keys and `1` (integer) for boolean `true`.
     """
+    is_unsubscribed = cast(
+        Customer.extra_metadata.op("->>")("is_unsubscribed"), String,
+    )
+    is_pending = cast(
+        Customer.extra_metadata.op("->>")("pending_unsubscribe"), String,
+    )
+    pending_expires_at = cast(
+        Customer.extra_metadata.op("->>")("pending_unsubscribe_expires_at"), String,
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    not_unsubscribed = or_(
+        is_unsubscribed.is_(None),
+        and_(is_unsubscribed != "true", is_unsubscribed != "1"),
+    )
+    not_pending = or_(
+        is_pending.is_(None),
+        and_(is_pending != "true", is_pending != "1"),
+        pending_expires_at <= now_iso,
+    )
     return q.filter(
         Customer.normalized_phone.isnot(None),
         Customer.normalized_phone != "",
-        # Exclude opted-out customers: JSONB key is_unsubscribed must NOT be 'true'
-        Customer.extra_metadata.op("->>")("is_unsubscribed") != "true",
+        not_unsubscribed,
+        not_pending,
     )
 
 

@@ -398,12 +398,18 @@ export default function Customers() {
                         className="px-3 py-3 cursor-pointer"
                         onClick={() => setSelectedCustomer(c)}
                       >
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="font-medium text-slate-900">{c.name || '—'}</span>
                           {c.is_unsubscribed && (
                             <span className="inline-flex items-center gap-0.5 bg-red-100 text-red-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-red-200">
                               <BellOff className="w-2.5 h-2.5" />
                               ألغى الاشتراك
+                            </span>
+                          )}
+                          {!c.is_unsubscribed && c.pending_unsubscribe && (
+                            <span className="inline-flex items-center gap-0.5 bg-amber-100 text-amber-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-amber-200">
+                              <BellOff className="w-2.5 h-2.5" />
+                              بانتظار تأكيد الإلغاء
                             </span>
                           )}
                         </div>
@@ -702,6 +708,16 @@ export default function Customers() {
                     </p>
                     <p className="text-red-500">مستثنى من الحملات والطيار الآلي والذكاء</p>
                     <p className="text-slate-500 text-[10px]">يعود تلقائياً عند إرساله أي رسالة</p>
+                  </div>
+                )}
+                {!selectedCustomer.is_unsubscribed && selectedCustomer.pending_unsubscribe && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800 text-center space-y-1">
+                    <p className="font-semibold flex items-center justify-center gap-1">
+                      <BellOff className="w-3.5 h-3.5" />
+                      بانتظار تأكيد إلغاء الاشتراك
+                    </p>
+                    <p className="text-amber-700">طلب الإلغاء — أُرسلت له رسالة تأكيد بزرين</p>
+                    <p className="text-slate-500 text-[10px]">يتم إيقاف الأتمتة والذكاء حتى يضغط "نعم متأكد" أو "تراجع"</p>
                   </div>
                 )}
                 <Badge
