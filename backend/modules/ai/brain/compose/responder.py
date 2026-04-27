@@ -174,9 +174,30 @@ class DefaultComposer:
             if not result.success:
                 return T.generic_fallback()
             if data.get("needs_options"):
+                _missing_groups = data.get("missing_option_groups", []) or []
+                # WhatsApp quick-reply buttons for the FIRST pending group
+                # (≤3 values — WhatsApp's hard limit on reply buttons).
+                # The text body still lists every pending group so the
+                # customer can answer all of them at once if they prefer
+                # to type — buttons are an accelerator, not a replacement.
+                if _missing_groups:
+                    _first = _missing_groups[0] or {}
+                    _values = [v for v in (_first.get("values") or []) if (v.get("name") or "").strip()]
+                    if 1 <= len(_values) <= 3:
+                        wa_buttons = []
+                        for i, v in enumerate(_values, 1):
+                            title = ((v.get("name") or "").strip())[:20]
+                            if not title:
+                                continue
+                            wa_buttons.append({
+                                "type": "reply",
+                                "reply": {"id": f"opt_{i}", "title": title},
+                            })
+                        if wa_buttons:
+                            result.data["pending_buttons"] = wa_buttons
                 return T.ask_product_options(
                     product=data.get("product", {}),
-                    missing_option_groups=data.get("missing_option_groups", []),
+                    missing_option_groups=_missing_groups,
                     selected_options=data.get("selected_options", {}),
                 )
             if data.get("salla_escalate"):

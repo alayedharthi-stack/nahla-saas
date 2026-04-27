@@ -91,9 +91,36 @@ class DraftOrderHandler:
         # is_first_ask: True when no customer data exists yet (very first data-collection turn)
         _is_first_ask = not bool(prep.customer_first_name or prep.city or prep.short_address_code)
 
+        # Snapshot pre-merge state to detect if this turn brought new
+        # address signals (used both for the "address captured during
+        # options phase" log and to avoid clearing previously captured
+        # address fields after the customer has moved on to options).
+        _had_address_before = bool(
+            prep.short_address_code or prep.google_maps_url or prep.address_line
+        )
+        _had_city_before = bool(prep.city)
+        _had_prep_before = bool(
+            prep.customer_first_name
+            or prep.city
+            or prep.short_address_code
+            or prep.google_maps_url
+            or prep.product_options
+        )
+
         _seed_checkout_state(prep, ctx)
         _merge_message_details(prep, ctx.intent.slots, ctx.message)
         await _resolve_checkout_address(prep)
+
+        if _had_prep_before:
+            logger.info(
+                "[ORDER FLOW] continuing flow with preserved data | tenant=%s "
+                "name=%r city=%r short_code=%r options_picked=%d",
+                ctx.tenant_id,
+                bool(prep.customer_first_name),
+                prep.city,
+                prep.short_address_code,
+                len(prep.product_options or {}),
+            )
 
         # Country-aware address rules: Saudi customers can finish the
         # order with name + city + (national short code OR Maps URL).
@@ -140,6 +167,30 @@ class DraftOrderHandler:
         #   • or pass the resolved selection into create_draft_order.
         await _ensure_product_options_loaded(prep, ctx, external_id)
         _merge_message_options(prep, ctx.message)
+
+        # If the customer dropped a short_code / Maps URL / city while
+        # we were still collecting product options, log it explicitly so
+        # we can verify in Railway that data preservation works.
+        _has_address_now = bool(
+            prep.short_address_code or prep.google_maps_url or prep.address_line
+        )
+        if (not _had_address_before) and _has_address_now:
+            logger.info(
+                "[ORDER FLOW] address captured during options phase | tenant=%s "
+                "short_code=%r maps=%s city=%r options_pending=%s",
+                ctx.tenant_id,
+                prep.short_address_code,
+                bool(prep.google_maps_url),
+                prep.city,
+                [g.get("name") for g in _missing_product_options(prep)],
+            )
+        elif (not _had_city_before) and prep.city and _missing_product_options(prep):
+            logger.info(
+                "[ORDER FLOW] address captured during options phase | tenant=%s "
+                "city=%r (newly added)",
+                ctx.tenant_id, prep.city,
+            )
+
         _missing_options = _missing_product_options(prep)
         if _missing_options:
             _next_group = _missing_options[0]
@@ -166,11 +217,23 @@ class DraftOrderHandler:
                 },
             )
         if prep.product_has_required_options:
+            _final_selection = {
+                k: v.get("value_name") for k, v in (prep.product_options or {}).items()
+            }
             logger.info(
                 "[ORDER FLOW] product options selected | tenant=%s product=%s selection=%s",
-                ctx.tenant_id, external_id,
-                {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+                ctx.tenant_id, external_id, _final_selection,
             )
+            # "all options collected" — emitted on the turn that completes
+            # the option set so we can trace the boundary between option-
+            # collection turns and order creation.
+            _prev_selection_count = len(getattr(prev_prep, "product_options", None) or {})
+            if len(prep.product_options or {}) > _prev_selection_count:
+                logger.info(
+                    "[ORDER FLOW] all options collected | tenant=%s product=%s count=%d selection=%s",
+                    ctx.tenant_id, external_id,
+                    len(prep.product_options or {}), _final_selection,
+                )
 
         # Log phone resolution — phone is always taken from the WhatsApp conversation,
         # never asked from the customer.
@@ -822,24 +885,30 @@ async def _ensure_product_options_loaded(
         )
 
 
-def _merge_message_options(prep: OrderPreparationState, message: str) -> None:
+def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
     """Match values mentioned in the customer's message against cached options.
 
-    Rule-based: case-insensitive substring match on the value name. The
-    first match per group wins, and we never overwrite a previously
-    selected value (the customer can re-pick by sending a new message —
-    selection is replaced explicitly only when the prior value isn't in
-    the message text). Numeric input is allowed (e.g. "1" → first value)
-    but only when exactly one option group is still missing, so a generic
-    "1" never accidentally overwrites a color/size already chosen.
+    Rule-based, runs against ALL pending groups (multi-option in a single
+    message such as "M أسود" or "2 1"):
+
+      1. Direct value-name substring match (case-insensitive + Arabic
+         normalised) across every required group that's still missing.
+      2. Multi-token numeric pick — splits the message on whitespace, so
+         "2 1" assigns 2 to the first pending group and 1 to the second.
+         The single-number case "1" still works when exactly one group
+         is pending.
+
+    Returns the number of groups newly selected on this turn so callers
+    can emit a `[ORDER FLOW] multi-option parsed` log when ≥2 captured.
     """
     if not prep.product_options_meta:
-        return
+        return 0
     text = (message or "").strip()
     if not text:
-        return
+        return 0
     text_lower = text.lower()
     text_norm = _norm_ar(text_lower)
+    captured = 0
 
     # ── direct value-name match across all groups ────────────────────────
     for group in prep.product_options_meta:
@@ -847,6 +916,8 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> None:
         if not gname:
             continue
         gkey = gname.lower()
+        if gkey in (prep.product_options or {}):
+            continue
         for val in group.get("values") or []:
             vname = (val.get("name") or "").strip()
             if not vname:
@@ -854,45 +925,58 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> None:
             v_lower = vname.lower()
             v_norm = _norm_ar(v_lower)
             if v_lower in text_lower or (v_norm and v_norm in text_norm):
-                if gkey in (prep.product_options or {}):
-                    prior = prep.product_options[gkey]
-                    if (prior or {}).get("value_name", "").lower() == v_lower:
-                        continue
                 prep.product_options[gkey] = {
                     "option_id": group.get("id"),
                     "option_name": gname,
                     "value_id": val.get("id"),
                     "value_name": vname,
                 }
+                captured += 1
                 logger.info(
                     "[ORDER FLOW] product option selected | group=%r value=%r",
                     gname, vname,
                 )
                 break
 
-    # ── numeric pick when exactly one group is still pending ──────────────
-    missing_now = _missing_product_options(prep)
-    if len(missing_now) == 1 and text.isdigit():
-        try:
-            idx = int(text)
-        except ValueError:
-            idx = 0
-        group = missing_now[0]
-        values = group.get("values") or []
-        if 1 <= idx <= len(values):
+    # ── multi-token numeric pick across remaining pending groups ──────────
+    pending_after_text = _missing_product_options(prep)
+    if pending_after_text:
+        tokens = [t for t in text.split() if t.isdigit()]
+        for i, group in enumerate(pending_after_text):
+            if i >= len(tokens):
+                break
+            try:
+                idx = int(tokens[i])
+            except ValueError:
+                continue
+            values = group.get("values") or []
+            if not (1 <= idx <= len(values)):
+                continue
             val = values[idx - 1]
             gname = group.get("name") or ""
             gkey = gname.lower()
+            if gkey in (prep.product_options or {}):
+                continue
             prep.product_options[gkey] = {
                 "option_id": group.get("id"),
                 "option_name": gname,
                 "value_id": val.get("id"),
                 "value_name": val.get("name") or "",
             }
+            captured += 1
             logger.info(
                 "[ORDER FLOW] product option selected (numeric) | group=%r idx=%d value=%r",
                 gname, idx, val.get("name") or "",
             )
+
+    if captured >= 2:
+        logger.info(
+            "[ORDER FLOW] multi-option parsed | captured=%d selection=%s",
+            captured,
+            {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+        )
+
+    return captured
 
 
 def _missing_product_options(prep: OrderPreparationState) -> List[Dict[str, Any]]:

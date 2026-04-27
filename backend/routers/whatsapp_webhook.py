@@ -1032,6 +1032,19 @@ async def _dispatch_message(
                     )
                     return
 
+                # Product-option buttons (size/color quick-replies). The title
+                # carries the human-readable value name ("M", "أسود"), which
+                # `_merge_message_options` already matches via its value-name
+                # path. Forward the title so the brain treats it like a normal
+                # text reply.
+                if btn_id.startswith("opt_") and not _is_platform_tenant(db, resolved_tenant_id):
+                    forwarded = (btn_txt or "").strip() or btn_id.split("_", 1)[-1]
+                    await _handle_merchant_message(
+                        phone_id=used_pid, to=sender, text=forwarded,
+                        tenant_id=resolved_tenant_id, db=db,
+                    )
+                    return
+
                 await _handle_button_reply(
                     btn_id=btn_id, phone_id=used_pid, to=sender,
                     tenant_id=resolved_tenant_id, db=db,
