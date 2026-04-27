@@ -206,8 +206,21 @@ class DefaultDecisionEngine:
                         reason=f"customer picked option {idx} — not orderable, confirm product",
                         confidence=0.90,
                     )
-            # We saw a numeric pick but have no list to map it onto. Don't
-            # punt to the LLM — ask for clarification so the customer can
+            # We saw a numeric pick but have no list to map it onto.
+            # ── If we already have a product focus + order_prep, the
+            # number is likely a quantity ("1") rather than a product
+            # pick — keep the order flow alive instead of breaking it.
+            if state.current_product_focus and facts.orderable:
+                logger.info(
+                    "[ORDER FLOW] numeric pick without candidates but product focused → continue order"
+                )
+                return Decision(
+                    action=ACTION_PROPOSE_DRAFT_ORDER,
+                    args={"product": state.current_product_focus},
+                    reason="numeric pick + existing product focus — continue order flow",
+                    confidence=0.85,
+                )
+            # Otherwise: ask for clarification so the customer can
             # name the product (or repeat the search).
             return Decision(
                 action=ACTION_CLARIFY,

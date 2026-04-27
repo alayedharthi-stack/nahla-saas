@@ -217,18 +217,28 @@ class MerchantBrain:
         # it to populate state. This was the root cause of the production bug
         # where pick_list_item ("اخترت 2") fell through to the LLM because
         # state.last_search_candidates was always empty.
+        #
+        # We persist the list whenever the executor returned a products array
+        # — regardless of decision.action. "Show top sellers" / "recommend"
+        # / "search" all surface ordered lists the user can pick from.
         _search_products = (
             result.data.get("pending_candidates")
             or result.data.get("products")
+            or result.data.get("recommended_products")
             or []
         )
-        if decision.action == "search_products" and _search_products:
-            # Cap to 8 so a pick like "5" is meaningful but state stays small.
-            new_state.last_search_candidates = list(_search_products)[:8]
-        elif intent.name == INTENT_PICK_LIST_ITEM:
-            # Clear candidates after a successful pick (decision engine already
-            # consumed the chosen product into ACTION_PROPOSE_DRAFT_ORDER).
+        if intent.name == INTENT_PICK_LIST_ITEM and new_state.current_product_focus:
+            # Successful pick → decision engine already consumed the chosen
+            # product into ACTION_PROPOSE_DRAFT_ORDER. Clear candidates.
             new_state.last_search_candidates = []
+        elif _search_products:
+            # Cap to 16 so picks like "14" remain meaningful (top-seller lists
+            # often exceed 8 items) while state stays small.
+            new_state.last_search_candidates = list(_search_products)[:16]
+            logger.info(
+                "[ORDER FLOW] persisted product list for pick | count=%d action=%s",
+                len(new_state.last_search_candidates), decision.action,
+            )
 
         new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)
         ctx.state = new_state

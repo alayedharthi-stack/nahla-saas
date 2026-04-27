@@ -21,6 +21,8 @@ from typing import Any, Dict, List
 from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 from ..types import (
     INTENT_GENERAL,
+    INTENT_PICK_LIST_ITEM,
+    INTENT_TALK_HUMAN,
     Intent,
     MerchantConversationState,
 )
@@ -60,6 +62,17 @@ class DefaultIntentClassifier:
             and getattr(state, "stage", None) in _ORDERING_STAGES
             and bool(getattr(state, "current_product_focus", None))
         )
+
+        # ── Numeric pick is ALWAYS rule-based (deterministic) ──────────────
+        # When the user types "1", "2", "٣", we must NEVER let the LLM
+        # reclassify this as anything else. The decision engine relies on
+        # PICK_LIST_ITEM with list_index to bridge to ACTION_PROPOSE_DRAFT_ORDER.
+        if rule_intent and rule_intent.name == INTENT_PICK_LIST_ITEM:
+            logger.info(
+                "[Classifier] numeric pick → rules-only | idx=%s",
+                rule_intent.slots.get("list_index"),
+            )
+            return rule_intent
 
         if (
             rule_intent
@@ -107,6 +120,26 @@ class DefaultIntentClassifier:
         base_conf   = rule_intent.confidence if rule_intent else 0.50
 
         llm_hint = slots.pop("intent_hint", None) or INTENT_GENERAL
+
+        # ── Guard: never let LLM hijack an in-order-flow turn into handoff ──
+        # When the customer is mid-checkout and provides order data
+        # (name / city / short address code / google maps url), the LLM
+        # sometimes mis-classifies this as `talk_to_human`. That triggers
+        # ACTION_HANDOFF and breaks the entire order flow.
+        # The user must EXPLICITLY ask to talk to a human (rules will catch
+        # it with high confidence) — we never trust LLM to escalate.
+        if llm_hint == INTENT_TALK_HUMAN:
+            _has_order_data = any(slots.get(k) for k in (
+                "customer_name", "city", "short_address_code",
+                "google_maps_url", "customer_first_name", "customer_last_name",
+            ))
+            if in_order_flow or _has_order_data:
+                logger.warning(
+                    "[Classifier] BLOCKED LLM talk_to_human hint | "
+                    "in_order_flow=%s has_order_data=%s — keeping rule intent",
+                    in_order_flow, _has_order_data,
+                )
+                llm_hint = base_intent  # keep rule intent (likely general)
 
         # If the LLM disagrees with rules and it's a high-confidence rules
         # signal we keep the rules result; otherwise trust LLM
