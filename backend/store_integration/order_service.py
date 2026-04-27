@@ -9,6 +9,11 @@ from __future__ import annotations
 import logging, os, sys
 from typing import Any, Dict, List, Optional
 
+try:
+    import httpx as _httpx
+except ImportError:
+    _httpx = None  # type: ignore[assignment]
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from store_integration.registry import get_adapter
 from store_integration.models import NormalizedOrder, OrderInput
@@ -35,15 +40,28 @@ async def create_order(tenant_id: int, order_input: OrderInput) -> Optional[Norm
 async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optional[NormalizedOrder]:
     adapter = get_adapter(tenant_id)
     if not adapter:
+        logger.warning("[OrderService] tenant=%s create_draft_order — no adapter found", tenant_id)
         return None
     try:
         order = await adapter.create_draft_order(order_input)
         logger.info(
-            f"[OrderService] tenant={tenant_id} created draft order {order.id} on {adapter.platform}"
+            "[OrderService] tenant=%s created draft order id=%s on %s",
+            tenant_id, order.id, adapter.platform,
         )
         return order
     except Exception as exc:
-        logger.error(f"[OrderService] tenant={tenant_id} create_draft_order failed: {exc}")
+        # Surface Salla's HTTP status + full response body to make Railway logs actionable
+        if _httpx and isinstance(exc, _httpx.HTTPStatusError):
+            logger.error(
+                "[OrderService] tenant=%s create_draft_order FAILED | "
+                "salla_status=%d salla_response=%s",
+                tenant_id, exc.response.status_code, exc.response.text[:2000],
+            )
+        else:
+            logger.error(
+                "[OrderService] tenant=%s create_draft_order FAILED | error=%s",
+                tenant_id, exc,
+            )
         return None
 
 

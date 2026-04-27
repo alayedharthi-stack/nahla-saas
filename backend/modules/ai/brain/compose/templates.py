@@ -101,14 +101,29 @@ def collect_order_details(
     product: Dict[str, Any],
     question: str = "",
     missing_fields: List[str] | None = None,
+    is_first_ask: bool = True,
     **_: Any,
 ) -> str:
     title = product.get("title", "المنتج المحدد")
-    lead = f"ممتاز، سأجهز طلب *{title}* لك."
-    if missing_fields:
-        lead += " بقيت عليّ بعض التفاصيل فقط."
     ask = question or "أرسل لي البيانات الناقصة لإكمال الطلب."
-    return f"{lead}\n{ask}"
+    if is_first_ask:
+        # First time asking: show the intro + the specific question
+        lead = f"ممتاز، سأجهز طلب *{title}* لك."
+        if missing_fields:
+            lead += " بقيت عليّ بعض التفاصيل فقط."
+        return f"{lead}\n{ask}"
+    # Subsequent turns: just ask the specific question without the repeated intro
+    return ask
+
+
+def salla_retry_message(product: Dict[str, Any], code: str = "", **_: Any) -> str:
+    title = product.get("title", "المنتج المحدد")
+    code_ref = f"الرمز *{code}*" if code else "بيانات عنوانك"
+    return (
+        f"وصلني {code_ref} ✅\n"
+        f"واجهنا مشكلة تقنية مؤقتة في إنشاء طلب *{title}* في المتجر.\n"
+        "سأعيد المحاولة تلقائياً. فقط أرسل أي رسالة وسأكمل الطلب. 🔄"
+    )
 
 
 def order_intent_captured(product: Dict[str, Any], **_: Any) -> str:

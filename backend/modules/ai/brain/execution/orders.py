@@ -50,9 +50,10 @@ class DraftOrderHandler:
                 data={"message": "no_product_selected"},
             )
 
-        # Load prep from state but reset address when:
-        #   a) product has changed (avoid using an address from a different product's flow)
-        #   b) previous order creation failed (address might have been invalid)
+        # Load prep from state.
+        # Reset address ONLY when the product changes — not on every Salla failure.
+        # Failure retry is handled below: first failure → keep data + retry message;
+        # second consecutive failure → clear address + ask to re-enter.
         prev_prep = ctx.state.order_prep or OrderPreparationState()
         prep = OrderPreparationState.from_dict(prev_prep.to_dict())
 
@@ -61,13 +62,12 @@ class DraftOrderHandler:
         product_changed = bool(current_product_id and previous_product_id and current_product_id != previous_product_id)
         previous_failed = bool(getattr(prev_prep, "last_order_failed", False))
 
-        if product_changed or previous_failed:
+        if product_changed:
             logger.info(
-                "[DraftOrderHandler] Resetting address fields | "
-                "tenant=%s product_changed=%s previous_failed=%s",
-                ctx.tenant_id, product_changed, previous_failed,
+                "[DraftOrderHandler] Product changed — resetting address | "
+                "tenant=%s old=%s new=%s",
+                ctx.tenant_id, previous_product_id, current_product_id,
             )
-            # Keep name (already known from profile/previous answer) but clear address
             prep.short_address_code = ""
             prep.google_maps_url = ""
             prep.latitude = None
@@ -83,6 +83,9 @@ class DraftOrderHandler:
 
         # Track which product this prep belongs to
         prep.product_id = current_product_id
+
+        # is_first_ask: True when no customer data exists yet (very first data-collection turn)
+        _is_first_ask = not bool(prep.customer_first_name or prep.city or prep.short_address_code)
 
         _seed_checkout_state(prep, ctx)
         _merge_message_details(prep, ctx.intent.slots, ctx.message)
@@ -104,6 +107,7 @@ class DraftOrderHandler:
                     "needs_collection": True,
                     "missing_fields": missing,
                     "question": _checkout_question(missing[0], is_sa=is_sa),
+                    "is_first_ask": _is_first_ask,
                     "order_prep": prep.to_dict(),
                     "resolution_available": spl_resolution_available(),
                     "customer_region": "SA" if is_sa else "INTL",
@@ -124,14 +128,18 @@ class DraftOrderHandler:
 
         logger.info(
             "[ORDER FLOW] All data collected → creating order | tenant=%s "
-            "product=%s external_id=%s name=%r city=%r short_code=%r has_maps=%s",
+            "product=%s external_id=%s name=%r phone=%s city=%r "
+            "short_code=%r has_maps=%s quantity=%d previous_failed=%s",
             ctx.tenant_id,
             product_info.get("title", "?"),
             external_id,
             prep.customer_first_name + " " + prep.customer_last_name,
+            ctx.customer_phone[-4:] if ctx.customer_phone else "????",
             prep.city,
             prep.short_address_code,
             bool(prep.google_maps_url),
+            max(int(prep.quantity or 1), 1),
+            previous_failed,
         )
 
         runtime = CommerceToolRuntime(
@@ -189,25 +197,46 @@ class DraftOrderHandler:
                 },
             )
 
-        # Order creation failed — decide between re-collecting address or dead-end
+        # ── Order creation FAILED ─────────────────────────────────────────────
+        error_msg = str(runtime_result.error or "unknown")
         logger.error(
             "[ORDER FLOW] Order creation FAILED ✗ | tenant=%s product=%s "
-            "error=%s ok=%s name=%r city=%r short_code=%r",
+            "external_id=%s error=%r name=%r city=%r short_code=%r "
+            "previous_failed=%s",
             ctx.tenant_id,
             product_info.get("title", "?"),
-            runtime_result.error,
-            runtime_result.ok,
+            external_id,
+            error_msg,
             prep.customer_first_name,
             prep.city,
             prep.short_address_code,
+            previous_failed,
         )
 
-        # If we have name + city (data was collected) but Salla failed,
-        # the most likely cause is a bad/missing address. Mark it failed and
-        # re-collect the address instead of dead-ending with intent_only.
         if prep.customer_first_name and prep.city:
+            has_address = bool(prep.short_address_code or prep.google_maps_url or prep.latitude)
+
+            if has_address and not previous_failed:
+                # ── First failure with address present → keep data, show retry message ──
+                # The customer already provided a valid-looking address code.
+                # Don't ask for it again — just tell them we'll retry.
+                prep.last_order_failed = True
+                prep.missing_fields = []
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "salla_retry": True,
+                        "salla_address_code": prep.short_address_code,
+                        "order_prep": prep.to_dict(),
+                        "order_creation_error": error_msg,
+                    },
+                )
+
+            # ── Second consecutive failure OR no address → clear address and re-ask ──
+            # This covers: retry-after-first-failure also failed, or address was
+            # never sent and the issue might be something else entirely.
             prep.last_order_failed = True
-            # Clear address so next turn starts address collection fresh
             prep.short_address_code = ""
             prep.google_maps_url = ""
             prep.latitude = None
@@ -219,14 +248,15 @@ class DraftOrderHandler:
             prep.additional_number = ""
             prep.address_line = ""
             prep.missing_fields = ["address_location"]
-            error_msg = runtime_result.error or "unknown"
             question = (
-                "واجهنا مشكلة تقنية في إنشاء الطلب 🙏\n"
-                "هل يمكنك إعادة إرسال الرمز الوطني المختصر للعنوان (مثال: RIYD1234)؟"
-                if "422" not in str(error_msg) and "address" not in str(error_msg).lower()
+                "واجهنا مشكلة مرتين في إنشاء الطلب 🙏\n"
+                "هل يمكنك إعادة إرسال الرمز الوطني المختصر (مثال: RIYD1234) "
+                "أو رابط موقعك من خرائط جوجل؟"
+                if previous_failed
                 else
-                "يبدو أن هناك مشكلة في العنوان 🙏\n"
-                "هل يمكنك إعادة إرسال الرمز الوطني المختصر (مثال: RIYD1234) أو رابط موقعك من خرائط جوجل؟"
+                "واجهنا مشكلة تقنية في إنشاء الطلب 🙏\n"
+                "هل يمكنك إرسال الرمز الوطني المختصر للعنوان (مثال: RIYD1234) "
+                "أو رابط موقعك من خرائط جوجل؟"
             )
             return ActionResult(
                 success=True,
@@ -235,20 +265,21 @@ class DraftOrderHandler:
                     "needs_collection": True,
                     "missing_fields": ["address_location"],
                     "question": question,
+                    "is_first_ask": False,
                     "order_prep": prep.to_dict(),
                     "order_creation_error": error_msg,
                 },
             )
 
-        # No name/city at all — no adapter or completely fresh start
+        # No name/city at all — adapter missing or completely fresh start
         return ActionResult(
-            success=True,   # success=True so composer produces a friendly reply
+            success=True,
             data={
                 "order_id":    None,
                 "checkout_url": "",
                 "product":     product_info,
                 "intent_only": True,
-                "order_creation_error": runtime_result.error,
+                "order_creation_error": error_msg,
                 "order_prep":  prep.to_dict(),
             },
         )

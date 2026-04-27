@@ -200,7 +200,15 @@ class SallaAdapter(BaseStoreAdapter):
             return resp.json()
 
     async def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        import json as _json
         url = f"{SALLA_API_BASE}{path}"
+        # Log full request payload for /orders so we can diagnose creation failures
+        if path == "/orders":
+            logger.info(
+                "[SallaAdapter] POST /orders REQUEST | tenant=%s payload=%s",
+                self._tenant_id,
+                _json.dumps(body, ensure_ascii=False)[:3000],
+            )
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
             logger.info("[Salla API] POST %s → %d | tenant=%s", path, resp.status_code, self._tenant_id)
@@ -210,7 +218,13 @@ class SallaAdapter(BaseStoreAdapter):
                     resp = await client.post(url, headers=self._headers(), json=body)
                     logger.info("[Salla API] RETRY POST %s → %d", path, resp.status_code)
             if resp.status_code >= 400:
-                logger.error("[Salla API] ERROR POST %s → %d | body=%s", path, resp.status_code, resp.text[:300])
+                logger.error(
+                    "[SallaAdapter] POST %s FAILED | tenant=%s salla_status=%d "
+                    "salla_response=%s request_payload=%s",
+                    path, self._tenant_id, resp.status_code,
+                    resp.text[:2000],
+                    _json.dumps(body, ensure_ascii=False)[:1000],
+                )
             resp.raise_for_status()
             return resp.json()
 

@@ -173,11 +173,17 @@ class DefaultComposer:
         if action == ACTION_PROPOSE_DRAFT_ORDER:
             if not result.success:
                 return T.generic_fallback()
+            if data.get("salla_retry"):
+                return T.salla_retry_message(
+                    product=data.get("product", {}),
+                    code=data.get("salla_address_code", ""),
+                )
             if data.get("needs_collection"):
                 return T.collect_order_details(
                     product=data.get("product", {}),
                     question=data.get("question", ""),
                     missing_fields=data.get("missing_fields", []),
+                    is_first_ask=data.get("is_first_ask", True),
                 )
             if data.get("intent_only"):
                 return T.order_intent_captured(product=data.get("product", {}))
