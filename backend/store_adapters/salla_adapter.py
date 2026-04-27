@@ -445,15 +445,16 @@ class SallaAdapter(BaseStoreAdapter):
         return raw
 
     def _build_order_body(self, order_input: OrderInput, draft: bool) -> Dict[str, Any]:
-        # ── Products (Salla Admin API v2 uses "products", NOT "items") ──────────
+        # ── Products (Salla Admin API v2 requires identifier + identifier_type) ──
         products = []
         for item in order_input.items:
             entry: Dict[str, Any] = {
-                "id": int(item.product_id),     # Salla uses "id", not "product_id"
+                "identifier_type": "id",
+                "identifier": str(int(item.product_id)),
                 "quantity": item.quantity,
             }
             if item.variant_id:
-                entry["variants"] = [{"id": int(item.variant_id)}]
+                entry["variant_id"] = int(item.variant_id)
             products.append(entry)
 
         # ── Phone — Salla requires E.164 (+966XXXXXXXXX) ────────────────────────
@@ -472,22 +473,30 @@ class SallaAdapter(BaseStoreAdapter):
             if not _last:
                 _last = " ".join(_parts[1:]) if len(_parts) > 1 else ""
 
-        # ── Payment — Salla requires payment.method + payment.status ────────────
+        # ── Payment — Salla Admin API v2 valid values:
+        #   status: "pending_payment" | "paid"
+        #   accepted_methods (when pending_payment): ["credit_card","mada","bank","cod"]
+        #   method (when paid): "credit_card" | "mada" | "bank" | "cod" | "subscription"
         is_cod = order_input.payment_method in ("cod", "cash_on_delivery")
-        payment_method_str = "cod" if is_cod else "online"
+        if is_cod:
+            payment_block: Dict[str, Any] = {
+                "status": "pending_payment",
+                "accepted_methods": ["cod"],
+            }
+        else:
+            payment_block = {
+                "status": "pending_payment",
+                "accepted_methods": ["credit_card", "mada", "bank", "cod"],
+            }
 
         body: Dict[str, Any] = {
-            "source": "api",
             "products": products,
             "customer": {
                 "first_name": _first or (order_input.customer_name or "عميل"),
                 "last_name":  _last,
                 "mobile":     mobile,
             },
-            "payment": {
-                "method": payment_method_str,
-                "status": "pending",
-            },
+            "payment": payment_block,
         }
         if order_input.customer_email:
             body["customer"]["email"] = order_input.customer_email
@@ -535,7 +544,7 @@ class SallaAdapter(BaseStoreAdapter):
         logger.info(
             "[SallaAdapter] _build_order_body | product_id=%s city=%s short_code=%s "
             "mobile=%s has_street=%s",
-            products[0]["id"] if products else "?",
+            products[0]["identifier"] if products else "?",
             order_input.city or "",
             order_input.short_address_code or "",
             mobile,
