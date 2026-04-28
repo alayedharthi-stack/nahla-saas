@@ -117,6 +117,65 @@ class DraftOrderHandler:
             or prep.product_options
         )
 
+        # ── EARLY product validation ──────────────────────────────────────
+        # CRITICAL: validate the external_id and load product options BEFORE
+        # checking `missing` fields. The previous ordering put these checks
+        # AFTER the `if missing: return` early-exit, so for the first 2
+        # turns (city, address) we never hit Salla at all. On Turn 3 (the
+        # first time all fields are filled) we'd call get_product() for the
+        # VERY FIRST TIME — and a single transient Salla hiccup would mark
+        # the product as unsyncable, producing the "غير متاح" message after
+        # the customer had already given their city and address code.
+        #
+        # By moving it here, Turn 1 (product pick) validates immediately:
+        #   • If the product is bad → customer hears it NOW, not 3 turns later.
+        #   • If it's good → product_options_loaded=True on Turn 1, so Turns
+        #     2 and 3 skip the Salla call entirely (via the loaded guard).
+        external_id = str(product_info.get("external_id") or "").strip()
+        if not external_id:
+            logger.error(
+                "[ORDER FLOW] invalid product — no external_id (Salla product id missing) | "
+                "tenant=%s nahla_db_id=%s title=%r product_info=%s",
+                ctx.tenant_id,
+                product_info.get("id"),
+                product_info.get("title"),
+                product_info,
+            )
+            return ActionResult(
+                success=True,
+                data={
+                    "product_unsyncable": True,
+                    "message": "product_missing_external_id",
+                    "order_prep": prep.to_dict(),
+                },
+            )
+
+        logger.info(
+            "[ORDER FLOW] product validated | nahla_db_id=%s salla_product_id=%s name=%r "
+            "options_loaded=%s unsyncable=%s turn_product_changed=%s",
+            product_info.get("id"), external_id, product_info.get("title"),
+            prep.product_options_loaded, prep.product_unsyncable, product_changed,
+        )
+
+        await _ensure_product_options_loaded(prep, ctx, external_id)
+
+        if prep.product_unsyncable:
+            logger.error(
+                "[ORDER FLOW] aborting order — product not found on Salla | "
+                "tenant=%s salla_product_id=%s name=%r",
+                ctx.tenant_id, external_id, product_info.get("title"),
+            )
+            return ActionResult(
+                success=True,
+                data={
+                    "product_unsyncable": True,
+                    "message": "product_not_on_store",
+                    "order_prep": prep.to_dict(),
+                },
+            )
+
+        # ── From here on, the product is confirmed to exist on Salla. ─────
+
         _seed_checkout_state(prep, ctx)
 
         # ── Consume any address signals stashed BEFORE a product was
@@ -160,11 +219,7 @@ class DraftOrderHandler:
                 len(prep.product_options or {}),
             )
 
-        # Country-aware address rules: Saudi customers can finish the
-        # order with name + city + (national short code OR Maps URL).
-        # International customers need an explicit country and either
-        # a structured address or a free-form address line. The phone
-        # E.164 prefix is the source of truth for "is the customer in SA".
+        # Country-aware address rules
         is_sa = _is_saudi_customer(ctx.customer_phone)
         missing = _missing_checkout_fields(prep, is_sa=is_sa)
         prep.missing_fields = missing
@@ -180,67 +235,6 @@ class DraftOrderHandler:
                     "order_prep": prep.to_dict(),
                     "resolution_available": spl_resolution_available(),
                     "customer_region": "SA" if is_sa else "INTL",
-                },
-            )
-
-        # CRITICAL: external_id MUST be the platform (Salla / Zid / Shopify)
-        # product identifier. Do NOT fall back to product_info["id"] — that
-        # is Nahla's internal DB primary key and is meaningless to Salla.
-        external_id = str(product_info.get("external_id") or "").strip()
-        if not external_id:
-            logger.error(
-                "[ORDER FLOW] invalid product — no external_id (Salla product id missing) | "
-                "tenant=%s nahla_db_id=%s title=%r product_info=%s",
-                ctx.tenant_id,
-                product_info.get("id"),
-                product_info.get("title"),
-                product_info,
-            )
-            # Drop product focus so a stale, unsyncable product doesn't keep
-            # blocking the flow. The user will be re-prompted to pick again.
-            return ActionResult(
-                success=True,
-                data={
-                    "product_unsyncable": True,
-                    "message": "product_missing_external_id",
-                    "order_prep": prep.to_dict(),
-                },
-            )
-
-        # Mandatory log: prove the Salla product id we'll use is real.
-        logger.info(
-            "[ORDER FLOW] product selected | nahla_db_id=%s salla_product_id=%s name=%r",
-            product_info.get("id"), external_id, product_info.get("title"),
-        )
-
-        # ── Product options (variants) ────────────────────────────────────────
-        # Salla rejects the order with `options: "خيارات المنتج مطلوبة"` when
-        # the product has required option groups (size, color, …) and the
-        # caller did not pick a value for every group. We fetch the options
-        # once, cache them on `prep`, parse the customer's message for any
-        # value that matches a known group, and either:
-        #   • return needs_options=True (ask the customer for the next group),
-        #   • or pass the resolved selection into create_draft_order.
-        await _ensure_product_options_loaded(prep, ctx, external_id)
-
-        # HARD GUARD: if Salla returned no product for `external_id`, the
-        # identifier is invalid (likely we used Nahla's internal DB id). We
-        # MUST NOT continue: there are no options to load, so the eventual
-        # `POST /orders` would crash with a misleading 422
-        # ("خيارات المنتج مطلوبة"). Stop here and ask the customer to pick
-        # a different product.
-        if prep.product_unsyncable:
-            logger.error(
-                "[ORDER FLOW] aborting order — product not found on Salla | "
-                "tenant=%s salla_product_id=%s name=%r",
-                ctx.tenant_id, external_id, product_info.get("title"),
-            )
-            return ActionResult(
-                success=True,
-                data={
-                    "product_unsyncable": True,
-                    "message": "product_not_on_store",
-                    "order_prep": prep.to_dict(),
                 },
             )
 
