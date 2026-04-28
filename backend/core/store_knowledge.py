@@ -213,7 +213,7 @@ class CatalogContextBuilder:
         ext_id = (p.external_id or "").strip()
         stock_qty = meta.get("stock_qty", p.stock_quantity)
         in_stock_flag = meta.get("in_stock", p.in_stock)
-        status = meta.get("status", "active")
+        status = str(meta.get("status", "active") or "active").lower()
 
         # Variant awareness: if variants are synced, at least one must be
         # in-stock for the parent product to be orderable.
@@ -221,7 +221,7 @@ class CatalogContextBuilder:
         variants_ok = True
         if variants:
             variants_ok = any(
-                (v.get("stock_quantity") or v.get("quantity") or 0) > 0
+                _safe_int(v.get("stock_quantity") or v.get("quantity") or 0, 0) > 0
                 for v in variants
                 if isinstance(v, dict)
             )
@@ -230,7 +230,7 @@ class CatalogContextBuilder:
             bool(ext_id)
             and status == "active"
             and bool(in_stock_flag)
-            and (stock_qty is None or int(stock_qty or 0) > 0)
+            and (stock_qty is None or _safe_int(stock_qty, 0) > 0)
             and variants_ok
         )
         return {
@@ -548,8 +548,189 @@ class PolicyContextBuilder:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main entry point — build_ai_context()
+# Main entry points — build_merchant_context() / build_ai_context()
 # ─────────────────────────────────────────────────────────────────────────────
+
+def build_merchant_context(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str = "",
+    product_query: str = "",
+    state: Optional[Any] = None,
+    history: Optional[List[Dict[str, Any]]] = None,
+    profile: Optional[Dict[str, Any]] = None,
+    product_limit: int = 8,
+) -> Dict[str, Any]:
+    """Return a structured, fact-grounded merchant context for Brain/LLM use.
+
+    This is intentionally built from existing sources only: store snapshots,
+    synced products, customers, conversation state, and tenant settings JSON.
+    No editable fact is invented here.
+    """
+    loader = StoreKnowledgeLoader(db, tenant_id)
+    catalog = CatalogContextBuilder(db, tenant_id)
+    customer_builder = CustomerContextBuilder(db, tenant_id)
+    settings = (
+        db.query(TenantSettings)
+        .filter(TenantSettings.tenant_id == tenant_id)
+        .first()
+    )
+    ai_settings = dict((settings.ai_settings if settings else None) or {})
+    store_settings = dict((settings.store_settings if settings else None) or {})
+    snap = loader.snapshot()
+
+    # Bounded catalog limit — avoid empty/negative limits surprising callers.
+    effective_limit = (
+        product_limit
+        if isinstance(product_limit, int) and product_limit > 0
+        else 8
+    )
+
+    store_profile = dict(loader.store_profile() or {})
+    if store_settings.get("store_name") and not store_profile.get("store_name"):
+        store_profile["store_name"] = store_settings.get("store_name")
+    if store_settings.get("store_url") and not store_profile.get("store_url"):
+        store_profile["store_url"] = store_settings.get("store_url")
+
+    # Match build_context_block: if search finds nothing, still surface orderable top products.
+    pq = (product_query or "").strip()
+    if pq:
+        products = catalog.search_products(pq, limit=effective_limit)
+        if not products:
+            products = catalog.get_top_products(effective_limit)
+    else:
+        products = catalog.get_top_products(effective_limit)
+
+    # Insights: one cheap COUNT + a small bounded sample for _format()-accurate orderable stats.
+    # (Full-table Python _format loops are too heavy for large catalogs.)
+    from sqlalchemy import func as sa_func  # noqa: PLC0415
+    from sqlalchemy import or_ as sa_or_  # noqa: PLC0415
+
+    total_product_count = int(
+        db.query(sa_func.count(Product.id))
+        .filter(Product.tenant_id == tenant_id)
+        .scalar()
+        or 0
+    )
+    insight_scan_limit = min(150, total_product_count)
+    product_rows = (
+        db.query(Product)
+        .filter_by(tenant_id=tenant_id)
+        .order_by(Product.in_stock.desc(), Product.id)
+        .limit(insight_scan_limit)
+        .all()
+    )
+    formatted_rows = [catalog._format(p) for p in product_rows]  # noqa: SLF001 - same module helper
+    unavailable_count = sum(1 for p in formatted_rows if not p.get("orderable"))
+    without_description_count = int(
+        db.query(sa_func.count(Product.id))
+        .filter(
+            Product.tenant_id == tenant_id,
+            sa_or_(
+                Product.description.is_(None),
+                sa_func.trim(Product.description) == "",
+            ),
+        )
+        .scalar()
+        or 0
+    )
+
+    policy_summary = dict(loader.policy_summary() or {})
+    shipping_summary = dict(loader.shipping_summary() or {})
+    policies = {
+        "shipping_policy": (
+            store_settings.get("shipping_policy")
+            or policy_summary.get("shipping_policy")
+            or shipping_summary.get("notes")
+            or ""
+        ),
+        "payment_policy": store_settings.get("payment_policy") or "",
+        "return_policy": store_settings.get("return_policy") or policy_summary.get("return_policy") or "",
+        "warranty_policy": store_settings.get("warranty_policy") or "",
+        "delivery_areas": store_settings.get("delivery_areas") or shipping_summary.get("delivery_areas") or "",
+        "working_hours": (
+            store_settings.get("working_hours")
+            or policy_summary.get("support_hours")
+            or store_profile.get("business_hours")
+            or ""
+        ),
+        "payment_methods": policy_summary.get("payment_methods") or [],
+        "shipping_methods": shipping_summary.get("methods") or [],
+    }
+    policy_presence = {
+        key: bool(value)
+        for key, value in policies.items()
+        if key not in ("payment_methods", "shipping_methods")
+    }
+
+    customer_profile = {}
+    if customer_phone:
+        customer_profile = customer_builder.get_profile(customer_phone) or {
+            "phone": customer_phone,
+            "segment": "lead",
+            "is_returning": False,
+        }
+    if profile:
+        customer_profile = {**customer_profile, **profile}
+
+    conversation = {
+        "stage": getattr(state, "stage", ""),
+        "customer_goal": getattr(state, "customer_goal", ""),
+        "selected_product": getattr(state, "current_product_focus", None),
+        "last_recommended_products": list(getattr(state, "last_recommended_products", []) or []),
+        "conversation_summary": getattr(state, "conversation_summary", ""),
+        "recent_messages": list((history or [])[-10:]),
+    }
+
+    approved_faq = list(store_settings.get("faq_approved") or ai_settings.get("faq_approved") or [])
+    suggested_faq = list(store_settings.get("faq_suggested") or ai_settings.get("faq_suggested") or [])
+    brain_profile = {
+        "tone": ai_settings.get("reply_tone", "friendly"),
+        "reply_length": ai_settings.get("reply_length", "medium"),
+        "sales_style": ai_settings.get("sales_style", "consultative"),
+        "coupon_strategy": ai_settings.get("coupon_strategy", "on_hesitation"),
+        "emoji_usage": ai_settings.get("emoji_usage", "moderate"),
+        "upsell_enabled": bool(ai_settings.get("upsell_enabled", ai_settings.get("recommendations_enabled", True))),
+        "recommendations_enabled": bool(ai_settings.get("recommendations_enabled", True)),
+        "owner_instructions": ai_settings.get("owner_instructions", ""),
+        "coupon_rules": ai_settings.get("coupon_rules", ""),
+    }
+
+    insights = {
+        "product_count": total_product_count,
+        "orderable_count": sum(1 for p in formatted_rows if p.get("orderable")),
+        "unavailable_count": unavailable_count,
+        "without_description_count": without_description_count,
+        "last_sync_at": (
+            snap.last_full_sync_at.isoformat()
+            if snap and getattr(snap, "last_full_sync_at", None)
+            else None
+        ),
+        "knowledge_fresh": loader.is_fresh(),
+    }
+
+    return {
+        "tenant_profile": store_profile,
+        "customer": customer_profile,
+        "conversation": conversation,
+        "products": products,
+        "policies": policies,
+        "policy_presence": policy_presence,
+        "faq": {
+            "approved": approved_faq,
+            "suggested": suggested_faq,
+            "approved_only": True,
+        },
+        "insights": insights,
+        "brain_profile": brain_profile,
+        "retrieval_rules": {
+            "products_are_orderable_only": True,
+            "do_not_invent_missing_policies": True,
+            "faq_suggested_requires_approval": True,
+            "short_whatsapp_reply": True,
+        },
+    }
+
 
 def build_ai_context(
     db: Session,
@@ -639,3 +820,12 @@ def build_ai_context(
         )
 
     return "\n\n".join(parts) if parts else "لا توجد بيانات متجر متاحة حالياً."
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value in (None, ""):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
