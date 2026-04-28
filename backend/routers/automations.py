@@ -1574,6 +1574,47 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
 
     recovery_summaries = summarise_for_orders(db, tenant_id, abandoned)
 
+    # ── Phone → name lookup from Customer table ──────────────────────────────
+    # Builds a map once for this tenant so all order loops (carts, pending
+    # payment, COD) share it without extra round-trips.
+    # This is the most reliable source: the Customer record is populated when
+    # the customer first contacts the merchant via WhatsApp and always has a
+    # name, unlike customer_info from Salla webhooks which may use first_name/
+    # last_name keys (or be partially empty) rather than a 'name' key.
+    from models import Customer as _CustomerModel  # noqa: PLC0415
+    _phone_to_name: Dict[str, str] = {}
+    for _c in (
+        db.query(_CustomerModel.normalized_phone, _CustomerModel.phone, _CustomerModel.name)
+        .filter(_CustomerModel.tenant_id == tenant_id, _CustomerModel.name.isnot(None))
+        .all()
+    ):
+        _cname = (_c.name or "").strip()
+        if not _cname:
+            continue
+        for _ph in (_c.normalized_phone, _c.phone):
+            if _ph:
+                _phone_to_name[str(_ph).strip()] = _cname
+
+    def _resolve_name(ci: dict, fallback: Optional[str], phone: str = "") -> str:
+        """Resolve the best available display name for a customer.
+
+        Priority chain:
+          1. customer_info["name"]
+          2. customer_info["first_name"] + ["last_name"]  (Salla webhook format)
+          3. Order.customer_name column (denormalised at sync time)
+          4. Customer table lookup by phone   (most reliable long-term)
+        """
+        name = (ci.get("name") or "").strip()
+        if not name:
+            first = (ci.get("first_name") or "").strip()
+            last  = (ci.get("last_name")  or "").strip()
+            name  = (first + " " + last).strip()
+        if not name:
+            name = (fallback or "").strip()
+        if not name and phone:
+            name = _phone_to_name.get(phone.strip(), "")
+        return name or "—"
+
     cart_items = []
     for o in abandoned:
         ci = o.customer_info or {}
@@ -1582,11 +1623,12 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             total_val = float(o.total or 0)
         except (TypeError, ValueError):
             total_val = 0.0
+        _cart_phone = ci.get("phone") or ci.get("mobile") or ""
         cart_items.append({
             "order_id":       o.id,
             "external_id":    o.external_id,
-            "customer_name":  ci.get("name") or o.customer_name or "—",
-            "customer_phone": ci.get("phone") or ci.get("mobile") or "",
+            "customer_name":  _resolve_name(ci, o.customer_name, _cart_phone),
+            "customer_phone": _cart_phone,
             "checkout_url":   o.checkout_url or "",
             "total":          total_val,
             "status":         o.status or "abandoned",
@@ -1696,20 +1738,6 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
     })
     grace = timedelta(minutes=15)
 
-    def _resolve_name(ci: dict, fallback: Optional[str]) -> str:
-        """Resolve customer display name from customer_info JSON.
-
-        Salla stores first_name / last_name without a composite 'name' key in
-        older synced rows.  We build it on the fly so the dashboard is never
-        blank for these orders.
-        """
-        name = ci.get("name") or ""
-        if not name:
-            first = (ci.get("first_name") or "").strip()
-            last  = (ci.get("last_name")  or "").strip()
-            name  = (first + " " + last).strip()
-        return name or (fallback or "").strip() or "—"
-
     pending_payment_items = []
     for o in (
         db.query(Order)
@@ -1753,12 +1781,13 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
                 break
         if not last_emitted_at and manual_reminders:
             last_emitted_at = meta.get("last_reminder_at")
+        _pp_phone = ci.get("phone") or ci.get("mobile") or ""
         pending_payment_items.append({
             "order_id":         o.id,
             "external_id":      o.external_id,
             "order_number":     o.external_order_number or o.external_id or f"#{o.id}",
-            "customer_name":    _resolve_name(ci, o.customer_name),
-            "customer_phone":   ci.get("phone") or ci.get("mobile") or "",
+            "customer_name":    _resolve_name(ci, o.customer_name, _pp_phone),
+            "customer_phone":   _pp_phone,
             "checkout_url":     o.checkout_url or "",
             "total":            float(o.total or 0),
             "status":           raw,
@@ -1798,12 +1827,13 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             if r.get("emitted_at"):
                 cod_last_reminder_at = r["emitted_at"]
                 break
+        _cod_phone = ci.get("phone") or ci.get("mobile") or ""
         cod_pending_items.append({
             "order_id":           o.id,
             "external_id":        o.external_id,
             "order_number":       o.external_order_number or o.external_id or f"#{o.id}",
-            "customer_name":      _resolve_name(ci, o.customer_name),
-            "customer_phone":     ci.get("phone") or ci.get("mobile") or "",
+            "customer_name":      _resolve_name(ci, o.customer_name, _cod_phone),
+            "customer_phone":     _cod_phone,
             "total":              float(o.total or 0),
             "status":             raw,
             "created_at":         meta.get("created_at", ""),
