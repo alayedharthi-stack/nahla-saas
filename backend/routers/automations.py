@@ -2185,6 +2185,173 @@ async def abandoned_cart_recovery_timeline(
     return timeline_for_order(db, tenant_id, order)
 
 
+# ── Pending-payment / COD reminder timeline ───────────────────────────────────
+
+_PENDING_PAY_STATUSES_TL = frozenset({
+    "pending", "pending_payment", "payment_pending",
+    "awaiting_payment", "draft", "new",
+})
+_COD_PENDING_STATUSES_TL = frozenset({
+    "pending_confirmation", "awaiting_confirmation",
+    "under_review", "in_review",
+})
+
+_STEP_STATUS_LABELS = {
+    "sent":    "أُرسلت",
+    "skipped": "تم التخطّي",
+    "failed":  "فشلت",
+    "pending": "قيد الإرسال",
+    "emitted": "جُدولت",
+}
+
+
+@router.get("/autopilot/orders/{order_id}/reminder-timeline")
+async def order_reminder_timeline(
+    order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Timeline of emitted + executed reminder stages for a pending-payment
+    or COD-pending order.
+
+    Each step carries the actual delivery status from AutomationExecution
+    (``sent`` | ``failed`` | ``skipped``) rather than just the emit timestamp,
+    giving the merchant an honest view of what was delivered.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id, Order.tenant_id == tenant_id)
+        .first()
+    )
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found for this tenant")
+
+    meta = order.extra_metadata or {}
+    raw_status = (order.status or "").strip().lower()
+
+    if raw_status in _PENDING_PAY_STATUSES_TL:
+        reminder_type = "pending_payment"
+        event_type    = "order_payment_pending"
+        meta_key      = "unpaid_reminders"
+    elif raw_status in _COD_PENDING_STATUSES_TL:
+        reminder_type = "cod"
+        event_type    = "order_cod_pending"
+        meta_key      = "cod_reminders"
+    else:
+        # Order may have been paid/completed since. Pick whichever history exists.
+        if meta.get("unpaid_reminders"):
+            reminder_type = "pending_payment"
+            event_type    = "order_payment_pending"
+            meta_key      = "unpaid_reminders"
+        elif meta.get("cod_reminders"):
+            reminder_type = "cod"
+            event_type    = "order_cod_pending"
+            meta_key      = "cod_reminders"
+        else:
+            ci = order.customer_info or {}
+            return {
+                "order_id":      order_id,
+                "order_number":  order.external_order_number or order.external_id or f"#{order_id}",
+                "customer_name": ci.get("name") or order.customer_name or "—",
+                "reminder_type": "unknown",
+                "total_emitted": 0,
+                "steps_sent":    0,
+                "steps":         [],
+                "order_status":  raw_status,
+            }
+
+    reminders: list = list(meta.get(meta_key) or [])
+
+    # Fetch all automation events of the relevant type for this tenant,
+    # then filter to this order in Python to avoid JSONB operator dependencies.
+    all_events = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type == event_type,
+        )
+        .order_by(AutomationEvent.created_at.asc())
+        .all()
+    )
+    order_events = [
+        e for e in all_events
+        if str((e.payload or {}).get("order_internal_id", "")) == str(order.id)
+    ]
+
+    event_by_step: dict = {}
+    for e in order_events:
+        s = int((e.payload or {}).get("step_idx", -1))
+        if s >= 0:
+            event_by_step[s] = e
+
+    emitted_by_step = {
+        int(r.get("step_idx", -1)): r
+        for r in reminders
+        if r.get("step_idx") is not None
+    }
+
+    all_step_indices = sorted(
+        set(list(emitted_by_step.keys()) + list(event_by_step.keys()))
+    )
+
+    steps = []
+    for step_idx in all_step_indices:
+        if step_idx < 0:
+            continue
+        emitted_record = emitted_by_step.get(step_idx)
+        event          = event_by_step.get(step_idx)
+
+        execution = None
+        if event:
+            execution = (
+                db.query(AutomationExecution)
+                .filter(AutomationExecution.event_id == event.id)
+                .order_by(AutomationExecution.executed_at.desc())
+                .first()
+            )
+
+        if execution:
+            if execution.status == "sent":
+                status = "sent"
+            elif execution.status == "skipped":
+                status = "skipped"
+            else:
+                status = "failed"
+        elif event and not event.processed:
+            status = "pending"
+        elif emitted_record:
+            status = "emitted"
+        else:
+            status = "pending"
+
+        steps.append({
+            "step_idx":      step_idx + 1,       # 1-based for display
+            "emitted_at":    emitted_record.get("emitted_at") if emitted_record else None,
+            "executed_at":   execution.executed_at.isoformat() if execution and execution.executed_at else None,
+            "status":        status,
+            "status_label":  _STEP_STATUS_LABELS.get(status, status),
+            "skip_reason":   execution.skip_reason if execution else None,
+            "error_message": execution.error_message if execution else None,
+            "template_name": (execution.action_taken or {}).get("template_name") if execution else None,
+        })
+
+    ci = order.customer_info or {}
+    sent_count = sum(1 for s in steps if s["status"] == "sent")
+    return {
+        "order_id":      order_id,
+        "order_number":  order.external_order_number or order.external_id or f"#{order_id}",
+        "customer_name": ci.get("name") or order.customer_name or "—",
+        "reminder_type": reminder_type,
+        "total_emitted": len(reminders),
+        "steps_sent":    sent_count,
+        "steps":         steps,
+        "order_status":  raw_status,
+    }
+
+
 # ── Manual retry (temporary, feature-flagged) ────────────────────────────────
 @router.post("/autopilot/abandoned-carts/{order_id}/retry")
 async def retry_abandoned_cart(

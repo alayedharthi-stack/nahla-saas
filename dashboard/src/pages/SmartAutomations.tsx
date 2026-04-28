@@ -30,6 +30,8 @@ import {
   type PendingPaymentOrderItem,
   type CodPendingOrderItem,
   type GovernorLogItem,
+  type OrderReminderTimeline,
+  type OrderReminderStep,
   ORDER_STATUS_LABELS,
   ORDER_STATUS_COLORS,
   GOVERNOR_REASON_META,
@@ -849,9 +851,214 @@ function PredictiveReorderQueue({ items }: { items: PredictiveReorderItem[] }) {
   )
 }
 
+// ── Order Reminder Timeline Drawer ───────────────────────────────────────────
+// Sliding panel that shows the real send status of each emitted reminder stage
+// (similar to CartRecoveryDetail for abandoned carts).
+
+function OrderReminderDrawer({
+  orderId,
+  onClose,
+}: {
+  orderId: number
+  onClose: () => void
+}) {
+  const [timeline, setTimeline] = useState<OrderReminderTimeline | null>(null)
+  const [loading, setLoading]   = useState(true)
+  const [error, setError]       = useState<string | null>(null)
+
+  const load = useCallback(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    autopilotApi
+      .orderReminderTimeline(orderId)
+      .then((res) => { if (!cancelled) setTimeline(res) })
+      .catch((e) => { if (!cancelled) setError(e?.message || 'تعذّر تحميل التفاصيل') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [orderId])
+
+  useEffect(() => load(), [load])
+
+  // Step dot colour by status
+  const dotCls = (s: OrderReminderStep['status']) => {
+    if (s === 'sent')    return 'bg-green-500  ring-green-100'
+    if (s === 'failed')  return 'bg-red-500    ring-red-100'
+    if (s === 'skipped') return 'bg-amber-400  ring-amber-100'
+    if (s === 'pending') return 'bg-indigo-300 ring-indigo-100'
+    return 'bg-slate-300 ring-slate-100'   // emitted
+  }
+  const cardCls = (s: OrderReminderStep['status']) => {
+    if (s === 'sent')    return 'border-green-200  bg-green-50/30'
+    if (s === 'failed')  return 'border-red-200    bg-red-50/30'
+    if (s === 'skipped') return 'border-amber-200  bg-amber-50/30'
+    if (s === 'pending') return 'border-indigo-200 bg-indigo-50/20'
+    return 'border-slate-100 bg-slate-50/40'   // emitted
+  }
+
+  const skipReasonAr: Record<string, string> = {
+    blocked_by_unsubscribe:   'إلغاء اشتراك العميل',
+    blocked_by_daily_limit:   'تجاوز الحد اليومي',
+    blocked_by_weekly_limit:  'تجاوز الحد الأسبوعي',
+    blocked_by_cooldown:      'فترة راحة بين الرسائل (6 ساعات)',
+    blocked_by_higher_priority: 'أولوية أعلى للخدمة',
+    autopilot_disabled:       'الطيار الآلي معطّل',
+    order_no_longer_pending:  'تغيّرت حالة الطلب',
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-slate-900/40 z-40 flex justify-end"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md h-full bg-white shadow-2xl overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="p-5 border-b border-slate-100 flex items-start justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-slate-800">سير التذكيرات</h3>
+            {timeline && (
+              <p className="text-xs text-slate-500 mt-1">
+                {timeline.customer_name} · {timeline.order_number}
+              </p>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-600"
+            aria-label="إغلاق"
+          >✕</button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {loading && (
+            <div className="text-center py-8 text-slate-400 text-sm">جارٍ التحميل…</div>
+          )}
+          {error && (
+            <div className="text-center py-6 text-red-500 text-sm">{error}</div>
+          )}
+          {!loading && !error && timeline && (
+            <>
+              {/* Summary */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-slate-100 p-3">
+                  <p className="text-[11px] text-slate-400">حالة الطلب</p>
+                  <p className="mt-1 text-xs font-medium text-slate-700">
+                    {ORDER_STATUS_LABELS[timeline.order_status] ?? timeline.order_status}
+                  </p>
+                </div>
+                <div className="rounded-lg border border-slate-100 p-3">
+                  <p className="text-[11px] text-slate-400">تذكيرات أُرسلت فعلياً</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-700">
+                    {timeline.steps_sent} / {timeline.total_emitted}
+                  </p>
+                </div>
+              </div>
+
+              {/* Legend */}
+              <div className="flex flex-wrap gap-2 text-[11px] text-slate-500 bg-slate-50 rounded-lg p-3">
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block"/>أُرسلت للعميل</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-300 inline-block"/>قيد الإرسال</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-slate-300 inline-block"/>جُدولت (لم تُعالج بعد)</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block"/>تم التخطّي</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block"/>فشل الإرسال</span>
+              </div>
+
+              {/* Refresh */}
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={load}
+                  disabled={loading}
+                  className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-600"
+                >
+                  <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                  تحديث
+                </button>
+              </div>
+
+              {/* Steps timeline */}
+              {timeline.steps.length === 0 ? (
+                <div className="text-center py-8">
+                  <Clock className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                  <p className="text-sm text-slate-500">لم يُرسل أي تذكير حتى الآن</p>
+                  <p className="text-xs text-slate-400 mt-1">
+                    سيبدأ الطيار الآلي بالإرسال بعد انتهاء فترة الانتظار
+                  </p>
+                </div>
+              ) : (
+                <ol className="relative">
+                  {timeline.steps.map((step, idx) => {
+                    const isLast = idx === timeline.steps.length - 1
+                    const timeLabel = step.executed_at
+                      ? formatRelativeRiyadh(step.executed_at)
+                      : step.emitted_at
+                        ? `جُدولت ${formatRelativeRiyadh(step.emitted_at)}`
+                        : null
+                    const skipLabel = step.skip_reason
+                      ? (skipReasonAr[step.skip_reason] ?? step.skip_reason)
+                      : null
+                    return (
+                      <li key={step.step_idx} className="flex gap-3 pb-0">
+                        <div className="flex flex-col items-center">
+                          <div className={`shrink-0 w-5 h-5 rounded-full ring-2 flex items-center justify-center text-white text-[10px] font-bold ${dotCls(step.status)}`}>
+                            {step.step_idx}
+                          </div>
+                          {!isLast && <div className="w-0.5 flex-1 min-h-[16px] bg-slate-200 my-0.5" />}
+                        </div>
+                        <div className={`flex-1 min-w-0 rounded-lg border p-2.5 mb-2 ${cardCls(step.status)}`}>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-medium text-slate-700">
+                              المرحلة {step.step_idx}
+                            </span>
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${
+                              step.status === 'sent'    ? 'bg-green-50 text-green-700 border-green-200' :
+                              step.status === 'failed'  ? 'bg-red-50 text-red-700 border-red-200' :
+                              step.status === 'skipped' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                              step.status === 'pending' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' :
+                              'bg-slate-50 text-slate-500 border-slate-200'
+                            }`}>
+                              {step.status_label}
+                            </span>
+                          </div>
+                          {timeLabel && (
+                            <p className="text-[11px] text-slate-400 mt-0.5">{timeLabel}</p>
+                          )}
+                          {step.template_name && (
+                            <p className="text-[11px] text-slate-500 mt-0.5">
+                              قالب: <span className="font-mono">{step.template_name}</span>
+                            </p>
+                          )}
+                          {skipLabel && (
+                            <p className="text-[11px] text-amber-700 mt-0.5">
+                              السبب: {skipLabel}
+                            </p>
+                          )}
+                          {step.error_message && step.status === 'failed' && (
+                            <p className="text-[11px] text-red-600 mt-0.5">{step.error_message}</p>
+                          )}
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ol>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Pending Payment Orders Queue ─────────────────────────────────────────────
 
 function PendingPaymentQueue({ items }: { items: PendingPaymentOrderItem[] }) {
+  const [openOrderId, setOpenOrderId] = useState<number | null>(null)
+
   if (items.length === 0) {
     return (
       <div className="text-center py-8 text-slate-400">
@@ -862,78 +1069,94 @@ function PendingPaymentQueue({ items }: { items: PendingPaymentOrderItem[] }) {
     )
   }
   return (
-    <div className="divide-y divide-slate-100">
-      {items.map((item) => {
-        const ageLabel = item.created_at ? formatRelativeRiyadh(item.created_at) : null
-        const lastReminderLabel = item.last_reminder_at ? formatRelativeRiyadh(item.last_reminder_at) : null
-        // Stage chip: 0 = waiting, 1-3 = escalation level reached
-        const stageLabel =
-          item.current_stage === 0 ? 'لم يُرسل تذكير' :
-          item.current_stage === 1 ? 'المرحلة ١ أُرسلت' :
-          item.current_stage === 2 ? 'المرحلة ٢ أُرسلت' :
-          `المرحلة ${item.current_stage} أُرسلت`
-        const stageColor =
-          item.current_stage === 0 ? 'bg-slate-50 text-slate-500 border-slate-200' :
-          item.current_stage === 1 ? 'bg-amber-50 text-amber-700 border-amber-200' :
-          'bg-red-50 text-red-700 border-red-200'
-        return (
-          <div key={item.order_id} className="py-3 px-1">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
-                  <span className="text-xs text-slate-400 font-mono shrink-0">{item.order_number}</span>
-                </div>
-                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                  {item.customer_phone && (
-                    <span className="flex items-center gap-1 text-xs text-slate-400">
-                      <Phone className="w-3 h-3" />{item.customer_phone}
-                    </span>
+    <>
+      <div className="divide-y divide-slate-100">
+        {items.map((item) => {
+          const ageLabel = item.created_at ? formatRelativeRiyadh(item.created_at) : null
+          const lastReminderLabel = item.last_reminder_at ? formatRelativeRiyadh(item.last_reminder_at) : null
+          // Stage chip: 0 = no event emitted yet; ≥1 = event queued (not necessarily delivered)
+          const stageLabel =
+            item.current_stage === 0 ? 'لم يُجدَّل تذكير' :
+            `المرحلة ${item.current_stage} جُدولت`
+          const stageColor =
+            item.current_stage === 0 ? 'bg-slate-50 text-slate-500 border-slate-200' :
+            item.current_stage === 1 ? 'bg-amber-50 text-amber-700 border-amber-200' :
+            'bg-red-50 text-red-700 border-red-200'
+          return (
+            <div key={item.order_id} className="py-3 px-1">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
+                    <span className="text-xs text-slate-400 font-mono shrink-0">{item.order_number}</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                    {item.customer_phone && (
+                      <span className="flex items-center gap-1 text-xs text-slate-400">
+                        <Phone className="w-3 h-3" />{item.customer_phone}
+                      </span>
+                    )}
+                    {ageLabel && (
+                      <span className="flex items-center gap-1 text-xs text-slate-400">
+                        <Clock className="w-3 h-3" />{ageLabel}
+                      </span>
+                    )}
+                  </div>
+                  {lastReminderLabel && (
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      آخر تذكير: {lastReminderLabel}
+                    </p>
                   )}
-                  {ageLabel && (
-                    <span className="flex items-center gap-1 text-xs text-slate-400">
-                      <Clock className="w-3 h-3" />{ageLabel}
-                    </span>
-                  )}
                 </div>
-                {lastReminderLabel && (
-                  <p className="text-[10px] text-slate-400 mt-0.5">
-                    آخر تذكير: {lastReminderLabel}
-                  </p>
-                )}
-              </div>
-              <div className="shrink-0 flex flex-col items-end gap-1.5">
-                <span className="text-sm font-semibold text-slate-700 tabular-nums">
-                  {item.total > 0 ? `${item.total.toFixed(2)} ر.س` : '—'}
-                </span>
-                <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${stageColor}`}>
-                    {stageLabel}
+                <div className="shrink-0 flex flex-col items-end gap-1.5">
+                  <span className="text-sm font-semibold text-slate-700 tabular-nums">
+                    {item.total > 0 ? `${item.total.toFixed(2)} ر.س` : '—'}
                   </span>
-                  {item.checkout_url && (
-                    <a
-                      href={item.checkout_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200 hover:bg-brand-100 transition-colors flex items-center gap-0.5"
+                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${stageColor}`}>
+                      {stageLabel}
+                    </span>
+                    {item.checkout_url && (
+                      <a
+                        href={item.checkout_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200 hover:bg-brand-100 transition-colors flex items-center gap-0.5"
+                      >
+                        <ExternalLink className="w-2.5 h-2.5" />
+                        رابط الدفع
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setOpenOrderId(item.order_id)}
+                      className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200 transition-colors flex items-center gap-0.5"
                     >
-                      <ExternalLink className="w-2.5 h-2.5" />
-                      رابط الدفع
-                    </a>
-                  )}
+                      <ChevronDown className="w-2.5 h-2.5" />
+                      تفاصيل
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )
-      })}
-    </div>
+          )
+        })}
+      </div>
+      {openOrderId !== null && (
+        <OrderReminderDrawer
+          orderId={openOrderId}
+          onClose={() => setOpenOrderId(null)}
+        />
+      )}
+    </>
   )
 }
 
 // ── COD Pending Confirmation Queue ────────────────────────────────────────────
 
 function CodPendingQueue({ items }: { items: CodPendingOrderItem[] }) {
+  const [openOrderId, setOpenOrderId] = useState<number | null>(null)
+
   if (items.length === 0) {
     return (
       <div className="text-center py-8 text-slate-400">
@@ -944,57 +1167,73 @@ function CodPendingQueue({ items }: { items: CodPendingOrderItem[] }) {
     )
   }
   return (
-    <div className="divide-y divide-slate-100">
-      {items.map((item) => {
-        const ageLabel = item.created_at ? formatRelativeRiyadh(item.created_at) : null
-        const lastReminderLabel = item.last_reminder_at ? formatRelativeRiyadh(item.last_reminder_at) : null
-        const statusLabel = ORDER_STATUS_LABELS[item.status] ?? item.status
-        return (
-          <div key={item.order_id} className="py-3 px-1">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
-                  <span className="text-xs text-slate-400 font-mono shrink-0">{item.order_number}</span>
-                </div>
-                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                  {item.customer_phone && (
-                    <span className="flex items-center gap-1 text-xs text-slate-400">
-                      <Phone className="w-3 h-3" />{item.customer_phone}
-                    </span>
+    <>
+      <div className="divide-y divide-slate-100">
+        {items.map((item) => {
+          const ageLabel = item.created_at ? formatRelativeRiyadh(item.created_at) : null
+          const lastReminderLabel = item.last_reminder_at ? formatRelativeRiyadh(item.last_reminder_at) : null
+          const statusLabel = ORDER_STATUS_LABELS[item.status] ?? item.status
+          return (
+            <div key={item.order_id} className="py-3 px-1">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
+                    <span className="text-xs text-slate-400 font-mono shrink-0">{item.order_number}</span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                    {item.customer_phone && (
+                      <span className="flex items-center gap-1 text-xs text-slate-400">
+                        <Phone className="w-3 h-3" />{item.customer_phone}
+                      </span>
+                    )}
+                    {ageLabel && (
+                      <span className="flex items-center gap-1 text-xs text-slate-400">
+                        <Clock className="w-3 h-3" />{ageLabel}
+                      </span>
+                    )}
+                  </div>
+                  {lastReminderLabel && (
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      آخر تذكير للتأكيد: {lastReminderLabel}
+                    </p>
                   )}
-                  {ageLabel && (
-                    <span className="flex items-center gap-1 text-xs text-slate-400">
-                      <Clock className="w-3 h-3" />{ageLabel}
-                    </span>
-                  )}
                 </div>
-                {lastReminderLabel && (
-                  <p className="text-[10px] text-slate-400 mt-0.5">
-                    آخر تذكير للتأكيد: {lastReminderLabel}
-                  </p>
-                )}
-              </div>
-              <div className="shrink-0 flex flex-col items-end gap-1.5">
-                <span className="text-sm font-semibold text-slate-700 tabular-nums">
-                  {item.total > 0 ? `${item.total.toFixed(2)} ر.س` : '—'}
-                </span>
-                <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-700 border border-orange-200 font-medium">
-                    {statusLabel}
+                <div className="shrink-0 flex flex-col items-end gap-1.5">
+                  <span className="text-sm font-semibold text-slate-700 tabular-nums">
+                    {item.total > 0 ? `${item.total.toFixed(2)} ر.س` : '—'}
                   </span>
-                  {item.reminders_sent > 0 && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 font-medium">
-                      {item.reminders_sent} تذكير
+                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-700 border border-orange-200 font-medium">
+                      {statusLabel}
                     </span>
-                  )}
+                    {item.reminders_sent > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 font-medium">
+                        {item.reminders_sent} جُدولت
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setOpenOrderId(item.order_id)}
+                      className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200 transition-colors flex items-center gap-0.5"
+                    >
+                      <ChevronDown className="w-2.5 h-2.5" />
+                      تفاصيل
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )
-      })}
-    </div>
+          )
+        })}
+      </div>
+      {openOrderId !== null && (
+        <OrderReminderDrawer
+          orderId={openOrderId}
+          onClose={() => setOpenOrderId(null)}
+        />
+      )}
+    </>
   )
 }
 

@@ -203,6 +203,30 @@ export interface AutopilotQueues {
   cod_pending_orders: CodPendingOrderItem[]
 }
 
+export type OrderReminderStepStatus = 'sent' | 'failed' | 'skipped' | 'pending' | 'emitted'
+
+export interface OrderReminderStep {
+  step_idx: number               // 1-based display index
+  emitted_at: string | null      // when the event was queued
+  executed_at: string | null     // when the engine actually ran it
+  status: OrderReminderStepStatus
+  status_label: string           // Arabic label from backend
+  skip_reason: string | null
+  error_message: string | null
+  template_name: string | null
+}
+
+export interface OrderReminderTimeline {
+  order_id: number
+  order_number: string
+  customer_name: string
+  reminder_type: 'pending_payment' | 'cod' | 'unknown'
+  total_emitted: number
+  steps_sent: number
+  steps: OrderReminderStep[]
+  order_status: string
+}
+
 // ── API client ────────────────────────────────────────────────────────────────
 
 import { apiCall } from './client'
@@ -265,6 +289,14 @@ export const autopilotApi = {
   abandonedCartRecovery: (orderId: number) =>
     apiCall<AbandonedCartRecoveryTimeline>(
       `/autopilot/abandoned-carts/${orderId}/recovery`,
+    ),
+
+  /** Reminder timeline for a pending-payment or COD-pending order.
+   *  Returns actual delivery status (sent / failed / skipped / pending)
+   *  for every emitted stage — more honest than the queue-level current_stage. */
+  orderReminderTimeline: (orderId: number) =>
+    apiCall<OrderReminderTimeline>(
+      `/autopilot/orders/${orderId}/reminder-timeline`,
     ),
 
   /** Manually re-enqueue the latest failed stage of a cart's recovery
