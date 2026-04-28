@@ -299,6 +299,18 @@ export const autopilotApi = {
       `/autopilot/orders/${orderId}/reminder-timeline`,
     ),
 
+  /** Clear failed/skipped stage markers so the next emitter sweep re-queues them.
+   *  Successfully-sent stages and permanently-blocked ones are preserved.
+   *  Returns has_template_error=true when Meta template approval is required. */
+  rescheduleOrderReminders: (orderId: number) =>
+    apiCall<{
+      ok: boolean
+      steps_cleared: number
+      has_template_error: boolean
+      has_permanent_block: boolean
+      message: string
+    }>(`/autopilot/orders/${orderId}/reschedule-reminders`, { method: 'POST' }),
+
   /** Manually re-enqueue the latest failed stage of a cart's recovery
    *  sequence. Feature-flagged on the backend
    *  (``AUTOPILOT_ENABLE_MANUAL_RETRY``); the dashboard hides its

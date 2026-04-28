@@ -2352,6 +2352,159 @@ async def order_reminder_timeline(
     }
 
 
+# ── Reschedule failed/skipped reminder stages ─────────────────────────────────
+
+# Skips that are permanent (unsubscribe) or user-action-required (template
+# not approved) are flagged in the response so the UI can warn the merchant.
+_PERMANENT_SKIP_REASONS = frozenset({
+    "blocked_by_unsubscribe",
+    "order_no_longer_pending",
+})
+_TEMPLATE_SKIP_REASONS = frozenset({
+    "no_approved_template",
+    "template_not_found",
+    "template_not_approved",
+})
+
+
+@router.post("/autopilot/orders/{order_id}/reschedule-reminders")
+async def reschedule_order_reminders(
+    order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Re-queue failed or temporarily-skipped reminder stages for a
+    pending-payment or COD-pending order.
+
+    Clears the failed/skipped step markers from ``extra_metadata`` so the
+    next emitter sweep (≤ 60 s) picks them up and re-queues fresh events.
+
+    Only failed / governor-skipped steps are cleared — steps that were
+    successfully sent are always preserved.
+
+    Returns::
+
+        {
+          "ok": true,
+          "steps_cleared": <int>,
+          "has_template_error": <bool>,  // true → merchant must approve templates first
+          "has_permanent_block": <bool>, // true → unsubscribe or order closed
+          "message": "<Arabic summary>",
+        }
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id, Order.tenant_id == tenant_id)
+        .first()
+    )
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found for this tenant")
+
+    meta = dict(order.extra_metadata or {})
+    raw_status = (order.status or "").strip().lower()
+
+    if raw_status in _PENDING_PAY_STATUSES_TL or meta.get("unpaid_reminders"):
+        meta_key   = "unpaid_reminders"
+        event_type = "order_payment_pending"
+    elif raw_status in _COD_PENDING_STATUSES_TL or meta.get("cod_reminders"):
+        meta_key   = "cod_reminders"
+        event_type = "order_cod_pending"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Order is not in a reschedulable state (not pending-payment or COD-pending)",
+        )
+
+    reminders: list = list(meta.get(meta_key) or [])
+
+    # Resolve automation events for this order (Python-level filter for DB compat)
+    all_events = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type == event_type,
+        )
+        .all()
+    )
+    order_events = [
+        e for e in all_events
+        if str((e.payload or {}).get("order_internal_id", "")) == str(order.id)
+    ]
+    event_by_step: dict = {}
+    for e in order_events:
+        s = int((e.payload or {}).get("step_idx", -1))
+        if s >= 0:
+            event_by_step[s] = e
+
+    steps_to_clear:    set  = set()
+    has_template_error: bool = False
+    has_permanent_block: bool = False
+
+    for reminder in reminders:
+        step_idx = int(reminder.get("step_idx", -1))
+        if step_idx < 0:
+            continue
+        event = event_by_step.get(step_idx)
+        if event is None:
+            continue
+        execution = (
+            db.query(AutomationExecution)
+            .filter(AutomationExecution.event_id == event.id)
+            .order_by(AutomationExecution.executed_at.desc())
+            .first()
+        )
+        if execution is None:
+            continue
+
+        if execution.status == "sent":
+            continue  # never clear successfully sent steps
+
+        skip = execution.skip_reason or ""
+        err  = execution.error_message or ""
+
+        # Classify the failure type to surface warnings in the UI.
+        if skip in _TEMPLATE_SKIP_REASONS or "no_approved_template" in err:
+            has_template_error = True
+        if skip in _PERMANENT_SKIP_REASONS:
+            has_permanent_block = True
+            continue  # permanent blocks: do NOT clear (re-queuing is pointless)
+
+        if execution.status in ("failed", "skipped"):
+            steps_to_clear.add(step_idx)
+
+    if not steps_to_clear and not has_template_error:
+        return {
+            "ok":                  True,
+            "steps_cleared":       0,
+            "has_template_error":  False,
+            "has_permanent_block": has_permanent_block,
+            "message":             "لا توجد مراحل فاشلة قابلة لإعادة الجدولة",
+        }
+
+    if steps_to_clear:
+        meta[meta_key] = [
+            r for r in reminders
+            if int(r.get("step_idx", -1)) not in steps_to_clear
+        ]
+        order.extra_metadata = meta
+        db.commit()
+
+    return {
+        "ok":                  True,
+        "steps_cleared":       len(steps_to_clear),
+        "has_template_error":  has_template_error,
+        "has_permanent_block": has_permanent_block,
+        "message": (
+            "لم يتم تغيير أي شيء — القالب يحتاج اعتماد Meta أولاً"
+            if has_template_error and not steps_to_clear
+            else f"تمت إعادة جدولة {len(steps_to_clear)} مرحلة — ستُرسَل في الدورة القادمة"
+        ),
+    }
+
+
 # ── Manual retry (temporary, feature-flagged) ────────────────────────────────
 @router.post("/autopilot/abandoned-carts/{order_id}/retry")
 async def retry_abandoned_cart(

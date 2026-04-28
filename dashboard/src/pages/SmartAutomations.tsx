@@ -862,9 +862,14 @@ function OrderReminderDrawer({
   orderId: number
   onClose: () => void
 }) {
-  const [timeline, setTimeline] = useState<OrderReminderTimeline | null>(null)
-  const [loading, setLoading]   = useState(true)
-  const [error, setError]       = useState<string | null>(null)
+  const [timeline, setTimeline]         = useState<OrderReminderTimeline | null>(null)
+  const [loading, setLoading]           = useState(true)
+  const [error, setError]               = useState<string | null>(null)
+  const [rescheduling, setRescheduling] = useState(false)
+  const [rescheduleNotice, setRescheduleNotice] = useState<{
+    kind: 'ok' | 'warn' | 'err'
+    text: string
+  } | null>(null)
 
   const load = useCallback(() => {
     let cancelled = false
@@ -879,6 +884,56 @@ function OrderReminderDrawer({
   }, [orderId])
 
   useEffect(() => load(), [load])
+
+  const handleReschedule = useCallback(async () => {
+    setRescheduling(true)
+    setRescheduleNotice(null)
+    try {
+      const res = await autopilotApi.rescheduleOrderReminders(orderId)
+      if (res.has_template_error && res.steps_cleared === 0) {
+        setRescheduleNotice({
+          kind: 'warn',
+          text: 'القالب غير معتمد من Meta — اعتمد القالب أولاً ثم أعد الجدولة.',
+        })
+      } else if (res.has_template_error) {
+        setRescheduleNotice({
+          kind: 'warn',
+          text: `أُعيدت جدولة ${res.steps_cleared} مرحلة، لكن بعض المراحل تحتاج اعتماد القالب من Meta.`,
+        })
+      } else if (res.has_permanent_block) {
+        setRescheduleNotice({
+          kind: 'warn',
+          text: 'لا يمكن إعادة جدولة بعض المراحل (إلغاء اشتراك العميل أو الطلب مغلق).',
+        })
+      } else {
+        setRescheduleNotice({ kind: 'ok', text: res.message })
+        load()
+      }
+    } catch (e) {
+      setRescheduleNotice({
+        kind: 'err',
+        text: e instanceof Error ? e.message : 'تعذّرت إعادة الجدولة — حاول مجدداً.',
+      })
+    } finally {
+      setRescheduling(false)
+    }
+  }, [orderId, load])
+
+  // Show reschedule button only when there are failed/skipped (non-permanent) steps
+  const canReschedule = Boolean(
+    timeline &&
+    timeline.steps.some(
+      (s) => s.status === 'failed' ||
+             (s.status === 'skipped' && s.skip_reason !== 'blocked_by_unsubscribe'),
+    )
+  )
+  const hasTemplateError = Boolean(
+    timeline?.steps.some(
+      (s) => (s.status === 'failed' || s.status === 'skipped') &&
+             (s.error_message?.includes('no_approved_template') ||
+              s.skip_reason === 'no_approved_template'),
+    )
+  )
 
   // Step dot colour by status
   const dotCls = (s: OrderReminderStep['status']) => {
@@ -966,8 +1021,8 @@ function OrderReminderDrawer({
                 <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block"/>فشل الإرسال</span>
               </div>
 
-              {/* Refresh */}
-              <div className="flex justify-end">
+              {/* Actions row: refresh + reschedule */}
+              <div className="flex items-center justify-between gap-2">
                 <button
                   type="button"
                   onClick={load}
@@ -977,7 +1032,44 @@ function OrderReminderDrawer({
                   <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
                   تحديث
                 </button>
+
+                {canReschedule && (
+                  <button
+                    type="button"
+                    onClick={handleReschedule}
+                    disabled={rescheduling}
+                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    title="إعادة جدولة المراحل الفاشلة فقط — المراحل المُرسَلة تبقى كما هي"
+                  >
+                    <RefreshCcw className={`w-3.5 h-3.5 ${rescheduling ? 'animate-spin' : ''}`} />
+                    {rescheduling ? 'جارٍ إعادة الجدولة…' : 'إعادة جدولة الفاشلة'}
+                  </button>
+                )}
               </div>
+
+              {/* Template approval warning — shown above reschedule notice */}
+              {hasTemplateError && (
+                <div className="rounded-lg border border-orange-200 bg-orange-50 p-3 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-orange-500 shrink-0 mt-0.5" />
+                  <div className="text-xs text-orange-700">
+                    <p className="font-medium mb-0.5">القالب غير معتمد من Meta</p>
+                    <p>اعتمد قوالب الرسائل من لوحة <strong>القوالب</strong> ثم أعد الجدولة — ستفشل الرسالة مجدداً قبل الاعتماد.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Reschedule notice */}
+              {rescheduleNotice && (
+                <div className={`rounded-lg border p-3 text-xs ${
+                  rescheduleNotice.kind === 'ok'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : rescheduleNotice.kind === 'warn'
+                      ? 'border-amber-200 bg-amber-50 text-amber-700'
+                      : 'border-red-200 bg-red-50 text-red-700'
+                }`}>
+                  {rescheduleNotice.text}
+                </div>
+              )}
 
               {/* Steps timeline */}
               {timeline.steps.length === 0 ? (
