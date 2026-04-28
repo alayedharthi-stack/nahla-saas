@@ -385,6 +385,28 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_products", exc)
             raise
 
+    async def get_pages(self) -> List[Dict[str, Any]]:
+        """Fetch all store pages from Salla CMS (GET /pages).
+
+        Returns raw page dicts. Failures are logged and an empty list is
+        returned so callers can treat this as a non-fatal, best-effort fetch.
+        Each page dict contains at minimum: id, title, slug, status, content (HTML).
+        """
+        try:
+            raw_list = await self._get_all_pages("/pages", label="pages", per_page=50)
+            logger.info(
+                "[Salla] get_pages: fetched %d pages | tenant=%s",
+                len(raw_list), self._tenant_id,
+            )
+            return raw_list
+        except Exception as exc:
+            self._log_error("get_pages", exc)
+            logger.warning(
+                "[Salla] get_pages failed (non-fatal) | tenant=%s error=%s",
+                self._tenant_id, exc,
+            )
+            return []
+
     async def get_product(self, product_id: str) -> Optional[NormalizedProduct]:
         try:
             data = await self._get(f"/products/{product_id}")

@@ -20,12 +20,34 @@ from __future__ import annotations
 
 import logging
 import os
+import re as _re
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 # A job stuck in "running" for longer than this is considered timed out
 _SYNC_JOB_TIMEOUT_MINUTES = 10
+
+_SCRIPT_BLOCK_RE = _re.compile(r"<(script|style)[^>]*>.*?<\/\1>", _re.DOTALL | _re.IGNORECASE)
+_HTML_TAG_RE     = _re.compile(r"<[^>]+>", _re.DOTALL)
+_WHITESPACE_RE   = _re.compile(r"\s+")
+
+
+def _strip_html(html: str, max_length: int = 500) -> str:
+    """Strip HTML tags and collapse whitespace into a plain-text summary.
+
+    Designed for Salla CMS page content:
+      1. Removes entire <script> and <style> blocks (tags + inner code).
+      2. Strips remaining HTML tags.
+      3. Collapses whitespace so the AI sees clean prose.
+    Capped at max_length characters to keep prompts lean.
+    """
+    if not html:
+        return ""
+    text = _SCRIPT_BLOCK_RE.sub(" ", html)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    return text[:max_length]
 
 from sqlalchemy.orm import Session
 
@@ -463,6 +485,9 @@ class StoreSyncService:
             "description":   store_cfg.get("store_description", ""),
             "contact_phone": wa_cfg.get("owner_whatsapp_number", ""),
             "contact_email": store_cfg.get("contact_email", ""),
+            # Populated by sync_pages() which runs before _rebuild_snapshot()
+            # in full_sync(). Falls back to [] when pages have not been synced yet.
+            "pages":         list(store_cfg.get("pages") or []),
         }
         snap.catalog_summary = {
             "total_products": products_count,
@@ -1189,6 +1214,94 @@ class StoreSyncService:
         )
         return created + updated
 
+    # ── Pages sync ─────────────────────────────────────────────────────────────
+
+    async def sync_pages(self) -> int:
+        """Fetch static CMS pages from Salla and persist to store_settings["pages"].
+
+        The result is intentionally non-fatal: if Salla does not expose the
+        /pages endpoint, or the token lacks the required scope, we log a warning
+        and leave the existing store_settings["pages"] value untouched so that
+        any pages the merchant entered manually are preserved.
+
+        Returns the number of pages successfully persisted (0 on any failure).
+        """
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        adapter = self._get_adapter()
+        if not adapter:
+            return 0
+
+        if not hasattr(adapter, "get_pages"):
+            logger.info(
+                "tenant=%s adapter does not support get_pages — skipping page sync",
+                self.tenant_id,
+            )
+            return 0
+
+        try:
+            raw_pages = await adapter.get_pages()
+        except Exception as exc:
+            logger.warning(
+                "tenant=%s pages sync failed (non-fatal, existing pages preserved): %s",
+                self.tenant_id, exc,
+            )
+            return 0
+
+        # Normalise: keep only active pages with a non-empty title.
+        _ACTIVE_STATUSES = {"active", "published", "مفعّل", "مفعل"}
+        pages: List[Dict[str, Any]] = []
+        for raw in raw_pages:
+            status = str(raw.get("status") or "active").strip().lower()
+            if status not in _ACTIVE_STATUSES:
+                continue
+            title = str(raw.get("title") or "").strip()
+            if not title:
+                continue
+            pages.append({
+                "id":              str(raw.get("id") or ""),
+                "title":           title,
+                "slug":            str(raw.get("slug") or ""),
+                "status":          status,
+                "content":         _strip_html(str(raw.get("content") or ""), max_length=500),
+                "seo_description": str(raw.get("seo_description") or "")[:200],
+            })
+
+        page_titles = [pg["title"] for pg in pages]
+        logger.info(
+            "tenant=%s pages_synced=%d titles=%r",
+            self.tenant_id, len(pages), page_titles,
+        )
+
+        # Persist to TenantSettings.store_settings["pages"].
+        try:
+            settings = (
+                self.db.query(TenantSettings)
+                .filter_by(tenant_id=self.tenant_id)
+                .first()
+            )
+            if settings:
+                current = dict(settings.store_settings or {})
+                current["pages"] = pages
+                settings.store_settings = current
+                flag_modified(settings, "store_settings")
+                self.db.commit()
+                logger.info(
+                    "tenant=%s store_settings[pages] updated — %d pages written",
+                    self.tenant_id, len(pages),
+                )
+        except Exception as db_exc:
+            logger.error(
+                "tenant=%s failed to persist pages to store_settings: %s",
+                self.tenant_id, db_exc,
+            )
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+
+        return len(pages)
+
     # ── Customers sync ─────────────────────────────────────────────────────────
 
     async def sync_customers(self, incremental: bool = False) -> int:
@@ -1398,6 +1511,15 @@ class StoreSyncService:
                 commit=True,
                 emit_event=True,
             )
+
+            try:
+                pages_n = await self.sync_pages()
+            except Exception as pages_exc:
+                logger.warning(
+                    "tenant=%s pages sync raised unexpectedly (non-fatal): %s",
+                    self.tenant_id, pages_exc,
+                )
+                pages_n = 0
 
             self._rebuild_snapshot(products_n, orders_n, coupons_n)
             self._finish_job(

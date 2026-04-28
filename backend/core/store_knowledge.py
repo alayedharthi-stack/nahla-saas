@@ -696,11 +696,15 @@ def build_merchant_context(
         "coupon_rules": ai_settings.get("coupon_rules", ""),
     }
 
-    # Pages — placeholder for future Salla/Zid page sync.
-    # Shape per page: {"title": str, "url": str, "content": str, "type": str}
-    # Currently sourced from store_settings["pages"] if the merchant has entered them manually.
-    # Will be populated automatically once page sync from the integration is implemented.
-    pages: List[Dict[str, Any]] = list(store_settings.get("pages") or [])
+    # Pages — synced from Salla via StoreSyncService.sync_pages() which writes to
+    # store_settings["pages"] and snapshots them into StoreKnowledgeSnapshot.store_profile["pages"].
+    # Primary source: store_settings (written directly by sync_pages after each full sync).
+    # Fallback: snapshot store_profile (populated by _rebuild_snapshot, same underlying data).
+    # Both are empty until the first full sync completes successfully.
+    pages: List[Dict[str, Any]] = (
+        list(store_settings.get("pages") or [])
+        or list((loader.store_profile() or {}).get("pages") or [])
+    )
 
     orderable_count = sum(1 for p in formatted_rows if p.get("orderable"))
     excluded_count = unavailable_count
