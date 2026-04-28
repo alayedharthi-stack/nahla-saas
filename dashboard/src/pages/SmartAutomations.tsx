@@ -6,7 +6,7 @@ import {
   Package, RotateCcw,
   Clock, Phone, ExternalLink,
   RefreshCcw, Rocket, HeartHandshake, Brain,
-  ShieldCheck, HelpCircle,
+  ShieldCheck, HelpCircle, CreditCard, BadgeAlert,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -27,6 +27,8 @@ import {
   type RecoveryStatus,
   type PredictiveReorderItem,
   type OrderStatusUpdateItem,
+  type PendingPaymentOrderItem,
+  type CodPendingOrderItem,
   type GovernorLogItem,
   ORDER_STATUS_LABELS,
   ORDER_STATUS_COLORS,
@@ -224,7 +226,7 @@ function ConfigObject({ obj, depth = 0 }: { obj: Record<string, unknown>; depth?
 
 // ── Operational Queues ────────────────────────────────────────────────────────
 
-type QueueTab = 'order_status' | 'abandoned_carts' | 'predictive_reorder'
+type QueueTab = 'order_status' | 'abandoned_carts' | 'predictive_reorder' | 'pending_payment' | 'cod_pending'
 
 const STATUS_COLOR_MAP: Record<string, string> = {
   amber:  'bg-amber-100 text-amber-700 border-amber-200',
@@ -847,6 +849,156 @@ function PredictiveReorderQueue({ items }: { items: PredictiveReorderItem[] }) {
   )
 }
 
+// ── Pending Payment Orders Queue ─────────────────────────────────────────────
+
+function PendingPaymentQueue({ items }: { items: PendingPaymentOrderItem[] }) {
+  if (items.length === 0) {
+    return (
+      <div className="text-center py-8 text-slate-400">
+        <CreditCard className="w-8 h-8 mx-auto mb-2 opacity-40" />
+        <p className="text-sm">لا توجد طلبات بانتظار الدفع</p>
+        <p className="text-xs mt-1 text-slate-300">كل الطلبات الحالية مكتملة الدفع</p>
+      </div>
+    )
+  }
+  return (
+    <div className="divide-y divide-slate-100">
+      {items.map((item) => {
+        const ageLabel = item.created_at ? formatRelativeRiyadh(item.created_at) : null
+        const lastReminderLabel = item.last_reminder_at ? formatRelativeRiyadh(item.last_reminder_at) : null
+        // Stage chip: 0 = waiting, 1-3 = escalation level reached
+        const stageLabel =
+          item.current_stage === 0 ? 'لم يُرسل تذكير' :
+          item.current_stage === 1 ? 'المرحلة ١ أُرسلت' :
+          item.current_stage === 2 ? 'المرحلة ٢ أُرسلت' :
+          `المرحلة ${item.current_stage} أُرسلت`
+        const stageColor =
+          item.current_stage === 0 ? 'bg-slate-50 text-slate-500 border-slate-200' :
+          item.current_stage === 1 ? 'bg-amber-50 text-amber-700 border-amber-200' :
+          'bg-red-50 text-red-700 border-red-200'
+        return (
+          <div key={item.order_id} className="py-3 px-1">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
+                  <span className="text-xs text-slate-400 font-mono shrink-0">{item.order_number}</span>
+                </div>
+                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                  {item.customer_phone && (
+                    <span className="flex items-center gap-1 text-xs text-slate-400">
+                      <Phone className="w-3 h-3" />{item.customer_phone}
+                    </span>
+                  )}
+                  {ageLabel && (
+                    <span className="flex items-center gap-1 text-xs text-slate-400">
+                      <Clock className="w-3 h-3" />{ageLabel}
+                    </span>
+                  )}
+                </div>
+                {lastReminderLabel && (
+                  <p className="text-[10px] text-slate-400 mt-0.5">
+                    آخر تذكير: {lastReminderLabel}
+                  </p>
+                )}
+              </div>
+              <div className="shrink-0 flex flex-col items-end gap-1.5">
+                <span className="text-sm font-semibold text-slate-700 tabular-nums">
+                  {item.total > 0 ? `${item.total.toFixed(2)} ر.س` : '—'}
+                </span>
+                <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full border font-medium ${stageColor}`}>
+                    {stageLabel}
+                  </span>
+                  {item.checkout_url && (
+                    <a
+                      href={item.checkout_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-200 hover:bg-brand-100 transition-colors flex items-center gap-0.5"
+                    >
+                      <ExternalLink className="w-2.5 h-2.5" />
+                      رابط الدفع
+                    </a>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── COD Pending Confirmation Queue ────────────────────────────────────────────
+
+function CodPendingQueue({ items }: { items: CodPendingOrderItem[] }) {
+  if (items.length === 0) {
+    return (
+      <div className="text-center py-8 text-slate-400">
+        <BadgeAlert className="w-8 h-8 mx-auto mb-2 opacity-40" />
+        <p className="text-sm">لا توجد طلبات بانتظار التأكيد</p>
+        <p className="text-xs mt-1 text-slate-300">كل طلبات الدفع عند الاستلام مؤكدة</p>
+      </div>
+    )
+  }
+  return (
+    <div className="divide-y divide-slate-100">
+      {items.map((item) => {
+        const ageLabel = item.created_at ? formatRelativeRiyadh(item.created_at) : null
+        const lastReminderLabel = item.last_reminder_at ? formatRelativeRiyadh(item.last_reminder_at) : null
+        const statusLabel = ORDER_STATUS_LABELS[item.status] ?? item.status
+        return (
+          <div key={item.order_id} className="py-3 px-1">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-sm font-medium text-slate-800 truncate">{item.customer_name}</p>
+                  <span className="text-xs text-slate-400 font-mono shrink-0">{item.order_number}</span>
+                </div>
+                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                  {item.customer_phone && (
+                    <span className="flex items-center gap-1 text-xs text-slate-400">
+                      <Phone className="w-3 h-3" />{item.customer_phone}
+                    </span>
+                  )}
+                  {ageLabel && (
+                    <span className="flex items-center gap-1 text-xs text-slate-400">
+                      <Clock className="w-3 h-3" />{ageLabel}
+                    </span>
+                  )}
+                </div>
+                {lastReminderLabel && (
+                  <p className="text-[10px] text-slate-400 mt-0.5">
+                    آخر تذكير للتأكيد: {lastReminderLabel}
+                  </p>
+                )}
+              </div>
+              <div className="shrink-0 flex flex-col items-end gap-1.5">
+                <span className="text-sm font-semibold text-slate-700 tabular-nums">
+                  {item.total > 0 ? `${item.total.toFixed(2)} ر.س` : '—'}
+                </span>
+                <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-700 border border-orange-200 font-medium">
+                    {statusLabel}
+                  </span>
+                  {item.reminders_sent > 0 && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 font-medium">
+                      {item.reminders_sent} تذكير
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+
 interface OperationalQueuesProps {
   queues: AutopilotQueues | null
   loading: boolean
@@ -878,6 +1030,18 @@ function OperationalQueues({ queues, loading, onRefresh, manualRetryEnabled = fa
       label: 'إعادة الطلب التنبؤي',
       icon: <RotateCcw className="w-3.5 h-3.5" />,
       count: queues?.predictive_reorder.length ?? 0,
+    },
+    {
+      id: 'pending_payment',
+      label: 'بانتظار الدفع',
+      icon: <CreditCard className="w-3.5 h-3.5" />,
+      count: queues?.pending_payment_orders.length ?? 0,
+    },
+    {
+      id: 'cod_pending',
+      label: 'بانتظار التأكيد',
+      icon: <BadgeAlert className="w-3.5 h-3.5" />,
+      count: queues?.cod_pending_orders.length ?? 0,
     },
   ]
 
@@ -956,6 +1120,12 @@ function OperationalQueues({ queues, loading, onRefresh, manualRetryEnabled = fa
             )}
             {activeTab === 'predictive_reorder' && (
               <PredictiveReorderQueue items={queues?.predictive_reorder ?? []} />
+            )}
+            {activeTab === 'pending_payment' && (
+              <PendingPaymentQueue items={queues?.pending_payment_orders ?? []} />
+            )}
+            {activeTab === 'cod_pending' && (
+              <CodPendingQueue items={queues?.cod_pending_orders ?? []} />
             )}
           </>
         )}

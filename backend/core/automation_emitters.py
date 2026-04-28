@@ -131,11 +131,17 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
         return 0
 
     # Pending orders for this tenant.
+    # is_abandoned=False guard is critical: abandoned carts are stored as
+    # Order rows with is_abandoned=True and may carry status values from
+    # _PENDING_PAYMENT_STATUSES before the normaliser sets them to "abandoned".
+    # Without this filter a cart could receive both an abandoned-cart reminder
+    # AND an unpaid-order reminder — exactly the duplication we must prevent.
     orders = (
         db.query(Order)
         .filter(
             Order.tenant_id == tenant_id,
             Order.status.in_(_PENDING_PAYMENT_STATUSES),
+            Order.is_abandoned.is_(False),
         )
         .all()
     )
@@ -459,11 +465,15 @@ def scan_cod_confirmations(
         # bad config can't cancel orders before any reminder ever fires.
         cancel_after = reminder_after + max(60, reminder_after)
 
+    # Defensive is_abandoned=False guard — COD orders are always real store
+    # orders (Salla requires a phone + address before confirming COD), but the
+    # guard ensures a mis-flagged row can never land in two queues at once.
     pending_orders = (
         db.query(Order)
         .filter(
             Order.tenant_id == tenant_id,
             Order.status == "pending_confirmation",
+            Order.is_abandoned.is_(False),
         )
         .all()
     )

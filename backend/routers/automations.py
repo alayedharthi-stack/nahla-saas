@@ -1685,10 +1685,126 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             "created_at":            meta.get("created_at", ""),
         })
 
+    # ── Pending payment orders ───────────────────────────────────────────────
+    # Real orders (not abandoned carts) whose payment has not been completed.
+    # Mirrors the status set used by the `unpaid_order_reminder` sweeper in
+    # automation_emitters so the queue and the automation act on the same rows.
+    # A 15-minute grace period keeps freshly created orders off the list.
+    _PENDING_PAY_STATUSES = frozenset({
+        "pending", "pending_payment", "payment_pending",
+        "awaiting_payment", "draft", "new",
+    })
+    grace = timedelta(minutes=15)
+
+    pending_payment_items = []
+    for o in (
+        db.query(Order)
+        .filter(Order.tenant_id == tenant_id, Order.is_abandoned.is_(False))
+        .order_by(Order.id.desc())
+        .limit(100)
+        .all()
+    ):
+        raw = (o.status or "").strip().lower()
+        if raw not in _PENDING_PAY_STATUSES:
+            continue
+        meta = o.extra_metadata or {}
+        cstr = meta.get("created_at")
+        if cstr:
+            try:
+                cdt = datetime.fromisoformat(str(cstr).replace("Z", "+00:00"))
+                if not cdt.tzinfo:
+                    cdt = cdt.replace(tzinfo=timezone.utc)
+                if (now - cdt) < grace:
+                    continue
+            except Exception:
+                pass
+        ci = o.customer_info or {}
+        # Automated reminders are tracked under `unpaid_reminders` by the
+        # emitter; manual reminders (sent from the orders dashboard) land
+        # under `payment_reminders`. We surface the combined count and derive
+        # `current_stage` from the automated tracker so the merchant sees
+        # which escalation step has been reached.
+        unpaid_reminders: list = list(meta.get("unpaid_reminders") or [])
+        manual_reminders: list = list(meta.get("payment_reminders") or [])
+        reminders_sent = len(unpaid_reminders) + len(manual_reminders)
+        # The last emitted stage index (0-based); -1 means not yet emitted.
+        last_step_idx: int = max(
+            (int(r.get("step_idx", -1)) for r in unpaid_reminders),
+            default=-1,
+        )
+        last_emitted_at: Optional[str] = None
+        for r in reversed(unpaid_reminders):
+            if r.get("emitted_at"):
+                last_emitted_at = r["emitted_at"]
+                break
+        if not last_emitted_at and manual_reminders:
+            last_emitted_at = meta.get("last_reminder_at")
+        pending_payment_items.append({
+            "order_id":         o.id,
+            "external_id":      o.external_id,
+            "order_number":     o.external_order_number or o.external_id or f"#{o.id}",
+            "customer_name":    ci.get("name") or o.customer_name or "—",
+            "customer_phone":   ci.get("phone") or ci.get("mobile") or "",
+            "checkout_url":     o.checkout_url or "",
+            "total":            float(o.total or 0),
+            "status":           raw,
+            "created_at":       meta.get("created_at", ""),
+            "reminders_sent":   reminders_sent,
+            "last_reminder_at": last_emitted_at,
+            "current_stage":    last_step_idx + 1,  # 0 = no reminder yet, 1-3 = stage reached
+        })
+
+    # ── COD pending confirmation orders ──────────────────────────────────────
+    # Orders waiting for the customer to confirm a Cash-on-Delivery purchase.
+    # Mirrors the status set used by `automation_emitters.scan_cod_confirmations`
+    # and is disjoint from `_PENDING_PAY_STATUSES` by design — the same order
+    # never appears in both lists.
+    _COD_PENDING_STATUSES = frozenset({
+        "pending_confirmation", "awaiting_confirmation",
+        "under_review", "in_review",
+    })
+    cod_pending_items = []
+    for o in (
+        db.query(Order)
+        .filter(Order.tenant_id == tenant_id, Order.is_abandoned.is_(False))
+        .order_by(Order.id.desc())
+        .limit(100)
+        .all()
+    ):
+        raw = (o.status or "").strip().lower()
+        if raw not in _COD_PENDING_STATUSES:
+            continue
+        meta = o.extra_metadata or {}
+        ci = o.customer_info or {}
+        # COD reminders are tracked in `cod_reminders` by
+        # automation_emitters.scan_cod_confirmations.
+        cod_reminders: list = list(meta.get("cod_reminders") or [])
+        cod_last_reminder_at: Optional[str] = None
+        for r in reversed(cod_reminders):
+            if r.get("emitted_at"):
+                cod_last_reminder_at = r["emitted_at"]
+                break
+        cod_pending_items.append({
+            "order_id":           o.id,
+            "external_id":        o.external_id,
+            "order_number":       o.external_order_number or o.external_id or f"#{o.id}",
+            "customer_name":      ci.get("name") or o.customer_name or "—",
+            "customer_phone":     ci.get("phone") or ci.get("mobile") or "",
+            "total":              float(o.total or 0),
+            "status":             raw,
+            "created_at":         meta.get("created_at", ""),
+            "reminders_sent":     len(cod_reminders),
+            "last_reminder_at":   cod_last_reminder_at,
+            # True if the auto-cancel sweep has already scheduled a cancel.
+            "auto_cancel_at":     meta.get("cod_auto_cancelled_at"),
+        })
+
     return {
-        "abandoned_carts":      cart_items,
-        "predictive_reorder":   reorder_items,
-        "order_status_updates": order_updates,
+        "abandoned_carts":        cart_items,
+        "predictive_reorder":     reorder_items,
+        "order_status_updates":   order_updates,
+        "pending_payment_orders": pending_payment_items,
+        "cod_pending_orders":     cod_pending_items,
     }
 
 

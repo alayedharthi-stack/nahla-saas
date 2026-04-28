@@ -164,10 +164,43 @@ export interface OrderStatusUpdateItem {
   created_at: string
 }
 
+export interface PendingPaymentOrderItem {
+  order_id: number
+  external_id: string | null
+  order_number: string
+  customer_name: string
+  customer_phone: string
+  checkout_url: string
+  total: number
+  status: string
+  created_at: string
+  reminders_sent: number
+  last_reminder_at: string | null
+  /** 0 = no reminder emitted yet, 1 = stage-1 sent, 2 = stage-2 sent, etc. */
+  current_stage: number
+}
+
+export interface CodPendingOrderItem {
+  order_id: number
+  external_id: string | null
+  order_number: string
+  customer_name: string
+  customer_phone: string
+  total: number
+  status: string
+  created_at: string
+  reminders_sent: number
+  last_reminder_at: string | null
+  /** ISO timestamp when the order was auto-cancelled (null = not cancelled). */
+  auto_cancel_at: string | null
+}
+
 export interface AutopilotQueues {
   abandoned_carts: AbandonedCartItem[]
   predictive_reorder: PredictiveReorderItem[]
   order_status_updates: OrderStatusUpdateItem[]
+  pending_payment_orders: PendingPaymentOrderItem[]
+  cod_pending_orders: CodPendingOrderItem[]
 }
 
 // ── API client ────────────────────────────────────────────────────────────────
