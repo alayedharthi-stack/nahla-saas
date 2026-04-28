@@ -404,6 +404,214 @@ async def get_customer_profile(customer_id: int, request: Request, db: Session =
     return profile_data
 
 
+@router.get("/intelligence/merchant-brain/knowledge")
+async def merchant_brain_knowledge(request: Request, db: Session = Depends(get_db)):
+    """Return a structured, UI-friendly snapshot of what the AI knows about the store.
+
+    Schema is intentionally decoupled from the internal merchant_context dict so
+    the Brain engine can evolve without breaking the dashboard.
+    """
+    import logging as _log  # noqa: PLC0415
+    _logger = _log.getLogger("nahla-backend")
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    db.commit()
+
+    try:
+        from core.store_knowledge import (  # noqa: PLC0415
+            CatalogContextBuilder,
+            StoreKnowledgeLoader,
+            build_merchant_context,
+        )
+    except ImportError as exc:
+        _logger.error("[MerchantBrainKnowledge] import failed: %s", exc)
+        raise HTTPException(status_code=500, detail="store_knowledge module unavailable")
+
+    mc: Dict[str, Any] = {}
+    try:
+        mc = build_merchant_context(db, tenant_id=tenant_id, product_limit=25) or {}
+    except Exception as exc:
+        _logger.error("[MerchantBrainKnowledge] build_merchant_context error: %s", exc)
+        mc = {}
+
+    # ── Excluded products (non-orderable) for display ──────────────────────────
+    excluded_products: List[Dict[str, Any]] = []
+    try:
+        from models import Product as _Product  # noqa: PLC0415
+
+        raw_rows = (
+            db.query(_Product)
+            .filter_by(tenant_id=tenant_id)
+            .order_by(_Product.in_stock.desc(), _Product.id)
+            .limit(80)
+            .all()
+        )
+        catalog_builder = CatalogContextBuilder(db, tenant_id)
+        for p in raw_rows:
+            fmt = catalog_builder._format(p)  # noqa: SLF001
+            if not fmt.get("orderable"):
+                reason = _excluded_reason(fmt)
+                excluded_products.append({
+                    "id": fmt["id"],
+                    "title": fmt["title"],
+                    "sku": fmt.get("sku") or "",
+                    "price": fmt.get("price"),
+                    "in_stock": fmt.get("in_stock"),
+                    "stock_qty": fmt.get("stock_qty"),
+                    "status": fmt.get("status"),
+                    "has_salla_id": bool(fmt.get("external_id")),
+                    "reason": reason,
+                })
+                if len(excluded_products) >= 20:
+                    break
+    except Exception as exc:
+        _logger.warning("[MerchantBrainKnowledge] excluded products query failed: %s", exc)
+
+    return _serialize_merchant_knowledge(mc, excluded_products)
+
+
+def _excluded_reason(p: Dict[str, Any]) -> str:
+    """Return a human-readable Arabic reason why a product is not orderable."""
+    if not p.get("external_id"):
+        return "لا يوجد معرّف سلة — لم تتم مزامنته بعد"
+    status = str(p.get("status") or "").lower()
+    if status not in ("active", ""):
+        return f"الحالة: {status}"
+    if not p.get("in_stock"):
+        return "نفد المخزون"
+    qty = p.get("stock_qty")
+    if qty is not None and int(qty or 0) <= 0:
+        return "الكمية المتاحة = 0"
+    return "غير متاح للطلب"
+
+
+def _serialize_merchant_knowledge(
+    mc: Dict[str, Any],
+    excluded_products: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Convert internal merchant_context to a stable, UI-friendly schema.
+
+    Callers should depend on this schema, not on mc's internal structure.
+    """
+    insights: Dict[str, Any] = mc.get("insights") or {}
+    policies: Dict[str, Any] = mc.get("policies") or {}
+    faq_data: Dict[str, Any] = mc.get("faq") or {}
+    brain_profile: Dict[str, Any] = mc.get("brain_profile") or {}
+    tenant_profile: Dict[str, Any] = mc.get("tenant_profile") or {}
+    pages: List[Dict[str, Any]] = list(mc.get("pages") or [])
+    orderable_products: List[Dict[str, Any]] = list(mc.get("products") or [])
+    policy_presence: Dict[str, Any] = mc.get("policy_presence") or {}
+
+    # ── Sync status ───────────────────────────────────────────────────────────
+    sync_status = {
+        "last_sync_at": insights.get("last_sync_at"),
+        "is_fresh": bool(insights.get("knowledge_fresh", False)),
+        "platform": tenant_profile.get("integration_platform") or "unknown",
+        "store_name": tenant_profile.get("store_name") or "",
+        "store_url": tenant_profile.get("store_url") or "",
+    }
+
+    # ── Quality score (0-100) ─────────────────────────────────────────────────
+    score = 0
+    if (insights.get("orderable_count") or 0) >= 1:
+        score += 30
+    if policy_presence.get("return_policy"):
+        score += 15
+    if policy_presence.get("shipping_policy"):
+        score += 15
+    payment_methods = list(policies.get("payment_methods") or [])
+    if payment_methods:
+        score += 15
+    shipping_methods_raw = list(policies.get("shipping_methods") or [])
+    if shipping_methods_raw:
+        score += 15
+    if faq_data.get("approved"):
+        score += 10
+
+    if score <= 40:
+        score_label = "يحتاج تحسين"
+    elif score <= 70:
+        score_label = "مقبول"
+    elif score <= 85:
+        score_label = "جيد"
+    else:
+        score_label = "ممتاز"
+
+    # ── Shipping methods normalisation ────────────────────────────────────────
+    shipping_methods: List[Dict[str, Any]] = []
+    for m in shipping_methods_raw:
+        if isinstance(m, dict):
+            shipping_methods.append({
+                "name": m.get("name") or "",
+                "cost": str(m.get("cost") or m.get("price") or ""),
+                "eta": str(m.get("eta") or m.get("delivery_days") or ""),
+            })
+        elif m:
+            shipping_methods.append({"name": str(m), "cost": "", "eta": ""})
+
+    # ── Missing fields & warnings ─────────────────────────────────────────────
+    missing: List[str] = []
+    warnings: List[str] = []
+
+    if not orderable_products:
+        missing.append("orderable_products")
+        warnings.append("لا توجد منتجات قابلة للطلب — تحقق من المزامنة مع سلة")
+    if not policy_presence.get("return_policy"):
+        missing.append("return_policy")
+        warnings.append("سياسة الإرجاع غير محددة")
+    if not policy_presence.get("shipping_policy"):
+        missing.append("shipping_policy")
+        warnings.append("سياسة الشحن غير محددة")
+    if not payment_methods:
+        missing.append("payment_methods")
+        warnings.append("طرق الدفع غير محددة")
+    if not shipping_methods:
+        missing.append("shipping_methods")
+        warnings.append("طرق الشحن غير محددة")
+    if not faq_data.get("approved"):
+        missing.append("faq_approved")
+        warnings.append("لا توجد أسئلة شائعة معتمدة")
+    if not pages:
+        missing.append("pages")
+
+    return {
+        "sync_status": sync_status,
+        "quality": {"score": score, "label": score_label},
+        "products": {
+            "orderable_count": insights.get("orderable_count") or len(orderable_products),
+            "excluded_count": insights.get("unavailable_count") or len(excluded_products),
+            "total_count": insights.get("product_count") or 0,
+            "without_description_count": insights.get("without_description_count") or 0,
+            "orderable": orderable_products,
+            "excluded": excluded_products,
+        },
+        "policies": {
+            "return_policy": policies.get("return_policy") or "",
+            "shipping_policy": policies.get("shipping_policy") or "",
+            "payment_policy": policies.get("payment_policy") or "",
+            "warranty_policy": policies.get("warranty_policy") or "",
+            "delivery_areas": policies.get("delivery_areas") or "",
+            "working_hours": policies.get("working_hours") or "",
+        },
+        "payment_methods": payment_methods,
+        "shipping_methods": shipping_methods,
+        "faqs": {
+            "approved": list(faq_data.get("approved") or []),
+            "suggested": list(faq_data.get("suggested") or []),
+        },
+        "pages": pages,
+        "missing": missing,
+        "warnings": warnings,
+        "brain_profile": {
+            "tone": brain_profile.get("tone") or "friendly",
+            "reply_length": brain_profile.get("reply_length") or "medium",
+            "coupon_strategy": brain_profile.get("coupon_strategy") or "on_hesitation",
+            "upsell_enabled": bool(brain_profile.get("upsell_enabled", True)),
+            "owner_instructions": brain_profile.get("owner_instructions") or "",
+        },
+    }
+
+
 @router.post("/intelligence/reorder-estimate")
 async def create_reorder_estimate(
     request: Request,

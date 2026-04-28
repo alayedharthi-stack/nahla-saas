@@ -113,6 +113,97 @@ export interface IntelligenceDashboard {
   rfm_segments?: CustomerSegment[]
 }
 
+// ── Merchant Brain Knowledge types ────────────────────────────────────────────
+
+export interface MerchantKnowledgeSyncStatus {
+  last_sync_at: string | null
+  is_fresh: boolean
+  platform: string
+  store_name: string
+  store_url: string
+}
+
+export interface MerchantKnowledgeProduct {
+  id: number
+  title: string
+  sku: string
+  price: number | null
+  sale_price?: number | null
+  category?: string
+  in_stock: boolean
+  stock_qty: number | null
+  orderable: boolean
+  external_id?: string | null
+}
+
+export interface MerchantKnowledgeExcludedProduct {
+  id: number
+  title: string
+  sku: string
+  price: number | null
+  in_stock: boolean | null
+  stock_qty: number | null
+  status: string
+  has_salla_id: boolean
+  reason: string
+}
+
+export interface MerchantKnowledgeShippingMethod {
+  name: string
+  cost: string
+  eta: string
+}
+
+export interface MerchantKnowledgePolicies {
+  return_policy: string
+  shipping_policy: string
+  payment_policy: string
+  warranty_policy: string
+  delivery_areas: string
+  working_hours: string
+}
+
+export interface MerchantKnowledgeFaqs {
+  approved: string[]
+  suggested: string[]
+}
+
+export interface MerchantKnowledgePage {
+  title: string
+  url?: string
+  content?: string
+  type?: string
+}
+
+export interface MerchantKnowledgeBrainProfile {
+  tone: string
+  reply_length: string
+  coupon_strategy: string
+  upsell_enabled: boolean
+  owner_instructions: string
+}
+
+export interface MerchantKnowledge {
+  sync_status: MerchantKnowledgeSyncStatus
+  quality: { score: number; label: string }
+  products: {
+    orderable_count: number
+    excluded_count: number
+    total_count: number
+    without_description_count: number
+    orderable: MerchantKnowledgeProduct[]
+    excluded: MerchantKnowledgeExcludedProduct[]
+  }
+  policies: MerchantKnowledgePolicies
+  payment_methods: string[]
+  shipping_methods: MerchantKnowledgeShippingMethod[]
+  faqs: MerchantKnowledgeFaqs
+  pages: MerchantKnowledgePage[]
+  missing: string[]
+  warnings: string[]
+  brain_profile: MerchantKnowledgeBrainProfile
+}
+
 // ── API client ────────────────────────────────────────────────────────────────
 
 import { apiCall } from './client'
@@ -147,6 +238,9 @@ export const automationsApi = {
 
   getIntelligence: () =>
     apiCall<IntelligenceDashboard>('/intelligence/dashboard'),
+
+  getMerchantKnowledge: () =>
+    apiCall<MerchantKnowledge>('/intelligence/merchant-brain/knowledge'),
 
   enginesSummary: (windowDays?: number) =>
     apiCall<EnginesSummaryResponse>(

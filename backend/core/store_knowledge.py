@@ -696,10 +696,24 @@ def build_merchant_context(
         "coupon_rules": ai_settings.get("coupon_rules", ""),
     }
 
+    # Pages — placeholder for future Salla/Zid page sync.
+    # Shape per page: {"title": str, "url": str, "content": str, "type": str}
+    # Currently sourced from store_settings["pages"] if the merchant has entered them manually.
+    # Will be populated automatically once page sync from the integration is implemented.
+    pages: List[Dict[str, Any]] = list(store_settings.get("pages") or [])
+
+    orderable_count = sum(1 for p in formatted_rows if p.get("orderable"))
+    excluded_count = unavailable_count
+    policies_count = sum(1 for v in policy_presence.values() if v)
+    payment_methods_count = len(policies.get("payment_methods") or [])
+    shipping_methods_count = len(policies.get("shipping_methods") or [])
+    faq_count = len(approved_faq)
+    pages_count = len(pages)
+
     insights = {
         "product_count": total_product_count,
-        "orderable_count": sum(1 for p in formatted_rows if p.get("orderable")),
-        "unavailable_count": unavailable_count,
+        "orderable_count": orderable_count,
+        "unavailable_count": excluded_count,
         "without_description_count": without_description_count,
         "last_sync_at": (
             snap.last_full_sync_at.isoformat()
@@ -708,6 +722,20 @@ def build_merchant_context(
         ),
         "knowledge_fresh": loader.is_fresh(),
     }
+
+    logger.info(
+        "[MerchantContext] tenant=%s orderable=%d excluded=%d policies=%d "
+        "payment_methods=%d shipping_methods=%d faq=%d pages=%d fresh=%s",
+        tenant_id,
+        orderable_count,
+        excluded_count,
+        policies_count,
+        payment_methods_count,
+        shipping_methods_count,
+        faq_count,
+        pages_count,
+        loader.is_fresh(),
+    )
 
     return {
         "tenant_profile": store_profile,
@@ -721,6 +749,7 @@ def build_merchant_context(
             "suggested": suggested_faq,
             "approved_only": True,
         },
+        "pages": pages,
         "insights": insights,
         "brain_profile": brain_profile,
         "retrieval_rules": {

@@ -11,6 +11,8 @@ import {
   Sparkles,
   Clock,
   Save, Bot, Loader2, ToggleLeft, ToggleRight, Settings2,
+  Store, PackageCheck, PackageX, ShieldCheck, CreditCard, Truck,
+  MessageSquare, FileText, Info, ChevronDown, ChevronUp,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -21,6 +23,7 @@ import {
   IntelligenceDashboard,
   IntelligenceSuggestion,
   CustomerSegment,
+  MerchantKnowledge,
 } from '../api/automations'
 import { settingsApi, type AISettings } from '../api/settings'
 
@@ -308,12 +311,430 @@ function AISettingsPanel() {
   )
 }
 
+// ── Merchant Knowledge Panel ──────────────────────────────────────────────────
+
+function QualityRing({ score }: { score: number }) {
+  const color =
+    score > 85 ? 'text-emerald-500' :
+    score > 70 ? 'text-brand-500' :
+    score > 40 ? 'text-amber-500' : 'text-red-500'
+  const ringColor =
+    score > 85 ? 'stroke-emerald-500' :
+    score > 70 ? 'stroke-brand-500' :
+    score > 40 ? 'stroke-amber-400' : 'stroke-red-400'
+  const r = 28
+  const circ = 2 * Math.PI * r
+  const offset = circ - (score / 100) * circ
+  return (
+    <div className="relative w-20 h-20 shrink-0">
+      <svg className="w-20 h-20 -rotate-90" viewBox="0 0 72 72">
+        <circle cx="36" cy="36" r={r} fill="none" stroke="#e2e8f0" strokeWidth="6" />
+        <circle
+          cx="36" cy="36" r={r} fill="none"
+          className={ringColor}
+          strokeWidth="6"
+          strokeDasharray={circ}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+        />
+      </svg>
+      <span className={`absolute inset-0 flex items-center justify-center text-base font-bold ${color}`}>
+        {score}
+      </span>
+    </div>
+  )
+}
+
+function SectionHeader({ icon: Icon, title, count }: { icon: React.ElementType; title: string; count?: number }) {
+  return (
+    <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+      <Icon className="w-4 h-4 text-brand-500 shrink-0" />
+      <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+      {count !== undefined && (
+        <span className="ms-auto text-xs text-slate-400 font-medium">{count}</span>
+      )}
+    </div>
+  )
+}
+
+function EmptySlot({ message }: { message: string }) {
+  return (
+    <p className="text-xs text-slate-400 text-center py-6 px-4">{message}</p>
+  )
+}
+
+function PolicyCard({ label, value }: { label: string; value: string }) {
+  const hasValue = Boolean(value?.trim())
+  return (
+    <div className={`rounded-xl border p-3.5 ${hasValue ? 'border-slate-200 bg-white' : 'border-red-100 bg-red-50'}`}>
+      <p className={`text-xs font-semibold mb-1 ${hasValue ? 'text-slate-600' : 'text-red-500'}`}>{label}</p>
+      {hasValue
+        ? <p className="text-xs text-slate-700 leading-relaxed line-clamp-3">{value}</p>
+        : <p className="text-xs text-red-400">غير محددة</p>
+      }
+    </div>
+  )
+}
+
+function CollapsibleSection({ title, icon: Icon, children, defaultOpen = true }: {
+  title: string; icon: React.ElementType; children: React.ReactNode; defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div className="card overflow-hidden">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 px-5 py-4 border-b border-slate-100 hover:bg-slate-50 transition-colors text-start"
+      >
+        <Icon className="w-4 h-4 text-brand-500 shrink-0" />
+        <span className="text-sm font-semibold text-slate-900 flex-1">{title}</span>
+        {open ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+      </button>
+      {open && <div>{children}</div>}
+    </div>
+  )
+}
+
+function MerchantKnowledgePanel() {
+  const [data, setData] = useState<MerchantKnowledge | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(false)
+    try {
+      const result = await automationsApi.getMerchantKnowledge()
+      setData(result)
+    } catch {
+      setError(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 gap-4">
+        <div className="w-10 h-10 border-4 border-brand-200 border-t-brand-500 rounded-full animate-spin" />
+        <p className="text-sm text-slate-500">جارٍ تحميل معرفة المتجر…</p>
+      </div>
+    )
+  }
+
+  if (error || !data) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 gap-4">
+        <AlertTriangle className="w-10 h-10 text-red-400" />
+        <p className="text-sm text-slate-600">تعذّر تحميل بيانات ذكاء المتجر</p>
+        <button onClick={load} className="btn-primary text-sm flex items-center gap-2">
+          <RefreshCw className="w-4 h-4" /> إعادة المحاولة
+        </button>
+      </div>
+    )
+  }
+
+  const { sync_status, quality, products, policies, payment_methods, shipping_methods, faqs, pages, warnings, brain_profile } = data
+
+  const lastSync = sync_status.last_sync_at
+    ? new Date(sync_status.last_sync_at).toLocaleDateString('ar-SA', { year: 'numeric', month: 'long', day: 'numeric' })
+    : 'لم تتم مزامنة'
+
+  return (
+    <div className="space-y-5">
+
+      {/* ── Warnings banner ── */}
+      {warnings.length > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex gap-3">
+          <Info className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs font-semibold text-amber-800 mb-1">نواقص تؤثر على جودة الذكاء</p>
+            <ul className="space-y-0.5">
+              {warnings.map((w, i) => (
+                <li key={i} className="text-xs text-amber-700">• {w}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
+      {/* ── Status overview card ── */}
+      <div className="card p-5">
+        <div className="flex items-start gap-5 flex-wrap">
+          <QualityRing score={quality.score} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
+              <h2 className="text-base font-bold text-slate-900">جودة معرفة الذكاء</h2>
+              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                quality.score > 85 ? 'bg-emerald-100 text-emerald-700' :
+                quality.score > 70 ? 'bg-brand-100 text-brand-700' :
+                quality.score > 40 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'
+              }`}>{quality.label}</span>
+              {sync_status.is_fresh
+                ? <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">بيانات محدّثة</span>
+                : <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">قديمة</span>
+              }
+            </div>
+            <p className="text-xs text-slate-500 mb-3">
+              {sync_status.store_name && <span className="font-medium text-slate-700">{sync_status.store_name}</span>}
+              {sync_status.store_name && ' — '}
+              آخر مزامنة: {lastSync}
+              {sync_status.platform !== 'unknown' && ` (${sync_status.platform})`}
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+              {[
+                { label: 'منتج قابل للطلب', value: products.orderable_count, ok: products.orderable_count > 0 },
+                { label: 'مستبعد', value: products.excluded_count, ok: true },
+                { label: 'طرق دفع', value: payment_methods.length, ok: payment_methods.length > 0 },
+                { label: 'طرق شحن', value: shipping_methods.length, ok: shipping_methods.length > 0 },
+                { label: 'FAQ معتمد', value: faqs.approved.length, ok: faqs.approved.length > 0 },
+                { label: 'صفحات', value: pages.length, ok: true },
+              ].map(({ label, value, ok }) => (
+                <div key={label} className={`rounded-lg p-2.5 text-center ${ok ? 'bg-slate-50' : 'bg-red-50'}`}>
+                  <p className={`text-xl font-bold ${ok ? 'text-slate-800' : 'text-red-500'}`}>{value}</p>
+                  <p className="text-[10px] text-slate-500 mt-0.5 leading-tight">{label}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Orderable products ── */}
+      <CollapsibleSection title={`المنتجات التي يستطيع الذكاء بيعها (${products.orderable_count})`} icon={PackageCheck}>
+        {products.orderable.length === 0
+          ? <EmptySlot message="لا توجد منتجات قابلة للطلب — تحقق من المزامنة مع سلة" />
+          : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 bg-slate-50">
+                    <th className="text-start px-5 py-2.5 font-medium text-slate-500">المنتج</th>
+                    <th className="text-start px-3 py-2.5 font-medium text-slate-500">السعر</th>
+                    <th className="text-start px-3 py-2.5 font-medium text-slate-500">المخزون</th>
+                    <th className="text-start px-3 py-2.5 font-medium text-slate-500 pe-5">التصنيف</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {products.orderable.map((p, i) => (
+                    <tr key={i} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-5 py-3">
+                        <p className="font-medium text-slate-900 truncate max-w-[200px]">{p.title}</p>
+                        {p.sku && <p className="text-slate-400 mt-0.5 font-mono text-[10px]">{p.sku}</p>}
+                      </td>
+                      <td className="px-3 py-3 text-slate-700 whitespace-nowrap">
+                        {p.sale_price
+                          ? <><span className="font-semibold text-emerald-600">{p.sale_price}</span> <span className="line-through text-slate-400">{p.price}</span></>
+                          : <span>{p.price ?? '—'}</span>
+                        } <span className="text-slate-400">ر.س</span>
+                      </td>
+                      <td className="px-3 py-3">
+                        <Badge
+                          label={p.stock_qty !== null ? `${p.stock_qty} قطعة` : 'متاح'}
+                          variant="green"
+                        />
+                      </td>
+                      <td className="px-3 py-3 pe-5 text-slate-500 truncate max-w-[100px]">
+                        {(p as unknown as Record<string, unknown>).category as string || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        }
+      </CollapsibleSection>
+
+      {/* ── Excluded products ── */}
+      {products.excluded.length > 0 && (
+        <CollapsibleSection title={`المنتجات المستبعدة (${products.excluded_count})`} icon={PackageX} defaultOpen={false}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-slate-100 bg-slate-50">
+                  <th className="text-start px-5 py-2.5 font-medium text-slate-500">المنتج</th>
+                  <th className="text-start px-3 py-2.5 font-medium text-slate-500 pe-5">سبب الاستبعاد</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {products.excluded.map((p, i) => (
+                  <tr key={i} className="hover:bg-slate-50 transition-colors">
+                    <td className="px-5 py-3">
+                      <p className="font-medium text-slate-700 truncate max-w-[200px]">{p.title}</p>
+                      {!p.has_salla_id && (
+                        <span className="inline-block mt-0.5 text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">بدون معرّف سلة</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 pe-5">
+                      <span className="text-red-600 bg-red-50 px-2 py-0.5 rounded text-[10px]">{p.reason}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </CollapsibleSection>
+      )}
+
+      {/* ── Policies ── */}
+      <CollapsibleSection title="سياسات المتجر" icon={ShieldCheck}>
+        <div className="p-5 grid sm:grid-cols-2 gap-3">
+          <PolicyCard label="سياسة الإرجاع" value={policies.return_policy} />
+          <PolicyCard label="سياسة الشحن" value={policies.shipping_policy} />
+          <PolicyCard label="سياسة الدفع" value={policies.payment_policy} />
+          <PolicyCard label="ضمان المنتجات" value={policies.warranty_policy} />
+          <PolicyCard label="مناطق التوصيل" value={policies.delivery_areas} />
+          <PolicyCard label="ساعات العمل" value={policies.working_hours} />
+        </div>
+      </CollapsibleSection>
+
+      {/* ── Payment + Shipping ── */}
+      <div className="grid sm:grid-cols-2 gap-5">
+        <div className="card">
+          <SectionHeader icon={CreditCard} title="طرق الدفع" count={payment_methods.length} />
+          <div className="p-4">
+            {payment_methods.length === 0
+              ? <EmptySlot message="لا توجد طرق دفع — أضفها من إعدادات سلة" />
+              : (
+                <div className="flex flex-wrap gap-2">
+                  {payment_methods.map((m, i) => (
+                    <span key={i} className="text-xs bg-brand-50 text-brand-700 border border-brand-200 px-3 py-1 rounded-full font-medium">
+                      {m}
+                    </span>
+                  ))}
+                </div>
+              )
+            }
+          </div>
+        </div>
+
+        <div className="card">
+          <SectionHeader icon={Truck} title="طرق الشحن" count={shipping_methods.length} />
+          <div className="p-4">
+            {shipping_methods.length === 0
+              ? <EmptySlot message="لا توجد طرق شحن — تحقق من المزامنة" />
+              : (
+                <div className="space-y-2">
+                  {shipping_methods.map((m, i) => (
+                    <div key={i} className="flex items-center gap-2 text-xs">
+                      <span className="font-medium text-slate-800">{m.name}</span>
+                      {m.cost && <span className="text-slate-500">— {m.cost} ر.س</span>}
+                      {m.eta && <span className="text-slate-400 ms-auto">{m.eta}</span>}
+                    </div>
+                  ))}
+                </div>
+              )
+            }
+          </div>
+        </div>
+      </div>
+
+      {/* ── FAQ ── */}
+      <CollapsibleSection title="الأسئلة الشائعة (FAQ)" icon={MessageSquare}>
+        <div className="p-5 space-y-4">
+          <div>
+            <p className="text-xs font-semibold text-slate-600 mb-2">
+              معتمدة ({faqs.approved.length})
+              <span className="text-[10px] font-normal text-slate-400 ms-1">— يستخدمها الذكاء مباشرة</span>
+            </p>
+            {faqs.approved.length === 0
+              ? <EmptySlot message="لا توجد أسئلة شائعة معتمدة بعد" />
+              : (
+                <ul className="space-y-1.5">
+                  {faqs.approved.map((q, i) => (
+                    <li key={i} className="flex items-start gap-2 text-xs">
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
+                      <span className="text-slate-700">{typeof q === 'string' ? q : JSON.stringify(q)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )
+            }
+          </div>
+          {faqs.suggested.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-amber-600 mb-2">
+                مقترحة ({faqs.suggested.length})
+                <span className="text-[10px] font-normal text-amber-400 ms-1">— تحتاج موافقتك</span>
+              </p>
+              <ul className="space-y-1.5">
+                {faqs.suggested.map((q, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                    <span className="text-slate-600">{typeof q === 'string' ? q : JSON.stringify(q)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </CollapsibleSection>
+
+      {/* ── Pages ── */}
+      <CollapsibleSection title="الصفحات الثابتة" icon={FileText} defaultOpen={false}>
+        {pages.length === 0
+          ? (
+            <div className="p-6 text-center space-y-2">
+              <FileText className="w-8 h-8 text-slate-200 mx-auto" />
+              <p className="text-sm text-slate-500">الصفحات غير مربوطة بعد</p>
+              <p className="text-xs text-slate-400">سيتم ربط صفحات المتجر (عن المتجر، سياسات، تواصل) تلقائياً عند تفعيل مزامنة الصفحات</p>
+            </div>
+          )
+          : (
+            <ul className="divide-y divide-slate-100">
+              {pages.map((p, i) => (
+                <li key={i} className="px-5 py-3 flex items-center gap-3">
+                  <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <span className="text-xs font-medium text-slate-800">{p.title}</span>
+                  {p.url && <a href={p.url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-brand-500 ms-auto hover:underline">{p.url}</a>}
+                </li>
+              ))}
+            </ul>
+          )
+        }
+      </CollapsibleSection>
+
+      {/* ── Brain profile ── */}
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Bot className="w-4 h-4 text-brand-500" />
+          <h2 className="text-sm font-semibold text-slate-900">إعدادات شخصية الذكاء المُحمَّلة</h2>
+          <span className="text-[10px] text-slate-400 ms-1">— هذا ما تراه نحلة في كل محادثة</span>
+        </div>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+          {[
+            { label: 'نبرة الرد', value: brain_profile.tone === 'friendly' ? 'ودية' : brain_profile.tone === 'professional' ? 'احترافية' : brain_profile.tone },
+            { label: 'طول الرد', value: brain_profile.reply_length === 'short' ? 'قصير' : brain_profile.reply_length === 'medium' ? 'متوسط' : 'تفصيلي' },
+            { label: 'استراتيجية الكوبون', value: brain_profile.coupon_strategy === 'on_hesitation' ? 'عند التردد' : brain_profile.coupon_strategy },
+            { label: 'توصيات المنتجات', value: brain_profile.upsell_enabled ? 'مفعّلة' : 'معطّلة' },
+          ].map(({ label, value }) => (
+            <div key={label} className="bg-slate-50 rounded-lg px-3 py-2.5">
+              <p className="text-[10px] text-slate-400 mb-0.5">{label}</p>
+              <p className="font-medium text-slate-800">{value}</p>
+            </div>
+          ))}
+          {brain_profile.owner_instructions && (
+            <div className="sm:col-span-2 lg:col-span-3 bg-brand-50 rounded-lg px-3 py-2.5 border border-brand-100">
+              <p className="text-[10px] text-brand-500 mb-0.5">تعليمات المالك المُحمَّلة</p>
+              <p className="text-slate-700 leading-relaxed line-clamp-3">{brain_profile.owner_instructions}</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Intelligence() {
   useLanguage() // initialise RTL context
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings'>('dashboard')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant'>('dashboard')
   const [data, setData] = useState<IntelligenceDashboard | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -355,13 +776,17 @@ export default function Intelligence() {
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
               تحديث
             </button>
+          ) : activeTab === 'merchant' ? (
+            <span className="text-xs text-slate-400 flex items-center gap-1.5">
+              <Store className="w-3.5 h-3.5" /> ما تعرفه نحلة عن متجرك
+            </span>
           ) : undefined
         }
       />
 
       {/* ── Tabs ──────────────────────────────────────────────────────────── */}
       <div className="border-b border-slate-200 -mx-3 px-3 md:-mx-6 md:px-6">
-        <div className="flex gap-1">
+        <div className="flex gap-1 overflow-x-auto">
           <button
             onClick={() => setActiveTab('settings')}
             className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
@@ -384,11 +809,25 @@ export default function Intelligence() {
             <Brain className="w-4 h-4 shrink-0" />
             لوحة الذكاء
           </button>
+          <button
+            onClick={() => setActiveTab('merchant')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+              activeTab === 'merchant'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <Store className="w-4 h-4 shrink-0" />
+            ذكاء المتجر
+          </button>
         </div>
       </div>
 
       {/* ── AI Settings Tab ────────────────────────────────────────────────── */}
       {activeTab === 'settings' && <AISettingsPanel />}
+
+      {/* ── Merchant Knowledge Tab ─────────────────────────────────────────── */}
+      {activeTab === 'merchant' && <MerchantKnowledgePanel />}
 
       {/* ── Dashboard Tab ─────────────────────────────────────────────────── */}
       {activeTab === 'dashboard' && (<>

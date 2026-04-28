@@ -169,6 +169,31 @@ class MerchantBrain:
             customer_id=customer_id,
             tenant_context=tenant_ctx,
         )
+
+        # ── 3b. Merchant context (Step 2 wire-up — best-effort) ───────────
+        # Fact-grounded view of catalog + policies + customer + brain profile.
+        # If anything fails (DB hiccup, missing settings row, etc.) we keep
+        # an empty dict and the brain falls back to its previous behaviour.
+        merchant_context: Dict[str, Any] = {}
+        try:
+            from core.store_knowledge import build_merchant_context  # noqa: PLC0415
+            merchant_context = build_merchant_context(
+                db,
+                tenant_id      = tenant_id,
+                customer_phone = customer_phone,
+                product_query  = message or "",
+                state          = state,
+                history        = history,
+                profile        = profile,
+            ) or {}
+        except Exception as exc:
+            logger.warning(
+                "[BrainPipeline] build_merchant_context failed tenant=%s — "
+                "falling back to legacy context: %s",
+                tenant_id, exc,
+            )
+            merchant_context = {}
+
         ctx = BrainContext(
             tenant_id      = tenant_id,
             customer_phone = customer_phone,
@@ -182,9 +207,20 @@ class MerchantBrain:
             conversation_id= conversation_id,
             sales_context  = sales_context,
             tenant_context = tenant_ctx,
+            merchant_context = merchant_context,
         )
         # Attach db for handlers that need it (avoids threading Session issues)
         ctx._db = db  # type: ignore[attr-defined]
+
+        if merchant_context:
+            logger.info(
+                "[BrainPipeline] merchant_context loaded tenant=%s products=%d "
+                "policies=%d has_customer=%s",
+                tenant_id,
+                len(merchant_context.get("products") or []),
+                sum(1 for v in (merchant_context.get("policy_presence") or {}).values() if v),
+                bool((merchant_context.get("customer") or {}).get("phone")),
+            )
 
         stage_before = state.stage
 
@@ -338,6 +374,33 @@ class MerchantBrain:
         except Exception:
             pass
 
+        # Slim merchant_context for the prompt — caps product list and FAQ so
+        # the LLM payload stays bounded while still covering key facts.
+        slim_merchant_ctx: Dict[str, Any] = {}
+        if isinstance(ctx.merchant_context, dict) and ctx.merchant_context:
+            mc = ctx.merchant_context
+            try:
+                _faq_approved = list((mc.get("faq") or {}).get("approved") or [])[:5]
+                slim_merchant_ctx = {
+                    "tenant_profile":  mc.get("tenant_profile") or {},
+                    "customer":        mc.get("customer") or {},
+                    "conversation":    mc.get("conversation") or {},
+                    "products":        list((mc.get("products") or []))[:8],
+                    "policies":        mc.get("policies") or {},
+                    "policy_presence": mc.get("policy_presence") or {},
+                    "brain_profile":   mc.get("brain_profile") or {},
+                    "retrieval_rules": mc.get("retrieval_rules") or {},
+                }
+                if _faq_approved:
+                    slim_merchant_ctx["faq_approved"] = _faq_approved
+            except Exception as exc:
+                logger.warning(
+                    "[BrainPipeline] failed to slim merchant_context "
+                    "tenant=%s: %s — sending empty",
+                    tenant_id, exc,
+                )
+                slim_merchant_ctx = {}
+
         ctx.reply_state = _build_reply_state(
             ctx=ctx,
             previous_state=state,
@@ -346,6 +409,7 @@ class MerchantBrain:
             decision=decision,
             tenant_tone=_tenant_tone,
             tenant_overlay=_tenant_overlay,
+            merchant_context=slim_merchant_ctx,
         )
 
         # ── 7. Compose reply ──────────────────────────────────────────────
@@ -485,6 +549,7 @@ def _build_reply_state(
     decision: Decision,
     tenant_tone: str = "",
     tenant_overlay: str = "",
+    merchant_context: Optional[Dict[str, Any]] = None,
 ) -> BrainReplyState:
     recent_turns = []
     for turn in (ctx.history or [])[-4:]:
@@ -545,6 +610,7 @@ def _build_reply_state(
         explicit_pending_action=current_state.pending_action,
         intent_name=getattr(ctx.intent, "name", "") or "",
         response_goal=_compose_response_goal(decision, suggestion),
+        merchant_context=dict(merchant_context or {}),
     )
 
 
