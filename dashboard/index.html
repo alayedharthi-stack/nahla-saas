@@ -39,12 +39,41 @@
   </head>
   <body>
     <div id="root"></div>
+
+    <!--
+      Salla embedded handshake — fires IMMEDIATELY when the iframe HTML loads,
+      before React even bundles.  Salla's host frame shows
+      "لم يتم الاتصال بالتطبيق" if app.ready doesn't arrive within ~5s.
+      We send both event shapes (legacy + current SDK) and re-send at 1s/3s.
+    -->
+    <script>
+      (function () {
+        if (window.parent === window) return; // not in an iframe
+        var send = function () {
+          try {
+            window.parent.postMessage(
+              { event: 'embedded::ready', payload: {}, timestamp: Date.now(),
+                source: 'embedded-app', metadata: { version: '0.2.4' } },
+              '*'
+            );
+          } catch (e) {}
+          try { window.parent.postMessage({ event: 'app.ready', type: 'app.ready' }, '*'); } catch (e) {}
+        };
+        send();
+        setTimeout(send, 600);
+        setTimeout(send, 2000);
+        setTimeout(send, 5000);
+      })();
+    </script>
+
     <script type="module" src="/src/main.tsx"></script>
     <script>
       if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js').catch(() => {})
-        })
+        window.addEventListener('load', function () {
+          // Skip SW inside Salla iframe to avoid first-load races
+          if (window.parent !== window) return;
+          navigator.serviceWorker.register('/sw.js').catch(function () {});
+        });
       }
     </script>
   </body>
