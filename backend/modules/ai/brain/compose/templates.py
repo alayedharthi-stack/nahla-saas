@@ -39,7 +39,7 @@ Rules:
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # ── Greeting ─────────────────────────────────────────────────────────────────
 
@@ -253,9 +253,30 @@ def product_unsyncable(product: Dict[str, Any], **_: Any) -> str:
     to choose another item instead of attempting a doomed order."""
     title = product.get("title", "هذا المنتج")
     return (
-        f"معذرةً، تعذّر إكمال الطلب لـ *{title}* لأن المنتج غير متاح حالياً في المتجر. 🙏\n"
-        "هل تحب أعرض لك منتجات مشابهة، أو تكتب اسم منتج آخر؟"
+        f"للأسف *{title}* غير متوفر حالياً في المخزون 😔\n"
+        "اكتب اسم منتج ثاني أو قول \"أكثر مبيعاً\" وأعرض لك المتاح."
     )
+
+
+def product_unavailable_alternatives(
+    rejected_title: str = "",
+    alternatives: Optional[List[Dict[str, Any]]] = None,
+    **_: Any,
+) -> str:
+    """Smart fallback when a customer picks a product that turned out to
+    be out-of-stock / not orderable. Shows alternatives when available."""
+    name = rejected_title or "المنتج اللي اخترته"
+    header = f"للأسف *{name}* غير متوفر حالياً 😔"
+
+    if alternatives:
+        lines = [header, "لكن عندنا خيارات قريبة:\n"]
+        for i, p in enumerate(alternatives, 1):
+            price_str = f" — {p['price']} ريال" if p.get("price") else ""
+            lines.append(f"{i}. {p.get('title', '؟')}{price_str}")
+        lines.append("\nأرسل رقم المنتج اللي يعجبك 👆")
+        return "\n".join(lines)
+
+    return f"{header}\nاكتب اسم منتج ثاني أو قول \"أكثر مبيعاً\" وأعرض لك المتاح."
 
 
 def salla_escalate_message(product: Dict[str, Any], **_: Any) -> str:

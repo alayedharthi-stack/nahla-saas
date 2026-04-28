@@ -149,12 +149,20 @@ class DefaultComposer:
 
         # ── Search ─────────────────────────────────────────────────────────
         if action == ACTION_SEARCH_PRODUCTS:
+            # Handle "rejected product → suggest alternatives" flow
+            rejected = decision.args.get("rejected_product")
+            if rejected:
+                alts = decision.args.get("alternatives") or data.get("products") or []
+                return T.product_unavailable_alternatives(
+                    rejected_title=rejected.get("title", ""),
+                    alternatives=alts,
+                )
+
             if not result.success or data.get("message") == "no_products_in_catalog":
                 return T.no_products()
             # If many results and no specific intent, present as narrow choices
             if data.get("suggest_narrow") and data.get("products"):
                 candidates = data["products"][:3]
-                # Build WhatsApp interactive buttons (max 20 chars per title)
                 wa_buttons = []
                 for i, p in enumerate(candidates, 1):
                     raw_title = str(p.get("title") or "")

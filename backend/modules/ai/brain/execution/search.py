@@ -31,6 +31,22 @@ class ProductSearchHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         from modules.ai.commerce.runtime import CommerceToolRuntime
 
+        # Fast path: decision engine already computed alternatives for a
+        # rejected (unorderable) product — skip the search entirely.
+        if decision.args.get("rejected_product"):
+            alts = decision.args.get("alternatives") or []
+            return ActionResult(
+                success=True,
+                data={
+                    "products":      alts,
+                    "product_lines": "",
+                    "count":         len(alts),
+                    "query":         "",
+                    "suggest_narrow": False,
+                    "rejected_product": decision.args["rejected_product"],
+                },
+            )
+
         query = decision.args.get("query", ctx.message)
 
         try:
@@ -59,18 +75,15 @@ class ProductSearchHandler:
                     data={"message": "no_products_in_catalog"},
                 )
 
-            # Format the result for the composer
             lines = []
             for p in products:
-                in_stock_ar = "متاح" if p.get("in_stock") else "غير متاح"
-                price_str   = f"{p['price']} ريال" if p.get("price") else "السعر غير محدد"
-                line        = f"• {p['title']} — {price_str} ({in_stock_ar})"
+                price_str = f"{p['price']} ريال" if p.get("price") else "السعر غير محدد"
+                line = f"• {p['title']} — {price_str}"
                 if p.get("sku"):
                     line += f" [SKU: {p['sku']}]"
                 lines.append(line)
 
             after_search = decision.args.get("after_search", "")
-            # Flag narrow when many products found and no specific match was requested
             suggest_narrow = len(products) > 3 and not after_search
             selected_product = products[0] if len(products) == 1 else None
 

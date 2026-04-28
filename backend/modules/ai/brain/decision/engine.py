@@ -158,11 +158,6 @@ class DefaultDecisionEngine:
             )
 
         # ── 3.4 Product name match from last search candidates ────────────────
-        # When the customer types a product name instead of a number (e.g.
-        # "بلورة 179 ر" or just "بلورة") after seeing a product list, we should
-        # treat it as a selection and start the order flow immediately.
-        # Guard: only trigger when we are NOT already mid-collection (to avoid
-        # misinterpreting a customer's name as a product name mid-flow).
         _in_data_collection = (
             state.stage == STAGE_ORDERING
             and bool(getattr(state.order_prep, "missing_fields", None))
@@ -174,20 +169,34 @@ class DefaultDecisionEngine:
         ):
             _matched_product = _match_product_from_message(ctx.message, _candidates)
             if _matched_product:
+                _prod_orderable = _matched_product.get("orderable", True)
                 logger.info(
-                    "[ORDER FLOW] product selected (by name) | "
-                    "salla_product_id=%s nahla_db_id=%s name=%r tenant=%s intent=%s",
-                    _matched_product.get("external_id"),
-                    _matched_product.get("id"),
-                    _matched_product.get("title"),
-                    ctx.tenant_id,
-                    intent.name,
+                    "[ORDER FLOW] product selection validation (by name) | "
+                    "name=%r orderable=%s stock=%s salla_id=%s tenant=%s",
+                    _matched_product.get("title"), _prod_orderable,
+                    _matched_product.get("stock_qty"),
+                    _matched_product.get("external_id"), ctx.tenant_id,
                 )
-                if not _matched_product.get("external_id"):
-                    logger.error(
-                        "[ORDER FLOW] matched product has NO external_id — "
-                        "order will be aborted | nahla_db_id=%s name=%r",
-                        _matched_product.get("id"), _matched_product.get("title"),
+                if not _prod_orderable or not _matched_product.get("external_id"):
+                    _alts = [
+                        c for c in _candidates
+                        if c.get("orderable", True) and c.get("external_id")
+                        and c.get("id") != _matched_product.get("id")
+                    ][:3]
+                    logger.warning(
+                        "[ORDER FLOW] picked product NOT orderable — "
+                        "suggesting %d alternatives | name=%r",
+                        len(_alts), _matched_product.get("title"),
+                    )
+                    return Decision(
+                        action=ACTION_SEARCH_PRODUCTS,
+                        args={
+                            "query": _matched_product.get("category") or _matched_product.get("title", ""),
+                            "rejected_product": _matched_product,
+                            "alternatives": _alts,
+                        },
+                        reason="picked product not orderable — suggest alternatives",
+                        confidence=0.92,
                     )
                 if facts.orderable:
                     return Decision(
@@ -204,16 +213,7 @@ class DefaultDecisionEngine:
                 )
 
         # ── 3.5 Pick from numbered list ───────────────────────────────────────
-        # CRITICAL bridging logic: when the customer picks "1" / "2" / "3"
-        # we MUST commit to a product and start the order flow. Falling
-        # through to the LLM here was the production bug that broke the
-        # whole sales funnel — the user would type a number, the bot would
-        # respond with generic chit-chat, and product_focus stayed null
-        # forever.
         if intent.name == INTENT_PICK_LIST_ITEM:
-            # Prefer the candidates persisted from the most recent search;
-            # fall back to last_recommended_products (set by the suggestion
-            # engine) so an old recommendation list is still actionable.
             candidates = (
                 list(state.last_search_candidates or [])
                 or list(state.last_recommended_products or [])
@@ -223,21 +223,36 @@ class DefaultDecisionEngine:
                 idx = max(1, min(idx, len(candidates)))
                 product = candidates[idx - 1]
                 if product:
+                    _prod_orderable = product.get("orderable", True)
                     logger.info(
-                        "[ORDER FLOW] product selected | display_index=%d "
-                        "salla_product_id=%s nahla_db_id=%s name=%r tenant=%s",
-                        idx,
-                        product.get("external_id"),
-                        product.get("id"),
-                        product.get("title"),
-                        ctx.tenant_id,
+                        "[ORDER FLOW] product selection validation | "
+                        "display_index=%d name=%r orderable=%s stock=%s "
+                        "salla_id=%s tenant=%s",
+                        idx, product.get("title"), _prod_orderable,
+                        product.get("stock_qty"),
+                        product.get("external_id"), ctx.tenant_id,
                     )
-                    if not product.get("external_id"):
-                        logger.error(
-                            "[ORDER FLOW] picked product has NO external_id "
-                            "(Salla product id) — order will be aborted | "
-                            "nahla_db_id=%s name=%r",
-                            product.get("id"), product.get("title"),
+                    if not _prod_orderable or not product.get("external_id"):
+                        _alts = [
+                            c for c in candidates
+                            if c.get("orderable", True) and c.get("external_id")
+                            and c.get("id") != product.get("id")
+                        ][:3]
+                        logger.warning(
+                            "[ORDER FLOW] picked product #%d NOT orderable — "
+                            "suggesting %d alternatives | name=%r stock=%s",
+                            idx, len(_alts), product.get("title"),
+                            product.get("stock_qty"),
+                        )
+                        return Decision(
+                            action=ACTION_SEARCH_PRODUCTS,
+                            args={
+                                "query": product.get("category") or product.get("title", ""),
+                                "rejected_product": product,
+                                "alternatives": _alts,
+                            },
+                            reason=f"picked product #{idx} not orderable — suggest alternatives",
+                            confidence=0.95,
                         )
                     if facts.orderable:
                         return Decision(
@@ -246,7 +261,6 @@ class DefaultDecisionEngine:
                             reason=f"customer picked option {idx} from list — start order",
                             confidence=0.95,
                         )
-                    # Store not orderable — confirm product focus, show details
                     return Decision(
                         action=ACTION_SEARCH_PRODUCTS,
                         args={"query": product.get("title", ""),

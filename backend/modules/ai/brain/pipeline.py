@@ -284,7 +284,21 @@ class MerchantBrain:
             or result.data.get("recommended_products")
             or []
         )
-        if intent.name == INTENT_PICK_LIST_ITEM and new_state.current_product_focus:
+        if decision.args.get("rejected_product"):
+            # Customer picked a product that was not orderable. The decision
+            # engine routed to ACTION_SEARCH_PRODUCTS with alternatives.
+            # Clear product focus so we don't loop on the rejected product,
+            # and replace candidates with the orderable alternatives.
+            new_state.current_product_focus = None
+            alts = decision.args.get("alternatives") or _search_products
+            new_state.last_search_candidates = list(alts)[:16]
+            logger.info(
+                "[ORDER FLOW] rejected unorderable pick — replaced candidates | "
+                "rejected=%r new_count=%d",
+                (decision.args["rejected_product"] or {}).get("title"),
+                len(new_state.last_search_candidates),
+            )
+        elif intent.name == INTENT_PICK_LIST_ITEM and new_state.current_product_focus:
             # Successful pick → decision engine already consumed the chosen
             # product into ACTION_PROPOSE_DRAFT_ORDER. Clear candidates.
             new_state.last_search_candidates = []

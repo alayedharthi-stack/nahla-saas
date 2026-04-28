@@ -128,7 +128,7 @@ class CatalogContextBuilder:
         Strategy (priority order):
           1. PostgreSQL full-text search on title + description (supports Arabic)
           2. ILIKE fallback on title for very short queries or FTS failures
-        Only returns in-stock products first; out-of-stock follow if needed.
+        Only returns **orderable** products (has external_id + in_stock).
         """
         from sqlalchemy import text as sa_text  # noqa: PLC0415
         q_clean = query.strip()
@@ -153,7 +153,7 @@ class CatalogContextBuilder:
                     .filter(Product.id.in_(ids))
                     .all()
                 )
-                return [self._format(p) for p in rows]
+                return self._filter_orderable(rows, source="search")
         except Exception:
             pass  # fall through to ILIKE
 
@@ -169,7 +169,7 @@ class CatalogContextBuilder:
             .limit(limit)
             .all()
         )
-        return [self._format(p) for p in rows]
+        return self._filter_orderable(rows, source="search_ilike")
 
     def get_by_external_id(self, ext_id: str) -> Optional[Dict]:
         p = (
@@ -180,15 +180,15 @@ class CatalogContextBuilder:
         return self._format(p) if p else None
 
     def get_top_products(self, limit: int = 25) -> List[Dict]:
-        """Return top products, prioritising in-stock items."""
+        """Return top **orderable** products."""
         rows = (
             self.db.query(Product)
             .filter_by(tenant_id=self.tenant_id)
             .order_by(Product.in_stock.desc(), Product.id)
-            .limit(limit)
+            .limit(limit + 20)  # fetch extra to compensate for filtered-out rows
             .all()
         )
-        return [self._format(p) for p in rows]
+        return self._filter_orderable(rows, source="top_products")[:limit]
 
     def check_availability(self, ext_id: str) -> Dict:
         """Return {'available': bool, 'stock_qty': int|None} from synced data."""
@@ -210,19 +210,73 @@ class CatalogContextBuilder:
 
     def _format(self, p: Product) -> Dict:
         meta = p.extra_metadata or {}
+        ext_id = (p.external_id or "").strip()
+        stock_qty = meta.get("stock_qty", p.stock_quantity)
+        in_stock_flag = meta.get("in_stock", p.in_stock)
+        status = meta.get("status", "active")
+
+        # Variant awareness: if variants are synced, at least one must be
+        # in-stock for the parent product to be orderable.
+        variants = meta.get("variants") or []
+        variants_ok = True
+        if variants:
+            variants_ok = any(
+                (v.get("stock_quantity") or v.get("quantity") or 0) > 0
+                for v in variants
+                if isinstance(v, dict)
+            )
+
+        orderable = (
+            bool(ext_id)
+            and status == "active"
+            and bool(in_stock_flag)
+            and (stock_qty is None or int(stock_qty or 0) > 0)
+            and variants_ok
+        )
         return {
             "id":          p.id,
-            "external_id": p.external_id,
+            "external_id": ext_id or None,
             "title":       p.title,
             "sku":         p.sku,
             "price":       p.price,
             "sale_price":  meta.get("sale_price"),
             "category":    meta.get("category", ""),
             "brand":       meta.get("brand", ""),
-            "in_stock":    meta.get("in_stock", True),
-            "stock_qty":   meta.get("stock_qty"),
+            "in_stock":    in_stock_flag,
+            "stock_qty":   stock_qty,
             "image_url":   meta.get("image_url", ""),
+            "orderable":   orderable,
+            "status":      status,
         }
+
+    def _filter_orderable(
+        self, rows: List[Product], *, source: str = ""
+    ) -> List[Dict]:
+        """Format product rows and drop non-orderable ones.
+
+        Every product is logged with a [CATALOG] line for diagnostics.
+        """
+        result: List[Dict] = []
+        for p in rows:
+            fmt = self._format(p)
+            if fmt["orderable"]:
+                logger.info(
+                    "[CATALOG] product listed | source=%s name=%r salla_id=%s "
+                    "stock=%s orderable=True status=%s",
+                    source, fmt["title"], fmt["external_id"],
+                    fmt["stock_qty"], fmt["status"],
+                )
+                result.append(fmt)
+            else:
+                logger.debug(
+                    "[CATALOG] product SKIPPED (not orderable) | source=%s "
+                    "name=%r salla_id=%s stock=%s in_stock=%s status=%s "
+                    "has_external_id=%s",
+                    source, fmt["title"], fmt["external_id"],
+                    fmt["stock_qty"], fmt["in_stock"], fmt["status"],
+                    bool(fmt["external_id"]),
+                )
+        return result
 
     def build_context_block(self, query: str = "") -> str:
         """Return a formatted text block for the AI prompt."""
@@ -244,18 +298,22 @@ class CatalogContextBuilder:
                 "اعتذر بأدب وأخبر العميل أن المتجر سيتواصل معه قريباً."
             )
 
-        lines = ["### المنتجات المتاحة (من البيانات الفعلية للمتجر):"]
+        lines = ["### المنتجات المتاحة للبيع (متوفرة فعلياً في المخزون):"]
         for p in products:
             price_str = f"{p['price']} ريال"
             if p.get("sale_price"):
                 price_str = f"{p['sale_price']} ريال (بدلاً من {p['price']} ريال)"
-            avail = "متوفر" if p.get("in_stock") else "غير متوفر"
+            stock_str = ""
             if p.get("stock_qty") is not None:
-                avail += f" ({p['stock_qty']} قطعة)"
+                stock_str = f" ({p['stock_qty']} قطعة)"
             lines.append(
-                f"- {p['title']} | السعر: {price_str} | الحالة: {avail}"
+                f"- {p['title']} | السعر: {price_str} | متوفر{stock_str}"
                 + (f" | التصنيف: {p['category']}" if p.get("category") else "")
             )
+        lines.append(
+            "\nتنبيه: جميع المنتجات أعلاه تم التحقق من توفرها في المخزون."
+            " لا تعرض أي منتج غير مذكور في هذه القائمة."
+        )
         return "\n".join(lines)
 
 
