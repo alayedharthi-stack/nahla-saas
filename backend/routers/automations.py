@@ -59,6 +59,7 @@ ORDER_STATUS_LABELS: Dict[str, str] = {
 from core.automations_seed import (
     ENGINE_BY_TYPE as _ENGINE_BY_TYPE,
     ensure_engine_for_tenant as _ensure_engine_for_tenant,
+    ensure_order_notifications_automation as _ensure_order_notifications_automation,
     seed_automations_if_empty as _seed_automations_if_empty,
 )
 from core.billing import require_billing_access
@@ -73,6 +74,13 @@ from core.tenant import (
 )
 
 router = APIRouter()
+
+
+def _sync_automation_catalog_for_tenant(db: Session, tenant_id: int) -> None:
+    """Seed catalogue additions + guarantee ``order_notifications`` + repair ``engine``."""
+    _seed_automations_if_empty(db, tenant_id)
+    _ensure_order_notifications_automation(db, tenant_id)
+    _ensure_engine_for_tenant(db, tenant_id)
 
 
 # ── Feature flags (process-level, runtime-readable) ───────────────────────────
@@ -207,12 +215,22 @@ class AutopilotSettingsIn(BaseModel):
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 
-def _auto_to_dict(a: SmartAutomation) -> Dict[str, Any]:
+def _auto_to_dict(a: SmartAutomation, db: Optional[Session] = None, tenant_id: Optional[int] = None) -> Dict[str, Any]:
+    enabled = bool(a.enabled)
+    # Order notifications toggle is mirrored in TenantSettings autopilot.order_status_update
+    # so merchants see one consistent switch with legacy autopilot payloads.
+    if (
+        getattr(a, "automation_type", None) == "order_notifications"
+        and db is not None
+        and tenant_id is not None
+    ):
+        ap_osu = _get_autopilot_settings(db, int(tenant_id)).get("order_status_update") or {}
+        enabled = bool(ap_osu.get("enabled", enabled))
     return {
         "id": a.id,
         "automation_type": a.automation_type,
         "name": a.name,
-        "enabled": a.enabled,
+        "enabled": enabled,
         # 4-engine grouping for the SmartAutomations dashboard. Falls back
         # to the canonical map for legacy rows whose `engine` column was
         # never backfilled (defensive — ensure_engine_for_tenant should
@@ -404,9 +422,7 @@ def _placeholder_removed_job(name: str) -> None:  # pragma: no cover - sentinel
 async def list_automations(request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
-    _seed_automations_if_empty(db, tenant_id)
-    # Repair the 4-engine bucket for any pre-0027 rows (no-op once migrated).
-    _ensure_engine_for_tenant(db, tenant_id)
+    _sync_automation_catalog_for_tenant(db, tenant_id)
     db.commit()
     autos = (
         db.query(SmartAutomation)
@@ -415,7 +431,7 @@ async def list_automations(request: Request, db: Session = Depends(get_db)):
         .all()
     )
     autopilot = _get_autopilot_enabled(db, tenant_id)
-    return {"automations": [_auto_to_dict(a) for a in autos], "autopilot_enabled": autopilot}
+    return {"automations": [_auto_to_dict(a, db, tenant_id) for a in autos], "autopilot_enabled": autopilot}
 
 
 # ── Attribution windows (days) per automation type ───────────────────────────
@@ -430,6 +446,7 @@ _ATTRIBUTION_WINDOW_DAYS: Dict[str, int] = {
     "predictive_reorder": 7,
     "new_product_alert":  7,
     "back_in_stock":      7,
+    "order_notifications": 7,
 }
 
 
@@ -776,8 +793,7 @@ async def get_engines_summary(
     """
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
-    _seed_automations_if_empty(db, tenant_id)
-    _ensure_engine_for_tenant(db, tenant_id)
+    _sync_automation_catalog_for_tenant(db, tenant_id)
     db.commit()
 
     autos: List[SmartAutomation] = (
@@ -897,9 +913,15 @@ async def toggle_automation(
         raise HTTPException(status_code=404, detail="Automation not found")
     auto.enabled = body.enabled
     auto.updated_at = datetime.now(timezone.utc)
+    if auto.automation_type == "order_notifications":
+        cur_ap = _get_autopilot_settings(db, tenant_id)
+        osu = dict(cur_ap.get("order_status_update") or DEFAULT_AUTOPILOT["order_status_update"])
+        osu["enabled"] = bool(body.enabled)
+        cur_ap["order_status_update"] = osu
+        _save_autopilot_settings(db, tenant_id, cur_ap)
     db.commit()
     db.refresh(auto)
-    return _auto_to_dict(auto)
+    return _auto_to_dict(auto, db, tenant_id)
 
 
 @router.put("/automations/{automation_id}/config")
@@ -922,7 +944,7 @@ async def update_automation_config(
     auto.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(auto)
-    return _auto_to_dict(auto)
+    return _auto_to_dict(auto, db, tenant_id)
 
 
 @router.post("/automations/autopilot")
@@ -965,6 +987,7 @@ async def autopilot_status(request: Request, db: Session = Depends(get_db)):
     """Return autopilot settings, today's action summary, and next scheduled run time."""
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+    _sync_automation_catalog_for_tenant(db, tenant_id)
     db.commit()
 
     ap = _get_autopilot_settings(db, tenant_id)
@@ -1007,6 +1030,7 @@ async def update_autopilot_settings(
     """Save autopilot master toggle and sub-automation settings."""
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+    _sync_automation_catalog_for_tenant(db, tenant_id)
 
     if body.enabled:
         require_billing_access(db, int(tenant_id))
@@ -1029,6 +1053,23 @@ async def update_autopilot_settings(
 
     _save_autopilot_settings(db, tenant_id, current)
     db.commit()
+
+    # Keep SmartAutomation order_notifications.enabled aligned with autopilot.order_status_update.enabled.
+    osu_en = (current.get("order_status_update") or {}).get("enabled")
+    if osu_en is not None:
+        sync_auto = (
+            db.query(SmartAutomation)
+            .filter(
+                SmartAutomation.tenant_id == tenant_id,
+                SmartAutomation.automation_type == "order_notifications",
+            )
+            .first()
+        )
+        if sync_auto is not None and sync_auto.enabled != bool(osu_en):
+            sync_auto.enabled = bool(osu_en)
+            sync_auto.updated_at = datetime.now(timezone.utc)
+            db.commit()
+
     return {"settings": current}
 
 
@@ -1148,6 +1189,9 @@ async def all_automations_readiness(request: Request, db: Session = Depends(get_
       steps: list       — one entry per template with status details
     """
     tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    _sync_automation_catalog_for_tenant(db, tenant_id)
+    db.commit()
 
     from core.service_template_resolver import resolve_template_for_send  # noqa: PLC0415
     from models import WhatsAppTemplate  # noqa: PLC0415
@@ -1234,6 +1278,33 @@ async def all_automations_readiness(request: Request, db: Session = Depends(get_
                 "legacy_names": ["salary_payday_offer_ar", "salary_payday_offer_en"],
                 "library_keys": ["salary_payday_offer_template"],
                 "service_key":  "salary_payday_offers",
+            },
+        ],
+        # Nahla library service families linked to store order lifecycle notices.
+        "order_notifications": [
+            {
+                "label": "المرحلة 1 — تأكيد الطلب والملخص",
+                "legacy_names": ["order_status_update_ar"],
+                "library_keys": ["post_purchase_thanks", "order_summary", "order_confirmed"],
+                "service_key":  "order_confirmation",
+            },
+            {
+                "label": "المرحلة 2 — الشحن والتتبع",
+                "legacy_names": [],
+                "library_keys": ["shipping_update", "order_out_for_delivery"],
+                "service_key":  "shipping_tracking",
+            },
+            {
+                "label": "المرحلة 3 — التسليم وتجربة ما بعد الشراء",
+                "legacy_names": [],
+                "library_keys": ["order_delivered", "review_request"],
+                "service_key":  "post_delivery",
+            },
+            {
+                "label": "المرحلة 4 — تأكيد COD",
+                "legacy_names": [],
+                "library_keys": ["cod_confirmation", "cod_reminder_before_shipping"],
+                "service_key":  "cod_confirmation",
             },
         ],
     }

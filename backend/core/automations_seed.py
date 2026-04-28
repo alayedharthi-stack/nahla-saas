@@ -44,6 +44,7 @@ ENGINE_BY_TYPE: Dict[str, str] = {
     "back_in_stock":         "growth",
     "seasonal_offer":        "growth",
     "salary_payday_offer":   "growth",
+    "order_notifications":   "recovery",
 }
 
 
@@ -52,6 +53,19 @@ ENGINE_BY_TYPE: Dict[str, str] = {
 # dashboard can render it inside the right operational bucket — no backfill
 # migration needed for fresh tenants.
 SEED_AUTOMATIONS: List[Dict[str, Any]] = [
+    {
+        "automation_type": "order_notifications",
+        "engine":          "recovery",
+        "trigger_event":   AutomationTrigger.ORDER_NOTIFICATIONS.value,
+        "name":            "إشعارات الطلبات",
+        "enabled":         False,
+        "config": {
+            "description_ar": (
+                "تنبيهات واتساب لمراحل الطلب (تأكيد، شحن وتتبع، تسليم، COD…) "
+                "باستخدام قوالب نحلة المعتمدة."
+            ),
+        },
+    },
     {
         "automation_type": "abandoned_cart",
         "engine":          "recovery",
@@ -372,7 +386,7 @@ def seed_automations_if_empty(db: Session, tenant_id: int) -> None:
     """
     Idempotent seed for one tenant.
 
-    On first call for a tenant this inserts the 6 canonical automations with
+    On first call for a tenant this inserts the canonical automations with
     `trigger_event` pre-populated. On subsequent calls it inserts anything
     missing (e.g. after we add a new trigger to the enum) without touching
     existing rows the merchant may have customised.
@@ -398,6 +412,58 @@ def seed_automations_if_empty(db: Session, tenant_id: int) -> None:
             updated_at=now,
         )
         db.add(auto)
+    db.flush()
+
+
+def ensure_order_notifications_automation(db: Session, tenant_id: int) -> None:
+    """
+    Guarantee exactly one ``order_notifications`` SmartAutomation row per tenant.
+
+    ``seed_automations_if_empty`` skips types already present in the catalogue —
+    production merchants seeded **before** ``order_notifications`` was added would not get this row unless something adds it here.
+    Safe to call on every `/automations` GET (idempotent insert-if-missing).
+    """
+    exists = (
+        db.query(SmartAutomation.id)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "order_notifications",
+        )
+        .first()
+    )
+    if exists:
+        return
+
+    spec = next((s for s in SEED_AUTOMATIONS if s["automation_type"] == "order_notifications"), None)
+    if spec is None:
+        # Fallback if SEED_AUTOMATIONS is reorganised — keeps production repair working.
+        spec = {
+            "automation_type": "order_notifications",
+            "engine":          "recovery",
+            "trigger_event":   AutomationTrigger.ORDER_NOTIFICATIONS.value,
+            "name":            "إشعارات الطلبات",
+            "enabled":         False,
+            "config":          {
+                "description_ar": (
+                    "تنبيهات واتساب لمراحل الطلب (تأكيد، شحن وتتبع، تسليم، COD…) "
+                    "باستخدام قوالب نحلة المعتمدة."
+                ),
+            },
+        }
+
+    now = datetime.now(timezone.utc)
+    auto = SmartAutomation(
+        tenant_id=tenant_id,
+        automation_type=spec["automation_type"],
+        engine=spec.get("engine") or ENGINE_BY_TYPE.get(spec["automation_type"], "recovery"),
+        trigger_event=spec["trigger_event"],
+        name=spec["name"],
+        enabled=bool(spec.get("enabled", False)),
+        config=spec.get("config"),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(auto)
     db.flush()
 
 

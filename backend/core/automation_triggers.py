@@ -58,6 +58,10 @@ class AutomationTrigger(str, Enum):
     # — the two sweepers operate on disjoint status sets and never
     # collide on the same order.
     ORDER_COD_PENDING      = "order_cod_pending"
+    # Order lifecycle WhatsApp notices (confirmation, shipping, delivery, COD…).
+    # No emitter fans into this trigger yet — the row exists for dashboard + readiness;
+    # real sends use events like ``order_shipped`` / dedicated flows. Kept stable for UI/sync.
+    ORDER_NOTIFICATIONS    = "order_notifications"
 
 
 # Canonical mapping: SmartAutomation.automation_type → AutomationTrigger
@@ -74,6 +78,7 @@ AUTOMATION_TYPE_TO_TRIGGER: Dict[str, AutomationTrigger] = {
     "seasonal_offer":        AutomationTrigger.SEASONAL_EVENT_DUE,
     "salary_payday_offer":   AutomationTrigger.SALARY_PAYDAY_DUE,
     "cod_confirmation":      AutomationTrigger.ORDER_COD_PENDING,
+    "order_notifications":   AutomationTrigger.ORDER_NOTIFICATIONS,
 }
 
 

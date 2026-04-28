@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from models import Integration, Tenant, User, WhatsAppConnection
+from models import Integration, Product, SmartAutomation, Tenant, User, WhatsAppConnection
 
 from core.audit import audit
 from core.auth import create_token, get_jwt_tenant_id, hash_password
@@ -539,6 +539,300 @@ async def salla_whoami(request: Request, db: Session = Depends(get_db)):
             "cannot be changed by the client or request headers."
         ),
     }
+
+
+# ── Session Check (Zero-Friction Entry) ───────────────────────────────────────
+
+@router.get("/api/salla/session")
+async def salla_check_session(request: Request, db: Session = Depends(get_db)):
+    """
+    PROTECTED — requires valid Nahla JWT in Authorization header.
+
+    Used by /app/salla at startup: if a live session exists the merchant is
+    routed directly to the dashboard without re-running the token-exchange.
+
+    Also used by /app/entry to fetch merchant readiness state in one call.
+
+    Returns 200 {
+      connected, tenant_id, token,
+      whatsapp_connected, has_automations, has_products
+    }
+    Returns 401 if expired / missing.
+    """
+    try:
+        payload = require_authenticated(request)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="session_expired")
+
+    tenant_id = int(payload.get("tenant_id", 0))
+    user_id   = payload.get("user_id")
+    email     = str(payload.get("sub", ""))
+    role      = str(payload.get("role", "merchant"))
+
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="invalid_tenant")
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=401, detail="tenant_not_found")
+
+    # Rolling session — re-issue a fresh JWT
+    fresh_token = create_token(
+        email=email,
+        role=role,
+        tenant_id=tenant_id,
+        user_id=int(user_id) if user_id is not None else None,
+    )
+
+    # ── Merchant readiness probes (cheap point-queries) ────────────────────
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == tenant_id)
+        .first()
+    )
+    wa_connected = bool(wa_conn and wa_conn.status == "connected")
+
+    has_automations = (
+        db.query(SmartAutomation.id)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.enabled.is_(True),
+        )
+        .first()
+    ) is not None
+
+    has_products = (
+        db.query(Product.id)
+        .filter(Product.tenant_id == tenant_id)
+        .limit(1)
+        .first()
+    ) is not None
+
+    logger.info(
+        "[SallaSession] ✅ tenant=%s wa=%s autos=%s products=%s",
+        tenant_id, wa_connected, has_automations, has_products,
+    )
+
+    return {
+        "connected":          True,
+        "tenant_id":          tenant_id,
+        "token":              fresh_token,
+        "whatsapp_connected": wa_connected,
+        "has_automations":    has_automations,
+        "has_products":       has_products,
+    }
+
+
+@router.post("/api/salla/activate-from-email")
+async def salla_activate_from_email(request: Request, db: Session = Depends(get_db)):
+    """
+    PUBLIC — no JWT required.
+
+    Salla's process: when a merchant installs the app, Salla sends the
+    merchant's embedded token + info to the partner's email.  The admin (or
+    an email-link clicked by the merchant) calls this endpoint to activate
+    the account without requiring the merchant to go through the full OAuth
+    flow again.
+
+    Body:
+        token         — Salla embedded / access token
+        merchant_email — hint used when introspection fails
+        store_id       — optional Salla store ID hint
+
+    Returns the same payload as /salla/token-login so the frontend can
+    persist the session and navigate to /app/entry.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    salla_token    = (body.get("token")          or "").strip()
+    merchant_email = (body.get("merchant_email") or "").strip().lower()
+    store_id_hint  = str(body.get("store_id") or "")
+
+    if not salla_token:
+        raise HTTPException(status_code=400, detail="token required")
+
+    logger.info(
+        "[SallaActivate] ▶ activate-from-email | email=%s store=%s",
+        merchant_email, store_id_hint,
+    )
+
+    # ── Try Salla token introspection (same path as token-login) ──────────
+    merchant_id_str = store_id_hint
+    store_name      = ""
+    owner_email     = merchant_email
+    introspect_ok   = False
+
+    try:
+        app_id = str(body.get("app_id") or SALLA_CLIENT_ID or "")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.salla.dev/exchange-authority/v1/introspect",
+                json={"token": salla_token, "app_id": app_id},
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            )
+        if resp.status_code == 200:
+            idata = resp.json()
+            data  = idata.get("data", idata)
+            merchant_id_str = str(
+                data.get("store", {}).get("id")
+                or data.get("merchant", {}).get("id")
+                or data.get("id")
+                or store_id_hint
+            )
+            store_name  = data.get("store", {}).get("name", "") or store_name
+            owner_email = (
+                data.get("merchant", {}).get("email")
+                or data.get("email")
+                or merchant_email
+            )
+            introspect_ok = True
+            logger.info(
+                "[SallaActivate] Introspect OK | merchant=%s store=%s",
+                merchant_id_str, store_name,
+            )
+        else:
+            logger.warning(
+                "[SallaActivate] Introspect %d — using email hint | email=%s",
+                resp.status_code, merchant_email,
+            )
+    except Exception as exc:
+        logger.warning("[SallaActivate] Introspect error: %s — using hint", exc)
+
+    # ── Find existing tenant (by integration record or email) ─────────────
+    tenant_id: Optional[int] = None
+    is_new = False
+
+    if merchant_id_str:
+        existing = db.query(Integration).filter(
+            Integration.provider == "salla",
+            Integration.external_store_id == merchant_id_str,
+        ).first()
+        if existing:
+            tenant_id = existing.tenant_id
+
+    if not tenant_id and owner_email:
+        user_row = db.query(User).filter(User.email == owner_email).first()
+        if user_row:
+            tenant_id = user_row.tenant_id
+
+    # ── Create tenant if still not found ─────────────────────────────────
+    if not tenant_id:
+        unique_name = f"{store_name or 'متجر سلة'}-{merchant_id_str}" if merchant_id_str else (store_name or "متجر سلة")
+        new_tenant = Tenant(name=unique_name)
+        db.add(new_tenant)
+        db.flush()
+        tenant_id = new_tenant.id
+        is_new    = True
+
+        if owner_email:
+            new_user = User(
+                username      = owner_email.split("@")[0],
+                email         = owner_email,
+                password_hash = hash_password(_secrets.token_urlsafe(16)),
+                role          = "merchant",
+                tenant_id     = tenant_id,
+                is_active     = True,
+            )
+            db.add(new_user)
+            db.flush()
+
+    # ── Ensure Salla integration row exists ───────────────────────────────
+    if merchant_id_str:
+        intg = db.query(Integration).filter(
+            Integration.provider == "salla",
+            Integration.external_store_id == merchant_id_str,
+        ).first()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if intg:
+            cfg = dict(intg.config or {})
+            cfg.update({"store_name": store_name, "last_seen": now_iso,
+                        "activated_from_email": True})
+            intg.config  = cfg
+            intg.enabled = True
+        else:
+            db.add(Integration(
+                provider          = "salla",
+                external_store_id = merchant_id_str,
+                tenant_id         = tenant_id,
+                enabled           = True,
+                config            = {
+                    "store_id":             merchant_id_str,
+                    "store_name":           store_name,
+                    "salla_owner_email":    owner_email,
+                    "activated_from_email": True,
+                    "activated_at":         now_iso,
+                },
+            ))
+
+    db.commit()
+
+    # ── Issue JWT ─────────────────────────────────────────────────────────
+    user_row2 = db.query(User).filter(User.tenant_id == tenant_id).first()
+    jwt_token = create_token(
+        email     = owner_email or (user_row2.email if user_row2 else ""),
+        role      = "merchant",
+        tenant_id = tenant_id,
+        user_id   = user_row2.id if user_row2 else None,
+    )
+
+    audit("salla_activate_from_email", tenant_id=tenant_id)
+    logger.info(
+        "[SallaActivate] ✅ Done | tenant=%s is_new=%s introspect_ok=%s",
+        tenant_id, is_new, introspect_ok,
+    )
+
+    return {
+        "access_token": jwt_token,
+        "tenant_id":    tenant_id,
+        "store_name":   store_name,
+        "email":        owner_email,
+        "is_new":       is_new,
+        "introspect_ok": introspect_ok,
+        "status":       "activated",
+    }
+
+
+@router.get("/admin/salla-activations")
+async def admin_salla_activations(request: Request, db: Session = Depends(get_db)):
+    """
+    ADMIN — returns all Salla integrations for the admin activations dashboard.
+
+    Shows store name, tenant, status and when it was last activated.
+    """
+    from core.auth import require_authenticated  # noqa: PLC0415
+    payload = require_authenticated(request)
+    if payload.get("role") not in ("admin", "owner", "staff"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    rows = (
+        db.query(Integration)
+        .filter(Integration.provider == "salla")
+        .order_by(Integration.id.desc())
+        .limit(200)
+        .all()
+    )
+
+    result = []
+    for r in rows:
+        cfg = r.config or {}
+        tenant = db.query(Tenant).filter(Tenant.id == r.tenant_id).first()
+        result.append({
+            "integration_id":       r.id,
+            "tenant_id":            r.tenant_id,
+            "tenant_name":          tenant.name if tenant else "—",
+            "store_id":             r.external_store_id or cfg.get("store_id", ""),
+            "store_name":           cfg.get("store_name", ""),
+            "email":                cfg.get("salla_owner_email", ""),
+            "enabled":              r.enabled,
+            "activated_from_email": cfg.get("activated_from_email", False),
+            "activated_at":         cfg.get("activated_at", ""),
+            "last_seen":            cfg.get("last_seen", ""),
+        })
+
+    return {"activations": result, "total": len(result)}
 
 
 # ── Salla Embedded App Page ────────────────────────────────────────────────────

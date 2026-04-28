@@ -11,6 +11,7 @@ export type AutomationType =
   | 'cod_confirmation'
   | 'seasonal_offer'
   | 'salary_payday_offer'
+  | 'order_notifications'
 
 export type EngineKey = 'recovery' | 'growth' | 'experience' | 'intelligence'
 
@@ -242,5 +243,12 @@ export const AUTOMATION_META: Record<AutomationType, {
     trigger: 'salary_payday_due',
     icon: '💰',
     color: 'emerald',
+  },
+  order_notifications: {
+    label: 'إشعارات الطلبات',
+    desc: 'تنبيهات واتساب لمراحل الطلب — تأكيد، شحن، تسليم، وتأكيد الدفع عند الاستلام (قوالب مكتبة نحلة)',
+    trigger: 'order_notifications',
+    icon: '📣',
+    color: 'blue',
   },
 }

@@ -15,6 +15,7 @@ import {
   automationsApi,
   AutomationRecord,
   AUTOMATION_META,
+  type AutomationType,
   type EngineKey,
   type EngineSummary,
 } from '../api/automations'
@@ -113,9 +114,10 @@ interface ToggleProps {
   onChange: (next: boolean) => void
   size?: 'sm' | 'lg'
   disabled?: boolean
+  title?: string
 }
 
-function Toggle({ enabled, onChange, size = 'sm', disabled = false }: ToggleProps) {
+function Toggle({ enabled, onChange, size = 'sm', disabled = false, title }: ToggleProps) {
   const trackBase =
     size === 'lg'
       ? 'w-14 h-7 rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500'
@@ -132,6 +134,8 @@ function Toggle({ enabled, onChange, size = 'sm', disabled = false }: ToggleProp
       type="button"
       role="switch"
       aria-checked={enabled}
+      aria-label={title}
+      title={title}
       disabled={disabled}
       onClick={() => !disabled && onChange(!enabled)}
       className={`${trackBase} ${enabled ? 'bg-emerald-500' : 'bg-slate-200'} ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
@@ -985,7 +989,14 @@ function AutomationCard({ automation, onToggle, readiness, readinessLoading }: A
   const templatesReady = readiness?.all_ready === true
   const templatesNotReady = !readinessLoading && readiness !== null && !readiness.all_ready
 
-  const meta = AUTOMATION_META[automation.automation_type]
+  const meta =
+    AUTOMATION_META[automation.automation_type as AutomationType] ?? {
+      label: automation.name || String(automation.automation_type),
+      desc: 'أتمتة من الطيار الآلي',
+      trigger: String(automation.automation_type),
+      icon: '📣',
+      color: 'blue',
+    }
 
   const triggerVariantMap: Record<string, 'amber' | 'blue' | 'purple' | 'green' | 'slate'> = {
     amber: 'amber',
@@ -1012,6 +1023,7 @@ function AutomationCard({ automation, onToggle, readiness, readinessLoading }: A
   }
 
   const isAbandonedCart = automation.automation_type === 'abandoned_cart'
+  const isOrderNotifications = automation.automation_type === 'order_notifications'
   const steps =
     isAbandonedCart && Array.isArray((automation.config as Record<string, unknown>).steps)
       ? ((automation.config as Record<string, unknown>).steps as Record<string, unknown>[])
@@ -1039,8 +1051,50 @@ function AutomationCard({ automation, onToggle, readiness, readinessLoading }: A
   }
   const dsMeta = discountSourceMeta[discountSource]
 
+  let statusBadgeLabel: string
+  let statusBadgeVariant: 'amber' | 'green' | 'slate'
+  if (isOrderNotifications) {
+    if (readinessLoading) {
+      statusBadgeLabel = 'جاري التحقق من مراحل القوالب…'
+      statusBadgeVariant = 'slate'
+    } else if (automation.enabled && templatesNotReady) {
+      statusBadgeLabel = 'مُفعَّل — يتطلّب اعتماد كامل قبل أي إرسال'
+      statusBadgeVariant = 'amber'
+    } else if (automation.enabled) {
+      statusBadgeLabel = 'مُفعَّل'
+      statusBadgeVariant = 'green'
+    } else if (!templatesReady) {
+      statusBadgeLabel = 'التفعيل مقفل — اعتماد القوالب مطلوب'
+      statusBadgeVariant = 'amber'
+    } else {
+      statusBadgeLabel = 'متوقف — جاهز للتفعيل'
+      statusBadgeVariant = 'slate'
+    }
+  } else {
+    statusBadgeLabel =
+      automation.enabled && templatesNotReady
+        ? 'مُفعَّل — القوالب غير معتمدة'
+        : automation.enabled
+          ? 'مُفعَّل'
+          : 'معطّل'
+    statusBadgeVariant =
+      automation.enabled && templatesNotReady ? 'amber'
+        : automation.enabled ? 'green' : 'slate'
+  }
+
+  const cardAccent =
+    automation.enabled ? 'ring-1 ring-emerald-200 shadow-sm'
+      : isOrderNotifications
+        ? `ring-1 ${!templatesReady && !readinessLoading ? 'ring-amber-200 shadow-sm' : 'ring-slate-200'}`
+        : ''
+
+  const toggleLockHint =
+    isOrderNotifications && !templatesReady && !automation.enabled
+      ? 'يجب اعتماد القوالب الأربعة من مكتبة نحلة أولاً (اعتماد Meta).'
+      : undefined
+
   return (
-    <div className={`card overflow-hidden transition-all duration-200 ${automation.enabled ? 'ring-1 ring-emerald-200' : ''}`}>
+    <div className={`card overflow-hidden transition-all duration-200 bg-white ${cardAccent}`}>
       <div className="p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
@@ -1048,39 +1102,104 @@ function AutomationCard({ automation, onToggle, readiness, readinessLoading }: A
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-sm font-semibold text-slate-900">{automation.name || meta.label}</h3>
-                <Badge
-                  label={
-                    automation.enabled && templatesNotReady
-                      ? 'مُفعَّل — القوالب غير معتمدة'
-                      : automation.enabled ? 'مُفعَّل' : 'معطّل'
-                  }
-                  variant={
-                    automation.enabled && templatesNotReady ? 'amber'
-                      : automation.enabled ? 'green' : 'slate'
-                  }
-                  dot
-                />
+                <Badge label={statusBadgeLabel} variant={statusBadgeVariant} dot />
               </div>
               <p className="text-xs text-slate-500 mt-1 leading-relaxed">{meta.desc}</p>
+              {isOrderNotifications && (
+                <p className="text-[11px] text-slate-600 mt-2 leading-relaxed border-s-2 border-slate-200 ps-2">
+                  الإرسال الفعلي لتحديثات الطلب عبر واتساب يُربَط تلقائياً بأحداث الطلب من المتجر (مثل سلة) بعد اعتماد القوالب.
+                  لا يوجد إرسال مكتمل بهذه الخدمة قبل اعتماد القوالب واكتمال الربط الفني بالأحداث.
+                </p>
+              )}
             </div>
           </div>
           <Toggle
             enabled={automation.enabled}
             onChange={handleToggle}
             disabled={toggling || (!templatesReady && !automation.enabled)}
+            title={toggleLockHint}
           />
         </div>
 
-        {/* Readiness — loading */}
-        {readinessLoading && (
+        {/* إشعارات الطلبات: المراحل الظاهرة دائماً للديمو */}
+        {isOrderNotifications && (
+          <div className="mt-4 space-y-2">
+            <p className="text-[11px] font-semibold text-slate-700">مراحل القوالب (مكتبة نحلة)</p>
+            {readinessLoading ? (
+              <div className="space-y-2 animate-pulse">
+                {[1, 2, 3, 4].map(i => (
+                  <div key={i} className="h-9 rounded-lg bg-slate-100 border border-slate-100" />
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {(readiness?.steps ?? []).map((s, i) => (
+                  <div
+                    key={i}
+                    className={`flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-xs ${
+                      s.ready
+                        ? 'bg-emerald-50/80 border-emerald-200 text-emerald-800'
+                        : 'bg-white border-slate-200 text-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      {s.ready ? (
+                        <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                      )}
+                      <span className="font-medium truncate">{s.label}</span>
+                    </div>
+                    <span
+                      className={`shrink-0 px-2 py-0.5 rounded text-[10px] font-medium ${
+                        s.ready
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : s.status === 'MISSING'
+                            ? 'bg-red-50 text-red-700'
+                            : 'bg-amber-100 text-amber-800'
+                      }`}
+                    >
+                      {s.ready ? 'معتمد ✓' : s.status === 'MISSING' ? 'غير معتمد بعد' : s.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {!readinessLoading && !templatesReady && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2">
+                <p className="text-[11px] font-semibold text-amber-900">التفعيل مقفل</p>
+                <p className="text-[11px] text-amber-800/95 mt-0.5">
+                  اعتمِد كل مرحلة في الأسفل عبر{' '}
+                  <a href="/templates" className="underline font-medium hover:text-amber-950">
+                    مكتبة القوالب
+                  </a>{' '}
+                  ثم عُد لتفعيل الخدمة.
+                </p>
+              </div>
+            )}
+            <a
+              href="/templates"
+              className="inline-flex items-center gap-2 text-xs font-semibold text-brand-700 hover:text-brand-900 px-1 py-0.5"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              افتح مكتبة القوالب — اعتماد وربط القوالب بالخدمة
+            </a>
+            <p className="text-[10px] text-slate-500 leading-relaxed pt-1">
+              تحتاج هذه الخدمة إلى قالب واتساب معتمد قبل الإرسال خارج نافذة خدمة الـ 24 ساعة.
+            </p>
+          </div>
+        )}
+
+        {/* Readiness — loading (لا نكرره لبطاقة إشعارات الطلبات) */}
+        {!isOrderNotifications && readinessLoading && (
           <div className="mt-3 flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
             <div className="w-3.5 h-3.5 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin shrink-0" />
             <span className="text-xs text-slate-500">جاري التحقق من اعتماد قوالب WhatsApp...</span>
           </div>
         )}
 
-        {/* Readiness gate — templates NOT ready */}
-        {!readinessLoading && templatesNotReady && (
+        {/* Readiness gate — templates NOT ready (البطاقات الأخرى فقط؛ إشعارات الطلبات تُعرَض أعلاه) */}
+        {!readinessLoading && templatesNotReady && !isOrderNotifications && (
           <div className={`mt-3 rounded-xl p-4 border ${automation.enabled ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
             <div className="flex items-start gap-2 mb-2">
               <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${automation.enabled ? 'text-red-500' : 'text-amber-600'}`} />
@@ -1148,33 +1267,46 @@ function AutomationCard({ automation, onToggle, readiness, readinessLoading }: A
         )}
 
         {/* Readiness OK badge */}
-        {!readinessLoading && readiness?.all_ready && (
+        {!readinessLoading && readiness?.all_ready && !isOrderNotifications && (
           <div className="mt-3 flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
             <CheckCircle className="w-4 h-4 text-emerald-500" />
             <span className="text-xs font-medium text-emerald-700">جاهز للتشغيل — جميع القوالب معتمدة</span>
           </div>
         )}
-
-        <div className="flex items-center gap-4 mt-4 flex-wrap">
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-slate-400">المُشغِّل:</span>
-            <Badge label={meta.trigger} variant={triggerVariant} />
+        {!readinessLoading && readiness?.all_ready && isOrderNotifications && (
+          <div className="mt-3 flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+            <CheckCircle className="w-4 h-4 text-emerald-500" />
+            <span className="text-xs font-medium text-emerald-700">جميع المراحل معتمدة — يمكنك تفعيل الخدمة</span>
           </div>
-          {automation.template_name && (
+        )}
+
+        {!isOrderNotifications && (
+          <div className="flex items-center gap-4 mt-4 flex-wrap">
             <div className="flex items-center gap-1.5">
-              <span className="text-xs text-slate-400">القالب:</span>
-              <span className="text-xs font-medium text-slate-700 bg-slate-50 px-2 py-0.5 rounded-md border border-slate-200">
-                {automation.template_name}
-              </span>
+              <span className="text-xs text-slate-400">المُشغِّل:</span>
+              <Badge label={meta.trigger} variant={triggerVariant} />
             </div>
-          )}
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs text-slate-400">الخصم:</span>
-            <Badge label={dsMeta.label} variant={dsMeta.variant} />
+            {automation.template_name && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-slate-400">القالب:</span>
+                <span className="text-xs font-medium text-slate-700 bg-slate-50 px-2 py-0.5 rounded-md border border-slate-200">
+                  {automation.template_name}
+                </span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-slate-400">الخصم:</span>
+              <Badge label={dsMeta.label} variant={dsMeta.variant} />
+            </div>
           </div>
-        </div>
+        )}
 
-        <div className="flex items-center gap-5 mt-4 pt-4 border-t border-slate-100">
+        <div className={`flex items-center gap-5 mt-4 pt-4 border-t border-slate-100 flex-wrap ${isOrderNotifications ? 'gap-y-2' : ''}`}>
+          {isOrderNotifications && (
+            <p className="text-[10px] text-slate-500 w-full basis-full order-first">
+              أرقام المُشغَّل والمُرسَل تتبع نشاط الطيار بعد اكتمال اعتماد القوالب والربط الفني بأحداث الطلب من المتجر.
+            </p>
+          )}
           <div className="text-center">
             <p className="text-base font-bold text-slate-900">{automation.stats_triggered.toLocaleString('ar-SA')}</p>
             <p className="text-xs text-slate-400 mt-0.5">مُشغَّل</p>
@@ -1230,6 +1362,12 @@ function AutomationCard({ automation, onToggle, readiness, readinessLoading }: A
                 await automationsApi.updateConfig(automation.id, next)
               }}
             />
+          ) : isOrderNotifications ? (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                تفاصيل القوالب والمراحل مُعرَضة في البطاقة الرئيسية. لا حاجة لإعداد إضافي هنا قبل الديمو.
+              </p>
+            </div>
           ) : steps ? (
             <div className="space-y-3">
               {steps.map((step, idx) => (
@@ -1247,14 +1385,14 @@ function AutomationCard({ automation, onToggle, readiness, readinessLoading }: A
             </div>
           )}
 
-          {!isAbandonedCart && automation.template_name && (
+          {!isAbandonedCart && !isOrderNotifications && automation.template_name && (
             <TemplateVarMapPanel templateName={automation.template_name} />
           )}
-          {!isAbandonedCart && !automation.template_name && !!(automation.config as Record<string, unknown>).template_name && (
+          {!isAbandonedCart && !isOrderNotifications && !automation.template_name && !!(automation.config as Record<string, unknown>).template_name && (
             <TemplateVarMapPanel templateName={String((automation.config as Record<string, unknown>).template_name)} />
           )}
 
-          {!isAbandonedCart && (
+          {!isAbandonedCart && !isOrderNotifications && (
             <p className="text-xs text-slate-400 mt-3 flex items-center gap-1.5">
               <AlertCircle className="w-3.5 h-3.5 shrink-0" />
               التعديل على الإعدادات متاح من لوحة الإعدادات المتقدمة.
@@ -1307,6 +1445,27 @@ const ENGINE_DISPLAY: Record<EngineKey, {
 }
 
 
+/** ترتيب العرض داخل «محرك الاسترداد» — إشعارات الطلبات أولاً للديمو والوضوح. */
+const RECOVERY_AUTOMATION_DISPLAY_ORDER: AutomationType[] = [
+  'order_notifications',
+  'abandoned_cart',
+  'customer_winback',
+  'unpaid_order_reminder',
+  'cod_confirmation',
+]
+
+function sortAutomationsForEngine(engine: EngineKey, list: AutomationRecord[]): AutomationRecord[] {
+  if (engine !== 'recovery') return list
+  return [...list].sort((a, b) => {
+    const ia = RECOVERY_AUTOMATION_DISPLAY_ORDER.indexOf(a.automation_type)
+    const ib = RECOVERY_AUTOMATION_DISPLAY_ORDER.indexOf(b.automation_type)
+    const ra = ia === -1 ? 1000 + a.id : ia
+    const rb = ib === -1 ? 1000 + b.id : ib
+    if (ra !== rb) return ra - rb
+    return a.id - b.id
+  })
+}
+
 // ── EngineSection: one collapsible section per engine ─────────────────────────
 
 interface EngineSectionProps {
@@ -1333,7 +1492,10 @@ function EngineSection({
   const display = ENGINE_DISPLAY[engine.engine]
   const IconCmp = display.icon
 
-  const items = automations.filter(a => a.engine === engine.engine)
+  const items = sortAutomationsForEngine(
+    engine.engine,
+    automations.filter(a => a.engine === engine.engine),
+  )
   const showEmpty = engine.available && items.length === 0
 
   const handleEngineToggle = async (next: boolean) => {
@@ -1531,6 +1693,7 @@ function GovernorLogPanel() {
     seasonal_offer:        '🎊',
     salary_payday_offer:   '💵',
     customer_winback:      '💛',
+    order_notifications:   '📣',
   }
 
   return (
@@ -1726,6 +1889,12 @@ export default function SmartAutomations() {
       setAutopilot(Boolean(autopilotStatus.settings.enabled))
       setManualRetryEnabled(Boolean(autopilotStatus.manual_retry_enabled))
       setEngines(summary.engines)
+      // تشخيص مؤقت: هل وصل order_notifications من الـ API؟ (يُزال عند استقرار الإنتاج)
+      console.info('[Nahla Autopilot] automations from API', {
+        count: data.automations.length,
+        types: data.automations.map(a => a.automation_type),
+        hasOrderNotifications: data.automations.some(a => a.automation_type === 'order_notifications'),
+      })
     } catch (e) {
       const message = e instanceof Error ? e.message : ''
       if (message.includes('402') || message.includes('خطة نحلة') || message.includes('التجربة')) {

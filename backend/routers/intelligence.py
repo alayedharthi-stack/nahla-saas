@@ -30,7 +30,10 @@ from models import (  # noqa: E402
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
-from core.automations_seed import seed_automations_if_empty as _seed_automations_if_empty
+from core.automations_seed import (
+    ensure_order_notifications_automation as _ensure_order_notifications_automation,
+    seed_automations_if_empty as _seed_automations_if_empty,
+)
 from services.customer_intelligence import (
     CUSTOMER_STATUS_LABELS,
     RFM_SEGMENT_LABELS,
@@ -79,6 +82,7 @@ async def intelligence_dashboard(request: Request, db: Session = Depends(get_db)
     try:
         get_or_create_tenant(db, tenant_id)
         _seed_automations_if_empty(db, tenant_id)
+        _ensure_order_notifications_automation(db, tenant_id)
         _cleanup_demo_customers(db, tenant_id)
         db.commit()
     except Exception as exc:

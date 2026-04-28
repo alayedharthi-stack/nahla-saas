@@ -39,11 +39,14 @@ import AdminSystemStatus from './pages/AdminSystemStatus'
 import AdminTools from './pages/AdminTools'
 import AdminWebhookHealth from './pages/AdminWebhookHealth'
 import AdminTenantIntegrity from './pages/AdminTenantIntegrity'
+import AdminSallaActivations from './pages/AdminSallaActivations'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
-import SallaEmbedded from './pages/SallaEmbedded'
-import ZidCallback   from './pages/ZidCallback'
+import SallaEmbedded    from './pages/SallaEmbedded'
+import SallaEntryScreen from './pages/SallaEntryScreen'
+import InviteFlow       from './pages/InviteFlow'
+import ZidCallback      from './pages/ZidCallback'
 import Register from './pages/Register'
 import WhatsAppConnect from './pages/WhatsAppConnect'
 import WaUsage        from './pages/WaUsage'
@@ -85,7 +88,14 @@ export default function App() {
           <Route path="/integrations/salla/success" element={<SallaOAuthSuccess />} />
           <Route path="/integrations/salla/error"   element={<SallaOAuthError />} />
           <Route path="/salla-callback"             element={<SallaCallback />} />
+          {/* Zero-Friction embedded entry — set /app/salla as the iframe URL in Salla partner portal */}
+          <Route path="/app/salla"                  element={<SallaEmbedded />} />
+          {/* Smart Entry Screen — always shown after Salla auth, before dashboard */}
+          <Route path="/app/entry"                  element={<SallaEntryScreen />} />
+          {/* Legacy entry kept for backwards compatibility */}
           <Route path="/salla"                      element={<SallaEmbedded />} />
+          {/* Direct-invite onboarding (outside Salla) */}
+          <Route path="/invite/:code"               element={<InviteFlow />} />
           <Route path="/zid-callback"               element={<ZidCallback />} />
 
           {/* Protected dashboard — all existing routes unchanged */}
@@ -134,6 +144,7 @@ export default function App() {
             <Route path="admin/tools"          element={<AdminTools />} />
             <Route path="admin/webhook-health"    element={<AdminWebhookHealth />} />
             <Route path="admin/tenant-integrity" element={<AdminTenantIntegrity />} />
+            <Route path="admin/salla-activations" element={<AdminSallaActivations />} />
             <Route path="billing"            element={<Billing />} />
             <Route path="widgets"            element={<MerchantWidgets />} />
             <Route path="help/whatsapp-manual-setup" element={<WhatsAppManualSetup />} />
