@@ -419,6 +419,11 @@ class BrainReplyState:
     last_recommended_products: List[Dict[str, Any]] = field(default_factory=list)
     explicit_pending_action: str = ""
     tenant_overlay: str = ""
+    # ── Merchant context (Phase 2 — Step 2 wire-up) ──────────────────────────
+    # Slim, fact-grounded snapshot from `core.store_knowledge.build_merchant_context`.
+    # Surfaced to the LLM via `asdict(state)` in compose/prompt_builder.py.
+    # Intentionally excludes FAQ and insights at this step.
+    merchant_context: Dict[str, Any] = field(default_factory=dict)
     # Decision-engine context surfaced to the LLM so the model never has to
     # guess "why am I being asked to compose now?". These two fields close
     # the loop the user explicitly asked for: the LLM fallback receives
@@ -455,6 +460,9 @@ class BrainContext:
     # Built once at the top of the pipeline and forwarded to every layer
     # so no downstream code re-derives or re-validates the tenant id.
     tenant_context: Optional["TenantContext"] = None
+    # Full merchant context snapshot from `build_merchant_context(...)`.
+    # Empty dict when the call failed (pipeline degrades silently).
+    merchant_context: Dict[str, Any] = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
