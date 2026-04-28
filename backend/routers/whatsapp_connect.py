@@ -334,6 +334,193 @@ async def get_connection_status(request: Request, db: Session = Depends(get_db))
     return _safe_view(conn)
 
 
+# ── Real-world connection health check (no message sent) ──────────────────────
+#
+# /whatsapp/connection plus /integrations/whatsapp/status only report what the
+# DB knows. A merchant can have status="connected" while:
+#   • waba_id is missing (e.g. coexistence handoff not finished)
+#   • the provider token was revoked / disabled
+#   • 360dialog channel is suspended
+#
+# This endpoint actively probes the provider with the stored credentials and
+# returns a structured verdict the frontend can use to render an honest banner
+# instead of a green "✅ مرتبط" lie.
+
+@router.get("/connection/live-verify")
+async def live_verify_connection(request: Request, db: Session = Depends(get_db)):
+    """
+    Perform a live, non-intrusive health check against the WhatsApp provider
+    using the stored credentials. Does NOT send any user-visible message.
+
+    Returns
+    -------
+    {
+      truly_connected: bool,
+      reason_code:     str | null,        # eg. missing_waba_id, token_revoked
+      reason_message:  str,
+      checks: [
+        {name: 'has_record',      ok: bool},
+        {name: 'status_ok',       ok: bool, value: <db status>},
+        {name: 'has_waba_id',     ok: bool},
+        {name: 'has_phone_id',    ok: bool},
+        {name: 'has_token',       ok: bool},
+        {name: 'provider_reachable', ok: bool, status_code: int|null,
+         provider: '360dialog'|'meta', detail: str|null},
+      ],
+      provider:        '360dialog'|'meta',
+      db_status:       str,
+      verified_at:     iso datetime,
+    }
+    """
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id,
+    ).first()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    checks: list[dict] = []
+
+    def _add(name: str, ok: bool, **extra) -> None:
+        checks.append({"name": name, "ok": bool(ok), **extra})
+
+    # ── Local checks ─────────────────────────────────────────────────────────
+    _add("has_record", conn is not None)
+    if not conn:
+        return {
+            "truly_connected": False,
+            "reason_code":     "no_record",
+            "reason_message":  "لا يوجد سجل ربط واتساب لهذا المتجر.",
+            "checks":          checks,
+            "provider":        None,
+            "db_status":       None,
+            "verified_at":     now_iso,
+        }
+
+    provider = _wa_provider(conn)
+    db_status = conn.status or "unknown"
+    status_ok = db_status in ("connected", "pending", "review_pending", "activation_pending")
+    _add("status_ok", status_ok, value=db_status)
+
+    waba_id = conn.whatsapp_business_account_id or ""
+    phone_id = conn.phone_number_id or ""
+    has_token = bool(conn.access_token)
+
+    _add("has_waba_id",  bool(waba_id))
+    _add("has_phone_id", bool(phone_id))
+    _add("has_token",    has_token)
+
+    # Decide blocking reason (priority order)
+    reason_code: Optional[str] = None
+    reason_msg = ""
+    if not status_ok:
+        reason_code = "status_invalid"
+        reason_msg  = f"حالة الربط في النظام «{db_status}» — لا تسمح بالاستخدام."
+    elif not has_token:
+        reason_code = "missing_token"
+        reason_msg  = "مفتاح الوصول لمزود واتساب مفقود."
+    elif not phone_id:
+        reason_code = "missing_phone_id"
+        reason_msg  = "phone_number_id مفقود — أعد ربط واتساب."
+    elif not waba_id:
+        reason_code = "missing_waba_id"
+        reason_msg  = "WABA ID مفقود — لا يمكن إرسال القوالب أو رسائل الأعمال. يرجى إعادة الربط."
+
+    # ── Live provider probe (skip if local checks already failed hard) ──────
+    # We still try it when we have token+phone_id but missing waba_id, since
+    # the probe can confirm whether the channel itself is alive.
+    provider_reachable = False
+    provider_status_code: Optional[int] = None
+    provider_detail: Optional[str] = None
+
+    if has_token and (phone_id or waba_id):
+        try:
+            ctx = await get_token_for_operation(
+                db, conn,
+                tenant_id=tenant_id,
+                operation="connection_live_verify",
+                prefer_platform=False,
+            )
+            if provider == WHATSAPP_PROVIDER_360DIALOG:
+                # GET /v1/configs returns the channel/profile config.
+                # 401/403 → token revoked/disabled. 200 → channel alive.
+                from services.whatsapp_platform.service import (  # noqa: PLC0415
+                    _provider_url, _provider_headers,
+                )
+                headers = dict(_provider_headers(conn, ctx))
+                headers.pop("Content-Type", None)
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(_provider_url(conn, "v1/configs"), headers=headers)
+                provider_status_code = resp.status_code
+                provider_reachable   = 200 <= resp.status_code < 300
+                if not provider_reachable:
+                    try:
+                        provider_detail = (resp.json().get("error") or {}).get("message") or resp.text[:200]
+                    except Exception:
+                        provider_detail = resp.text[:200]
+            else:
+                # Meta Cloud API: GET /{phone_id}?fields=verified_name
+                from services.whatsapp_platform.service import (  # noqa: PLC0415
+                    _provider_url, _provider_headers,
+                )
+                headers = dict(_provider_headers(conn, ctx))
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(
+                        _provider_url(conn, phone_id),
+                        headers=headers,
+                        params={"fields": "verified_name,quality_rating"},
+                    )
+                provider_status_code = resp.status_code
+                provider_reachable   = 200 <= resp.status_code < 300
+                if not provider_reachable:
+                    try:
+                        provider_detail = (resp.json().get("error") or {}).get("message") or resp.text[:200]
+                    except Exception:
+                        provider_detail = resp.text[:200]
+        except Exception as exc:
+            provider_detail = f"network_error: {exc}"
+            provider_reachable = False
+
+    _add(
+        "provider_reachable", provider_reachable,
+        status_code=provider_status_code, provider=provider, detail=provider_detail,
+    )
+
+    # If the provider rejected the credentials (4xx), upgrade the reason.
+    if reason_code is None and provider_status_code is not None and provider_status_code in (401, 403):
+        reason_code = "token_revoked"
+        reason_msg  = "مزوّد واتساب رفض المفتاح — قد يكون مُلغًى أو موقوفًا. يرجى إعادة الربط."
+    elif reason_code is None and not provider_reachable:
+        reason_code = "provider_unreachable"
+        reason_msg  = (
+            f"تعذر الوصول إلى {provider} للتحقق من حالة الربط فعليًا. "
+            "حاول لاحقًا أو أعد الربط."
+        )
+
+    truly_connected = (
+        reason_code is None
+        and conn.status == "connected"
+        and bool(waba_id) and bool(phone_id) and has_token
+        and provider_reachable
+    )
+
+    logger.info(
+        "[WA live-verify] tenant=%s provider=%s db_status=%s "
+        "waba=%s phone=%s token=%s probe=%s code=%s truly_connected=%s",
+        tenant_id, provider, db_status, bool(waba_id), bool(phone_id),
+        has_token, provider_status_code, reason_code, truly_connected,
+    )
+
+    return {
+        "truly_connected": truly_connected,
+        "reason_code":     reason_code,
+        "reason_message":  reason_msg or ("الربط فعّال." if truly_connected else "غير متصل فعليًا."),
+        "checks":          checks,
+        "provider":        provider,
+        "db_status":       db_status,
+        "verified_at":     now_iso,
+    }
+
+
 @router.post("/connection/start")
 async def start_connection(request: Request, db: Session = Depends(get_db)):
     """

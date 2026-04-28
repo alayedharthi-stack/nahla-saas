@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  AlertCircle,
   AlertTriangle,
   BadgeCheck,
   Building2,
@@ -1304,6 +1305,31 @@ export default function WhatsAppConnect() {
   const [connAt, setConnAt]         = useState('')
   const [connLabel, setConnLabel]   = useState('واتساب الأعمال')
 
+  // Live verification (real provider probe)
+  const [liveVerify, setLiveVerify] = useState<{
+    truly_connected: boolean
+    reason_code:     string | null
+    reason_message:  string
+    db_status:       string | null
+    provider:        string | null
+    checks:          Array<{ name: string; ok: boolean; status_code?: number | null; detail?: string | null }>
+  } | null>(null)
+  const [liveVerifying, setLiveVerifying] = useState(false)
+
+  const runLiveVerify = async () => {
+    setLiveVerifying(true)
+    try {
+      const res = await apiCall<typeof liveVerify>('/whatsapp/connection/live-verify')
+      console.info('[WhatsApp] live-verify result', res)
+      setLiveVerify(res)
+    } catch (e) {
+      console.warn('[WhatsApp] live-verify failed', e)
+      setLiveVerify(null)
+    } finally {
+      setLiveVerifying(false)
+    }
+  }
+
   useEffect(() => {
     getStatus()
       .then(s => {
@@ -1317,6 +1343,8 @@ export default function WhatsAppConnect() {
           setConnAt(s.connected_at ?? '')
           setConnLabel(s.merchant_channel_label ?? 'واتساب الأعمال')
           setStep(4)
+          // Probe the provider in the background — DB record alone isn't proof.
+          void runLiveVerify()
         } else if (s.connection_type === 'coexistence' || s.provider === 'dialog360') {
           setMode('coexistence')
         } else if ((s.status === 'pending' || s.status === 'otp_pending') && s.phone_number_id) {
@@ -1844,14 +1872,33 @@ export default function WhatsAppConnect() {
       )}
 
       {/* ── Step 4: Connected ─────────────────────────────────────────────── */}
-      {step === 4 && (
+      {step === 4 && (() => {
+        // Honest verdict: DB says connected, but the live probe is the truth.
+        // While the probe is running we show a neutral "checking" badge,
+        // not a false green.
+        const verifyKnown   = liveVerify !== null
+        const trulyOk       = verifyKnown && liveVerify!.truly_connected
+        const trulyBroken   = verifyKnown && !liveVerify!.truly_connected
+        const palette = !verifyKnown
+          ? { wrap: 'bg-slate-50 border-slate-200',  iconWrap: 'bg-slate-100',   iconColor: 'text-slate-500', title: 'text-slate-700' }
+          : trulyOk
+            ? { wrap: 'bg-emerald-50 border-emerald-200', iconWrap: 'bg-emerald-100', iconColor: 'text-emerald-600', title: 'text-emerald-800' }
+            : { wrap: 'bg-red-50 border-red-200',         iconWrap: 'bg-red-100',     iconColor: 'text-red-600',     title: 'text-red-800' }
+
+        return (
         <div className="space-y-4">
-          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-6 text-center space-y-3">
-            <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto">
-              <BadgeCheck className="w-9 h-9 text-emerald-600"/>
+          <div className={`border rounded-2xl p-6 text-center space-y-3 ${palette.wrap}`}>
+            <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto ${palette.iconWrap}`}>
+              {trulyBroken
+                ? <AlertCircle className={`w-9 h-9 ${palette.iconColor}`}/>
+                : <BadgeCheck className={`w-9 h-9 ${palette.iconColor}`}/>}
             </div>
             <div>
-              <p className="font-bold text-emerald-800 text-lg">واتساب مرتبط ✅</p>
+              <p className={`font-bold text-lg ${palette.title}`}>
+                {!verifyKnown && (liveVerifying ? 'جارٍ التحقق من حالة الربط…' : 'واتساب مرتبط (لم يُتحقّق بعد)')}
+                {trulyOk      && 'واتساب مرتبط ومُتحقّق ✅'}
+                {trulyBroken  && 'واتساب غير متصل فعليًا — يرجى إعادة الربط ❌'}
+              </p>
               {connName && <p className="font-semibold text-slate-700 mt-1">{connName}</p>}
               {connPhone && <p className="text-sm font-mono text-slate-500 mt-0.5">{connPhone}</p>}
               {connAt && (
@@ -1863,17 +1910,66 @@ export default function WhatsAppConnect() {
                 <p className="text-xs text-slate-500 mt-1">{connLabel}</p>
               )}
             </div>
-            <div className="bg-white rounded-xl p-4 text-right space-y-2">
-              {[
-                'الرد التلقائي على العملاء مفعّل',
-                'نحلة AI جاهز للمحادثات',
-                'الحملات التسويقية متاحة',
-              ].map(t => (
-                <div key={t} className="flex items-center gap-2 text-sm text-emerald-700">
-                  <CheckCircle2 className="w-4 h-4 shrink-0"/>{t}
-                </div>
-              ))}
-            </div>
+
+            {/* Provider checklist — shows the real state from the live probe */}
+            {verifyKnown && (
+              <div className="bg-white rounded-xl p-4 text-right space-y-1.5">
+                {liveVerify!.checks.map(c => (
+                  <div key={c.name} className={`flex items-center gap-2 text-xs ${c.ok ? 'text-emerald-700' : 'text-red-600'}`}>
+                    {c.ok
+                      ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0"/>
+                      : <AlertCircle className="w-3.5 h-3.5 shrink-0"/>}
+                    <span>
+                      {({
+                        has_record:          'سجل ربط في النظام',
+                        status_ok:           'حالة الربط',
+                        has_waba_id:         'WABA ID',
+                        has_phone_id:        'phone_number_id',
+                        has_token:           'access token',
+                        provider_reachable:  `استجابة مزود ${c.name === 'provider_reachable' ? (liveVerify!.provider || 'الرسائل') : ''}`,
+                      } as Record<string,string>)[c.name] || c.name}
+                      {c.status_code != null && ` (${c.status_code})`}
+                      {c.detail && !c.ok && <span className="text-slate-500"> — {c.detail}</span>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {trulyBroken && (
+              <div className="bg-white rounded-xl p-3 text-sm text-red-700 text-right border border-red-200">
+                <p className="font-semibold">السبب:</p>
+                <p className="mt-1">{liveVerify!.reason_message}</p>
+                {liveVerify!.reason_code && (
+                  <p className="text-[11px] text-slate-400 mt-1 font-mono">code: {liveVerify!.reason_code}</p>
+                )}
+              </div>
+            )}
+
+            {trulyOk && (
+              <div className="bg-white rounded-xl p-4 text-right space-y-2">
+                {[
+                  'الرد التلقائي على العملاء مفعّل',
+                  'نحلة AI جاهز للمحادثات',
+                  'الحملات التسويقية متاحة',
+                ].map(t => (
+                  <div key={t} className="flex items-center gap-2 text-sm text-emerald-700">
+                    <CheckCircle2 className="w-4 h-4 shrink-0"/>{t}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={runLiveVerify}
+              disabled={liveVerifying}
+              className="text-xs font-medium text-slate-500 hover:text-slate-700 underline inline-flex items-center gap-1 disabled:opacity-50"
+            >
+              {liveVerifying
+                ? <><Loader2 className="w-3 h-3 animate-spin"/> جارٍ التحقق…</>
+                : <><RefreshCw className="w-3 h-3"/> إعادة التحقق من الربط فعليًا</>}
+            </button>
           </div>
 
           <div className="flex gap-3">
@@ -1893,7 +1989,8 @@ export default function WhatsAppConnect() {
             )}
           </div>
         </div>
-      )}
+        )
+      })()}
     </div>
     </>
   )
