@@ -1293,12 +1293,11 @@ async def _execute_action(
     if body_params:
         components.append({"type": "body", "parameters": body_params})
 
-    # ── URL button parameters ────────────────────────────────────────────────
-    # Templates with dynamic URL buttons (``{{1}}`` in the URL) need a
-    # separate "button" component carrying the variable suffix. The base
-    # URL is merchant-agnostic (set at import from the library); at send
-    # time we extract the dynamic path from whichever URL field the event
-    # payload provides.
+    # ── Button parameters (URL + COPY_CODE) ──────────────────────────────────
+    # Meta requires a runtime parameter component for:
+    #   • Dynamic URL buttons (``{{1}}`` in the URL) — suffix text
+    #   • COPY_CODE buttons — coupon_code value
+    # Missing either causes Meta error 132000 / template_param_mismatch.
     _URL_SLOT_PRECEDENCE = (
         "checkout_url", "cart_url", "tracking_url", "payment_url",
         "product_url", "reorder_url", "store_url",
@@ -1308,11 +1307,43 @@ async def _execute_action(
     _payload_for_btn: Dict[str, Any] = dict(event.payload or {})
     _has_dynamic_url_btn = False
     _btn_suffix_resolved = False
+
+    # Resolve coupon code once (used for COPY_CODE buttons below)
+    _coupon_code_for_btn: str = (
+        coupon_extras.get("coupon_code")
+        or coupon_extras.get("discount_code")
+        or ""
+    )
+
     for comp in (template.components or []):
         if str(comp.get("type", "")).upper() != "BUTTONS":
             continue
         for btn_idx, btn in enumerate(comp.get("buttons", [])):
-            if str(btn.get("type", "")).upper() != "URL":
+            btn_type = str(btn.get("type", "")).upper()
+
+            # ── COPY_CODE button ──────────────────────────────────────────
+            # Meta requires: {"type":"button","sub_type":"copy_code",
+            #                 "index":"N","parameters":[{"type":"coupon_code",
+            #                                            "coupon_code":"XYZ"}]}
+            if btn_type == "COPY_CODE":
+                code = _coupon_code_for_btn or "NAHLA"
+                if not _coupon_code_for_btn:
+                    logger.warning(
+                        "[AutoEngine] COPY_CODE button on template %s has no "
+                        "coupon code — using placeholder 'NAHLA'. "
+                        "Enable auto_coupon on this automation to fix this.",
+                        template.name,
+                    )
+                components.append({
+                    "type":       "button",
+                    "sub_type":   "copy_code",
+                    "index":      str(btn_idx),
+                    "parameters": [{"type": "coupon_code", "coupon_code": code}],
+                })
+                continue
+
+            # ── Dynamic URL button ────────────────────────────────────────
+            if btn_type != "URL":
                 continue
             btn_url_tpl: str = btn.get("url", "")
             if "{{1}}" not in btn_url_tpl:

@@ -330,6 +330,16 @@ export const autopilotApi = {
       message: string
     }>(`/autopilot/abandoned-carts/${orderId}/retry`, { method: 'POST' }),
 
+  /** Re-queue only the steps that failed — sent stages are untouched.
+   *  Returns 409 with error="no_failed_steps" when nothing needs rescheduling. */
+  rescheduleFailedCartSteps: (orderId: number) =>
+    apiCall<{
+      ok: boolean
+      steps_rescheduled: number
+      executions_cleared: number
+      message: string
+    }>(`/autopilot/abandoned-carts/${orderId}/reschedule-failed`, { method: 'POST' }),
+
   retryAllStaleCarts: () =>
     apiCall<{
       ok: boolean

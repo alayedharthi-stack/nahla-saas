@@ -2732,3 +2732,135 @@ async def retry_abandoned_cart(
     }
 
 
+# ── Reschedule failed steps only (surgical, keeps sent stages intact) ────────
+@router.post("/autopilot/abandoned-carts/{order_id}/reschedule-failed")
+async def reschedule_failed_cart_steps(
+    order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Re-queue only the cart-recovery steps that failed — without touching
+    stages that were already sent successfully.
+
+    For each AutomationEvent whose execution ended with status='failed':
+      1. Delete its AutomationExecution record(s).
+      2. Reset AutomationEvent.processed = False so the engine picks it up again.
+
+    The engine re-runs each reset event independently; sent stages are untouched.
+    """
+    if not _manual_retry_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "manual_retry_disabled",
+                "message": (
+                    "زر إعادة الإرسال اليدوي معطّل في هذه البيئة. "
+                    "اضبط المتغير AUTOPILOT_ENABLE_MANUAL_RETRY=true لتفعيله."
+                ),
+            },
+        )
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id, Order.tenant_id == tenant_id)
+        .first()
+    )
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found for this tenant")
+
+    from services.cart_recovery_status import timeline_for_order  # noqa: PLC0415
+
+    timeline = timeline_for_order(db, tenant_id, order)
+
+    if not timeline.get("recovery_event_id"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "no_recovery_event",
+                "message": "لا توجد حملة استعادة مرتبطة بهذه السلة بعد.",
+            },
+        )
+
+    if timeline.get("status") == "converted":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "already_converted",
+                "message": "تم الشراء بالفعل — لا حاجة لإعادة الإرسال.",
+            },
+        )
+
+    # ── Collect failed-step event IDs ────────────────────────────────────────
+    failed_event_ids = [
+        s["event_id"]
+        for s in timeline.get("steps", [])
+        if s.get("status") == "failed" and s.get("event_id")
+    ]
+
+    if not failed_event_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "no_failed_steps",
+                "message": "لا توجد مراحل فاشلة لإعادة جدولتها.",
+            },
+        )
+
+    # ── For each failed event: wipe its execution, reset processed=False ─────
+    cleared = 0
+    for ev_id in failed_event_ids:
+        deleted = db.query(AutomationExecution).filter(
+            AutomationExecution.tenant_id == tenant_id,
+            AutomationExecution.event_id == ev_id,
+        ).delete(synchronize_session="fetch")
+        cleared += deleted
+
+        db.query(AutomationEvent).filter(
+            AutomationEvent.id == ev_id,
+            AutomationEvent.tenant_id == tenant_id,
+        ).update({"processed": False}, synchronize_session="fetch")
+
+    db.commit()
+
+    # ── Trigger engine for the reset events only ─────────────────────────────
+    import asyncio
+
+    _eids = list(failed_event_ids)
+
+    async def _bg_retry():
+        from core.database import SessionLocal          # noqa: PLC0415
+        bg_db = SessionLocal()
+        try:
+            from core.automation_engine import process_pending_events  # noqa: PLC0415
+            sent = await process_pending_events(
+                bg_db, tenant_id,
+                skip_autopilot_check=True,
+                event_ids=_eids,
+            )
+            logger.info(
+                "reschedule-failed order=%s events=%s sent=%d", order_id, _eids, sent
+            )
+        except Exception as exc:
+            logger.error(
+                "reschedule-failed bg order=%s failed: %s", order_id, exc, exc_info=True
+            )
+        finally:
+            bg_db.close()
+
+    asyncio.create_task(_bg_retry())
+
+    return {
+        "ok":             True,
+        "steps_rescheduled": len(failed_event_ids),
+        "executions_cleared": cleared,
+        "message": (
+            f"تمت إعادة جدولة {len(failed_event_ids)} مرحلة فاشلة. "
+            "المراحل المُرسَلة بنجاح لم تُمَس."
+        ),
+    }
+
+
