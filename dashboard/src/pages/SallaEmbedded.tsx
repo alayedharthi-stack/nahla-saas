@@ -1,93 +1,122 @@
 /**
- * SallaEmbedded.tsx
- * -----------------
- * Zero-Friction Entry for Salla merchants.
+ * SallaEmbedded.tsx  —  /app/salla  &  /salla  (legacy)
+ * -------------------------------------------------------
+ * Zero-Friction embedded entry for Salla merchants.
  *
- * Routes that render this page:
- *   /app/salla   — primary embedded entry (partner-portal iframe URL)
- *   /salla       — legacy entry (kept for backwards compatibility)
+ * CRITICAL RULE: signalReady() MUST be called synchronously on first render,
+ * BEFORE any async work.  Salla's host frame shows "لم يتم الاتصال بالتطبيق"
+ * if the app.ready postMessage doesn't arrive within a few seconds.
  *
- * Bootstrap sequence (≤ 2 s target):
- *   1. Show skeleton (< 1 s)
- *   2. Check existing session  → navigate /overview immediately if live
- *   3. Load Salla SDK + handshake (parallel with step 2)
- *   4. POST /salla/token-login with URL ?token → receive Nahla JWT
- *   5. Persist JWT → navigate /overview or /onboarding
+ * Bootstrap order:
+ *   mount → signalReady() immediately (sync)
+ *         → re-signal at 1 s + 3 s (belt-and-suspenders)
+ *         → load Salla SDK in background (non-blocking)
+ *         → check existing Nahla session (5 s timeout)
+ *         → if none: POST /salla/token-login (10 s timeout)
+ *         → navigate to /app/entry
+ *   Global watchdog: 13 s → show error with retry button
  *
- * Error path: inline message inside the embedded frame — never shows Login UI.
+ * Error path: inline UI inside iframe — never navigates away to Landing/Login.
  */
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 
-type Phase = 'skeleton' | 'checking' | 'login' | 'success' | 'error'
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const SDK_URL          = 'https://cdn.jsdelivr.net/npm/@salla.sa/embedded-sdk@0.2.4/dist/umd/index.js'
+const SESSION_TIMEOUT  = 5_000   // ms — check existing session
+const LOGIN_TIMEOUT    = 10_000  // ms — token-login (Salla introspect can be slow)
+const WATCHDOG_TIMEOUT = 13_000  // ms — global stuck-skeleton guard
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+type Phase = 'init' | 'checking' | 'login' | 'success' | 'error'
 
 interface LoginResponse {
   access_token: string
-  role: string
-  tenant_id: number
-  store_name: string
-  email: string
-  is_new: boolean
+  role:         string
+  tenant_id:    number
+  store_name:   string
+  email:        string
+  is_new:       boolean
   wa_connected: boolean
-  redirect_to: string
-  detail?: string
+  redirect_to:  string
+  detail?:      string
 }
 
 interface SessionResponse {
-  connected: boolean
-  tenant_id: number
-  token: string
+  connected:  boolean
+  tenant_id:  number
+  token:      string
 }
 
-const SDK_URL =
-  'https://cdn.jsdelivr.net/npm/@salla.sa/embedded-sdk@0.2.4/dist/umd/index.js'
-
-const TIMEOUT_MS = 3000
-
-function decodeJwtPayload(token: string): Record<string, unknown> {
-  const parts = token.split('.')
-  return JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
-}
-
-// ── Salla SDK ─────────────────────────────────────────────────────────────────
+// ── Salla SDK handshake ───────────────────────────────────────────────────────
+// Must be called as early as possible. Salla's host frame listens for these
+// events to dismiss its own loading overlay.
 
 function signalReady() {
-  const msg = {
-    event: 'embedded::ready',
-    payload: {},
+  console.info('[SallaEmbedded] → signaling app.ready to Salla host frame')
+  const readyMsg = {
+    event:     'embedded::ready',
+    payload:   {},
     timestamp: Date.now(),
-    source: 'embedded-app',
-    metadata: { version: '0.2.4' },
+    source:    'embedded-app',
+    metadata:  { version: '0.2.4' },
   }
-  try { window.parent.postMessage(msg, '*') } catch { /* cross-origin */ }
+  try { window.parent.postMessage(readyMsg, '*') } catch { /* cross-origin */ }
   try { window.parent.postMessage({ event: 'app.ready', type: 'app.ready' }, '*') } catch { /* cross-origin */ }
-}
-
-function initSdkHandshake() {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sdk = (window as any).Salla?.embedded
-  if (!sdk) { signalReady(); return }
-  sdk.init({ debug: false })
-    .then(() => { sdk.ready(); signalReady() })
-    .catch(() => signalReady())
 }
 
 function loadSdk(): Promise<void> {
   return new Promise((resolve) => {
     if (document.querySelector(`script[src="${SDK_URL}"]`)) { resolve(); return }
-    const s = document.createElement('script')
+    const s   = document.createElement('script')
     s.src     = SDK_URL
-    s.onload  = () => resolve()
-    s.onerror = () => resolve()
+    s.onload  = () => {
+      console.info('[SallaEmbedded] SDK loaded from CDN')
+      resolve()
+    }
+    s.onerror = () => {
+      console.warn('[SallaEmbedded] SDK CDN load failed — continuing without SDK')
+      resolve()   // non-fatal: postMessage works without the SDK helper
+    }
     document.head.appendChild(s)
   })
 }
 
-// ── Session persistence ────────────────────────────────────────────────────────
+function initSdkHandshake() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sdk = (window as any).Salla?.embedded
+  if (!sdk) {
+    console.info('[SallaEmbedded] Salla.embedded not found — using raw postMessage only')
+    signalReady()
+    return
+  }
+  sdk.init({ debug: false })
+    .then(() => { sdk.ready(); signalReady() })
+    .catch((err: unknown) => {
+      console.warn('[SallaEmbedded] sdk.init error:', err)
+      signalReady()
+    })
+}
 
-function persistSession(data: LoginResponse | SessionResponse, storeId?: string) {
-  const jwt = 'access_token' in data ? data.access_token : data.token
+// ── JWT helpers ───────────────────────────────────────────────────────────────
+
+function decodeJwtPayload(token: string): Record<string, unknown> {
+  try {
+    const parts = token.split('.')
+    return JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+  } catch {
+    return {}
+  }
+}
+
+function persistSession(
+  data: LoginResponse | SessionResponse,
+  storeId?: string,
+) {
+  const jwt    = 'access_token' in data ? data.access_token : data.token
   const claims = decodeJwtPayload(jwt)
 
   ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
@@ -99,75 +128,106 @@ function persistSession(data: LoginResponse | SessionResponse, storeId?: string)
   localStorage.setItem('nahla_email',     String(claims.sub       ?? ''))
   localStorage.setItem('nahla_tenant_id', String(claims.tenant_id ?? ''))
   localStorage.setItem('nahla_user_id',   String(claims.user_id   ?? ''))
+  localStorage.setItem('nahla_salla_embedded', '1')
 
   if ('store_name' in data && data.store_name) {
     localStorage.setItem('nahla_salla_store_name', data.store_name)
-    localStorage.setItem('nahla_store_name', data.store_name)
+    localStorage.setItem('nahla_store_name',        data.store_name)
   }
-  if (storeId) {
-    localStorage.setItem('nahla_salla_store_id', storeId)
-  }
+  if (storeId) localStorage.setItem('nahla_salla_store_id', storeId)
 }
 
-// ── Main component ─────────────────────────────────────────────────────────────
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function SallaEmbedded() {
-  const navigate    = useNavigate()
-  const [phase, setPhase]           = useState<Phase>('skeleton')
-  const [statusText, setStatusText] = useState('')
-  const [errorDetail, setErrorDetail] = useState('')
-  const bootedRef = useRef(false)
+  const navigate = useNavigate()
 
-  const params     = new URLSearchParams(window.location.search)
-  const sallaToken = params.get('token')    || ''
-  const storeId    = params.get('store_id') || ''
-  const appId      = params.get('app_id')   || ''
+  const [phase, setPhase]               = useState<Phase>('init')
+  const [statusText, setStatusText]     = useState('جاري تهيئة الاتصال...')
+  const [errorDetail, setErrorDetail]   = useState('')
+  const bootedRef                       = useRef(false)
+  const watchdogRef                     = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // ── Inline error (never navigate away from iframe) ────────────────────────
-  const showError = useCallback((msg: string) => {
-    setPhase('error')
-    setErrorDetail(msg)
+  // Read URL params once
+  const paramsRef  = useRef(new URLSearchParams(window.location.search))
+  const sallaToken = paramsRef.current.get('token')    || ''
+  const storeId    = paramsRef.current.get('store_id') || ''
+  const appId      = paramsRef.current.get('app_id')   || ''
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  const clearWatchdog = useCallback(() => {
+    if (watchdogRef.current) {
+      clearTimeout(watchdogRef.current)
+      watchdogRef.current = null
+    }
   }, [])
 
-  // ── Navigate to Smart Entry Screen (always, regardless of is_new) ──────
-  const enterDashboard = useCallback((_dest?: string) => {
-    // Mark this session as originating from Salla embedded
-    localStorage.setItem('nahla_salla_embedded', '1')
-    setPhase('success')
-    // Always route through the Smart Entry Screen — never to a blank dashboard
-    setTimeout(() => navigate('/app/entry', { replace: true }), 600)
-  }, [navigate])
+  const showError = useCallback((msg: string) => {
+    clearWatchdog()
+    console.error('[SallaEmbedded] ✗ error:', msg)
+    setPhase('error')
+    setErrorDetail(msg)
+  }, [clearWatchdog])
 
-  // ── Step 2: check existing Nahla session ──────────────────────────────────
+  const enterDashboard = useCallback(() => {
+    clearWatchdog()
+    console.info('[SallaEmbedded] ✓ auth complete → navigating to /app/entry')
+    setPhase('success')
+    setStatusText('جاري الدخول...')
+    setTimeout(() => navigate('/app/entry', { replace: true }), 500)
+  }, [navigate, clearWatchdog])
+
+  // ── Step 1: check existing Nahla session ──────────────────────────────────
+
   const checkSession = useCallback(async (): Promise<boolean> => {
     const stored = localStorage.getItem('nahla_token')
-    if (!stored) return false
+    if (!stored) {
+      console.info('[SallaEmbedded] no stored token — skipping session check')
+      return false
+    }
+
+    console.info('[SallaEmbedded] checking existing session...')
+    setPhase('checking')
+    setStatusText('جاري التحقق من جلستك...')
 
     try {
       const ctrl = new AbortController()
-      const tid  = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
-      const res  = await fetch(`${API_BASE}/api/salla/session`, {
+      const tid  = setTimeout(() => ctrl.abort(), SESSION_TIMEOUT)
+
+      const res = await fetch(`${API_BASE}/api/salla/session`, {
         headers: { Authorization: `Bearer ${stored}` },
-        signal: ctrl.signal,
+        signal:  ctrl.signal,
       })
       clearTimeout(tid)
 
+      console.info('[SallaEmbedded] session check status:', res.status)
+
       if (res.ok) {
         const data: SessionResponse = await res.json()
+        console.info('[SallaEmbedded] ✓ live session — tenant:', data.tenant_id)
         persistSession(data, storeId)
-        enterDashboard('/overview')
+        enterDashboard()
         return true
       }
-    } catch {
-      /* network error or abort → fall through to token exchange */
+      // 401 → token expired, fall through
+    } catch (e) {
+      console.warn('[SallaEmbedded] session check failed (will try token-login):', e)
     }
     return false
   }, [storeId, enterDashboard])
 
-  // ── Step 4: Salla token exchange → Nahla JWT ─────────────────────────────
+  // ── Step 2: token exchange with Salla ─────────────────────────────────────
+
   const doLogin = useCallback(async () => {
+    console.info('[SallaEmbedded] starting token-login | token present:', !!sallaToken)
+
     if (!sallaToken) {
-      showError('لم يتم إرسال رمز المصادقة من سلة. أعد فتح التطبيق من لوحة سلة.')
+      showError(
+        'لم يتم استقبال رمز المصادقة من سلة.\n' +
+        'تأكد من أن رابط التطبيق في بوابة الشركاء يشير إلى:\n' +
+        'https://app.nahlah.ai/app/salla',
+      )
       return
     }
 
@@ -176,8 +236,10 @@ export default function SallaEmbedded() {
 
     try {
       const ctrl = new AbortController()
-      const tid  = setTimeout(() => ctrl.abort(), TIMEOUT_MS)
-      const res  = await fetch(`${API_BASE}/salla/token-login`, {
+      const tid  = setTimeout(() => ctrl.abort(), LOGIN_TIMEOUT)
+
+      console.info('[SallaEmbedded] → POST /salla/token-login')
+      const res = await fetch(`${API_BASE}/salla/token-login`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ token: sallaToken, app_id: appId || undefined }),
@@ -185,84 +247,116 @@ export default function SallaEmbedded() {
       })
       clearTimeout(tid)
 
-      const data: LoginResponse = await res.json()
+      console.info('[SallaEmbedded] token-login status:', res.status)
 
-      if (!data.access_token) {
-        showError(data.detail || 'تعذّر التحقق من هويتك. حاول إغلاق التطبيق وإعادة فتحه.')
+      let data: LoginResponse
+      try {
+        data = await res.json()
+      } catch {
+        showError('الخادم أرجع استجابة غير صالحة. حاول مجدداً.')
         return
       }
 
-      persistSession(data, storeId)
+      if (!res.ok || !data.access_token) {
+        const detail = data?.detail || `HTTP ${res.status}`
+        console.error('[SallaEmbedded] token-login failed:', detail, data)
+        showError(data?.detail || 'تعذّر التحقق من هويتك. أغلق التطبيق وأعد فتحه.')
+        return
+      }
 
+      console.info('[SallaEmbedded] ✓ token-login OK | tenant:', data.tenant_id, 'is_new:', data.is_new)
+      persistSession(data, storeId)
       setStatusText(
         data.is_new
           ? 'مرحباً! جاري إعداد حسابك...'
-          : `مرحباً بعودتك${data.store_name ? ` ${data.store_name}` : ''}`
+          : `مرحباً بعودتك${data.store_name ? ` ${data.store_name}` : ''}`,
       )
-
       enterDashboard()
     } catch (e) {
-      const aborted = e instanceof DOMException && e.name === 'AbortError'
+      const isAbort = e instanceof DOMException && e.name === 'AbortError'
+      console.error('[SallaEmbedded] token-login exception:', e)
       showError(
-        aborted
+        isAbort
           ? 'استغرق الخادم وقتاً طويلاً. تحقق من اتصالك وأعد المحاولة.'
-          : 'تعذر الوصول إلى الخادم. تحقق من اتصالك بالإنترنت.'
+          : 'تعذر الوصول إلى الخادم. تحقق من اتصالك بالإنترنت.',
       )
     }
   }, [sallaToken, appId, storeId, showError, enterDashboard])
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────
+
+  const bootstrap = useCallback(async () => {
+    // Global watchdog: if still loading after WATCHDOG_TIMEOUT → show error
+    watchdogRef.current = setTimeout(() => {
+      console.error('[SallaEmbedded] ⏱ watchdog triggered — still loading after', WATCHDOG_TIMEOUT, 'ms')
+      showError('استغرق التحميل وقتاً طويلاً. أعد فتح التطبيق أو تواصل مع الدعم.')
+    }, WATCHDOG_TIMEOUT)
+
+    // Load SDK in background — do NOT await before checking session/token
+    loadSdk().then(initSdkHandshake)
+
+    // Check existing session first
+    const alive = await checkSession()
+    if (alive) return
+
+    // No session → use Salla token from URL
+    await doLogin()
+  }, [checkSession, doLogin, showError])
+
+  // ── Mount effect ──────────────────────────────────────────────────────────
+  // IMPORTANT: signalReady is called synchronously on mount, before any async.
+
   useEffect(() => {
+    console.info(
+      '[SallaEmbedded] mounted | path:', window.location.pathname,
+      '| token present:', !!sallaToken,
+      '| store_id:', storeId,
+    )
+
+    // ⚡ CRITICAL: signal Salla host frame IMMEDIATELY
+    signalReady()
+    const t1 = setTimeout(signalReady, 1000)  // re-signal in case iframe missed it
+    const t2 = setTimeout(signalReady, 4000)  // final belt-and-suspenders
+
     if (bootedRef.current) return
     bootedRef.current = true
 
-    ;(async () => {
-      // Skeleton for a brief moment while we kick off parallel work
-      setPhase('skeleton')
+    bootstrap()
 
-      // SDK handshake + session check run in parallel
-      const [, sessionAlive] = await Promise.all([
-        (async () => {
-          await loadSdk()
-          initSdkHandshake()
-          // Belt-and-suspenders: re-signal after 3 s in case iframe missed it
-          setTimeout(signalReady, 3000)
-        })(),
-        (async () => {
-          setPhase('checking')
-          return checkSession()
-        })(),
-      ])
-
-      // Session was live → already navigated inside checkSession
-      if (sessionAlive) return
-
-      // No live session → use the Salla token from the URL
-      await doLogin()
-    })()
-  }, [checkSession, doLogin])
+    return () => {
+      clearTimeout(t1)
+      clearTimeout(t2)
+      clearWatchdog()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── Retry ─────────────────────────────────────────────────────────────────
+
   const handleRetry = useCallback(() => {
+    console.info('[SallaEmbedded] retry triggered')
     bootedRef.current = false
-    setPhase('skeleton')
+    setPhase('init')
+    setStatusText('جاري إعادة المحاولة...')
     setErrorDetail('')
     bootedRef.current = true
+    // Re-signal and retry login
+    signalReady()
     doLogin()
   }, [doLogin])
 
   // ── Render ────────────────────────────────────────────────────────────────
-  const isSkeleton = phase === 'skeleton' || phase === 'checking'
+
+  const isLoading = phase === 'init' || phase === 'checking' || phase === 'login'
 
   return (
     <div
       dir="rtl"
       className="min-h-dvh flex flex-col items-center justify-center px-4 py-6"
       style={{
-        fontFamily: "'Cairo', system-ui, sans-serif",
-        background: '#0f172a',
-        backgroundImage:
-          'radial-gradient(ellipse 80% 60% at 50% -10%, rgba(245,158,11,0.08) 0%, transparent 70%)',
+        fontFamily:      "'Cairo', system-ui, sans-serif",
+        background:      '#0f172a',
+        backgroundImage: 'radial-gradient(ellipse 80% 60% at 50% -10%, rgba(245,158,11,0.08) 0%, transparent 70%)',
       }}
     >
       {/* Logo */}
@@ -291,10 +385,10 @@ export default function SallaEmbedded() {
           <span
             className="text-xs font-black px-2 py-0.5 rounded-md"
             style={{
-              background:  'rgba(245,158,11,0.15)',
-              border:      '1px solid rgba(245,158,11,0.35)',
-              boxShadow:   '0 0 10px rgba(245,158,11,0.3)',
-              color:       '#f59e0b',
+              background:    'rgba(245,158,11,0.15)',
+              border:        '1px solid rgba(245,158,11,0.35)',
+              boxShadow:     '0 0 10px rgba(245,158,11,0.3)',
+              color:         '#f59e0b',
               letterSpacing: '0.5px',
             }}
           >
@@ -307,80 +401,67 @@ export default function SallaEmbedded() {
       <div
         className="w-full max-w-sm rounded-2xl p-7"
         style={{
-          background:    'rgba(255,255,255,0.03)',
-          border:        '1px solid rgba(245,158,11,0.2)',
+          background:     'rgba(255,255,255,0.03)',
+          border:         '1px solid rgba(245,158,11,0.2)',
           backdropFilter: 'blur(16px)',
         }}
       >
-        {phase === 'error' ? (
-          /* Error state */
+        {/* ── Error ─────────────────────────────────────────────────────── */}
+        {phase === 'error' && (
           <div className="text-center space-y-4">
             <div className="text-5xl">⚠️</div>
-            <p className="text-white font-semibold text-base">تعذّر الدخول</p>
-            <p className="text-slate-400 text-sm leading-relaxed">{errorDetail}</p>
+            <p className="text-white font-semibold text-base">تعذّر الاتصال بسلة</p>
+            <p className="text-slate-400 text-sm leading-relaxed whitespace-pre-line">{errorDetail}</p>
             <div className="flex flex-col gap-3 pt-2">
               <button
                 onClick={handleRetry}
-                className="w-full py-3 px-6 rounded-xl font-bold text-sm transition-all"
-                style={{
-                  background: '#f59e0b',
-                  color:      '#0f172a',
-                  boxShadow:  '0 4px 20px rgba(245,158,11,0.35)',
-                }}
+                className="w-full py-3 px-6 rounded-xl font-bold text-sm"
+                style={{ background: '#f59e0b', color: '#0f172a', boxShadow: '0 4px 20px rgba(245,158,11,0.35)' }}
               >
                 إعادة المحاولة
               </button>
+              <a
+                href="mailto:support@nahlah.ai"
+                className="text-slate-500 text-xs text-center hover:text-slate-400"
+              >
+                تواصل مع الدعم
+              </a>
             </div>
           </div>
-        ) : phase === 'success' ? (
-          /* Success state */
+        )}
+
+        {/* ── Success ───────────────────────────────────────────────────── */}
+        {phase === 'success' && (
           <div className="text-center space-y-4">
             <div className="text-5xl">✅</div>
-            <p className="text-white font-semibold text-base">{statusText || 'جاري الدخول...'}</p>
-            <p className="text-slate-400 text-sm">جاري تحويلك للوحة التحكم...</p>
+            <p className="text-white font-semibold text-base">{statusText}</p>
+            <p className="text-slate-400 text-sm">جاري تحويلك...</p>
           </div>
-        ) : isSkeleton ? (
-          /* Skeleton state — pulse instead of spin (≤ 1 s, non-blocking feel) */
-          <div className="space-y-3">
+        )}
+
+        {/* ── Loading (skeleton + status) ───────────────────────────────── */}
+        {isLoading && (
+          <div className="space-y-5">
+            {/* Skeleton rows */}
             <div className="flex items-center gap-3">
               <div
                 className="w-10 h-10 rounded-full animate-pulse shrink-0"
-                style={{ background: 'rgba(245,158,11,0.15)' }}
+                style={{ background: 'rgba(245,158,11,0.12)' }}
               />
               <div className="flex-1 space-y-2">
-                <div
-                  className="h-3 rounded animate-pulse"
-                  style={{ background: 'rgba(255,255,255,0.06)', width: '60%' }}
-                />
-                <div
-                  className="h-2.5 rounded animate-pulse"
-                  style={{ background: 'rgba(255,255,255,0.04)', width: '40%' }}
-                />
+                <div className="h-3 rounded animate-pulse" style={{ background: 'rgba(255,255,255,0.06)', width: '55%' }} />
+                <div className="h-2.5 rounded animate-pulse" style={{ background: 'rgba(255,255,255,0.04)', width: '35%' }} />
               </div>
             </div>
-            <div
-              className="h-10 rounded-xl animate-pulse mt-4"
-              style={{ background: 'rgba(245,158,11,0.08)' }}
-            />
-            <div
-              className="h-10 rounded-xl animate-pulse"
-              style={{ background: 'rgba(255,255,255,0.04)' }}
-            />
-          </div>
-        ) : (
-          /* Login-in-progress state */
-          <div className="text-center space-y-4">
-            <div className="relative w-14 h-14 mx-auto">
-              <div className="absolute inset-0 rounded-full border-4 border-amber-400/20" />
-              <div className="absolute inset-0 rounded-full border-4 border-t-amber-400 animate-spin" />
-              <span className="absolute inset-0 flex items-center justify-center text-xl">🐝</span>
-            </div>
-            <p className="text-white font-semibold text-base">{statusText || 'جاري التحقق...'}</p>
+            <div className="h-10 rounded-xl animate-pulse" style={{ background: 'rgba(245,158,11,0.07)' }} />
+            <div className="h-10 rounded-xl animate-pulse" style={{ background: 'rgba(255,255,255,0.04)' }} />
+
+            {/* Live status text */}
+            <p className="text-center text-slate-500 text-xs pt-1">{statusText}</p>
           </div>
         )}
       </div>
 
-      {/* Footer */}
       <p className="mt-5 text-xs" style={{ color: '#334155' }}>
         بأيدي سعودية 100% 🇸🇦 · Nahla AI
       </p>
