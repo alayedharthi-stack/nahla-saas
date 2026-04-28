@@ -198,12 +198,17 @@ def _normalise_order(raw: Any) -> Dict:
         or external_id
     ).strip() or external_id
 
+    _ci = customer_info if isinstance(customer_info, dict) else {}
     customer_name = (
-        (customer_info.get("name") if isinstance(customer_info, dict) else None)
+        _ci.get("name")
+        or " ".join(filter(None, [_ci.get("first_name"), _ci.get("last_name")])).strip()
         or raw.get("customer_name")
         or ""
     )
     customer_name = str(customer_name).strip()
+    # Backfill "name" into customer_info so future ci.get("name") lookups work.
+    if customer_name and isinstance(customer_info, dict) and not customer_info.get("name"):
+        customer_info["name"] = customer_name
 
     return {
         "external_id":           external_id,

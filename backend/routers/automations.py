@@ -1696,6 +1696,20 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
     })
     grace = timedelta(minutes=15)
 
+    def _resolve_name(ci: dict, fallback: Optional[str]) -> str:
+        """Resolve customer display name from customer_info JSON.
+
+        Salla stores first_name / last_name without a composite 'name' key in
+        older synced rows.  We build it on the fly so the dashboard is never
+        blank for these orders.
+        """
+        name = ci.get("name") or ""
+        if not name:
+            first = (ci.get("first_name") or "").strip()
+            last  = (ci.get("last_name")  or "").strip()
+            name  = (first + " " + last).strip()
+        return name or (fallback or "").strip() or "—"
+
     pending_payment_items = []
     for o in (
         db.query(Order)
@@ -1743,7 +1757,7 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             "order_id":         o.id,
             "external_id":      o.external_id,
             "order_number":     o.external_order_number or o.external_id or f"#{o.id}",
-            "customer_name":    ci.get("name") or o.customer_name or "—",
+            "customer_name":    _resolve_name(ci, o.customer_name),
             "customer_phone":   ci.get("phone") or ci.get("mobile") or "",
             "checkout_url":     o.checkout_url or "",
             "total":            float(o.total or 0),
@@ -1788,7 +1802,7 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             "order_id":           o.id,
             "external_id":        o.external_id,
             "order_number":       o.external_order_number or o.external_id or f"#{o.id}",
-            "customer_name":      ci.get("name") or o.customer_name or "—",
+            "customer_name":      _resolve_name(ci, o.customer_name),
             "customer_phone":     ci.get("phone") or ci.get("mobile") or "",
             "total":              float(o.total or 0),
             "status":             raw,
