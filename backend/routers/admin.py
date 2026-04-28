@@ -882,6 +882,113 @@ async def get_tenant_summary(
     return _tenant_summary_payload(db, tenant)
 
 
+# ── Trial extension (admin only) ──────────────────────────────────────────────
+
+class ExtendTrialIn(BaseModel):
+    days:   int            = Field(default=14, ge=1, le=365)
+    reason: Optional[str]  = "payment_provider_pending_review"
+
+
+@router.post("/admin/tenants/{tenant_id}/extend-trial")
+async def extend_tenant_trial(
+    tenant_id: int,
+    body: ExtendTrialIn,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Extend a tenant's free trial by N days **without** activating any paid
+    subscription. Touches only `tenants.trial_ends_at` and writes audit
+    metadata into `tenant_settings.metadata.billing.trial_extension`.
+
+    Rules
+    -----
+    * `created_at` is never modified.
+    * No tenant is recreated.
+    * No billing/subscription field is touched.
+    * If `trial_ends_at` is in the future → add `days` on top of it.
+    * If `trial_ends_at` is missing or expired → set to `now + days`.
+
+    `compute_trial_info()` reads `trial_ends_at` directly so the new value
+    is picked up by every downstream endpoint without further changes.
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    now      = datetime.now(timezone.utc)
+    days     = int(body.days)
+    reason   = (body.reason or "").strip() or "payment_provider_pending_review"
+
+    # Coerce existing value to UTC for safe comparison.
+    current  = tenant.trial_ends_at
+    if current is not None and current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+
+    if current is not None and current > now:
+        new_end = current + timedelta(days=days)
+        mode    = "extended_from_existing"
+    else:
+        new_end = now + timedelta(days=days)
+        mode    = "reset_to_now_plus_days"
+
+    previous_iso = current.isoformat() if current else None
+
+    # Strip tzinfo so we don't mix naive/aware datetimes in the DB column
+    # (Tenant.trial_ends_at is a naive DateTime; we already coerce on read).
+    tenant.trial_ends_at = new_end.replace(tzinfo=None)
+
+    # ── Audit trail in tenant_settings.metadata (no schema migration) ───────
+    settings = get_or_create_settings(db, tenant_id)
+    meta     = dict(settings.extra_metadata or {})
+    billing  = dict(meta.get("billing") or {})
+    history  = list(billing.get("trial_extension_history") or [])
+    history.append({
+        "extended_at":  now.isoformat(),
+        "previous_end": previous_iso,
+        "new_end":      new_end.isoformat(),
+        "days_added":   days,
+        "reason":       reason,
+        "mode":         mode,
+        "admin":        admin.get("sub") or admin.get("email"),
+    })
+    billing["trial_extended_by_admin"] = True
+    billing["trial_extension_reason"]  = reason
+    billing["trial_extension_history"] = history[-20:]   # keep last 20
+    meta["billing"] = billing
+    settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
+
+    db.commit()
+    db.refresh(tenant)
+
+    audit(
+        "tenant_trial_extended",
+        admin=admin.get("sub"),
+        tenant_id=tenant_id,
+        days=days,
+        reason=reason,
+        mode=mode,
+        previous_end=previous_iso,
+        new_end=new_end.isoformat(),
+    )
+    logger.info(
+        "[Admin] Trial extended tenant=%s days=%s mode=%s reason=%s "
+        "previous_end=%s new_end=%s",
+        tenant_id, days, mode, reason, previous_iso, new_end.isoformat(),
+    )
+
+    return {
+        "tenant_id":               tenant_id,
+        "trial_ends_at":           new_end.isoformat(),
+        "previous_trial_ends_at":  previous_iso,
+        "days_added":              days,
+        "mode":                    mode,
+        "reason":                  reason,
+        "trial_extended_by_admin": True,
+    }
+
+
 @router.get("/admin/tenants/{tenant_id}/users")
 async def get_tenant_users(
     tenant_id: int,
