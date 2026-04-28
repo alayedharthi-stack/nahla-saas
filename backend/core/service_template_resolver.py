@@ -168,6 +168,17 @@ _SERVICE_NAME_PATTERNS: Dict[str, List[str]] = {
         "تذكير_السلة", "تذكير السلة",
         "استرجاع",
     ],
+    "payment_reminder": [
+        # English
+        "unpaid_order", "unpaid_reminder", "payment_reminder",
+        "payment_pending", "pending_payment", "unpaid",
+        "order_payment", "paymentreminder",
+        # Arabic
+        "غير_مدفوع", "غير مدفوع",
+        "انتظار_الدفع", "انتظار الدفع",
+        "تذكير_دفع", "تذكير الدفع",
+        "دفع_معلق",
+    ],
     "cod_confirmation": [
         "cod_confirmation", "cod_confirm", "cash_on_delivery",
         "تأكيد", "الدفع_عند", "عند_الاستلام",
