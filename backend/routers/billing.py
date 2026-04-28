@@ -558,11 +558,74 @@ async def create_billing_checkout(
             )
         except Exception as exc:
             db.rollback()
-            logger.error("[Billing] Moyasar invoice error tenant=%s: %s", tenant_id, exc)
-            raise HTTPException(status_code=502, detail=f"Payment gateway error: {exc}")
+            err_text = str(exc).lower()
+            logger.error(
+                "[Billing] Moyasar invoice error tenant=%s plan=%s: %s",
+                tenant_id, plan.slug, exc,
+            )
+
+            # ── Detect "account not yet approved / disabled / unauthorized" ─
+            # Moyasar typically returns these as 401/403 with messages like:
+            #   "merchant disabled", "account not active",
+            #   "invalid api key", "unauthorized", "onboarding pending".
+            provider_not_ready_signals = (
+                "unauthorized",
+                "invalid api key",
+                "invalid_api_key",
+                "merchant disabled",
+                "merchant_disabled",
+                "account not active",
+                "account_not_active",
+                "onboarding",
+                "not approved",
+                "not_approved",
+                "disabled",
+                "401",
+                "403",
+            )
+            is_provider_not_ready = any(s in err_text for s in provider_not_ready_signals)
+
+            if is_provider_not_ready:
+                logger.warning(
+                    "[Billing] Payment provider not ready (likely under review) "
+                    "tenant=%s plan=%s — surfacing manual-activation path",
+                    tenant_id, plan.slug,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code":    "payment_provider_not_ready",
+                        "message": "بوابة الدفع قيد المراجعة حاليًا. يمكنك تفعيل الاشتراك يدويًا عبر الدعم.",
+                    },
+                )
+
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code":    "payment_gateway_error",
+                    "message": f"تعذّر الاتصال ببوابة الدفع. حاول لاحقاً أو فعّل الاشتراك يدويًا عبر الدعم. ({exc})",
+                },
+            )
 
         invoice_id   = invoice.get("id", "")
         checkout_url = invoice.get("url", "")
+
+        # ── Defensive: gateway accepted the call but didn't return a usable URL ─
+        # This happens for some half-onboarded merchant accounts.
+        # Do NOT activate the subscription — surface a clear manual path.
+        if not checkout_url:
+            db.rollback()
+            logger.warning(
+                "[Billing] Moyasar returned no checkout URL tenant=%s plan=%s invoice=%s",
+                tenant_id, plan.slug, invoice_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code":    "payment_provider_not_ready",
+                    "message": "بوابة الدفع قيد المراجعة حاليًا. يمكنك تفعيل الاشتراك يدويًا عبر الدعم.",
+                },
+            )
 
         meta = dict(sub.extra_metadata or {})
         meta["moyasar_invoice_id"] = invoice_id

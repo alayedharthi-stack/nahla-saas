@@ -2,9 +2,18 @@ import { useState, useEffect } from 'react'
 import {
   CheckCircle, Zap, TrendingUp, Rocket, Loader2, AlertCircle,
   RefreshCw, Tag, MessageSquare, Star, ArrowUp, ExternalLink, ShieldCheck,
-  Clock, Sparkles, Bot,
+  Clock, Sparkles, Bot, Phone,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
+
+// ── Manual fallback (used when payment gateway is down / not configured) ──────
+// ⚠️ Update this number if Nahla support contact changes.
+const SUPPORT_WHATSAPP = '966555000000'   // +966 5 55 00 00 00 (placeholder)
+
+function buildSupportUrl(planNameAr: string, storeName: string): string {
+  const text = `مرحباً، أرغب بتفعيل باقة «${planNameAr}» لمتجر ${storeName || '—'}.`
+  return `https://wa.me/${SUPPORT_WHATSAPP}?text=${encodeURIComponent(text)}`
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -38,15 +47,19 @@ function PlanCard({
   billingStatus,
   onCheckout,
   checkingOut,
+  storeName,
 }: {
   plan:          BillingPlan
   billingStatus: BillingStatus | null
   onCheckout:    (slug: string) => void
   checkingOut:   string | null
+  storeName:     string
 }) {
   const isPopular  = plan.slug === 'growth'
   const gradient   = PLAN_GRADIENTS[plan.slug] ?? 'from-slate-500 to-slate-600'
+  // Only THIS card is loading — other cards remain clickable.
   const isLoading  = checkingOut === plan.slug
+  const isOtherLoading = checkingOut !== null && checkingOut !== plan.slug
   const hasDiscount = plan.launch_price_sar < plan.price_sar
 
   const isPaidActive = billingStatus?.has_subscription
@@ -138,19 +151,38 @@ function PlanCard({
               </div>
             )}
             <button
-              onClick={() => onCheckout(plan.slug)}
-              disabled={!!checkingOut}
+              type="button"
+              onClick={() => {
+                console.info('[Billing] plan clicked', {
+                  plan_slug: plan.slug,
+                  plan_name: plan.name_ar,
+                  price_sar: plan.launch_price_sar,
+                })
+                onCheckout(plan.slug)
+              }}
+              disabled={isOtherLoading || isLoading}
               className={[
                 'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all',
                 'flex items-center justify-center gap-2',
                 `bg-gradient-to-br ${gradient}`,
-                checkingOut ? 'opacity-60 cursor-not-allowed' : 'hover:opacity-90 active:scale-95',
+                (isOtherLoading || isLoading) ? 'opacity-60 cursor-not-allowed' : 'hover:opacity-90 active:scale-95',
               ].join(' ')}
             >
               {isLoading
                 ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ التوجيه للدفع...</>
                 : <><ExternalLink className="w-4 h-4" /> ادفع الآن — {plan.launch_price_sar.toLocaleString('ar-SA')} ر.س</>}
             </button>
+
+            {/* Manual fallback — always visible so the merchant is never stuck */}
+            <a
+              href={buildSupportUrl(plan.name_ar, storeName)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 w-full py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+            >
+              <Phone className="w-3.5 h-3.5" />
+              أو فعّل الباقة عبر واتساب الدعم
+            </a>
           </>
         )}
 
@@ -177,6 +209,7 @@ export default function Billing() {
   const [checkingOut, setCheckingOut] = useState<string | null>(null)
   const [checkoutMsg, setCheckoutMsg] = useState<string | null>(null)
   const [checkoutErr, setCheckoutErr] = useState<string | null>(null)
+  const [checkoutErrCode, setCheckoutErrCode] = useState<string>('')
 
   const load = async () => {
     setLoading(true)
@@ -199,26 +232,69 @@ export default function Billing() {
   useEffect(() => { load() }, [])
 
   const handleCheckout = async (slug: string) => {
+    const tenantId = (() => {
+      try { return localStorage.getItem('nahla_tenant_id') || '?' } catch { return '?' }
+    })()
+    console.info('[Billing] → /billing/checkout', { plan_slug: slug, tenant_id: tenantId })
+
     setCheckingOut(slug)
     setCheckoutMsg(null)
     setCheckoutErr(null)
+    setCheckoutErrCode('')
 
     try {
       const res = await billingApi.createCheckout(slug)
+      console.info('[Billing] checkout response', {
+        gateway:        res.gateway,
+        has_url:        !!res.checkout_url,
+        demo_mode:      res.demo_mode,
+        subscription_id: res.subscription_id,
+      })
 
       if (res.checkout_url) {
         // Real Moyasar payment — redirect to hosted payment page
+        console.info('[Billing] redirecting to payment gateway:', res.checkout_url)
         window.location.href = res.checkout_url
-        // (page navigates away; no further state updates needed)
-      } else if (res.demo_mode) {
-        // No gateway configured — subscription activated immediately
+        return
+      }
+
+      if (res.demo_mode) {
         setCheckoutMsg('تم تفعيل الخطة بنجاح! (وضع تجريبي — بدون دفع)')
         await load()
         setCheckingOut(null)
+        return
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'خطأ غير معروف'
-      setCheckoutErr(`فشل إنشاء جلسة الدفع: ${msg}`)
+
+      // ── Gateway responded successfully but with NO usable url ──────────
+      // Don't leave the merchant stuck on a spinner — show actionable error.
+      console.warn('[Billing] checkout returned no checkout_url and no demo_mode', res)
+      setCheckoutErr(
+        'بوابة الدفع قيد المراجعة حاليًا. يمكنك تفعيل الاشتراك يدويًا عبر الدعم.',
+      )
+      setCheckoutErrCode('payment_provider_not_ready')
+      setCheckingOut(null)
+    } catch (err: any) {
+      const code = (err?.code as string | undefined) ?? ''
+      const msg  = (err?.message as string | undefined) ?? 'خطأ غير معروف'
+      console.error('[Billing] checkout failed', { code, msg, status: err?.status, plan_slug: slug })
+
+      let friendly: string
+      switch (code) {
+        case 'payment_provider_not_ready':
+          // Moyasar account under review / not approved yet.
+          friendly = msg || 'بوابة الدفع قيد المراجعة حاليًا. يمكنك تفعيل الاشتراك يدويًا عبر الدعم.'
+          break
+        case 'payment_gateway_error':
+          friendly = msg || 'تعذّر الاتصال ببوابة الدفع. حاول لاحقاً أو فعّل الاشتراك يدويًا عبر الدعم.'
+          break
+        case 'subscription_inactive':
+          friendly = msg
+          break
+        default:
+          friendly = `تعذّر إنشاء جلسة الدفع (${msg}). يمكنك تفعيل الاشتراك يدويًا عبر واتساب الدعم.`
+      }
+      setCheckoutErr(friendly)
+      setCheckoutErrCode(code)
       setCheckingOut(null)
     }
   }
@@ -334,19 +410,58 @@ export default function Billing() {
           {checkoutMsg}
         </div>
       )}
-      {checkoutErr && (
-        <div className="flex items-center gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          {checkoutErr}
-        </div>
-      )}
+      {checkoutErr && (() => {
+        // Provider-not-ready is an "info" state, not a hard error.
+        const isProviderNotReady = checkoutErrCode === 'payment_provider_not_ready'
+        const palette = isProviderNotReady
+          ? { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-800', icon: 'text-amber-500' }
+          : { bg: 'bg-red-50',   border: 'border-red-200',   text: 'text-red-700',   icon: 'text-red-500'   }
+        const title = isProviderNotReady
+          ? 'بوابة الدفع قيد المراجعة'
+          : 'تعذّر إنشاء جلسة الدفع'
+        return (
+          <div className={`flex items-start gap-3 ${palette.bg} border ${palette.border} ${palette.text} rounded-xl px-4 py-3 text-sm`}>
+            <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${palette.icon}`} />
+            <div className="flex-1">
+              <p className="font-semibold">{title}</p>
+              <p className="mt-0.5">{checkoutErr}</p>
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <a
+                  href={buildSupportUrl('—', (() => {
+                    try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
+                  })())}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs font-bold bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-700 transition-colors"
+                >
+                  <Phone className="w-3.5 h-3.5" />
+                  تفعيل الاشتراك يدوياً عبر واتساب
+                </a>
+                <button
+                  onClick={() => { setCheckoutErr(null); setCheckoutErrCode('') }}
+                  className="text-xs text-slate-500 hover:text-slate-700 underline"
+                >
+                  إغلاق
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
-      {/* Redirecting overlay */}
-      {checkingOut && (
+      {/* Redirecting overlay — only while waiting for backend response.
+          Auto-dismisses on error so the merchant can act. */}
+      {checkingOut && !checkoutErr && (
         <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center gap-4">
           <Loader2 className="w-10 h-10 animate-spin text-brand-500" />
-          <p className="text-sm font-semibold text-slate-700">جارٍ التوجيه إلى صفحة الدفع...</p>
-          <p className="text-xs text-slate-400">يرجى الانتظار</p>
+          <p className="text-sm font-semibold text-slate-700">جارٍ التحضير لصفحة الدفع...</p>
+          <p className="text-xs text-slate-400">يرجى الانتظار بضع ثوانٍ</p>
+          <button
+            onClick={() => setCheckingOut(null)}
+            className="mt-2 text-xs text-slate-500 hover:text-slate-700 underline"
+          >
+            إلغاء
+          </button>
         </div>
       )}
 
@@ -476,6 +591,9 @@ export default function Billing() {
               billingStatus={status}
               onCheckout={handleCheckout}
               checkingOut={checkingOut}
+              storeName={(() => {
+                try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
+              })()}
             />
           ))}
         </div>
