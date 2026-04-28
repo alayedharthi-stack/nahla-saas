@@ -95,6 +95,14 @@ class OrderPreparationState:
     # i.e. the product identifier we have is wrong / not synced. Order
     # creation MUST be blocked while this is True.
     product_unsyncable: bool = False
+    # True once `_ensure_product_options_loaded` has had ONE successful
+    # call to adapter.get_product(). Critical: a successful response with
+    # an EMPTY options array (a simple product) must still flip this so
+    # we do NOT re-hit Salla on every turn. The previous code keyed off
+    # `product_options_meta` truthiness, which made simple products
+    # re-fetch forever — and a single transient empty Salla response
+    # mid-flow falsely flagged the product as unsyncable.
+    product_options_loaded: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -124,6 +132,7 @@ class OrderPreparationState:
             "product_options": dict(self.product_options or {}),
             "product_has_required_options": self.product_has_required_options,
             "product_unsyncable": self.product_unsyncable,
+            "product_options_loaded": self.product_options_loaded,
         }
 
     @staticmethod
@@ -161,6 +170,7 @@ class OrderPreparationState:
             product_options=dict(raw.get("product_options") or {}),
             product_has_required_options=bool(raw.get("product_has_required_options", False)),
             product_unsyncable=bool(raw.get("product_unsyncable", False)),
+            product_options_loaded=bool(raw.get("product_options_loaded", False)),
         )
 
 

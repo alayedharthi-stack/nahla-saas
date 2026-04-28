@@ -89,6 +89,11 @@ class DraftOrderHandler:
             prep.product_options_meta = []
             prep.product_options = {}
             prep.product_has_required_options = False
+            # Reset the load-cache so we re-fetch options for the new
+            # product. Also clear any previous unsyncable verdict — that
+            # was about the OLD product.
+            prep.product_options_loaded = False
+            prep.product_unsyncable = False
 
         # Track which product this prep belongs to
         prep.product_id = current_product_id
@@ -547,6 +552,7 @@ class DraftOrderHandler:
             # Salla via the dedicated /products/{id}/options endpoint.
             prep.product_options_meta = []
             prep.product_options = {}
+            prep.product_options_loaded = False
             logger.error(
                 "[ORDER FLOW] options required by Salla — reloading metadata | "
                 "tenant=%s product=%s",
@@ -1032,7 +1038,16 @@ async def _ensure_product_options_loaded(
     detail payload; if this prep already has cached metadata for the same
     product we skip the network call.
     """
-    if prep.product_options_meta:
+    # CRITICAL: key off the explicit `product_options_loaded` boolean —
+    # NOT the truthiness of `product_options_meta`. A simple product
+    # legitimately has an empty options list, and the old check
+    # (`if prep.product_options_meta`) treated `[]` as "never loaded",
+    # so we re-hit Salla on EVERY single turn. After 2-3 calls one of
+    # them returns transiently empty (rate-limit, gateway hiccup, 200
+    # with `data: null`) and we wrongly flip `product_unsyncable=True`
+    # — which produced the "هذا المنتج غير متاح" message after the
+    # customer had already given city + short address code.
+    if prep.product_options_loaded:
         return
     if not external_id:
         return
@@ -1043,11 +1058,24 @@ async def _ensure_product_options_loaded(
             return
         product = await adapter.get_product(external_id)
         if not product:
-            # Salla returned nothing for this id → the id is wrong (likely we
-            # accidentally used Nahla's internal DB id instead of the Salla
-            # product id, or the product was deleted on Salla). Mark the prep
-            # as un-syncable so the caller can refuse to create the order and
-            # ask the customer to pick a different product.
+            # Salla returned nothing for this id. We MUST be careful here:
+            #   • If we have NEVER successfully loaded this product
+            #     before, the id is genuinely wrong / the product was
+            #     deleted → safe to mark unsyncable.
+            #   • If we previously loaded it (`product_options_loaded`
+            #     was True) and somehow we're being called again, the
+            #     empty response is almost certainly transient — do NOT
+            #     overwrite a previously good state. The early return
+            #     above prevents this in normal flow, but we belt-and-
+            #     braces it here too.
+            if prep.product_options_loaded:
+                logger.warning(
+                    "[ORDER FLOW] transient empty get_product result — "
+                    "ignoring (product was loaded successfully before) | "
+                    "tenant=%s product_id=%s",
+                    ctx.tenant_id, external_id,
+                )
+                return
             logger.error(
                 "[ORDER FLOW] invalid product_id for Salla — get_product returned empty | "
                 "tenant=%s product_id=%s (this id does NOT exist on Salla)",
@@ -1056,6 +1084,7 @@ async def _ensure_product_options_loaded(
             prep.product_unsyncable = True
             return
         prep.product_unsyncable = False
+        prep.product_options_loaded = True
         opts = list(getattr(product, "options", None) or [])
         prep.product_options_meta = opts
         # ── Defensive default: any product with option groups (size,
