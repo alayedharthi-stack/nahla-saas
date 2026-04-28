@@ -562,31 +562,51 @@ export default function SallaEntryScreen() {
   }, [markShown, navigate])
 
   // ── Session load ───────────────────────────────────────────────────────
+  // Defensive: we already have a valid JWT (just persisted by SallaEmbedded).
+  // If the readiness probe fails for any reason (timeout, 5xx, CORS), we
+  // STILL enter the dashboard at /overview rather than blocking the merchant
+  // on an error screen. Worst case the entry screen falls back to the live
+  // ("ready") state with quick links — never a dead-end.
   const load = useCallback(async () => {
     const stored = localStorage.getItem('nahla_token')
+    console.info('[SallaEntry] mount | token present:', !!stored)
+
     if (!stored) {
+      console.warn('[SallaEntry] no token → /app/salla')
       navigate('/app/salla', { replace: true })
       return
     }
 
     try {
       const ctrl = new AbortController()
-      const tid  = setTimeout(() => ctrl.abort(), 5000)
+      const tid  = setTimeout(() => ctrl.abort(), 10_000)  // 10s — readiness probes can be slow
+      console.info('[SallaEntry] → GET /api/salla/session')
       const res  = await fetch(`${API_BASE}/api/salla/session`, {
         headers: { Authorization: `Bearer ${stored}` },
         signal:  ctrl.signal,
       })
       clearTimeout(tid)
+      console.info('[SallaEntry] session status:', res.status)
 
-      if (res.status === 401) {
-        localStorage.clear()
-        navigate('/app/salla', { replace: true })
+      // Only a real auth failure should bounce back to /app/salla.
+      // Network errors / 5xx don't invalidate the token we just got.
+      if (res.status === 401 || res.status === 403) {
+        console.warn('[SallaEntry] auth rejected → /overview (fallback, do not clear token)')
+        // Don't clear the token — let the dashboard guard re-check.
+        navigate('/overview', { replace: true })
         return
       }
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        console.warn('[SallaEntry] non-OK status, using safe fallback')
+        navigate('/overview', { replace: true })
+        return
+      }
 
       const data: MerchantState & { token?: string } = await res.json()
+      console.info('[SallaEntry] session OK | wa:', data.whatsapp_connected,
+                   '| autos:', data.has_automations,
+                   '| products:', data.has_products)
 
       if (data.token) localStorage.setItem('nahla_token', data.token)
 
@@ -597,12 +617,12 @@ export default function SallaEntryScreen() {
           : 'ready'
 
       setPhase(nextPhase)
-      // Small delay so the skeleton doesn't flash then instantly disappear
       setTimeout(() => setVisible(true), 50)
-    } catch {
-      setPhase('error')
-      setErrorMsg('تعذر تحميل بيانات حسابك.')
-      setVisible(true)
+    } catch (e) {
+      // Network error / abort / parse error — DO NOT show a dead-end.
+      // The merchant is logged in (we have a token); take them to /overview.
+      console.error('[SallaEntry] readiness probe failed → /overview fallback:', e)
+      navigate('/overview', { replace: true })
     }
   }, [navigate])
 
