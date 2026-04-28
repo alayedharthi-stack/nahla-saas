@@ -1735,7 +1735,7 @@ export default function Templates() {
   const [showNahlaLibrary, setShowNahlaLibrary] = useState(false)
   const [preview, setPreview] = useState<WhatsAppTemplateRecord | null>(null)
   const [editTemplate, setEditTemplate] = useState<WhatsAppTemplateRecord | null>(null)
-  const [submitError, setSubmitError] = useState<{id: number; msg: string} | null>(null)
+  const [submitError, setSubmitError] = useState<{id: number; msg: string; code?: string} | null>(null)
   const [submitting, setSubmitting] = useState<number | null>(null)
   const { t } = useLanguage()
 
@@ -1876,9 +1876,13 @@ export default function Templates() {
       const res = await templatesApi.submit(id)
       setTemplates(ts => ts.map(t => (t.id === id ? res.template : t)))
     } catch (e: any) {
-      const msg = e?.detail ?? e?.message ?? 'فشل إرسال القالب — تحقق من ربط واتساب'
-      setSubmitError({ id, msg })
-      setTimeout(() => setSubmitError(s => s?.id === id ? null : s), 10000)
+      // Backend now returns a structured detail: { code, message }.
+      // apiCall surfaces them as err.message + err.code (see api/client.ts).
+      const code = (e?.code as string | undefined) ?? ''
+      const msg  = (e?.message as string | undefined) ?? 'فشل إرسال القالب — تحقق من ربط واتساب'
+      console.error('[templates/submit] failed', { id, code, msg, status: e?.status })
+      setSubmitError({ id, msg, code })
+      setTimeout(() => setSubmitError(s => s?.id === id ? null : s), 12000)
     } finally {
       setSubmitting(null)
     }
@@ -1925,16 +1929,36 @@ export default function Templates() {
         />
       )}
 
-      {/* Submit error toast */}
-      {submitError && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-red-600 text-white px-5 py-3 rounded-xl shadow-xl text-sm">
-          <XCircle className="w-4 h-4 shrink-0" />
-          <span>{submitError.msg}</span>
-          <button onClick={() => setSubmitError(null)} className="ml-2 opacity-70 hover:opacity-100">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
+      {/* Submit error toast — context-aware action button */}
+      {submitError && (() => {
+        const code = submitError.code ?? ''
+        const ctx =
+          code === 'subscription_inactive' ? { label: 'فعّل الاشتراك', to: '/billing' } :
+          code === 'whatsapp_not_connected'   ||
+          code === 'whatsapp_status_invalid'  ||
+          code === 'missing_waba_id'          ||
+          code === 'missing_phone_number_id'  ||
+          code === 'missing_token'
+            ? { label: 'إصلاح ربط واتساب', to: '/whatsapp-connect' }
+            : null
+        return (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-red-600 text-white px-5 py-3 rounded-xl shadow-xl text-sm max-w-xl">
+            <XCircle className="w-4 h-4 shrink-0" />
+            <span className="flex-1">{submitError.msg}</span>
+            {ctx && (
+              <a
+                href={ctx.to}
+                className="bg-white/15 hover:bg-white/25 px-3 py-1 rounded-lg text-xs font-bold whitespace-nowrap"
+              >
+                {ctx.label}
+              </a>
+            )}
+            <button onClick={() => setSubmitError(null)} className="opacity-70 hover:opacity-100">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )
+      })()}
 
       {/* Soft-delete confirmation toast */}
       {deleteMsg && (

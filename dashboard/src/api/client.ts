@@ -49,38 +49,48 @@ export async function apiCall<T>(path: string, options?: RequestInit): Promise<T
     throw new Error(classifyNetworkError(error))
   }
 
+  // ── Structured-error helper ────────────────────────────────────────────────
+  // Backends may return either:
+  //   { detail: "حصل خطأ نصي" }
+  //   { detail: { code: "subscription_inactive", message: "..."} }
+  // Surface as a normal Error whose `.message` is the human Arabic text and
+  // whose `.code` (when present) is the machine-readable reason.
+  const buildApiError = (body: any, fallback: string): Error & { code?: string; status?: number } => {
+    let msg  = fallback
+    let code: string | undefined
+    const d = body?.detail
+    if (typeof d === 'string') {
+      msg = d
+    } else if (d && typeof d === 'object') {
+      if (typeof d.message === 'string' && d.message.trim()) msg = d.message
+      else if (typeof d.detail === 'string') msg = d.detail
+      if (typeof d.code === 'string') code = d.code
+    }
+    const err = new Error(msg) as Error & { code?: string; status?: number }
+    err.code   = code
+    err.status = res.status
+    return err
+  }
+
   // 401 — only logout when the backend signals the session/token itself is invalid.
   // A 401 for other reasons (e.g. permission checks) should surface as a normal error.
   if (res.status === 401) {
-    let code = ''
-    try {
-      const body = await res.clone().json()
-      code = body?.code ?? ''
-    } catch { /* ignore */ }
+    let body: any = null
+    try { body = await res.clone().json() } catch { /* ignore */ }
+    const code = body?.code ?? body?.detail?.code ?? ''
 
     if (SESSION_EXPIRED_CODES.has(code)) {
-      // True session expiry — clear state and send user to login
       logout()
       window.location.href = '/login'
       throw new Error('انتهت صلاحية الجلسة — يرجى تسجيل الدخول مجدداً')
     }
-
-    // Other 401 (e.g. impersonation blocked) — surface as a normal error
-    let detail = 'غير مصرح'
-    try {
-      const body = await res.json()
-      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-    } catch { /* ignore */ }
-    throw new Error(detail)
+    throw buildApiError(body, 'غير مصرح')
   }
 
   if (!res.ok) {
-    let detail = `API error ${res.status}`
-    try {
-      const body = await res.json()
-      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
-    } catch { /* ignore */ }
-    throw new Error(detail)
+    let body: any = null
+    try { body = await res.json() } catch { /* ignore */ }
+    throw buildApiError(body, `API error ${res.status}`)
   }
 
   return res.json() as Promise<T>

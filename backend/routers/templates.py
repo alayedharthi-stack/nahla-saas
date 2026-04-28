@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from models import Customer, CustomerProfile, TenantSettings, WhatsAppTemplate  # noqa: E402
+from models import Customer, CustomerProfile, Tenant, TenantSettings, WhatsAppTemplate  # noqa: E402
 
 from core.database import get_db
 from core.tenant import (
@@ -1959,35 +1959,128 @@ async def generate_template(body: GenerateTemplateIn, request: Request, db: Sess
 
 @router.post("/templates/{template_id}/submit")
 async def submit_template_to_meta(template_id: int, request: Request, db: Session = Depends(get_db)):
-    """Submit a DRAFT template to Meta for approval."""
+    """
+    Submit a DRAFT template to Meta for approval.
+
+    Returns a structured error with `code` + `message` so the dashboard can
+    show a precise reason. Possible failure codes:
+
+      • subscription_inactive       — trial expired and no paid subscription
+      • template_not_found          — template_id doesn't exist for this tenant
+      • template_status_invalid     — template is APPROVED/PENDING already
+      • whatsapp_not_connected      — no WhatsAppConnection row at all
+      • whatsapp_status_invalid     — connection exists but status != connected
+      • missing_waba_id             — no whatsapp_business_account_id
+      • missing_phone_number_id     — phone_number_id not set
+      • missing_token               — access_token absent / null
+      • meta_validation_error       — Meta API returned an error
+      • meta_no_id_returned         — Meta accepted but returned no template id
+    """
     from models import WhatsAppConnection  # noqa: PLC0415
+    from core.billing import has_billing_access  # noqa: PLC0415
+
     tenant_id = resolve_tenant_id(request)
+
+    # ── Gate 1: subscription / trial status ─────────────────────────────────
+    if not has_billing_access(db, tenant_id):
+        logger.warning(
+            "[template/submit] BLOCKED tenant=%s reason=subscription_inactive template=%s",
+            tenant_id, template_id,
+        )
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code":    "subscription_inactive",
+                "message": "لا يمكن إرسال القوالب للاعتماد لأن التجربة المجانية منتهية. فعّل الاشتراك أولاً من صفحة الفوترة.",
+            },
+        )
+
+    # ── Gate 2: template exists and is in submittable state ─────────────────
     tpl = db.query(WhatsAppTemplate).filter(
         WhatsAppTemplate.id == template_id,
         WhatsAppTemplate.tenant_id == tenant_id,
     ).first()
     if not tpl:
-        raise HTTPException(status_code=404, detail="Template not found")
+        raise HTTPException(status_code=404, detail={
+            "code": "template_not_found",
+            "message": "القالب غير موجود.",
+        })
     if tpl.status not in ("DRAFT", "REJECTED"):
-        raise HTTPException(status_code=400, detail=f"لا يمكن إرسال قالب بحالة '{tpl.status}' إلى Meta")
+        raise HTTPException(status_code=400, detail={
+            "code":    "template_status_invalid",
+            "message": f"لا يمكن إرسال قالب بحالة '{tpl.status}' إلى Meta.",
+        })
 
-    # Resolve WABA ID: prefer WhatsAppConnection (live), fall back to settings
+    # ── Gate 3: WhatsApp connection completeness ───────────────────────────
     wa_conn = db.query(WhatsAppConnection).filter(
         WhatsAppConnection.tenant_id == tenant_id,
     ).order_by(WhatsAppConnection.created_at.desc()).first()
 
     settings = get_or_create_settings(db, tenant_id)
     wa = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
+
+    if not wa_conn:
+        # No connection row at all — but maybe the merchant has manual settings.
+        # Allow submission only if waba_id is present in settings as fallback.
+        legacy_waba = wa.get("whatsapp_business_account_id", "")
+        if not legacy_waba:
+            logger.warning(
+                "[template/submit] BLOCKED tenant=%s reason=whatsapp_not_connected template=%s",
+                tenant_id, template_id,
+            )
+            raise HTTPException(status_code=422, detail={
+                "code":    "whatsapp_not_connected",
+                "message": "واتساب غير مربوط بعد. اذهب إلى «الإعدادات ← واتساب» لإكمال الربط.",
+            })
+
     waba_id = (
         (wa_conn.whatsapp_business_account_id if wa_conn else None)
         or wa.get("whatsapp_business_account_id", "")
     )
-    if not waba_id:
-        raise HTTPException(
-            status_code=422,
-            detail="بيانات WhatsApp Business غير مُعدَّة. أكمل ربط واتساب أولاً (الإعدادات ← واتساب).",
-        )
+    phone_number_id = (wa_conn.phone_number_id if wa_conn else None) \
+        or wa.get("phone_number_id", "")
+    access_token    = (wa_conn.access_token if wa_conn else None) \
+        or wa.get("access_token", "") or wa.get("api_key", "")
+    conn_status     = wa_conn.status if wa_conn else None
 
+    # Detailed diagnostic log so support can pinpoint the real problem instantly
+    logger.info(
+        "[template/submit] gate-check tenant=%s template=%s "
+        "wa_conn=%s status=%s waba=%s phone_id=%s has_token=%s",
+        tenant_id, template_id, bool(wa_conn), conn_status,
+        bool(waba_id), bool(phone_number_id), bool(access_token),
+    )
+
+    if conn_status and conn_status not in (
+        "connected", "pending", "review_pending", "activation_pending"
+    ):
+        raise HTTPException(status_code=422, detail={
+            "code":    "whatsapp_status_invalid",
+            "message": (
+                f"حالة واتساب الحالية «{conn_status}» — لا تسمح بإرسال قوالب. "
+                "أعد ربط واتساب من الإعدادات."
+            ),
+        })
+
+    if not waba_id:
+        raise HTTPException(status_code=422, detail={
+            "code":    "missing_waba_id",
+            "message": "معرّف WhatsApp Business Account (WABA) مفقود. أعد ربط واتساب من «الإعدادات ← واتساب».",
+        })
+
+    if not phone_number_id:
+        raise HTTPException(status_code=422, detail={
+            "code":    "missing_phone_number_id",
+            "message": "رقم واتساب الرسمي غير مُسجَّل في Meta. أكمل خطوة تسجيل الرقم من الإعدادات.",
+        })
+
+    if not access_token:
+        raise HTTPException(status_code=422, detail={
+            "code":    "missing_token",
+            "message": "رمز الوصول إلى Meta منتهي أو مفقود. أعد ربط واتساب من الإعدادات.",
+        })
+
+    # ── All gates passed → submit to Meta ───────────────────────────────────
     try:
         meta_id = await _submit_template_to_meta(
             db=db,
@@ -2000,9 +2093,17 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
             components=tpl.components or [],
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        logger.warning("[template/submit] meta_validation tenant=%s: %s", tenant_id, exc)
+        raise HTTPException(status_code=422, detail={
+            "code":    "meta_validation_error",
+            "message": str(exc),
+        }) from exc
+
     if not meta_id:
-        raise HTTPException(status_code=502, detail="فشل إرسال القالب إلى Meta. تحقق من بيانات الاعتماد وحاول مرة أخرى.")
+        raise HTTPException(status_code=502, detail={
+            "code":    "meta_no_id_returned",
+            "message": "فشل إرسال القالب إلى Meta. تحقق من بيانات الاعتماد وحاول مرة أخرى.",
+        })
 
     tpl.meta_template_id = meta_id
     tpl.status = "PENDING"
@@ -2018,6 +2119,89 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
     db.commit()
 
     return {"submitted": True, "template": _tpl_to_dict(tpl)}
+
+
+@router.get("/templates/submit-diagnostic")
+async def template_submit_diagnostic(request: Request, db: Session = Depends(get_db)):
+    """
+    Returns the exact reason WHY the current tenant cannot submit templates,
+    without actually attempting a submission. Useful for support / dashboard
+    pre-flight checks.
+
+    Same gates as POST /templates/{id}/submit, in the same order.
+    """
+    from models import WhatsAppConnection  # noqa: PLC0415
+    from core.billing import compute_trial_info, get_tenant_subscription, has_billing_access  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    tenant    = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+
+    sub        = get_tenant_subscription(db, tenant_id)
+    trial_info = compute_trial_info(tenant) if tenant else {"is_trial": False, "trial_expired": True}
+    can_send   = has_billing_access(db, tenant_id)
+
+    wa_conn = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.tenant_id == tenant_id,
+    ).order_by(WhatsAppConnection.created_at.desc()).first()
+
+    settings    = get_or_create_settings(db, tenant_id)
+    wa_settings = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
+
+    waba_id = (
+        (wa_conn.whatsapp_business_account_id if wa_conn else None)
+        or wa_settings.get("whatsapp_business_account_id", "")
+    )
+    phone_number_id = (wa_conn.phone_number_id if wa_conn else None) \
+        or wa_settings.get("phone_number_id", "")
+    has_token = bool(
+        (wa_conn.access_token if wa_conn else None)
+        or wa_settings.get("access_token") or wa_settings.get("api_key")
+    )
+
+    blocking_code = None
+    blocking_msg  = None
+    if not can_send:
+        blocking_code = "subscription_inactive"
+        blocking_msg  = "التجربة المجانية منتهية ولا يوجد اشتراك نشط."
+    elif not wa_conn and not waba_id:
+        blocking_code = "whatsapp_not_connected"
+        blocking_msg  = "واتساب غير مربوط بعد."
+    elif wa_conn and wa_conn.status not in (
+        "connected", "pending", "review_pending", "activation_pending"
+    ):
+        blocking_code = "whatsapp_status_invalid"
+        blocking_msg  = f"حالة واتساب «{wa_conn.status}» — لا تسمح بإرسال القوالب."
+    elif not waba_id:
+        blocking_code = "missing_waba_id"
+        blocking_msg  = "WABA ID مفقود."
+    elif not phone_number_id:
+        blocking_code = "missing_phone_number_id"
+        blocking_msg  = "phone_number_id مفقود."
+    elif not has_token:
+        blocking_code = "missing_token"
+        blocking_msg  = "access_token مفقود."
+
+    return {
+        "tenant_id":          tenant_id,
+        "can_submit":         blocking_code is None,
+        "blocking_code":      blocking_code,
+        "blocking_message":   blocking_msg,
+        "billing": {
+            "has_subscription": sub is not None,
+            "subscription_status": sub.status if sub else None,
+            "trial_expired":      trial_info.get("trial_expired"),
+            "trial_days_left":    trial_info.get("trial_days_remaining", 0),
+        },
+        "whatsapp": {
+            "has_connection":         bool(wa_conn),
+            "status":                 wa_conn.status if wa_conn else None,
+            "has_waba_id":            bool(waba_id),
+            "has_phone_number_id":    bool(phone_number_id),
+            "has_access_token":       has_token,
+            "provider":               wa_conn.provider if wa_conn else None,
+            "connection_type":        wa_conn.connection_type if wa_conn else None,
+        },
+    }
 
 
 @router.get("/templates/health")
