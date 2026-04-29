@@ -73,6 +73,15 @@ DEFAULT_AI: Dict[str, Any] = {
     ),
     "allowed_discount_levels":  "10",
     "recommendations_enabled":  True,
+    # ── Merchant-configurable policy rules (Phase 11) ─────────────────────
+    # coupon_cap_hours: block a second coupon to same customer within N hours
+    "coupon_cap_hours":          24,
+    # auto_escalate_after_n: transfer to human after N consecutive GENERAL turns
+    "auto_escalate_after_n":    3,
+    # max_order_value: refuse orders above this amount (0 or null = unlimited)
+    "max_order_value":           0,
+    # context_verbosity: "full" (default) or "compact" (A/B test smaller context)
+    "context_verbosity":        "full",
 }
 
 DEFAULT_STORE: Dict[str, Any] = {

@@ -7,16 +7,16 @@ PassThroughPolicyGate  — Phase 1 no-op (kept for testing / emergency bypass).
 RealPolicyGate         — Phase 2 production gate with real business rules.
 
 RealPolicyGate rules (applied in order, first match modifies decision):
-  1. Working-hours gate  — if store has hours config and it's outside those
-                           hours, downgrade order/payment actions to LLM_REPLY
-                           with a "closed" context so it can apologise.
-  2. Coupon frequency cap — if a coupon was sent to this customer within 24 h
-                            and a new suggest_coupon is requested, block it.
-  3. Price-range gate     — if slots carry a price_range and the product in
-                            focus is outside that range, steer back to search.
-  4. Auto-escalate        — if the customer has sent INTENT_GENERAL 3 times
-                            in a row and is still in STAGE_DISCOVERY, upgrade
-                            to ACTION_HANDOFF so a human can step in.
+  1. Working-hours gate   — if store has hours config and it's outside those
+                            hours, downgrade order/payment actions to LLM_REPLY.
+  2. Coupon frequency cap — block a second coupon within N hours (merchant-
+                            configurable via ai_settings.coupon_cap_hours,
+                            default 24 h).
+  3. Price-range gate     — steer back to search when product exceeds budget.
+  4. Max-order-value gate — block orders above merchant's configured ceiling
+                            (ai_settings.max_order_value, 0 = unlimited).
+  5. Auto-escalate        — transfer to human after N consecutive GENERAL turns
+                            (ai_settings.auto_escalate_after_n, default 3).
 """
 from __future__ import annotations
 
@@ -53,14 +53,21 @@ class RealPolicyGate:
     any failure returns the original decision unchanged (fail-open).
     """
 
-    # Number of consecutive GENERAL turns before auto-escalating
-    ESCALATE_AFTER_N_GENERAL = 3
+    # Fallback constants (used when brain_profile is unavailable)
+    _DEFAULT_COUPON_CAP_HOURS    = 24
+    _DEFAULT_ESCALATE_AFTER_N    = 3
+
+    def _brain_profile(self, ctx: BrainContext) -> dict:
+        """Extract brain_profile from merchant_context (populated by build_merchant_context)."""
+        mc = getattr(ctx, "merchant_context", None) or {}
+        return mc.get("brain_profile", {})
 
     def gate(self, decision: Decision, ctx: BrainContext) -> Decision:
         try:
             decision = self._working_hours(decision, ctx)
             decision = self._coupon_cap(decision, ctx)
             decision = self._price_range(decision, ctx)
+            decision = self._max_order_value(decision, ctx)
             decision = self._auto_escalate(decision, ctx)
         except Exception as exc:
             logger.warning("[PolicyGate] unexpected error: %s — returning original decision", exc)
@@ -98,9 +105,14 @@ class RealPolicyGate:
         if not db:
             return decision
 
+        # Merchant-configurable cap window (defaults to 24 h)
+        bp = self._brain_profile(ctx)
+        cap_hours = int(bp.get("coupon_cap_hours") or self._DEFAULT_COUPON_CAP_HOURS)
+        cap_hours = max(1, cap_hours)
+
         try:
             from database.models import ConversationTrace
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=cap_hours)
             recent = (
                 db.query(ConversationTrace)
                 .filter(
@@ -113,13 +125,13 @@ class RealPolicyGate:
             )
             if recent:
                 logger.info(
-                    "[PolicyGate] coupon already sent to %s within 24h — blocking",
-                    ctx.customer_phone[-4:],
+                    "[PolicyGate] coupon already sent to %s within %dh — blocking",
+                    ctx.customer_phone[-4:], cap_hours,
                 )
                 return Decision(
                     action=ACTION_LLM_REPLY,
-                    args={"policy_reason": "coupon_cap_24h"},
-                    reason="policy: coupon already sent in last 24h",
+                    args={"policy_reason": f"coupon_cap_{cap_hours}h"},
+                    reason=f"policy: coupon already sent in last {cap_hours}h",
                     confidence=decision.confidence,
                 )
         except Exception as exc:
@@ -157,7 +169,42 @@ class RealPolicyGate:
             )
         return decision
 
-    # ── Rule 4: auto-escalate on repeated confusion ───────────────────────────
+    # ── Rule 4: max order value gate ──────────────────────────────────────────
+
+    def _max_order_value(self, decision: Decision, ctx: BrainContext) -> Decision:
+        """Block CREATE_ORDER / PROPOSE_DRAFT_ORDER when product price exceeds
+        the merchant's configured maximum order value (0 or None = unlimited)."""
+        from .actions import ACTION_PROPOSE_DRAFT_ORDER, ACTION_SEARCH_PRODUCTS
+
+        if decision.action not in (ACTION_PROPOSE_DRAFT_ORDER,):
+            return decision
+
+        bp = self._brain_profile(ctx)
+        max_val = bp.get("max_order_value")
+        if not max_val:
+            return decision  # unlimited
+
+        product = ctx.state.current_product_focus or {}
+        product_price = product.get("price") or product.get("sale_price")
+
+        try:
+            if product_price and float(product_price) > float(max_val):
+                logger.info(
+                    "[PolicyGate] max_order_value: product %.2f > limit %.2f — blocking order",
+                    float(product_price), float(max_val),
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"policy_reason": "product_above_max_order_value"},
+                    reason=f"policy: product price {product_price} exceeds merchant max_order_value {max_val}",
+                    confidence=decision.confidence,
+                )
+        except (TypeError, ValueError):
+            pass
+
+        return decision
+
+    # ── Rule 5: auto-escalate on repeated confusion ───────────────────────────
 
     def _auto_escalate(self, decision: Decision, ctx: BrainContext) -> Decision:
         from ..state.stages import STAGE_DISCOVERY, STAGE_EXPLORING
@@ -179,11 +226,16 @@ class RealPolicyGate:
             # We don't have intent per history turn yet — use last_intent from state
             break   # Phase 2 stub — needs intent stored per turn in memory updater
 
-        # Use state.last_intent as a proxy: if 3+ turns all general intent, escalate
-        if ctx.state.turn >= self.ESCALATE_AFTER_N_GENERAL and ctx.state.last_intent == INTENT_GENERAL:
+        # Merchant-configurable threshold (defaults to 3)
+        bp = self._brain_profile(ctx)
+        escalate_n = int(bp.get("auto_escalate_after_n") or self._DEFAULT_ESCALATE_AFTER_N)
+        escalate_n = max(1, escalate_n)
+
+        # Use state.last_intent as a proxy: if N+ turns all general intent, escalate
+        if ctx.state.turn >= escalate_n and ctx.state.last_intent == INTENT_GENERAL:
             logger.info(
-                "[PolicyGate] auto-escalate: %d turns in GENERAL at stage=%s",
-                ctx.state.turn, ctx.state.stage,
+                "[PolicyGate] auto-escalate: %d turns in GENERAL at stage=%s (threshold=%d)",
+                ctx.state.turn, ctx.state.stage, escalate_n,
             )
             return Decision(
                 action=ACTION_HANDOFF,

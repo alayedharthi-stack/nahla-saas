@@ -294,6 +294,91 @@ function AISettingsPanel() {
         </div>
       </div>
 
+      {/* ── Policy Rules ── */}
+      <div className="card">
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4 text-brand-500" />
+          <h2 className="text-sm font-semibold text-slate-900">قواعد الأتمتة الذكية</h2>
+          <p className="text-xs text-slate-400 mr-1">تحكّم في سلوك الذكاء تلقائياً</p>
+        </div>
+        <div className="p-5 space-y-5">
+
+          {/* Coupon cap hours */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-xs font-semibold text-slate-700">مدة حماية الكوبون</label>
+              <span className="text-xs font-bold text-brand-600 bg-brand-50 px-2 py-0.5 rounded-full">
+                {ai.coupon_cap_hours ?? 24} ساعة
+              </span>
+            </div>
+            <p className="text-[10px] text-slate-400 mb-2">
+              لا يُرسَل كوبون جديد للعميل إذا تلقّى واحداً خلال هذه المدة
+            </p>
+            <input
+              type="range" min={1} max={168} step={1}
+              className="w-full accent-brand-500"
+              value={ai.coupon_cap_hours ?? 24}
+              onChange={e => patch({ coupon_cap_hours: Number(e.target.value) })}
+            />
+            <div className="flex justify-between text-[9px] text-slate-300 mt-0.5">
+              <span>1 ساعة</span><span>24 ساعة</span><span>72 ساعة</span><span>أسبوع</span>
+            </div>
+          </div>
+
+          {/* Auto-escalate threshold */}
+          <Field label="التصعيد التلقائي للإنسان" hint="عدد الردود العامة المتكررة قبل تحويل المحادثة">
+            <select
+              className="input"
+              value={ai.auto_escalate_after_n ?? 3}
+              onChange={e => patch({ auto_escalate_after_n: Number(e.target.value) })}
+            >
+              {[1,2,3,4,5,7,10].map(n => (
+                <option key={n} value={n}>بعد {n} ردود غير محددة</option>
+              ))}
+            </select>
+          </Field>
+
+          {/* Max order value */}
+          <Field label="الحد الأقصى لقيمة الطلب (ريال)" hint="الذكاء يرفض الطلبات التي تتجاوز هذه القيمة — اتركه 0 للسماح بكل القيم">
+            <input
+              type="number" min={0} step={50}
+              className="input"
+              placeholder="0 = غير محدود"
+              value={ai.max_order_value ?? 0}
+              onChange={e => patch({ max_order_value: Number(e.target.value) })}
+            />
+          </Field>
+
+          {/* Context verbosity A/B */}
+          <div>
+            <p className="text-xs font-semibold text-slate-700 mb-1">حجم سياق الذكاء</p>
+            <p className="text-[10px] text-slate-400 mb-2">
+              اختبر أيّ الوضعين يُنتج ردوداً أفضل — راقب النتائج في تبويب "أداء الذكاء"
+            </p>
+            <div className="flex gap-2">
+              {([
+                { key: 'full',    label: 'مفصّل (كامل)',   desc: 'أكثر منتجات، FAQ، سياسات كاملة' },
+                { key: 'compact', label: 'مختصر (تجريبي)', desc: '5 منتجات فقط، بدون FAQ مقترح' },
+              ] as const).map(({ key, label, desc }) => (
+                <button
+                  key={key}
+                  onClick={() => patch({ context_verbosity: key })}
+                  className={`flex-1 rounded-xl border p-3 text-start transition-colors ${
+                    (ai.context_verbosity ?? 'full') === key
+                      ? 'border-brand-400 bg-brand-50 text-brand-700'
+                      : 'border-slate-200 text-slate-600 hover:border-brand-200'
+                  }`}
+                >
+                  <p className="text-xs font-semibold">{label}</p>
+                  <p className="text-[10px] mt-0.5 opacity-70">{desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+        </div>
+      </div>
+
       {/* ── Save bar ── */}
       <div className="flex items-center gap-3 flex-wrap pb-2">
         <button onClick={handleSave} disabled={saving} className="btn-primary text-sm">

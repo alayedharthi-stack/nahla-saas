@@ -758,6 +758,11 @@ def build_merchant_context(
         if is_compact
         else list(store_settings.get("faq_suggested") or ai_settings.get("faq_suggested") or [])
     )
+    # ── Policy rule values — read from ai_settings, surfaced to PolicyGate ──
+    _cap_hours_raw = ai_settings.get("coupon_cap_hours", 24)
+    _escalate_raw  = ai_settings.get("auto_escalate_after_n", 3)
+    _max_order_raw = ai_settings.get("max_order_value", 0)
+
     brain_profile = {
         "tone": ai_settings.get("reply_tone", "friendly"),
         "reply_length": ai_settings.get("reply_length", "medium"),
@@ -768,6 +773,11 @@ def build_merchant_context(
         "recommendations_enabled": bool(ai_settings.get("recommendations_enabled", True)),
         "owner_instructions": ai_settings.get("owner_instructions", ""),
         "coupon_rules": ai_settings.get("coupon_rules", ""),
+        # Merchant-configurable policy knobs (Phase 11)
+        "coupon_cap_hours": max(1, int(_cap_hours_raw)) if str(_cap_hours_raw).isdigit() or isinstance(_cap_hours_raw, (int, float)) else 24,
+        "auto_escalate_after_n": max(1, int(_escalate_raw)) if str(_escalate_raw).isdigit() or isinstance(_escalate_raw, (int, float)) else 3,
+        "max_order_value": float(_max_order_raw) if _max_order_raw and float(_max_order_raw) > 0 else None,
+        "context_verbosity": context_verbosity,
     }
 
     # Pages — synced from Salla via StoreSyncService.sync_pages() which writes to

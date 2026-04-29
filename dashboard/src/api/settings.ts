@@ -24,6 +24,11 @@ export interface AISettings {
   escalation_rules: string
   allowed_discount_levels: string
   recommendations_enabled: boolean
+  // ── Merchant-configurable policy rules (Phase 11) ────────────────────
+  coupon_cap_hours: number
+  auto_escalate_after_n: number
+  max_order_value: number
+  context_verbosity: 'full' | 'compact'
 }
 
 export interface StoreSettings {
