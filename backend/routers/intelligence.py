@@ -618,6 +618,93 @@ def _serialize_merchant_knowledge(
     }
 
 
+@router.put("/intelligence/merchant-brain/knowledge")
+async def update_merchant_brain_knowledge(request: Request, db: Session = Depends(get_db)):
+    """Persist merchant-editable fields of the Brain knowledge base.
+
+    Accepted body (all fields optional):
+        {
+          "faqs": {
+            "approved":  ["سؤال 1", "سؤال 2", ...],
+            "suggested": ["سؤال مقترح", ...]
+          },
+          "policies": {
+            "return_policy":   "...",
+            "shipping_policy": "...",
+            "payment_policy":  "...",
+            "warranty_policy": "...",
+            "delivery_areas":  "...",
+            "working_hours":   "..."
+          }
+        }
+
+    Data is written into TenantSettings.store_settings (JSONB) under the same
+    keys build_merchant_context() reads from, so changes are immediately visible
+    in the next GET /intelligence/merchant-brain/knowledge response.
+    """
+    import logging as _log  # noqa: PLC0415
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    _logger = _log.getLogger("nahla-backend")
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    body: Dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
+
+    from core.tenant import get_or_create_settings  # noqa: PLC0415
+    settings = get_or_create_settings(db, tenant_id)
+    store: Dict[str, Any] = dict(settings.store_settings or {})
+
+    changed = False
+
+    # ── FAQ ────────────────────────────────────────────────────────────────────
+    faqs_body = body.get("faqs")
+    if isinstance(faqs_body, dict):
+        if "approved" in faqs_body:
+            approved = [str(q).strip() for q in (faqs_body["approved"] or []) if str(q).strip()]
+            store["faq_approved"] = approved
+            changed = True
+            _logger.info(
+                "[KnowledgeUpdate] faq_approved updated | tenant=%s count=%d",
+                tenant_id, len(approved),
+            )
+        if "suggested" in faqs_body:
+            suggested = [str(q).strip() for q in (faqs_body["suggested"] or []) if str(q).strip()]
+            store["faq_suggested"] = suggested
+            changed = True
+
+    # ── Policies ───────────────────────────────────────────────────────────────
+    policies_body = body.get("policies")
+    EDITABLE_POLICY_KEYS = {
+        "return_policy", "shipping_policy", "payment_policy",
+        "warranty_policy", "delivery_areas", "working_hours",
+    }
+    if isinstance(policies_body, dict):
+        for key in EDITABLE_POLICY_KEYS:
+            if key in policies_body:
+                store[key] = str(policies_body[key] or "").strip()
+                changed = True
+        if changed:
+            _logger.info(
+                "[KnowledgeUpdate] policies updated | tenant=%s keys=%s",
+                tenant_id, [k for k in policies_body if k in EDITABLE_POLICY_KEYS],
+            )
+
+    if not changed:
+        return {"ok": True, "changed": False}
+
+    settings.store_settings = store
+    flag_modified(settings, "store_settings")
+    db.add(settings)
+    db.commit()
+
+    return {"ok": True, "changed": True}
+
+
 @router.post("/intelligence/reorder-estimate")
 async def create_reorder_estimate(
     request: Request,

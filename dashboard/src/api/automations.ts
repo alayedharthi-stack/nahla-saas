@@ -244,6 +244,15 @@ export const automationsApi = {
   getMerchantKnowledge: () =>
     apiCall<MerchantKnowledge>('/intelligence/merchant-brain/knowledge'),
 
+  updateMerchantKnowledge: (payload: {
+    faqs?: { approved?: string[]; suggested?: string[] }
+    policies?: Partial<MerchantKnowledgePolicies>
+  }) =>
+    apiCall<{ ok: boolean; changed: boolean }>('/intelligence/merchant-brain/knowledge', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
   enginesSummary: (windowDays?: number) =>
     apiCall<EnginesSummaryResponse>(
       `/automations/engines/summary${windowDays ? `?days=${windowDays}` : ''}`,

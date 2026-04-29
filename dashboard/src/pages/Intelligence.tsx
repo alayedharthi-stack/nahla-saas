@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   RefreshCw,
   Brain,
@@ -13,6 +13,7 @@ import {
   Save, Bot, Loader2, ToggleLeft, ToggleRight, Settings2,
   Store, PackageCheck, PackageX, ShieldCheck, CreditCard, Truck,
   MessageSquare, FileText, Info, ChevronDown, ChevronUp,
+  Plus, Trash2, ThumbsUp, Pencil, X,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -24,6 +25,7 @@ import {
   IntelligenceSuggestion,
   CustomerSegment,
   MerchantKnowledge,
+  MerchantKnowledgePolicies,
 } from '../api/automations'
 import { settingsApi, type AISettings } from '../api/settings'
 
@@ -400,12 +402,34 @@ function MerchantKnowledgePanel() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
 
+  // ── Editable FAQ state ───────────────────────────────────────────────────
+  const [approvedFaqs, setApprovedFaqs] = useState<string[]>([])
+  const [suggestedFaqs, setSuggestedFaqs] = useState<string[]>([])
+  const [newFaq, setNewFaq] = useState('')
+  const [savingFaq, setSavingFaq] = useState(false)
+  const [faqSaved, setFaqSaved] = useState(false)
+  const faqDirty = useRef(false)
+
+  // ── Editable Policies state ──────────────────────────────────────────────
+  const [policies, setPolicies] = useState<MerchantKnowledgePolicies>({
+    return_policy: '', shipping_policy: '', payment_policy: '',
+    warranty_policy: '', delivery_areas: '', working_hours: '',
+  })
+  const [savingPolicies, setSavingPolicies] = useState(false)
+  const [policiesSaved, setPoliciesSaved] = useState(false)
+  const policiesDirty = useRef(false)
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(false)
     try {
       const result = await automationsApi.getMerchantKnowledge()
       setData(result)
+      setApprovedFaqs(result.faqs.approved ?? [])
+      setSuggestedFaqs(result.faqs.suggested ?? [])
+      setPolicies(result.policies)
+      faqDirty.current = false
+      policiesDirty.current = false
     } catch {
       setError(true)
     } finally {
@@ -414,6 +438,58 @@ function MerchantKnowledgePanel() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // ── FAQ handlers ─────────────────────────────────────────────────────────
+  const addFaq = () => {
+    const q = newFaq.trim()
+    if (!q || approvedFaqs.includes(q)) return
+    setApprovedFaqs(prev => [...prev, q])
+    setNewFaq('')
+    faqDirty.current = true
+  }
+
+  const deleteFaq = (idx: number) => {
+    setApprovedFaqs(prev => prev.filter((_, i) => i !== idx))
+    faqDirty.current = true
+  }
+
+  const approveSuggested = (q: string) => {
+    if (!approvedFaqs.includes(q)) setApprovedFaqs(prev => [...prev, q])
+    setSuggestedFaqs(prev => prev.filter(s => s !== q))
+    faqDirty.current = true
+  }
+
+  const deleteSuggested = (q: string) => {
+    setSuggestedFaqs(prev => prev.filter(s => s !== q))
+    faqDirty.current = true
+  }
+
+  const saveFaqs = async () => {
+    setSavingFaq(true)
+    try {
+      await automationsApi.updateMerchantKnowledge({
+        faqs: { approved: approvedFaqs, suggested: suggestedFaqs },
+      })
+      faqDirty.current = false
+      setFaqSaved(true)
+      setTimeout(() => setFaqSaved(false), 2500)
+    } finally {
+      setSavingFaq(false)
+    }
+  }
+
+  // ── Policy handlers ──────────────────────────────────────────────────────
+  const savePolicies = async () => {
+    setSavingPolicies(true)
+    try {
+      await automationsApi.updateMerchantKnowledge({ policies })
+      policiesDirty.current = false
+      setPoliciesSaved(true)
+      setTimeout(() => setPoliciesSaved(false), 2500)
+    } finally {
+      setSavingPolicies(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -436,7 +512,7 @@ function MerchantKnowledgePanel() {
     )
   }
 
-  const { sync_status, quality, products, policies, payment_methods, shipping_methods, faqs, pages, warnings, brain_profile } = data
+  const { sync_status, quality, products, payment_methods, shipping_methods, pages, warnings, brain_profile } = data
 
   const lastSync = sync_status.last_sync_at
     ? new Date(sync_status.last_sync_at).toLocaleDateString('ar-SA', { year: 'numeric', month: 'long', day: 'numeric' })
@@ -489,7 +565,7 @@ function MerchantKnowledgePanel() {
                 { label: 'مستبعد', value: products.excluded_count, ok: true },
                 { label: 'طرق دفع', value: payment_methods.length, ok: payment_methods.length > 0 },
                 { label: 'طرق شحن', value: shipping_methods.length, ok: shipping_methods.length > 0 },
-                { label: 'FAQ معتمد', value: faqs.approved.length, ok: faqs.approved.length > 0 },
+                { label: 'FAQ معتمد', value: approvedFaqs.length, ok: approvedFaqs.length > 0 },
                 { label: 'صفحات', value: pages.length, ok: true },
               ].map(({ label, value, ok }) => (
                 <div key={label} className={`rounded-lg p-2.5 text-center ${ok ? 'bg-slate-50' : 'bg-red-50'}`}>
@@ -579,15 +655,54 @@ function MerchantKnowledgePanel() {
         </CollapsibleSection>
       )}
 
-      {/* ── Policies ── */}
+      {/* ── Policies (editable) ── */}
       <CollapsibleSection title="سياسات المتجر" icon={ShieldCheck}>
-        <div className="p-5 grid sm:grid-cols-2 gap-3">
-          <PolicyCard label="سياسة الإرجاع" value={policies.return_policy} />
-          <PolicyCard label="سياسة الشحن" value={policies.shipping_policy} />
-          <PolicyCard label="سياسة الدفع" value={policies.payment_policy} />
-          <PolicyCard label="ضمان المنتجات" value={policies.warranty_policy} />
-          <PolicyCard label="مناطق التوصيل" value={policies.delivery_areas} />
-          <PolicyCard label="ساعات العمل" value={policies.working_hours} />
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-slate-500">
+            هذه السياسات تُستخدم مباشرة بواسطة نحلة للإجابة على أسئلة العملاء. عدّلها ثم احفظ.
+          </p>
+          <div className="grid sm:grid-cols-2 gap-3">
+            {([
+              { key: 'return_policy',   label: 'سياسة الإرجاع' },
+              { key: 'shipping_policy', label: 'سياسة الشحن' },
+              { key: 'payment_policy',  label: 'سياسة الدفع' },
+              { key: 'warranty_policy', label: 'ضمان المنتجات' },
+              { key: 'delivery_areas',  label: 'مناطق التوصيل' },
+              { key: 'working_hours',   label: 'ساعات العمل' },
+            ] as { key: keyof MerchantKnowledgePolicies; label: string }[]).map(({ key, label }) => (
+              <div key={key} className="flex flex-col gap-1">
+                <label className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
+                  {label}
+                </label>
+                <textarea
+                  rows={3}
+                  dir="rtl"
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800 resize-none focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition placeholder-slate-300"
+                  placeholder={`أدخل ${label}…`}
+                  value={policies[key]}
+                  onChange={e => {
+                    setPolicies(prev => ({ ...prev, [key]: e.target.value }))
+                    policiesDirty.current = true
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-3 pt-1">
+            <button
+              onClick={savePolicies}
+              disabled={savingPolicies}
+              className="btn-primary text-xs flex items-center gap-2 py-2 px-4"
+            >
+              {savingPolicies ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+              حفظ السياسات
+            </button>
+            {policiesSaved && (
+              <span className="text-xs text-emerald-600 flex items-center gap-1">
+                <CheckCircle className="w-3.5 h-3.5" /> تم الحفظ
+              </span>
+            )}
+          </div>
         </div>
       </CollapsibleSection>
 
@@ -632,44 +747,107 @@ function MerchantKnowledgePanel() {
         </div>
       </div>
 
-      {/* ── FAQ ── */}
-      <CollapsibleSection title="الأسئلة الشائعة (FAQ)" icon={MessageSquare}>
-        <div className="p-5 space-y-4">
+      {/* ── FAQ (editable) ── */}
+      <CollapsibleSection title={`الأسئلة الشائعة (${approvedFaqs.length} معتمد)`} icon={MessageSquare}>
+        <div className="p-5 space-y-5">
+
+          {/* Approved list */}
           <div>
             <p className="text-xs font-semibold text-slate-600 mb-2">
-              معتمدة ({faqs.approved.length})
+              معتمدة ({approvedFaqs.length})
               <span className="text-[10px] font-normal text-slate-400 ms-1">— يستخدمها الذكاء مباشرة</span>
             </p>
-            {faqs.approved.length === 0
-              ? <EmptySlot message="لا توجد أسئلة شائعة معتمدة بعد" />
+            {approvedFaqs.length === 0
+              ? <EmptySlot message="لا توجد أسئلة شائعة معتمدة بعد — أضف أسئلة يطرحها عملاؤك" />
               : (
                 <ul className="space-y-1.5">
-                  {faqs.approved.map((q, i) => (
-                    <li key={i} className="flex items-start gap-2 text-xs">
+                  {approvedFaqs.map((q, i) => (
+                    <li key={i} className="flex items-start gap-2 text-xs group">
                       <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
-                      <span className="text-slate-700">{typeof q === 'string' ? q : JSON.stringify(q)}</span>
+                      <span className="text-slate-700 flex-1">{q}</span>
+                      <button
+                        onClick={() => deleteFaq(i)}
+                        title="حذف"
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-red-400 hover:text-red-600 shrink-0"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </li>
                   ))}
                 </ul>
               )
             }
           </div>
-          {faqs.suggested.length > 0 && (
+
+          {/* Suggested list */}
+          {suggestedFaqs.length > 0 && (
             <div>
               <p className="text-xs font-semibold text-amber-600 mb-2">
-                مقترحة ({faqs.suggested.length})
+                مقترحة ({suggestedFaqs.length})
                 <span className="text-[10px] font-normal text-amber-400 ms-1">— تحتاج موافقتك</span>
               </p>
               <ul className="space-y-1.5">
-                {faqs.suggested.map((q, i) => (
-                  <li key={i} className="flex items-start gap-2 text-xs">
+                {suggestedFaqs.map((q, i) => (
+                  <li key={i} className="flex items-start gap-2 text-xs group rounded-lg border border-amber-100 bg-amber-50 px-3 py-2">
                     <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
-                    <span className="text-slate-600">{typeof q === 'string' ? q : JSON.stringify(q)}</span>
+                    <span className="text-slate-600 flex-1">{q}</span>
+                    <button
+                      onClick={() => approveSuggested(q)}
+                      title="اعتماد"
+                      className="text-emerald-500 hover:text-emerald-700 shrink-0 ms-1"
+                    >
+                      <ThumbsUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => deleteSuggested(q)}
+                      title="حذف"
+                      className="text-slate-400 hover:text-red-500 shrink-0"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                   </li>
                 ))}
               </ul>
             </div>
           )}
+
+          {/* Add new FAQ */}
+          <div className="flex gap-2 items-center">
+            <input
+              type="text"
+              dir="rtl"
+              className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition placeholder-slate-300"
+              placeholder="أضف سؤالاً شائعاً جديداً…"
+              value={newFaq}
+              onChange={e => setNewFaq(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addFaq()}
+            />
+            <button
+              onClick={addFaq}
+              disabled={!newFaq.trim()}
+              className="btn-secondary text-xs flex items-center gap-1.5 py-2 px-3 shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              إضافة
+            </button>
+          </div>
+
+          {/* Save button */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={saveFaqs}
+              disabled={savingFaq}
+              className="btn-primary text-xs flex items-center gap-2 py-2 px-4"
+            >
+              {savingFaq ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+              حفظ الأسئلة الشائعة
+            </button>
+            {faqSaved && (
+              <span className="text-xs text-emerald-600 flex items-center gap-1">
+                <CheckCircle className="w-3.5 h-3.5" /> تم الحفظ
+              </span>
+            )}
+          </div>
         </div>
       </CollapsibleSection>
 
