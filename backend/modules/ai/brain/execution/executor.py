@@ -77,7 +77,19 @@ class _SendPaymentLinkHandler:
 
 class _SuggestCouponHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime
+        from modules.ai.commerce.runtime import CommerceToolRuntime  # noqa: PLC0415
+
+        # Pull the product the customer is currently considering so we can
+        # pass its price as cart_total to the offer engine (smarter discount).
+        product_focus: dict = ctx.state.current_product_focus or {}
+        product_title: str  = str(product_focus.get("title") or "").strip()
+        product_price: float | None = None
+        _raw_price = product_focus.get("price")
+        if _raw_price is not None:
+            try:
+                product_price = float(_raw_price)
+            except (TypeError, ValueError):
+                pass
 
         runtime = CommerceToolRuntime(
             ctx._db,  # type: ignore[attr-defined]
@@ -86,7 +98,7 @@ class _SuggestCouponHandler:
             customer_id=ctx.customer_id,
             tenant_context=ctx.tenant_context,
         )
-        payload = {
+        payload: dict = {
             "discount_pct": (ctx.sales_context.offer_signals or {}).get("recommended_discount_pct", 0)
             if ctx.sales_context
             else 0,
@@ -94,17 +106,46 @@ class _SuggestCouponHandler:
             if ctx.sales_context
             else "",
         }
+        if product_price:
+            payload["cart_total"] = product_price
+
         runtime_result = await runtime.execute("apply_coupon", payload)
-        coupon = runtime_result.payload.get("coupon") or {}
-        code = str(coupon.get("coupon_code") or coupon.get("discount_code") or "").strip()
-        block = f"كود الخصم: {code}" if code else ""
+        coupon    = runtime_result.payload.get("coupon") or {}
+        raw_dec   = runtime_result.payload.get("decision") or {}
+        code      = str(coupon.get("coupon_code") or coupon.get("discount_code") or "").strip()
+
+        # Build a human-readable Arabic coupon block.
+        if code:
+            # Try to include the discount percentage from the decision object.
+            disc_val = raw_dec.get("discount_value")
+            disc_type = str(raw_dec.get("discount_type") or "").lower()
+            if disc_val and disc_type == "percentage":
+                pct_label = f" ({int(disc_val)}% خصم)"
+            elif disc_val and disc_type == "fixed":
+                pct_label = f" (خصم {disc_val:.0f} ريال)"
+            else:
+                pct_label = ""
+
+            if product_title:
+                block = f"كود خصم{pct_label} خاص بك على *{product_title}*: `{code}`"
+            else:
+                block = f"كود خصم{pct_label} خاص بك: `{code}`"
+
+            # Validity hint
+            validity = raw_dec.get("validity_days")
+            if validity:
+                block += f"\n⏳ صالح لـ {validity} يوم"
+        else:
+            block = ""
 
         return ActionResult(
             success=bool(block),
             data={
-                "coupon_block": block,
-                "product": decision.args.get("product"),
+                "coupon_block":   block,
+                "product":        decision.args.get("product") or (product_focus or None),
                 "coupon_payload": coupon,
+                "discount_value": raw_dec.get("discount_value"),
+                "discount_type":  raw_dec.get("discount_type"),
             },
         )
 

@@ -298,7 +298,12 @@ class CommerceToolRuntime:
                 int(payload.get("discount_pct")) if payload.get("discount_pct") is not None else None
             ),
             suggested_segment=str(payload.get("segment") or "").strip() or None,
-            signals=collect_signals(self.db, tenant_id=self.tenant_id, customer_id=self.customer_id),
+            signals=collect_signals(
+                self.db,
+                tenant_id=self.tenant_id,
+                customer_id=self.customer_id,
+                cart_total=float(payload["cart_total"]) if payload.get("cart_total") else None,
+            ),
         )
         decision = decide(self.db, ctx)
         extras = await apply_decision(self.db, ctx=ctx, decision=decision, customer=None)
@@ -307,20 +312,46 @@ class CommerceToolRuntime:
             tool_name="apply_coupon",
             payload={"decision": decision.__dict__, "coupon": extras},
             error=None if extras.get("coupon_code") else "coupon_not_issued",
-            audit={"customer_id": self.customer_id},
+            audit={"customer_id": self.customer_id, "cart_total": payload.get("cart_total")},
         )
 
     async def _tool_track_order(self, payload: Dict[str, Any]) -> ToolExecutionResult:
-        from store_integration.order_service import get_customer_orders
+        from store_integration.order_service import get_customer_orders, get_order  # noqa: PLC0415
 
+        order_number = str(payload.get("order_number") or "").strip()
+
+        # Step 1: Try direct lookup if customer mentioned a specific order number
+        matched: Dict[str, Any] | None = None
+        if order_number:
+            direct = await get_order(self.tenant_id, order_number)
+            if direct:
+                matched = direct.model_dump()
+
+        # Step 2: Fetch customer's recent orders for fallback / list matching
         orders = await get_customer_orders(self.tenant_id, self.customer_phone)
-        latest = orders[0].model_dump() if orders else None
+
+        # Step 3: If we got a direct match, verify it belongs to this customer.
+        # If not, search the customer's order list by reference_id / id.
+        if not matched and orders:
+            if order_number:
+                for o in orders:
+                    ref = str(o.reference_id or o.id or "").lower()
+                    if order_number.lower() in ref or ref in order_number.lower():
+                        matched = o.model_dump()
+                        break
+            if not matched:
+                matched = orders[0].model_dump()
+
         return ToolExecutionResult(
-            ok=bool(latest),
+            ok=bool(matched),
             tool_name="track_order",
-            payload={"order": latest, "orders_count": len(orders)},
-            error=None if latest else "no_orders_found",
-            audit={"customer_phone": self.customer_phone},
+            payload={
+                "order":         matched,
+                "orders_count":  len(orders),
+                "matched_by_ref": bool(order_number and matched),
+            },
+            error=None if matched else "no_orders_found",
+            audit={"customer_phone": self.customer_phone, "order_number": order_number},
         )
 
     async def _tool_get_store_info(self, payload: Dict[str, Any]) -> ToolExecutionResult:

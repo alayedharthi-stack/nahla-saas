@@ -652,11 +652,45 @@ class DraftOrderHandler:
         )
 
 
+_ORDER_STATUS_AR: dict = {
+    "pending":           "قيد الانتظار",
+    "in_progress":       "قيد التنفيذ",
+    "under_review":      "تحت المراجعة",
+    "processing":        "جاري المعالجة",
+    "confirmed":         "مؤكّد",
+    "shipped":           "تم الشحن",
+    "on_the_way":        "في الطريق",
+    "out_for_delivery":  "خارج للتوصيل",
+    "delivered":         "تم التسليم",
+    "completed":         "مكتمل",
+    "cancelled":         "ملغي",
+    "refunded":          "مُسترجع",
+    "returned":          "مُرتجع",
+    "failed":            "فشل",
+    "cod":               "دفع عند الاستلام",
+}
+
+
 class TrackOrderHandler:
-    """Handles ACTION_TRACK_ORDER."""
+    """Handles ACTION_TRACK_ORDER.
+
+    Improvements (Phase roadmap):
+    - Extracts order_number from intent slots so the customer can ask about
+      a specific order ("ما حال طلبي رقم 12345") instead of always getting
+      the latest one.
+    - Returns richer data: Arabic status label + up to 3 item titles so the
+      Composer can render a meaningful status card.
+    """
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime
+        from modules.ai.commerce.runtime import CommerceToolRuntime  # noqa: PLC0415
+
+        # Pull order_number from intent slots or decision args
+        order_number = (
+            str(decision.args.get("order_number") or "").strip()
+            or str(ctx.intent.slots.get("order_id") or "").strip()
+            or str(ctx.intent.slots.get("order_number") or "").strip()
+        )
 
         runtime = CommerceToolRuntime(
             ctx._db,  # type: ignore[attr-defined]
@@ -665,8 +699,8 @@ class TrackOrderHandler:
             customer_id=ctx.customer_id,
             tenant_context=ctx.tenant_context,
         )
-        runtime_result = await runtime.execute("track_order", {})
-        latest = runtime_result.payload.get("order") if runtime_result.ok else None
+        runtime_result = await runtime.execute("track_order", {"order_number": order_number})
+        latest: dict = runtime_result.payload.get("order") if runtime_result.ok else {}
 
         if not latest:
             return ActionResult(
@@ -675,14 +709,28 @@ class TrackOrderHandler:
                 data={"message": "no_orders_found"},
             )
 
+        raw_status = str(latest.get("status") or "").lower().replace(" ", "_")
+        status_ar = _ORDER_STATUS_AR.get(raw_status) or latest.get("status") or "—"
+
+        # Summarise items (max 3 titles) for the response template
+        items = latest.get("items") or []
+        item_titles = [
+            str(it.get("name") or it.get("title") or it.get("product_name") or "")
+            for it in items[:3]
+            if it.get("name") or it.get("title") or it.get("product_name")
+        ]
+
         return ActionResult(
             success=True,
             data={
-                "order_id":  latest.get("id"),
-                "reference": latest.get("reference_id") or latest.get("id"),
-                "status":    latest.get("status"),
-                "total":     latest.get("total"),
-                "currency":  latest.get("currency", "SAR"),
+                "order_id":        latest.get("id"),
+                "reference":       latest.get("reference_id") or latest.get("id"),
+                "status":          latest.get("status"),
+                "status_label_ar": status_ar,
+                "total":           latest.get("total"),
+                "currency":        latest.get("currency", "SAR"),
+                "item_titles":     item_titles,
+                "matched_by_ref":  runtime_result.payload.get("matched_by_ref", False),
             },
         )
 

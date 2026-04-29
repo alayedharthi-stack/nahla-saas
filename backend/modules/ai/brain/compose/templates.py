@@ -376,12 +376,25 @@ def payment_link(checkout_url: str = "", **_: Any) -> str:
 
 # ── Order tracking ────────────────────────────────────────────────────────────
 
-def order_status(reference: str = "", status: str = "", total: float = 0, currency: str = "SAR", **_: Any) -> str:
+def order_status(
+    reference: str = "",
+    status: str = "",
+    status_label_ar: str = "",
+    total: float = 0,
+    currency: str = "SAR",
+    item_titles: list | None = None,
+    **_: Any,
+) -> str:
     ref_part = f"رقم الطلب {reference}" if reference else "آخر طلب"
-    return (
-        f"حالة {ref_part}: *{status}*\n"
-        f"الإجمالي: {total:.2f} {currency}"
-    )
+    label = status_label_ar or status or "—"
+    lines = [
+        f"حالة {ref_part}: *{label}*",
+        f"الإجمالي: {total:.2f} {currency}",
+    ]
+    if item_titles:
+        items_str = " | ".join(item_titles)
+        lines.append(f"المنتجات: {items_str}")
+    return "\n".join(lines)
 
 
 def no_orders(**_: Any) -> str:

@@ -287,8 +287,10 @@ class DefaultComposer:
                 T.order_status(
                     reference=str(data.get("reference", "")),
                     status=data.get("status", ""),
+                    status_label_ar=data.get("status_label_ar", ""),
                     total=float(data.get("total") or 0),
                     currency=data.get("currency", "SAR"),
+                    item_titles=data.get("item_titles") or [],
                 ),
                 ctx,
             )
