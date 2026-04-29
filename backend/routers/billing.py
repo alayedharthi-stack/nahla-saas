@@ -501,6 +501,28 @@ async def create_billing_checkout(
     """
     tenant_id = resolve_tenant_id(request)
     try:
+        return await _do_checkout(body, request, db, tenant_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "[Billing] Unexpected checkout error tenant=%s: %s",
+            tenant_id, exc, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "internal_error", "message": "حدث خطأ داخلي. حاول مرة أخرى أو تواصل مع الدعم."},
+        )
+
+
+async def _do_checkout(
+    body: "CheckoutRequest",
+    request: Request,
+    db: Session,
+    tenant_id: str,
+) -> dict:
+    """Inner checkout logic — all non-HTTPExceptions bubble up to the caller."""
+    try:
         ensure_billing_plans(db)
     except Exception as _ep_exc:
         logger.warning("[Billing] ensure_billing_plans non-fatal: %s", _ep_exc)

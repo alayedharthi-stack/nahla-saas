@@ -57,20 +57,41 @@ app = FastAPI(
 
 
 # ── Global exception handler ──────────────────────────────────────────────────
-# Catches any unhandled non-HTTP exception that reaches FastAPI's ExceptionMiddleware.
-# Without this, such exceptions propagate to ServerErrorMiddleware which sends a
-# bare 500 response OUTSIDE the CORSMiddleware layer — causing the browser to report
-# a misleading CORS failure instead of the real error.
+# When an unhandled exception reaches ServerErrorMiddleware (the outermost layer),
+# it sends the error response using the raw ASGI send — OUTSIDE the CORSMiddleware
+# layer. This means the browser sees a 500 without Access-Control-Allow-Origin and
+# reports it as a CORS error instead of the real problem.
+#
+# Fix: @app.exception_handler(Exception) is given to ServerErrorMiddleware, so
+# CORSMiddleware never touches its response. We must manually embed CORS headers
+# directly into the JSONResponse object so they survive the bypass.
 from fastapi import Request as _Request  # noqa: E402
 from fastapi.responses import JSONResponse as _JSONResponse  # noqa: E402
+import re as _re  # noqa: E402
 
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResponse:
-    logger.error("[GlobalExceptionHandler] Unhandled exception on %s: %s", _req.url.path, exc, exc_info=True)
+    logger.error(
+        "[GlobalExceptionHandler] Unhandled exception on %s: %s",
+        _req.url.path, exc, exc_info=True,
+    )
+    from core.config import CORS_ORIGINS as _co, CORS_ORIGIN_REGEX as _cr  # noqa: E402
+    origin = _req.headers.get("origin", "")
+    cors_headers: dict = {}
+    if origin and (
+        origin in _co
+        or "*" in _co
+        or (_cr and _re.fullmatch(_cr, origin))
+    ):
+        cors_headers = {
+            "Access-Control-Allow-Origin":      origin,
+            "Access-Control-Allow-Credentials": "true",
+        }
     return _JSONResponse(
         status_code=500,
         content={"detail": "Internal server error", "code": "internal_error"},
+        headers=cors_headers,
     )
 
 # ── Middleware stack ───────────────────────────────────────────────────────────
