@@ -55,6 +55,24 @@ app = FastAPI(
     version="2.0.0",
 )
 
+
+# ── Global exception handler ──────────────────────────────────────────────────
+# Catches any unhandled non-HTTP exception that reaches FastAPI's ExceptionMiddleware.
+# Without this, such exceptions propagate to ServerErrorMiddleware which sends a
+# bare 500 response OUTSIDE the CORSMiddleware layer — causing the browser to report
+# a misleading CORS failure instead of the real error.
+from fastapi import Request as _Request  # noqa: E402
+from fastapi.responses import JSONResponse as _JSONResponse  # noqa: E402
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResponse:
+    logger.error("[GlobalExceptionHandler] Unhandled exception on %s: %s", _req.url.path, exc, exc_info=True)
+    return _JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "code": "internal_error"},
+    )
+
 # ── Middleware stack ───────────────────────────────────────────────────────────
 # Registration order: LAST registered = OUTERMOST = first to process requests
 # and LAST to process responses.

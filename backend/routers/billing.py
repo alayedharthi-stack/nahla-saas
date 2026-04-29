@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -499,7 +500,10 @@ async def create_billing_checkout(
     Gateway-agnostic: Moyasar when configured, otherwise demo activation.
     """
     tenant_id = resolve_tenant_id(request)
-    ensure_billing_plans(db)
+    try:
+        ensure_billing_plans(db)
+    except Exception as _ep_exc:
+        logger.warning("[Billing] ensure_billing_plans non-fatal: %s", _ep_exc)
 
     plan = (
         db.query(BillingPlan)
@@ -557,7 +561,10 @@ async def create_billing_checkout(
                 },
             )
         except Exception as exc:
-            db.rollback()
+            try:
+                db.rollback()
+            except Exception:
+                pass
             err_text = str(exc).lower()
             logger.error(
                 "[Billing] Moyasar invoice error tenant=%s plan=%s: %s",
