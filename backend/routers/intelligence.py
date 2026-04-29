@@ -695,6 +695,17 @@ async def update_merchant_brain_knowledge(request: Request, db: Session = Depend
                 tenant_id, [k for k in policies_body if k in EDITABLE_POLICY_KEYS],
             )
 
+    # ── Blocked customers ──────────────────────────────────────────────────────
+    blocked_body = body.get("blocked_customers")
+    if isinstance(blocked_body, list):
+        cleaned = [str(p).strip() for p in blocked_body if str(p).strip()]
+        store["blocked_customers"] = cleaned
+        changed = True
+        _logger.info(
+            "[KnowledgeUpdate] blocked_customers updated | tenant=%s count=%d",
+            tenant_id, len(cleaned),
+        )
+
     if not changed:
         return {"ok": True, "changed": False}
 

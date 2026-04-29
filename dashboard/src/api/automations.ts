@@ -209,6 +209,7 @@ export interface MerchantKnowledgeBrainProfile {
   coupon_strategy: string
   upsell_enabled: boolean
   owner_instructions: string
+  blocked_customers?: string[]
 }
 
 export interface MerchantKnowledge {
@@ -273,6 +274,7 @@ export const automationsApi = {
   updateMerchantKnowledge: (payload: {
     faqs?: { approved?: string[]; suggested?: string[] }
     policies?: Partial<MerchantKnowledgePolicies>
+    blocked_customers?: string[]
   }) =>
     apiCall<{ ok: boolean; changed: boolean }>('/intelligence/merchant-brain/knowledge', {
       method: 'PUT',

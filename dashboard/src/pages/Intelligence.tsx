@@ -15,6 +15,7 @@ import {
   MessageSquare, FileText, Info, ChevronDown, ChevronUp,
   Plus, Trash2, ThumbsUp, Pencil, X,
   BarChart2, Activity, Timer,
+  Shield,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -506,6 +507,12 @@ function MerchantKnowledgePanel() {
   const [policiesSaved, setPoliciesSaved] = useState(false)
   const policiesDirty = useRef(false)
 
+  // ── Blocked customers state ───────────────────────────────────────────────
+  const [blockedCustomers, setBlockedCustomers] = useState<string[]>([])
+  const [newBlockedPhone, setNewBlockedPhone] = useState('')
+  const [savingBlocked, setSavingBlocked] = useState(false)
+  const [blockedSaved, setBlockedSaved] = useState(false)
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(false)
@@ -515,6 +522,7 @@ function MerchantKnowledgePanel() {
       setApprovedFaqs(result.faqs.approved ?? [])
       setSuggestedFaqs(result.faqs.suggested ?? [])
       setPolicies(result.policies)
+      setBlockedCustomers(result.brain_profile?.blocked_customers ?? [])
       faqDirty.current = false
       policiesDirty.current = false
     } catch {
@@ -575,6 +583,29 @@ function MerchantKnowledgePanel() {
       setTimeout(() => setPoliciesSaved(false), 2500)
     } finally {
       setSavingPolicies(false)
+    }
+  }
+
+  // ── Blocked customers handlers ────────────────────────────────────────────
+  const addBlockedPhone = () => {
+    const phone = newBlockedPhone.trim()
+    if (!phone || blockedCustomers.includes(phone)) return
+    setBlockedCustomers(prev => [...prev, phone])
+    setNewBlockedPhone('')
+  }
+
+  const removeBlockedPhone = (phone: string) => {
+    setBlockedCustomers(prev => prev.filter(p => p !== phone))
+  }
+
+  const saveBlocked = async () => {
+    setSavingBlocked(true)
+    try {
+      await automationsApi.updateMerchantKnowledge({ blocked_customers: blockedCustomers })
+      setBlockedSaved(true)
+      setTimeout(() => setBlockedSaved(false), 2500)
+    } finally {
+      setSavingBlocked(false)
     }
   }
 
@@ -960,6 +991,69 @@ function MerchantKnowledgePanel() {
             </ul>
           )
         }
+      </CollapsibleSection>
+
+      {/* ── Blocked Customers ── */}
+      <CollapsibleSection title="العملاء المحظورون" icon={Shield} defaultOpen={false}>
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-slate-500">أرقام هواتف العملاء المزعجين — سيتم تحويل رسائلهم مباشرةً إلى الدعم البشري دون رد آلي.</p>
+
+          {/* Add phone input */}
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newBlockedPhone}
+              onChange={e => setNewBlockedPhone(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addBlockedPhone()}
+              placeholder="+966XXXXXXXXX"
+              dir="ltr"
+              className="input-field text-xs flex-1 font-mono"
+            />
+            <button
+              onClick={addBlockedPhone}
+              className="btn-secondary text-xs flex items-center gap-1 px-3 py-2"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              إضافة
+            </button>
+          </div>
+
+          {/* Blocked list */}
+          {blockedCustomers.length === 0 ? (
+            <p className="text-xs text-slate-400 text-center py-3">لا يوجد عملاء محظورون</p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {blockedCustomers.map((phone) => (
+                <li key={phone} className="flex items-center justify-between py-2">
+                  <span className="text-xs font-mono text-slate-700 dir-ltr">{phone}</span>
+                  <button
+                    onClick={() => removeBlockedPhone(phone)}
+                    className="text-red-400 hover:text-red-600 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* Save button */}
+          <div className="flex items-center gap-3 pt-1">
+            <button
+              onClick={saveBlocked}
+              disabled={savingBlocked}
+              className="btn-primary text-xs flex items-center gap-2 py-2 px-4"
+            >
+              {savingBlocked ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+              حفظ القائمة
+            </button>
+            {blockedSaved && (
+              <span className="text-xs text-emerald-600 flex items-center gap-1">
+                <CheckCircle className="w-3.5 h-3.5" /> تم الحفظ
+              </span>
+            )}
+          </div>
+        </div>
       </CollapsibleSection>
 
       {/* ── Brain profile ── */}
