@@ -17,7 +17,7 @@ from models import BillingPlan, BillingSubscription, Tenant  # noqa: E402
 # ── Billing constants ──────────────────────────────────────────────────────────
 INTEGRATION_FEE_SAR = 59
 LAUNCH_PROMO_MONTHS = 2
-LAUNCH_PROMO_UNTIL  = datetime(2026, 6, 30, 23, 59, 59)
+LAUNCH_PROMO_UNTIL  = datetime(2026, 6, 30, 23, 59, 59, tzinfo=timezone.utc)
 FREE_TRIAL_DAYS     = 14
 
 BILLING_PLANS_SEED: List[Dict[str, Any]] = [
@@ -185,11 +185,12 @@ def is_launch_discount_active(sub: BillingSubscription) -> bool:
     if not sub.started_at:
         return False
     now = datetime.now(timezone.utc)
+    started_at = _coerce_utc(sub.started_at)
     months_active = (
-        (now.year - sub.started_at.year) * 12
-        + (now.month - sub.started_at.month)
+        (now.year - started_at.year) * 12
+        + (now.month - started_at.month)
     )
-    return months_active < LAUNCH_PROMO_MONTHS and sub.started_at <= LAUNCH_PROMO_UNTIL
+    return months_active < LAUNCH_PROMO_MONTHS and started_at <= LAUNCH_PROMO_UNTIL
 
 
 def require_subscription(db: Session, tenant_id: int) -> None:
