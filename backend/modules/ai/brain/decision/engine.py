@@ -162,7 +162,14 @@ class DefaultDecisionEngine:
             state.stage == STAGE_ORDERING
             and bool(getattr(state.order_prep, "missing_fields", None))
         )
-        _candidates = list(state.last_search_candidates or []) or list(state.last_recommended_products or [])
+        # Sort candidates by affinity_score (desc) so the most-known product
+        # wins ties when more than one title matches the message.
+        _raw_candidates = list(state.last_search_candidates or []) or list(state.last_recommended_products or [])
+        _candidates = sorted(
+            _raw_candidates,
+            key=lambda p: float(p.get("affinity_score") or 0.0),
+            reverse=True,
+        )
         if _candidates and not _in_data_collection and intent.name not in (
             INTENT_TALK_HUMAN, INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO,
             INTENT_ASK_OWNER_CONTACT,
