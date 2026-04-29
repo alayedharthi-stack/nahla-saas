@@ -97,6 +97,13 @@ async def _dispatch_salla(db: Session, event) -> None:
 
     if event_type in ("order.created", "order.updated"):
         await svc.handle_order_webhook(data)
+        # Close the analytics loop: if this order is confirmed, mark the
+        # matching ConversationTrace so we know the AI sale converted.
+        try:
+            from services.outcome_tracker import record_order_outcome  # noqa: PLC0415
+            record_order_outcome(db, tenant_id, data, event_type=event_type)
+        except Exception as _ot_exc:
+            logger.debug("[Dispatcher] outcome_tracker raised (non-fatal): %s", _ot_exc)
         return
 
     if event_type in ("product.created", "product.updated"):

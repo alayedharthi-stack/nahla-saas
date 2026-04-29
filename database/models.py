@@ -1367,6 +1367,10 @@ class ConversationTrace(Base):
     order_started = Column(Boolean, default=False)
     payment_link_sent = Column(Boolean, default=False)
     handoff_triggered = Column(Boolean, default=False)
+    # Outcome columns — written by outcome_tracker when Salla fires the
+    # confirmation webhook, not at turn-write time.
+    order_confirmed = Column(Boolean, nullable=True, default=False)
+    coupon_redeemed = Column(Boolean, nullable=True, default=False)
     # Performance
     latency_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
