@@ -9,9 +9,17 @@ Primary runtime mode:
 Fallback mode:
   - Extract short code / map URL / coordinates from user text and keep them in
     the checkout state so the brain can continue collecting any missing fields.
+
+Supported map URL formats (capture + coordinate extraction):
+  - Google Maps full:  maps.google.com, google.com/maps (coords in URL)
+  - Google Maps short: maps.app.goo.gl, goo.gl/maps     (requires redirect expansion)
+  - Google Places:     g.page
+  - Apple Maps:        maps.apple.com  (?q=lat,lng or ?ll=lat,lng)
+  - Waze:              waze.com/ul      (?ll=lat,lng)
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, asdict
 import os
 import re
@@ -19,6 +27,11 @@ from typing import Any, Dict, Optional
 
 import httpx
 
+logger = logging.getLogger("nahla-backend")
+
+# SPL config — read from env directly (same as before) so this module stays
+# usable without importing from core.config (avoids circular import risk).
+# The canonical values are also published in core/config.py for logging/docs.
 _SPL_API_KEY = os.environ.get("SPL_NATIONAL_ADDRESS_API_KEY", "").strip()
 _SPL_BASE = os.environ.get(
     "SPL_NATIONAL_ADDRESS_BASE_URL",
@@ -26,10 +39,30 @@ _SPL_BASE = os.environ.get(
 ).rstrip("/")
 
 _SHORT_CODE_RE = re.compile(r"\b([A-Za-z]{4}\d{4})\b")
-_MAPS_URL_RE = re.compile(r"(https?://(?:www\.)?(?:maps\.app\.goo\.gl|goo\.gl/maps|maps\.google\.com|google\.com/maps|g\.page)[^\s]+)", re.IGNORECASE)
-_AT_COORDS_RE = re.compile(r"@(-?\d+\.\d+),(-?\d+\.\d+)")
-_PAIR_COORDS_RE = re.compile(r"\b(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\b")
-_BANG_COORDS_RE = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")
+
+# Recognise all major map platforms used in Saudi Arabia.
+# Google short links (maps.app.goo.gl, goo.gl/maps) need redirect-expansion
+# to recover coordinates; Apple Maps and Waze embed them in query params.
+_MAPS_URL_RE = re.compile(
+    r"(https?://(?:www\.)?(?:"
+    r"maps\.app\.goo\.gl"       # Google Maps new short link (most common in SA)
+    r"|goo\.gl/maps"            # Google Maps old short link
+    r"|maps\.google\.com"       # Google Maps full domain
+    r"|google\.com/maps"        # Google Maps via google.com
+    r"|g\.page"                 # Google Places short link
+    r"|maps\.apple\.com"        # Apple Maps (iOS users share these)
+    r"|waze\.com/ul"            # Waze navigation links
+    r")[^\s]*)",
+    re.IGNORECASE,
+)
+
+_AT_COORDS_RE    = re.compile(r"@(-?\d+\.\d+),(-?\d+\.\d+)")
+_PAIR_COORDS_RE  = re.compile(r"\b(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\b")
+_BANG_COORDS_RE  = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")
+# Apple Maps ?q=lat,lng  /  ?ll=lat,lng  /  Waze ?ll=lat,lng  /  Google ?center=lat,lng
+_QUERY_COORDS_RE = re.compile(
+    r"[?&](?:q|ll|daddr|center)=(-?\d+\.\d+),(-?\d+\.\d+)"
+)
 
 
 @dataclass
@@ -131,6 +164,59 @@ def spl_resolution_available() -> bool:
     return bool(_SPL_API_KEY)
 
 
+# ── Google Maps / shortened-URL helpers ──────────────────────────────────────
+
+_SHORTENED_URL_HOSTS = frozenset({
+    "maps.app.goo.gl",
+    "goo.gl",
+    "g.page",
+})
+
+
+def _is_shortened_maps_url(url: str) -> bool:
+    """Return True when the URL is a known short-link that hides coordinates."""
+    try:
+        from urllib.parse import urlparse  # noqa: PLC0415
+        host = urlparse(url).hostname or ""
+        return host.lower() in _SHORTENED_URL_HOSTS
+    except Exception:
+        return False
+
+
+async def expand_maps_url(url: str, timeout_seconds: float = 8.0) -> str:
+    """Follow HTTP redirects on a shortened map URL and return the final URL.
+
+    Uses a HEAD request to avoid downloading the full page HTML. Returns the
+    original URL unchanged if expansion fails (network error, timeout, etc.)
+    so callers can treat this as a best-effort, non-fatal enrichment step.
+
+    Typical use-case: `maps.app.goo.gl/xyz` → `maps.google.com/maps/place/.../@lat,lng,...`
+    after which `_extract_coords()` can pull out the coordinates.
+    """
+    if not url or not _is_shortened_maps_url(url):
+        return url
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout_seconds,
+            follow_redirects=True,
+            max_redirects=6,
+        ) as client:
+            resp = await client.head(url)
+            expanded = str(resp.url)
+            if expanded and expanded != url:
+                logger.info(
+                    "[AddressResolution] expanded short maps URL | %s -> %s",
+                    url[:60], expanded[:80],
+                )
+            return expanded or url
+    except Exception as exc:
+        logger.debug(
+            "[AddressResolution] expand_maps_url failed (non-fatal) | url=%s err=%s",
+            url[:60], exc,
+        )
+        return url
+
+
 async def _fetch_json(
     url: str,
     *,
@@ -148,12 +234,23 @@ async def _fetch_json(
 
 
 def _extract_coords(text: str) -> tuple[Optional[float], Optional[float]]:
-    for regex in (_AT_COORDS_RE, _BANG_COORDS_RE, _PAIR_COORDS_RE):
+    """Extract the first lat/lng pair found in text or a URL.
+
+    Priority order (most-specific to least):
+      1. @lat,lng        — Google Maps full URL viewport anchor
+      2. !3dlat!4dlng   — Google Maps embed/data format
+      3. ?q= / ?ll= / ?daddr= / ?center= — Apple Maps, Waze, Google query params
+      4. bare lat,lng   — loose coordinate pair anywhere in text
+    """
+    for regex in (_AT_COORDS_RE, _BANG_COORDS_RE, _QUERY_COORDS_RE, _PAIR_COORDS_RE):
         match = regex.search(text or "")
         if not match:
             continue
         try:
-            return float(match.group(1)), float(match.group(2))
+            lat, lng = float(match.group(1)), float(match.group(2))
+            # Basic sanity check: valid latitude -90..90, longitude -180..180
+            if -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0:
+                return lat, lng
         except Exception:
             continue
     return None, None

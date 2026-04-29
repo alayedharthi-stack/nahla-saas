@@ -313,6 +313,25 @@ MERCHANT_BRAIN_TENANT_IDS: set = {
     if x.strip().isdigit()
 }
 
+# ── SPL National Address API (Saudi Address Resolution) ───────────────────────
+# Used by services/address_resolution.py to resolve national short address codes
+# (e.g. RIYD1234) and GPS coordinates into city/district/street/postal_code.
+# Get a key from: https://address.gov.sa/en/developer
+SPL_NATIONAL_ADDRESS_API_KEY = os.environ.get("SPL_NATIONAL_ADDRESS_API_KEY", "").strip()
+SPL_NATIONAL_ADDRESS_BASE_URL = os.environ.get(
+    "SPL_NATIONAL_ADDRESS_BASE_URL",
+    "https://apina.address.gov.sa/NationalAddress/v3.1",
+)
+if not SPL_NATIONAL_ADDRESS_API_KEY:
+    _cfg_logger.warning(
+        "[Address] SPL_NATIONAL_ADDRESS_API_KEY is not set — "
+        "national short address codes and GPS coordinates from Google Maps links "
+        "will NOT be auto-resolved into city/district/postal fields. "
+        "Checkout will still work (the raw code/URL is forwarded in order notes) "
+        "but address auto-fill will be disabled. "
+        "Get a free key from https://address.gov.sa/en/developer"
+    )
+
 # ── CORS ───────────────────────────────────────────────────────────────────────
 # IMPORTANT:
 #   Never allow an environment override to DROP the canonical Nahla origins.

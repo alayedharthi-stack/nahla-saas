@@ -30,6 +30,7 @@ from ...brain.types import (
     OrderPreparationState,
 )
 from services.address_resolution import (
+    expand_maps_url,
     extract_address_signals,
     resolve_coordinates,
     resolve_short_address,
@@ -766,10 +767,30 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
 
 
 async def _resolve_checkout_address(prep: OrderPreparationState) -> None:
+    # Step 0: If we have a shortened Google Maps URL but no coordinates yet,
+    # follow the redirect to recover the full URL and extract lat/lng from it.
+    # This handles the most common SA pattern: customer shares maps.app.goo.gl/xxx.
+    if prep.google_maps_url and prep.latitude is None:
+        expanded = await expand_maps_url(prep.google_maps_url)
+        if expanded and expanded != prep.google_maps_url:
+            from services.address_resolution import _extract_coords  # noqa: PLC0415
+            lat, lng = _extract_coords(expanded)
+            if lat is not None and lng is not None:
+                prep.latitude  = lat
+                prep.longitude = lng
+                logger.info(
+                    "[ORDER FLOW] coords extracted from expanded maps URL | "
+                    "lat=%.6f lng=%.6f tenant=%s",
+                    lat, lng, getattr(prep, "product_id", "?"),
+                )
+
+    # Step 1: Resolve national short address code via SPL API.
     if prep.short_address_code and not _has_structured_address(prep):
         resolved = await resolve_short_address(prep.short_address_code, city=prep.city)
         _merge_resolved_address(prep, resolved)
 
+    # Step 2: Reverse-geocode coordinates (from direct user input OR from
+    # the expanded maps URL above) via SPL API.
     if (prep.latitude is not None and prep.longitude is not None) and (
         not _has_structured_address(prep) or not prep.city
     ):

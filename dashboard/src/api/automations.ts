@@ -121,6 +121,8 @@ export interface MerchantKnowledgeSyncStatus {
   platform: string
   store_name: string
   store_url: string
+  spl_enabled?: boolean
+  address_autofill?: boolean
 }
 
 export interface MerchantKnowledgeProduct {

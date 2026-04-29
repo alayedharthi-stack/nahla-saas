@@ -723,6 +723,18 @@ function MerchantKnowledgePanel() {
             </div>
           )}
         </div>
+
+        {/* ── SPL address auto-fill status ── */}
+        <div className={`mt-4 rounded-lg px-3 py-2.5 flex items-center gap-2.5 text-xs border ${
+          sync_status.spl_enabled
+            ? 'bg-emerald-50 border-emerald-100 text-emerald-700'
+            : 'bg-amber-50 border-amber-100 text-amber-700'
+        }`}>
+          <span className={`w-2 h-2 rounded-full shrink-0 ${sync_status.spl_enabled ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+          {sync_status.spl_enabled
+            ? 'تحليل العنوان فعّال — الرموز الوطنية وروابط الخرائط تُحوَّل تلقائياً إلى عنوان كامل'
+            : 'تحليل العنوان معطّل — أضف SPL_NATIONAL_ADDRESS_API_KEY في بيئة التشغيل لتفعيل auto-fill للعناوين'}
+        </div>
       </div>
 
     </div>

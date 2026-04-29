@@ -503,12 +503,18 @@ def _serialize_merchant_knowledge(
     policy_presence: Dict[str, Any] = mc.get("policy_presence") or {}
 
     # ── Sync status ───────────────────────────────────────────────────────────
+    from services.address_resolution import spl_resolution_available  # noqa: PLC0415
+    _spl_on = spl_resolution_available()
     sync_status = {
         "last_sync_at": insights.get("last_sync_at"),
         "is_fresh": bool(insights.get("knowledge_fresh", False)),
         "platform": tenant_profile.get("integration_platform") or "unknown",
         "store_name": tenant_profile.get("store_name") or "",
         "store_url": tenant_profile.get("store_url") or "",
+        # Address auto-fill status — shown in the dashboard so merchants know
+        # whether short codes / Google Maps links will be resolved automatically.
+        "spl_enabled": _spl_on,
+        "address_autofill": _spl_on,
     }
 
     # ── Quality score (0-100) ─────────────────────────────────────────────────
