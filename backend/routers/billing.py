@@ -526,6 +526,12 @@ async def _do_checkout(
         ensure_billing_plans(db)
     except Exception as _ep_exc:
         logger.warning("[Billing] ensure_billing_plans non-fatal: %s", _ep_exc)
+        # CRITICAL: if ensure_billing_plans failed mid-transaction the SQLAlchemy
+        # session is in an error state. We must rollback before any further query.
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     plan = (
         db.query(BillingPlan)

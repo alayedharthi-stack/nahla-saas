@@ -94,6 +94,7 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
 
 def ensure_billing_plans(db: Session) -> None:
     """Seed system billing plans on first use (idempotent)."""
+    added = False
     for seed in BILLING_PLANS_SEED:
         if not db.query(BillingPlan).filter(BillingPlan.slug == seed["slug"]).first():
             plan = BillingPlan(
@@ -112,7 +113,9 @@ def ensure_billing_plans(db: Session) -> None:
                 },
             )
             db.add(plan)
-    db.commit()
+            added = True
+    if added:
+        db.commit()
 
 
 def get_tenant_subscription(db: Session, tenant_id: int) -> Optional[BillingSubscription]:
