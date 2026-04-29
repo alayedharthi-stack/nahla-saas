@@ -505,13 +505,23 @@ async def create_billing_checkout(
     except HTTPException:
         raise
     except Exception as exc:
+        import traceback as _tb  # noqa: PLC0415
+        tb_text = _tb.format_exc()
         logger.error(
-            "[Billing] Unexpected checkout error tenant=%s: %s",
-            tenant_id, exc, exc_info=True,
+            "[Billing] Unexpected checkout error tenant=%s: %s\n%s",
+            tenant_id, exc, tb_text,
         )
+        # TEMPORARY DIAGNOSTIC: return real exception details so we can see the
+        # actual failure cause in the browser. Will be tightened back to a
+        # generic message once the root cause is identified.
         raise HTTPException(
             status_code=500,
-            detail={"code": "internal_error", "message": "حدث خطأ داخلي. حاول مرة أخرى أو تواصل مع الدعم."},
+            detail={
+                "code":       "internal_error",
+                "message":    "حدث خطأ داخلي. حاول مرة أخرى أو تواصل مع الدعم.",
+                "debug_type": type(exc).__name__,
+                "debug_msg":  str(exc)[:500],
+            },
         )
 
 

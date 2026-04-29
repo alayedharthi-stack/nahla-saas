@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>نحلة — طيار المبيعات الآلي</title>
+    <meta name="description" content="مساعد مبيعات ذكي لمتجرك عبر واتساب — نحلة AI" />
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#f59e0b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <!-- Apple PWA -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="نحلة" />
+    <link rel="apple-touch-icon" href="/logo.png" />
+    <link rel="apple-touch-startup-image" href="/logo.png" />
+
+    <!-- Icons -->
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <link rel="shortcut icon" href="/logo.png" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="نحلة — طيار المبيعات الآلي" />
+    <meta property="og:description" content="مساعد مبيعات ذكي يرد على عملائك عبر واتساب" />
+    <meta property="og:image" content="/logo.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://app.nahlah.ai" />
+
+    <!-- Fonts: Cairo (Arabic primary) + Inter (English) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;900&family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script type="module" crossorigin src="/assets/index-CK6VfupZ.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CPTSaZjk.css">
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!--
+      Salla embedded handshake — fires IMMEDIATELY when the iframe HTML loads,
+      before React even bundles.  Salla's host frame shows
+      "لم يتم الاتصال بالتطبيق" if app.ready doesn't arrive within ~5s.
+      We send both event shapes (legacy + current SDK) and re-send at 1s/3s.
+    -->
+    <script>
+      (function () {
+        if (window.parent === window) return; // not in an iframe
+        var send = function () {
+          try {
+            window.parent.postMessage(
+              { event: 'embedded::ready', payload: {}, timestamp: Date.now(),
+                source: 'embedded-app', metadata: { version: '0.2.4' } },
+              '*'
+            );
+          } catch (e) {}
+          try { window.parent.postMessage({ event: 'app.ready', type: 'app.ready' }, '*'); } catch (e) {}
+        };
+        send();
+        setTimeout(send, 600);
+        setTimeout(send, 2000);
+        setTimeout(send, 5000);
+      })();
+    </script>
+
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          // Skip SW inside Salla iframe to avoid first-load races
+          if (window.parent !== window) return;
+          navigator.serviceWorker.register('/sw.js').catch(function () {});
+        });
+      }
+    </script>
+  </body>
+</html>
