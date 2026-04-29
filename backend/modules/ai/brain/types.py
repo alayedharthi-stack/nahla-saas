@@ -217,6 +217,11 @@ class MerchantConversationState:
     # `stash_address_pre_product`, …) — used for the BRAIN_RESULT trace
     # log and the `/debug/recent-whatsapp-turns` endpoint.
     last_action: str = ""
+    # Number of consecutive turns where the customer's intent was GENERAL
+    # (unrecognised / off-topic). Reset to 0 whenever a specific intent fires.
+    # Used by RealPolicyGate._auto_escalate for a real streak check instead of
+    # the crude turn-counter proxy.
+    general_streak: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -245,6 +250,7 @@ class MerchantConversationState:
             "pending_google_maps_url": self.pending_google_maps_url,
             "pending_city": self.pending_city,
             "last_action": self.last_action,
+            "general_streak": self.general_streak,
         }
 
     @staticmethod
@@ -275,6 +281,7 @@ class MerchantConversationState:
             pending_google_maps_url=str(d.get("pending_google_maps_url", "") or ""),
             pending_city=str(d.get("pending_city", "") or ""),
             last_action=str(d.get("last_action", "") or ""),
+            general_streak=int(d.get("general_streak", 0) or 0),
         )
 
 

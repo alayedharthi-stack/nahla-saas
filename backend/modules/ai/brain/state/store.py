@@ -36,6 +36,7 @@ from ..types import (
     INTENT_PAY_NOW,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
+    INTENT_GENERAL,
     Decision,
     Intent,
     MerchantConversationState,
@@ -448,6 +449,12 @@ class DefaultStateStore:
             pending_google_maps_url=getattr(state, "pending_google_maps_url", "") or "",
             pending_city=getattr(state, "pending_city", "") or "",
             last_action=getattr(state, "last_action", "") or "",
+            # Increment general_streak when intent is GENERAL, reset otherwise.
+            general_streak=(
+                (getattr(state, "general_streak", 0) or 0) + 1
+                if intent.name == INTENT_GENERAL
+                else 0
+            ),
         )
 
         action = decision.action

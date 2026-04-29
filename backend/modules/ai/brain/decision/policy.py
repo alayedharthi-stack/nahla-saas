@@ -7,6 +7,8 @@ PassThroughPolicyGate  — Phase 1 no-op (kept for testing / emergency bypass).
 RealPolicyGate         — Phase 2 production gate with real business rules.
 
 RealPolicyGate rules (applied in order, first match modifies decision):
+  0. Block list           — silently hand off blocked/abusive customer phones
+                            (store_settings.blocked_customers list).
   1. Working-hours gate   — if store has hours config and it's outside those
                             hours, downgrade order/payment actions to LLM_REPLY.
   2. Coupon frequency cap — block a second coupon within N hours (merchant-
@@ -16,7 +18,8 @@ RealPolicyGate rules (applied in order, first match modifies decision):
   4. Max-order-value gate — block orders above merchant's configured ceiling
                             (ai_settings.max_order_value, 0 = unlimited).
   5. Auto-escalate        — transfer to human after N consecutive GENERAL turns
-                            (ai_settings.auto_escalate_after_n, default 3).
+                            (real general_streak counter, threshold from
+                            ai_settings.auto_escalate_after_n, default 3).
 """
 from __future__ import annotations
 
@@ -64,6 +67,7 @@ class RealPolicyGate:
 
     def gate(self, decision: Decision, ctx: BrainContext) -> Decision:
         try:
+            decision = self._block_list(decision, ctx)
             decision = self._working_hours(decision, ctx)
             decision = self._coupon_cap(decision, ctx)
             decision = self._price_range(decision, ctx)
@@ -71,6 +75,46 @@ class RealPolicyGate:
             decision = self._auto_escalate(decision, ctx)
         except Exception as exc:
             logger.warning("[PolicyGate] unexpected error: %s — returning original decision", exc)
+        return decision
+
+    # ── Rule 0: block list ────────────────────────────────────────────────────
+
+    def _block_list(self, decision: Decision, ctx: BrainContext) -> Decision:
+        """Silently hand off customers whose phone number is in the merchant's
+        block list (store_settings.blocked_customers).
+
+        Blocked customers still receive a response (we hand off to human
+        monitoring rather than going silent), but the AI stops engaging.
+        """
+        if decision.action == ACTION_HANDOFF:
+            return decision  # already heading to human
+
+        bp = self._brain_profile(ctx)
+        blocked: list = bp.get("blocked_customers") or []
+        if not blocked:
+            return decision
+
+        phone = str(ctx.customer_phone or "").strip()
+        if not phone:
+            return decision
+
+        # Normalise for comparison: strip spaces/dashes, lower-case.
+        def _norm(p: str) -> str:
+            return "".join(c for c in p if c.isdigit() or c == "+")
+
+        phone_norm = _norm(phone)
+        for entry in blocked:
+            if phone_norm and _norm(str(entry)) == phone_norm:
+                logger.info(
+                    "[PolicyGate] block_list: customer %s is blocked — routing to handoff",
+                    phone[-4:],
+                )
+                return Decision(
+                    action=ACTION_HANDOFF,
+                    args={"policy_reason": "customer_blocked"},
+                    reason="policy: customer phone is on merchant's block list",
+                    confidence=1.0,
+                )
         return decision
 
     # ── Rule 1: working hours ─────────────────────────────────────────────────
@@ -218,29 +262,25 @@ class RealPolicyGate:
         if ctx.intent.name != INTENT_GENERAL:
             return decision
 
-        # Count consecutive GENERAL intents in history
-        general_streak = 0
-        for turn in reversed(ctx.history[-6:]):
-            if turn.get("direction") != "in":
-                continue
-            # We don't have intent per history turn yet — use last_intent from state
-            break   # Phase 2 stub — needs intent stored per turn in memory updater
-
         # Merchant-configurable threshold (defaults to 3)
         bp = self._brain_profile(ctx)
         escalate_n = int(bp.get("auto_escalate_after_n") or self._DEFAULT_ESCALATE_AFTER_N)
         escalate_n = max(1, escalate_n)
 
-        # Use state.last_intent as a proxy: if N+ turns all general intent, escalate
-        if ctx.state.turn >= escalate_n and ctx.state.last_intent == INTENT_GENERAL:
+        # Use the real general_streak counter persisted in MerchantConversationState.
+        # This is incremented by DefaultStateStore.transition() every time the
+        # classifier resolves INTENT_GENERAL, and reset to 0 on any other intent.
+        general_streak = getattr(ctx.state, "general_streak", 0) or 0
+
+        if general_streak >= escalate_n:
             logger.info(
-                "[PolicyGate] auto-escalate: %d turns in GENERAL at stage=%s (threshold=%d)",
-                ctx.state.turn, ctx.state.stage, escalate_n,
+                "[PolicyGate] auto-escalate: general_streak=%d >= threshold=%d at stage=%s",
+                general_streak, escalate_n, ctx.state.stage,
             )
             return Decision(
                 action=ACTION_HANDOFF,
                 args={"policy_reason": "repeated_confusion"},
-                reason="policy: customer stuck in general intent — escalate to human",
+                reason=f"policy: {general_streak} consecutive GENERAL intents — escalate to human",
                 confidence=0.70,
             )
         return decision

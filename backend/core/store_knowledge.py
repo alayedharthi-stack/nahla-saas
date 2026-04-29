@@ -762,6 +762,9 @@ def build_merchant_context(
     _cap_hours_raw = ai_settings.get("coupon_cap_hours", 24)
     _escalate_raw  = ai_settings.get("auto_escalate_after_n", 3)
     _max_order_raw = ai_settings.get("max_order_value", 0)
+    # blocked_customers: list of phone numbers stored in store_settings (not ai_settings)
+    _blocked_raw = store_settings.get("blocked_customers") or []
+    _blocked_list: list = [str(p).strip() for p in _blocked_raw if p] if isinstance(_blocked_raw, list) else []
 
     brain_profile = {
         "tone": ai_settings.get("reply_tone", "friendly"),
@@ -778,6 +781,8 @@ def build_merchant_context(
         "auto_escalate_after_n": max(1, int(_escalate_raw)) if str(_escalate_raw).isdigit() or isinstance(_escalate_raw, (int, float)) else 3,
         "max_order_value": float(_max_order_raw) if _max_order_raw and float(_max_order_raw) > 0 else None,
         "context_verbosity": context_verbosity,
+        # Block list — customer phone numbers the merchant has flagged (Phase 12)
+        "blocked_customers": _blocked_list,
     }
 
     # Pages — synced from Salla via StoreSyncService.sync_pages() which writes to
