@@ -54,6 +54,34 @@ _DESC_TAG_RE     = _re.compile(r"<[^>]+>", _re.DOTALL)
 _DESC_SPACE_RE   = _re.compile(r"\s+")
 
 
+def _format_variants_for_llm(variants: list, max_items: int = 6) -> str:
+    """Summarise in-stock variant names for the LLM context.
+
+    Salla stores each combination (e.g. "S / أحمر", "M / أبيض") as a separate
+    variant row.  We surface only the in-stock ones so the AI can answer
+    "ما المقاسات المتاحة؟" without fabricating values.
+
+    Returns a comma-separated string like "S, M, L" or "" when empty.
+    """
+    if not variants or not isinstance(variants, list):
+        return ""
+    seen: list = []
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        name = (v.get("name") or v.get("title") or "").strip()
+        if not name:
+            continue
+        available = v.get("available", True)
+        qty = v.get("quantity") or v.get("stock_quantity")
+        in_stock = bool(available) and (qty is None or int(qty or 0) > 0)
+        if in_stock and name not in seen:
+            seen.append(name)
+        if len(seen) >= max_items:
+            break
+    return "، ".join(seen)
+
+
 def _clean_description(raw: str, max_length: int = 200) -> str:
     """Strip HTML from a product description and return a plain-text summary.
 
@@ -259,20 +287,23 @@ class CatalogContextBuilder:
             and variants_ok
         )
         return {
-            "id":          p.id,
-            "external_id": ext_id or None,
-            "title":       p.title,
-            "sku":         p.sku,
-            "description": _clean_description(p.description or meta.get("description", "")),
-            "price":       p.price,
-            "sale_price":  meta.get("sale_price"),
-            "category":    meta.get("category", ""),
-            "brand":       meta.get("brand", ""),
-            "in_stock":    in_stock_flag,
-            "stock_qty":   stock_qty,
-            "image_url":   meta.get("image_url", ""),
-            "orderable":   orderable,
-            "status":      status,
+            "id":              p.id,
+            "external_id":     ext_id or None,
+            "title":           p.title,
+            "sku":             p.sku,
+            "description":     _clean_description(p.description or meta.get("description", "")),
+            "price":           p.price,
+            "sale_price":      meta.get("sale_price"),
+            "category":        meta.get("category", ""),
+            "brand":           meta.get("brand", ""),
+            "in_stock":        in_stock_flag,
+            "stock_qty":       stock_qty,
+            "image_url":       meta.get("image_url", ""),
+            "orderable":       orderable,
+            "status":          status,
+            # Variant/option names (e.g. "S, M, L" or "أحمر، أزرق") —
+            # only in-stock combinations, max 6 entries.
+            "variants_summary": _format_variants_for_llm(variants),
         }
 
     def _filter_orderable(
@@ -338,6 +369,8 @@ class CatalogContextBuilder:
             )
             if p.get("description"):
                 line += f"\n  الوصف: {p['description']}"
+            if p.get("variants_summary"):
+                line += f"\n  الخيارات المتاحة: {p['variants_summary']}"
             lines.append(line)
         lines.append(
             "\nتنبيه: جميع المنتجات أعلاه تم التحقق من توفرها في المخزون."
