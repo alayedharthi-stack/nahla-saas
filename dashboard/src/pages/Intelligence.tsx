@@ -14,6 +14,7 @@ import {
   Store, PackageCheck, PackageX, ShieldCheck, CreditCard, Truck,
   MessageSquare, FileText, Info, ChevronDown, ChevronUp,
   Plus, Trash2, ThumbsUp, Pencil, X,
+  BarChart2, Activity, Timer,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -26,6 +27,7 @@ import {
   CustomerSegment,
   MerchantKnowledge,
   MerchantKnowledgePolicies,
+  ResponseQualityData,
 } from '../api/automations'
 import { settingsApi, type AISettings } from '../api/settings'
 
@@ -919,12 +921,271 @@ function MerchantKnowledgePanel() {
   )
 }
 
+// ── Brain Analytics Panel ─────────────────────────────────────────────────────
+
+const INTENT_LABELS: Record<string, string> = {
+  greeting:       'ترحيب',
+  ask_product:    'سؤال منتج',
+  ask_price:      'سؤال سعر',
+  start_order:    'بدء طلب',
+  pay_now:        'طلب دفع',
+  shipping:       'شحن / توصيل',
+  hesitation:     'تردد',
+  handoff:        'تحويل',
+  track_order:    'تتبع طلب',
+  pick_list_item: 'اختيار من قائمة',
+  who_are_you:    'من أنت',
+  other:          'أخرى',
+}
+
+function MiniBar({ value, max, color = 'bg-brand-400' }: { value: number; max: number; color?: string }) {
+  const pct = max > 0 ? Math.max(4, Math.round((value / max) * 100)) : 4
+  return (
+    <div className="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden">
+      <div className={`${color} h-2 rounded-full transition-all`} style={{ width: `${pct}%` }} />
+    </div>
+  )
+}
+
+function FunnelStep({ label, count, total, color }: { label: string; count: number; total: number; color: string }) {
+  const pct = total > 0 ? Math.round((count / total) * 100) : 0
+  return (
+    <div className="flex items-center gap-3 text-xs">
+      <span className="w-28 text-end text-slate-600 shrink-0">{label}</span>
+      <div className="flex-1 bg-slate-100 rounded-full h-5 overflow-hidden relative">
+        <div className={`${color} h-5 rounded-full transition-all`} style={{ width: `${Math.max(pct, 2)}%` }} />
+        {pct >= 12 && (
+          <span className="absolute inset-0 flex items-center justify-center text-white text-[10px] font-semibold">
+            {count.toLocaleString('ar-SA')}
+          </span>
+        )}
+      </div>
+      {pct < 12 && <span className="text-slate-700 font-semibold w-8 shrink-0">{count}</span>}
+      <span className="text-slate-400 w-8 shrink-0 text-end">{pct}%</span>
+    </div>
+  )
+}
+
+function BrainAnalyticsPanel() {
+  const [data, setData] = useState<ResponseQualityData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const [period, setPeriod] = useState<'7' | '30'>('7')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(false)
+    try {
+      setData(await automationsApi.getResponseQuality())
+    } catch {
+      setError(true)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return (
+    <div className="flex flex-col items-center justify-center py-24 gap-4">
+      <div className="w-10 h-10 border-4 border-brand-200 border-t-brand-500 rounded-full animate-spin" />
+      <p className="text-sm text-slate-500">جارٍ تحميل مقاييس أداء الذكاء…</p>
+    </div>
+  )
+
+  if (error || !data) return (
+    <div className="flex flex-col items-center justify-center py-24 gap-4">
+      <AlertTriangle className="w-10 h-10 text-red-400" />
+      <p className="text-sm text-slate-600">تعذّر تحميل بيانات الأداء</p>
+      <button onClick={load} className="btn-primary text-sm flex items-center gap-2">
+        <RefreshCw className="w-4 h-4" /> إعادة المحاولة
+      </button>
+    </div>
+  )
+
+  const m = period === '7' ? data.last_7_days : data.last_30_days
+
+  const maxDaily = Math.max(...data.daily.map(d => d.turns), 1)
+
+  return (
+    <div className="space-y-5">
+
+      {/* ── Period toggle ── */}
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-slate-500 me-1">الفترة:</span>
+        {(['7', '30'] as const).map(p => (
+          <button
+            key={p}
+            onClick={() => setPeriod(p)}
+            className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+              period === p
+                ? 'bg-brand-500 text-white border-brand-500'
+                : 'bg-white text-slate-600 border-slate-200 hover:border-brand-300'
+            }`}
+          >
+            {p === '7' ? 'آخر 7 أيام' : 'آخر 30 يوماً'}
+          </button>
+        ))}
+        <button onClick={load} className="ms-auto btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-3">
+          <RefreshCw className="w-3.5 h-3.5" /> تحديث
+        </button>
+      </div>
+
+      {/* ── KPI cards ── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: 'إجمالي المحادثات', value: m.sessions_total, icon: MessageSquare, color: 'text-brand-600', bg: 'bg-brand-50' },
+          { label: 'إجمالي الردود', value: m.turns_total, icon: Activity, color: 'text-blue-600', bg: 'bg-blue-50' },
+          { label: 'طلبات مؤكدة', value: m.order_confirmed_count, icon: CheckCircle, color: 'text-emerald-600', bg: 'bg-emerald-50' },
+          { label: 'متوسط وقت الرد', value: m.avg_latency_ms ? `${m.avg_latency_ms}ms` : '—', icon: Timer, color: 'text-slate-600', bg: 'bg-slate-100' },
+        ].map(({ label, value, icon: Icon, color, bg }) => (
+          <div key={label} className="card px-4 py-3 flex items-start gap-3">
+            <div className={`${bg} rounded-lg p-2 shrink-0`}>
+              <Icon className={`w-4 h-4 ${color}`} />
+            </div>
+            <div className="min-w-0">
+              <p className={`text-lg font-bold ${color}`}>{typeof value === 'number' ? value.toLocaleString('ar-SA') : value}</p>
+              <p className="text-[10px] text-slate-500 leading-tight">{label}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Conversion funnel ── */}
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <BarChart2 className="w-4 h-4 text-brand-500" />
+          <h2 className="text-sm font-semibold text-slate-900">قمع التحويل</h2>
+          <span className="text-[10px] text-slate-400 ms-1">— من رد إلى طلب مؤكد</span>
+        </div>
+        <div className="space-y-2.5">
+          <FunnelStep label="ردود المساعد" count={m.turns_total} total={m.turns_total} color="bg-brand-400" />
+          <FunnelStep label="بدأ طلباً" count={m.order_started_count} total={m.turns_total} color="bg-blue-400" />
+          <FunnelStep label="أرسل رابط دفع" count={m.payment_link_count} total={m.turns_total} color="bg-amber-400" />
+          <FunnelStep label="أكّد الطلب" count={m.order_confirmed_count} total={m.turns_total} color="bg-emerald-500" />
+          <FunnelStep label="استخدم كوبون" count={m.coupon_redeemed_count} total={m.turns_total} color="bg-purple-400" />
+          <FunnelStep label="حُوِّل لخدمة عملاء" count={m.handoff_count} total={m.turns_total} color="bg-red-400" />
+        </div>
+        {m.order_started_count > 0 && (
+          <div className="mt-3 pt-3 border-t border-slate-100 flex gap-4 text-xs text-slate-500">
+            <span>معدل التحويل: <strong className="text-emerald-600">{(m.conversion_rate * 100).toFixed(1)}%</strong></span>
+            <span>معدل التحويل لخدمة عملاء: <strong className="text-red-500">{(m.handoff_rate * 100).toFixed(1)}%</strong></span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Daily sparkline + Intents/Actions grid ── */}
+      <div className="grid lg:grid-cols-2 gap-5">
+
+        {/* Daily sparkline */}
+        <div className="card p-5">
+          <h2 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-brand-500" /> النشاط اليومي (7 أيام)
+          </h2>
+          <div className="flex items-end gap-1.5 h-20">
+            {data.daily.map(d => {
+              const pct = maxDaily > 0 ? Math.max(4, Math.round((d.turns / maxDaily) * 100)) : 4
+              return (
+                <div key={d.date} className="flex-1 flex flex-col items-center gap-1 group relative">
+                  <div
+                    className="w-full bg-brand-400 rounded-t transition-all hover:bg-brand-500"
+                    style={{ height: `${pct}%`, minHeight: 4 }}
+                  />
+                  {d.orders_confirmed > 0 && (
+                    <div
+                      className="w-1.5 h-1.5 rounded-full bg-emerald-500 absolute bottom-5"
+                      title={`${d.orders_confirmed} طلبات مؤكدة`}
+                    />
+                  )}
+                  <span className="text-[8px] text-slate-400 mt-0.5">
+                    {new Date(d.date).toLocaleDateString('ar-SA', { weekday: 'short' })}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-1 text-center">كل شريط = عدد ردود الذكاء • النقاط الخضراء = طلبات مؤكدة</p>
+        </div>
+
+        {/* Top intents */}
+        <div className="card p-5">
+          <h2 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
+            <Brain className="w-4 h-4 text-brand-500" /> أكثر النوايا تكراراً (30 يوم)
+          </h2>
+          {data.top_intents.length === 0
+            ? <p className="text-xs text-slate-400 text-center py-4">لا توجد بيانات بعد</p>
+            : (
+              <div className="space-y-2.5">
+                {data.top_intents.map(({ intent, count }) => {
+                  const maxCount = data.top_intents[0]?.count || 1
+                  return (
+                    <div key={intent} className="flex items-center gap-2 text-xs">
+                      <span className="w-24 text-end text-slate-600 shrink-0 truncate">
+                        {INTENT_LABELS[intent] || intent}
+                      </span>
+                      <MiniBar value={count} max={maxCount} />
+                      <span className="text-slate-700 font-semibold w-8 text-end shrink-0">{count}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          }
+        </div>
+      </div>
+
+      {/* ── Top actions ── */}
+      {data.top_actions.length > 0 && (
+        <div className="card p-5">
+          <h2 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
+            <Zap className="w-4 h-4 text-amber-500" /> أكثر الإجراءات تنفيذاً (30 يوم)
+          </h2>
+          <div className="grid sm:grid-cols-2 gap-2.5">
+            {data.top_actions.map(({ action, count }) => {
+              const maxCount = data.top_actions[0]?.count || 1
+              return (
+                <div key={action} className="flex items-center gap-2 text-xs">
+                  <span className="w-32 text-end text-slate-600 shrink-0 truncate font-mono text-[10px]">{action}</span>
+                  <MiniBar value={count} max={maxCount} color="bg-amber-400" />
+                  <span className="text-slate-700 font-semibold w-8 text-end shrink-0">{count}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Latency summary ── */}
+      {(m.avg_latency_ms !== null) && (
+        <div className="card p-5 flex items-center gap-6 flex-wrap">
+          <Timer className="w-5 h-5 text-slate-400 shrink-0" />
+          <div>
+            <p className="text-[10px] text-slate-400 mb-0.5">متوسط وقت الاستجابة</p>
+            <p className="text-xl font-bold text-slate-800">{m.avg_latency_ms} <span className="text-xs font-normal text-slate-400">ms</span></p>
+          </div>
+          {m.p95_latency_ms !== null && (
+            <div>
+              <p className="text-[10px] text-slate-400 mb-0.5">P95 (أبطأ 5%)</p>
+              <p className="text-xl font-bold text-slate-800">{m.p95_latency_ms} <span className="text-xs font-normal text-slate-400">ms</span></p>
+            </div>
+          )}
+          <div>
+            <p className="text-[10px] text-slate-400 mb-0.5">متوسط الردود/محادثة</p>
+            <p className="text-xl font-bold text-slate-800">{m.avg_turns_per_session}</p>
+          </div>
+        </div>
+      )}
+
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Intelligence() {
   useLanguage() // initialise RTL context
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant'>('dashboard')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant' | 'analytics'>('dashboard')
   const [data, setData] = useState<IntelligenceDashboard | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -970,6 +1231,10 @@ export default function Intelligence() {
             <span className="text-xs text-slate-400 flex items-center gap-1.5">
               <Store className="w-3.5 h-3.5" /> ما تعرفه نحلة عن متجرك
             </span>
+          ) : activeTab === 'analytics' ? (
+            <span className="text-xs text-slate-400 flex items-center gap-1.5">
+              <BarChart2 className="w-3.5 h-3.5" /> أداء الذكاء وجودة الردود
+            </span>
           ) : undefined
         }
       />
@@ -1010,6 +1275,17 @@ export default function Intelligence() {
             <Store className="w-4 h-4 shrink-0" />
             ذكاء المتجر
           </button>
+          <button
+            onClick={() => setActiveTab('analytics')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+              activeTab === 'analytics'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <BarChart2 className="w-4 h-4 shrink-0" />
+            أداء الذكاء
+          </button>
         </div>
       </div>
 
@@ -1018,6 +1294,9 @@ export default function Intelligence() {
 
       {/* ── Merchant Knowledge Tab ─────────────────────────────────────────── */}
       {activeTab === 'merchant' && <MerchantKnowledgePanel />}
+
+      {/* ── Brain Analytics Tab ────────────────────────────────────────────── */}
+      {activeTab === 'analytics' && <BrainAnalyticsPanel />}
 
       {/* ── Dashboard Tab ─────────────────────────────────────────────────── */}
       {activeTab === 'dashboard' && (<>

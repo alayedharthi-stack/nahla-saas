@@ -13,11 +13,12 @@ Routes:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func as sqlfunc
+from sqlalchemy import func as sqlfunc, case
 from sqlalchemy.orm import Session
 
 from models import (  # noqa: E402
@@ -703,6 +704,139 @@ async def update_merchant_brain_knowledge(request: Request, db: Session = Depend
     db.commit()
 
     return {"ok": True, "changed": True}
+
+
+@router.get("/intelligence/response-quality")
+async def response_quality(request: Request, db: Session = Depends(get_db)):
+    """Return AI brain performance metrics for the last 7 / 30 days.
+
+    Reads ConversationTrace rows to compute:
+      - Conversion funnel  (turns → orders started → confirmed)
+      - Handoff / payment-link rates
+      - Avg + P95 latency
+      - Top 8 intents and top 8 actions
+      - Daily turn + conversion counts for the last 7 days (sparkline data)
+    """
+    import logging as _log  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    _logger = _log.getLogger("nahla-backend")
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    try:
+        from database.models import ConversationTrace  # noqa: PLC0415
+    except ImportError:
+        raise HTTPException(status_code=500, detail="ConversationTrace model unavailable")
+
+    now_utc = datetime.now(timezone.utc)
+    cutoff_7d  = (now_utc - timedelta(days=7)).replace(tzinfo=None)
+    cutoff_30d = (now_utc - timedelta(days=30)).replace(tzinfo=None)
+
+    # ── Base query for last 30 days ────────────────────────────────────────────
+    base_q = (
+        db.query(ConversationTrace)
+        .filter(
+            ConversationTrace.tenant_id == tenant_id,
+            ConversationTrace.created_at >= cutoff_30d,
+        )
+    )
+
+    rows_30d = base_q.all()
+    rows_7d  = [r for r in rows_30d if r.created_at >= cutoff_7d]
+
+    if not rows_30d:
+        _logger.info("[ResponseQuality] no traces for tenant=%s in last 30d", tenant_id)
+
+    def _metrics(rows: List[Any]) -> Dict[str, Any]:
+        total = len(rows)
+        if total == 0:
+            return {
+                "turns_total": 0,
+                "sessions_total": 0,
+                "avg_turns_per_session": 0,
+                "order_started_count": 0,
+                "order_confirmed_count": 0,
+                "coupon_redeemed_count": 0,
+                "handoff_count": 0,
+                "payment_link_count": 0,
+                "conversion_rate": 0.0,
+                "handoff_rate": 0.0,
+                "payment_link_rate": 0.0,
+                "avg_latency_ms": None,
+                "p95_latency_ms": None,
+            }
+
+        sessions  = len({r.session_id or r.customer_phone for r in rows})
+        started   = sum(1 for r in rows if r.order_started)
+        confirmed = sum(1 for r in rows if r.order_confirmed)
+        coupons   = sum(1 for r in rows if r.coupon_redeemed)
+        handoffs  = sum(1 for r in rows if r.handoff_triggered)
+        payments  = sum(1 for r in rows if r.payment_link_sent)
+
+        latencies = sorted([r.latency_ms for r in rows if r.latency_ms is not None])
+        avg_lat   = int(sum(latencies) / len(latencies)) if latencies else None
+        p95_lat   = latencies[int(len(latencies) * 0.95)] if latencies else None
+
+        return {
+            "turns_total":            total,
+            "sessions_total":         sessions,
+            "avg_turns_per_session":  round(total / sessions, 1) if sessions else 0,
+            "order_started_count":    started,
+            "order_confirmed_count":  confirmed,
+            "coupon_redeemed_count":  coupons,
+            "handoff_count":          handoffs,
+            "payment_link_count":     payments,
+            "conversion_rate":        round(confirmed / started, 3) if started else 0.0,
+            "handoff_rate":           round(handoffs / total, 3) if total else 0.0,
+            "payment_link_rate":      round(payments / total, 3) if total else 0.0,
+            "avg_latency_ms":         avg_lat,
+            "p95_latency_ms":         p95_lat,
+        }
+
+    # ── Top intents & actions (30-day window) ─────────────────────────────────
+    intent_counter: Counter = Counter()
+    action_counter: Counter = Counter()
+
+    for row in rows_30d:
+        if row.detected_intent:
+            intent_counter[row.detected_intent] += 1
+        if row.actions_triggered:
+            try:
+                acts = row.actions_triggered if isinstance(row.actions_triggered, list) else json.loads(row.actions_triggered)
+                for act in acts:
+                    key = act if isinstance(act, str) else (act.get("action") or act.get("type") or str(act))
+                    action_counter[str(key)] += 1
+            except Exception:
+                pass
+
+    top_intents = [{"intent": k, "count": v} for k, v in intent_counter.most_common(8)]
+    top_actions = [{"action": k, "count": v} for k, v in action_counter.most_common(8)]
+
+    # ── Daily sparkline: last 7 days ──────────────────────────────────────────
+    daily_map: Dict[str, Dict[str, int]] = {}
+    for delta in range(7):
+        day = (now_utc - timedelta(days=6 - delta)).strftime("%Y-%m-%d")
+        daily_map[day] = {"date": day, "turns": 0, "orders_started": 0, "orders_confirmed": 0}
+
+    for row in rows_7d:
+        day = row.created_at.strftime("%Y-%m-%d")
+        if day in daily_map:
+            daily_map[day]["turns"] += 1
+            if row.order_started:
+                daily_map[day]["orders_started"] += 1
+            if row.order_confirmed:
+                daily_map[day]["orders_confirmed"] += 1
+
+    daily = list(daily_map.values())
+
+    return {
+        "last_7_days":  _metrics(rows_7d),
+        "last_30_days": _metrics(rows_30d),
+        "top_intents":  top_intents,
+        "top_actions":  top_actions,
+        "daily":        daily,
+    }
 
 
 @router.post("/intelligence/reorder-estimate")

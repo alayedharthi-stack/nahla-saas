@@ -113,6 +113,32 @@ export interface IntelligenceDashboard {
   rfm_segments?: CustomerSegment[]
 }
 
+// ── Response Quality / Brain Analytics types ──────────────────────────────────
+
+export interface ResponseQualityMetrics {
+  turns_total: number
+  sessions_total: number
+  avg_turns_per_session: number
+  order_started_count: number
+  order_confirmed_count: number
+  coupon_redeemed_count: number
+  handoff_count: number
+  payment_link_count: number
+  conversion_rate: number
+  handoff_rate: number
+  payment_link_rate: number
+  avg_latency_ms: number | null
+  p95_latency_ms: number | null
+}
+
+export interface ResponseQualityData {
+  last_7_days: ResponseQualityMetrics
+  last_30_days: ResponseQualityMetrics
+  top_intents: { intent: string; count: number }[]
+  top_actions: { action: string; count: number }[]
+  daily: { date: string; turns: number; orders_started: number; orders_confirmed: number }[]
+}
+
 // ── Merchant Brain Knowledge types ────────────────────────────────────────────
 
 export interface MerchantKnowledgeSyncStatus {
@@ -252,6 +278,9 @@ export const automationsApi = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+
+  getResponseQuality: () =>
+    apiCall<ResponseQualityData>('/intelligence/response-quality'),
 
   enginesSummary: (windowDays?: number) =>
     apiCall<EnginesSummaryResponse>(

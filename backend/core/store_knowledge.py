@@ -641,12 +641,19 @@ def build_merchant_context(
     store_settings = dict((settings.store_settings if settings else None) or {})
     snap = loader.snapshot()
 
-    # Bounded catalog limit — avoid empty/negative limits surprising callers.
-    effective_limit = (
-        product_limit
+    # ── Context verbosity — A/B knob readable from ai_settings ───────────────
+    # "compact" : fewer products, shorter policies, no suggested FAQ  (variant A)
+    # "full"    : default, complete context                           (variant B)
+    context_verbosity: str = str(ai_settings.get("context_verbosity") or "full").lower()
+    is_compact = context_verbosity == "compact"
+
+    # Bounded catalog limit — compact caps at 5, full keeps caller's choice.
+    effective_limit = max(1, min(
+        (5 if is_compact else product_limit)
         if isinstance(product_limit, int) and product_limit > 0
-        else 8
-    )
+        else (5 if is_compact else 8),
+        50,
+    ))
 
     store_profile = dict(loader.store_profile() or {})
     if store_settings.get("store_name") and not store_profile.get("store_name"):
@@ -745,7 +752,12 @@ def build_merchant_context(
     }
 
     approved_faq = list(store_settings.get("faq_approved") or ai_settings.get("faq_approved") or [])
-    suggested_faq = list(store_settings.get("faq_suggested") or ai_settings.get("faq_suggested") or [])
+    # compact mode skips suggested FAQ to shrink context size
+    suggested_faq = (
+        []
+        if is_compact
+        else list(store_settings.get("faq_suggested") or ai_settings.get("faq_suggested") or [])
+    )
     brain_profile = {
         "tone": ai_settings.get("reply_tone", "friendly"),
         "reply_length": ai_settings.get("reply_length", "medium"),
@@ -791,7 +803,7 @@ def build_merchant_context(
 
     logger.info(
         "[MerchantContext] tenant=%s orderable=%d excluded=%d policies=%d "
-        "payment_methods=%d shipping_methods=%d faq=%d pages=%d fresh=%s",
+        "payment_methods=%d shipping_methods=%d faq=%d pages=%d fresh=%s verbosity=%s",
         tenant_id,
         orderable_count,
         excluded_count,
@@ -801,6 +813,7 @@ def build_merchant_context(
         faq_count,
         pages_count,
         loader.is_fresh(),
+        context_verbosity,
     )
 
     return {
@@ -824,6 +837,7 @@ def build_merchant_context(
             "faq_suggested_requires_approval": True,
             "short_whatsapp_reply": True,
         },
+        "context_verbosity": context_verbosity,
     }
 
 
