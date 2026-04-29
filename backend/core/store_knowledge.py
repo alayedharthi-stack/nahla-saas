@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re as _re
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -46,6 +47,30 @@ from models import (  # noqa: E402
 )
 
 logger = logging.getLogger("nahla-backend")
+
+# ── Description sanitisation ──────────────────────────────────────────────────
+_DESC_SCRIPT_RE  = _re.compile(r"<(script|style)[^>]*>.*?</\1>", _re.DOTALL | _re.IGNORECASE)
+_DESC_TAG_RE     = _re.compile(r"<[^>]+>", _re.DOTALL)
+_DESC_SPACE_RE   = _re.compile(r"\s+")
+
+
+def _clean_description(raw: str, max_length: int = 200) -> str:
+    """Strip HTML from a product description and return a plain-text summary.
+
+    Removes script/style blocks, strips all tags, collapses whitespace, and
+    truncates to *max_length* characters so descriptions don't bloat the LLM
+    context window.  Returns '' when raw is falsy.
+    """
+    if not raw:
+        return ""
+    text = _DESC_SCRIPT_RE.sub(" ", str(raw))
+    text = _DESC_TAG_RE.sub(" ", text)
+    text = _DESC_SPACE_RE.sub(" ", text).strip()
+    if len(text) > max_length:
+        # Cut at the last space before the limit so we don't break mid-word
+        cut = text[:max_length].rsplit(" ", 1)[0]
+        return cut + "…"
+    return text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +263,7 @@ class CatalogContextBuilder:
             "external_id": ext_id or None,
             "title":       p.title,
             "sku":         p.sku,
+            "description": _clean_description(p.description or meta.get("description", "")),
             "price":       p.price,
             "sale_price":  meta.get("sale_price"),
             "category":    meta.get("category", ""),
@@ -306,10 +332,13 @@ class CatalogContextBuilder:
             stock_str = ""
             if p.get("stock_qty") is not None:
                 stock_str = f" ({p['stock_qty']} قطعة)"
-            lines.append(
+            line = (
                 f"- {p['title']} | السعر: {price_str} | متوفر{stock_str}"
                 + (f" | التصنيف: {p['category']}" if p.get("category") else "")
             )
+            if p.get("description"):
+                line += f"\n  الوصف: {p['description']}"
+            lines.append(line)
         lines.append(
             "\nتنبيه: جميع المنتجات أعلاه تم التحقق من توفرها في المخزون."
             " لا تعرض أي منتج غير مذكور في هذه القائمة."
