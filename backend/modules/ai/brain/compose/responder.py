@@ -106,7 +106,11 @@ class DefaultComposer:
 
         # ── Greet ──────────────────────────────────────────────────────────
         if action == ACTION_GREET:
-            return T.greeting(store_name=ctx.facts.store_name)
+            variant = self._variant_idx(ctx)
+            text = T.greeting(store_name=ctx.facts.store_name, variant=variant)
+            if self._is_duplicate(text, ctx):
+                text = T.greeting(store_name=ctx.facts.store_name, variant=(variant + 1) % 3)
+            return text
 
         # ── FAQ ────────────────────────────────────────────────────────────
         if action == ACTION_FAQ_REPLY:
@@ -145,7 +149,7 @@ class DefaultComposer:
                     ),
                     ctx,
                 )
-            return T.generic_fallback()
+            return T.generic_fallback(variant=self._variant_idx(ctx))
 
         # ── Search ─────────────────────────────────────────────────────────
         if action == ACTION_SEARCH_PRODUCTS:
@@ -159,7 +163,11 @@ class DefaultComposer:
                 )
 
             if not result.success or data.get("message") == "no_products_in_catalog":
-                return T.no_products()
+                variant = self._variant_idx(ctx)
+                text = T.no_products(variant=variant)
+                if self._is_duplicate(text, ctx):
+                    text = T.no_products(variant=(variant + 1) % 3)
+                return text
             # If many results and no specific intent, present as narrow choices
             if data.get("suggest_narrow") and data.get("products"):
                 candidates = data["products"][:3]
@@ -174,17 +182,31 @@ class DefaultComposer:
                     })
                 result.data["pending_buttons"] = wa_buttons
                 result.data["pending_candidates"] = candidates
-                return T.narrow_choices(products=candidates)
-            return T.product_results(
+                variant = self._variant_idx(ctx)
+                text = T.narrow_choices(products=candidates, variant=variant)
+                if self._is_duplicate(text, ctx):
+                    text = T.narrow_choices(products=candidates, variant=(variant + 1) % 3)
+                return text
+            variant = self._variant_idx(ctx)
+            text = T.product_results(
                 product_lines=data.get("product_lines", ""),
                 query=data.get("query", ""),
                 count=data.get("count", 0),
+                variant=variant,
             )
+            if self._is_duplicate(text, ctx):
+                text = T.product_results(
+                    product_lines=data.get("product_lines", ""),
+                    query=data.get("query", ""),
+                    count=data.get("count", 0),
+                    variant=(variant + 1) % 3,
+                )
+            return text
 
         # ── Draft order ────────────────────────────────────────────────────
         if action == ACTION_PROPOSE_DRAFT_ORDER:
             if not result.success:
-                return T.generic_fallback()
+                return T.generic_fallback(variant=self._variant_idx(ctx))
             # The product reference we have can't be resolved on the store
             # (wrong id, deleted, not synced). Ask the customer to choose
             # again — never silently push a doomed order to Salla.
@@ -274,7 +296,7 @@ class DefaultComposer:
         # ── Coupon ─────────────────────────────────────────────────────────
         if action == ACTION_SUGGEST_COUPON:
             if not result.success or not data.get("coupon_block"):
-                return T.generic_fallback()
+                return T.generic_fallback(variant=self._variant_idx(ctx))
             return self._with_follow_up(
                 T.coupon_offer(
                     coupon_block=data.get("coupon_block", ""),
@@ -286,7 +308,7 @@ class DefaultComposer:
         # ── Addon recommendation ───────────────────────────────────────────
         if action == ACTION_RECOMMEND_ADDON:
             if not result.success:
-                return T.generic_fallback()
+                return T.generic_fallback(variant=self._variant_idx(ctx))
             return self._with_follow_up(
                 T.addon_recommendations(products=data.get("products", [])),
                 ctx,
@@ -307,17 +329,49 @@ class DefaultComposer:
 
         # ── Narrow choices ─────────────────────────────────────────────────
         if action == ACTION_NARROW:
-            return T.narrow_choices(products=data.get("products", []))
+            variant = self._variant_idx(ctx)
+            text = T.narrow_choices(products=data.get("products", []), variant=variant)
+            if self._is_duplicate(text, ctx):
+                text = T.narrow_choices(products=data.get("products", []), variant=(variant + 1) % 3)
+            return text
 
         # ── Handoff ────────────────────────────────────────────────────────
         if action == ACTION_HANDOFF:
-            return T.handoff()
+            variant = self._variant_idx(ctx)
+            text = T.handoff(variant=variant)
+            if self._is_duplicate(text, ctx):
+                text = T.handoff(variant=(variant + 1) % 3)
+            return text
 
         # ── LLM fallback ───────────────────────────────────────────────────
         if action == ACTION_LLM_REPLY:
             return await self._llm_compose(ctx, result)
 
-        return T.generic_fallback()
+        variant = self._variant_idx(ctx)
+        return T.generic_fallback(variant=variant)
+
+    # ── Variant + dedup helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _variant_idx(ctx: BrainContext) -> int:
+        """Deterministic variant index — rotates 0/1/2 with turn count."""
+        return len(ctx.history or []) % 3
+
+    @staticmethod
+    def _last_outbound(ctx: BrainContext) -> str:
+        """Last message the bot sent in this conversation."""
+        for turn in reversed(ctx.history or []):
+            if turn.get("direction") in ("out", "outbound"):
+                return str(turn.get("body") or "")
+        return ""
+
+    @staticmethod
+    def _is_duplicate(text: str, ctx: BrainContext) -> bool:
+        """True if text's first 70 chars match the last outbound message."""
+        last = DefaultComposer._last_outbound(ctx)
+        if not last:
+            return False
+        return text[:70].strip() == last[:70].strip()
 
     def _should_skip_greet(self, ctx: BrainContext) -> bool:
         """True when sending the greeting template would be wrong.
@@ -570,7 +624,7 @@ class DefaultComposer:
             logger.error("[Composer._legacy_llm_compose] error: %s", exc)
 
         result.data["chosen_path"] = "llm_fallback_failed"
-        return T.generic_fallback()
+        return T.generic_fallback(variant=self._variant_idx(ctx))
 
 
 def _as_ai_history(history: List[Dict[str, Any]], current_message: str) -> List[Dict[str, str]]:

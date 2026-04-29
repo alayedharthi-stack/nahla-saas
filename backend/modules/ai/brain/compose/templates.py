@@ -36,6 +36,15 @@ Rules:
   - Emoji are intentionally minimal — one or two per message max.
   - Templates do not greet or self-introduce mid-conversation; the
     greeting template is the only one that says "أهلاً، أنا مساعد ...".
+
+Variant system
+──────────────
+Six high-frequency templates (greeting, product_results, narrow_choices,
+no_products, handoff, generic_fallback) accept an optional `variant: int`
+parameter (0, 1, or 2).  The Composer passes `len(ctx.history) % 3` so
+wording rotates naturally across turns without randomness or stored state.
+Checkout-flow templates (collect_order_details, draft_order_created, etc.)
+are data-driven and always unique — they need no variants.
 """
 from __future__ import annotations
 
@@ -43,36 +52,92 @@ from typing import Any, Dict, List, Optional
 
 # ── Greeting ─────────────────────────────────────────────────────────────────
 
-def greeting(store_name: str = "", **_: Any) -> str:
-    name = store_name or "متجرنا"
-    return (
+_GREETING_VARIANTS = [
+    # variant 0
+    lambda name: (
         f"أهلاً! أنا مساعد {name} الذكي 🤖\n"
         "هنا أساعدك في أي شي تحتاجه:\n"
         "• استفسارات عن المنتجات والأسعار\n"
         "• إنشاء طلب مباشرة من هنا\n"
         "• متابعة الشحن\n\n"
         "كيف أقدر أساعدك اليوم؟"
-    )
+    ),
+    # variant 1
+    lambda name: (
+        f"مرحباً بك في {name}! 👋\n"
+        "أنا المساعد الذكي وأقدر أساعدك في:\n"
+        "• البحث عن المنتج المناسب\n"
+        "• إنشاء طلبك مباشرة\n"
+        "• الاستفسار عن الشحن والدفع\n\n"
+        "بماذا أخدمك؟"
+    ),
+    # variant 2
+    lambda name: (
+        f"أهلاً وسهلاً! 🌟 معك مساعد {name}.\n"
+        "قولي وش تحتاج — منتج، سعر، طلب، أو أي استفسار — وأنا هنا."
+    ),
+]
+
+
+def greeting(store_name: str = "", variant: int = 0, **_: Any) -> str:
+    name = store_name or "متجرنا"
+    return _GREETING_VARIANTS[variant % 3](name)
 
 
 # ── Product search ────────────────────────────────────────────────────────────
 
-def product_results(product_lines: str, query: str = "", count: int = 0, **_: Any) -> str:
-    intro = f"وجدت {count} منتج" if count else "إليك المنتجات المتاحة"
-    if query:
-        intro += f" مناسب لـ \"{query}\""
-    return (
-        f"{intro}:\n\n"
-        f"{product_lines}\n\n"
-        "هل تودّ معرفة تفاصيل أكثر عن أي منتج، أو تريد الطلب مباشرة؟"
-    )
+_PRODUCT_RESULTS_INTROS = [
+    # variant 0
+    lambda count, query: (
+        (f"وجدت {count} منتج" if count else "إليك المنتجات المتاحة")
+        + (f' مناسب لـ "{query}"' if query else "")
+        + ":"
+    ),
+    # variant 1
+    lambda count, query: (
+        "إليك" + (f' أبرز خيارات "{query}":' if query else " ما يتوفر حالياً:")
+    ),
+    # variant 2
+    lambda count, query: (
+        "هذه المنتجات المتوفرة" + (f' بحثاً عن "{query}":' if query else ":")
+    ),
+]
+
+_PRODUCT_RESULTS_CLOSINGS = [
+    "هل تودّ معرفة تفاصيل أكثر عن أي منتج، أو تريد الطلب مباشرة؟",
+    "اختر منتجاً وأساعدك بالتفاصيل أو نبدأ الطلب مباشرة.",
+    "أرسل رقم أو اسم المنتج اللي يهمك وأكمل معك.",
+]
 
 
-def no_products(**_: Any) -> str:
-    return (
-        "عذراً، لم أتمكن من العثور على منتجات متاحة في المتجر حالياً.\n"
-        "سيتواصل معك فريق المتجر قريباً للمساعدة. 🙏"
-    )
+def product_results(
+    product_lines: str,
+    query: str = "",
+    count: int = 0,
+    variant: int = 0,
+    **_: Any,
+) -> str:
+    v = variant % 3
+    intro   = _PRODUCT_RESULTS_INTROS[v](count, query)
+    closing = _PRODUCT_RESULTS_CLOSINGS[v]
+    return f"{intro}\n\n{product_lines}\n\n{closing}"
+
+
+_NO_PRODUCTS_VARIANTS = [
+    # variant 0
+    "عذراً، لم أتمكن من العثور على منتجات متاحة في المتجر حالياً.\n"
+    "سيتواصل معك فريق المتجر قريباً للمساعدة. 🙏",
+    # variant 1
+    "ما وجدت منتجات متوفرة في الوقت الحالي.\n"
+    "جرّب البحث بكلمة أخرى أو تواصل مع المتجر مباشرة.",
+    # variant 2
+    "لا توجد منتجات مزامنة الآن. 🙏\n"
+    "حاول مرة أخرى لاحقاً أو أخبرنا وش تبحث عنه بشكل أدق.",
+]
+
+
+def no_products(variant: int = 0, **_: Any) -> str:
+    return _NO_PRODUCTS_VARIANTS[variant % 3]
 
 
 # ── Draft order ───────────────────────────────────────────────────────────────
@@ -424,11 +489,21 @@ def web_search_summary(summary: str = "", citations: List[str] | None = None, **
 
 # ── Handoff ───────────────────────────────────────────────────────────────────
 
-def handoff(**_: Any) -> str:
-    return (
-        "بالتأكيد! سأحوّلك الآن لأحد أعضاء فريق المتجر.\n"
-        "سيتواصل معك في أقرب وقت ممكن. 🙏"
-    )
+_HANDOFF_VARIANTS = [
+    # variant 0
+    "بالتأكيد! سأحوّلك الآن لأحد أعضاء فريق المتجر.\n"
+    "سيتواصل معك في أقرب وقت ممكن. 🙏",
+    # variant 1
+    "وصل طلبك! سأُعيد توجيهك لفريق الدعم ليكمل معك. 🤝\n"
+    "سيتواصلون معك بأسرع وقت.",
+    # variant 2
+    "حسناً، سأوصّلك بفريق المتجر الآن.\n"
+    "انتظر — سيتواصلون معك قريباً. 🙏",
+]
+
+
+def handoff(variant: int = 0, **_: Any) -> str:
+    return _HANDOFF_VARIANTS[variant % 3]
 
 
 # ── Fallback ──────────────────────────────────────────────────────────────────
@@ -438,22 +513,45 @@ def clarify(question: str = "", **_: Any) -> str:
     return q
 
 
-def narrow_choices(products: List[Dict[str, Any]], **_: Any) -> str:
+_NARROW_CHOICES_HEADERS = [
+    "وجدت عدة خيارات تناسبك، أيها يثير اهتمامك أكثر؟",
+    "عندي عدة منتجات قد تعجبك — أيها يناسبك؟",
+    "لقيت أكثر من خيار، اختر اللي يهمك:",
+]
+_NARROW_CHOICES_CLOSINGS = [
+    "أخبرني برقم الخيار أو اسم المنتج لأساعدك أكثر.",
+    "أرسل رقم المنتج أو اكتب اسمه وأكمل معك.",
+    "رقم الخيار أو اسمه — وأنا هنا.",
+]
+
+
+def narrow_choices(products: List[Dict[str, Any]], variant: int = 0, **_: Any) -> str:
     if not products:
         return generic_fallback()
-    lines = ["وجدت عدة خيارات تناسبك، أيها يثير اهتمامك أكثر؟\n"]
+    v = variant % 3
+    lines = [_NARROW_CHOICES_HEADERS[v] + "\n"]
     for i, p in enumerate(products[:3], 1):
         price_str = f"{p['price']} ريال" if p.get("price") else ""
         line = f"{i}. *{p['title']}*"
         if price_str:
             line += f" — {price_str}"
         lines.append(line)
-    lines.append("\nأخبرني برقم الخيار أو اسم المنتج لأساعدك أكثر.")
+    lines.append("\n" + _NARROW_CHOICES_CLOSINGS[v])
     return "\n".join(lines)
 
 
-def generic_fallback(**_: Any) -> str:
-    return (
-        "شكراً على تواصلك! هل يمكنك توضيح طلبك أكثر؟\n"
-        "يمكنني مساعدتك في البحث عن المنتجات أو إنشاء طلب."
-    )
+_GENERIC_FALLBACK_VARIANTS = [
+    # variant 0
+    "شكراً على تواصلك! هل يمكنك توضيح طلبك أكثر؟\n"
+    "يمكنني مساعدتك في البحث عن المنتجات أو إنشاء طلب.",
+    # variant 1
+    "وصلني سؤالك! لو تقدر تعطيني تفاصيل أكثر سأكون أقدر على المساعدة.\n"
+    "ابحث عن منتج أو أبدأ لك طلباً مباشرة.",
+    # variant 2
+    "أنا هنا لمساعدتك. 🤝\n"
+    "هل تبحث عن منتج معين أو تريد مساعدة في طلب سابق؟",
+]
+
+
+def generic_fallback(variant: int = 0, **_: Any) -> str:
+    return _GENERIC_FALLBACK_VARIANTS[variant % 3]
