@@ -16,6 +16,7 @@ import hmac
 import json as _json
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -35,6 +36,8 @@ from core.audit import audit
 from core.billing import get_moyasar_settings
 from core.config import (
     HYPERPAY_WEBHOOK_SECRET,
+    MOYASAR_SECRET_KEY,
+    MOYASAR_WEBHOOK_SECRET,
     SALLA_WEBHOOK_SECRET,
     SALLA_WEBHOOK_ENFORCE_SIGNATURE,
     SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE,
@@ -580,11 +583,12 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
         return {"received": True}
 
     cfg            = get_moyasar_settings(db, sub.tenant_id)
-    webhook_secret = cfg.get("webhook_secret", "")
+    webhook_secret = cfg.get("webhook_secret", "") or MOYASAR_WEBHOOK_SECRET
     if webhook_secret:
         sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
         from payment_gateways.moyasar import MoyasarClient  # noqa: PLC0415
-        client = MoyasarClient(secret_key=cfg.get("secret_key", ""))
+        secret_key = cfg.get("secret_key", "") or MOYASAR_SECRET_KEY
+        client = MoyasarClient(secret_key=secret_key)
         if not client.verify_webhook_signature(body_bytes, signature, webhook_secret):
             logger.warning(
                 "[Billing Webhook] Invalid signature for sub=%s tenant=%s",
