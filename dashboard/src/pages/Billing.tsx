@@ -2,9 +2,28 @@ import { useState, useEffect } from 'react'
 import {
   CheckCircle, Zap, TrendingUp, Rocket, Loader2, AlertCircle,
   RefreshCw, Tag, MessageSquare, Star, ArrowUp, ExternalLink, ShieldCheck,
-  Clock, Sparkles, Bot, Phone, Info,
+  Clock, Sparkles, Bot, Phone, Info, ArrowUpRight,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
+
+// ── Salla app URL ─────────────────────────────────────────────────────────────
+// Single source of truth for "subscribe / manage your plan via Salla".
+// Override per-environment with VITE_SALLA_APP_URL (Railway / Vercel / .env).
+const SALLA_APP_URL: string =
+  (import.meta.env.VITE_SALLA_APP_URL as string | undefined) ||
+  'https://s.salla.sa/apps/nahla'
+
+// Open the Salla app subscription page at the TOP level so it breaks out of
+// the iframe when the merchant is viewing this page inside Salla's dashboard.
+function openSallaApp(): void {
+  try {
+    if (window.top) {
+      window.top.location.href = SALLA_APP_URL
+      return
+    }
+  } catch { /* cross-origin top access blocked — fall through */ }
+  window.location.href = SALLA_APP_URL
+}
 
 // Detect whether the merchant is browsing this billing page from inside the
 // Salla embedded experience.  Used to render a Salla-specific notice that
@@ -170,17 +189,17 @@ function PlanCard({
               </div>
             )}
             <a
-              href="https://s.salla.sa/apps/nahla"
+              href={SALLA_APP_URL}
               target="_top"
               rel="noopener noreferrer"
               className={[
                 'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all',
-                'flex items-center justify-center gap-2',
+                'flex items-center justify-center gap-2 cursor-alias',
                 `bg-gradient-to-br ${gradient}`,
                 'hover:opacity-90 active:scale-95',
               ].join(' ')}
             >
-              <ExternalLink className="w-4 h-4" />
+              <ArrowUpRight className="w-4 h-4" />
               الاشتراك عبر سلة
             </a>
             <p className="mt-2 text-[11px] text-amber-700 text-center leading-relaxed">
@@ -259,6 +278,19 @@ export default function Billing() {
   // Detected once per render — Salla merchants must subscribe via Salla.
   const isSalla = isSallaMerchant()
 
+  // Inactivity hint for Salla merchants — appears 8 seconds after the page
+  // loads if they haven't started a checkout yet.  Helps merchants who don't
+  // realise the subscription is completed via Salla's billing UI.
+  const [showSallaHint, setShowSallaHint] = useState(false)
+  useEffect(() => {
+    if (!isSalla) return
+    const t = setTimeout(() => {
+      // Skip hint if a checkout already started or the page already navigated.
+      if (!checkingOut) setShowSallaHint(true)
+    }, 8000)
+    return () => clearTimeout(t)
+  }, [isSalla, checkingOut])
+
   const load = async () => {
     setLoading(true)
     setLoadError(null)
@@ -286,12 +318,7 @@ export default function Billing() {
     // Salla app subscription page at the top level instead of opening Moyasar.
     if (isSalla) {
       console.info('[Billing] Salla merchant — redirecting to Salla subscription instead of Moyasar')
-      const sallaSubUrl = 'https://s.salla.sa/apps/nahla'
-      if (window.top) {
-        window.top.location.href = sallaSubUrl
-      } else {
-        window.location.href = sallaSubUrl
-      }
+      openSallaApp()
       return
     }
 
@@ -639,16 +666,72 @@ export default function Billing() {
           policy: subscriptions for Salla merchants must go through Salla's
           billing UI to ensure correct activation + linking with their store. */}
       {isSalla && (
-        <div className="flex items-start gap-3 bg-amber-50 border-2 border-amber-300 rounded-xl p-4">
-          <Info className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <p className="text-sm font-bold text-amber-900">
-              تنبيه لتجار سلة
-            </p>
-            <p className="text-xs text-amber-800 mt-1 leading-relaxed">
-              يتم الاشتراك وتجديد الباقة من داخل منصة سلة لضمان تفعيل الخدمة وربطها بمتجرك بشكل صحيح.
-            </p>
+        <div className="space-y-3">
+          {/* Policy notice */}
+          <div className="flex items-start gap-3 bg-amber-50 border-2 border-amber-300 rounded-xl p-4">
+            <Info className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-bold text-amber-900">
+                تنبيه لتجار سلة
+              </p>
+              <p className="text-xs text-amber-800 mt-1 leading-relaxed">
+                يتم الاشتراك وتجديد الباقة من داخل منصة سلة لضمان تفعيل الخدمة وربطها بمتجرك بشكل صحيح.
+              </p>
+            </div>
           </div>
+
+          {/* Primary CTA — always available so the merchant can jump to Salla
+              at any time, even before scrolling through the plans below. */}
+          <a
+            href={SALLA_APP_URL}
+            target="_top"
+            rel="noopener noreferrer"
+            onClick={() => setShowSallaHint(false)}
+            className={[
+              'group flex items-center justify-between gap-3',
+              'rounded-2xl px-5 py-4',
+              'bg-gradient-to-l from-brand-600 to-brand-500 text-white',
+              'shadow-lg shadow-brand-500/20 hover:shadow-brand-500/30',
+              'transition-all hover:-translate-y-0.5 active:translate-y-0',
+              'cursor-alias',
+            ].join(' ')}
+            aria-label="افتح صفحة الاشتراك على سلة"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+                <ArrowUpRight className="w-5 h-5" />
+              </div>
+              <div className="text-right">
+                <p className="text-base font-bold leading-tight">
+                  اشترك أو أدر باقتك عبر سلة
+                </p>
+                <p className="text-xs text-white/80 mt-0.5">
+                  سيتم فتح صفحة التطبيق على منصة سلة في تبويب علوي
+                </p>
+              </div>
+            </div>
+            <span className="hidden sm:inline-flex items-center gap-1 bg-white/15 rounded-lg px-3 py-1.5 text-xs font-semibold group-hover:bg-white/25 transition-colors">
+              فتح سلة
+              <ExternalLink className="w-3.5 h-3.5" />
+            </span>
+          </a>
+
+          {/* Inactivity hint — shows after 8s if the merchant hasn't acted */}
+          {showSallaHint && (
+            <div className="flex items-center justify-between gap-3 bg-brand-50 border border-brand-200 text-brand-800 rounded-xl px-4 py-2.5 text-xs animate-pulse">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-brand-500" />
+                <span>لإتمام الاشتراك، سيتم توجيهك إلى سلة 👆</span>
+              </div>
+              <button
+                onClick={() => setShowSallaHint(false)}
+                className="text-brand-500 hover:text-brand-700 text-xs underline"
+                aria-label="إغلاق التنبيه"
+              >
+                إغلاق
+              </button>
+            </div>
+          )}
         </div>
       )}
 
