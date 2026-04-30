@@ -72,16 +72,36 @@ export default function SallaLaunch() {
         }
 
         // Persist the full session the same way the rest of the app expects.
+        // CRITICAL: must include `nahla_auth = '1'` — ProtectedRoute uses it
+        // (via isAuthenticated()) and will redirect to /landing without it,
+        // even if the JWT itself is valid.
         try {
+          localStorage.setItem('nahla_auth',             '1')
           localStorage.setItem('nahla_token',            data.access_token)
           localStorage.setItem('nahla_tenant_id',        String(data.tenant_id))
           localStorage.setItem('nahla_email',            data.email)
           localStorage.setItem('nahla_role',             data.role)
           localStorage.setItem('nahla_salla_store_name', data.store_name)
           localStorage.setItem('nahla_salla_embedded',   '1')
+          // user_id is optional — pull from JWT payload if present so
+          // getUserId() in auth.ts returns a real number, not null.
+          try {
+            const parts   = data.access_token.split('.')
+            const payload = JSON.parse(
+              atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')),
+            ) as { user_id?: number | string }
+            if (payload?.user_id != null) {
+              localStorage.setItem('nahla_user_id', String(payload.user_id))
+            }
+          } catch { /* JWT parse — best effort */ }
         } catch {
           // localStorage blocked (private browsing?) — navigate anyway
         }
+
+        console.info(
+          '[SallaLaunch] session persisted | tenant_id=%s email=%s role=%s next=%s',
+          data.tenant_id, data.email, data.role, nextPath,
+        )
 
         // Navigate to the requested destination (replaces this transient page
         // so the user cannot "go back" to it).

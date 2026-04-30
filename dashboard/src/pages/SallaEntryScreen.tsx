@@ -309,7 +309,18 @@ export default function SallaEntryScreen() {
   const openWithAutoLogin = useCallback(async (kind: 'dashboard' | 'whatsapp') => {
     setLaunching(kind)
     const token = getToken()
-    const next  = kind === 'whatsapp' ? '/app/settings/whatsapp' : '/overview'
+    // /overview is the merchant dashboard root.  We deliberately do NOT
+    // open /landing here — that's the public marketing page and would
+    // log the merchant out.  /app/whatsapp-connect is the in-app
+    // WhatsApp linking flow (Layout-rendered, also auth-gated).
+    const next  = kind === 'whatsapp' ? '/whatsapp-connect' : '/overview'
+
+    let tenantId = ''
+    try { tenantId = localStorage.getItem('nahla_tenant_id') || '' } catch { /* noop */ }
+    console.info(
+      '[SallaEntry] open advanced dashboard clicked | target=%s | hasToken=%s | tenant_id=%s',
+      next, !!token, tenantId || '(missing)',
+    )
 
     if (!token) {
       alert('انتهت الجلسة، أعد فتح التطبيق من سلة.')
