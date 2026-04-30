@@ -705,11 +705,16 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
 
     Also used by /app/entry to fetch merchant readiness state in one call.
 
+    Optional query param ?store_id= — when present, the endpoint verifies
+    that the JWT's tenant actually owns this Salla store. If not, 401 is
+    returned so the frontend can force a fresh token-login, preventing
+    cross-tenant data leakage when a user switches between stores.
+
     Returns 200 {
       connected, tenant_id, token,
-      whatsapp_connected, has_automations, has_products
+      whatsapp_connected, has_automations, has_products, store_name
     }
-    Returns 401 if expired / missing.
+    Returns 401 if expired / missing / store mismatch.
     """
     try:
         payload = require_authenticated(request)
@@ -723,6 +728,24 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
 
     if not tenant_id:
         raise HTTPException(status_code=401, detail="invalid_tenant")
+
+    # ── Store-isolation guard ────────────────────────────────────────────────
+    # If the caller passed ?store_id=, verify the JWT's tenant actually
+    # owns that Salla store.  A mismatch means the old token is for a
+    # DIFFERENT store → reject so the frontend does a fresh token-login.
+    requested_store = str(request.query_params.get("store_id") or "").strip()
+    if requested_store:
+        matching_integ = db.query(Integration).filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider  == "salla",
+            Integration.external_store_id == requested_store,
+        ).first()
+        if not matching_integ:
+            logger.warning(
+                "[SallaSession] store_id mismatch — JWT tenant=%s does not own store=%s",
+                tenant_id, requested_store,
+            )
+            raise HTTPException(status_code=401, detail="store_mismatch")
 
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
@@ -1685,36 +1708,63 @@ async def salla_oauth_callback(
                             tenant_id=tenant_id,
                             user_id=existing_user2.id,
                         )
+                        logger.info(
+                            "[Salla OAuth] Reusing existing user for tenant | email=%s tenant=%s",
+                            existing_user2.email, tenant_id,
+                        )
+                    else:
+                        # Tenant exists but no user — create one
+                        temp_password = _secrets.token_urlsafe(16)
+                        new_user = User(
+                            username=salla_email.split("@")[0],
+                            email=salla_email,
+                            password_hash=hash_password(temp_password),
+                            role="merchant",
+                            tenant_id=tenant_id,
+                            is_active=True,
+                        )
+                        db.add(new_user)
+                        db.flush()
+                        auto_jwt = create_token(
+                            email=salla_email,
+                            role="merchant",
+                            tenant_id=tenant_id,
+                            user_id=new_user.id,
+                        )
+                        logger.info(
+                            "[Salla OAuth] Created user for existing tenant | email=%s tenant=%s",
+                            salla_email, tenant_id,
+                        )
                 else:
                     # Create new Tenant + User with unique name
                     unique_name = f"{store_name or 'متجر سلة'}-{salla_store_id}" if salla_store_id else (store_name or "متجر سلة")
                     new_tenant = Tenant(name=unique_name)
                     db.add(new_tenant)
-                    db.flush()   # get new_tenant.id
+                    db.flush()
                     tenant_id = new_tenant.id
 
-                temp_password = _secrets.token_urlsafe(16)
-                new_user = User(
-                    username=salla_email.split("@")[0],
-                    email=salla_email,
-                    password_hash=hash_password(temp_password),
-                    role="merchant",
-                    tenant_id=tenant_id,
-                    is_active=True,
-                )
-                db.add(new_user)
-                db.flush()
+                    temp_password = _secrets.token_urlsafe(16)
+                    new_user = User(
+                        username=salla_email.split("@")[0],
+                        email=salla_email,
+                        password_hash=hash_password(temp_password),
+                        role="merchant",
+                        tenant_id=tenant_id,
+                        is_active=True,
+                    )
+                    db.add(new_user)
+                    db.flush()
 
-                auto_jwt = create_token(
-                    email=salla_email,
-                    role="merchant",
-                    tenant_id=tenant_id,
-                    user_id=new_user.id,
-                )
-                logger.info(
-                    "[Salla OAuth] Auto-registered new merchant | email=%s tenant=%s user_id=%s",
-                    salla_email, tenant_id, new_user.id,
-                )
+                    auto_jwt = create_token(
+                        email=salla_email,
+                        role="merchant",
+                        tenant_id=tenant_id,
+                        user_id=new_user.id,
+                    )
+                    logger.info(
+                        "[Salla OAuth] Auto-registered new merchant | email=%s tenant=%s user_id=%s",
+                        salla_email, tenant_id, new_user.id,
+                    )
 
         except Exception as exc:
             logger.exception("[Salla OAuth] Auto-register failed: %s", exc)
@@ -1740,8 +1790,31 @@ async def salla_oauth_callback(
                     salla_store_id, tenant_id, existing_integ.enabled,
                 )
         if tenant_id == 0:
-            tenant_id = 1  # last resort fallback
-            logger.warning("[Salla OAuth] Could not resolve tenant, falling back to tenant=1")
+            if not salla_store_id:
+                logger.error(
+                    "[Salla OAuth] ❌ Cannot resolve tenant — no store_id AND no state. "
+                    "Refusing to fall back to tenant_id=1."
+                )
+                return RedirectResponse(
+                    url=_error_url("tenant_resolution_failed"),
+                    status_code=302,
+                )
+            # Create a brand-new tenant for this store instead of
+            # silently falling back to tenant_id=1.
+            unique_name = (
+                f"{store_name or 'متجر سلة'}-{salla_store_id}"
+                if salla_store_id
+                else (store_name or "متجر سلة")
+            )
+            new_tenant = Tenant(name=unique_name)
+            db.add(new_tenant)
+            db.flush()
+            tenant_id = new_tenant.id
+            logger.info(
+                "[Salla OAuth] Created new tenant (existing-merchant-path, "
+                "state was lost by Salla) | store_id=%s tenant=%s",
+                salla_store_id, tenant_id,
+            )
         get_or_create_tenant(db, tenant_id)
 
     # ── Step 4b: Save Salla integration to DB ──────────────────────────────────

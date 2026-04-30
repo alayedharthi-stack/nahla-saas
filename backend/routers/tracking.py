@@ -12,7 +12,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -54,11 +54,14 @@ async def track_storefront_event(
     cart_abandon events are forwarded to the autopilot engine
     as abandoned_cart signals for WhatsApp recovery flows.
     """
-    raw_tid = body.tenant_id or request.headers.get("X-Tenant-ID", "1")
+    raw_tid = body.tenant_id or request.headers.get("X-Tenant-ID", "")
     try:
         tenant_id = int(raw_tid)
     except (ValueError, TypeError):
-        tenant_id = 1
+        raise HTTPException(
+            status_code=400,
+            detail="tenant_id is required for storefront events",
+        )
 
     get_or_create_tenant(db, tenant_id)
 

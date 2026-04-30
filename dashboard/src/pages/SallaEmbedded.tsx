@@ -208,6 +208,23 @@ export default function SallaEmbedded() {
       return false
     }
 
+    // ── TENANT ISOLATION: if the current Salla store_id differs from the
+    // stored one, the cached session belongs to a DIFFERENT store. Clear it
+    // and force a fresh token-login so we never leak cross-store data.
+    const storedStoreId = localStorage.getItem('nahla_salla_store_id') || ''
+    if (storeId && storedStoreId && storeId !== storedStoreId) {
+      console.warn(
+        '[SallaEmbedded] ⚠️ store_id changed:',
+        storedStoreId, '→', storeId, '— clearing stale session',
+      )
+      ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
+        'nahla_tenant_id', 'nahla_user_id', 'nahla_salla_store_id',
+        'nahla_salla_store_name', 'nahla_store_name',
+        'nahla_salla_is_new', 'nahla_salla_wa_connected',
+      ].forEach(k => localStorage.removeItem(k))
+      return false
+    }
+
     console.info('[SallaEmbedded] checking existing session...')
     setPhase('checking')
     setStatusText('جاري التحقق من جلستك...')
@@ -216,7 +233,10 @@ export default function SallaEmbedded() {
       const ctrl = new AbortController()
       const tid  = setTimeout(() => ctrl.abort(), SESSION_TIMEOUT)
 
-      const res = await fetch(`${API_BASE}/api/salla/session`, {
+      const sessionUrl = storeId
+        ? `${API_BASE}/api/salla/session?store_id=${encodeURIComponent(storeId)}`
+        : `${API_BASE}/api/salla/session`
+      const res = await fetch(sessionUrl, {
         headers: { Authorization: `Bearer ${stored}` },
         signal:  ctrl.signal,
       })

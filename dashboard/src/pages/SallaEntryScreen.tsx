@@ -342,13 +342,17 @@ export default function SallaEntryScreen() {
     const token = getToken()
     if (!token) { navigate('/app/salla', { replace: true }); return }
 
-    const headers = { Authorization: `Bearer ${token}` }
-    const signal  = AbortSignal.timeout(9000)
+    const headers    = { Authorization: `Bearer ${token}` }
+    const signal     = AbortSignal.timeout(9000)
+    const savedStore = (() => { try { return localStorage.getItem('nahla_salla_store_id') || '' } catch { return '' } })()
+    const sessionUrl = savedStore
+      ? `${API_BASE}/api/salla/session?store_id=${encodeURIComponent(savedStore)}`
+      : `${API_BASE}/api/salla/session`
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const [sessionR, settingsR, subR, syncR] = await Promise.allSettled<any>([
-        fetch(`${API_BASE}/api/salla/session`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
+        fetch(sessionUrl, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
         fetch(`${API_BASE}/salla/app-settings`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
         fetch(`${API_BASE}/salla/subscription/status`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
         fetch(`${API_BASE}/store-sync/status`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),

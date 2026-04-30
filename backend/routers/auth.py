@@ -208,7 +208,9 @@ async def auth_me_full(
     """
     from models import Tenant, WhatsAppConnection  # noqa: PLC0415
     email     = user.get("sub")
-    tenant_id = int(user.get("tenant_id", 1))
+    tenant_id = int(user.get("tenant_id", 0))
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="JWT missing tenant_id")
 
     db_user = db.query(User).filter_by(email=email).first()
     tenant  = db.query(Tenant).filter_by(id=tenant_id).first()
