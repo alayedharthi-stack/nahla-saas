@@ -3546,3 +3546,155 @@ async def admin_test_email(
     if ok:
         return {"success": True, "message": f"تم إرسال الإيميل إلى {body.to}", "template": body.template}
     return {"success": False, "error": "فشل الإرسال — راجع سجلات السيرفر"}
+
+
+# ── Salla Orders Poller — production diagnostics ─────────────────────────────
+#
+# These endpoints expose what the dedicated 60s Salla orders poller is
+# actually doing in production so an operator can answer "why didn't this
+# new order appear in Nahla?" without scraping logs.
+#
+#   GET  /admin/salla/orders-poller/diag?tenant_id=...    ← snapshot
+#   POST /admin/salla/orders-poller/run-once?tenant_id=... ← force poll now
+#
+# Both are admin-only.
+
+@router.get("/admin/salla/orders-poller/diag")
+async def salla_orders_poller_diag(
+    tenant_id: int = Query(..., description="Tenant whose Salla integration to inspect"),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Return a full diagnostic snapshot for one tenant:
+      • In-memory poller state (last tick at / scanned / errors).
+      • Integration row: enabled, store_id, token presence, reauth flags.
+      • Last 5 orders in Nahla DB for this tenant (newest first).
+      • Whether each of those last orders has had notifications_emitted
+        flipped on by the poller.
+    """
+    from services.salla_orders_poller import get_poller_state  # noqa: PLC0415
+
+    state = get_poller_state()
+    intg = db.query(Integration).filter(
+        Integration.provider == "salla",
+        Integration.tenant_id == tenant_id,
+    ).first()
+
+    integration_info: Dict[str, Any] = {"present": False}
+    if intg is not None:
+        cfg = intg.config or {}
+        integration_info = {
+            "present":               True,
+            "integration_id":        intg.id,
+            "enabled":               intg.enabled,
+            "external_store_id":     getattr(intg, "external_store_id", None),
+            "store_id_in_config":    cfg.get("store_id") or cfg.get("merchant_id"),
+            "token_present":         bool(cfg.get("api_key")),
+            "refresh_token_present": bool(cfg.get("refresh_token")),
+            "needs_reauth":          bool(cfg.get("needs_reauth")),
+            "needs_reauth_reason":   cfg.get("needs_reauth_reason"),
+            "needs_reauth_at":       cfg.get("needs_reauth_at"),
+            "no_auto_refresh":       bool(cfg.get("no_auto_refresh")),
+            "no_auto_refresh_reason": cfg.get("no_auto_refresh_reason"),
+            "soft_disabled":         bool(cfg.get("soft_disabled")),
+            "last_token_refresh":    cfg.get("last_token_refresh"),
+        }
+
+    # Last 5 orders for this tenant
+    orders = (
+        db.query(Order)
+        .filter(Order.tenant_id == tenant_id)
+        .order_by(Order.id.desc())
+        .limit(5)
+        .all()
+    )
+    last_orders: List[Dict[str, Any]] = []
+    for o in orders:
+        meta = o.extra_metadata or {}
+        last_orders.append({
+            "id":                       o.id,
+            "external_id":              o.external_id,
+            "external_order_number":    o.external_order_number,
+            "status":                   o.status,
+            "is_abandoned":             o.is_abandoned,
+            "source":                   o.source,
+            "total":                    o.total,
+            "created_at_meta":          meta.get("created_at"),
+            "payment_method":           meta.get("payment_method"),
+            "notifications_emitted":    bool(meta.get("notifications_emitted")),
+            "notifications_emitted_at": meta.get("notifications_emitted_at"),
+            "notifications_emitted_by": meta.get("notifications_emitted_by"),
+        })
+
+    # Per-tenant slice of the in-memory state
+    tenant_state = state.get("tenants", {}).get(tenant_id) \
+        or state.get("tenants", {}).get(str(tenant_id))
+
+    audit(
+        "admin_salla_orders_poller_diag",
+        admin     = _admin.get("sub"),
+        tenant_id = tenant_id,
+        present   = integration_info.get("present"),
+    )
+
+    return {
+        "ok":           True,
+        "tenant_id":    tenant_id,
+        "now":          datetime.now(timezone.utc).isoformat(),
+        "poller": {
+            "started_at":               state.get("started_at"),
+            "last_tick_at":             state.get("last_tick_at"),
+            "last_tick_duration_ms":    state.get("last_tick_duration_ms"),
+            "last_tick_scanned":        state.get("last_tick_scanned"),
+            "last_tick_new_orders":     state.get("last_tick_new_orders"),
+            "last_tick_errors":         state.get("last_tick_errors"),
+            "last_tick_skipped_reason": state.get("last_tick_skipped_reason"),
+            "ticks_total":              state.get("ticks_total"),
+            "config":                   state.get("config"),
+        },
+        "integration": integration_info,
+        "tenant_state": tenant_state,
+        "last_orders":  last_orders,
+    }
+
+
+@router.post("/admin/salla/orders-poller/run-once")
+async def salla_orders_poller_run_once(
+    tenant_id: int = Query(..., description="Tenant to poll right now"),
+    lookback_minutes: Optional[int] = Query(
+        None,
+        description="Override lookback window (defaults to NAHLA_SALLA_ORDERS_LOOKBACK_MIN)",
+    ),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Trigger a single immediate Salla poll for one tenant, bypassing the
+    schedule and the advisory lock.  Returns the full per-tenant stats
+    dict (api_returned, upserted_total, new_orders, events_emitted, etc.)
+    plus the integration's diagnostic context (token presence, reauth
+    flags, store_id).
+
+    Use this to answer the question "is the poller broken or is the
+    Salla API simply not returning my new order?" — without touching
+    the scheduled loop.
+    """
+    from services.salla_orders_poller import run_once_for_tenant  # noqa: PLC0415
+
+    logger.info(
+        "[Admin] manual salla_orders_poller run_once tenant_id=%s lookback_minutes=%s admin=%s",
+        tenant_id, lookback_minutes, _admin.get("sub", "?"),
+    )
+
+    result = await run_once_for_tenant(tenant_id, lookback_minutes=lookback_minutes)
+
+    audit(
+        "admin_salla_orders_poller_run_once",
+        admin            = _admin.get("sub"),
+        tenant_id        = tenant_id,
+        lookback_minutes = lookback_minutes,
+        ok               = bool(result.get("ok")),
+        new_orders       = result.get("new_orders"),
+        api_returned     = result.get("api_returned"),
+    )
+    return result
