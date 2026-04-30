@@ -891,6 +891,17 @@ class StoreSyncService:
                                 },
                                 commit=False,
                             )
+                        # Mark on the new row so the safety-net poller in
+                        # services/salla_orders_poller.py knows we already
+                        # fired and never double-emits for this order.
+                        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                        _meta = dict(new_row.extra_metadata or {})
+                        _meta["notifications_emitted"]    = True
+                        _meta["notifications_emitted_at"] = datetime.now(timezone.utc).isoformat()
+                        _meta["notifications_emitted_by"] = f"sync_orders.{triggered_by}"
+                        new_row.extra_metadata = _meta
+                        flag_modified(new_row, "extra_metadata")
+
                         self.db.commit()
                         logger.info(
                             "[StoreSync/poll] automation events emitted tenant=%s order=%s pm=%s",

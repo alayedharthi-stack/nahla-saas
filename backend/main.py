@@ -582,16 +582,19 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("Store sync scheduler could not start: %s", exc)
 
-    # 4b-i. Fast incremental order sync every 5 minutes.
-    # Webhooks are best-effort — if Salla misses a webhook, this loop
-    # fetches orders updated in the last 10 minutes so every new order
-    # appears in Nahla within at most 5 minutes regardless.
+    # 4b-i. Dedicated Salla orders poller (every 60s, NEVER stops).
+    # This is the safety-net that guarantees every new order in Salla
+    # appears in Nahla within ~60s and triggers ORDER_NOTIFICATIONS,
+    # even if Salla's webhook for `order.created` is delayed or never
+    # delivered.  Multi-worker safe via Postgres advisory lock.
     try:
-        from core.scheduler import run_order_fast_sync_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_order_fast_sync_scheduler())
-        logger.info("Order fast-sync scheduler started (every 5 min).")
+        from services.salla_orders_poller import (  # noqa: PLC0415
+            run_salla_orders_poller_scheduler,
+        )
+        asyncio.create_task(run_salla_orders_poller_scheduler())
+        logger.info("Salla orders poller started (every 60s, multi-worker safe).")
     except Exception as exc:
-        logger.warning("Order fast-sync scheduler could not start: %s", exc)
+        logger.warning("Salla orders poller could not start: %s", exc)
 
     # 4b. Dedicated abandoned-cart scheduler (every 5 min by default).
     # The hourly full sync above ALSO runs sync_abandoned_carts as part
