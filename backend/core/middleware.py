@@ -35,6 +35,7 @@ JWT_PUBLIC_PREFIXES = (
     "/integrations/salla/",             # Salla success/error landing HTML pages (public)
     "/salla",                           # /salla/start (new merchant install entry point)
     "/api/salla/test/authorize",        # Salla TEST app OAuth start — public redirect
+    "/api/salla/diag/",                 # public diagnostic endpoints (no secrets exposed)
     "/zid",                             # /zid/app, /zid/redirect, /zid/token-login
     "/settings/validate",               # Salla Partner Portal validation probe
     "/snippet.js",
@@ -74,6 +75,7 @@ async def api_key_middleware(request: Request, call_next):
             or path.startswith("/debug/")    # TEMPORARY: token-gated debug surface
             or path.startswith("/webhook")
             or path.startswith("/auth")
+            or path.startswith("/api/salla/diag/")  # public diagnostic
         ):
             auth_header = request.headers.get("Authorization", "")
             has_bearer_token = auth_header.startswith("Bearer ")
