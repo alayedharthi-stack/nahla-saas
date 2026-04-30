@@ -81,19 +81,12 @@ _DASHBOARD_ORIGIN = _DASHBOARD or "https://app.nahlah.ai"
 # embedded URL (which only works inside Salla's iframe context).
 _SALLA_POST_OAUTH_PATH = "/app/entry"
 
-# After OAuth completes, hand control back to Salla.  We redirect the
-# merchant to Nahla's listing on the Salla App Store — this page is owned
-# and rendered by Salla itself and shows the app name, description, and
-# the official "استخدام التطبيق" button.  We NEVER show a Nahla page in
-# this position because:
-#   - Salla's app-review policy expects merchants to enter the app via
-#     the "استخدام التطبيق" button only.
-#   - Showing any Nahla branding here breaks Salla's UX flow.
-# Override via SALLA_POST_INSTALL_URL env var if needed.
-_SALLA_POST_INSTALL_URL = (
-    os.getenv("SALLA_POST_INSTALL_URL", "").strip()
-    or "https://s.salla.sa/apps/nahla"
-)
+# NOTE: We deliberately do NOT define a post-install redirect target.
+# After OAuth completes, /oauth/salla/callback returns a neutral 200 OK
+# with a single Arabic line and stops.  Salla's embedded-app policy
+# requires merchants to enter the app via the 'استخدام التطبيق' button
+# only — any redirect we initiate (even to a Salla URL) counts as us
+# overriding Salla's flow, which is not allowed.
 
 # The Salla callback page on the dashboard (for new merchants auto-logged in
 # via Salla — it stores the JWT in localStorage then routes to /app/entry).
@@ -2183,29 +2176,28 @@ async def salla_oauth_callback(
     except Exception as _exc:
         logger.warning("[Salla OAuth] Could not queue initial sync: %s", _exc)
 
-    # ── Step 5: Hand control back to Salla ────────────────────────────────────
-    # We redirect the merchant straight to Nahla's listing on the Salla App
-    # Store.  That page is rendered by Salla itself and shows the official
-    # app name, description, and 'استخدام التطبيق' button — exactly the
-    # surface Salla expects merchants to enter the app from.
+    # ── Step 5: Return a neutral 200 OK — DO NOT redirect anywhere ────────────
+    # Salla's embedded-app contract is:
+    #   • OAuth callback is a server-side step.
+    #   • The merchant must enter the app via Salla's 'استخدام التطبيق'
+    #     button — never via any auto-opened/redirected page from us.
     #
-    # We never show ANY Nahla page in this position:
-    #   ❌ no /salla-callback
-    #   ❌ no /app/entry
-    #   ❌ no api.nahlah.ai welcome / window.close() page
-    #   ✅ only a 302 → s.salla.sa/apps/nahla
+    # So we MUST NOT redirect to:
+    #   ❌ app.nahlah.ai (any path)
+    #   ❌ s.salla.sa/apps/nahla (still a navigation we initiate)
+    #   ❌ salla.sa/dashboard (often shows 'المتجر مغلق' for setup-mode stores)
     #
-    # The Nahla session JWT is created fresh the next time the merchant
-    # clicks 'استخدام التطبيق' inside Salla — the iframe loads /app/salla
-    # which calls /salla/token-login and persists the JWT in localStorage on
-    # app.nahlah.ai at that point.  No JWT needs to traverse this redirect.
+    # We return a minimal, brand-free 200 OK HTML with one Arabic line
+    # and stop.  The merchant returns to Salla on their own; Salla shows
+    # the app + 'استخدام التطبيق' button naturally; the iframe loads
+    # /app/salla on that click and creates the Nahla session via
+    # /salla/token-login at that point.
     logger.info(
         "[SallaOAuth] install complete | tenant=%s store=%s is_new=%s "
-        "has_jwt=%s — redirecting BACK to Salla: %s",
+        "has_jwt=%s — returning neutral 200 OK, NO redirect, NO Nahla UI",
         tenant_id, salla_store_id, is_new_merchant, bool(auto_jwt),
-        _SALLA_POST_INSTALL_URL,
     )
-    return RedirectResponse(url=_SALLA_POST_INSTALL_URL, status_code=302)
+    return HTMLResponse(content=_install_complete_html(), status_code=200)
 
 
 @router.get("/integrations/salla/success", response_class=HTMLResponse)
@@ -2259,130 +2251,90 @@ def _redirect_html(dest: str, title: str, subtitle: str) -> str:
 </html>"""
 
 
-def _install_complete_html(store_name: str = "", is_new: bool = True) -> str:
+def _install_complete_html() -> str:
     """
-    Render the post-OAuth landing page entirely on api.nahlah.ai — no
-    redirect to /salla-callback, no opening of any Nahla page, no
-    interference with Salla's UI.
+    Truly neutral post-OAuth response — minimal text only.
 
-    The page:
-      • Confirms install success in Arabic.
-      • Tries window.close() so the OAuth tab closes itself (works when
-        Salla / the browser opened it as a popup or single-step
-        navigation).
-      • If the tab does NOT close, shows a calm instruction telling the
-        merchant to return to Salla and press 'استخدام التطبيق'.
+    Salla embedded-app policy: nothing from us should run, render, or
+    redirect after OAuth completes.  The merchant must return to Salla
+    on their own and press 'استخدام التطبيق'.  This page therefore:
 
-    The merchant's Nahla session is created the next time they press
-    'استخدام التطبيق' inside Salla — the iframe loads /app/salla which
-    calls /salla/token-login and persists the JWT in localStorage on
-    app.nahlah.ai at that point.  No JWT needs to traverse this page.
+      • Has no Nahla logo, no brand colour, no icon.
+      • Does NOT call window.close().
+      • Does NOT redirect anywhere (no meta refresh, no JS navigation).
+      • Does NOT load any external resources.
+      • Just shows one short Arabic line on a white background and stops.
+
+    Salla's OAuth flow does not require any specific HTTP body or
+    redirect target after token exchange — returning a plain 200 OK is
+    sufficient.  We return minimal HTML purely so a merchant who sees
+    this tab understands what happened, instead of a blank page.
     """
-    safe_store = (store_name or "").replace("<", "&lt;").replace(">", "&gt;")
-    headline   = "تم تثبيت نحلة بنجاح!" if is_new else "تم تجديد الربط بنجاح!"
-    store_line = (
-        f'<p style="color:#cbd5e1;font-size:14px;margin:8px 0 0">'
-        f'المتجر: <span style="color:#f59e0b;font-weight:700">{safe_store}</span></p>'
-        if safe_store else ""
-    )
-    return f"""<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html dir="rtl" lang="ar">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>نحلة AI — تم التثبيت</title>
+  <title>تم الربط</title>
   <style>
-    *,*::before,*::after {{ box-sizing: border-box; }}
-    body {{
-      margin: 0; min-height: 100dvh;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center;
-      background: #0f172a; color: #f1f5f9;
-      font-family: 'Cairo', system-ui, -apple-system, Arial, sans-serif;
+    html, body {
+      margin: 0; padding: 0;
+      background: #ffffff; color: #1f2937;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                   Tahoma, Arial, sans-serif;
+    }
+    body {
+      min-height: 100dvh;
+      display: flex; align-items: center; justify-content: center;
       padding: 24px; text-align: center;
-    }}
-    .icon {{ font-size: 64px; line-height: 1; }}
-    h1 {{ font-size: 24px; font-weight: 800; margin: 16px 0 0; color: #fff; }}
-    .card {{
-      margin-top: 22px; max-width: 420px;
-      background: rgba(30,41,59,.6);
-      border: 1px solid rgba(245,158,11,.25);
-      border-radius: 16px; padding: 18px 18px 16px;
-      text-align: right;
-    }}
-    .card p.title {{ color: #fbbf24; font-size: 14px; font-weight: 700; margin: 0 0 8px; }}
-    .card p.body  {{ color: #e2e8f0; font-size: 14px; line-height: 1.8; margin: 0; }}
-    .card b {{ color: #f59e0b; }}
-    .hint {{ color: #64748b; font-size: 12px; margin-top: 18px; }}
-    button.close-btn {{
-      margin-top: 14px;
-      background: transparent; color: #94a3b8;
-      border: none; cursor: pointer;
-      font: inherit; font-size: 12px;
-      text-decoration: underline; text-underline-offset: 4px;
-    }}
-    button.close-btn:hover {{ color: #cbd5e1; }}
+    }
+    p { font-size: 15px; line-height: 1.8; max-width: 420px; margin: 0; }
   </style>
 </head>
 <body>
-  <div class="icon">✅</div>
-  <h1>{headline}</h1>
-  {store_line}
-  <div class="card">
-    <p class="title">📌 للبدء باستخدام نحلة:</p>
-    <p class="body">
-      عُد إلى متجرك في سلة، وستجد نحلة الآن في قسم
-      <b>«تطبيقاتي»</b> مع زر
-      <b>«استخدام التطبيق»</b> جاهزاً للضغط.
-    </p>
-  </div>
-  <button class="close-btn" onclick="tryClose()">إغلاق هذه الصفحة</button>
-  <p class="hint">يمكنك إغلاق هذه النافذة الآن.</p>
-  <script>
-    function tryClose() {{
-      try {{ window.close(); }} catch (e) {{}}
-      // Browsers block window.close() unless the page was opened via JS.
-      // If close() was a no-op, try going back in history as a last resort.
-      try {{ if (!window.closed) window.history.back(); }} catch (e) {{}}
-    }}
-    // Best-effort auto-close 1.5s after load.  No-op silently if blocked.
-    setTimeout(tryClose, 1500);
-  </script>
+  <p>تم الربط بنجاح. يمكنك إغلاق هذه الصفحة والعودة إلى سلة.</p>
 </body>
 </html>"""
 
 
 def _install_error_html(reason: str) -> str:
-    """Minimal error page rendered on api.nahlah.ai (no redirect)."""
+    """
+    Neutral error response — same minimal style as the success page.
+
+    No Nahla branding, no auto-close, no redirect.  Includes the raw
+    error reason as a small code line so a merchant or support agent
+    can report it back to us.
+    """
     safe_reason = (reason or "unknown_error").replace("<", "&lt;").replace(">", "&gt;")
     return f"""<!DOCTYPE html>
 <html dir="rtl" lang="ar">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>نحلة AI — خطأ في التثبيت</title>
+  <title>تعذّر إتمام الربط</title>
   <style>
+    html, body {{
+      margin: 0; padding: 0;
+      background: #ffffff; color: #1f2937;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                   Tahoma, Arial, sans-serif;
+    }}
     body {{
-      margin: 0; min-height: 100dvh;
+      min-height: 100dvh;
       display: flex; flex-direction: column;
       align-items: center; justify-content: center;
-      background: #0f172a; color: #f1f5f9;
-      font-family: 'Cairo', system-ui, Arial, sans-serif;
       padding: 24px; text-align: center;
     }}
-    h1 {{ font-size: 22px; font-weight: 800; margin: 12px 0 8px; color: #fff; }}
+    p {{ font-size: 15px; line-height: 1.8; max-width: 420px; margin: 0; }}
     code {{
-      display: inline-block; margin-top: 12px;
-      background: #1e293b; color: #fbbf24;
-      padding: 6px 12px; border-radius: 8px; font-size: 12px;
+      display: inline-block; margin-top: 16px;
+      background: #f3f4f6; color: #6b7280;
+      padding: 4px 10px; border-radius: 6px; font-size: 12px;
     }}
-    p {{ color: #94a3b8; font-size: 14px; max-width: 380px; line-height: 1.7; }}
   </style>
 </head>
 <body>
-  <div style="font-size:56px">⚠️</div>
-  <h1>تعذّر إكمال تثبيت نحلة</h1>
-  <p>يمكنك إغلاق هذه النافذة وإعادة المحاولة من متجر تطبيقات سلة.</p>
+  <p>تعذّر إتمام الربط. يمكنك إغلاق هذه الصفحة وإعادة المحاولة من سلة.</p>
   <code>{safe_reason}</code>
 </body>
 </html>"""
