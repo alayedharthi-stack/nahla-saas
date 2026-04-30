@@ -40,7 +40,7 @@ export default function SallaCallback() {
     const store       = params.get('store') || ''
     const name        = params.get('name')  || ''
 
-    if (!token || status !== 'connected') {
+    if (status !== 'connected') {
       const reason = params.get('reason') || 'oauth_failed'
       setError(reason)
       return
@@ -49,42 +49,62 @@ export default function SallaCallback() {
     setIsNew(newFlag)
     setStoreName(name)
 
+    // Common metadata writes — happen for BOTH "fresh JWT" and
+    // "existing localStorage JWT" paths.
     try {
-      const parts   = token.split('.')
-      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
-
-      ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
-        'nahla_tenant_id', 'nahla_user_id'].forEach(k => localStorage.removeItem(k))
-
-      localStorage.setItem('nahla_auth',      '1')
-      localStorage.setItem('nahla_token',     token)
-      localStorage.setItem('nahla_role',      String(payload.role      || 'merchant'))
-      localStorage.setItem('nahla_email',     String(payload.sub       || ''))
-      localStorage.setItem('nahla_tenant_id', String(payload.tenant_id ?? ''))
-      localStorage.setItem('nahla_user_id',   String(payload.user_id   ?? ''))
       if (store) localStorage.setItem('nahla_salla_store_id',   store)
       if (name) {
         localStorage.setItem('nahla_salla_store_name', name)
         localStorage.setItem('nahla_store_name', name)
       }
-
       localStorage.setItem('nahla_salla_embedded',     '1')
       localStorage.setItem('nahla_salla_is_new',       newFlag ? '1' : '0')
       localStorage.setItem('nahla_salla_wa_connected', waConnected ? '1' : '0')
+    } catch { /* localStorage blocked */ }
 
-      // Strip the token from the URL (no autoplay back-button replay).
+    // ── Path A: fresh JWT in URL (first-install via Salla App Store) ────────
+    if (token) {
       try {
-        window.history.replaceState(null, '', window.location.pathname)
-      } catch { /* noop */ }
+        const parts   = token.split('.')
+        const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
 
-      console.log('[SallaCallback] install complete — waiting for "استخدام التطبيق" click in Salla',
-        { isNew: newFlag, waConnected, store })
-      // ↑ NO navigate(), NO window.location.href — Salla policy: merchant must
-      //   press "استخدام التطبيق" themselves to open the app.
-    } catch (e) {
-      console.error('[SallaCallback] invalid token:', e)
-      setError('invalid_token')
+        ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
+          'nahla_tenant_id', 'nahla_user_id'].forEach(k => localStorage.removeItem(k))
+
+        localStorage.setItem('nahla_auth',      '1')
+        localStorage.setItem('nahla_token',     token)
+        localStorage.setItem('nahla_role',      String(payload.role      || 'merchant'))
+        localStorage.setItem('nahla_email',     String(payload.sub       || ''))
+        localStorage.setItem('nahla_tenant_id', String(payload.tenant_id ?? ''))
+        localStorage.setItem('nahla_user_id',   String(payload.user_id   ?? ''))
+
+        console.log('[SallaCallback] persisted fresh JWT from URL', { isNew: newFlag, store })
+      } catch (e) {
+        console.error('[SallaCallback] invalid token in URL:', e)
+        setError('invalid_token')
+        return
+      }
+    } else {
+      // ── Path B: no token in URL — relies on JWT already in localStorage
+      // from the earlier /salla/token-login call (OAuth re-grant from iframe).
+      const haveToken = localStorage.getItem('nahla_token')
+      if (!haveToken) {
+        console.warn('[SallaCallback] no token in URL AND no token in localStorage')
+        setError('session_lost')
+        return
+      }
+      console.log('[SallaCallback] no URL token — using existing localStorage session', { store })
     }
+
+    // Strip the token from the URL (no back-button replay).
+    try {
+      window.history.replaceState(null, '', window.location.pathname)
+    } catch { /* noop */ }
+
+    console.log('[SallaCallback] install complete — waiting for "استخدام التطبيق" click in Salla',
+      { isNew: newFlag, waConnected, store })
+    // ↑ NO navigate(), NO window.location.href — Salla policy: merchant must
+    //   press "استخدام التطبيق" themselves to open the app.
   }, [])
 
   const goToSalla = () => {

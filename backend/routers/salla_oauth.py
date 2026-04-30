@@ -2168,36 +2168,32 @@ async def salla_oauth_callback(
         logger.warning("[Salla OAuth] Could not queue initial sync: %s", _exc)
 
     # ── Step 5: Redirect ────────────────────────────────────────────────────────
-    # ALL Salla merchants land on the mini-dashboard /app/entry after OAuth.
-    # Never on /landing (public marketing page) and never on the iframe URL.
+    # ALL Salla merchants land on /salla-callback after OAuth — never directly
+    # on /app/entry.  /salla-callback shows a gated "click استخدام التطبيق"
+    # screen so we never bypass Salla's policy by jumping the merchant into
+    # the mini-dashboard before they explicitly press the button in Salla.
+    #
+    # This applies to BOTH paths:
+    #   • is_new_merchant (state=salla_new_*)   — first install from App Store
+    #   • existing merchant (state=t<id>_<rand>) — OAuth re-grant from iframe
+    #
+    # In the existing-merchant case the JWT is already in localStorage from
+    # the earlier /salla/token-login call, so no token in the URL is needed.
+    params: dict[str, str] = {
+        "status": "connected",
+        "store":  salla_store_id or "",
+        "name":   store_name or "",
+        "new":    "1" if is_new_merchant else "0",
+    }
     if auto_jwt:
-        # New merchant: route through /salla-callback so it can persist the
-        # fresh JWT in localStorage on app.nahlah.ai BEFORE entering the
-        # mini-dashboard.  The callback page navigates to /app/entry on success.
-        params = urllib.parse.urlencode({
-            "token":     auto_jwt,
-            "status":    "connected",
-            "store":     salla_store_id,
-            "name":      store_name,
-            "new":       "1" if is_new_merchant else "0",
-        })
-        redirect_url = f"{_DASHBOARD_ORIGIN}/salla-callback?{params}"
-        logger.info(
-            "[SallaOAuth] callback success redirect_to=%s | path=/salla-callback "
-            "tenant=%s store=%s is_new=%s",
-            redirect_url, tenant_id, salla_store_id, is_new_merchant,
-        )
-        return RedirectResponse(url=redirect_url, status_code=302)
-
-    # Existing merchant: they already have a valid JWT in localStorage from the
-    # earlier salla_token_login call — go straight to /app/entry.
-    success_url = _success_url(salla_store_id, store_name)
+        params["token"] = auto_jwt
+    redirect_url = f"{_DASHBOARD_ORIGIN}/salla-callback?{urllib.parse.urlencode(params)}"
     logger.info(
-        "[SallaOAuth] callback success redirect_to=%s | path=%s "
-        "tenant=%s store=%s",
-        success_url, _SALLA_POST_OAUTH_PATH, tenant_id, salla_store_id,
+        "[SallaOAuth] callback success redirect_to=%s | path=/salla-callback "
+        "tenant=%s store=%s is_new=%s has_jwt=%s",
+        redirect_url, tenant_id, salla_store_id, is_new_merchant, bool(auto_jwt),
     )
-    return RedirectResponse(url=success_url, status_code=302)
+    return RedirectResponse(url=redirect_url, status_code=302)
 
 
 @router.get("/integrations/salla/success", response_class=HTMLResponse)
