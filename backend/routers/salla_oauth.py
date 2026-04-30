@@ -523,19 +523,33 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 needs_oauth = True
                 # Build OAuth authorize URL with state pointing to this tenant
                 if SALLA_CLIENT_ID and SALLA_REDIRECT_URI:
+                    # Normalize redirect_uri: strip trailing slash and whitespace
+                    # to match Salla Partner Portal's exact-match requirement.
+                    normalized_redirect = SALLA_REDIRECT_URI.strip().rstrip("/")
                     state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}"
                     params = urllib.parse.urlencode({
                         "client_id":     SALLA_CLIENT_ID,
-                        "redirect_uri":  SALLA_REDIRECT_URI,
+                        "redirect_uri":  normalized_redirect,
                         "response_type": "code",
                         "scope":         "offline_access",
                         "state":         state,
                     })
                     oauth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
                     logger.info(
-                        "[SallaLogin] needs_oauth=True | tenant=%s "
+                        "[SallaLogin] needs_oauth=True | tenant=%s | "
+                        "client_id=%s | redirect_uri=%r (raw env=%r) | "
                         "has_refresh=%s api_key_source=%s",
-                        tenant_id, has_refresh, api_key_src,
+                        tenant_id,
+                        (SALLA_CLIENT_ID[:8] + "***") if SALLA_CLIENT_ID else "EMPTY",
+                        normalized_redirect, SALLA_REDIRECT_URI,
+                        has_refresh, api_key_src,
+                    )
+                    logger.info("[SallaLogin] FULL oauth_url=%s", oauth_url)
+                else:
+                    logger.error(
+                        "[SallaLogin] needs_oauth=True BUT cannot build oauth_url | "
+                        "SALLA_CLIENT_ID=%s SALLA_REDIRECT_URI=%r",
+                        bool(SALLA_CLIENT_ID), SALLA_REDIRECT_URI,
                     )
     except Exception as _e:
         logger.warning("[SallaLogin] needs_oauth check failed: %s", _e)
@@ -1574,20 +1588,62 @@ async def salla_authorize(request: Request):
     if not SALLA_CLIENT_ID:
         raise HTTPException(status_code=503, detail="SALLA_CLIENT_ID not configured")
 
+    normalized_redirect = (SALLA_REDIRECT_URI or "").strip().rstrip("/")
     state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}"
     params = urllib.parse.urlencode({
         "client_id":     SALLA_CLIENT_ID,
-        "redirect_uri":  SALLA_REDIRECT_URI,
+        "redirect_uri":  normalized_redirect,
         "response_type": "code",
         "scope":         "offline_access",
         "state":         state,
     })
     auth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
     logger.info(
-        "Salla authorize URL generated | tenant=%s redirect_uri=%s",
-        tenant_id, SALLA_REDIRECT_URI,
+        "Salla authorize URL generated | tenant=%s redirect_uri=%r (raw=%r)",
+        tenant_id, normalized_redirect, SALLA_REDIRECT_URI,
     )
-    return {"url": auth_url, "redirect_uri": SALLA_REDIRECT_URI}
+    return {"url": auth_url, "redirect_uri": normalized_redirect}
+
+
+@router.get("/api/salla/diag/oauth-config")
+async def salla_diag_oauth_config():
+    """
+    PUBLIC — diagnostic endpoint that returns the exact OAuth config the
+    backend is using. Safe because it only exposes redirect_uri + a masked
+    client_id (NOT the client_secret).
+
+    Use this to verify Railway env vars match Salla Partner Portal:
+      curl https://api.nahlah.ai/api/salla/diag/oauth-config
+    """
+    raw_redirect       = SALLA_REDIRECT_URI or ""
+    normalized_redirect = raw_redirect.strip().rstrip("/")
+    sample_state       = "tDIAG_xxxxxx"
+    sample_params      = urllib.parse.urlencode({
+        "client_id":     SALLA_CLIENT_ID or "",
+        "redirect_uri":  normalized_redirect,
+        "response_type": "code",
+        "scope":         "offline_access",
+        "state":         sample_state,
+    })
+    sample_oauth_url   = f"https://accounts.salla.sa/oauth2/auth?{sample_params}"
+
+    return {
+        "client_id_set":          bool(SALLA_CLIENT_ID),
+        "client_id_prefix":       (SALLA_CLIENT_ID[:8] + "***") if SALLA_CLIENT_ID else None,
+        "client_secret_set":      bool(SALLA_CLIENT_SECRET),
+        "redirect_uri_raw":       raw_redirect,
+        "redirect_uri_normalized": normalized_redirect,
+        "redirect_uri_has_trailing_slash": raw_redirect.endswith("/"),
+        "redirect_uri_has_whitespace":     raw_redirect != raw_redirect.strip(),
+        "expected_value":         "https://api.nahlah.ai/oauth/salla/callback",
+        "matches_expected":       normalized_redirect == "https://api.nahlah.ai/oauth/salla/callback",
+        "sample_oauth_url":       sample_oauth_url,
+        "instructions": (
+            "Set Railway env var: "
+            "SALLA_REDIRECT_URI=https://api.nahlah.ai/oauth/salla/callback "
+            "(NO trailing slash, MUST be https, MUST match Salla Partner Portal Callback URL exactly)"
+        ),
+    }
 
 
 @router.get("/oauth/salla/callback")
@@ -1656,7 +1712,10 @@ async def salla_oauth_callback(
         return RedirectResponse(url=_error_url("app_not_configured"), status_code=302)
 
     # ── Step 2: Token exchange ─────────────────────────────────────────────────
-    logger.info("[Salla OAuth] Starting token exchange...")
+    # Normalize redirect_uri so it matches EXACTLY the authorize-URL value
+    # (Salla compares them character-for-character; trailing slash will fail).
+    normalized_redirect_cb = (SALLA_REDIRECT_URI or "").strip().rstrip("/")
+    logger.info("[Salla OAuth] Starting token exchange | redirect_uri=%r", normalized_redirect_cb)
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             token_resp = await client.post(
@@ -1666,7 +1725,7 @@ async def salla_oauth_callback(
                     "client_id":     SALLA_CLIENT_ID,
                     "client_secret": SALLA_CLIENT_SECRET,
                     "code":          code,
-                    "redirect_uri":  SALLA_REDIRECT_URI,
+                    "redirect_uri":  normalized_redirect_cb,
                 },
                 headers={
                     "Accept":       "application/json",
