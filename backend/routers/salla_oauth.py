@@ -35,7 +35,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from models import Integration, Product, SmartAutomation, Tenant, User, WhatsAppConnection
@@ -180,6 +180,9 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     store_name      = ""
     owner_email     = ""
     introspect_ok   = False
+    introspect_access_token  = ""
+    introspect_refresh_token = ""
+    introspect_expires_in    = None
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -200,10 +203,33 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
 
             if resp.status_code == 200:
                 data = resp.json()
+                # Diagnostic: log the SHAPE of the response (keys only,
+                # no token values) so we can tell whether Salla returned
+                # a refresh_token for this app/flow.  Embedded "Communication
+                # App" introspect typically returns access_token only;
+                # full OAuth returns access_token + refresh_token.
+                _payload_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+                _merchant     = _payload_data.get("merchant") if isinstance(_payload_data.get("merchant"), dict) else {}
+                logger.info(
+                    "[SallaLogin] STEP 2 — introspect response shape | "
+                    "top_keys=%s data_keys=%s merchant_keys=%s "
+                    "has_access_token=%s has_refresh_token=%s",
+                    list(data.keys()),
+                    list(_payload_data.keys()),
+                    list(_merchant.keys()) if _merchant else [],
+                    bool(_payload_data.get("access_token") or data.get("access_token")),
+                    bool(_payload_data.get("refresh_token") or data.get("refresh_token")),
+                )
                 if data.get("success"):
                     introspect_ok   = True
                     payload_data    = data.get("data") or {}
                     merchant        = payload_data.get("merchant") or {}
+                    # Defensive: if Salla ever returns a refresh_token in
+                    # introspect (some app types do), capture it so the
+                    # integration save below can persist it.
+                    introspect_access_token  = str(payload_data.get("access_token")  or data.get("access_token")  or "")
+                    introspect_refresh_token = str(payload_data.get("refresh_token") or data.get("refresh_token") or "")
+                    introspect_expires_in    = payload_data.get("expires_in") or data.get("expires_in")
 
                     # Handle multiple possible Salla response shapes
                     merchant_id_str = str(
@@ -445,67 +471,96 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             # We save it so the merchant sees the integration as "connected"
             # immediately on first login, even before the full OAuth refresh
             # token arrives via the app.store.authorize webhook.
-            embedded_api_key = salla_token  # the v4.public.* token from the iframe
+            #
+            # If introspect ALSO returned an access_token/refresh_token (some
+            # Salla app types do — Easy mode, OAuth-completed apps), we
+            # prefer those over the embedded iframe token because they're
+            # valid Admin API tokens.
+            embedded_api_key   = salla_token  # the v4.public.* token from the iframe
+            api_key_to_persist = introspect_access_token or embedded_api_key
+            api_key_source     = "introspect" if introspect_access_token else "embedded_token"
 
             if integration:
                 cfg = dict(integration.config or {})
-                # Keep existing long-lived api_key (OAuth token from app.store.authorize)
-                # if present.  The embedded iframe token is NOT a valid Admin API
-                # access token and cannot call /admin/v2/* endpoints, so we only
-                # store it as a fallback when no real OAuth token exists yet.
-                existing_key = cfg.get("api_key", "")
+                # If the existing row has a real refresh_token, keep its
+                # access_token (don't downgrade to embedded).  Otherwise
+                # overwrite with whatever introspect/embedded gave us so
+                # the row reflects the active session.
+                existing_refresh = cfg.get("refresh_token", "")
                 cfg.update({
                     "store_id":          merchant_id_str,
                     "store_name":        store_name,
                     "last_seen":         now_iso,
                     "salla_owner_email": owner_email,
                 })
-                if not existing_key and embedded_api_key:
-                    cfg["api_key"] = embedded_api_key
-                    cfg["api_key_source"] = "embedded_token"
+                if not existing_refresh:
+                    # No prior OAuth state — refresh from introspect/embedded
+                    cfg["api_key"]             = api_key_to_persist
+                    cfg["api_key_source"]      = api_key_source
                     cfg["api_key_received_at"] = now_iso
+                if introspect_refresh_token:
+                    cfg["refresh_token"] = introspect_refresh_token
+                    cfg["api_key_source"] = "introspect"
+                    if introspect_expires_in:
+                        cfg["expires_in"] = introspect_expires_in
                 # When the merchant actively logs in, clear any stale reauth /
-                # no_auto_refresh flags so a pending app.store.authorize webhook
-                # (which arrives shortly after login) can restore full sync.
-                cfg.pop("needs_reauth",          None)
-                cfg.pop("needs_reauth_at",       None)
-                cfg.pop("needs_reauth_reason",   None)
-                cfg.pop("no_auto_refresh",       None)
-                cfg.pop("no_auto_refresh_reason",None)
-                cfg.pop("no_auto_refresh_at",    None)
-                cfg.pop("soft_disabled",         None)
-                cfg.pop("uninstalled_at",        None)
+                # no_auto_refresh / cleanup flags so a pending app.store.authorize
+                # webhook (which may arrive shortly after login) — or this very
+                # introspect — can restore full sync.
+                cfg.pop("needs_reauth",                None)
+                cfg.pop("needs_reauth_at",             None)
+                cfg.pop("needs_reauth_reason",         None)
+                cfg.pop("no_auto_refresh",             None)
+                cfg.pop("no_auto_refresh_reason",      None)
+                cfg.pop("no_auto_refresh_at",          None)
+                cfg.pop("soft_disabled",               None)
+                cfg.pop("uninstalled_at",              None)
+                cfg.pop("superseded_by_oauth_reconnect", None)
+                cfg.pop("disabled_reason",             None)
+                cfg.pop("disabled_at",                 None)
                 integration.config = cfg
                 integration.external_store_id = merchant_id_str
                 # Mark as enabled if we have ANY usable api_key
                 if cfg.get("api_key"):
                     integration.enabled = True
+                from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                flag_modified(integration, "config")
                 logger.info(
-                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s enabled=%s api_key_source=%s",
+                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s "
+                    "enabled=%s api_key_source=%s has_refresh=%s",
                     tenant_id, merchant_id_str, integration.enabled,
-                    cfg.get("api_key_source", "oauth"),
+                    cfg.get("api_key_source") or "?",
+                    bool(cfg.get("refresh_token")),
                 )
             else:
+                new_cfg = {
+                    "store_id":             merchant_id_str,
+                    "store_name":           store_name,
+                    "salla_token_login":    True,
+                    "connected_at":         now_iso,
+                    "salla_owner_email":    owner_email,
+                    "api_key":              api_key_to_persist,
+                    "api_key_source":       api_key_source,
+                    "api_key_received_at":  now_iso,
+                }
+                if introspect_refresh_token:
+                    new_cfg["refresh_token"] = introspect_refresh_token
+                    new_cfg["api_key_source"] = "introspect"
+                    if introspect_expires_in:
+                        new_cfg["expires_in"] = introspect_expires_in
                 db.add(Integration(
                     tenant_id = tenant_id,
                     provider  = "salla",
                     external_store_id = merchant_id_str,
-                    config    = {
-                        "store_id":             merchant_id_str,
-                        "store_name":           store_name,
-                        "salla_token_login":    True,
-                        "connected_at":         now_iso,
-                        "salla_owner_email":    owner_email,
-                        "api_key":              embedded_api_key,
-                        "api_key_source":       "embedded_token",
-                        "api_key_received_at":  now_iso,
-                    },
-                    enabled = bool(embedded_api_key),
+                    config    = new_cfg,
+                    enabled   = bool(api_key_to_persist),
                 ))
                 logger.info(
                     "[SallaLogin]    Integration CREATED | tenant=%s store_id=%s "
-                    "enabled=%s api_key_source=embedded_token",
-                    tenant_id, merchant_id_str, bool(embedded_api_key),
+                    "enabled=%s api_key_source=%s has_refresh=%s",
+                    tenant_id, merchant_id_str, bool(api_key_to_persist),
+                    new_cfg.get("api_key_source"),
+                    bool(new_cfg.get("refresh_token")),
                 )
 
         db.commit()
@@ -925,86 +980,158 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
     }
     Returns 401 if expired / missing / store mismatch.
     """
-    try:
-        payload = require_authenticated(request)
-    except HTTPException:
-        raise HTTPException(status_code=401, detail="session_expired")
-
-    tenant_id = int(payload.get("tenant_id", 0))
-    user_id   = payload.get("user_id")
-    email     = str(payload.get("sub", ""))
-    role      = str(payload.get("role", "merchant"))
-
-    if not tenant_id:
-        raise HTTPException(status_code=401, detail="invalid_tenant")
-
-    # ── Store-isolation guard ────────────────────────────────────────────────
-    # If the caller passed ?store_id=, verify the JWT's tenant actually
-    # owns that Salla store.  A mismatch means the old token is for a
-    # DIFFERENT store → reject so the frontend does a fresh token-login.
+    # ── Outer guard so any unhandled error returns clean JSON, not 500 ──────
+    # (The previous version let exceptions propagate which surfaced as a
+    # CORS-wrapped 500 — useless for diagnosis.  Now every failure is
+    # logged with the full traceback and returned as a structured body
+    # the frontend can act on.)
+    import traceback as _tb  # noqa: PLC0415
     requested_store = str(request.query_params.get("store_id") or "").strip()
-    if requested_store:
-        matching_integ = db.query(Integration).filter(
-            Integration.tenant_id == tenant_id,
-            Integration.provider  == "salla",
-            Integration.external_store_id == requested_store,
-        ).first()
-        if not matching_integ:
-            logger.warning(
-                "[SallaSession] store_id mismatch — JWT tenant=%s does not own store=%s",
-                tenant_id, requested_store,
-            )
-            raise HTTPException(status_code=401, detail="store_mismatch")
+    tenant_id = 0
+    integration_id: Optional[int] = None
+    api_key_source = ""
+    has_access_token = False
+    has_refresh_token = False
+    try:
+        try:
+            payload = require_authenticated(request)
+        except HTTPException:
+            raise HTTPException(status_code=401, detail="session_expired")
 
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=401, detail="tenant_not_found")
+        tenant_id = int(payload.get("tenant_id", 0))
+        user_id   = payload.get("user_id")
+        email     = str(payload.get("sub", ""))
+        role      = str(payload.get("role", "merchant"))
 
-    # Rolling session — re-issue a fresh JWT
-    fresh_token = create_token(
-        email=email,
-        role=role,
-        tenant_id=tenant_id,
-        user_id=int(user_id) if user_id is not None else None,
-    )
+        if not tenant_id:
+            raise HTTPException(status_code=401, detail="invalid_tenant")
 
-    # ── Merchant readiness probes (cheap point-queries) ────────────────────
-    wa_conn = (
-        db.query(WhatsAppConnection)
-        .filter(WhatsAppConnection.tenant_id == tenant_id)
-        .first()
-    )
-    wa_connected = bool(wa_conn and wa_conn.status == "connected")
+        # ── Store-isolation guard ──────────────────────────────────────────
+        # If the caller passed ?store_id=, verify the JWT's tenant actually
+        # owns that Salla store.  A mismatch means the old token is for a
+        # DIFFERENT store → reject so the frontend does a fresh token-login.
+        if requested_store:
+            matching_integ = db.query(Integration).filter(
+                Integration.tenant_id == tenant_id,
+                Integration.provider  == "salla",
+                Integration.external_store_id == requested_store,
+            ).first()
+            if not matching_integ:
+                logger.warning(
+                    "[SallaSession] store_id mismatch — JWT tenant=%s does not own store=%s",
+                    tenant_id, requested_store,
+                )
+                raise HTTPException(status_code=401, detail="store_mismatch")
+            integration_id    = matching_integ.id
+            _cfg              = matching_integ.config or {}
+            api_key_source    = (_cfg.get("api_key_source") or "").lower()
+            has_access_token  = bool(_cfg.get("api_key"))
+            has_refresh_token = bool(_cfg.get("refresh_token"))
 
-    has_automations = (
-        db.query(SmartAutomation.id)
-        .filter(
-            SmartAutomation.tenant_id == tenant_id,
-            SmartAutomation.enabled.is_(True),
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant:
+            raise HTTPException(status_code=401, detail="tenant_not_found")
+
+        # Rolling session — re-issue a fresh JWT
+        fresh_token = create_token(
+            email=email,
+            role=role,
+            tenant_id=tenant_id,
+            user_id=int(user_id) if user_id is not None else None,
         )
-        .first()
-    ) is not None
 
-    has_products = (
-        db.query(Product.id)
-        .filter(Product.tenant_id == tenant_id)
-        .limit(1)
-        .first()
-    ) is not None
+        # ── Merchant readiness probes (cheap point-queries) ───────────────
+        wa_conn = (
+            db.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.tenant_id == tenant_id)
+            .first()
+        )
+        wa_connected = bool(wa_conn and wa_conn.status == "connected")
 
-    logger.info(
-        "[SallaSession] ✅ tenant=%s wa=%s autos=%s products=%s",
-        tenant_id, wa_connected, has_automations, has_products,
-    )
+        has_automations = (
+            db.query(SmartAutomation.id)
+            .filter(
+                SmartAutomation.tenant_id == tenant_id,
+                SmartAutomation.enabled.is_(True),
+            )
+            .first()
+        ) is not None
 
-    return {
-        "connected":          True,
-        "tenant_id":          tenant_id,
-        "token":              fresh_token,
-        "whatsapp_connected": wa_connected,
-        "has_automations":    has_automations,
-        "has_products":       has_products,
-    }
+        has_products = (
+            db.query(Product.id)
+            .filter(Product.tenant_id == tenant_id)
+            .limit(1)
+            .first()
+        ) is not None
+
+        logger.info(
+            "[SallaSession] OK tenant=%s store=%s integration_id=%s "
+            "api_key_source=%s has_access=%s has_refresh=%s "
+            "wa=%s autos=%s products=%s",
+            tenant_id, requested_store or "-", integration_id,
+            api_key_source or "?", has_access_token, has_refresh_token,
+            wa_connected, has_automations, has_products,
+        )
+
+        return {
+            "connected":          True,
+            "tenant_id":          tenant_id,
+            "token":              fresh_token,
+            "whatsapp_connected": wa_connected,
+            "has_automations":    has_automations,
+            "has_products":       has_products,
+            "integration": {
+                "id":                integration_id,
+                "api_key_source":    api_key_source or None,
+                "has_access_token":  has_access_token,
+                "has_refresh_token": has_refresh_token,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Full diagnostics — type, message, traceback, plus the most
+        # useful integration context (no token values).
+        tb = _tb.format_exc()
+        logger.error(
+            "[SallaSession] FAILED store=%s tenant_id=%s integration_id=%s "
+            "api_key_source=%s has_access=%s has_refresh=%s "
+            "exc_type=%s exc_msg=%s\n%s",
+            requested_store or "-", tenant_id, integration_id,
+            api_key_source or "?", has_access_token, has_refresh_token,
+            type(exc).__name__, str(exc)[:300], tb[-2000:],
+        )
+        # Return a clean JSON 200 so the dashboard can show a useful UI
+        # instead of a CORS-wrapped 500.  When refresh_token is missing
+        # we surface needs_oauth so the frontend can prompt reconnect.
+        if not has_refresh_token:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "connected":    False,
+                    "needs_oauth":  True,
+                    "reason":       "missing_refresh_token",
+                    "tenant_id":    tenant_id or None,
+                    "integration_id": integration_id,
+                    "store_id":     requested_store or None,
+                    "reconnect_url": "/api/salla/reconnect",
+                    "error_type":   type(exc).__name__,
+                    "error":        str(exc)[:200],
+                },
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "connected":      False,
+                "reason":         "session_check_failed",
+                "tenant_id":      tenant_id or None,
+                "integration_id": integration_id,
+                "store_id":       requested_store or None,
+                "error_type":     type(exc).__name__,
+                "error":          str(exc)[:200],
+            },
+        )
 
 
 @router.post("/api/salla/activate-from-email")
