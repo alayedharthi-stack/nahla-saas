@@ -233,7 +233,7 @@ export const FEATURE_LABELS_AR: Record<keyof PlanFeatures, string> = {
 
 const _FALSE_FEATURES = Object.fromEntries(
   Object.keys(FEATURE_REQUIRED_PLAN).map(k => [k, false])
-) as PlanFeatures
+) as unknown as PlanFeatures
 
 const DEFAULT_ENTITLEMENTS: EntitlementsData = {
   plan:           'none',
