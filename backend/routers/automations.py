@@ -17,7 +17,7 @@ Routes:
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -1799,13 +1799,16 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
 
     # ── COD pending confirmation orders ──────────────────────────────────────
     # Orders waiting for the customer to confirm a Cash-on-Delivery purchase.
-    # Mirrors the status set used by `automation_emitters.scan_cod_confirmations`
-    # and is disjoint from `_PENDING_PAY_STATUSES` by design — the same order
-    # never appears in both lists.
+    # Includes orders in classic pending-confirmation statuses PLUS new orders
+    # that arrived directly via Salla webhook with in_progress/in_transit status
+    # if the payment_method is COD (these are auto-confirmed by the merchant).
     _COD_PENDING_STATUSES = frozenset({
         "pending_confirmation", "awaiting_confirmation",
         "under_review", "in_review",
     })
+    _COD_METHOD_KEYWORDS = ("cod", "cash_on_delivery", "cash")
+    # Threshold: treat in_progress COD orders placed within last 48 h as pending.
+    _cod_recent_threshold = datetime.now(timezone.utc) - timedelta(hours=48)
     cod_pending_items = []
     for o in (
         db.query(Order)
@@ -1815,9 +1818,32 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
         .all()
     ):
         raw = (o.status or "").strip().lower()
-        if raw not in _COD_PENDING_STATUSES:
-            continue
         meta = o.extra_metadata or {}
+        # Classic confirmation-pending statuses.
+        in_classic_pending = raw in _COD_PENDING_STATUSES
+        # in_progress orders: include if payment_method is COD and order is recent
+        # (these are COD orders auto-confirmed in Salla before Nahla could detect them).
+        if not in_classic_pending:
+            _pm = str(meta.get("payment_method") or "").lower()
+            _is_cod_method = any(kw in _pm for kw in _COD_METHOD_KEYWORDS)
+            if raw == "in_progress" and _is_cod_method:
+                # Only show if recent enough (within 48h) to avoid stale entries.
+                _created_str = meta.get("created_at") or ""
+                _is_recent = False
+                if _created_str:
+                    try:
+                        _ts = datetime.fromisoformat(_created_str.replace("Z", "+00:00"))
+                        if _ts.tzinfo is None:
+                            _ts = _ts.replace(tzinfo=timezone.utc)
+                        _is_recent = _ts >= _cod_recent_threshold
+                    except Exception:
+                        _is_recent = True  # safe default: show if we can't parse
+                else:
+                    _is_recent = True  # no timestamp → assume recent
+                if not _is_recent:
+                    continue
+            else:
+                continue
         ci = o.customer_info or {}
         # COD reminders are tracked in `cod_reminders` by
         # automation_emitters.scan_cod_confirmations.

@@ -210,6 +210,15 @@ def _normalise_order(raw: Any) -> Dict:
     if customer_name and isinstance(customer_info, dict) and not customer_info.get("name"):
         customer_info["name"] = customer_name
 
+    # Extract payment method so COD orders can be detected later.
+    # Salla sends it under payment.method (webhook) or payment_method (some endpoints).
+    _payment_block = raw.get("payment") or {}
+    payment_method = str(
+        (_payment_block.get("method") if isinstance(_payment_block, dict) else None)
+        or raw.get("payment_method")
+        or ""
+    ).strip().lower()
+
     return {
         "external_id":           external_id,
         "external_order_number": external_order_number,
@@ -222,6 +231,7 @@ def _normalise_order(raw: Any) -> Dict:
         "is_abandoned":          raw.get("is_abandoned", raw.get("abandoned", False)),
         "source":                str(raw.get("source") or "").strip().lower() or None,
         "created_at":            order_dt.isoformat() if order_dt else raw.get("created_at"),
+        "payment_method":        payment_method,
     }
 
 
@@ -1788,7 +1798,10 @@ class StoreSyncService:
                 checkout_url          = normalised["checkout_url"],
                 is_abandoned          = normalised["is_abandoned"],
                 source                = webhook_source,
-                extra_metadata        = {"created_at": normalised.get("created_at")},
+                extra_metadata        = {
+                    "created_at":     normalised.get("created_at"),
+                    "payment_method": normalised.get("payment_method") or "",
+                },
             )
             self.db.add(order_row)
             try:
@@ -1875,6 +1888,65 @@ class StoreSyncService:
                 logger.exception(
                     "[StoreSync] emit order_created failed tenant=%s order=%s: %s",
                     self.tenant_id, order_row.id, exc,
+                )
+
+        # ── COD confirmation trigger ──────────────────────────────────────────
+        # For orders placed directly on Salla (not via Nahla AI chat), the
+        # initial COD confirmation message is never sent because ai_sales.py
+        # only handles AI-created orders. We detect new COD orders here and
+        # immediately emit order_cod_pending so the cod_confirmation automation
+        # fires and sends the WhatsApp confirmation to the customer.
+        #
+        # Detection: payment_method in {"cod", "cash_on_delivery", ...} AND
+        # the order is new. We avoid double-emitting by storing
+        # extra_metadata.cod_webhook_triggered = True on the order row.
+        _payment_method = str(normalised.get("payment_method") or "").lower()
+        _COD_METHODS = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
+        _is_cod = bool(
+            _payment_method
+            and any(_payment_method == m or m in _payment_method for m in _COD_METHODS)
+        )
+        if is_new and _is_cod and customer and order_row is not None:
+            try:
+                meta = dict(order_row.extra_metadata or {})
+                if not meta.get("cod_webhook_triggered"):
+                    from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                    from core.automation_triggers import AutomationTrigger  # noqa: PLC0415
+                    emit_automation_event(
+                        self.db,
+                        self.tenant_id,
+                        AutomationTrigger.ORDER_COD_PENDING.value,
+                        customer_id=customer.id,
+                        payload={
+                            "external_id":           ext_id,
+                            "order_id":              order_row.id,
+                            "order_internal_id":     order_row.id,
+                            "order_number":          normalised.get("external_order_number") or ext_id,
+                            "external_order_number": normalised.get("external_order_number"),
+                            "status":                normalised.get("status"),
+                            "total":                 normalised.get("total"),
+                            "payment_method":        _payment_method,
+                            "checkout_url":          normalised.get("checkout_url") or "",
+                            "payment_url":           normalised.get("checkout_url") or "",
+                            "source":                "store_sync.cod_webhook",
+                            "step_idx":              0,
+                            "message_type":          "initial_confirmation",
+                        },
+                        commit=False,
+                    )
+                    meta["cod_webhook_triggered"] = True
+                    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                    order_row.extra_metadata = meta
+                    flag_modified(order_row, "extra_metadata")
+                    self.db.commit()
+                    logger.info(
+                        "[StoreSync] COD confirmation event emitted tenant=%s order=%s payment_method=%s",
+                        self.tenant_id, ext_id, _payment_method,
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "[StoreSync] COD confirmation emit failed tenant=%s order=%s: %s",
+                    self.tenant_id, ext_id, exc,
                 )
 
         # ── P0: Cancel any in-flight abandoned-cart recovery ──────────────
