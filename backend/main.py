@@ -582,6 +582,17 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("Store sync scheduler could not start: %s", exc)
 
+    # 4b-i. Fast incremental order sync every 5 minutes.
+    # Webhooks are best-effort — if Salla misses a webhook, this loop
+    # fetches orders updated in the last 10 minutes so every new order
+    # appears in Nahla within at most 5 minutes regardless.
+    try:
+        from core.scheduler import run_order_fast_sync_scheduler  # noqa: PLC0415
+        asyncio.create_task(run_order_fast_sync_scheduler())
+        logger.info("Order fast-sync scheduler started (every 5 min).")
+    except Exception as exc:
+        logger.warning("Order fast-sync scheduler could not start: %s", exc)
+
     # 4b. Dedicated abandoned-cart scheduler (every 5 min by default).
     # The hourly full sync above ALSO runs sync_abandoned_carts as part
     # of full_sync, but 1h is far too slow for a "near real-time"

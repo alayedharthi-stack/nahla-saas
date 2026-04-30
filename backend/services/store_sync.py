@@ -719,25 +719,31 @@ class StoreSyncService:
 
     # ── Orders sync ────────────────────────────────────────────────────────────
 
-    async def sync_orders(self, incremental: bool = False) -> int:
+    async def sync_orders(
+        self,
+        incremental: bool = False,
+        updated_since: str | None = None,
+        triggered_by: str = "manual",
+    ) -> int:
         adapter = self._get_adapter()
         if not adapter:
             return 0
 
-        updated_since = None
+        _since = updated_since  # explicit override takes priority
         has_local_orders = self.db.query(Order).filter(Order.tenant_id == self.tenant_id).first() is not None
-        if incremental and has_local_orders:
-            updated_since = self._last_sync_timestamp()
+        if _since is None and incremental and has_local_orders:
+            _since = self._last_sync_timestamp()
 
         try:
-            raw_list = await adapter.get_orders(updated_since=updated_since)
+            raw_list = await adapter.get_orders(updated_since=_since)
         except Exception as exc:
             logger.warning("tenant=%s orders sync failed: %s", self.tenant_id, exc)
             raise
 
         logger.info(
-            "tenant=%s syncing %d orders (incremental=%s, since=%s)",
-            self.tenant_id, len(raw_list), incremental and has_local_orders, updated_since or "beginning",
+            "tenant=%s syncing %d orders (incremental=%s, since=%s, triggered_by=%s)",
+            self.tenant_id, len(raw_list), incremental and has_local_orders, _since or "beginning",
+            triggered_by,
         )
 
         created = 0

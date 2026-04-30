@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
@@ -19,7 +20,10 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger("nahla-scheduler")
 
 _CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
-_SYNC_INTERVAL_SECONDS = 3600  # store sync every 1 hour
+_SYNC_INTERVAL_SECONDS = 3600  # full store sync every 1 hour
+# Fast order sync: poll only recent orders every 5 minutes to catch orders
+# that Salla didn't deliver a webhook for (webhook delivery is best-effort).
+_ORDER_FAST_SYNC_SECONDS = int(os.getenv("NAHLA_ORDER_FAST_SYNC_SECONDS", "300"))
 _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
 _SALLA_TOKEN_REFRESH_SECONDS = 6 * 3600  # Salla token refresh every 6 hours
@@ -199,6 +203,81 @@ async def run_store_sync_scheduler() -> None:
         except Exception as exc:
             logger.error("[StoreSync Scheduler] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_SYNC_INTERVAL_SECONDS)
+
+
+async def run_order_fast_sync_scheduler() -> None:
+    """Fast incremental order sync every 5 minutes.
+
+    Salla webhooks are best-effort — a webhook for `order.created` may be
+    delayed or not delivered at all.  This sweeper fetches only the orders
+    updated in the last 10 minutes from Salla and upserts them into Nahla
+    so every order appears within at most `_ORDER_FAST_SYNC_SECONDS` seconds,
+    regardless of whether the webhook arrived.
+    """
+    await asyncio.sleep(60)  # short startup delay
+    logger.info(
+        "[OrderFastSync] Started — incremental order polling every %ss",
+        _ORDER_FAST_SYNC_SECONDS,
+    )
+    while True:
+        try:
+            await _fast_sync_orders_all_stores()
+        except Exception as exc:
+            logger.error("[OrderFastSync] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_ORDER_FAST_SYNC_SECONDS)
+
+
+async def _fast_sync_orders_all_stores() -> None:
+    """Fetch orders updated in the last 10 min for every active Salla store."""
+    import sys as _sys, os as _os  # noqa: PLC0415
+    _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
+
+    from core.database import SessionLocal  # noqa: PLC0415
+    from models import Integration          # noqa: PLC0415
+
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        logger.error("[OrderFastSync] Cannot open DB: %s", exc)
+        return
+
+    try:
+        integrations = db.query(Integration).filter(
+            Integration.provider == "salla",
+            Integration.enabled == True,  # noqa: E712
+        ).all()
+
+        if not integrations:
+            return
+
+        # Look back 10 minutes to catch any order that arrived since the last cycle.
+        lookback = datetime.now(timezone.utc) - timedelta(minutes=10)
+        lookback_iso = lookback.isoformat()
+
+        for intg in integrations:
+            tenant_id = intg.tenant_id
+            cfg = intg.config or {}
+            if cfg.get("needs_reauth") or not cfg.get("api_key"):
+                continue
+            try:
+                from services.store_sync import StoreSyncService  # noqa: PLC0415
+                svc = StoreSyncService(db, tenant_id)
+                result = await svc.sync_orders(
+                    updated_since=lookback_iso,
+                    triggered_by="order_fast_sync",
+                )
+                new_orders = result.get("orders_synced", 0) or result.get("created", 0)
+                if new_orders:
+                    logger.info(
+                        "[OrderFastSync] tenant=%s — %d order(s) picked up",
+                        tenant_id, new_orders,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[OrderFastSync] tenant=%s failed: %s", tenant_id, exc,
+                )
+    finally:
+        db.close()
 
 
 async def run_coupon_generator_scheduler() -> None:
