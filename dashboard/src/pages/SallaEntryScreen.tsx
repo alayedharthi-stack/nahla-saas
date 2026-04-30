@@ -1,720 +1,776 @@
 /**
- * SallaEntryScreen.tsx  —  /app/entry
- * ------------------------------------
- * Smart Entry Screen — the first thing every Salla merchant sees after auth.
+ * SallaEntryScreen.tsx — /app/entry
+ * ─────────────────────────────────
+ * Mini-dashboard for "استخدام التطبيق" inside the Salla embedded iframe.
  *
- * QA rules (Salla approval checklist):
- *   ✔ No Landing, no Login, no empty dashboard
- *   ✔ Primary CTA above the fold, high contrast
- *   ✔ Interactive demo — not just a passive preview
- *   ✔ Value copy under every title (minimal, action-first)
- *   ✔ "Skip" is a subtle text link at the very bottom — not a button
- *   ✔ Smooth skeleton → content (no flicker, no double-render)
- *   ✔ Total time to interaction ≤ 3 s
+ * Sections:
+ *   1. Sticky header — Nahla logo + store name
+ *   2. Welcome — greeting + description
+ *   3. Status cards (2×2) — Salla / WhatsApp / Subscription / Nahla
+ *   4. Onboarding steps — completed / current / locked states
+ *   5. Metrics cards (2×2) — today's stats (graceful fallback to "--")
+ *   6. Primary CTA  — فتح لوحة نحلة المتقدمة  (target="_top")
+ *   7. Secondary CTA — ربط واتساب الآن         (target="_top")
  */
-import { useEffect, useState, useCallback, useRef } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+const NAHLA_DASHBOARD   = 'https://app.nahlah.ai'
+const NAHLA_WA_SETTINGS = 'https://app.nahlah.ai/whatsapp-connect'
 
-interface MerchantState {
-  tenant_id:          number
-  whatsapp_connected: boolean
-  has_automations:    boolean
-  has_products:       boolean
-  token:              string
+function getToken(): string {
+  try { return localStorage.getItem('nahla_token') || '' } catch { return '' }
 }
 
-type ScreenPhase = 'loading' | 'wa-missing' | 'no-automations' | 'ready' | 'error'
+// ── Types ──────────────────────────────────────────────────────────────────────
 
-// ── Interactive Demo Modal ────────────────────────────────────────────────────
-// Animated chat simulation showing the full cart-recovery flow in real-time.
+interface EmbeddedStatus {
+  whatsapp_connected: boolean
+  auto_reply_enabled: boolean
+  store_name:         string
+}
 
-const CHAT_STEPS = [
-  {
-    type: 'system',
-    delay: 400,
-    text: '🔔 أحمد أضاف منتجاً للسلة — لم يكمل الشراء منذ 30 دقيقة',
-  },
-  {
-    type: 'outgoing',
-    delay: 1300,
-    text: 'مرحباً أحمد 👋\nلاحظنا أن سلتك لا تزال تنتظرك في متجر الرياض.\n\n📦 Nike Air Max 270 — 499 ر.س\n\nأتمّ طلبك الآن قبل نفاد الكمية 👇',
-    cta: 'إتمام الشراء →',
-  },
-  {
-    type: 'typing',
-    delay: 2200,
-  },
-  {
-    type: 'incoming',
-    delay: 3100,
-    text: 'شكراً! أنا في الطريق، سأكمل الشراء الآن 😊',
-  },
-  {
-    type: 'success',
-    delay: 3900,
-    text: '✅ تم الاسترداد! مبيعة بقيمة 499 ر.س',
-  },
-] as const
+interface Subscription {
+  salla_plan_slug:  string | null
+  salla_plan_name:  string | null
+  billing_status:   string
+  salla_valid_till: string | null
+}
 
-function InteractiveDemoModal({
-  onClose,
-  onActivate,
+interface SyncStats {
+  conversations_today: number
+  orders_today:        number
+  whatsapp_revenue_today: number
+  ai_reply_rate:       number
+}
+
+type StepState = 'completed' | 'current' | 'locked'
+interface MetricPresence {
+  conversations: boolean
+  orders:        boolean
+  revenue:       boolean
+  aiRate:        boolean
+}
+
+// ── Design tokens (inline styles for iframe compatibility) ─────────────────────
+
+const C = {
+  amber:       '#f59e0b',
+  amberLight:  '#fff7ed',
+  amberBorder: '#fed7aa',
+  green:       '#22c55e',
+  greenLight:  '#f0fdf4',
+  greenText:   '#15803d',
+  slate50:     '#f8fafc',
+  slate100:    '#f1f5f9',
+  slate200:    '#e2e8f0',
+  slate300:    '#cbd5e1',
+  slate400:    '#94a3b8',
+  slate500:    '#64748b',
+  slate900:    '#0f172a',
+  white:       '#ffffff',
+  red50:       '#fef2f2',
+  redBorder:   '#fecaca',
+  redText:     '#dc2626',
+  bg:          '#f9fafb',
+} as const
+
+// ── Sub-components ─────────────────────────────────────────────────────────────
+
+function MiniStatusCard({
+  icon, label, active, activeText, inactiveText,
 }: {
-  onClose: () => void
-  onActivate: () => void
+  icon: string; label: string; active: boolean; activeText: string; inactiveText: string
 }) {
-  const [visibleSteps, setVisibleSteps] = useState<number[]>([])
-  const [typing, setTyping]             = useState(false)
-  const mountedRef                      = useRef(true)
+  return (
+    <div
+      style={{
+        background:   C.white,
+        border:       active ? `1.5px solid #bbf7d0` : `1.5px solid ${C.slate100}`,
+        borderRadius: 16,
+        padding:      '14px',
+        boxShadow:    '0 1px 3px rgba(0,0,0,0.04)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <span style={{ fontSize: 18 }}>{icon}</span>
+        <span
+          style={{
+            width:     8,
+            height:    8,
+            borderRadius: '50%',
+            background: active ? C.green : C.slate200,
+            boxShadow:  active ? `0 0 6px rgba(34,197,94,0.4)` : 'none',
+            display:    'inline-block',
+            flexShrink: 0,
+          }}
+        />
+      </div>
+      <p style={{ fontSize: 11, color: C.slate400, fontWeight: 600, margin: 0 }}>{label}</p>
+      <p style={{ fontSize: 12, fontWeight: 700, color: active ? C.greenText : C.slate300, margin: '2px 0 0' }}>
+        {active ? activeText : inactiveText}
+      </p>
+    </div>
+  )
+}
 
-  useEffect(() => {
-    mountedRef.current = true
-    const timers: ReturnType<typeof setTimeout>[] = []
-
-    CHAT_STEPS.forEach((step, idx) => {
-      if (step.type === 'typing') {
-        timers.push(setTimeout(() => { if (mountedRef.current) setTyping(true) }, step.delay))
-        timers.push(setTimeout(() => { if (mountedRef.current) setTyping(false) }, step.delay + 800))
-      } else {
-        timers.push(
-          setTimeout(() => {
-            if (mountedRef.current)
-              setVisibleSteps(prev => prev.includes(idx) ? prev : [...prev, idx])
-          }, step.delay),
-        )
-      }
-    })
-
-    return () => {
-      mountedRef.current = false
-      timers.forEach(clearTimeout)
-    }
-  }, [])
-
-  const done = visibleSteps.includes(CHAT_STEPS.length - 1)
+function OnboardingStep({
+  num, title, description, state, isLast,
+}: {
+  num: number; title: string; description: string; state: StepState; isLast: boolean
+}) {
+  const isDone    = state === 'completed'
+  const isCurrent = state === 'current'
+  const isLocked  = state === 'locked'
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center p-4"
-      style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(6px)' }}
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-sm rounded-2xl p-5 mb-4"
-        style={{ background: '#0f1a2e', border: '1px solid rgba(245,158,11,0.25)' }}
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Modal header */}
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <p className="text-white font-bold text-sm">تجربة تفاعلية</p>
-            <p className="text-slate-500 text-[10px]">شاهد كيف تسترد نحلة السلات المتروكة</p>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-slate-500 hover:text-slate-300 text-2xl leading-none w-7 h-7 flex items-center justify-center rounded-full"
-            style={{ background: 'rgba(255,255,255,0.05)' }}
-          >
-            ×
-          </button>
-        </div>
-
-        {/* Chat simulation */}
-        <div
-          className="rounded-xl p-4 space-y-3 min-h-[220px]"
-          style={{ background: '#1e293b' }}
-          dir="rtl"
-        >
-          {/* Sender header */}
-          <div className="flex items-center gap-2 pb-1 border-b border-white/5">
-            <div
-              className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-black shrink-0"
-              style={{ background: 'linear-gradient(135deg,#f59e0b,#d97706)', color: '#000' }}
-            >
-              N
-            </div>
-            <div>
-              <p className="text-white text-xs font-semibold">نحلة AI</p>
-              <p className="text-slate-500 text-[9px]">متجرك الذكي · WhatsApp Business</p>
-            </div>
-            <div
-              className="mr-auto flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full"
-              style={{ background: 'rgba(37,211,102,0.12)', color: '#4ade80' }}
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-              متصل
-            </div>
-          </div>
-
-          {/* Steps */}
-          {CHAT_STEPS.map((step, idx) => {
-            if (!visibleSteps.includes(idx) && step.type !== 'typing') return null
-
-            if (step.type === 'system') {
-              return (
-                <div key={idx} className="text-center animate-fade-up">
-                  <span
-                    className="text-[10px] px-2 py-1 rounded-full"
-                    style={{ background: 'rgba(245,158,11,0.1)', color: '#94a3b8' }}
-                  >
-                    {step.text}
-                  </span>
-                </div>
-              )
-            }
-
-            if (step.type === 'typing' && typing) {
-              return (
-                <div key={idx} className="flex items-end gap-1.5">
-                  <div className="flex gap-0.5 px-3 py-2 rounded-xl" style={{ background: 'rgba(255,255,255,0.06)' }}>
-                    {[0, 1, 2].map(d => (
-                      <span
-                        key={d}
-                        className="w-1 h-1 rounded-full bg-slate-400 animate-bounce"
-                        style={{ animationDelay: `${d * 0.15}s` }}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )
-            }
-
-            if (step.type === 'outgoing') {
-              return (
-                <div key={idx} className="flex justify-end animate-fade-up">
-                  <div
-                    className="max-w-[85%] rounded-2xl rounded-tr-sm p-3 space-y-2"
-                    style={{ background: 'rgba(37,211,102,0.15)', border: '1px solid rgba(37,211,102,0.2)' }}
-                  >
-                    <p className="text-slate-100 text-xs leading-relaxed whitespace-pre-line">{step.text}</p>
-                    <button
-                      className="w-full py-1.5 rounded-lg text-xs font-bold text-center"
-                      style={{ background: 'rgba(37,211,102,0.25)', color: '#4ade80' }}
-                    >
-                      {step.cta}
-                    </button>
-                  </div>
-                </div>
-              )
-            }
-
-            if (step.type === 'incoming') {
-              return (
-                <div key={idx} className="flex justify-start animate-fade-up">
-                  <div
-                    className="max-w-[85%] rounded-2xl rounded-tl-sm px-3 py-2"
-                    style={{ background: 'rgba(255,255,255,0.07)' }}
-                  >
-                    <p className="text-slate-200 text-xs">{step.text}</p>
-                  </div>
-                </div>
-              )
-            }
-
-            if (step.type === 'success') {
-              return (
-                <div key={idx} className="text-center animate-fade-up">
-                  <div
-                    className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold"
-                    style={{ background: 'rgba(74,222,128,0.12)', color: '#4ade80', border: '1px solid rgba(74,222,128,0.2)' }}
-                  >
-                    {step.text}
-                  </div>
-                </div>
-              )
-            }
-
-            return null
-          })}
-
-          {/* Typing indicator - separate from step list so it always appears */}
-          {typing && !visibleSteps.includes(3) && (
-            <div className="flex items-end gap-1.5">
-              <div className="flex gap-0.5 px-3 py-2 rounded-xl" style={{ background: 'rgba(255,255,255,0.06)' }}>
-                {[0, 1, 2].map(d => (
-                  <span
-                    key={d}
-                    className="w-1 h-1 rounded-full bg-slate-400 animate-bounce"
-                    style={{ animationDelay: `${d * 0.15}s` }}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* CTA after animation */}
-        {done && (
-          <button
-            onClick={onActivate}
-            className="mt-4 flex items-center justify-center gap-2 w-full py-3.5 rounded-2xl font-black text-sm animate-fade-up"
-            style={{
-              background: '#f59e0b',
-              color:      '#0f172a',
-              boxShadow:  '0 4px 20px rgba(245,158,11,0.4)',
-            }}
-          >
-            🚀 فعّل هذه الأتمتة الآن
-          </button>
-        )}
-
-        {!done && (
-          <p className="mt-3 text-center text-[10px] text-slate-700">
-            جاري المحاكاة...
-          </p>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ── Loading skeleton ──────────────────────────────────────────────────────────
-
-function LoadingSkeleton() {
-  return (
-    <div className="space-y-4 animate-pulse">
-      <div className="h-3 rounded-full bg-white/[0.04] w-24" />
-      <div className="h-8 rounded-full bg-white/[0.05] w-4/5" />
-      <div className="h-4 rounded-full bg-white/[0.03] w-3/4" />
-      <div className="space-y-2.5 pt-2">
-        {[0.9, 0.8, 0.85, 0.8].map((w, i) => (
-          <div
-            key={i}
-            className="h-12 rounded-xl"
-            style={{ background: 'rgba(255,255,255,0.025)', width: `${w * 100}%` }}
-          />
-        ))}
-      </div>
-      <div className="h-14 rounded-2xl" style={{ background: 'rgba(245,158,11,0.07)' }} />
-    </div>
-  )
-}
-
-// ── Shared subcomponents ──────────────────────────────────────────────────────
-
-function Badge({ children, color = 'amber' }: { children: React.ReactNode; color?: 'amber' | 'green' }) {
-  const amber = color === 'amber'
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1 rounded-full"
       style={{
-        background: amber ? 'rgba(245,158,11,0.12)' : 'rgba(37,211,102,0.12)',
-        color:      amber ? '#f59e0b' : '#4ade80',
-        border:     amber ? '1px solid rgba(245,158,11,0.25)' : '1px solid rgba(37,211,102,0.2)',
+        display:       'flex',
+        alignItems:    'flex-start',
+        gap:           12,
+        padding:       '12px 16px',
+        borderBottom:  isLast ? 'none' : `1px solid ${C.slate50}`,
+        opacity:       isLocked ? 0.45 : 1,
+        transition:    'opacity 0.2s',
       }}
     >
-      {color === 'green' && <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />}
-      {children}
-    </span>
-  )
-}
-
-function PrimaryCta({
-  children,
-  to,
-  onClick,
-  green = false,
-}: {
-  children: React.ReactNode
-  to?: string
-  onClick?: () => void
-  green?: boolean
-}) {
-  const style = {
-    background: green ? 'linear-gradient(135deg, #25D366 0%, #128C7E 100%)' : '#f59e0b',
-    color:      green ? '#fff' : '#0f172a',
-    boxShadow:  green ? '0 6px 24px rgba(37,211,102,0.4)' : '0 6px 24px rgba(245,158,11,0.4)',
-  }
-  const className =
-    'flex items-center justify-center gap-2 w-full py-4 rounded-2xl font-black text-base transition-transform active:scale-[0.98]'
-
-  if (to) {
-    return (
-      <Link to={to} className={className} style={style} onClick={onClick}>
-        {children}
-      </Link>
-    )
-  }
-  return (
-    <button className={className} style={style} onClick={onClick}>
-      {children}
-    </button>
-  )
-}
-
-function DemoBtn({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="w-full py-3 rounded-2xl text-sm font-semibold"
-      style={{
-        background: 'rgba(255,255,255,0.04)',
-        color:      '#64748b',
-        border:     '1px solid rgba(255,255,255,0.07)',
-      }}
-    >
-      📱 شاهد كيف تعمل — تجربة تفاعلية
-    </button>
-  )
-}
-
-// ── State A: Connect WhatsApp ─────────────────────────────────────────────────
-
-function StateWaMissing({
-  onDemo,
-  onSkip,
-}: {
-  onDemo: () => void
-  onSkip: () => void
-}) {
-  return (
-    <div className="space-y-5">
-      <Badge>خطوة واحدة للبدء</Badge>
-
-      <div className="space-y-1.5">
-        <h2 className="text-[1.6rem] font-black text-white leading-tight">
-          ربط واتساب
-          <br />
-          <span style={{ color: '#f59e0b' }}>يستغرق دقيقتين فقط</span>
-        </h2>
-        <p className="text-slate-400 text-sm leading-relaxed">
-          حوّل سلاتك المتروكة إلى مبيعات تلقائياً — دون أي جهد يدوي
-        </p>
-      </div>
-
-      {/* Benefits */}
-      <div className="space-y-2">
-        {([
-          ['🛒', 'استرداد السلة المتروكة تلقائياً'],
-          ['✅', 'تأكيد الطلبات فورياً للعميل'],
-          ['🚚', 'إشعارات الشحن والتسليم'],
-          ['💰', 'تحصيل طلبات الدفع عند الاستلام'],
-        ] as const).map(([icon, text]) => (
-          <div
-            key={text}
-            className="flex items-center gap-3 rounded-xl px-4 py-3"
-            style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}
-          >
-            <span className="text-lg shrink-0">{icon}</span>
-            <span className="text-slate-300 text-sm">{text}</span>
-            <span className="mr-auto text-green-400 text-xs font-bold shrink-0">✓</span>
-          </div>
-        ))}
-      </div>
-
-      <PrimaryCta to="/whatsapp-connect" onClick={onSkip} green>
-        <span>💬</span>
-        ربط واتساب الآن
-      </PrimaryCta>
-
-      <DemoBtn onClick={onDemo} />
-    </div>
-  )
-}
-
-// ── State B: WA connected, no automations ────────────────────────────────────
-
-function StateNoAutomations({
-  onDemo,
-  onSkip,
-}: {
-  onDemo: () => void
-  onSkip: () => void
-}) {
-  return (
-    <div className="space-y-5">
-      <Badge color="green">واتساب متصل</Badge>
-
-      <div className="space-y-1.5">
-        <h2 className="text-[1.6rem] font-black text-white leading-tight">
-          ابدأ أول أتمتة
-          <br />
-          <span style={{ color: '#f59e0b' }}>واسترد السلات المتروكة</span>
-        </h2>
-        <p className="text-slate-400 text-sm leading-relaxed">
-          فعّل الأتمتة مرة واحدة — ستعمل 24/7 وتسترد مبيعاتك تلقائياً
-        </p>
-      </div>
-
-      {/* Stats card */}
+      {/* Step bubble */}
       <div
-        className="rounded-2xl p-4 space-y-3"
         style={{
-          background: 'linear-gradient(135deg, rgba(245,158,11,0.09) 0%, rgba(245,158,11,0.03) 100%)',
-          border:     '1px solid rgba(245,158,11,0.22)',
+          width:          28,
+          height:         28,
+          borderRadius:   '50%',
+          display:        'flex',
+          alignItems:     'center',
+          justifyContent: 'center',
+          flexShrink:     0,
+          fontSize:       12,
+          fontWeight:     900,
+          background:     isDone ? C.amber : isCurrent ? C.amberLight : C.slate50,
+          border:         isDone
+            ? `2px solid ${C.amber}`
+            : isCurrent
+            ? `2px solid ${C.amber}`
+            : `2px solid ${C.slate200}`,
+          color:          isDone ? C.slate900 : isCurrent ? C.amber : C.slate300,
         }}
       >
-        <div className="flex items-start gap-3">
-          <span className="text-3xl">🛒</span>
-          <div>
-            <p className="text-white font-bold text-sm">استرداد السلة المتروكة</p>
-            <p className="text-slate-400 text-xs mt-0.5">رسالة واتساب تلقائية بعد 30 دقيقة</p>
-          </div>
-        </div>
-        <div className="flex items-center justify-around pt-1">
-          {[
-            ['+22%', 'متوسط الاسترداد'],
-            ['تلقائي', 'لا إعداد'],
-            ['٢٤/٧', 'دائماً'],
-          ].map(([val, label]) => (
-            <div key={label} className="text-center">
-              <p className="text-amber-400 font-black text-lg">{val}</p>
-              <p className="text-slate-500 text-[10px]">{label}</p>
-            </div>
-          ))}
-        </div>
+        {isDone ? '✓' : num}
       </div>
 
-      <PrimaryCta to="/smart-automations" onClick={onSkip}>
-        <span>🚀</span>
-        تفعيل الأتمتة الآن
-      </PrimaryCta>
-
-      <DemoBtn onClick={onDemo} />
-    </div>
-  )
-}
-
-// ── State C: Fully live ───────────────────────────────────────────────────────
-
-function StateReady({
-  onDemo,
-  onSkip,
-}: {
-  onDemo: () => void
-  onSkip: () => void
-}) {
-  return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap gap-2">
-        <Badge color="green">واتساب متصل</Badge>
-        <Badge>⚡ أتمتات نشطة</Badge>
-      </div>
-
-      <div className="space-y-1.5">
-        <h2 className="text-[1.6rem] font-black text-white leading-tight">
-          كل شيء جاهز 🚀
-        </h2>
-        <p className="text-slate-400 text-sm leading-relaxed">
-          أتمتاتك تعمل وتسترد المبيعات الآن — جرّب تجربة عميلك مباشرةً
-        </p>
-      </div>
-
-      <PrimaryCta onClick={onDemo} green>
-        <span>📩</span>
-        جرّب تجربة واتساب التفاعلية
-      </PrimaryCta>
-
-      {/* Quick links grid */}
-      <div className="grid grid-cols-2 gap-2">
-        {([
-          ['📊 لوحة التحكم', '/overview'],
-          ['⚡ الأتمتات',    '/smart-automations'],
-          ['📋 الطلبات',     '/orders'],
-          ['📣 حملة جديدة', '/campaigns'],
-        ] as const).map(([label, to]) => (
-          <Link
-            key={to}
-            to={to}
-            onClick={onSkip}
-            className="py-3 rounded-xl text-center text-sm font-semibold transition-colors hover:bg-white/10"
+      {/* Text content */}
+      <div style={{ flex: 1, paddingTop: 2 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span
             style={{
-              background: 'rgba(255,255,255,0.04)',
-              color:      '#94a3b8',
-              border:     '1px solid rgba(255,255,255,0.07)',
+              fontSize:   13,
+              fontWeight: 700,
+              color:      isDone ? C.slate400 : C.slate900,
             }}
           >
-            {label}
-          </Link>
-        ))}
+            {title}
+          </span>
+
+          {isCurrent && (
+            <span
+              style={{
+                fontSize:     10,
+                fontWeight:   900,
+                padding:      '2px 8px',
+                borderRadius: 99,
+                background:   C.amberLight,
+                color:        C.amber,
+                border:       `1px solid ${C.amberBorder}`,
+              }}
+            >
+              الخطوة التالية
+            </span>
+          )}
+
+          {isDone && (
+            <span
+              style={{
+                fontSize:     10,
+                fontWeight:   900,
+                padding:      '2px 8px',
+                borderRadius: 99,
+                background:   C.greenLight,
+                color:        C.greenText,
+              }}
+            >
+              مكتمل ✓
+            </span>
+          )}
+        </div>
+        <p style={{ fontSize: 11, color: C.slate400, margin: '3px 0 0', lineHeight: 1.5 }}>
+          {description}
+        </p>
       </div>
     </div>
   )
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
+function MetricCard({
+  icon, label, rawValue, hasData,
+}: {
+  icon: string; label: string; rawValue: string; hasData: boolean
+}) {
+  return (
+    <div
+      style={{
+        background:   C.white,
+        border:       `1.5px solid ${C.slate100}`,
+        borderRadius: 16,
+        padding:      '14px',
+        boxShadow:    '0 1px 3px rgba(0,0,0,0.04)',
+      }}
+    >
+      <span style={{ fontSize: 18 }}>{icon}</span>
+      <p style={{ fontSize: 11, color: C.slate400, margin: '8px 0 2px', lineHeight: 1.4 }}>{label}</p>
+      <p
+        style={{
+          fontSize:   20,
+          fontWeight: 900,
+          color:      hasData ? C.slate900 : C.slate300,
+          margin:     0,
+          direction:  'ltr',
+          textAlign:  'right',
+        }}
+      >
+        {hasData ? rawValue : '--'}
+      </p>
+    </div>
+  )
+}
+
+function LoadingSkeleton() {
+  const pulse: React.CSSProperties = {
+    background: 'linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%)',
+    backgroundSize: '200% 100%',
+    animation: 'shimmer 1.4s infinite',
+    borderRadius: 16,
+  }
+  return (
+    <>
+      <style>{`@keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }`}</style>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        {[1, 2, 3, 4].map(i => <div key={i} style={{ ...pulse, height: 84 }} />)}
+      </div>
+      <div style={{ ...pulse, height: 200 }} />
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        {[1, 2, 3, 4].map(i => <div key={i} style={{ ...pulse, height: 84 }} />)}
+      </div>
+    </>
+  )
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────────
 
 export default function SallaEntryScreen() {
-  const navigate      = useNavigate()
-  const [phase, setPhase]       = useState<ScreenPhase>('loading')
-  const [showDemo, setShowDemo] = useState(false)
-  const [visible, setVisible]   = useState(false) // fade-in after load
-  const [errorMsg, setErrorMsg] = useState('')
-  const loadedRef               = useRef(false)
+  const navigate  = useNavigate()
+  const bootedRef = useRef(false)
+  const [logoErr, setLogoErr]   = useState(false)
 
-  // ── Mark entry & skip ──────────────────────────────────────────────────
-  const markShown = useCallback(() => {
-    sessionStorage.setItem('salla_entry_shown', '1')
-  }, [])
+  const [status,  setStatus]  = useState<EmbeddedStatus | null>(null)
+  const [sub,     setSub]     = useState<Subscription | null>(null)
+  const [metrics, setMetrics] = useState<SyncStats | null>(null)
+  const [metricPresence, setMetricPresence] = useState<MetricPresence>({
+    conversations: false,
+    orders:        false,
+    revenue:       false,
+    aiRate:        false,
+  })
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState<string | null>(null)
+  const [partialFallback, setPartialFallback] = useState(false)
 
-  const handleSkip = useCallback(() => {
-    markShown()
-    navigate('/overview', { replace: true })
-  }, [markShown, navigate])
+  const storedName = (() => {
+    try { return localStorage.getItem('nahla_salla_store_name') || '' } catch { return '' }
+  })()
 
-  const handleActivate = useCallback(() => {
-    markShown()
-    setShowDemo(false)
-    navigate('/smart-automations', { replace: true })
-  }, [markShown, navigate])
-
-  // ── Session load ───────────────────────────────────────────────────────
-  // Defensive: we already have a valid JWT (just persisted by SallaEmbedded).
-  // If the readiness probe fails for any reason (timeout, 5xx, CORS), we
-  // STILL enter the dashboard at /overview rather than blocking the merchant
-  // on an error screen. Worst case the entry screen falls back to the live
-  // ("ready") state with quick links — never a dead-end.
   const load = useCallback(async () => {
-    const stored = localStorage.getItem('nahla_token')
-    console.info('[SallaEntry] mount | token present:', !!stored)
+    setLoading(true)
+    setError(null)
+    setPartialFallback(false)
+    setMetricPresence({
+      conversations: false,
+      orders:        false,
+      revenue:       false,
+      aiRate:        false,
+    })
+    const token = getToken()
+    if (!token) { navigate('/app/salla', { replace: true }); return }
 
-    if (!stored) {
-      console.warn('[SallaEntry] no token → /app/salla')
-      navigate('/app/salla', { replace: true })
-      return
-    }
+    const headers = { Authorization: `Bearer ${token}` }
+    const signal  = AbortSignal.timeout(9000)
 
     try {
-      const ctrl = new AbortController()
-      const tid  = setTimeout(() => ctrl.abort(), 10_000)  // 10s — readiness probes can be slow
-      console.info('[SallaEntry] → GET /api/salla/session')
-      const res  = await fetch(`${API_BASE}/api/salla/session`, {
-        headers: { Authorization: `Bearer ${stored}` },
-        signal:  ctrl.signal,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const [sessionR, settingsR, subR, syncR] = await Promise.allSettled<any>([
+        fetch(`${API_BASE}/api/salla/session`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
+        fetch(`${API_BASE}/salla/app-settings`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
+        fetch(`${API_BASE}/salla/subscription/status`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
+        fetch(`${API_BASE}/store-sync/status`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
+      ])
+
+      const sessionOk  = sessionR.status  === 'fulfilled' && !!sessionR.value?.ok
+      const settingsOk = settingsR.status === 'fulfilled' && !!settingsR.value?.ok
+      const subOk      = subR.status      === 'fulfilled' && !!subR.value?.ok
+      const syncOk     = syncR.status     === 'fulfilled' && !!syncR.value?.ok
+
+      // Required APIs for accurate status in the mini dashboard.
+      if (!sessionOk || !subOk) setPartialFallback(true)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wa:      any = sessionOk  ? (sessionR.value?.data ?? {}) : {}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cfg:     any = settingsOk ? (settingsR.value?.data?.settings ?? {}) : {}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const subData: any = subOk      ? (subR.value?.data ?? {}) : {}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sync:    any = syncOk     ? (syncR.value?.data ?? null) : null
+
+      localStorage.setItem('nahla_salla_wa_connected', wa.whatsapp_connected ? '1' : '0')
+
+      setStatus({
+        whatsapp_connected: !!wa.whatsapp_connected,
+        auto_reply_enabled: cfg.nahla_enabled ?? true,
+        store_name:         wa.store_name || storedName,
       })
-      clearTimeout(tid)
-      console.info('[SallaEntry] session status:', res.status)
 
-      // Only a real auth failure should bounce back to /app/salla.
-      // Network errors / 5xx don't invalidate the token we just got.
-      if (res.status === 401 || res.status === 403) {
-        console.warn('[SallaEntry] auth rejected → /overview (fallback, do not clear token)')
-        // Don't clear the token — let the dashboard guard re-check.
-        navigate('/overview', { replace: true })
-        return
+      if (subData?.subscription) setSub(subData.subscription)
+
+      if (sync) {
+        const pickNumber = (...vals: unknown[]): number | undefined => {
+          for (const val of vals) {
+            if (typeof val === 'number' && Number.isFinite(val)) return val
+            if (typeof val === 'string' && val.trim() !== '' && Number.isFinite(Number(val))) return Number(val)
+          }
+          return undefined
+        }
+        const convValue    = pickNumber(sync.conversations_today)
+        const ordersValue  = pickNumber(sync.orders_today, sync.ai_orders)
+        const revenueValue = pickNumber(sync.whatsapp_revenue_today, sync.ai_revenue)
+        const aiRateRaw    = pickNumber(sync.ai_reply_rate, sync.ai_rate)
+        const aiRateValue  = aiRateRaw === undefined ? undefined : (aiRateRaw > 1 ? aiRateRaw / 100 : aiRateRaw)
+
+        setMetricPresence({
+          conversations: convValue !== undefined,
+          orders:        ordersValue !== undefined,
+          revenue:       revenueValue !== undefined,
+          aiRate:        aiRateValue !== undefined,
+        })
+
+        setMetrics({
+          conversations_today: convValue ?? 0,
+          orders_today:        ordersValue ?? 0,
+          whatsapp_revenue_today: revenueValue ?? 0,
+          ai_reply_rate:       aiRateValue ?? 0,
+        })
       }
-
-      if (!res.ok) {
-        console.warn('[SallaEntry] non-OK status, using safe fallback')
-        navigate('/overview', { replace: true })
-        return
-      }
-
-      const data: MerchantState & { token?: string } = await res.json()
-      console.info('[SallaEntry] session OK | wa:', data.whatsapp_connected,
-                   '| autos:', data.has_automations,
-                   '| products:', data.has_products)
-
-      if (data.token) localStorage.setItem('nahla_token', data.token)
-
-      const nextPhase: ScreenPhase = !data.whatsapp_connected
-        ? 'wa-missing'
-        : !data.has_automations
-          ? 'no-automations'
-          : 'ready'
-
-      setPhase(nextPhase)
-      setTimeout(() => setVisible(true), 50)
-    } catch (e) {
-      // Network error / abort / parse error — DO NOT show a dead-end.
-      // The merchant is logged in (we have a token); take them to /overview.
-      console.error('[SallaEntry] readiness probe failed → /overview fallback:', e)
-      navigate('/overview', { replace: true })
+    } catch {
+      setError('تعذّر تحميل البيانات. تحقق من اتصالك وأعد المحاولة.')
+    } finally {
+      setLoading(false)
     }
-  }, [navigate])
+  }, [navigate, storedName])
 
   useEffect(() => {
-    if (loadedRef.current) return
-    loadedRef.current = true
+    if (bootedRef.current) return
+    bootedRef.current = true
     localStorage.setItem('nahla_salla_embedded', '1')
     load()
   }, [load])
 
-  return (
-    <>
-      {showDemo && (
-        <InteractiveDemoModal
-          onClose={() => setShowDemo(false)}
-          onActivate={handleActivate}
-        />
-      )}
+  // ── Derived state ────────────────────────────────────────────────────────────
 
-      <div
-        dir="rtl"
-        className="min-h-dvh flex flex-col px-4 py-7"
+  const waOk      = status?.whatsapp_connected ?? false
+  const autoOk    = status?.auto_reply_enabled ?? false
+  const nahlaOk   = waOk && autoOk
+  const subStatus = sub?.billing_status ?? 'none'
+  const subActive = subStatus === 'active' || subStatus === 'trial'
+  const subLabel  = subStatus === 'active'    ? 'نشط'
+                  : subStatus === 'trial'     ? 'تجريبي'
+                  : subStatus === 'cancelled' ? 'ملغى'
+                  : 'غير نشط'
+
+  const m        = metrics
+  const hasConv  = metricPresence.conversations
+  const hasOrd   = metricPresence.orders
+  const hasRev   = metricPresence.revenue
+  const hasRate  = metricPresence.aiRate
+  const noData   = !hasConv && !hasOrd && !hasRev && !hasRate
+
+  const fmt    = (n: number) => n.toLocaleString('ar-SA')
+  const fmtSAR = (n: number) => `${n.toLocaleString('ar-SA')} ر.س`
+  const fmtPct = (n: number) => `${Math.round(n * 100)}%`
+
+  // Onboarding steps: each entry is true when that step is done
+  const stepDone = [waOk, waOk && autoOk, hasConv, hasConv && (hasOrd || hasRev)]
+  const stepState = (i: number): StepState => {
+    if (stepDone[i]) return 'completed'
+    const first = stepDone.findIndex(d => !d)
+    return first === i ? 'current' : 'locked'
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────────────
+
+  return (
+    <div
+      dir="rtl"
+      style={{
+        minHeight:   '100dvh',
+        display:     'flex',
+        flexDirection: 'column',
+        fontFamily:  "'Cairo', system-ui, sans-serif",
+        background:  C.bg,
+        color:       C.slate900,
+      }}
+    >
+      {/* ── Sticky header ─────────────────────────────────────────────────── */}
+      <header
         style={{
-          fontFamily:      "'Cairo', system-ui, sans-serif",
-          background:      '#0f172a',
-          backgroundImage: 'radial-gradient(ellipse 80% 50% at 50% -5%, rgba(245,158,11,0.07) 0%, transparent 65%)',
+          position:     'sticky',
+          top:          0,
+          zIndex:       10,
+          background:   C.white,
+          borderBottom: `1px solid ${C.slate100}`,
+          boxShadow:    '0 1px 4px rgba(0,0,0,0.04)',
+          padding:      '10px 16px',
+          display:      'flex',
+          alignItems:   'center',
+          gap:          10,
         }}
       >
-        {/* Header — logo only, no escape button */}
-        <div className="flex items-center gap-2 mb-8">
+        {/* Logo */}
+        {!logoErr ? (
           <img
             src="https://app.nahlah.ai/logo.png"
             alt="نحلة"
-            className="w-7 h-7 object-contain"
-            style={{ filter: 'drop-shadow(0 0 8px rgba(245,158,11,0.5))' }}
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+            style={{ width: 30, height: 30, objectFit: 'contain' }}
+            onError={() => setLogoErr(true)}
           />
-          <span className="text-white font-black text-base">نحلة AI</span>
+        ) : (
+          <div
+            style={{
+              width:          30,
+              height:         30,
+              borderRadius:   '50%',
+              background:     C.amberLight,
+              border:         `1.5px solid ${C.amberBorder}`,
+              display:        'flex',
+              alignItems:     'center',
+              justifyContent: 'center',
+              fontSize:       16,
+              flexShrink:     0,
+            }}
+          >
+            🐝
+          </div>
+        )}
+
+        {/* Brand + store */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={{ fontSize: 14, fontWeight: 900, color: C.slate900, margin: 0 }}>نحلة AI</p>
+          {status?.store_name && (
+            <p style={{ fontSize: 10, color: C.slate400, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {status.store_name}
+            </p>
+          )}
         </div>
 
-        {/* Main content */}
-        <div
-          className="flex-1 flex flex-col justify-center max-w-sm mx-auto w-full transition-opacity duration-300"
-          style={{ opacity: phase === 'loading' || !visible ? 1 : 1 }}
+        {/* Refresh */}
+        <button
+          type="button"
+          onClick={load}
+          disabled={loading}
+          style={{
+            fontSize:     11,
+            color:        C.slate400,
+            background:   'transparent',
+            border:       'none',
+            cursor:       loading ? 'default' : 'pointer',
+            padding:      '4px 8px',
+            borderRadius: 8,
+            opacity:      loading ? 0.5 : 1,
+          }}
         >
-          {phase === 'loading' && <LoadingSkeleton />}
+          {loading ? '...' : 'تحديث'}
+        </button>
+      </header>
 
-          {phase === 'error' && (
-            <div className="text-center space-y-4">
-              <div className="text-4xl">⚠️</div>
-              <p className="text-white font-semibold text-sm">{errorMsg}</p>
-              <button
-                onClick={load}
-                className="w-full py-3.5 rounded-2xl font-bold text-sm"
-                style={{ background: '#f59e0b', color: '#0f172a' }}
-              >
-                إعادة المحاولة
-              </button>
-            </div>
-          )}
-
-          {phase === 'wa-missing' && visible && (
-            <StateWaMissing onDemo={() => setShowDemo(true)} onSkip={markShown} />
-          )}
-
-          {phase === 'no-automations' && visible && (
-            <StateNoAutomations onDemo={() => setShowDemo(true)} onSkip={markShown} />
-          )}
-
-          {phase === 'ready' && visible && (
-            <StateReady onDemo={() => setShowDemo(true)} onSkip={markShown} />
-          )}
-        </div>
-
-        {/* Footer — subtle skip link, zero visual weight */}
-        <div className="pt-8 pb-2 text-center space-y-2">
-          {phase !== 'loading' && (
-            <button
-              onClick={handleSkip}
-              className="text-[11px] transition-colors"
-              style={{ color: '#334155' }}
-              onMouseEnter={e => (e.currentTarget.style.color = '#475569')}
-              onMouseLeave={e => (e.currentTarget.style.color = '#334155')}
-            >
-              الدخول إلى لوحة التحكم
-            </button>
-          )}
-          <p className="text-[10px]" style={{ color: '#1e293b' }}>
-            بأيدي سعودية 100% 🇸🇦
+      {/* ── Main content ──────────────────────────────────────────────────── */}
+      <main
+        style={{
+          flex:      1,
+          padding:   '20px 16px 32px',
+          maxWidth:  520,
+          margin:    '0 auto',
+          width:     '100%',
+          boxSizing: 'border-box',
+          display:   'flex',
+          flexDirection: 'column',
+          gap:       20,
+        }}
+      >
+        {/* ─ Welcome ─ */}
+        <div style={{ textAlign: 'center', paddingTop: 4 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 900, color: C.slate900, margin: '0 0 6px' }}>
+            مرحباً بك في نحلة 👋
+          </h1>
+          <p style={{ fontSize: 13, color: C.slate500, margin: 0, lineHeight: 1.6 }}>
+            اربط واتساب وابدأ الرد الذكي لزيادة مبيعات متجرك
           </p>
         </div>
-      </div>
-    </>
+
+        {/* ─ Loading ─ */}
+        {loading && <LoadingSkeleton />}
+
+        {/* ─ Error ─ */}
+        {error && !loading && (
+          <div
+            style={{
+              display:      'flex',
+              alignItems:   'center',
+              gap:          12,
+              background:   C.red50,
+              border:       `1.5px solid ${C.redBorder}`,
+              borderRadius: 16,
+              padding:      '12px 16px',
+            }}
+          >
+            <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
+            <p style={{ fontSize: 12, color: C.redText, flex: 1, margin: 0, lineHeight: 1.5 }}>{error}</p>
+            <button
+              onClick={load}
+              style={{
+                fontSize:   12,
+                fontWeight: 700,
+                color:      C.redText,
+                background: 'transparent',
+                border:     'none',
+                cursor:     'pointer',
+                flexShrink: 0,
+                textDecoration: 'underline',
+              }}
+            >
+              إعادة المحاولة
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && status && (
+          <>
+            {/* ─ 1. Status cards (2×2) ─ */}
+            <section>
+              <p
+                style={{
+                  fontSize:      11,
+                  fontWeight:    700,
+                  color:         C.slate400,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  margin:        '0 0 10px',
+                }}
+              >
+                الحالة
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <MiniStatusCard icon="🏪" label="سلة"       active={true}      activeText="متصل"        inactiveText="غير متصل" />
+                <MiniStatusCard icon="💬" label="واتساب"    active={waOk}      activeText="متصل"        inactiveText="غير متصل" />
+                <MiniStatusCard icon="💳" label="الاشتراك"  active={subActive} activeText={subLabel}    inactiveText="غير نشط"  />
+                <MiniStatusCard icon="🤖" label="نحلة"      active={nahlaOk}   activeText="تعمل"        inactiveText="متوقفة"   />
+              </div>
+            </section>
+
+            {/* ─ 2. Onboarding steps ─ */}
+            <section
+              style={{
+                background:   C.white,
+                border:       `1.5px solid ${C.slate100}`,
+                borderRadius: 16,
+                boxShadow:    '0 1px 3px rgba(0,0,0,0.04)',
+                overflow:     'hidden',
+              }}
+            >
+              <div
+                style={{
+                  padding:      '12px 16px',
+                  borderBottom: `1px solid ${C.slate50}`,
+                }}
+              >
+                <p
+                  style={{
+                    fontSize:      11,
+                    fontWeight:    700,
+                    color:         C.slate400,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.08em',
+                    margin:        0,
+                  }}
+                >
+                  خطوات البدء
+                </p>
+              </div>
+              <OnboardingStep
+                num={1}
+                title="ربط واتساب"
+                description="اربط حساب واتساب بزنس بمتجرك"
+                state={stepState(0)}
+                isLast={false}
+              />
+              <OnboardingStep
+                num={2}
+                title="تفعيل الرد الذكي"
+                description="فعّل نحلة لترد على عملائك تلقائياً"
+                state={stepState(1)}
+                isLast={false}
+              />
+              <OnboardingStep
+                num={3}
+                title="تجربة أول محادثة"
+                description="ابدأ محادثة واتساب مع عميل أول"
+                state={stepState(2)}
+                isLast={false}
+              />
+              <OnboardingStep
+                num={4}
+                title="متابعة النتائج"
+                description="راقب الإحصائيات ومعدلات الرد الذكي"
+                state={stepState(3)}
+                isLast={true}
+              />
+            </section>
+
+            {/* ─ 3. Metrics (2×2) ─ */}
+            <section>
+              <p
+                style={{
+                  fontSize:      11,
+                  fontWeight:    700,
+                  color:         C.slate400,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  margin:        '0 0 10px',
+                }}
+              >
+                إحصائيات اليوم
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <MetricCard
+                  icon="💬"
+                  label="المحادثات اليوم"
+                  rawValue={fmt(m?.conversations_today ?? 0)}
+                  hasData={hasConv}
+                />
+                <MetricCard icon="🛍️" label="طلبات واتساب اليوم" rawValue={fmt(m?.orders_today ?? 0)} hasData={hasOrd} />
+                <MetricCard
+                  icon="💰"
+                  label="إيرادات واتساب اليوم"
+                  rawValue={fmtSAR(m?.whatsapp_revenue_today ?? 0)}
+                  hasData={hasRev}
+                />
+                <MetricCard
+                  icon="🤖"
+                  label="معدل الرد بالذكاء"
+                  rawValue={fmtPct(m?.ai_reply_rate ?? 0)}
+                  hasData={hasRate}
+                />
+              </div>
+
+              {partialFallback && (
+                <p
+                  style={{
+                    fontSize:      12,
+                    color:         C.slate500,
+                    textAlign:     'center',
+                    margin:        '10px 0 0',
+                    border:        `1px dashed ${C.slate200}`,
+                    borderRadius:  10,
+                    padding:       '8px 10px',
+                    background:    C.white,
+                  }}
+                >
+                  تعذر تحميل بعض البيانات، اضغط تحديث.
+                </p>
+              )}
+
+              {noData && (
+                <p
+                  style={{
+                    fontSize:   12,
+                    color:      C.slate400,
+                    textAlign:  'center',
+                    margin:     '12px 0 0',
+                    lineHeight: 1.6,
+                  }}
+                >
+                  ستظهر الإحصائيات بعد أول محادثات واتساب
+                </p>
+              )}
+            </section>
+
+            {/* ─ 4. CTAs ─ */}
+            <section style={{ display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 }}>
+              {/* Primary */}
+              <a
+                href={NAHLA_DASHBOARD}
+                target="_top"
+                rel="noreferrer"
+                style={{
+                  display:        'flex',
+                  alignItems:     'center',
+                  justifyContent: 'center',
+                  gap:            8,
+                  padding:        '15px 20px',
+                  borderRadius:   16,
+                  fontSize:       15,
+                  fontWeight:     900,
+                  background:     C.amber,
+                  color:          C.slate900,
+                  textDecoration: 'none',
+                  boxShadow:      '0 4px 20px rgba(245,158,11,0.28)',
+                  border:         'none',
+                }}
+              >
+                🚀 فتح لوحة نحلة المتقدمة
+              </a>
+
+              {/* Secondary */}
+              <a
+                href={NAHLA_WA_SETTINGS}
+                target="_top"
+                rel="noreferrer"
+                style={{
+                  display:        'flex',
+                  alignItems:     'center',
+                  justifyContent: 'center',
+                  gap:            8,
+                  padding:        '13px 20px',
+                  borderRadius:   16,
+                  fontSize:       14,
+                  fontWeight:     700,
+                  background:     C.white,
+                  color:          C.amber,
+                  textDecoration: 'none',
+                  border:         `1.5px solid ${C.amber}`,
+                }}
+              >
+                💬 ربط واتساب الآن
+              </a>
+            </section>
+          </>
+        )}
+      </main>
+
+      {/* ── Footer ─────────────────────────────────────────────────────────── */}
+      <footer style={{ textAlign: 'center', padding: '12px 16px', borderTop: `1px solid ${C.slate100}` }}>
+        <p style={{ fontSize: 10, color: C.slate300, margin: 0 }}>
+          بأيدي سعودية 🇸🇦 · Nahla AI
+        </p>
+      </footer>
+    </div>
   )
 }

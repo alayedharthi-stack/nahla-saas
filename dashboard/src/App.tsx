@@ -45,6 +45,8 @@ import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
 import SallaEmbedded    from './pages/SallaEmbedded'
 import SallaEntryScreen from './pages/SallaEntryScreen'
+import SallaPricing     from './pages/SallaPricing'
+import SallaSetup       from './pages/SallaSetup'
 import InviteFlow       from './pages/InviteFlow'
 import ZidCallback      from './pages/ZidCallback'
 import Register from './pages/Register'
@@ -90,8 +92,12 @@ export default function App() {
           <Route path="/salla-callback"             element={<SallaCallback />} />
           {/* Zero-Friction embedded entry — set /app/salla as the iframe URL in Salla partner portal */}
           <Route path="/app/salla"                  element={<SallaEmbedded />} />
-          {/* Smart Entry Screen — always shown after Salla auth, before dashboard */}
+          {/* Mini-dashboard — "استخدام التطبيق" inside Salla iframe (status + onboarding + metrics + CTAs) */}
           <Route path="/app/entry"                  element={<SallaEntryScreen />} />
+          {/* Pricing page — no Navbar/Sidebar; CTAs open app.nahlah.ai/billing externally */}
+          <Route path="/app/pricing"                element={<SallaPricing />} />
+          {/* Quick Setup — shown to new Salla merchants before entry screen */}
+          <Route path="/app/salla/setup"            element={<SallaSetup />} />
           {/* Legacy entry kept for backwards compatibility */}
           <Route path="/salla"                      element={<SallaEmbedded />} />
           {/* Direct-invite onboarding (outside Salla) */}

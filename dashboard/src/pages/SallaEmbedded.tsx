@@ -135,6 +135,12 @@ function persistSession(
     localStorage.setItem('nahla_store_name',        data.store_name)
   }
   if (storeId) localStorage.setItem('nahla_salla_store_id', storeId)
+
+  // Store wa_connected and is_new — used by SallaSetup guard
+  if ('is_new' in data) {
+    localStorage.setItem('nahla_salla_is_new',      data.is_new       ? '1' : '0')
+    localStorage.setItem('nahla_salla_wa_connected', data.wa_connected ? '1' : '0')
+  }
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -172,10 +178,17 @@ export default function SallaEmbedded() {
 
   const enterDashboard = useCallback(() => {
     clearWatchdog()
-    console.info('[SallaEmbedded] ✓ auth complete → navigating to /app/entry')
     setPhase('success')
-    setStatusText('جاري الدخول...')
-    setTimeout(() => navigate('/app/entry', { replace: true }), 500)
+
+    // Always land on the mini-dashboard inside Salla.
+    // Setup can still be reached from /app/entry CTAs.
+    const isNew       = localStorage.getItem('nahla_salla_is_new') === '1'
+    const destination = '/app/entry'
+
+    console.info('[SallaEmbedded] ✓ auth complete → navigating to', destination,
+      '| is_new:', isNew)
+    setStatusText(isNew ? 'مرحباً! جاري إعداد حسابك...' : 'جاري الدخول...')
+    setTimeout(() => navigate(destination, { replace: true }), 500)
   }, [navigate, clearWatchdog])
 
   // ── Step 1: check existing Nahla session ──────────────────────────────────
