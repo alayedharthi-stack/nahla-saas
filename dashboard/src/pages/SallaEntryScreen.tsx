@@ -16,6 +16,15 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 
+// ── Immediate ready re-signal ─────────────────────────────────────────────────
+// /app/entry is navigated to INSIDE the Salla iframe after auth. Re-signalling
+// here ensures Salla's host frame doesn't time-out waiting for app.ready when
+// React Router replaces the page via client-side navigation.
+;(function immediateReady() {
+  try { window.parent.postMessage({ type: 'app.ready' }, '*') } catch { /* cross-origin */ }
+  try { window.parent.postMessage({ event: 'embedded::ready', payload: {}, source: 'embedded-app' }, '*') } catch { /* cross-origin */ }
+})()
+
 const NAHLA_DASHBOARD   = 'https://app.nahlah.ai'
 const NAHLA_WA_SETTINGS = 'https://app.nahlah.ai/whatsapp-connect'
 
@@ -378,6 +387,9 @@ export default function SallaEntryScreen() {
   }, [navigate, storedName])
 
   useEffect(() => {
+    // Re-signal Salla's host frame in case it missed the module-level signal.
+    try { window.parent.postMessage({ type: 'app.ready' }, '*') } catch { /* cross-origin */ }
+
     if (bootedRef.current) return
     bootedRef.current = true
     localStorage.setItem('nahla_salla_embedded', '1')

@@ -22,6 +22,14 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 
+// ── Immediate ready signal — fires before React even renders ───────────────────
+// Salla requires app.ready within milliseconds of the iframe URL loading.
+// Calling it here (module scope) guarantees it runs before any hook/effect.
+;(function immediateReady() {
+  try { window.parent.postMessage({ type: 'app.ready' }, '*') } catch { /* cross-origin */ }
+  try { window.parent.postMessage({ event: 'embedded::ready', payload: {}, source: 'embedded-app' }, '*') } catch { /* cross-origin */ }
+})()
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const SDK_URL          = 'https://cdn.jsdelivr.net/npm/@salla.sa/embedded-sdk@0.2.4/dist/umd/index.js'
