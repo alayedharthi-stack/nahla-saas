@@ -81,6 +81,20 @@ _DASHBOARD_ORIGIN = _DASHBOARD or "https://app.nahlah.ai"
 # embedded URL (which only works inside Salla's iframe context).
 _SALLA_POST_OAUTH_PATH = "/app/entry"
 
+# After OAuth completes, hand control back to Salla.  We redirect the
+# merchant to Nahla's listing on the Salla App Store — this page is owned
+# and rendered by Salla itself and shows the app name, description, and
+# the official "استخدام التطبيق" button.  We NEVER show a Nahla page in
+# this position because:
+#   - Salla's app-review policy expects merchants to enter the app via
+#     the "استخدام التطبيق" button only.
+#   - Showing any Nahla branding here breaks Salla's UX flow.
+# Override via SALLA_POST_INSTALL_URL env var if needed.
+_SALLA_POST_INSTALL_URL = (
+    os.getenv("SALLA_POST_INSTALL_URL", "").strip()
+    or "https://s.salla.sa/apps/nahla"
+)
+
 # The Salla callback page on the dashboard (for new merchants auto-logged in
 # via Salla — it stores the JWT in localStorage then routes to /app/entry).
 _SALLA_CALLBACK_BASE = _DASHBOARD_ORIGIN
@@ -2169,26 +2183,29 @@ async def salla_oauth_callback(
     except Exception as _exc:
         logger.warning("[Salla OAuth] Could not queue initial sync: %s", _exc)
 
-    # ── Step 5: Render install-complete page on api.nahlah.ai ─────────────────
-    # We deliberately do NOT redirect to /salla-callback or any Nahla page.
-    # Salla policy: the merchant must press 'استخدام التطبيق' inside Salla
-    # themselves to enter the app for the first time.  Returning HTML here
-    # keeps the merchant on api.nahlah.ai (effectively a no-op tab) so they
-    # can close it and return to Salla's normal post-install flow where the
-    # app + 'استخدام التطبيق' button appear naturally.
+    # ── Step 5: Hand control back to Salla ────────────────────────────────────
+    # We redirect the merchant straight to Nahla's listing on the Salla App
+    # Store.  That page is rendered by Salla itself and shows the official
+    # app name, description, and 'استخدام التطبيق' button — exactly the
+    # surface Salla expects merchants to enter the app from.
     #
-    # The session JWT is NOT persisted via this page.  It is created fresh
-    # the next time the iframe calls /salla/token-login after the merchant
-    # presses 'استخدام التطبيق'.
+    # We never show ANY Nahla page in this position:
+    #   ❌ no /salla-callback
+    #   ❌ no /app/entry
+    #   ❌ no api.nahlah.ai welcome / window.close() page
+    #   ✅ only a 302 → s.salla.sa/apps/nahla
+    #
+    # The Nahla session JWT is created fresh the next time the merchant
+    # clicks 'استخدام التطبيق' inside Salla — the iframe loads /app/salla
+    # which calls /salla/token-login and persists the JWT in localStorage on
+    # app.nahlah.ai at that point.  No JWT needs to traverse this redirect.
     logger.info(
         "[SallaOAuth] install complete | tenant=%s store=%s is_new=%s "
-        "has_jwt=%s — rendering inline HTML, NO redirect to Nahla",
+        "has_jwt=%s — redirecting BACK to Salla: %s",
         tenant_id, salla_store_id, is_new_merchant, bool(auto_jwt),
+        _SALLA_POST_INSTALL_URL,
     )
-    return HTMLResponse(content=_install_complete_html(
-        store_name=store_name or "",
-        is_new=is_new_merchant,
-    ))
+    return RedirectResponse(url=_SALLA_POST_INSTALL_URL, status_code=302)
 
 
 @router.get("/integrations/salla/success", response_class=HTMLResponse)
