@@ -166,6 +166,12 @@ export default function Integrations() {
   const [copied,  setCopied]  = useState<string | null>(null)
   const [reconnecting, setReconnecting] = useState(false)
   const [reconnectMsg, setReconnectMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [easyReinstall, setEasyReinstall] = useState<{
+    message: string
+    salla_apps_url: string
+    steps: string[]
+    note?: string
+  } | null>(null)
 
   const [sallaStatus, setSallaStatus] = useState<SallaStatus>({ connected: false })
   const [waStatus,    setWaStatus]    = useState<WaStatus>({ connected: false })
@@ -233,13 +239,27 @@ export default function Integrations() {
   async function handleReconnectSalla() {
     setReconnecting(true)
     setReconnectMsg(null)
+    setEasyReinstall(null)
     try {
-      const data = await apiCall<{ action: string; url?: string; message: string; note?: string }>(
-        '/api/salla/reconnect', { method: 'POST' }
-      )
+      const data = await apiCall<{
+        action: string
+        url?: string
+        message: string
+        note?: string
+        salla_apps_url?: string
+        steps?: string[]
+      }>('/api/salla/reconnect', { method: 'POST' })
+
       if (data.action === 'refreshed' || data.action === 'reactivated') {
         setReconnectMsg({ type: 'success', text: data.message })
         reloadSallaStatus()
+      } else if (data.action === 'easy_reinstall_required') {
+        setEasyReinstall({
+          message:        data.message,
+          salla_apps_url: data.salla_apps_url || 'https://s.salla.sa/apps',
+          steps:          data.steps || [],
+          note:           data.note,
+        })
       } else if (data.action === 'oauth_required' && data.url) {
         window.location.href = data.url
       }
@@ -309,6 +329,36 @@ export default function Integrations() {
             : <XCircle className="w-4 h-4 shrink-0" />}
           <p className="text-sm font-medium">{reconnectMsg.text}</p>
           <button onClick={() => setReconnectMsg(null)} className="mr-auto text-xs opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
+
+      {/* Easy Mode reinstall instructions */}
+      {easyReinstall && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-5 py-4 space-y-3">
+          <div className="flex items-start gap-3">
+            <RefreshCw className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-blue-900">إعادة الربط عبر سلة (Easy Mode)</p>
+              <p className="text-xs text-blue-700 mt-1 leading-relaxed">{easyReinstall.message}</p>
+            </div>
+            <button onClick={() => setEasyReinstall(null)} className="text-xs text-blue-400 hover:text-blue-700">✕</button>
+          </div>
+          {easyReinstall.steps.length > 0 && (
+            <ol className="list-decimal list-inside space-y-1 text-xs text-blue-800 ms-1">
+              {easyReinstall.steps.map((s, i) => <li key={i}>{s}</li>)}
+            </ol>
+          )}
+          {easyReinstall.note && (
+            <p className="text-[11px] text-blue-600 leading-relaxed">{easyReinstall.note}</p>
+          )}
+          <a
+            href={easyReinstall.salla_apps_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-500 transition-colors"
+          >
+            فتح «تطبيقاتي» في سلة
+          </a>
         </div>
       )}
 

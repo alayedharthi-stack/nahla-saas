@@ -2642,10 +2642,15 @@ async def salla_reconnect(
     """
     Smart reconnect — tries every available path in priority order:
 
-    1. Silent refresh  — use refresh_token if present.
+    0. Easy Mode merchants — if the integration was installed via the
+       Salla App Store (app_type='easy' or api_key_source='easy_mode_webhook'),
+       OAuth authorize WILL fail with redirect_uri mismatch because Easy
+       Mode apps don't have a registered redirect_uri.  Return clear
+       reinstall instructions instead.
+    1. Silent refresh  — use refresh_token if present (Custom OAuth flow).
     2. Reactivate      — if no refresh_token but api_key exists, re-enable the
                          integration as-is (manual/long-lived token mode).
-    3. OAuth redirect  — last resort, returns the Salla OAuth URL.
+    3. OAuth redirect  — last resort for Custom OAuth apps only.
 
     Always returns HTTP 200; caller inspects `action` to decide next step.
     """
@@ -2660,8 +2665,97 @@ async def salla_reconnect(
     cfg           = dict(intg.config or {}) if intg else {}
     api_key       = cfg.get("api_key", "")
     refresh_token = cfg.get("refresh_token", "")
+    app_type      = (cfg.get("app_type")       or "").lower()
+    api_key_src   = (cfg.get("api_key_source") or "").lower()
     client_id     = SALLA_CLIENT_ID     or ""
     client_secret = SALLA_CLIENT_SECRET or ""
+
+    is_easy_mode = (
+        app_type == "easy"
+        or api_key_src == "easy_mode_webhook"
+    )
+
+    # ── Path 0: Easy Mode merchants — reinstall instructions, never OAuth ────
+    # Custom OAuth authorize requires a registered redirect_uri; Easy Mode
+    # apps do not have one so the redirect would 400.  The proper flow is
+    # to uninstall + reinstall from Salla → My Apps, which triggers an
+    # app.store.authorize webhook that drops fresh tokens into the
+    # Integration row and clears needs_reauth.
+    if is_easy_mode:
+        # If a silent refresh might still work (refresh_token + client creds
+        # exist), try it once before bothering the merchant — Easy Mode does
+        # provide refresh_tokens via the webhook.
+        if refresh_token and client_id and client_secret:
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(
+                        "https://accounts.salla.sa/oauth2/token",
+                        data={
+                            "grant_type":    "refresh_token",
+                            "client_id":     client_id,
+                            "client_secret": client_secret,
+                            "refresh_token": refresh_token,
+                        },
+                        headers={
+                            "Accept":       "application/json",
+                            "Content-Type": "application/x-www-form-urlencoded",
+                        },
+                    )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    new_access  = data.get("access_token", "")
+                    new_refresh = data.get("refresh_token", refresh_token)
+                    if new_access and intg:
+                        cfg["api_key"]            = new_access
+                        cfg["refresh_token"]      = new_refresh
+                        cfg["last_token_refresh"] = datetime.now(timezone.utc).isoformat()
+                        cfg.pop("needs_reauth",          None)
+                        cfg.pop("needs_reauth_reason",   None)
+                        cfg.pop("needs_reauth_at",       None)
+                        cfg.pop("no_auto_refresh",       None)
+                        cfg.pop("no_auto_refresh_reason",None)
+                        intg.config  = cfg
+                        intg.enabled = True
+                        db.commit()
+                        logger.info(
+                            "[SallaReconnect/Easy] silent refresh succeeded | tenant=%s",
+                            tenant_id,
+                        )
+                        return {
+                            "action":  "refreshed",
+                            "message": "تم تجديد التوكن تلقائياً — الربط فعّال الآن",
+                        }
+            except Exception as exc:
+                logger.warning(
+                    "[SallaReconnect/Easy] silent refresh attempt failed | "
+                    "tenant=%s: %s — falling back to reinstall instructions",
+                    tenant_id, exc,
+                )
+
+        logger.info(
+            "[SallaReconnect/Easy] returning reinstall instructions | "
+            "tenant=%s app_type=%s api_key_source=%s",
+            tenant_id, app_type or "?", api_key_src or "?",
+        )
+        return {
+            "action":         "easy_reinstall_required",
+            "message": (
+                "لإعادة ربط سلة، احذف تطبيق نحلة من «تطبيقاتي» في سلة "
+                "ثم أعد تثبيته. بعد التثبيت سيصل الربط تلقائياً عبر "
+                "Webhook خلال ثوانٍ."
+            ),
+            "salla_apps_url": "https://s.salla.sa/apps",
+            "steps": [
+                "افتح حسابك في سلة → «تطبيقاتي»",
+                "ابحث عن «نحلة» واضغط «إلغاء التثبيت»",
+                "ثم اضغط «تثبيت» مرة أخرى من نفس الصفحة",
+                "ستعود إلى نحلة تلقائياً خلال 5–10 ثوانٍ بربط جديد",
+            ],
+            "note": (
+                "أنت تستخدم تطبيق سلة Easy Mode، لذلك إعادة الربط تتم "
+                "من داخل سلة وليس عبر OAuth خارجي."
+            ),
+        }
 
     # ── Path 1: silent token refresh via refresh_token ────────────────────────
     if refresh_token and client_id and client_secret:
