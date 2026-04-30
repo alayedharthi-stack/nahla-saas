@@ -51,6 +51,8 @@ interface LoginResponse {
   is_new:       boolean
   wa_connected: boolean
   redirect_to:  string
+  needs_oauth?: boolean
+  oauth_url?:   string
   detail?:      string
 }
 
@@ -310,8 +312,23 @@ export default function SallaEmbedded() {
         return
       }
 
-      console.info('[SallaEmbedded] ✓ token-login OK | tenant:', data.tenant_id, 'store_id:', data.store_id, 'is_new:', data.is_new)
+      console.info('[SallaEmbedded] ✓ token-login OK | tenant:', data.tenant_id, 'store_id:', data.store_id, 'is_new:', data.is_new, 'needs_oauth:', data.needs_oauth)
       persistSession(data)
+
+      // ── Auto-trigger OAuth if integration only has embedded token ──────
+      // Without proper OAuth tokens, sync of products/orders/customers fails.
+      // Salla OAuth must be opened at TOP level (breaks out of iframe).
+      if (data.needs_oauth && data.oauth_url) {
+        console.info('[SallaEmbedded] needs_oauth=true → redirecting to Salla OAuth')
+        setStatusText('جاري إكمال الربط مع سلة...')
+        if (window.top) {
+          window.top.location.href = data.oauth_url
+        } else {
+          window.location.href = data.oauth_url
+        }
+        return
+      }
+
       setStatusText(
         data.is_new
           ? 'مرحباً! جاري إعداد حسابك...'

@@ -503,9 +503,46 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         owner_email, tenant_id, wa_connected, redirect_target,
     )
 
-    # ── Trigger initial Salla sync (fire-and-forget) for NEW merchants ───────
-    # Brings products, orders, customers immediately so the dashboard isn't empty.
-    if is_new and tenant_id:
+    # ── Detect if OAuth tokens are missing (embedded-only) ───────────────────
+    # The embedded token (v4.public.*) cannot call Salla's /admin/v2/* APIs.
+    # Without a real OAuth refresh_token, the sync of products/orders/customers
+    # will fail. We tell the frontend to redirect to OAuth flow.
+    needs_oauth = False
+    oauth_url   = ""
+    try:
+        check_integ = db.query(Integration).filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider == "salla",
+        ).first()
+        if check_integ:
+            cfg = check_integ.config or {}
+            has_refresh   = bool(cfg.get("refresh_token"))
+            api_key_src   = cfg.get("api_key_source", "")
+            # OAuth needed if no refresh_token OR api_key is just the embedded one
+            if not has_refresh or api_key_src == "embedded_token":
+                needs_oauth = True
+                # Build OAuth authorize URL with state pointing to this tenant
+                if SALLA_CLIENT_ID and SALLA_REDIRECT_URI:
+                    state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}"
+                    params = urllib.parse.urlencode({
+                        "client_id":     SALLA_CLIENT_ID,
+                        "redirect_uri":  SALLA_REDIRECT_URI,
+                        "response_type": "code",
+                        "scope":         "offline_access",
+                        "state":         state,
+                    })
+                    oauth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
+                    logger.info(
+                        "[SallaLogin] needs_oauth=True | tenant=%s "
+                        "has_refresh=%s api_key_source=%s",
+                        tenant_id, has_refresh, api_key_src,
+                    )
+    except Exception as _e:
+        logger.warning("[SallaLogin] needs_oauth check failed: %s", _e)
+
+    # ── Trigger initial Salla sync (fire-and-forget) ONLY if OAuth tokens present ─
+    # Without OAuth tokens, sync will fail (embedded token can't call /admin/v2/*).
+    if is_new and tenant_id and not needs_oauth:
         try:
             import asyncio as _asyncio  # noqa: PLC0415
 
@@ -540,6 +577,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         "store_name":     store_name,
         "store_id":       merchant_id_str,
         "email":          owner_email,
+        "needs_oauth":    needs_oauth,
+        "oauth_url":      oauth_url,
         "is_new":         is_new,
         "wa_connected":   wa_connected,
         "redirect_to":    redirect_target,
