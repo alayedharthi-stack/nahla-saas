@@ -2371,6 +2371,18 @@ async def order_reminder_timeline(
         else:
             status = "pending"
 
+        # Pull the structured failure context out of action_taken so the
+        # dashboard can render the localized Arabic label prominently
+        # with the stable English code as a muted hint underneath —
+        # mirroring the cart-recovery timeline's UX contract. Falls back
+        # to ``error_message`` (which is now the Arabic label by default
+        # for classified failures) for older execution rows that pre-date
+        # the structured taxonomy.
+        action_taken = (execution.action_taken or {}) if execution else {}
+        raw_message = execution.error_message if execution else None
+        error_label = action_taken.get("error_label") or raw_message
+        error_code = action_taken.get("error_code") or action_taken.get("error")
+
         steps.append({
             "step_idx":      step_idx + 1,       # 1-based for display
             "emitted_at":    emitted_record.get("emitted_at") if emitted_record else None,
@@ -2378,8 +2390,14 @@ async def order_reminder_timeline(
             "status":        status,
             "status_label":  _STEP_STATUS_LABELS.get(status, status),
             "skip_reason":   execution.skip_reason if execution else None,
-            "error_message": execution.error_message if execution else None,
-            "template_name": (execution.action_taken or {}).get("template_name") if execution else None,
+            # Backward-compat: the dashboard previously read this verbatim.
+            # We now keep it equal to the Arabic label so existing clients
+            # that don't yet read ``error_label`` still render a friendly
+            # reason instead of an English token.
+            "error_message": error_label,
+            "error_label":   error_label,
+            "error_code":    error_code,
+            "template_name": action_taken.get("template_name") or action_taken.get("template"),
         })
 
     ci = order.customer_info or {}
@@ -2508,9 +2526,21 @@ async def reschedule_order_reminders(
 
         skip = execution.skip_reason or ""
         err  = execution.error_message or ""
+        # Engine now persists the Arabic UX label in ``error_message``;
+        # the stable English code lives on ``action_taken['error_code']``.
+        # Read both so this classifier survives the migration and still
+        # works for legacy executions written before the change.
+        action = execution.action_taken or {}
+        err_code = str(action.get("error_code") or action.get("error") or "")
 
         # Classify the failure type to surface warnings in the UI.
-        if skip in _TEMPLATE_SKIP_REASONS or "no_approved_template" in err:
+        if (
+            skip in _TEMPLATE_SKIP_REASONS
+            or err_code in _TEMPLATE_SKIP_REASONS
+            or err_code == "template_param_mismatch"
+            or "no_approved_template" in err
+            or "template_param_mismatch" in err
+        ):
             has_template_error = True
         if skip in _PERMANENT_SKIP_REASONS:
             has_permanent_block = True

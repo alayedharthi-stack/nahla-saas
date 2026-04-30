@@ -730,7 +730,15 @@ async def _try_execute(
         error_message = None
     else:
         status = "failed"
-        error_message = action_info.get("error") or action_info.get("error_label")
+        # Persist the Arabic UX label (when classified) so the dashboard
+        # renders a human-readable reason. The raw English code stays
+        # available on ``action_taken['error_code']`` / ``['error']`` for
+        # filtering / analytics.
+        error_message = (
+            action_info.get("error_label")
+            or action_info.get("error")
+            or action_info.get("error_code")
+        )
 
     # On failure we now ALSO persist ``action_info`` (template name, to,
     # meta_error envelope, error_code, error_label) so the per-cart

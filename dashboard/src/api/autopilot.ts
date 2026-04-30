@@ -212,7 +212,16 @@ export interface OrderReminderStep {
   status: OrderReminderStepStatus
   status_label: string           // Arabic label from backend
   skip_reason: string | null
+  /** Localized Arabic reason for failure (mirrors ``error_label``).
+   *  Kept for backward compat with older builds that read this field
+   *  directly. New code should prefer ``error_label``. */
   error_message: string | null
+  /** Same as ``error_message`` — Arabic UX label, safe to render as-is. */
+  error_label: string | null
+  /** Stable English failure code (e.g. ``template_param_mismatch``).
+   *  Render in muted/monospace as a hint for support, not as the
+   *  primary message. */
+  error_code: string | null
   template_name: string | null
 }
 

@@ -926,13 +926,30 @@ function OrderReminderDrawer({
              (s.status === 'skipped' && s.skip_reason !== 'blocked_by_unsubscribe'),
     )
   )
-  const hasTemplateError = Boolean(
+  // Two distinct template failure shapes — surface a different banner
+  // copy for each because the merchant action is different:
+  //   • not_approved   → go to the Templates page and submit/approve
+  //   • param_mismatch → the template IS approved but its variable
+  //                       contract doesn't match what Nahla can fill
+  //                       (usually because the merchant edited the
+  //                        body without keeping the same {{N}} count).
+  const hasUnapprovedTemplate = Boolean(
     timeline?.steps.some(
       (s) => (s.status === 'failed' || s.status === 'skipped') &&
-             (s.error_message?.includes('no_approved_template') ||
-              s.skip_reason === 'no_approved_template'),
+             (s.error_code === 'template_not_approved' ||
+              s.error_code === 'no_approved_template' ||
+              s.skip_reason === 'no_approved_template' ||
+              s.error_message?.includes('no_approved_template')),
     )
   )
+  const hasTemplateParamMismatch = Boolean(
+    timeline?.steps.some(
+      (s) => s.status === 'failed' &&
+             (s.error_code === 'template_param_mismatch' ||
+              s.error_message?.includes('template_param_mismatch')),
+    )
+  )
+  const hasTemplateError = hasUnapprovedTemplate || hasTemplateParamMismatch
 
   // Step dot colour by status
   const dotCls = (s: OrderReminderStep['status']) => {
@@ -1047,12 +1064,28 @@ function OrderReminderDrawer({
               </div>
 
               {/* Template approval warning — shown above reschedule notice */}
-              {hasTemplateError && (
+              {hasUnapprovedTemplate && (
                 <div className="rounded-lg border border-orange-200 bg-orange-50 p-3 flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 text-orange-500 shrink-0 mt-0.5" />
                   <div className="text-xs text-orange-700">
                     <p className="font-medium mb-0.5">القالب غير معتمد من Meta</p>
                     <p>اعتمد قوالب الرسائل من لوحة <strong>القوالب</strong> ثم أعد الجدولة — ستفشل الرسالة مجدداً قبل الاعتماد.</p>
+                  </div>
+                </div>
+              )}
+              {hasTemplateParamMismatch && !hasUnapprovedTemplate && (
+                <div className="rounded-lg border border-orange-200 bg-orange-50 p-3 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-orange-500 shrink-0 mt-0.5" />
+                  <div className="text-xs text-orange-700">
+                    <p className="font-medium mb-0.5">متغيرات القالب غير مطابقة</p>
+                    <p>
+                      القالب معتمد ومرتبط لكن عدد المتغيرات
+                      <code className="font-mono mx-1 px-1 rounded bg-white/60">{'{{1}}, {{2}}, …'}</code>
+                      في نص القالب لا يطابق ما يرسله نحلة. افتح لوحة
+                      <strong> القوالب</strong>، عدّل القالب وأعِد المتغيرات
+                      الأصلية كما استوردتها من مكتبة نحلة، ثم أعد التقديم
+                      للاعتماد وأعد الجدولة.
+                    </p>
                   </div>
                 </div>
               )}
@@ -1127,8 +1160,15 @@ function OrderReminderDrawer({
                               السبب: {skipLabel}
                             </p>
                           )}
-                          {step.error_message && step.status === 'failed' && (
-                            <p className="text-[11px] text-red-600 mt-0.5">{step.error_message}</p>
+                          {step.status === 'failed' && (step.error_label || step.error_message) && (
+                            <div className="text-[11px] text-red-600 mt-0.5">
+                              <span>{step.error_label || step.error_message}</span>
+                              {step.error_code && step.error_code !== (step.error_label || step.error_message) && (
+                                <span className="text-red-400/70 font-mono ms-1">
+                                  ({step.error_code})
+                                </span>
+                              )}
+                            </div>
                           )}
                         </div>
                       </li>
