@@ -24,7 +24,7 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
     {
         "slug": "starter",
         "name": "Starter",
-        "name_ar": "المبتدئ",
+        "name_ar": "الأساسية",
         "description": "للمتاجر الصغيرة التي تبدأ رحلة الأتمتة",
         "price_sar": 899,
         "launch_price_sar": 449,
@@ -93,10 +93,17 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 def ensure_billing_plans(db: Session) -> None:
-    """Seed system billing plans on first use (idempotent)."""
-    added = False
+    """Seed system billing plans on first use (idempotent).
+
+    Also migrates existing plans' Arabic display name (extra_metadata.name_ar)
+    to match the current seed — without touching ANY price field.  This lets us
+    rename "المبتدئ" → "الأساسية" on live deployments without a manual SQL
+    migration or data loss.
+    """
+    changed = False
     for seed in BILLING_PLANS_SEED:
-        if not db.query(BillingPlan).filter(BillingPlan.slug == seed["slug"]).first():
+        existing = db.query(BillingPlan).filter(BillingPlan.slug == seed["slug"]).first()
+        if not existing:
             plan = BillingPlan(
                 tenant_id=None,
                 slug=seed["slug"],
@@ -113,8 +120,20 @@ def ensure_billing_plans(db: Session) -> None:
                 },
             )
             db.add(plan)
-            added = True
-    if added:
+            changed = True
+        else:
+            # ── Migrate name_ar only — preserve all price fields untouched.
+            meta = dict(existing.extra_metadata or {})
+            current_name_ar = meta.get("name_ar")
+            if current_name_ar != seed["name_ar"]:
+                meta["name_ar"] = seed["name_ar"]
+                # Preserve launch_price_sar if it already exists (do NOT overwrite).
+                # Only fill it in when missing, so we never change displayed prices.
+                if "launch_price_sar" not in meta:
+                    meta["launch_price_sar"] = seed["launch_price_sar"]
+                existing.extra_metadata = meta
+                changed = True
+    if changed:
         db.commit()
 
 

@@ -2,9 +2,21 @@ import { useState, useEffect } from 'react'
 import {
   CheckCircle, Zap, TrendingUp, Rocket, Loader2, AlertCircle,
   RefreshCw, Tag, MessageSquare, Star, ArrowUp, ExternalLink, ShieldCheck,
-  Clock, Sparkles, Bot, Phone,
+  Clock, Sparkles, Bot, Phone, Info,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
+
+// Detect whether the merchant is browsing this billing page from inside the
+// Salla embedded experience.  Used to render a Salla-specific notice that
+// directs the merchant to subscribe via Salla's billing UI (required by
+// Salla's app distribution policy).
+function isSallaMerchant(): boolean {
+  try {
+    if (localStorage.getItem('nahla_salla_embedded') === '1') return true
+    if (localStorage.getItem('nahla_salla_store_id'))         return true
+  } catch { /* localStorage blocked */ }
+  return false
+}
 
 // ── Manual fallback (used when payment gateway is down / not configured) ──────
 // ⚠️ Update this number if Nahla support contact changes.
@@ -568,6 +580,24 @@ export default function Billing() {
           <p className="text-sm text-brand-800">
             ترقية الخطة تعني محادثات أكثر وأتمتات أقوى.
           </p>
+        </div>
+      )}
+
+      {/* Salla-merchant subscription notice — appears ONLY for merchants who
+          opened this page via Salla embedded session. Required by Salla's
+          policy: subscriptions for Salla merchants must go through Salla's
+          billing UI to ensure correct activation + linking with their store. */}
+      {isSallaMerchant() && (
+        <div className="flex items-start gap-3 bg-amber-50 border-2 border-amber-300 rounded-xl p-4">
+          <Info className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-bold text-amber-900">
+              تنبيه لتجار سلة
+            </p>
+            <p className="text-xs text-amber-800 mt-1 leading-relaxed">
+              يتم الاشتراك وتجديد الباقة من داخل منصة سلة لضمان تفعيل الخدمة وربطها بمتجرك بشكل صحيح.
+            </p>
+          </div>
         </div>
       )}
 
