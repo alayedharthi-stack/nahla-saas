@@ -494,6 +494,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         "role":           role,
         "tenant_id":      tenant_id,
         "store_name":     store_name,
+        "store_id":       merchant_id_str,
         "email":          owner_email,
         "is_new":         is_new,
         "wa_connected":   wa_connected,

@@ -46,6 +46,7 @@ interface LoginResponse {
   role:         string
   tenant_id:    number
   store_name:   string
+  store_id:     string
   email:        string
   is_new:       boolean
   wa_connected: boolean
@@ -120,31 +121,35 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   }
 }
 
-function persistSession(
-  data: LoginResponse | SessionResponse,
-  storeId?: string,
-) {
+function persistSession(data: LoginResponse | SessionResponse) {
   const jwt    = 'access_token' in data ? data.access_token : data.token
   const claims = decodeJwtPayload(jwt)
 
+  // Clear ALL old session keys before writing new ones — prevents cross-store leakage
   ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
-    'nahla_tenant_id', 'nahla_user_id'].forEach(k => localStorage.removeItem(k))
+    'nahla_tenant_id', 'nahla_user_id', 'nahla_salla_store_id',
+    'nahla_salla_store_name', 'nahla_store_name',
+    'nahla_salla_is_new', 'nahla_salla_wa_connected',
+  ].forEach(k => localStorage.removeItem(k))
 
-  localStorage.setItem('nahla_auth',      '1')
-  localStorage.setItem('nahla_token',     jwt)
-  localStorage.setItem('nahla_role',      String(claims.role      ?? 'merchant'))
-  localStorage.setItem('nahla_email',     String(claims.sub       ?? ''))
-  localStorage.setItem('nahla_tenant_id', String(claims.tenant_id ?? ''))
-  localStorage.setItem('nahla_user_id',   String(claims.user_id   ?? ''))
+  localStorage.setItem('nahla_auth',           '1')
+  localStorage.setItem('nahla_token',          jwt)
+  localStorage.setItem('nahla_role',           String(claims.role      ?? 'merchant'))
+  localStorage.setItem('nahla_email',          String(claims.sub       ?? ''))
+  localStorage.setItem('nahla_tenant_id',      String(claims.tenant_id ?? ''))
+  localStorage.setItem('nahla_user_id',        String(claims.user_id   ?? ''))
   localStorage.setItem('nahla_salla_embedded', '1')
 
   if ('store_name' in data && data.store_name) {
     localStorage.setItem('nahla_salla_store_name', data.store_name)
-    localStorage.setItem('nahla_store_name',        data.store_name)
+    localStorage.setItem('nahla_store_name',       data.store_name)
   }
-  if (storeId) localStorage.setItem('nahla_salla_store_id', storeId)
 
-  // Store wa_connected and is_new — used by SallaSetup guard
+  // store_id comes from salla_token_login response — the AUTHORITATIVE key
+  if ('store_id' in data && data.store_id) {
+    localStorage.setItem('nahla_salla_store_id', data.store_id)
+  }
+
   if ('is_new' in data) {
     localStorage.setItem('nahla_salla_is_new',      data.is_new       ? '1' : '0')
     localStorage.setItem('nahla_salla_wa_connected', data.wa_connected ? '1' : '0')
@@ -247,7 +252,7 @@ export default function SallaEmbedded() {
       if (res.ok) {
         const data: SessionResponse = await res.json()
         console.info('[SallaEmbedded] ✓ live session — tenant:', data.tenant_id)
-        persistSession(data, storeId)
+        persistSession(data)
         enterDashboard()
         return true
       }
@@ -305,8 +310,8 @@ export default function SallaEmbedded() {
         return
       }
 
-      console.info('[SallaEmbedded] ✓ token-login OK | tenant:', data.tenant_id, 'is_new:', data.is_new)
-      persistSession(data, storeId)
+      console.info('[SallaEmbedded] ✓ token-login OK | tenant:', data.tenant_id, 'store_id:', data.store_id, 'is_new:', data.is_new)
+      persistSession(data)
       setStatusText(
         data.is_new
           ? 'مرحباً! جاري إعداد حسابك...'
@@ -336,13 +341,26 @@ export default function SallaEmbedded() {
     // Load SDK in background — do NOT await before checking session/token
     loadSdk().then(initSdkHandshake)
 
-    // Check existing session first
+    // ── TENANT ISOLATION: when Salla provides a fresh embedded token,
+    // ALWAYS do a full token-login so the backend resolves the correct
+    // tenant for THIS store via store_id.  Reusing a cached session would
+    // show a DIFFERENT store's data if the user switched stores.
+    if (sallaToken) {
+      console.info('[SallaEmbedded] fresh Salla token present — doing full login (skipping cached session)')
+      await doLogin()
+      return
+    }
+
+    // No fresh Salla token (e.g. page refresh inside iframe) → try cached session
     const alive = await checkSession()
     if (alive) return
 
-    // No session → use Salla token from URL
-    await doLogin()
-  }, [checkSession, doLogin, showError])
+    // Cached session invalid / expired and no Salla token → error
+    showError(
+      'لم يتم استقبال رمز المصادقة من سلة.\n' +
+      'أعد فتح التطبيق من داخل سلة.',
+    )
+  }, [sallaToken, checkSession, doLogin, showError])
 
   // ── Mount effect ──────────────────────────────────────────────────────────
   // IMPORTANT: signalReady is called synchronously on mount, before any async.
