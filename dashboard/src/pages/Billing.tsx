@@ -60,12 +60,14 @@ function PlanCard({
   onCheckout,
   checkingOut,
   storeName,
+  isSalla,
 }: {
   plan:          BillingPlan
   billingStatus: BillingStatus | null
   onCheckout:    (slug: string) => void
   checkingOut:   string | null
   storeName:     string
+  isSalla:       boolean
 }) {
   const isPopular  = plan.slug === 'growth'
   const gradient   = PLAN_GRADIENTS[plan.slug] ?? 'from-slate-500 to-slate-600'
@@ -154,6 +156,37 @@ function PlanCard({
           <div className="w-full py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm font-semibold text-center">
             مشترك الآن ✓
           </div>
+        ) : isSalla ? (
+          // ── Salla merchants — subscription must happen inside Salla's
+          // billing UI (per Salla App Store policy).  We disable our own
+          // payment flow and direct the merchant to Salla's app subscription
+          // page instead.  Hides the WhatsApp manual-fallback as well so we
+          // present a single, unambiguous path.
+          <>
+            {isTrialPlan && (
+              <div className="w-full py-2 rounded-xl bg-brand-50 border border-brand-200 text-brand-700 text-xs font-semibold text-center mb-2 flex items-center justify-center gap-1.5">
+                <Clock className="w-3.5 h-3.5" />
+                تجربة مجانية — متبقي {billingStatus?.trial_days_remaining ?? 0} يوم
+              </div>
+            )}
+            <a
+              href="https://s.salla.sa/apps/nahla"
+              target="_top"
+              rel="noopener noreferrer"
+              className={[
+                'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all',
+                'flex items-center justify-center gap-2',
+                `bg-gradient-to-br ${gradient}`,
+                'hover:opacity-90 active:scale-95',
+              ].join(' ')}
+            >
+              <ExternalLink className="w-4 h-4" />
+              الاشتراك عبر سلة
+            </a>
+            <p className="mt-2 text-[11px] text-amber-700 text-center leading-relaxed">
+              يتم الاشتراك من داخل منصة سلة لضمان الربط الصحيح بمتجرك
+            </p>
+          </>
         ) : (
           <>
             {isTrialPlan && (
@@ -198,8 +231,8 @@ function PlanCard({
           </>
         )}
 
-        {/* Secure payment note */}
-        {!isPaidActive && (
+        {/* Secure payment note (only for non-Salla payment flow) */}
+        {!isPaidActive && !isSalla && (
           <p className="flex items-center justify-center gap-1 text-[10px] text-slate-400 mt-2">
             <ShieldCheck className="w-3 h-3" />
             دفع آمن عبر موى
@@ -223,6 +256,9 @@ export default function Billing() {
   const [checkoutErr, setCheckoutErr] = useState<string | null>(null)
   const [checkoutErrCode, setCheckoutErrCode] = useState<string>('')
 
+  // Detected once per render — Salla merchants must subscribe via Salla.
+  const isSalla = isSallaMerchant()
+
   const load = async () => {
     setLoading(true)
     setLoadError(null)
@@ -244,6 +280,21 @@ export default function Billing() {
   useEffect(() => { load() }, [])
 
   const handleCheckout = async (slug: string) => {
+    // ── Salla merchants are NEVER allowed to use our checkout — they must
+    // subscribe through Salla's billing UI.  Defensive guard in addition to
+    // the disabled button: if the click somehow reaches us, redirect to the
+    // Salla app subscription page at the top level instead of opening Moyasar.
+    if (isSalla) {
+      console.info('[Billing] Salla merchant — redirecting to Salla subscription instead of Moyasar')
+      const sallaSubUrl = 'https://s.salla.sa/apps/nahla'
+      if (window.top) {
+        window.top.location.href = sallaSubUrl
+      } else {
+        window.location.href = sallaSubUrl
+      }
+      return
+    }
+
     const tenantId = (() => {
       try { return localStorage.getItem('nahla_tenant_id') || '?' } catch { return '?' }
     })()
@@ -587,7 +638,7 @@ export default function Billing() {
           opened this page via Salla embedded session. Required by Salla's
           policy: subscriptions for Salla merchants must go through Salla's
           billing UI to ensure correct activation + linking with their store. */}
-      {isSallaMerchant() && (
+      {isSalla && (
         <div className="flex items-start gap-3 bg-amber-50 border-2 border-amber-300 rounded-xl p-4">
           <Info className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div className="flex-1">
@@ -624,12 +675,15 @@ export default function Billing() {
               storeName={(() => {
                 try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
               })()}
+              isSalla={isSalla}
             />
           ))}
         </div>
       </div>
 
-      {/* Payment security note */}
+      {/* Payment security note — only shown for non-Salla merchants since
+          Salla merchants pay via Salla's own checkout. */}
+      {!isSalla && (
       <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-4 border border-slate-200">
         <ShieldCheck className="w-5 h-5 text-slate-400 shrink-0" />
         <div>
@@ -640,6 +694,7 @@ export default function Billing() {
           </p>
         </div>
       </div>
+      )}
 
       {/* Pricing structure */}
       <div className="card p-5 bg-slate-50">
