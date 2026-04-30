@@ -399,6 +399,12 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         new_cfg.pop("no_auto_refresh",       None)
         new_cfg.pop("no_auto_refresh_reason",None)
         new_cfg.pop("no_auto_refresh_at",    None)
+        # Scrub markers left by /admin/debug/salla/cleanup so a manual
+        # preflight followed by an Easy-mode reinstall produces a fully
+        # clean config (no leftover disabled_reason / superseded flags).
+        new_cfg.pop("superseded_by_oauth_reconnect", None)
+        new_cfg.pop("disabled_reason",               None)
+        new_cfg.pop("disabled_at",                   None)
         claim_store_for_tenant(
             db, store_id=salla_store_id, tenant_id=tenant_id, new_config=new_cfg,
         )
