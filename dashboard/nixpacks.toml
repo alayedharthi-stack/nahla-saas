@@ -1,5 +1,8 @@
+[phases.setup]
+nixPkgs = ["nginx"]
+
 [phases.build]
 cmds = ["npm install", "npm run build"]
 
 [start]
-cmd = "npx serve -s dist -l $PORT"
+cmd = "sed \"s|\\${PORT}|${PORT:-3000}|g\" /app/nginx.conf > /tmp/nginx_resolved.conf && nginx -c /tmp/nginx_resolved.conf -g 'daemon off;'"
