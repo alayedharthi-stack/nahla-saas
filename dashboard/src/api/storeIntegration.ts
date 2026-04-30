@@ -1,11 +1,30 @@
+export interface SupersededIntegration {
+  id: number
+  enabled: boolean
+  store_id: string
+  api_key_hint: string
+  easy_mode: boolean
+  api_key_source: string
+  superseded_at?: string | null
+  superseded_reason?: string | null
+}
+
 export interface StoreIntegrationStatus {
   configured: boolean
   platform: string | null
+  integration_id?: number
   store_id: string
+  store_name?: string
   api_key_hint: string
   enabled: boolean
+  easy_mode?: boolean
+  api_key_source?: string
+  app_type?: string
+  connected_at?: string | null
   sync_error?: string | null
   no_auto_refresh?: boolean
+  needs_reauth?: boolean
+  superseded_integrations?: SupersededIntegration[]
 }
 
 export interface StoreIntegrationInput {

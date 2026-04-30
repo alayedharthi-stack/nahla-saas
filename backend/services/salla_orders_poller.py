@@ -142,21 +142,37 @@ async def _run_one_tick() -> Dict[str, Any]:
             return {"skipped": True, "reason": "advisory_lock_held_by_other_worker"}
 
         from models import Integration  # noqa: PLC0415
+        from store_integration.registry import (  # noqa: PLC0415
+            pick_active_salla_integration,
+        )
 
-        integrations = db.query(Integration).filter(
-            Integration.provider == "salla",
-            Integration.enabled == True,  # noqa: E712
-        ).all()
-
-        # Also count ALL Salla integrations (including disabled) so we can
-        # tell whether a tenant exists at all vs is just disabled.
+        # Total Salla rows (any state) — for diagnostic logs.
         total_salla = db.query(Integration).filter(
             Integration.provider == "salla",
         ).count()
 
+        # Distinct tenant ids that have ANY Salla row, then dedupe-pick
+        # one canonical integration per tenant.  This guarantees we never
+        # poll the same store twice (manual + Easy Mode duplicates) and
+        # always use the row with the freshest tokens.
+        tenant_rows = (
+            db.query(Integration.tenant_id)
+            .filter(Integration.provider == "salla")
+            .distinct()
+            .all()
+        )
+        tenant_ids = sorted({tid for (tid,) in tenant_rows if tid})
+
+        integrations = []
+        for tid in tenant_ids:
+            picked = pick_active_salla_integration(db, tid)
+            if picked is not None and picked.enabled:
+                integrations.append(picked)
+
         logger.info(
-            "[Salla Orders Poller] active integrations found count=%d total_salla=%d",
-            len(integrations), total_salla,
+            "[Salla Orders Poller] active integrations found count=%d "
+            "tenants_with_salla=%d total_salla_rows=%d",
+            len(integrations), len(tenant_ids), total_salla,
         )
 
         scanned = 0
@@ -498,14 +514,13 @@ async def run_once_for_tenant(
     under [Salla Orders Poller] just like the scheduled tick.
     """
     from core.database import SessionLocal  # noqa: PLC0415
-    from models import Integration          # noqa: PLC0415
+    from store_integration.registry import (  # noqa: PLC0415
+        pick_active_salla_integration,
+    )
 
     db: Session = SessionLocal()
     try:
-        intg = db.query(Integration).filter(
-            Integration.provider == "salla",
-            Integration.tenant_id == tenant_id,
-        ).first()
+        intg = pick_active_salla_integration(db, tenant_id)
 
         if intg is None:
             logger.warning(

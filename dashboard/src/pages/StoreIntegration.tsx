@@ -204,15 +204,27 @@ export default function StoreIntegration() {
               : <Plug className="w-5 h-5 text-slate-400" />
             }
           </div>
-          <div>
-            <p className="font-semibold text-slate-900 text-sm">
-              {isConfigured
-                ? `متصل بـ ${status?.platform === 'salla' ? 'سلة' : status?.platform}`
-                : 'غير متصل'}
-            </p>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="font-semibold text-slate-900 text-sm">
+                {isConfigured
+                  ? `متصل بـ ${status?.platform === 'salla' ? 'سلة' : status?.platform}`
+                  : 'غير متصل'}
+              </p>
+              {isConfigured && status?.easy_mode && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700 text-[10px] font-bold">
+                  Easy Mode (تطبيق سلة)
+                </span>
+              )}
+              {isConfigured && status?.api_key_source === 'manual' && !status?.easy_mode && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-bold">
+                  ربط يدوي (Account Token)
+                </span>
+              )}
+            </div>
             <p className="text-slate-500 text-xs mt-0.5">
               {isConfigured
-                ? `معرّف المتجر: ${status?.store_id || '—'} · ${status?.api_key_hint ? `المفتاح: ${status.api_key_hint}` : ''}`
+                ? `معرّف المتجر: ${status?.store_id || '—'}${status?.store_name ? ` · ${status.store_name}` : ''}${status?.api_key_hint ? ` · المفتاح: ${status.api_key_hint}` : ''}`
                 : 'أضف بيانات الاعتماد أدناه لربط متجرك'}
             </p>
           </div>
@@ -226,6 +238,33 @@ export default function StoreIntegration() {
           )}
         </div>
       </div>
+
+      {/* Superseded (legacy) integrations warning */}
+      {(status?.superseded_integrations?.length ?? 0) > 0 && (
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-slate-500 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold text-slate-800">
+                ربط قديم غير مُستخدم ({status?.superseded_integrations?.length})
+              </p>
+              <p className="text-xs text-slate-600 mt-0.5">
+                وُجد ربط سابق لنفس المتجر لم يعد قيد الاستخدام لأن ربط
+                {' '}<strong className="text-blue-700">Easy Mode</strong>{' '} هو المصدر الأساسي حالياً.
+                المزامنة الآن تستخدم رموز Easy Mode، وليس المفاتيح القديمة.
+              </p>
+              <ul className="mt-2 space-y-1 text-[11px] text-slate-500">
+                {status?.superseded_integrations?.map(s => (
+                  <li key={s.id} className="font-mono">
+                    #{s.id} · مفتاح: {s.api_key_hint || '—'} · {s.easy_mode ? 'easy_mode' : (s.api_key_source || 'manual')}
+                    {s.superseded_at && ` · أُلغي في ${new Date(s.superseded_at).toLocaleString('ar')}`}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Sync error / fix-connection banner */}
       {status?.sync_error && (

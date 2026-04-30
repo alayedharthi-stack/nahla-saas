@@ -39,13 +39,27 @@ class StoreIntegrationSettingsIn(BaseModel):
 
 @router.get("/settings")
 async def get_store_integration_settings(request: Request, db: Session = Depends(get_db)):
-    """Return store integration config for this tenant (api_key masked)."""
+    """Return store integration config for this tenant (api_key masked).
+
+    When the tenant has more than one Salla integration (typical when an
+    older manual Account-Token row coexists with the new Easy Mode row),
+    we surface the CANONICAL one — the one the poller and StoreSyncService
+    are actually using — so the UI never shows stale credentials that
+    don't match what's running in production.  Legacy rows are listed
+    under `superseded_integrations` for transparency.
+    """
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
-    integration = db.query(Integration).filter(
-        Integration.tenant_id == tenant_id,
-        Integration.provider.in_(["salla"]),
-    ).first()
+
+    from store_integration.registry import (  # noqa: PLC0415
+        pick_active_salla_integration,
+        _list_salla_integrations_for_tenant,
+        _is_easy_mode,
+    )
+
+    integration = pick_active_salla_integration(db, tenant_id)
+    all_rows    = _list_salla_integrations_for_tenant(db, tenant_id)
+
     if not integration:
         return {"configured": False, "platform": None, "store_id": "", "enabled": False}
     cfg = integration.config or {}
@@ -65,14 +79,38 @@ async def get_store_integration_settings(request: Request, db: Session = Depends
     except Exception:
         pass
 
+    superseded = []
+    for row in all_rows:
+        if row.id == integration.id:
+            continue
+        rcfg = row.config or {}
+        superseded.append({
+            "id":               row.id,
+            "enabled":          row.enabled,
+            "store_id":         row.external_store_id or rcfg.get("store_id", ""),
+            "api_key_hint":     ("***" + rcfg.get("api_key", "")[-4:]) if rcfg.get("api_key") else "",
+            "easy_mode":        _is_easy_mode(row),
+            "api_key_source":   rcfg.get("api_key_source", ""),
+            "superseded_at":    rcfg.get("superseded_at"),
+            "superseded_reason": rcfg.get("superseded_reason"),
+        })
+
     return {
         "configured":      True,
         "platform":        integration.provider,
+        "integration_id":  integration.id,
         "store_id":        integration.external_store_id or cfg.get("store_id", ""),
+        "store_name":      cfg.get("store_name", ""),
         "api_key_hint":    ("***" + cfg.get("api_key", "")[-4:]) if cfg.get("api_key") else "",
         "enabled":         integration.enabled,
+        "easy_mode":       _is_easy_mode(integration),
+        "api_key_source":  cfg.get("api_key_source", ""),
+        "app_type":        cfg.get("app_type", ""),
+        "connected_at":    cfg.get("connected_at"),
         "sync_error":      sync_error,
         "no_auto_refresh": bool(cfg.get("no_auto_refresh")),
+        "needs_reauth":    bool(cfg.get("needs_reauth")),
+        "superseded_integrations": superseded,
     }
 
 

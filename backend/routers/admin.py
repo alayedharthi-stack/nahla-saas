@@ -3659,6 +3659,72 @@ async def salla_orders_poller_diag(
     }
 
 
+@router.get("/admin/salla/integrations")
+async def salla_list_integrations(
+    tenant_id: int = Query(..., description="Tenant whose Salla rows to list"),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """
+    Return every `integrations` row for provider='salla' for one tenant,
+    annotated with which one is canonical and why the others were
+    superseded.  Used to diagnose 'multiple Salla integrations' issues.
+    """
+    from store_integration.registry import (  # noqa: PLC0415
+        pick_active_salla_integration,
+        _list_salla_integrations_for_tenant,
+        _is_easy_mode,
+        _score_integration,
+    )
+
+    rows = _list_salla_integrations_for_tenant(db, tenant_id)
+    canonical = pick_active_salla_integration(db, tenant_id)
+    canonical_id = canonical.id if canonical else None
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        cfg = r.config or {}
+        out.append({
+            "id":                       r.id,
+            "is_canonical":             r.id == canonical_id,
+            "enabled":                  r.enabled,
+            "external_store_id":        r.external_store_id,
+            "store_id_in_config":       cfg.get("store_id"),
+            "store_name":               cfg.get("store_name"),
+            "easy_mode":                _is_easy_mode(r),
+            "app_type":                 cfg.get("app_type"),
+            "api_key_source":           cfg.get("api_key_source"),
+            "api_key_hint":             ("***" + cfg.get("api_key", "")[-4:]) if cfg.get("api_key") else None,
+            "has_refresh_token":        bool(cfg.get("refresh_token")),
+            "needs_reauth":             bool(cfg.get("needs_reauth")),
+            "needs_reauth_reason":      cfg.get("needs_reauth_reason"),
+            "no_auto_refresh":          bool(cfg.get("no_auto_refresh")),
+            "no_auto_refresh_reason":   cfg.get("no_auto_refresh_reason"),
+            "superseded_by_easy_mode":  bool(cfg.get("superseded_by_easy_mode")),
+            "superseded_at":            cfg.get("superseded_at"),
+            "superseded_by_id":         cfg.get("superseded_by_id"),
+            "superseded_reason":        cfg.get("superseded_reason"),
+            "connected_at":             cfg.get("connected_at"),
+            "last_token_refresh":       cfg.get("last_token_refresh"),
+            "score":                    list(_score_integration(r)),
+        })
+
+    audit(
+        "admin_salla_list_integrations",
+        admin     = _admin.get("sub"),
+        tenant_id = tenant_id,
+        count     = len(rows),
+    )
+
+    return {
+        "ok":            True,
+        "tenant_id":     tenant_id,
+        "count":         len(rows),
+        "canonical_id":  canonical_id,
+        "integrations": out,
+    }
+
+
 @router.post("/admin/salla/orders-poller/run-once")
 async def salla_orders_poller_run_once(
     tenant_id: int = Query(..., description="Tenant to poll right now"),
