@@ -21,9 +21,9 @@ logger = logging.getLogger("nahla-scheduler")
 
 _CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
 _SYNC_INTERVAL_SECONDS = 3600  # full store sync every 1 hour
-# Fast order sync: poll only recent orders every 5 minutes to catch orders
+# Fast order sync: poll only recent orders every 60 seconds to catch orders
 # that Salla didn't deliver a webhook for (webhook delivery is best-effort).
-_ORDER_FAST_SYNC_SECONDS = int(os.getenv("NAHLA_ORDER_FAST_SYNC_SECONDS", "300"))
+_ORDER_FAST_SYNC_SECONDS = int(os.getenv("NAHLA_ORDER_FAST_SYNC_SECONDS", "60"))
 _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
 _SALLA_TOKEN_REFRESH_SECONDS = 6 * 3600  # Salla token refresh every 6 hours
