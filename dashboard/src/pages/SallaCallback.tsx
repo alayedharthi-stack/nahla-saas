@@ -9,19 +9,20 @@
  * Behaviour:
  *   1. Persist the session (JWT + store metadata) to localStorage so the
  *      next iframe load is pre-authenticated.
- *   2. Show a brief 'تم التثبيت بنجاح' confirmation.
- *   3. Auto-redirect back to the merchant's Salla dashboard after ~2 s so
- *      Salla's own UI can surface the 'استخدام التطبيق' button — that
- *      button is the merchant's natural entry point and we should not
- *      duplicate or pre-empt it.
+ *   2. Show a confirmation screen telling the merchant the install
+ *      succeeded and that the app is now visible in their Salla dashboard.
+ *
+ * IMPORTANT — we DO NOT auto-redirect anywhere:
+ *   - https://salla.sa/dashboard often shows "المتجر مغلق" for stores in
+ *     setup mode, which would be a confusing dead-end.
+ *   - We don't know the merchant's specific store subdomain so we can't
+ *     deep-link to their admin /apps page.
+ *   - Salla's own UI surfaces the app + "استخدام التطبيق" button
+ *     automatically once the merchant returns to their dashboard.
+ *   The merchant will close this tab / use their browser back button to
+ *   return to Salla, or click the "اذهب إلى تطبيقاتي" link below.
  */
 import { useEffect, useState } from 'react'
-
-const SALLA_DASHBOARD_URL: string =
-  (import.meta.env.VITE_SALLA_DASHBOARD_URL as string | undefined) ||
-  'https://salla.sa/dashboard'
-
-const AUTO_REDIRECT_MS = 2200
 
 export default function SallaCallback() {
   const [error,     setError]     = useState('')
@@ -46,8 +47,7 @@ export default function SallaCallback() {
     setIsNew(newFlag)
     setStoreName(name)
 
-    // Common metadata writes — happen for BOTH 'fresh JWT in URL' and
-    // 'existing localStorage JWT' paths.
+    // Persist Salla store metadata for the next iframe load.
     try {
       if (store) localStorage.setItem('nahla_salla_store_id',   store)
       if (name) {
@@ -82,41 +82,24 @@ export default function SallaCallback() {
         return
       }
     }
-    // Path B: no token in URL — the existing JWT in localStorage from the
-    // earlier /salla/token-login call remains valid. Nothing to do here.
+    // Path B: no token in URL — JWT already in localStorage from earlier
+    // /salla/token-login call.  Nothing else to do.
 
     // Strip the token from the URL (no back-button replay).
     try {
       window.history.replaceState(null, '', window.location.pathname)
     } catch { /* noop */ }
 
-    console.log('[SallaCallback] install OK — auto-redirecting to Salla dashboard in', AUTO_REDIRECT_MS, 'ms')
-
-    // Auto-redirect back to Salla so the merchant's normal flow continues:
-    // Salla's UI shows the "استخدام التطبيق" button → click it → iframe
-    // loads /app/salla → mini-dashboard. We never insert ourselves into
-    // that flow with a manual 'go back' click.
-    const t = setTimeout(() => {
-      try {
-        if (window.top) {
-          window.top.location.href = SALLA_DASHBOARD_URL
-          return
-        }
-      } catch { /* cross-origin */ }
-      window.location.href = SALLA_DASHBOARD_URL
-    }, AUTO_REDIRECT_MS)
-
-    return () => clearTimeout(t)
+    console.log('[SallaCallback] install OK — waiting for merchant to return to Salla',
+      { isNew: newFlag, waConnected, store })
   }, [])
 
-  const goToSallaNow = () => {
-    try {
-      if (window.top) {
-        window.top.location.href = SALLA_DASHBOARD_URL
-        return
-      }
-    } catch { /* cross-origin */ }
-    window.location.href = SALLA_DASHBOARD_URL
+  const tryClose = () => {
+    // window.close() only works for windows opened via JS or with a single
+    // history entry — it silently no-ops otherwise.  We try it and fall
+    // back to history.back().
+    try { window.close() } catch { /* noop */ }
+    try { window.history.back() } catch { /* noop */ }
   }
 
   return (
@@ -131,37 +114,41 @@ export default function SallaCallback() {
           <p className="text-white font-semibold">حدث خطأ أثناء ربط المتجر</p>
           <p className="text-slate-400 text-sm">يمكنك إعادة المحاولة من متجر تطبيقات سلة.</p>
           <code className="text-amber-400 text-xs block bg-slate-800 rounded px-2 py-1">{error}</code>
-          <button
-            onClick={goToSallaNow}
-            className="mt-3 inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold text-sm px-5 py-2.5 rounded-xl transition-colors"
-          >
-            العودة إلى سلة
-          </button>
         </div>
       ) : (
-        /* ── Brief success state — auto-redirects back to Salla ─── */
-        <div className="text-center space-y-4 max-w-sm">
-          <div className="text-5xl">✅</div>
-          <p className="text-white font-bold text-lg">
-            {isNew ? 'تم تثبيت نحلة بنجاح!' : 'تم تجديد الربط بنجاح!'}
-          </p>
-          {storeName && (
-            <p className="text-slate-300 text-sm">
-              المتجر: <span className="text-amber-400 font-semibold">{storeName}</span>
+        /* ── Success state — clear, no auto-redirect ─────────── */
+        <div className="text-center space-y-5 max-w-md">
+          <div className="text-6xl">✅</div>
+          <div>
+            <p className="text-white font-bold text-2xl leading-snug">
+              {isNew ? 'تم تثبيت نحلة بنجاح!' : 'تم تجديد الربط بنجاح!'}
             </p>
-          )}
-          <div className="flex items-center justify-center gap-2 text-slate-400 text-sm pt-1">
-            <div
-              className="w-4 h-4 rounded-full border-2 border-amber-400/30 border-t-amber-400 animate-spin"
-              aria-hidden
-            />
-            <span>جاري إعادتك إلى سلة...</span>
+            {storeName && (
+              <p className="text-slate-300 text-sm mt-2">
+                المتجر: <span className="text-amber-400 font-semibold">{storeName}</span>
+              </p>
+            )}
           </div>
+
+          <div className="bg-slate-800/60 border border-amber-400/20 rounded-2xl p-5 text-right">
+            <p className="text-amber-300 text-sm font-bold mb-2 flex items-center gap-2">
+              <span>📌</span>
+              للبدء باستخدام نحلة:
+            </p>
+            <p className="text-slate-200 text-sm leading-relaxed">
+              عُد إلى متجرك في سلة، وستجد نحلة الآن في قسم
+              <span className="text-amber-400 font-bold"> «تطبيقاتي» </span>
+              مع زر
+              <span className="text-amber-400 font-bold"> «استخدام التطبيق» </span>
+              جاهزاً للضغط.
+            </p>
+          </div>
+
           <button
-            onClick={goToSallaNow}
-            className="text-amber-400 hover:text-amber-300 text-xs font-semibold underline underline-offset-4 transition-colors"
+            onClick={tryClose}
+            className="text-slate-400 hover:text-slate-300 text-xs font-semibold underline underline-offset-4 transition-colors"
           >
-            تخطي الانتظار
+            إغلاق هذه الصفحة
           </button>
         </div>
       )}
