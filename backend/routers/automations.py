@@ -1797,37 +1797,35 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             "current_stage":    last_step_idx + 1,  # 0 = no reminder yet, 1-3 = stage reached
         })
 
-    # ── COD pending confirmation orders ──────────────────────────────────────
-    # Orders waiting for the customer to confirm a Cash-on-Delivery purchase.
-    # Includes orders in classic pending-confirmation statuses PLUS new orders
-    # that arrived directly via Salla webhook with in_progress/in_transit status
-    # if the payment_method is COD (these are auto-confirmed by the merchant).
+    # ── Order confirmation queue ──────────────────────────────────────────────
+    # Shows orders waiting for the WhatsApp confirmation to be sent.
+    # Includes:
+    #   • Classic COD-specific statuses (under_review, pending_confirmation…)
+    #   • ALL recent orders (last 48 h) in in_progress / new / pending status,
+    #     regardless of payment method — every order needs a confirmation.
     _COD_PENDING_STATUSES = frozenset({
         "pending_confirmation", "awaiting_confirmation",
         "under_review", "in_review",
     })
-    _COD_METHOD_KEYWORDS = ("cod", "cash_on_delivery", "cash")
-    # Threshold: treat in_progress COD orders placed within last 48 h as pending.
+    # Threshold: show recent orders placed within last 48 h.
     _cod_recent_threshold = datetime.now(timezone.utc) - timedelta(hours=48)
     cod_pending_items = []
     for o in (
         db.query(Order)
         .filter(Order.tenant_id == tenant_id, Order.is_abandoned.is_(False))
         .order_by(Order.id.desc())
-        .limit(100)
+        .limit(200)
         .all()
     ):
         raw = (o.status or "").strip().lower()
         meta = o.extra_metadata or {}
-        # Classic confirmation-pending statuses.
+
+        # Classic confirmation-pending statuses — always show.
         in_classic_pending = raw in _COD_PENDING_STATUSES
-        # in_progress orders: include if payment_method is COD and order is recent
-        # (these are COD orders auto-confirmed in Salla before Nahla could detect them).
+
+        # Recent in_progress / new / pending orders (any payment method).
         if not in_classic_pending:
-            _pm = str(meta.get("payment_method") or "").lower()
-            _is_cod_method = any(kw in _pm for kw in _COD_METHOD_KEYWORDS)
-            if raw == "in_progress" and _is_cod_method:
-                # Only show if recent enough (within 48h) to avoid stale entries.
+            if raw in ("in_progress", "new", "pending"):
                 _created_str = meta.get("created_at") or ""
                 _is_recent = False
                 if _created_str:
@@ -1844,9 +1842,8 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
                     continue
             else:
                 continue
+
         ci = o.customer_info or {}
-        # COD reminders are tracked in `cod_reminders` by
-        # automation_emitters.scan_cod_confirmations.
         cod_reminders: list = list(meta.get("cod_reminders") or [])
         cod_last_reminder_at: Optional[str] = None
         for r in reversed(cod_reminders):
@@ -1862,10 +1859,10 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
             "customer_phone":     _cod_phone,
             "total":              float(o.total or 0),
             "status":             raw,
+            "payment_method":     str(meta.get("payment_method") or ""),
             "created_at":         meta.get("created_at", ""),
             "reminders_sent":     len(cod_reminders),
             "last_reminder_at":   cod_last_reminder_at,
-            # True if the auto-cancel sweep has already scheduled a cancel.
             "auto_cancel_at":     meta.get("cod_auto_cancelled_at"),
         })
 
@@ -2264,6 +2261,7 @@ _PENDING_PAY_STATUSES_TL = frozenset({
 _COD_PENDING_STATUSES_TL = frozenset({
     "pending_confirmation", "awaiting_confirmation",
     "under_review", "in_review",
+    "in_progress", "new",
 })
 
 _STEP_STATUS_LABELS = {

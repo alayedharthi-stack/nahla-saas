@@ -1863,6 +1863,46 @@ class StoreSyncService:
         if is_new:
             try:
                 from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                from core.automation_triggers import AutomationTrigger    # noqa: PLC0415
+                _payment_method = str(normalised.get("payment_method") or "").lower()
+                _order_status   = str(normalised.get("status") or "").lower()
+
+                # ── order_notifications ──────────────────────────────────────
+                # Fire for every new order regardless of payment method or status.
+                # This is the universal order-confirmation trigger — the
+                # order_notifications SmartAutomation sends the merchant's
+                # chosen confirmation template (order summary, COD confirmation,
+                # etc.) to the customer as soon as their order lands in Nahla.
+                # The engine deduplicates on (event_id, automation_id) so even
+                # if a future webhook update re-emits, only one execution fires.
+                emit_automation_event(
+                    self.db,
+                    self.tenant_id,
+                    AutomationTrigger.ORDER_NOTIFICATIONS.value,
+                    customer_id=customer.id if customer else None,
+                    payload={
+                        "external_id":           ext_id,
+                        "order_id":              order_row.id,
+                        "order_internal_id":     order_row.id,
+                        "status":                _order_status,
+                        "total":                 normalised.get("total"),
+                        "order_number":          normalised.get("external_order_number") or ext_id,
+                        "external_order_number": normalised.get("external_order_number"),
+                        "checkout_url":          normalised.get("checkout_url") or "",
+                        "payment_url":           normalised.get("checkout_url") or "",
+                        "payment_method":        _payment_method,
+                        "source":                "store_sync.order_webhook",
+                    },
+                    commit=True,
+                )
+                logger.info(
+                    "[StoreSync] order_notifications event emitted tenant=%s order=%s status=%s payment=%s",
+                    self.tenant_id, ext_id, _order_status, _payment_method or "unknown",
+                )
+
+                # ── order_created (legacy / backward compat) ─────────────────
+                # Keep emitting order_created so any custom automations wired
+                # to that event string continue to work.
                 emit_automation_event(
                     self.db,
                     self.tenant_id,
@@ -1871,59 +1911,51 @@ class StoreSyncService:
                     payload={
                         "external_id":           ext_id,
                         "order_id":              order_row.id,
-                        "status":                normalised.get("status"),
+                        "status":                _order_status,
                         "total":                 normalised.get("total"),
                         "order_number":          normalised.get("external_order_number") or ext_id,
                         "external_order_number": normalised.get("external_order_number"),
                         "checkout_url":          normalised.get("checkout_url") or "",
                         "payment_url":           normalised.get("checkout_url") or "",
+                        "payment_method":        _payment_method,
                     },
                     commit=True,
                 )
-            except Exception as exc:
-                # Automation failures are logged at ERROR so they are visible,
-                # but do not fail the whole webhook — the order is already
-                # durably stored and the dispatcher will retry this webhook
-                # if we re-raise, potentially double-inserting automation rows.
-                logger.exception(
-                    "[StoreSync] emit order_created failed tenant=%s order=%s: %s",
-                    self.tenant_id, order_row.id, exc,
-                )
 
-        # ── COD confirmation trigger ──────────────────────────────────────────
-        # For orders placed directly on Salla (not via Nahla AI chat), the
-        # initial COD confirmation message is never sent because ai_sales.py
-        # only handles AI-created orders. We detect new COD orders here and
-        # immediately emit order_cod_pending so the cod_confirmation automation
-        # fires and sends the WhatsApp confirmation to the customer.
-        #
-        # Detection: payment_method in {"cod", "cash_on_delivery", ...} AND
-        # the order is new. We avoid double-emitting by storing
-        # extra_metadata.cod_webhook_triggered = True on the order row.
-        _payment_method = str(normalised.get("payment_method") or "").lower()
-        _COD_METHODS = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
-        _is_cod = bool(
-            _payment_method
-            and any(_payment_method == m or m in _payment_method for m in _COD_METHODS)
-        )
-        if is_new and _is_cod and customer and order_row is not None:
-            try:
+                # ── COD-specific: also emit order_cod_pending ─────────────────
+                # When the payment method is COD AND the order has arrived in a
+                # confirmed/active state (in_progress, under_review, etc.), emit
+                # order_cod_pending so the dedicated cod_confirmation automation
+                # fires alongside the general order_notifications one.  The COD
+                # template typically includes a QUICK_REPLY button for the
+                # customer to confirm receipt intention.
+                _COD_METHODS = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
+                _is_cod = bool(
+                    _payment_method
+                    and any(
+                        _payment_method == m or m in _payment_method
+                        for m in _COD_METHODS
+                    )
+                )
+                _COD_ACTIVE_STATUSES = {
+                    "in_progress", "under_review", "in_review",
+                    "pending_confirmation", "awaiting_confirmation",
+                    "pending", "new",
+                }
                 meta = dict(order_row.extra_metadata or {})
-                if not meta.get("cod_webhook_triggered"):
-                    from core.automation_engine import emit_automation_event  # noqa: PLC0415
-                    from core.automation_triggers import AutomationTrigger  # noqa: PLC0415
+                if _is_cod and not meta.get("cod_webhook_triggered"):
                     emit_automation_event(
                         self.db,
                         self.tenant_id,
                         AutomationTrigger.ORDER_COD_PENDING.value,
-                        customer_id=customer.id,
+                        customer_id=customer.id if customer else None,
                         payload={
                             "external_id":           ext_id,
                             "order_id":              order_row.id,
                             "order_internal_id":     order_row.id,
                             "order_number":          normalised.get("external_order_number") or ext_id,
                             "external_order_number": normalised.get("external_order_number"),
-                            "status":                normalised.get("status"),
+                            "status":                _order_status,
                             "total":                 normalised.get("total"),
                             "payment_method":        _payment_method,
                             "checkout_url":          normalised.get("checkout_url") or "",
@@ -1940,13 +1972,18 @@ class StoreSyncService:
                     flag_modified(order_row, "extra_metadata")
                     self.db.commit()
                     logger.info(
-                        "[StoreSync] COD confirmation event emitted tenant=%s order=%s payment_method=%s",
-                        self.tenant_id, ext_id, _payment_method,
+                        "[StoreSync] order_cod_pending event emitted tenant=%s order=%s",
+                        self.tenant_id, ext_id,
                     )
+
             except Exception as exc:
+                # Automation failures are logged at ERROR so they are visible,
+                # but do not fail the whole webhook — the order is already
+                # durably stored and the dispatcher will retry this webhook
+                # if we re-raise, potentially double-inserting automation rows.
                 logger.exception(
-                    "[StoreSync] COD confirmation emit failed tenant=%s order=%s: %s",
-                    self.tenant_id, ext_id, exc,
+                    "[StoreSync] order notification emit failed tenant=%s order=%s: %s",
+                    self.tenant_id, getattr(order_row, "id", ext_id), exc,
                 )
 
         # ── P0: Cancel any in-flight abandoned-cart recovery ──────────────
