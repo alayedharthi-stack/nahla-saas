@@ -14,6 +14,12 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 
+// ── Immediate ready signal (in case Salla loads this URL directly) ─────────────
+;(function immediateReady() {
+  try { window.parent.postMessage({ type: 'app.ready' }, '*') } catch { /* cross-origin */ }
+  try { window.parent.postMessage({ event: 'embedded::ready', payload: {}, source: 'embedded-app' }, '*') } catch { /* cross-origin */ }
+})()
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const SETUP_DONE_KEY  = 'nahla_salla_setup_done'
@@ -136,6 +142,15 @@ function Field({
 export default function SallaSetup() {
   const navigate = useNavigate()
   const bootedRef = useRef(false)
+
+  // ── Redirect: SallaSetup is replaced by the mini-dashboard (SallaEntryScreen).
+  // If a token exists → go directly to /app/entry.
+  // If no token → go to /app/salla for proper Salla OAuth before the mini-dashboard.
+  useEffect(() => {
+    const token = (() => { try { return localStorage.getItem('nahla_token') || '' } catch { return '' } })()
+    navigate(token ? '/app/entry' : '/app/salla', { replace: true })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const [form,         setForm]         = useState<SetupState>(DEFAULTS)
   const [loading,      setLoading]      = useState(true)
