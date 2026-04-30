@@ -298,12 +298,11 @@ async def _poll_tenant(db: Session, tenant_id: int, lookback_iso: str) -> Dict[s
     api_returned = -1  # -1 means "did not capture"
     upserted_total = 0
     api_error: Optional[str] = None
+    needs_reauth_raised = False
 
     # We want to also know how many rows the Salla API actually returned
     # for this lookback window — so we call adapter.get_orders directly
     # and then hand the list-shaped sync to sync_orders for upserting.
-    # (sync_orders re-fetches internally; we accept the small extra cost
-    # for the diagnostic clarity it gives us.)
     try:
         adapter = svc._get_adapter()  # noqa: SLF001
         if adapter is not None:
@@ -316,18 +315,42 @@ async def _poll_tenant(db: Session, tenant_id: int, lookback_iso: str) -> Dict[s
                     tenant_id, api_returned, lookback_iso,
                 )
             except Exception as adapter_exc:
-                api_error = repr(adapter_exc)
-                logger.warning(
-                    "[Salla Orders Poller] tenant=%s salla_api_response error=%s",
-                    tenant_id, adapter_exc,
-                )
+                # Detect SallaTokenRevokedException without importing it
+                # (avoids a hard import-cycle here).
+                exc_name = type(adapter_exc).__name__
+                if exc_name == "SallaTokenRevokedException":
+                    needs_reauth_raised = True
+                    api_error = "needs_reauth: token refresh failed or revoked"
+                    logger.warning(
+                        "[Salla Orders Poller] tenant=%s sync stopped — needs_reauth (%s)",
+                        tenant_id, adapter_exc,
+                    )
+                else:
+                    api_error = repr(adapter_exc)
+                    logger.warning(
+                        "[Salla Orders Poller] tenant=%s salla_api_response error=%s",
+                        tenant_id, adapter_exc,
+                    )
     except Exception:
         pass
 
-    upserted_total = await svc.sync_orders(
-        updated_since=lookback_iso,
-        triggered_by="salla_orders_poller",
-    )
+    if not needs_reauth_raised:
+        try:
+            upserted_total = await svc.sync_orders(
+                updated_since=lookback_iso,
+                triggered_by="salla_orders_poller",
+            )
+        except Exception as sync_exc:
+            exc_name = type(sync_exc).__name__
+            if exc_name == "SallaTokenRevokedException":
+                needs_reauth_raised = True
+                api_error = api_error or "needs_reauth: token refresh failed or revoked"
+                logger.warning(
+                    "[Salla Orders Poller] tenant=%s sync_orders stopped — needs_reauth",
+                    tenant_id,
+                )
+            else:
+                raise
 
     try:
         db.commit()
@@ -361,6 +384,7 @@ async def _poll_tenant(db: Session, tenant_id: int, lookback_iso: str) -> Dict[s
     return {
         "api_returned":       api_returned,
         "api_error":          api_error,
+        "needs_reauth":       needs_reauth_raised,
         "upserted_total":     upserted_total,
         "new_orders":         new_orders_count,
         "updated_orders":     updated_orders_count,
