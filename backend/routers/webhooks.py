@@ -252,8 +252,92 @@ def _resolve_tenant_from_store(db, store_id) -> int | None:
     return None
 
 
+def _trigger_easy_initial_sync(tenant_id: int, salla_store_id: str) -> None:
+    """
+    Fire-and-forget the same full_sync that the OAuth callback used to run.
+
+    Called from `_handle_salla_authorize` after tokens are persisted, in
+    BOTH the existing-integration branch (re-install / token refresh) and
+    the new-integration branch (first install via Easy Mode).
+
+    Runs in a background asyncio task with its own DB session so the
+    webhook receiver can return 200 OK immediately — Salla retries any
+    webhook that doesn't get a 200 within ~10s.
+    """
+    try:
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        async def _do_sync(tid: int, sid: str) -> None:
+            # Small delay so the integration row is fully visible to other
+            # sessions and any post-commit hooks have settled.
+            await _asyncio.sleep(2)
+            from core.database import get_db as _gdb  # noqa: PLC0415
+            from services.store_sync import StoreSyncService  # noqa: PLC0415
+
+            logger.info(
+                "[Salla Easy] initial sync started | tenant=%s store=%s",
+                tid, sid,
+            )
+            _db = next(_gdb())
+            try:
+                svc = StoreSyncService(_db, tid)
+                result = await svc.full_sync(triggered_by="easy_mode_webhook")
+                logger.info(
+                    "[Salla Easy] initial sync completed | tenant=%s store=%s "
+                    "status=%s products=%s customers=%s orders=%s coupons=%s "
+                    "abandoned_carts=%s",
+                    tid, sid,
+                    result.get("status"),
+                    result.get("products_synced", 0),
+                    result.get("customers_synced", 0),
+                    result.get("orders_synced", 0),
+                    result.get("coupons_synced", 0),
+                    result.get("abandoned_carts_synced", 0),
+                )
+            except Exception as exc:
+                logger.error(
+                    "[Salla Easy] initial sync FAILED | tenant=%s store=%s err=%s",
+                    tid, sid, exc,
+                )
+            finally:
+                try:
+                    _db.close()
+                except Exception:
+                    pass
+
+        _asyncio.ensure_future(_do_sync(tenant_id, salla_store_id))
+        logger.info(
+            "[Salla Easy] initial sync task queued | tenant=%s store=%s",
+            tenant_id, salla_store_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Salla Easy] could not queue initial sync | tenant=%s store=%s err=%s",
+            tenant_id, salla_store_id, exc,
+        )
+
+
 async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> None:
-    """Save Salla OAuth tokens received via webhook (app.store.authorize / app.installed)."""
+    """
+    Save Salla OAuth tokens received via webhook + trigger initial sync.
+
+    Handles three Easy Mode events from Salla:
+      • app.store.authorize  — tokens delivered after merchant authorizes
+      • app.store.token      — tokens refreshed by Salla
+      • app.installed        — install confirmation (may or may not carry tokens)
+
+    Behaviour:
+      • Persists access_token + refresh_token + store metadata in
+        `integrations.config` with `app_type='easy'` and
+        `api_key_source='easy_mode_webhook'`.
+      • Sets `external_store_id` on the Integration row so webhook routing
+        and tenant resolution work correctly.
+      • Re-activates a soft-disabled integration if the merchant
+        re-installs after uninstalling.
+      • Fires a background `StoreSyncService.full_sync` so products,
+        customers, orders, and coupons are pre-loaded before the merchant
+        clicks 'استخدام التطبيق' inside Salla.
+    """
     from models import Integration, Tenant, User  # noqa: PLC0415
     from core.auth import hash_password, create_token  # noqa: PLC0415
     from core.tenant import get_or_create_tenant  # noqa: PLC0415
@@ -271,9 +355,10 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
     ) or f"متجر سلة {salla_store_id}"
 
     logger.info(
-        "[Salla WH] _handle_salla_authorize | store_id=%s has_access_token=%s "
-        "has_refresh_token=%s store_name=%s",
-        salla_store_id, bool(access_token), bool(refresh_token), store_name,
+        "[Salla Easy] authorize received | store_id=%s has_access_token=%s "
+        "has_refresh_token=%s expires_in=%s store_name=%s event=%s",
+        salla_store_id, bool(access_token), bool(refresh_token),
+        expires_in, store_name, payload.get("event", "?"),
     )
 
     # ── Find existing integration by salla store_id in config ─────────────────
@@ -286,7 +371,7 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
             Integration.external_store_id == salla_store_id,
         ).first()
     except Exception as _e:
-        logger.warning("[Salla Webhook] Integration lookup error: %s", _e)
+        logger.warning("[Salla Easy] integration lookup error: %s", _e)
 
     if existing_integration:
         from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
@@ -295,12 +380,14 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         tenant_id = existing_integration.tenant_id
         new_cfg = dict(existing_integration.config or {})
         new_cfg.update({
-            "api_key":       access_token or new_cfg.get("api_key", ""),
-            "refresh_token": refresh_token or new_cfg.get("refresh_token", ""),
-            "expires_in":    expires_in,
-            "store_name":    store_name,
-            "connected_at":  datetime.now(timezone.utc).isoformat(),
-            "app_type":      "easy",
+            "api_key":         access_token or new_cfg.get("api_key", ""),
+            "refresh_token":   refresh_token or new_cfg.get("refresh_token", ""),
+            "expires_in":      expires_in,
+            "store_id":        salla_store_id,
+            "store_name":      store_name,
+            "connected_at":    datetime.now(timezone.utc).isoformat(),
+            "app_type":        "easy",
+            "api_key_source":  "easy_mode_webhook",
         })
         new_cfg.pop("soft_disabled", None)
         new_cfg.pop("uninstalled_at", None)
@@ -313,22 +400,31 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         db.commit()
         if was_disabled:
             logger.info(
-                "[Salla Webhook] RE-ACTIVATED disabled integration via Easy webhook | "
-                "tenant=%s store=%s", tenant_id, salla_store_id,
+                "[Salla Easy] tokens saved (RE-ACTIVATED) | tenant=%s store=%s",
+                tenant_id, salla_store_id,
             )
         else:
             logger.info(
-                "[Salla Webhook] REFRESHED tokens for active integration | "
-                "tenant=%s store=%s", tenant_id, salla_store_id,
+                "[Salla Easy] tokens saved (refreshed existing integration) | "
+                "tenant=%s store=%s",
+                tenant_id, salla_store_id,
             )
+
+        # Trigger initial sync only when we actually have a fresh access
+        # token (not for token-less app.installed events that arrive before
+        # app.store.authorize).
+        if access_token:
+            _trigger_easy_initial_sync(tenant_id, salla_store_id)
         return
 
     # ── No existing integration: auto-create a new Nahla merchant account ─────
     if not access_token:
-        # app.installed without a token — just log and return (token comes via OAuth later)
+        # app.installed without a token — just log and return (the
+        # subsequent app.store.authorize event will carry the token and
+        # land in this same handler).
         logger.info(
-            "[Salla Webhook] app.installed with no token — merchant will link via OAuth | store=%s",
-            salla_store_id,
+            "[Salla Easy] authorize received WITHOUT token — waiting for "
+            "app.store.authorize event | store=%s", salla_store_id,
         )
         return
 
@@ -356,24 +452,32 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
             provider="salla",
             external_store_id=salla_store_id,
             config={
-                "api_key":       access_token,
-                "refresh_token": refresh_token,
-                "store_id":      salla_store_id,
-                "store_name":    store_name,
-                "expires_in":    expires_in,
-                "connected_at":  datetime.now(timezone.utc).isoformat(),
-                "app_type":      "easy",
+                "api_key":         access_token,
+                "refresh_token":   refresh_token,
+                "store_id":        salla_store_id,
+                "store_name":      store_name,
+                "expires_in":      expires_in,
+                "connected_at":    datetime.now(timezone.utc).isoformat(),
+                "app_type":        "easy",
+                "api_key_source":  "easy_mode_webhook",
             },
             enabled=True,
         )
         db.add(integration)
         db.commit()
         logger.info(
-            "[Salla Webhook] Auto-created merchant | tenant=%s email=%s store=%s",
+            "[Salla Easy] tokens saved (NEW tenant + integration) | "
+            "tenant=%s email=%s store=%s",
             tenant_id, salla_email, salla_store_id,
         )
+
+        # Pre-load the merchant's data so the mini-dashboard isn't empty
+        # when they click 'استخدام التطبيق' inside Salla a few seconds
+        # later.
+        _trigger_easy_initial_sync(tenant_id, salla_store_id)
+
     except Exception as exc:
-        logger.exception("[Salla Webhook] Auto-create failed: %s", exc)
+        logger.exception("[Salla Easy] auto-create FAILED: %s", exc)
         try:
             db.rollback()
         except Exception:
