@@ -138,8 +138,8 @@ async def create_campaign(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    from core.billing import require_billing_access  # noqa: PLC0415
-    require_billing_access(db, tenant_id)
+    from core.billing import require_outbound_access  # noqa: PLC0415
+    require_outbound_access(db, tenant_id)
 
     # ── Entitlement checks ─────────────────────────────────────────────────────
     from core.plan_entitlements import (  # noqa: PLC0415

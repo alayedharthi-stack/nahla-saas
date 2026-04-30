@@ -631,6 +631,11 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
 async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+
+    # Manual reply is an outbound action — blocked when no active billing
+    from core.billing import require_outbound_access  # noqa: PLC0415
+    require_outbound_access(db, tenant_id)
+
     customer_phone = normalize_phone(body.customer_phone) or body.customer_phone
 
     wa_conn = db.query(WhatsAppConnection).filter(

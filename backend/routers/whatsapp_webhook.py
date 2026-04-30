@@ -1698,9 +1698,24 @@ async def _handle_merchant_message(
                 )
                 # process() returns dict {"reply": str, "buttons": list, "handoff": bool}
                 if isinstance(brain_result, dict):
-                    reply   = brain_result.get("reply", "") or ""
-                    _brain_buttons = brain_result.get("buttons") or []
-                    _brain_handoff = bool(brain_result.get("handoff"))
+                    # billing_access_denied → skipped=True, reply=None — no outbound send
+                    _billing_denied = (
+                        brain_result.get("skipped")
+                        and brain_result.get("reason") == "billing_access_denied"
+                    )
+                    if _billing_denied:
+                        logger.info(
+                            "[BRAIN] billing_access_denied — inbound recorded, outbound suppressed | tenant=%s",
+                            tenant_id,
+                        )
+                        MERCHANT_BRAIN_ENABLED_FALLBACK = False
+                        reply          = ""
+                        _brain_buttons = []
+                        _brain_handoff = False
+                    else:
+                        reply   = brain_result.get("reply", "") or ""
+                        _brain_buttons = brain_result.get("buttons") or []
+                        _brain_handoff = bool(brain_result.get("handoff"))
                 else:
                     reply          = str(brain_result or "")
                     _brain_buttons = []

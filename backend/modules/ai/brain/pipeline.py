@@ -104,6 +104,21 @@ class MerchantBrain:
     ) -> Dict[str, Any]:
         t0 = time.monotonic()
 
+        # ── Outbound billing guard ────────────────────────────────────────────
+        # Inbound message ingestion and conversation recording always run.
+        # AI REPLY is an outbound action — blocked when no active billing.
+        from core.billing import has_billing_access as _has_access  # noqa: PLC0415
+        if not _has_access(db, tenant_id):
+            logger.info(
+                "[Brain] billing_access_denied — recording inbound but skipping AI reply | tenant=%s",
+                tenant_id,
+            )
+            return {
+                "reply":   None,
+                "skipped": True,
+                "reason":  "billing_access_denied",
+            }
+
         # ── 0. Tenant isolation context (single source of truth for the turn) ─
         # Built once here. Every downstream layer (sales context loader,
         # handlers/runtime, memory updater, signal emitter) MUST reuse this

@@ -825,6 +825,10 @@ async def send_payment_reminder(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
+    # Payment reminder is an outbound action — blocked when no active billing
+    from core.billing import require_outbound_access  # noqa: PLC0415
+    require_outbound_access(db, tenant_id)
+
     order = _lookup_order(db, tenant_id, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="order_not_found")

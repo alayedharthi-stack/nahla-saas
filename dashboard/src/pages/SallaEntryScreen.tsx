@@ -88,15 +88,19 @@ const C = {
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
 function MiniStatusCard({
-  icon, label, active, activeText, inactiveText,
+  icon, label, active, activeText, inactiveText, warning = false,
 }: {
-  icon: string; label: string; active: boolean; activeText: string; inactiveText: string
+  icon: string; label: string; active: boolean; activeText: string; inactiveText: string; warning?: boolean
 }) {
+  const borderColor = active ? '#bbf7d0' : warning ? '#fed7aa' : C.slate100
+  const dotColor    = active ? C.green   : warning ? '#f97316' : C.slate200
+  const dotGlow     = active ? `0 0 6px rgba(34,197,94,0.4)` : warning ? `0 0 6px rgba(249,115,22,0.4)` : 'none'
+  const textColor   = active ? C.greenText : warning ? '#c2410c' : C.slate300
   return (
     <div
       style={{
         background:   C.white,
-        border:       active ? `1.5px solid #bbf7d0` : `1.5px solid ${C.slate100}`,
+        border:       `1.5px solid ${borderColor}`,
         borderRadius: 16,
         padding:      '14px',
         boxShadow:    '0 1px 3px rgba(0,0,0,0.04)',
@@ -109,15 +113,15 @@ function MiniStatusCard({
             width:     8,
             height:    8,
             borderRadius: '50%',
-            background: active ? C.green : C.slate200,
-            boxShadow:  active ? `0 0 6px rgba(34,197,94,0.4)` : 'none',
+            background: dotColor,
+            boxShadow:  dotGlow,
             display:    'inline-block',
             flexShrink: 0,
           }}
         />
       </div>
       <p style={{ fontSize: 11, color: C.slate400, fontWeight: 600, margin: 0 }}>{label}</p>
-      <p style={{ fontSize: 12, fontWeight: 700, color: active ? C.greenText : C.slate300, margin: '2px 0 0' }}>
+      <p style={{ fontSize: 12, fontWeight: 700, color: textColor, margin: '2px 0 0' }}>
         {active ? activeText : inactiveText}
       </p>
     </div>
@@ -596,10 +600,56 @@ export default function SallaEntryScreen() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <MiniStatusCard icon="🏪" label="سلة"       active={true}      activeText="متصل"        inactiveText="غير متصل" />
                 <MiniStatusCard icon="💬" label="واتساب"    active={waOk}      activeText="متصل"        inactiveText="غير متصل" />
-                <MiniStatusCard icon="💳" label="الاشتراك"  active={subActive} activeText={subLabel}    inactiveText="غير نشط"  />
+                <MiniStatusCard icon="💳" label="الاشتراك"  active={subActive} activeText={subLabel}    inactiveText={subLabel} warning={trialBlocked} />
                 <MiniStatusCard icon="🤖" label="نحلة"      active={nahlaOk}   activeText="تعمل"        inactiveText="متوقفة"   />
               </div>
             </section>
+
+            {/* ─ Subscription-required notice (soft, non-blocking) ─ */}
+            {trialBlocked && (
+              <div
+                style={{
+                  background:    '#fff7ed',
+                  border:        '1.5px solid #fed7aa',
+                  borderRadius:  14,
+                  padding:       '12px 16px',
+                  display:       'flex',
+                  gap:           12,
+                  alignItems:    'flex-start',
+                }}
+              >
+                <span style={{ fontSize: 20, flexShrink: 0 }}>🔔</span>
+                <div>
+                  <p style={{ margin: 0, fontWeight: 700, fontSize: 13, color: '#9a3412' }}>
+                    الردود التلقائية والأتمتة مقفلة
+                  </p>
+                  <p style={{ margin: '4px 0 0', fontSize: 12, color: '#c2410c', lineHeight: 1.6 }}>
+                    يمكنك رؤية المحادثات الواردة والفرص والسلات المتروكة، لكن لن يرد نحلة تلقائياً ولن تُنفَّذ أي إجراءات حتى تفعيل الاشتراك.
+                  </p>
+                  <a
+                    href={appStoreUrl}
+                    target="_top"
+                    rel="noreferrer"
+                    style={{
+                      display:        'inline-flex',
+                      alignItems:     'center',
+                      gap:            5,
+                      marginTop:      8,
+                      padding:        '7px 14px',
+                      borderRadius:   8,
+                      fontSize:       12,
+                      fontWeight:     800,
+                      background:     '#f97316',
+                      color:          '#fff',
+                      textDecoration: 'none',
+                      border:         'none',
+                    }}
+                  >
+                    💳 اشترك الآن
+                  </a>
+                </div>
+              </div>
+            )}
 
             {/* ─ 2. Onboarding steps ─ */}
             <section

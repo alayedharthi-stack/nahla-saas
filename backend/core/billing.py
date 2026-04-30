@@ -208,18 +208,42 @@ def _has_salla_active_subscription(db: Session, tenant_id: int) -> bool:
 
 def has_billing_access(db: Session, tenant_id: int) -> bool:
     """
-    True when the tenant can use paid AI features.
+    True when the tenant can use paid AI features (outbound sends, AI replies, campaigns).
 
     Checks in priority order:
       1. Nahla-native active subscription (Stripe / HyperPay)
       2. Salla App Store active or trial subscription
       3. Nahla internal free-trial window
+
+    Inbound ingestion, store sync, analytics, and webhook processing
+    are ALWAYS allowed regardless of this flag — see automation_engine._execute_action.
     """
     return bool(
         get_tenant_subscription(db, tenant_id)
         or _has_salla_active_subscription(db, tenant_id)
         or has_active_trial(db, tenant_id)
     )
+
+
+def require_outbound_access(db: Session, tenant_id: int) -> None:
+    """
+    Raise HTTP 402 before any outbound action:
+      - AI / manual WhatsApp reply
+      - Campaign send
+      - Template send
+      - Automation execution
+      - Coupon auto-send
+
+    Does NOT apply to: webhook ingestion, store sync, analytics reads.
+    """
+    if not has_billing_access(db, tenant_id):
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code":    "billing_access_denied",
+                "message": "الاشتراك منتهٍ أو التجربة المجانية مستخدمة. يرجى الاشتراك للاستمرار في الإرسال.",
+            },
+        )
 
 
 def is_launch_discount_active(sub: BillingSubscription) -> bool:

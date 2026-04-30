@@ -204,19 +204,10 @@ async def process_pending_events(
             tenant_id, exc, exc_info=True,
         )
 
-    # ── Trial / subscription guard (ALWAYS enforced) ────────────────────
-    from core.billing import has_billing_access  # noqa: PLC0415
-    if not has_billing_access(db, tenant_id):
-        skipped = _drain_pending_for_reason(db, tenant_id, "trial_expired")
-        if skipped:
-            _log_event(
-                _EVENTS.AUTOMATION_AUTOPILOT_DISABLED,
-                level=logging.INFO,
-                tenant_id=tenant_id,
-                events_drained=skipped,
-                reason="trial_expired",
-            )
-        return 0
+    # NOTE: Billing/trial guard is NOT applied here.
+    # Inbound event scanning, matching, and recording run for ALL tenants.
+    # The outbound guard (has_billing_access) is enforced inside _execute_action
+    # immediately before any WhatsApp message is sent — see that function below.
 
     # ── Master autopilot switch (skipped for manual retries) ──────────
     if not skip_autopilot_check and not _is_autopilot_enabled(db, tenant_id):
@@ -911,6 +902,19 @@ async def _execute_action(
     """
     from models import Customer, WhatsAppConnection, WhatsAppTemplate  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+    # ── Outbound billing guard ────────────────────────────────────────────────
+    # Inbound events, sync, and analytics are ALWAYS allowed (see process_pending_events).
+    # This is the ONLY place where we gate outbound WhatsApp sends.
+    # Trials, active subscriptions, and Salla paid plans all pass.
+    # trial_blocked / cancelled / failed → skip with billing_access_denied reason.
+    from core.billing import has_billing_access as _has_access  # noqa: PLC0415
+    if not _has_access(db, tenant_id):
+        return False, {
+            "error":       "billing_access_denied",
+            "error_code":  "billing_access_denied",
+            "error_label": "الاشتراك منتهٍ أو التجربة مستخدمة — لا يمكن إرسال رسائل",
+        }
 
     customer_id = event.customer_id
     if not customer_id:
