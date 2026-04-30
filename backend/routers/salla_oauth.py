@@ -1720,17 +1720,19 @@ async def salla_oauth_callback(
     )
 
     # ── Handle provider-side errors ────────────────────────────────────────────
+    # All error states render inline HTML on api.nahlah.ai — we never bounce
+    # the merchant to a Nahla page, per Salla embedded-app policy.
     if error:
         logger.warning("[Salla OAuth] Provider error: %s", error)
-        return RedirectResponse(url=_error_url(error), status_code=302)
+        return HTMLResponse(content=_install_error_html(error), status_code=400)
 
     if not code:
         logger.warning("[Salla OAuth] Missing code in callback")
-        return RedirectResponse(url=_error_url("missing_code"), status_code=302)
+        return HTMLResponse(content=_install_error_html("missing_code"), status_code=400)
 
     if not SALLA_CLIENT_ID or not SALLA_CLIENT_SECRET:
         logger.error("[Salla OAuth] SALLA_CLIENT_ID or SALLA_CLIENT_SECRET not configured")
-        return RedirectResponse(url=_error_url("app_not_configured"), status_code=302)
+        return HTMLResponse(content=_install_error_html("app_not_configured"), status_code=503)
 
     # ── Step 2: Token exchange ─────────────────────────────────────────────────
     # Normalize redirect_uri so it matches EXACTLY the authorize-URL value
@@ -1774,9 +1776,9 @@ async def salla_oauth_callback(
                     "[Salla OAuth] Token exchange FAILED | http=%s salla_error=%s desc=%s",
                     token_resp.status_code, salla_err, salla_msg,
                 )
-                return RedirectResponse(
-                    url=_error_url("token_exchange_failed", salla_err or salla_msg),
-                    status_code=302,
+                return HTMLResponse(
+                    content=_install_error_html(f"token_exchange_failed: {salla_err or salla_msg}"),
+                    status_code=400,
                 )
 
             token_data    = token_resp.json()
@@ -1839,10 +1841,10 @@ async def salla_oauth_callback(
 
     except httpx.TimeoutException as exc:
         logger.error("[Salla OAuth] Token exchange timed out: %s", exc)
-        return RedirectResponse(url=_error_url("timeout"), status_code=302)
+        return HTMLResponse(content=_install_error_html("timeout"), status_code=504)
     except Exception as exc:
         logger.exception("[Salla OAuth] Unexpected error during token exchange: %s", exc)
-        return RedirectResponse(url=_error_url("network_error"), status_code=302)
+        return HTMLResponse(content=_install_error_html("network_error"), status_code=502)
 
     # ── Step 4: Resolve / create Nahla account for this merchant ───────────────
     auto_jwt: str = ""
@@ -1995,7 +1997,7 @@ async def salla_oauth_callback(
                 db.rollback()
             except Exception:
                 pass
-            return RedirectResponse(url=_error_url("registration_failed"), status_code=302)
+            return HTMLResponse(content=_install_error_html("registration_failed"), status_code=500)
 
     else:
         # Existing merchant — tenant_id came from state
@@ -2018,9 +2020,9 @@ async def salla_oauth_callback(
                     "[Salla OAuth] ❌ Cannot resolve tenant — no store_id AND no state. "
                     "Refusing to fall back to tenant_id=1."
                 )
-                return RedirectResponse(
-                    url=_error_url("tenant_resolution_failed"),
-                    status_code=302,
+                return HTMLResponse(
+                    content=_install_error_html("tenant_resolution_failed"),
+                    status_code=500,
                 )
             # Create a brand-new tenant for this store instead of
             # silently falling back to tenant_id=1.
@@ -2099,7 +2101,7 @@ async def salla_oauth_callback(
             db.rollback()
         except Exception:
             pass
-        return RedirectResponse(url=_error_url("db_save_failed"), status_code=302)
+        return HTMLResponse(content=_install_error_html("db_save_failed"), status_code=500)
 
     # ── Email: welcome (new) or salla_connected (returning) ─────────────────────
     try:
@@ -2167,33 +2169,26 @@ async def salla_oauth_callback(
     except Exception as _exc:
         logger.warning("[Salla OAuth] Could not queue initial sync: %s", _exc)
 
-    # ── Step 5: Redirect ────────────────────────────────────────────────────────
-    # ALL Salla merchants land on /salla-callback after OAuth — never directly
-    # on /app/entry.  /salla-callback shows a gated "click استخدام التطبيق"
-    # screen so we never bypass Salla's policy by jumping the merchant into
-    # the mini-dashboard before they explicitly press the button in Salla.
+    # ── Step 5: Render install-complete page on api.nahlah.ai ─────────────────
+    # We deliberately do NOT redirect to /salla-callback or any Nahla page.
+    # Salla policy: the merchant must press 'استخدام التطبيق' inside Salla
+    # themselves to enter the app for the first time.  Returning HTML here
+    # keeps the merchant on api.nahlah.ai (effectively a no-op tab) so they
+    # can close it and return to Salla's normal post-install flow where the
+    # app + 'استخدام التطبيق' button appear naturally.
     #
-    # This applies to BOTH paths:
-    #   • is_new_merchant (state=salla_new_*)   — first install from App Store
-    #   • existing merchant (state=t<id>_<rand>) — OAuth re-grant from iframe
-    #
-    # In the existing-merchant case the JWT is already in localStorage from
-    # the earlier /salla/token-login call, so no token in the URL is needed.
-    params: dict[str, str] = {
-        "status": "connected",
-        "store":  salla_store_id or "",
-        "name":   store_name or "",
-        "new":    "1" if is_new_merchant else "0",
-    }
-    if auto_jwt:
-        params["token"] = auto_jwt
-    redirect_url = f"{_DASHBOARD_ORIGIN}/salla-callback?{urllib.parse.urlencode(params)}"
+    # The session JWT is NOT persisted via this page.  It is created fresh
+    # the next time the iframe calls /salla/token-login after the merchant
+    # presses 'استخدام التطبيق'.
     logger.info(
-        "[SallaOAuth] callback success redirect_to=%s | path=/salla-callback "
-        "tenant=%s store=%s is_new=%s has_jwt=%s",
-        redirect_url, tenant_id, salla_store_id, is_new_merchant, bool(auto_jwt),
+        "[SallaOAuth] install complete | tenant=%s store=%s is_new=%s "
+        "has_jwt=%s — rendering inline HTML, NO redirect to Nahla",
+        tenant_id, salla_store_id, is_new_merchant, bool(auto_jwt),
     )
-    return RedirectResponse(url=redirect_url, status_code=302)
+    return HTMLResponse(content=_install_complete_html(
+        store_name=store_name or "",
+        is_new=is_new_merchant,
+    ))
 
 
 @router.get("/integrations/salla/success", response_class=HTMLResponse)
@@ -2243,6 +2238,135 @@ def _redirect_html(dest: str, title: str, subtitle: str) -> str:
   <p>{subtitle}</p>
   <p style="font-size:13px">جاري التحويل التلقائي...</p>
   <script>setTimeout(() => location.href = "{dest}", 1500);</script>
+</body>
+</html>"""
+
+
+def _install_complete_html(store_name: str = "", is_new: bool = True) -> str:
+    """
+    Render the post-OAuth landing page entirely on api.nahlah.ai — no
+    redirect to /salla-callback, no opening of any Nahla page, no
+    interference with Salla's UI.
+
+    The page:
+      • Confirms install success in Arabic.
+      • Tries window.close() so the OAuth tab closes itself (works when
+        Salla / the browser opened it as a popup or single-step
+        navigation).
+      • If the tab does NOT close, shows a calm instruction telling the
+        merchant to return to Salla and press 'استخدام التطبيق'.
+
+    The merchant's Nahla session is created the next time they press
+    'استخدام التطبيق' inside Salla — the iframe loads /app/salla which
+    calls /salla/token-login and persists the JWT in localStorage on
+    app.nahlah.ai at that point.  No JWT needs to traverse this page.
+    """
+    safe_store = (store_name or "").replace("<", "&lt;").replace(">", "&gt;")
+    headline   = "تم تثبيت نحلة بنجاح!" if is_new else "تم تجديد الربط بنجاح!"
+    store_line = (
+        f'<p style="color:#cbd5e1;font-size:14px;margin:8px 0 0">'
+        f'المتجر: <span style="color:#f59e0b;font-weight:700">{safe_store}</span></p>'
+        if safe_store else ""
+    )
+    return f"""<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>نحلة AI — تم التثبيت</title>
+  <style>
+    *,*::before,*::after {{ box-sizing: border-box; }}
+    body {{
+      margin: 0; min-height: 100dvh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: #0f172a; color: #f1f5f9;
+      font-family: 'Cairo', system-ui, -apple-system, Arial, sans-serif;
+      padding: 24px; text-align: center;
+    }}
+    .icon {{ font-size: 64px; line-height: 1; }}
+    h1 {{ font-size: 24px; font-weight: 800; margin: 16px 0 0; color: #fff; }}
+    .card {{
+      margin-top: 22px; max-width: 420px;
+      background: rgba(30,41,59,.6);
+      border: 1px solid rgba(245,158,11,.25);
+      border-radius: 16px; padding: 18px 18px 16px;
+      text-align: right;
+    }}
+    .card p.title {{ color: #fbbf24; font-size: 14px; font-weight: 700; margin: 0 0 8px; }}
+    .card p.body  {{ color: #e2e8f0; font-size: 14px; line-height: 1.8; margin: 0; }}
+    .card b {{ color: #f59e0b; }}
+    .hint {{ color: #64748b; font-size: 12px; margin-top: 18px; }}
+    button.close-btn {{
+      margin-top: 14px;
+      background: transparent; color: #94a3b8;
+      border: none; cursor: pointer;
+      font: inherit; font-size: 12px;
+      text-decoration: underline; text-underline-offset: 4px;
+    }}
+    button.close-btn:hover {{ color: #cbd5e1; }}
+  </style>
+</head>
+<body>
+  <div class="icon">✅</div>
+  <h1>{headline}</h1>
+  {store_line}
+  <div class="card">
+    <p class="title">📌 للبدء باستخدام نحلة:</p>
+    <p class="body">
+      عُد إلى متجرك في سلة، وستجد نحلة الآن في قسم
+      <b>«تطبيقاتي»</b> مع زر
+      <b>«استخدام التطبيق»</b> جاهزاً للضغط.
+    </p>
+  </div>
+  <button class="close-btn" onclick="tryClose()">إغلاق هذه الصفحة</button>
+  <p class="hint">يمكنك إغلاق هذه النافذة الآن.</p>
+  <script>
+    function tryClose() {{
+      try {{ window.close(); }} catch (e) {{}}
+      // Browsers block window.close() unless the page was opened via JS.
+      // If close() was a no-op, try going back in history as a last resort.
+      try {{ if (!window.closed) window.history.back(); }} catch (e) {{}}
+    }}
+    // Best-effort auto-close 1.5s after load.  No-op silently if blocked.
+    setTimeout(tryClose, 1500);
+  </script>
+</body>
+</html>"""
+
+
+def _install_error_html(reason: str) -> str:
+    """Minimal error page rendered on api.nahlah.ai (no redirect)."""
+    safe_reason = (reason or "unknown_error").replace("<", "&lt;").replace(">", "&gt;")
+    return f"""<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>نحلة AI — خطأ في التثبيت</title>
+  <style>
+    body {{
+      margin: 0; min-height: 100dvh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      background: #0f172a; color: #f1f5f9;
+      font-family: 'Cairo', system-ui, Arial, sans-serif;
+      padding: 24px; text-align: center;
+    }}
+    h1 {{ font-size: 22px; font-weight: 800; margin: 12px 0 8px; color: #fff; }}
+    code {{
+      display: inline-block; margin-top: 12px;
+      background: #1e293b; color: #fbbf24;
+      padding: 6px 12px; border-radius: 8px; font-size: 12px;
+    }}
+    p {{ color: #94a3b8; font-size: 14px; max-width: 380px; line-height: 1.7; }}
+  </style>
+</head>
+<body>
+  <div style="font-size:56px">⚠️</div>
+  <h1>تعذّر إكمال تثبيت نحلة</h1>
+  <p>يمكنك إغلاق هذه النافذة وإعادة المحاولة من متجر تطبيقات سلة.</p>
+  <code>{safe_reason}</code>
 </body>
 </html>"""
 
