@@ -291,7 +291,7 @@ export default function SallaEmbedded() {
   // ── Step 2: token exchange with Salla ─────────────────────────────────────
 
   const doLogin = useCallback(async () => {
-    console.info('[SallaEmbedded] starting token-login | token present:', !!sallaToken)
+    console.info('[SallaEmbedded] token-login start | token present:', !!sallaToken)
 
     if (!sallaToken) {
       showError(
@@ -336,20 +336,43 @@ export default function SallaEmbedded() {
       }
 
       console.info('[SallaEmbedded] ✓ token-login OK | tenant:', data.tenant_id, 'store_id:', data.store_id, 'is_new:', data.is_new, 'needs_oauth:', data.needs_oauth)
+      console.info('[SallaEmbedded] needs_oauth=' + String(!!data.needs_oauth))
       persistSession(data)
 
-      // ── Auto-trigger OAuth if integration only has embedded token ──────
-      // Without proper OAuth tokens, sync of products/orders/customers fails.
-      // Salla OAuth must be opened at TOP level (breaks out of iframe).
+      // ── Auto-trigger OAuth ONLY for legacy Custom OAuth integrations ──
+      //
+      // For Easy Mode merchants the backend now always returns
+      // needs_oauth=false because Easy Mode apps have no registered
+      // redirect_uri and accounts.salla.sa would 404 with
+      // 'redirect_uri does not match'.  As a defence-in-depth against
+      // an older backend deployment that still returns true, we also
+      // refuse to redirect to any URL whose path is /oauth2/auth — the
+      // merchant should NEVER see Salla's OAuth screen from inside the
+      // embedded iframe.  Instead we just enter the dashboard and let
+      // the app.store.authorize webhook (which already arrived for
+      // Easy Mode) hydrate tokens server-side.
       if (data.needs_oauth && data.oauth_url) {
-        console.info('[SallaEmbedded] needs_oauth=true → redirecting to Salla OAuth')
-        setStatusText('جاري إكمال الربط مع سلة...')
-        if (window.top) {
-          window.top.location.href = data.oauth_url
+        const oauthIsExternalAuthorize =
+          /accounts\.salla\.sa\/oauth2\/auth/i.test(data.oauth_url)
+        if (oauthIsExternalAuthorize) {
+          console.warn(
+            '[SallaEmbedded] backend asked for external OAuth authorize ' +
+            '(needs_oauth=true) — refusing because Easy Mode apps have no ' +
+            'redirect_uri registered. Entering dashboard directly.',
+          )
+          // Fall through to markReady — the embedded session is enough
+          // for the dashboard, and the orders poller / webhook handler
+          // will populate refresh_token when Salla delivers it.
         } else {
-          window.location.href = data.oauth_url
+          console.info('[SallaEmbedded] needs_oauth=true → redirecting to Salla OAuth')
+          setStatusText('جاري إكمال الربط مع سلة...')
+          if (window.top) {
+            window.top.location.href = data.oauth_url
+          } else {
+            window.location.href = data.oauth_url
+          }
+          return
         }
-        return
       }
 
       markReady()
@@ -399,6 +422,7 @@ export default function SallaEmbedded() {
   // IMPORTANT: signalReady is called synchronously on mount, before any async.
 
   useEffect(() => {
+    console.info('[SallaEmbedded] loaded')
     console.info(
       '[SallaEmbedded] mounted | path:', window.location.pathname,
       '| token present:', !!sallaToken,

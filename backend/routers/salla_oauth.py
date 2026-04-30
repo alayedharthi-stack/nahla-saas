@@ -546,9 +546,18 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     )
 
     # ── Detect if OAuth tokens are missing (embedded-only) ───────────────────
-    # The embedded token (v4.public.*) cannot call Salla's /admin/v2/* APIs.
-    # Without a real OAuth refresh_token, the sync of products/orders/customers
-    # will fail. We tell the frontend to redirect to OAuth flow.
+    #
+    # IMPORTANT: For Easy Mode merchants, OAuth authorize flow MUST NEVER be
+    # triggered.  Easy Mode apps have no registered redirect_uri in Salla
+    # Partner Portal — pointing the browser at accounts.salla.sa/oauth2/auth
+    # produces a 404 "redirect_uri does not match".  Tokens for these
+    # merchants arrive via the app.store.authorize webhook a few seconds
+    # after install, so the correct behaviour when refresh_token is missing
+    # is to wait (or ask the merchant to re-install), NOT to redirect.
+    #
+    # We only ever set needs_oauth=true for legacy Custom OAuth integrations
+    # — i.e. integrations whose api_key_source is NOT "easy_mode_webhook"
+    # AND whose app_type is NOT "easy".
     needs_oauth = False
     oauth_url   = ""
     try:
@@ -559,14 +568,31 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         if check_integ:
             cfg = check_integ.config or {}
             has_refresh   = bool(cfg.get("refresh_token"))
-            api_key_src   = cfg.get("api_key_source", "")
-            # OAuth needed if no refresh_token OR api_key is just the embedded one
-            if not has_refresh or api_key_src == "embedded_token":
+            api_key_src   = (cfg.get("api_key_source") or "").lower()
+            app_type      = (cfg.get("app_type")       or "").lower()
+            is_easy_mode  = (
+                app_type == "easy"
+                or api_key_src == "easy_mode_webhook"
+            )
+
+            if is_easy_mode:
+                # Easy Mode: never OAuth.  If refresh_token is somehow
+                # missing here, the app.store.authorize webhook will land
+                # within seconds (or the merchant must reinstall from
+                # s.salla.sa/apps).  Either way the embedded session is
+                # valid for the dashboard and the orders poller will pick
+                # up tokens once they arrive.
+                logger.info(
+                    "[SallaLogin] easy_mode tenant=%s — needs_oauth=false "
+                    "(has_refresh=%s api_key_source=%s app_type=%s)",
+                    tenant_id, has_refresh, api_key_src or "?", app_type or "?",
+                )
+            elif not has_refresh or api_key_src == "embedded_token":
+                # Legacy Custom OAuth path — only here do we still flip
+                # needs_oauth.  Easy Mode merchants will not reach this
+                # branch.
                 needs_oauth = True
-                # Build OAuth authorize URL with state pointing to this tenant
                 if SALLA_CLIENT_ID and SALLA_REDIRECT_URI:
-                    # Normalize redirect_uri: strip trailing slash and whitespace
-                    # to match Salla Partner Portal's exact-match requirement.
                     normalized_redirect = SALLA_REDIRECT_URI.strip().rstrip("/")
                     state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}"
                     params = urllib.parse.urlencode({
@@ -578,18 +604,15 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     })
                     oauth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
                     logger.info(
-                        "[SallaLogin] needs_oauth=True | tenant=%s | "
-                        "client_id=%s | redirect_uri=%r (raw env=%r) | "
-                        "has_refresh=%s api_key_source=%s",
+                        "[SallaLogin] (custom-oauth) needs_oauth=True | tenant=%s | "
+                        "client_id=%s | redirect_uri=%r | has_refresh=%s api_key_source=%s",
                         tenant_id,
                         (SALLA_CLIENT_ID[:8] + "***") if SALLA_CLIENT_ID else "EMPTY",
-                        normalized_redirect, SALLA_REDIRECT_URI,
-                        has_refresh, api_key_src,
+                        normalized_redirect, has_refresh, api_key_src,
                     )
-                    logger.info("[SallaLogin] FULL oauth_url=%s", oauth_url)
                 else:
                     logger.error(
-                        "[SallaLogin] needs_oauth=True BUT cannot build oauth_url | "
+                        "[SallaLogin] (custom-oauth) needs_oauth=True BUT cannot build oauth_url | "
                         "SALLA_CLIENT_ID=%s SALLA_REDIRECT_URI=%r",
                         bool(SALLA_CLIENT_ID), SALLA_REDIRECT_URI,
                     )
