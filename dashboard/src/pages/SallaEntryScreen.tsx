@@ -25,9 +25,6 @@ import { API_BASE } from '../api/client'
   try { window.parent.postMessage({ event: 'embedded::ready', payload: {}, source: 'embedded-app' }, '*') } catch { /* cross-origin */ }
 })()
 
-const NAHLA_DASHBOARD   = 'https://app.nahlah.ai'
-const NAHLA_WA_SETTINGS = 'https://app.nahlah.ai/whatsapp-connect'
-
 function getToken(): string {
   try { return localStorage.getItem('nahla_token') || '' } catch { return '' }
 }
@@ -296,13 +293,41 @@ export default function SallaEntryScreen() {
     revenue:       false,
     aiRate:        false,
   })
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState<string | null>(null)
+  const [loading,        setLoading]        = useState(true)
+  const [error,          setError]          = useState<string | null>(null)
   const [partialFallback, setPartialFallback] = useState(false)
+  const [launching,      setLaunching]      = useState<'dashboard' | 'whatsapp' | null>(null)
 
   const storedName = (() => {
     try { return localStorage.getItem('nahla_salla_store_name') || '' } catch { return '' }
   })()
+
+  // ── Auto-login launcher ───────────────────────────────────────────────────────
+  // Calls the backend to generate a short-lived launch token, then opens the
+  // resulting URL via window.top so the merchant lands in the full dashboard
+  // already logged in — no registration screen.
+  const openWithAutoLogin = useCallback(async (kind: 'dashboard' | 'whatsapp') => {
+    setLaunching(kind)
+    const token = getToken()
+    const next  = kind === 'whatsapp' ? '/app/settings/whatsapp' : '/overview'
+    try {
+      const res = await fetch(
+        `${API_BASE}/salla/session/launch-dashboard?next=${encodeURIComponent(next)}`,
+        { method: 'POST', headers: { Authorization: `Bearer ${token}` } },
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const { launch_url } = await res.json() as { launch_url: string }
+      // Open the launch URL as the top-level window (breaks out of iframe)
+      if (window.top) {
+        window.top.location.href = launch_url
+      } else {
+        window.location.href = launch_url
+      }
+    } catch {
+      alert('تعذر فتح لوحة نحلة، حاول مجدداً.')
+      setLaunching(null)
+    }
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -747,7 +772,8 @@ export default function SallaEntryScreen() {
               </div>
 
               {partialFallback && (
-                <p
+                <button
+                  onClick={load}
                   style={{
                     fontSize:      12,
                     color:         C.slate500,
@@ -757,10 +783,13 @@ export default function SallaEntryScreen() {
                     borderRadius:  10,
                     padding:       '8px 10px',
                     background:    C.white,
+                    cursor:        'pointer',
+                    width:         '100%',
+                    fontFamily:    'inherit',
                   }}
                 >
                   تعذر تحميل بعض البيانات، اضغط تحديث.
-                </p>
+                </button>
               )}
 
               {noData && (
@@ -780,11 +809,10 @@ export default function SallaEntryScreen() {
 
             {/* ─ 4. CTAs ─ */}
             <section style={{ display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 }}>
-              {/* Primary */}
-              <a
-                href={NAHLA_DASHBOARD}
-                target="_top"
-                rel="noreferrer"
+              {/* Primary — Auto-login to full dashboard */}
+              <button
+                onClick={() => openWithAutoLogin('dashboard')}
+                disabled={launching !== null}
                 style={{
                   display:        'flex',
                   alignItems:     'center',
@@ -794,21 +822,23 @@ export default function SallaEntryScreen() {
                   borderRadius:   16,
                   fontSize:       15,
                   fontWeight:     900,
-                  background:     C.amber,
+                  background:     launching ? C.slate200 : C.amber,
                   color:          C.slate900,
-                  textDecoration: 'none',
-                  boxShadow:      '0 4px 20px rgba(245,158,11,0.28)',
                   border:         'none',
+                  boxShadow:      launching ? 'none' : '0 4px 20px rgba(245,158,11,0.28)',
+                  cursor:         launching ? 'not-allowed' : 'pointer',
+                  width:          '100%',
+                  fontFamily:     'inherit',
+                  transition:     'background 0.2s',
                 }}
               >
-                🚀 فتح لوحة نحلة المتقدمة
-              </a>
+                {launching === 'dashboard' ? '⏳ جارٍ الفتح...' : '🚀 فتح لوحة نحلة المتقدمة'}
+              </button>
 
-              {/* Secondary */}
-              <a
-                href={NAHLA_WA_SETTINGS}
-                target="_top"
-                rel="noreferrer"
+              {/* Secondary — Auto-login to WhatsApp connect page */}
+              <button
+                onClick={() => openWithAutoLogin('whatsapp')}
+                disabled={launching !== null}
                 style={{
                   display:        'flex',
                   alignItems:     'center',
@@ -819,13 +849,16 @@ export default function SallaEntryScreen() {
                   fontSize:       14,
                   fontWeight:     700,
                   background:     C.white,
-                  color:          C.amber,
-                  textDecoration: 'none',
-                  border:         `1.5px solid ${C.amber}`,
+                  color:          launching ? C.slate300 : C.amber,
+                  border:         `1.5px solid ${launching ? C.slate200 : C.amber}`,
+                  cursor:         launching ? 'not-allowed' : 'pointer',
+                  width:          '100%',
+                  fontFamily:     'inherit',
+                  transition:     'color 0.2s, border-color 0.2s',
                 }}
               >
-                💬 ربط واتساب الآن
-              </a>
+                {launching === 'whatsapp' ? '⏳ جارٍ الفتح...' : '💬 ربط واتساب الآن'}
+              </button>
 
               {/* Trial-blocked notice — soft banner below CTAs, not a wall */}
               {trialBlocked && (
@@ -878,7 +911,7 @@ export default function SallaEntryScreen() {
       {/* ── Footer ─────────────────────────────────────────────────────────── */}
       <footer style={{ textAlign: 'center', padding: '12px 16px', borderTop: `1px solid ${C.slate100}` }}>
         <p style={{ fontSize: 10, color: C.slate300, margin: 0 }}>
-          بأيدي سعودية 🇸🇦 · Nahla AI
+          فريق سعودي 100% 🇸🇦 · Nahla AI
         </p>
       </footer>
     </div>

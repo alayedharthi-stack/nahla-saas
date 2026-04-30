@@ -45,6 +45,7 @@ import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
 import SallaEmbedded    from './pages/SallaEmbedded'
 import SallaEntryScreen from './pages/SallaEntryScreen'
+import SallaLaunch      from './pages/SallaLaunch'
 import SallaPricing     from './pages/SallaPricing'
 import SallaSetup       from './pages/SallaSetup'
 import InviteFlow       from './pages/InviteFlow'
@@ -98,6 +99,8 @@ export default function App() {
           <Route path="/app/pricing"                element={<SallaPricing />} />
           {/* Quick Setup — shown to new Salla merchants before entry screen */}
           <Route path="/app/salla/setup"            element={<SallaSetup />} />
+          {/* Auto-login landing — exchanges a short-lived token for a full session */}
+          <Route path="/app/salla/launch"           element={<SallaLaunch />} />
           {/* Legacy entry kept for backwards compatibility */}
           <Route path="/salla"                      element={<SallaEmbedded />} />
           {/* Direct-invite onboarding (outside Salla) */}

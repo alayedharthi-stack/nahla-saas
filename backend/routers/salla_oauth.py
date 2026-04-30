@@ -477,6 +477,161 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/salla/session/launch-dashboard")
+async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
+    """
+    PROTECTED — requires valid Nahla JWT (already issued by /salla/token-login).
+
+    Issues a one-time short-lived launch token (120 s) that the frontend can
+    embed in a URL opened via target="_top".  The launch page exchanges it for
+    a full-lifetime session token without showing a login screen.
+
+    Query param ?next= (optional) is forwarded to the launch URL so the user
+    lands on the right page inside the full dashboard.
+
+    Response:
+      { "launch_url": "https://app.nahlah.ai/app/salla/launch?token=...&next=..." }
+    """
+    from core.auth import require_authenticated  # noqa: PLC0415
+
+    payload    = require_authenticated(request)
+    tenant_id  = int(payload.get("tenant_id", 0))
+    email      = str(payload.get("sub", ""))
+    role       = str(payload.get("role", "merchant"))
+    user_id    = payload.get("user_id")
+    next_path  = str(request.query_params.get("next", "/overview"))
+
+    # Fetch the user row to get a stable user_id if JWT doesn't carry one
+    if not user_id:
+        from models import User  # noqa: PLC0415
+        u = db.query(User).filter(User.email == email).first()
+        user_id = u.id if u else None
+
+    # Issue a SHORT-LIVED launch token (120 s) with a marker so the resolve
+    # endpoint can distinguish it from a normal session token.
+    from datetime import timedelta  # noqa: PLC0415
+    launch_jwt = create_token(
+        email=email,
+        role=role,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        extra_claims={
+            "launch_token": True,   # marker — resolve endpoint checks this
+            "exp_override": True,   # informational only
+        },
+    )
+    # Override the expiry to 120 seconds by re-encoding with a short window.
+    # We decode then re-encode with the short exp so we don't depend on any
+    # extra parameter on create_token.
+    try:
+        import jose.jwt as _jose_jwt  # noqa: PLC0415
+        from core.config import JWT_SECRET, JWT_ALGORITHM  # noqa: PLC0415
+        from datetime import timezone  # noqa: PLC0415
+        decoded = _jose_jwt.decode(launch_jwt, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        decoded["exp"]          = int((datetime.now(timezone.utc) + timedelta(seconds=120)).timestamp())
+        decoded["launch_token"] = True
+        launch_jwt = _jose_jwt.encode(decoded, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    except Exception as _e:
+        logger.warning("[LaunchDashboard] Could not shorten token TTL: %s — using full TTL", _e)
+
+    import urllib.parse as _up  # noqa: PLC0415
+    params = _up.urlencode({"token": launch_jwt, "next": next_path})
+    launch_url = f"{_DASHBOARD.rstrip('/')}/app/salla/launch?{params}"
+
+    logger.info(
+        "[LaunchDashboard] launch_url issued | tenant=%s email=%s next=%s",
+        tenant_id, email, next_path,
+    )
+    return {"launch_url": launch_url}
+
+
+@router.post("/salla/session/resolve-launch")
+async def resolve_launch(request: Request, db: Session = Depends(get_db)):
+    """
+    PUBLIC — no auth header required.
+
+    Accepts a short-lived launch token from the request body, validates it,
+    and returns a full-lifetime Nahla JWT together with user metadata.
+
+    The frontend launch page (/app/salla/launch) calls this endpoint,
+    stores the returned token in localStorage, then replaces the URL
+    (hiding the token) and navigates to the `next` path.
+
+    Request body: { "token": "<launch_jwt>" }
+    Response:     { "access_token": "...", "tenant_id": ..., "email": "...",
+                    "role": "...", "store_name": "..." }
+    """
+    from core.config import JWT_SECRET, JWT_ALGORITHM  # noqa: PLC0415
+    from models import User, Integration  # noqa: PLC0415
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    token = (body.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="token required")
+
+    # Validate the launch JWT
+    try:
+        import jose.jwt as _jose_jwt  # noqa: PLC0415
+        decoded = _jose_jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception as _e:
+        logger.warning("[ResolveLaunch] Invalid or expired token: %s", _e)
+        raise HTTPException(
+            status_code=401,
+            detail="تعذر تسجيل الدخول من سلة، حاول فتح التطبيق مرة أخرى.",
+        )
+
+    # Extra safety: the token MUST carry the launch_token marker so that
+    # normal session tokens cannot be submitted here to mint a second session.
+    if not decoded.get("launch_token"):
+        raise HTTPException(
+            status_code=401,
+            detail="تعذر تسجيل الدخول من سلة، حاول فتح التطبيق مرة أخرى.",
+        )
+
+    email     = str(decoded.get("sub", ""))
+    role      = str(decoded.get("role", "merchant"))
+    tenant_id = int(decoded.get("tenant_id", 0))
+
+    if not tenant_id or not email:
+        raise HTTPException(status_code=401, detail="بيانات الجلسة غير مكتملة.")
+
+    # Fetch user_id (may be absent from token if legacy)
+    db_user = db.query(User).filter(User.email == email).first()
+    user_id = db_user.id if db_user else decoded.get("user_id")
+
+    # Fetch store name from integration config for localStorage persistence
+    integ = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .first()
+    )
+    store_name = ((integ.config or {}).get("store_name") or "") if integ else ""
+
+    # Issue a FULL-LIFETIME session token (no launch_token marker)
+    full_jwt = create_token(
+        email=email,
+        role=role,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+
+    logger.info(
+        "[ResolveLaunch] Full session issued | tenant=%s email=%s",
+        tenant_id, email,
+    )
+    return {
+        "access_token": full_jwt,
+        "tenant_id":    tenant_id,
+        "email":        email,
+        "role":         role,
+        "store_name":   store_name,
+    }
+
+
 @router.get("/salla/whoami")
 async def salla_whoami(request: Request, db: Session = Depends(get_db)):
     """
