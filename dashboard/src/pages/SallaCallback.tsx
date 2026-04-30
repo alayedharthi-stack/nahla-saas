@@ -57,12 +57,16 @@ export default function SallaCallback() {
         localStorage.setItem('nahla_store_name', name)
       }
 
-      // Routing logic:
-      //  - New merchant      → /onboarding (choose plan)
-      //  - Returning + WA ✓  → /overview   (everything ready)
-      //  - Returning + WA ✗  → /overview   (merchant can connect WA from settings)
-      const dest = isNew ? '/onboarding' : '/overview'
-      console.log('[SallaCallback] routing', { isNew, waConnected, dest })
+      // Mark this session as Salla-embedded so the mini-dashboard knows the context
+      localStorage.setItem('nahla_salla_embedded',    '1')
+      localStorage.setItem('nahla_salla_is_new',      isNew ? '1' : '0')
+      localStorage.setItem('nahla_salla_wa_connected', waConnected ? '1' : '0')
+
+      // All Salla merchants always land on the mini-dashboard (/app/entry).
+      // FUTURE: new merchants will first see /app/pricing for plan selection,
+      //         but that step is not implemented yet.
+      const dest = '/app/entry'
+      console.log('[SallaCallback] routing → mini-dashboard', { isNew, waConnected, dest })
       setTimeout(() => navigate(dest, { replace: true }), 800)
     } catch (e) {
       setError('invalid_token')

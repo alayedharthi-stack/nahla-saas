@@ -451,12 +451,9 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     wa_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     wa_connected = bool(wa_conn and wa_conn.status == "connected" and wa_conn.sending_enabled)
 
-    if is_new:
-        redirect_target = "/onboarding"
-    elif wa_connected:
-        redirect_target = "/overview"
-    else:
-        redirect_target = "/overview"   # Still go to overview — merchant decides when to connect WA
+    # All Salla merchants land on the mini-dashboard (/app/entry).
+    # FUTURE: new merchants will first see /app/pricing for plan selection.
+    redirect_target = "/app/entry"
 
     logger.info(
         "[SallaLogin] ✅ STEP 5 — JWT ISSUED | "
