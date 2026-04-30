@@ -1078,13 +1078,20 @@ function OrderReminderDrawer({
                   <AlertCircle className="w-4 h-4 text-orange-500 shrink-0 mt-0.5" />
                   <div className="text-xs text-orange-700">
                     <p className="font-medium mb-0.5">متغيرات القالب غير مطابقة</p>
-                    <p>
-                      القالب معتمد ومرتبط لكن عدد المتغيرات
+                    <p className="mb-1">
+                      القالب معتمد لكن عدد المتغيرات
                       <code className="font-mono mx-1 px-1 rounded bg-white/60">{'{{1}}, {{2}}, …'}</code>
-                      في نص القالب لا يطابق ما يرسله نحلة. افتح لوحة
-                      <strong> القوالب</strong>، عدّل القالب وأعِد المتغيرات
-                      الأصلية كما استوردتها من مكتبة نحلة، ثم أعد التقديم
-                      للاعتماد وأعد الجدولة.
+                      في نسخة Meta لا يطابق ما يرسله نحلة.
+                    </p>
+                    <p className="font-medium mb-0.5">الحل خطوة بخطوة:</p>
+                    <ol className="list-decimal list-inside space-y-0.5 text-orange-700">
+                      <li>افتح لوحة <strong>القوالب</strong> واحذف القالب الحالي.</li>
+                      <li>أنشئ قالباً جديداً من <strong>مكتبة نحلة</strong> (تذكير الدفع) — النسخة الجديدة تستخدم 3 متغيرات في النص + زر الدفع منفصل.</li>
+                      <li>قدّمه للاعتماد وانتظر الموافقة من Meta.</li>
+                      <li>عُد هنا واضغط <strong>إعادة جدولة الفاشلة</strong>.</li>
+                    </ol>
+                    <p className="mt-1 text-orange-600 text-[10px]">
+                      ملاحظة: الاعتماد لا يتحقق من عدد المتغيرات — Meta تتحقق منها فقط وقت الإرسال الفعلي.
                     </p>
                   </div>
                 </div>

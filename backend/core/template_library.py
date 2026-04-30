@@ -259,43 +259,62 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "languages": {
             "ar": {
                 "template_name": "unpaid_order_reminder_ar",
-                "slots":         ["customer_name", "order_id", "store_name", "payment_url"],
+                # body_slots only — payment_url goes to the URL button ({{1}} suffix),
+                # NOT as a {{4}} body variable. Meta requires the button parameter
+                # namespace to be independent from the body (always {{1}}).
+                "body_slots":    ["customer_name", "order_id", "store_name"],
+                "slots":         ["customer_name", "order_id", "store_name"],
                 "components": [
                     {
                         "type": "BODY",
                         "text": (
                             "مرحباً {{1}} 👋\n\n"
                             "طلبك رقم #{{2}} في متجر {{3}} لا يزال بانتظار الدفع.\n\n"
-                            "يمكنك إكمال الدفع الآن من هنا:\n\n"
-                            "{{4}}\n\n"
+                            "أكمل الدفع الآن من هنا وضمّن طلبك قبل نفاذ المخزون:\n\n"
                             "إذا واجهت أي مشكلة في الدفع نحن هنا لمساعدتك 🌟"
                         ),
+                        "example": {"body_text": [["أحمد", "78901", "متجر الأناقة"]]},
                     },
                     {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
                     {
                         "type": "BUTTONS",
-                        "buttons": [{"type": "URL", "text": "إكمال الدفع", "url": "{{4}}"}],
+                        "buttons": [
+                            {
+                                "type": "URL",
+                                "text": "إكمال الدفع",
+                                "url":  "https://store.example.com/pay/{{1}}",
+                                "example": ["https://store.example.com/pay/order-78901"],
+                            },
+                        ],
                     },
                 ],
             },
             "en": {
                 "template_name": "unpaid_order_reminder_en",
-                "slots":         ["customer_name", "order_id", "store_name", "payment_url"],
+                "body_slots":    ["customer_name", "order_id", "store_name"],
+                "slots":         ["customer_name", "order_id", "store_name"],
                 "components": [
                     {
                         "type": "BODY",
                         "text": (
                             "Hi {{1}} 👋\n\n"
                             "Your order #{{2}} at {{3}} is still awaiting payment.\n\n"
-                            "You can complete the payment here:\n\n"
-                            "{{4}}\n\n"
+                            "Complete your payment now to secure your order:\n\n"
                             "Reply if you ran into any trouble during checkout 🌟"
                         ),
+                        "example": {"body_text": [["Ahmed", "78901", "My Store"]]},
                     },
                     {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
                     {
                         "type": "BUTTONS",
-                        "buttons": [{"type": "URL", "text": "Complete payment", "url": "{{4}}"}],
+                        "buttons": [
+                            {
+                                "type": "URL",
+                                "text": "Complete payment",
+                                "url":  "https://store.example.com/pay/{{1}}",
+                                "example": ["https://store.example.com/pay/order-78901"],
+                            },
+                        ],
                     },
                 ],
             },
