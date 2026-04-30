@@ -262,11 +262,10 @@ async def _fast_sync_orders_all_stores() -> None:
             try:
                 from services.store_sync import StoreSyncService  # noqa: PLC0415
                 svc = StoreSyncService(db, tenant_id)
-                result = await svc.sync_orders(
+                new_orders = await svc.sync_orders(
                     updated_since=lookback_iso,
                     triggered_by="order_fast_sync",
                 )
-                new_orders = result.get("orders_synced", 0) or result.get("created", 0)
                 if new_orders:
                     logger.info(
                         "[OrderFastSync] tenant=%s — %d order(s) picked up",

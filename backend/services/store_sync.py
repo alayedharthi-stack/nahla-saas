@@ -816,7 +816,7 @@ class StoreSyncService:
                 }
                 updated += 1
             else:
-                self.db.add(Order(
+                new_row = Order(
                     tenant_id             = self.tenant_id,
                     external_id           = ext_id,
                     external_order_number = normalised["external_order_number"],
@@ -828,9 +828,82 @@ class StoreSyncService:
                     checkout_url          = normalised["checkout_url"],
                     is_abandoned          = normalised["is_abandoned"],
                     source                = adapter_source,
-                    extra_metadata        = {"created_at": normalised.get("created_at")},
-                ))
+                    extra_metadata        = {
+                        "created_at":     normalised.get("created_at"),
+                        "payment_method": normalised.get("payment_method") or "",
+                    },
+                )
+                self.db.add(new_row)
+                self.db.flush()  # assign PK so we can reference new_row.id below
+
+                # ── Fire automation events for new orders found via API poll ──
+                # Mirrors handle_order_webhook so confirmation messages are sent
+                # even when the webhook was missed or delayed by Salla.
+                if not normalised.get("is_abandoned"):
+                    try:
+                        from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                        from core.automation_triggers import AutomationTrigger    # noqa: PLC0415
+
+                        _pm     = str(normalised.get("payment_method") or "").lower()
+                        _status = str(normalised_status or "").lower()
+
+                        emit_automation_event(
+                            self.db,
+                            self.tenant_id,
+                            AutomationTrigger.ORDER_NOTIFICATIONS.value,
+                            payload={
+                                "external_id":           ext_id,
+                                "order_id":              new_row.id,
+                                "order_internal_id":     new_row.id,
+                                "status":                _status,
+                                "total":                 normalised.get("total"),
+                                "order_number":          normalised.get("external_order_number") or ext_id,
+                                "external_order_number": normalised.get("external_order_number"),
+                                "checkout_url":          normalised.get("checkout_url") or "",
+                                "payment_url":           normalised.get("checkout_url") or "",
+                                "payment_method":        _pm,
+                                "source":                f"store_sync.api_poll.{triggered_by}",
+                            },
+                            commit=False,
+                        )
+
+                        _COD_METHODS = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
+                        _is_cod = bool(
+                            _pm and any(_pm == m or m in _pm for m in _COD_METHODS)
+                        )
+                        if _is_cod:
+                            emit_automation_event(
+                                self.db,
+                                self.tenant_id,
+                                AutomationTrigger.ORDER_COD_PENDING.value,
+                                payload={
+                                    "external_id":           ext_id,
+                                    "order_id":              new_row.id,
+                                    "order_number":          normalised.get("external_order_number") or ext_id,
+                                    "status":                _status,
+                                    "total":                 normalised.get("total"),
+                                    "payment_method":        _pm,
+                                    "checkout_url":          normalised.get("checkout_url") or "",
+                                    "payment_url":           normalised.get("checkout_url") or "",
+                                    "source":                f"store_sync.api_poll.{triggered_by}",
+                                    "step_idx":              0,
+                                    "message_type":          "initial_confirmation",
+                                },
+                                commit=False,
+                            )
+                        self.db.commit()
+                        logger.info(
+                            "[StoreSync/poll] automation events emitted tenant=%s order=%s pm=%s",
+                            self.tenant_id, ext_id, _pm or "unknown",
+                        )
+                    except Exception as _ae:
+                        logger.warning(
+                            "[StoreSync/poll] automation emit failed tenant=%s order=%s: %s",
+                            self.tenant_id, ext_id, _ae,
+                        )
+
                 created += 1
+
         logger.info(
             "tenant=%s orders sync done — created=%d updated=%d total_upserted=%d "
             "status_distribution=%s zero_total=%d",
