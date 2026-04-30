@@ -39,7 +39,15 @@ const WATCHDOG_TIMEOUT = 13_000  // ms — global stuck-skeleton guard
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type Phase = 'init' | 'checking' | 'login' | 'success' | 'error'
+// Phases:
+//   init/checking/login → loading screens
+//   ready               → auth complete, waiting for the merchant to click
+//                         "ابدأ استخدام نحلة" — we DO NOT auto-navigate so
+//                         that we never bypass Salla's "استخدام التطبيق"
+//                         gating after a fresh install.
+//   success             → user clicked, we're navigating to /app/entry
+//   error               → inline error UI
+type Phase = 'init' | 'checking' | 'login' | 'ready' | 'success' | 'error'
 
 interface LoginResponse {
   access_token: string
@@ -191,20 +199,30 @@ export default function SallaEmbedded() {
     setErrorDetail(msg)
   }, [clearWatchdog])
 
-  const enterDashboard = useCallback(() => {
+  // ── markReady: auth + session save complete, waiting for user gesture ───
+  // Salla policy: do NOT bypass the "استخدام التطبيق" button by jumping the
+  // merchant straight into /app/entry on first iframe load.  We park them on
+  // a welcome screen with a single explicit CTA instead.
+  const markReady = useCallback(() => {
     clearWatchdog()
+    setPhase('ready')
+    const isNew = localStorage.getItem('nahla_salla_is_new') === '1'
+    setStatusText(
+      isNew
+        ? 'تم تثبيت نحلة بنجاح! اضغط "ابدأ" للدخول إلى لوحة التحكم.'
+        : 'تم تسجيل دخولك بنجاح. اضغط "ابدأ" للمتابعة.',
+    )
+    console.info('[SallaEmbedded] ✓ auth complete → waiting for user gesture (is_new:', isNew, ')')
+  }, [clearWatchdog])
+
+  // ── goToDashboard: explicit navigation triggered by user click only ─────
+  const goToDashboard = useCallback(() => {
     setPhase('success')
-
-    // Always land on the mini-dashboard inside Salla.
-    // Setup can still be reached from /app/entry CTAs.
-    const isNew       = localStorage.getItem('nahla_salla_is_new') === '1'
     const destination = '/app/entry'
-
-    console.info('[SallaEmbedded] ✓ auth complete → navigating to', destination,
-      '| is_new:', isNew)
-    setStatusText(isNew ? 'مرحباً! جاري إعداد حسابك...' : 'جاري الدخول...')
-    setTimeout(() => navigate(destination, { replace: true }), 500)
-  }, [navigate, clearWatchdog])
+    console.info('[SallaEmbedded] user pressed "ابدأ" → navigating to', destination)
+    setStatusText('جاري الدخول...')
+    setTimeout(() => navigate(destination, { replace: true }), 200)
+  }, [navigate])
 
   // ── Step 1: check existing Nahla session ──────────────────────────────────
 
@@ -255,7 +273,7 @@ export default function SallaEmbedded() {
         const data: SessionResponse = await res.json()
         console.info('[SallaEmbedded] ✓ live session — tenant:', data.tenant_id)
         persistSession(data)
-        enterDashboard()
+        markReady()
         return true
       }
       // 401 → token expired, fall through
@@ -263,7 +281,7 @@ export default function SallaEmbedded() {
       console.warn('[SallaEmbedded] session check failed (will try token-login):', e)
     }
     return false
-  }, [storeId, enterDashboard])
+  }, [storeId, markReady])
 
   // ── Step 2: token exchange with Salla ─────────────────────────────────────
 
@@ -329,12 +347,7 @@ export default function SallaEmbedded() {
         return
       }
 
-      setStatusText(
-        data.is_new
-          ? 'مرحباً! جاري إعداد حسابك...'
-          : `مرحباً بعودتك${data.store_name ? ` ${data.store_name}` : ''}`,
-      )
-      enterDashboard()
+      markReady()
     } catch (e) {
       const isAbort = e instanceof DOMException && e.name === 'AbortError'
       console.error('[SallaEmbedded] token-login exception:', e)
@@ -344,7 +357,7 @@ export default function SallaEmbedded() {
           : 'تعذر الوصول إلى الخادم. تحقق من اتصالك بالإنترنت.',
       )
     }
-  }, [sallaToken, appId, storeId, showError, enterDashboard])
+  }, [sallaToken, appId, storeId, showError, markReady])
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────
 
@@ -504,7 +517,31 @@ export default function SallaEmbedded() {
           </div>
         )}
 
-        {/* ── Success ───────────────────────────────────────────────────── */}
+        {/* ── Ready (auth complete, awaiting explicit "ابدأ" click) ────── */}
+        {phase === 'ready' && (
+          <div className="text-center space-y-5">
+            <div className="text-5xl">✅</div>
+            <p className="text-white font-semibold text-base leading-relaxed">
+              {statusText}
+            </p>
+            <button
+              onClick={goToDashboard}
+              className="w-full py-3 px-6 rounded-xl font-bold text-sm transition-all hover:opacity-90 active:scale-95"
+              style={{
+                background: '#f59e0b',
+                color:      '#0f172a',
+                boxShadow:  '0 4px 20px rgba(245,158,11,0.4)',
+              }}
+            >
+              ابدأ استخدام نحلة 🚀
+            </button>
+            <p className="text-slate-500 text-xs">
+              تم تجهيز كل شيء — اضغط الزر أعلاه للدخول إلى لوحة التحكم.
+            </p>
+          </div>
+        )}
+
+        {/* ── Success (post-click, navigating away) ─────────────────────── */}
         {phase === 'success' && (
           <div className="text-center space-y-4">
             <div className="text-5xl">✅</div>
