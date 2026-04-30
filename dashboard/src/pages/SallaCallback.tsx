@@ -6,25 +6,22 @@
  * The backend redirects here with:
  *   ?token=JWT&status=connected&store=STORE_ID&name=STORE_NAME&new=1
  *
- * IMPORTANT — Salla policy compliance:
- *   We do NOT auto-navigate to /app/entry on first install.  Salla expects
- *   the merchant to explicitly press the "استخدام التطبيق" button inside
- *   their dashboard before the embedded app opens.  Auto-jumping into the
- *   mini-dashboard at this stage bypasses that flow and risks rejection.
- *
- *   Instead we:
- *     1. Persist the session (token + tenant + store_id) to localStorage so
- *        the next iframe load is logged-in.
- *     2. Show a friendly "تم التثبيت" screen with a single CTA:
- *          "العودة إلى لوحة سلة" → window.top → s.salla.sa
- *     3. Provide a small secondary link for power users who explicitly want
- *        to enter Nahla now (rare — mainly internal testing).
+ * Behaviour:
+ *   1. Persist the session (JWT + store metadata) to localStorage so the
+ *      next iframe load is pre-authenticated.
+ *   2. Show a brief 'تم التثبيت بنجاح' confirmation.
+ *   3. Auto-redirect back to the merchant's Salla dashboard after ~2 s so
+ *      Salla's own UI can surface the 'استخدام التطبيق' button — that
+ *      button is the merchant's natural entry point and we should not
+ *      duplicate or pre-empt it.
  */
 import { useEffect, useState } from 'react'
 
 const SALLA_DASHBOARD_URL: string =
   (import.meta.env.VITE_SALLA_DASHBOARD_URL as string | undefined) ||
   'https://salla.sa/dashboard'
+
+const AUTO_REDIRECT_MS = 2200
 
 export default function SallaCallback() {
   const [error,     setError]     = useState('')
@@ -49,8 +46,8 @@ export default function SallaCallback() {
     setIsNew(newFlag)
     setStoreName(name)
 
-    // Common metadata writes — happen for BOTH "fresh JWT" and
-    // "existing localStorage JWT" paths.
+    // Common metadata writes — happen for BOTH 'fresh JWT in URL' and
+    // 'existing localStorage JWT' paths.
     try {
       if (store) localStorage.setItem('nahla_salla_store_id',   store)
       if (name) {
@@ -84,30 +81,35 @@ export default function SallaCallback() {
         setError('invalid_token')
         return
       }
-    } else {
-      // ── Path B: no token in URL — relies on JWT already in localStorage
-      // from the earlier /salla/token-login call (OAuth re-grant from iframe).
-      const haveToken = localStorage.getItem('nahla_token')
-      if (!haveToken) {
-        console.warn('[SallaCallback] no token in URL AND no token in localStorage')
-        setError('session_lost')
-        return
-      }
-      console.log('[SallaCallback] no URL token — using existing localStorage session', { store })
     }
+    // Path B: no token in URL — the existing JWT in localStorage from the
+    // earlier /salla/token-login call remains valid. Nothing to do here.
 
     // Strip the token from the URL (no back-button replay).
     try {
       window.history.replaceState(null, '', window.location.pathname)
     } catch { /* noop */ }
 
-    console.log('[SallaCallback] install complete — waiting for "استخدام التطبيق" click in Salla',
-      { isNew: newFlag, waConnected, store })
-    // ↑ NO navigate(), NO window.location.href — Salla policy: merchant must
-    //   press "استخدام التطبيق" themselves to open the app.
+    console.log('[SallaCallback] install OK — auto-redirecting to Salla dashboard in', AUTO_REDIRECT_MS, 'ms')
+
+    // Auto-redirect back to Salla so the merchant's normal flow continues:
+    // Salla's UI shows the "استخدام التطبيق" button → click it → iframe
+    // loads /app/salla → mini-dashboard. We never insert ourselves into
+    // that flow with a manual 'go back' click.
+    const t = setTimeout(() => {
+      try {
+        if (window.top) {
+          window.top.location.href = SALLA_DASHBOARD_URL
+          return
+        }
+      } catch { /* cross-origin */ }
+      window.location.href = SALLA_DASHBOARD_URL
+    }, AUTO_REDIRECT_MS)
+
+    return () => clearTimeout(t)
   }, [])
 
-  const goToSalla = () => {
+  const goToSallaNow = () => {
     try {
       if (window.top) {
         window.top.location.href = SALLA_DASHBOARD_URL
@@ -130,52 +132,37 @@ export default function SallaCallback() {
           <p className="text-slate-400 text-sm">يمكنك إعادة المحاولة من متجر تطبيقات سلة.</p>
           <code className="text-amber-400 text-xs block bg-slate-800 rounded px-2 py-1">{error}</code>
           <button
-            onClick={goToSalla}
+            onClick={goToSallaNow}
             className="mt-3 inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold text-sm px-5 py-2.5 rounded-xl transition-colors"
           >
             العودة إلى سلة
           </button>
         </div>
       ) : (
-        /* ── Install-success state — gated CTA, no auto-navigate ─── */
-        <div className="text-center space-y-5 max-w-md">
+        /* ── Brief success state — auto-redirects back to Salla ─── */
+        <div className="text-center space-y-4 max-w-sm">
           <div className="text-5xl">✅</div>
-          <div>
-            <p className="text-white font-bold text-xl">
-              {isNew ? 'تم تثبيت نحلة بنجاح!' : 'تم تجديد ربط نحلة بنجاح!'}
-            </p>
-            {storeName && (
-              <p className="text-slate-300 text-sm mt-1">
-                المتجر: <span className="text-amber-400 font-semibold">{storeName}</span>
-              </p>
-            )}
-          </div>
-
-          <div className="bg-slate-800/60 border border-amber-400/20 rounded-2xl p-5 text-right space-y-3">
-            <p className="text-amber-300 text-sm font-bold flex items-center gap-2">
-              <span>📌</span>
-              الخطوة التالية
-            </p>
-            <ol className="text-slate-300 text-sm leading-relaxed space-y-2 list-decimal list-inside">
-              <li>ارجع إلى لوحة تحكم متجرك في سلة</li>
-              <li>اذهب إلى قسم <span className="text-amber-400 font-semibold">«تطبيقاتي»</span></li>
-              <li>
-                اضغط على زر <span className="text-amber-400 font-semibold">«استخدام التطبيق»</span> بجانب نحلة
-              </li>
-            </ol>
-          </div>
-
-          <button
-            onClick={goToSalla}
-            className="w-full inline-flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 text-slate-900 font-bold text-base px-5 py-3.5 rounded-xl transition-all hover:-translate-y-0.5"
-            style={{ boxShadow: '0 4px 24px rgba(245,158,11,0.35)' }}
-          >
-            العودة إلى لوحة سلة ↗
-          </button>
-
-          <p className="text-slate-500 text-[11px]">
-            تم حفظ جلستك. عند ضغط «استخدام التطبيق» في سلة، ستفتح لوحة نحلة مباشرةً.
+          <p className="text-white font-bold text-lg">
+            {isNew ? 'تم تثبيت نحلة بنجاح!' : 'تم تجديد الربط بنجاح!'}
           </p>
+          {storeName && (
+            <p className="text-slate-300 text-sm">
+              المتجر: <span className="text-amber-400 font-semibold">{storeName}</span>
+            </p>
+          )}
+          <div className="flex items-center justify-center gap-2 text-slate-400 text-sm pt-1">
+            <div
+              className="w-4 h-4 rounded-full border-2 border-amber-400/30 border-t-amber-400 animate-spin"
+              aria-hidden
+            />
+            <span>جاري إعادتك إلى سلة...</span>
+          </div>
+          <button
+            onClick={goToSallaNow}
+            className="text-amber-400 hover:text-amber-300 text-xs font-semibold underline underline-offset-4 transition-colors"
+          >
+            تخطي الانتظار
+          </button>
         </div>
       )}
     </div>
