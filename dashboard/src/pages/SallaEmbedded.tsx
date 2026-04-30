@@ -199,25 +199,34 @@ export default function SallaEmbedded() {
     setErrorDetail(msg)
   }, [clearWatchdog])
 
-  // ── markReady: auth + session save complete, waiting for user gesture ───
-  // Salla policy: do NOT bypass the "استخدام التطبيق" button by jumping the
-  // merchant straight into /app/entry on first iframe load.  We park them on
-  // a welcome screen with a single explicit CTA instead.
+  // How long the brief welcome card stays on screen before we auto-navigate
+  // the merchant into /app/entry.  Long enough to register the success state,
+  // short enough to feel snappy.  This auto-navigate is fine here because
+  // the merchant has ALREADY pressed "استخدام التطبيق" inside Salla — that
+  // is the explicit gesture Salla policy requires; our iframe is the
+  // post-gesture surface so we may transition automatically.
+  const WELCOME_HOLD_MS = 1400
+
+  // ── markReady: auth + session save complete, show brief welcome card,
+  //            then auto-navigate to /app/entry.
   const markReady = useCallback(() => {
     clearWatchdog()
     setPhase('ready')
-    console.info('[SallaEmbedded] ✓ auth complete → waiting for user gesture')
-  }, [clearWatchdog])
+    console.info('[SallaEmbedded] ✓ auth complete → showing welcome, auto-entering /app/entry in', WELCOME_HOLD_MS, 'ms')
+    setTimeout(() => {
+      setPhase('success')
+      setStatusText('جاري الدخول...')
+      setTimeout(() => navigate('/app/entry', { replace: true }), 150)
+    }, WELCOME_HOLD_MS)
+  }, [clearWatchdog, navigate])
 
-  // ── goToDashboard: explicit navigation triggered by user click only ─────
-  // Always lands on the mini-dashboard /app/entry — it already has its own
-  // "ربط واتساب الآن" CTA, so duplicating it here would just confuse the
-  // merchant.  Setup steps live inside the mini-dashboard, not before it.
+  // ── goToDashboard: kept for the explicit "Open dashboard" button on the
+  //            welcome card — lets impatient merchants skip the 1.4 s hold.
   const goToDashboard = useCallback(() => {
     setPhase('success')
     console.info('[SallaEmbedded] user pressed CTA → navigating to /app/entry')
     setStatusText('جاري الدخول...')
-    setTimeout(() => navigate('/app/entry', { replace: true }), 200)
+    setTimeout(() => navigate('/app/entry', { replace: true }), 150)
   }, [navigate])
 
   // ── Step 1: check existing Nahla session ──────────────────────────────────
@@ -513,29 +522,21 @@ export default function SallaEmbedded() {
           </div>
         )}
 
-        {/* ── Ready (auth complete, awaiting explicit user click) ────────
-            One simple CTA → opens the mini-dashboard /app/entry.
-            Setup steps (WhatsApp, automation, etc.) are surfaced inside
-            the mini-dashboard itself — not duplicated here. */}
+        {/* ── Ready (brief welcome, auto-navigates to /app/entry shortly) ── */}
         {phase === 'ready' && (
-          <div className="text-center space-y-5">
-            <div className="text-4xl">🎉</div>
+          <div className="text-center space-y-4">
+            <div className="text-5xl">🎉</div>
             <p className="text-white font-bold text-lg leading-snug">
               تم ربط متجرك بنجاح!
             </p>
-            <p className="text-slate-300 text-sm leading-relaxed">
-              نحلة جاهزة الآن — افتح لوحة التحكم لإكمال الإعداد ومتابعة متجرك.
+            <p className="text-slate-300 text-sm">
+              جاري فتح لوحة نحلة...
             </p>
             <button
               onClick={goToDashboard}
-              className="w-full py-3 px-6 rounded-xl font-bold text-sm transition-all hover:opacity-90 active:scale-95"
-              style={{
-                background: '#f59e0b',
-                color:      '#0f172a',
-                boxShadow:  '0 4px 20px rgba(245,158,11,0.4)',
-              }}
+              className="text-amber-400 hover:text-amber-300 text-xs font-semibold underline underline-offset-4 transition-colors"
             >
-              فتح لوحة نحلة 🚀
+              تخطي
             </button>
           </div>
         )}
