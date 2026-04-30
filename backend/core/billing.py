@@ -175,9 +175,51 @@ def has_active_trial(db: Session, tenant_id: int) -> bool:
     return compute_trial_info(tenant)["is_trial"]
 
 
+def _has_salla_active_subscription(db: Session, tenant_id: int) -> bool:
+    """
+    True when the tenant has an active or in-trial Salla App Store subscription.
+
+    Salla billing_status values that grant access:
+      - "active"  → paid subscription
+      - "trial"   → first-time free trial (still within trial window)
+
+    Values that do NOT grant access:
+      - "trial_blocked" → trial already used on a previous install
+      - "failed"        → payment failed
+      - "cancelled"     → subscription cancelled
+      - "none" / absent → no subscription yet
+    """
+    from models import Integration  # noqa: PLC0415
+
+    integration = (
+        db.query(Integration)
+        .filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider  == "salla",
+        )
+        .first()
+    )
+    if not integration:
+        return False
+
+    status = (integration.config or {}).get("billing_status", "none")
+    return status in ("active", "trial")
+
+
 def has_billing_access(db: Session, tenant_id: int) -> bool:
-    """True when the tenant can use paid features through subscription or trial."""
-    return bool(get_tenant_subscription(db, tenant_id) or has_active_trial(db, tenant_id))
+    """
+    True when the tenant can use paid AI features.
+
+    Checks in priority order:
+      1. Nahla-native active subscription (Stripe / HyperPay)
+      2. Salla App Store active or trial subscription
+      3. Nahla internal free-trial window
+    """
+    return bool(
+        get_tenant_subscription(db, tenant_id)
+        or _has_salla_active_subscription(db, tenant_id)
+        or has_active_trial(db, tenant_id)
+    )
 
 
 def is_launch_discount_active(sub: BillingSubscription) -> bool:
