@@ -411,27 +411,37 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             ).first()
 
             now_iso = datetime.now(timezone.utc).isoformat()
+
+            # The embedded Salla token CAN be used as a temporary api_key for
+            # most read operations (products, orders, customers, store info).
+            # We save it so the merchant sees the integration as "connected"
+            # immediately on first login, even before the full OAuth refresh
+            # token arrives via the app.store.authorize webhook.
+            embedded_api_key = salla_token  # the v4.public.* token from the iframe
+
             if integration:
                 cfg = dict(integration.config or {})
+                # Keep existing long-lived api_key if present, else use embedded
+                existing_key = cfg.get("api_key", "")
                 cfg.update({
                     "store_id":          merchant_id_str,
                     "store_name":        store_name,
                     "last_seen":         now_iso,
                     "salla_owner_email": owner_email,
                 })
+                if not existing_key and embedded_api_key:
+                    cfg["api_key"] = embedded_api_key
+                    cfg["api_key_source"] = "embedded_token"
+                    cfg["api_key_received_at"] = now_iso
                 integration.config = cfg
                 integration.external_store_id = merchant_id_str
-                # token-login: enable if api_key exists (refresh_token
-                # arrives separately via app.store.authorize webhook).
-                # OAuth callback uses the stricter has_valid_tokens() check.
-                has_api_key = bool(cfg.get("api_key"))
-                if has_api_key:
+                # Mark as enabled if we have ANY usable api_key
+                if cfg.get("api_key"):
                     integration.enabled = True
-                # If no api_key, preserve current enabled state — don't
-                # force-disable an integration that may receive tokens soon.
                 logger.info(
-                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s enabled=%s has_api_key=%s",
-                    tenant_id, merchant_id_str, integration.enabled, has_api_key,
+                    "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s enabled=%s api_key_source=%s",
+                    tenant_id, merchant_id_str, integration.enabled,
+                    cfg.get("api_key_source", "oauth"),
                 )
             else:
                 db.add(Integration(
@@ -439,17 +449,21 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     provider  = "salla",
                     external_store_id = merchant_id_str,
                     config    = {
-                        "store_id":          merchant_id_str,
-                        "store_name":        store_name,
-                        "salla_token_login": True,
-                        "connected_at":      now_iso,
-                        "salla_owner_email": owner_email,
+                        "store_id":             merchant_id_str,
+                        "store_name":           store_name,
+                        "salla_token_login":    True,
+                        "connected_at":         now_iso,
+                        "salla_owner_email":    owner_email,
+                        "api_key":              embedded_api_key,
+                        "api_key_source":       "embedded_token",
+                        "api_key_received_at":  now_iso,
                     },
-                    enabled = False,
+                    enabled = bool(embedded_api_key),
                 ))
                 logger.info(
-                    "[SallaLogin]    Integration CREATED (disabled — awaiting OAuth) | tenant=%s store_id=%s",
-                    tenant_id, merchant_id_str,
+                    "[SallaLogin]    Integration CREATED | tenant=%s store_id=%s "
+                    "enabled=%s api_key_source=embedded_token",
+                    tenant_id, merchant_id_str, bool(embedded_api_key),
                 )
 
         db.commit()
@@ -488,6 +502,36 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         "[SallaLogin] ══ COMPLETE ═══ merchant=%s tenant=%s wa=%s → %s",
         owner_email, tenant_id, wa_connected, redirect_target,
     )
+
+    # ── Trigger initial Salla sync (fire-and-forget) for NEW merchants ───────
+    # Brings products, orders, customers immediately so the dashboard isn't empty.
+    if is_new and tenant_id:
+        try:
+            import asyncio as _asyncio  # noqa: PLC0415
+
+            async def _initial_sync_token_login(tid: int):
+                await _asyncio.sleep(2)
+                from core.database import get_db as _gdb  # noqa: PLC0415
+                from services.store_sync import StoreSyncService  # noqa: PLC0415
+                _db = next(_gdb())
+                try:
+                    svc = StoreSyncService(_db, tid)
+                    result = await svc.full_sync(triggered_by="salla_token_login_first_install")
+                    logger.info(
+                        "[SallaLogin] Initial sync done | tenant=%s status=%s",
+                        tid, result.get("status"),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[SallaLogin] Initial sync failed | tenant=%s: %s", tid, exc,
+                    )
+                finally:
+                    _db.close()
+
+            _asyncio.ensure_future(_initial_sync_token_login(tenant_id))
+            logger.info("[SallaLogin] Initial sync queued | tenant=%s", tenant_id)
+        except Exception as _exc:
+            logger.warning("[SallaLogin] Could not queue initial sync: %s", _exc)
 
     return {
         "access_token":   nahla_jwt,
