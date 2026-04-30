@@ -310,24 +310,47 @@ export default function SallaEntryScreen() {
     setLaunching(kind)
     const token = getToken()
     const next  = kind === 'whatsapp' ? '/app/settings/whatsapp' : '/overview'
+
+    if (!token) {
+      alert('انتهت الجلسة، أعد فتح التطبيق من سلة.')
+      setLaunching(null)
+      navigate('/app/salla', { replace: true })
+      return
+    }
+
     try {
       const res = await fetch(
         `${API_BASE}/salla/session/launch-dashboard?next=${encodeURIComponent(next)}`,
         { method: 'POST', headers: { Authorization: `Bearer ${token}` } },
       )
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`
+        try {
+          const err = await res.json() as { detail?: string }
+          if (err?.detail) detail = err.detail
+        } catch { /* ignore */ }
+        console.error('[OpenAdvanced] launch-dashboard failed:', detail)
+        if (res.status === 401) {
+          alert('انتهت الجلسة. أعد فتح التطبيق من سلة لتسجيل الدخول مجدداً.')
+          navigate('/app/salla', { replace: true })
+        } else {
+          alert(`تعذر فتح لوحة نحلة: ${detail}`)
+        }
+        setLaunching(null)
+        return
+      }
       const { launch_url } = await res.json() as { launch_url: string }
-      // Open the launch URL as the top-level window (breaks out of iframe)
       if (window.top) {
         window.top.location.href = launch_url
       } else {
         window.location.href = launch_url
       }
-    } catch {
-      alert('تعذر فتح لوحة نحلة، حاول مجدداً.')
+    } catch (e) {
+      console.error('[OpenAdvanced] network error:', e)
+      alert('تعذر الاتصال بالخادم، تحقق من الإنترنت وحاول مجدداً.')
       setLaunching(null)
     }
-  }, [])
+  }, [navigate])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -456,8 +479,20 @@ export default function SallaEntryScreen() {
   const fmtSAR = (n: number) => `${n.toLocaleString('ar-SA')} ر.س`
   const fmtPct = (n: number) => `${Math.round(n * 100)}%`
 
-  // Onboarding steps: each entry is true when that step is done
-  const stepDone = [waOk, waOk && autoOk, hasConv, hasConv && (hasOrd || hasRev)]
+  // Onboarding steps: each entry is true when that step is done.
+  // Steps are STRICTLY sequential — step N can only be completed if step N-1
+  // is completed.  This prevents nonsensical states like
+  // "first conversation completed" while WhatsApp is not connected.
+  const convCount = m?.conversations_today ?? 0
+  const ordCount  = m?.orders_today        ?? 0
+  const revAmount = m?.whatsapp_revenue_today ?? 0
+
+  const step1Done = waOk
+  const step2Done = step1Done && autoOk
+  const step3Done = step2Done && convCount > 0
+  const step4Done = step3Done && (ordCount > 0 || revAmount > 0)
+
+  const stepDone = [step1Done, step2Done, step3Done, step4Done]
   const stepState = (i: number): StepState => {
     if (stepDone[i]) return 'completed'
     const first = stepDone.findIndex(d => !d)
