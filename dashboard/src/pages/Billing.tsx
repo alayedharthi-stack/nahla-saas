@@ -25,6 +25,32 @@ function openSallaApp(): void {
   window.location.href = SALLA_APP_URL
 }
 
+// ── Analytics ─────────────────────────────────────────────────────────────────
+// Lightweight event tracker that forwards to whichever analytics platform is
+// loaded on the page (posthog, GA4 via gtag) and always logs to console so
+// tracking still works in dev / before any tool is wired.
+type TrackPayload = Record<string, string | number | boolean | null | undefined>
+
+function trackEvent(name: string, payload: TrackPayload = {}): void {
+  try {
+    console.info(`[track] ${name}`, payload)
+
+    // PostHog — if loaded (posthog.com)
+    const ph = (window as unknown as { posthog?: { capture: (n: string, p: TrackPayload) => void } }).posthog
+    if (ph && typeof ph.capture === 'function') {
+      ph.capture(name, payload)
+    }
+
+    // Google Analytics 4 / GTM — if loaded (gtag('event', ...))
+    const gtag = (window as unknown as { gtag?: (cmd: string, eventName: string, p: TrackPayload) => void }).gtag
+    if (typeof gtag === 'function') {
+      gtag('event', name, payload)
+    }
+  } catch (e) {
+    console.warn('[track] failed:', e)
+  }
+}
+
 // Detect whether the merchant is browsing this billing page from inside the
 // Salla embedded experience.  Used to render a Salla-specific notice that
 // directs the merchant to subscribe via Salla's billing UI (required by
@@ -192,6 +218,11 @@ function PlanCard({
               href={SALLA_APP_URL}
               target="_top"
               rel="noopener noreferrer"
+              onClick={() => trackEvent('salla_redirect_clicked', {
+                source:   'plan_card',
+                plan:     plan.slug,
+                is_salla: true,
+              })}
               className={[
                 'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all',
                 'flex items-center justify-center gap-2 cursor-alias',
@@ -290,6 +321,27 @@ export default function Billing() {
     }, 8000)
     return () => clearTimeout(t)
   }, [isSalla, checkingOut])
+
+  // "Returned from Salla without subscribing" banner.  Triggered when the
+  // merchant lands on /billing with ?from=salla in the URL — i.e. they
+  // bounced back without completing the subscription on Salla's side.
+  // Cleans the query param immediately so a browser refresh doesn't re-show
+  // the banner forever.
+  const [returnedFromSalla, setReturnedFromSalla] = useState(false)
+  useEffect(() => {
+    if (!isSalla) return
+    try {
+      const params = new URLSearchParams(window.location.search)
+      if (params.get('from') === 'salla') {
+        setReturnedFromSalla(true)
+        params.delete('from')
+        const cleanSearch = params.toString()
+        const cleanUrl    = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '')
+        window.history.replaceState(null, '', cleanUrl)
+        trackEvent('salla_returned_without_subscription', { is_salla: true })
+      }
+    } catch { /* noop */ }
+  }, [isSalla])
 
   const load = async () => {
     setLoading(true)
@@ -422,6 +474,41 @@ export default function Billing() {
         <h1 className="text-xl font-bold text-slate-900">الاشتراك والفوترة</h1>
         <p className="text-sm text-slate-500 mt-1">إدارة خطة نحلة واستخدامك الشهري</p>
       </div>
+
+      {/* Returned from Salla without subscribing — only for Salla merchants
+          who bounced back via ?from=salla query param. */}
+      {isSalla && returnedFromSalla && (
+        <div className="flex items-center justify-between gap-3 bg-amber-50 border-2 border-amber-300 rounded-xl px-4 py-3">
+          <div className="flex items-start gap-2.5 flex-1">
+            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <p className="text-sm font-semibold text-amber-900 leading-relaxed">
+              لم يتم إتمام الاشتراك بعد — يمكنك المتابعة عبر سلة 👆
+            </p>
+          </div>
+          <a
+            href={SALLA_APP_URL}
+            target="_top"
+            rel="noopener noreferrer"
+            onClick={() => {
+              setReturnedFromSalla(false)
+              trackEvent('salla_redirect_clicked', {
+                source:   'returned_banner',
+                plan:     null,
+                is_salla: true,
+              })
+            }}
+            className={[
+              'shrink-0 inline-flex items-center gap-1.5',
+              'bg-amber-600 hover:bg-amber-700 text-white',
+              'rounded-lg px-3 py-1.5 text-xs font-bold',
+              'transition-colors cursor-alias',
+            ].join(' ')}
+          >
+            الذهاب إلى سلة
+            <ArrowUpRight className="w-3.5 h-3.5" />
+          </a>
+        </div>
+      )}
 
       {/* Hero value proposition */}
       <div className="rounded-2xl bg-gradient-to-l from-brand-600 to-brand-400 p-5 text-white">
@@ -686,12 +773,23 @@ export default function Billing() {
             href={SALLA_APP_URL}
             target="_top"
             rel="noopener noreferrer"
-            onClick={() => setShowSallaHint(false)}
+            onClick={() => {
+              setShowSallaHint(false)
+              setReturnedFromSalla(false)
+              trackEvent('salla_redirect_clicked', {
+                source:   'billing_cta',
+                plan:     null,
+                is_salla: true,
+              })
+            }}
             className={[
               'group flex items-center justify-between gap-3',
               'rounded-2xl px-5 py-4',
               'bg-gradient-to-l from-brand-600 to-brand-500 text-white',
-              'shadow-lg shadow-brand-500/20 hover:shadow-brand-500/30',
+              // Stronger glow — this is THE primary action on the page for
+              // Salla merchants.  Brand-500 ring + lifted shadow on hover.
+              'shadow-xl shadow-brand-500/30 ring-1 ring-brand-400/40',
+              'hover:shadow-2xl hover:shadow-brand-500/40 hover:ring-brand-300/60',
               'transition-all hover:-translate-y-0.5 active:translate-y-0',
               'cursor-alias',
             ].join(' ')}
@@ -703,7 +801,7 @@ export default function Billing() {
               </div>
               <div className="text-right">
                 <p className="text-base font-bold leading-tight">
-                  اشترك أو أدر باقتك عبر سلة
+                  ابدأ اشتراكك أو أدر باقتك عبر سلة
                 </p>
                 <p className="text-xs text-white/80 mt-0.5">
                   سيتم فتح صفحة التطبيق على منصة سلة في تبويب علوي
@@ -720,8 +818,7 @@ export default function Billing() {
           {showSallaHint && (
             <div className="flex items-center justify-between gap-3 bg-brand-50 border border-brand-200 text-brand-800 rounded-xl px-4 py-2.5 text-xs animate-pulse">
               <div className="flex items-center gap-2">
-                <Sparkles className="w-3.5 h-3.5 text-brand-500" />
-                <span>لإتمام الاشتراك، سيتم توجيهك إلى سلة 👆</span>
+                <span>✨ لإتمام الاشتراك، توجه إلى سلة من هنا 👆</span>
               </div>
               <button
                 onClick={() => setShowSallaHint(false)}
