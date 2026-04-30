@@ -1476,6 +1476,9 @@ class StoreSyncService:
                     "tenant=%s ⛔ SYNC_BLOCKED — %s (triggered_by=%s)",
                     self.tenant_id, reason, triggered_by,
                 )
+                # Persist a failed job so the frontend can show a meaningful error.
+                blocked_job = self._start_job("full", triggered_by)
+                self._fail_job(blocked_job, f"مزامنة محظورة: {reason}")
                 return {"status": "blocked", "message": reason}
         except Exception as guard_exc:
             logger.warning("tenant=%s salla_guard check failed (non-fatal): %s", self.tenant_id, guard_exc)

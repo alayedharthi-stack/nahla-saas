@@ -449,7 +449,10 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
 
             if integration:
                 cfg = dict(integration.config or {})
-                # Keep existing long-lived api_key if present, else use embedded
+                # Keep existing long-lived api_key (OAuth token from app.store.authorize)
+                # if present.  The embedded iframe token is NOT a valid Admin API
+                # access token and cannot call /admin/v2/* endpoints, so we only
+                # store it as a fallback when no real OAuth token exists yet.
                 existing_key = cfg.get("api_key", "")
                 cfg.update({
                     "store_id":          merchant_id_str,
@@ -461,6 +464,17 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     cfg["api_key"] = embedded_api_key
                     cfg["api_key_source"] = "embedded_token"
                     cfg["api_key_received_at"] = now_iso
+                # When the merchant actively logs in, clear any stale reauth /
+                # no_auto_refresh flags so a pending app.store.authorize webhook
+                # (which arrives shortly after login) can restore full sync.
+                cfg.pop("needs_reauth",          None)
+                cfg.pop("needs_reauth_at",       None)
+                cfg.pop("needs_reauth_reason",   None)
+                cfg.pop("no_auto_refresh",       None)
+                cfg.pop("no_auto_refresh_reason",None)
+                cfg.pop("no_auto_refresh_at",    None)
+                cfg.pop("soft_disabled",         None)
+                cfg.pop("uninstalled_at",        None)
                 integration.config = cfg
                 integration.external_store_id = merchant_id_str
                 # Mark as enabled if we have ANY usable api_key

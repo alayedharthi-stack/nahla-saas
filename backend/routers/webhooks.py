@@ -389,11 +389,16 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
             "app_type":        "easy",
             "api_key_source":  "easy_mode_webhook",
         })
-        new_cfg.pop("soft_disabled", None)
-        new_cfg.pop("uninstalled_at", None)
-        new_cfg.pop("needs_reauth", None)
-        new_cfg.pop("needs_reauth_at", None)
-        new_cfg.pop("needs_reauth_reason", None)
+        new_cfg.pop("soft_disabled",         None)
+        new_cfg.pop("uninstalled_at",        None)
+        new_cfg.pop("needs_reauth",          None)
+        new_cfg.pop("needs_reauth_at",       None)
+        new_cfg.pop("needs_reauth_reason",   None)
+        # Also clear the no_auto_refresh flag that _mark_needs_reauth sets
+        # when invalid_grant is returned.  Fresh tokens from Salla supersede it.
+        new_cfg.pop("no_auto_refresh",       None)
+        new_cfg.pop("no_auto_refresh_reason",None)
+        new_cfg.pop("no_auto_refresh_at",    None)
         claim_store_for_tenant(
             db, store_id=salla_store_id, tenant_id=tenant_id, new_config=new_cfg,
         )

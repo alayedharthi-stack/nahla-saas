@@ -238,11 +238,35 @@ export default function StoreSyncPanel({ isStoreConnected }: StoreSyncPanelProps
         {(syncError || (hasError && !syncing && status?.last_job_error)) && (
           <div className="flex items-start gap-2.5 bg-red-50 border border-red-200 rounded-xl p-3.5">
             <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-            <div>
+            <div className="flex-1 min-w-0">
               <p className="text-xs font-semibold text-red-700">فشلت المزامنة الأخيرة</p>
               <p className="text-xs text-red-600 mt-1 break-all">
                 {syncError ?? status?.last_job_error}
               </p>
+              {/* Token / auth error hints */}
+              {(() => {
+                const err = (syncError ?? status?.last_job_error ?? '').toLowerCase()
+                const isTokenErr = err.includes('401') || err.includes('invalid_grant')
+                  || err.includes('unauthorized') || err.includes('token')
+                  || err.includes('توكن') || err.includes('blocked')
+                if (!isTokenErr) return null
+                return (
+                  <p className="text-xs text-red-700 mt-2 leading-relaxed">
+                    يبدو أن التوكن منتهي الصلاحية. افتح التطبيق من سلة مرة أخرى
+                    ثم اضغط <strong>مزامنة الآن</strong> — إذا استمرت المشكلة،
+                    أعِد تثبيت التطبيق من متجر سلة لتجديد الصلاحية.
+                  </p>
+                )
+              })()}
+              {/* Retry button inline */}
+              {isStoreConnected && !syncing && (
+                <button
+                  onClick={handleSync}
+                  className="mt-2 text-xs font-semibold text-red-700 underline underline-offset-2 hover:text-red-900 transition-colors"
+                >
+                  إعادة المزامنة الآن
+                </button>
+              )}
             </div>
           </div>
         )}
