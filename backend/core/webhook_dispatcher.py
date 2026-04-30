@@ -127,6 +127,41 @@ async def _dispatch_salla(db: Session, event) -> None:
         await svc.handle_abandoned_cart_webhook(data)
         return
 
+    # Merchant saved App Quick-Setup settings inside Salla Partner Portal.
+    # We apply the values directly to the tenant's settings row.
+    if event_type == "app.settings":
+        from routers.salla_app_settings import SallaQuickSetupIn, apply_quick_setup  # noqa: PLC0415
+        from core.tenant import get_or_create_settings  # noqa: PLC0415
+        raw_cfg = (data.get("settings") or data) if isinstance(data, dict) else {}
+        try:
+            setup = SallaQuickSetupIn(
+                nahla_enabled           = raw_cfg.get("nahla_enabled"),
+                whatsapp_number         = raw_cfg.get("whatsapp_number"),
+                reply_tone              = raw_cfg.get("reply_tone"),
+                abandoned_cart_enabled  = raw_cfg.get("abandoned_cart_enabled"),
+                discount_percentage     = raw_cfg.get("discount_percentage"),
+                autopilot_enabled       = raw_cfg.get("autopilot_enabled"),
+            )
+            s = get_or_create_settings(db, tenant_id)
+            changed = apply_quick_setup(s, setup, db)
+            logger.info("[Dispatcher] app.settings applied | tenant=%s changed=%s", tenant_id, list(changed.keys()))
+        except Exception as _se:
+            logger.error("[Dispatcher] app.settings parse/apply error: %s", _se)
+            raise
+        return
+
+    # ── Salla App Subscription lifecycle events ──────────────────────────────
+    if event_type in (
+        "subscription.created",
+        "subscription.charge.succeeded",
+        "subscription.charge.failed",
+        "subscription.cancelled",
+        "subscription.updated",
+    ):
+        from routers.salla_subscription import handle_subscription_webhook  # noqa: PLC0415
+        handle_subscription_webhook(db, tenant_id, event_type, data)
+        return
+
     # Unknown event — mark processed so it does not retry forever.
     logger.info(
         "[Dispatcher] Unhandled salla event_type=%s webhook_event_id=%s — marking processed",

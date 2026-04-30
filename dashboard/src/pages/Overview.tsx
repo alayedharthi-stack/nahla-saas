@@ -130,6 +130,13 @@ export default function Overview() {
               <Clock className="w-3.5 h-3.5 text-brand-500" />
               <span>{ov.salesBot.replace('24/7', '')} <strong className="text-slate-700">24/7</strong></span>
             </div>
+            <Link
+              to="/app/pricing"
+              className="flex items-center gap-1.5 text-xs font-bold bg-brand-500 hover:bg-brand-600 text-white rounded-xl px-3 py-2 transition-colors shrink-0"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              عرض الباقات
+            </Link>
           </div>
         </div>
       </div>

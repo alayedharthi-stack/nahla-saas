@@ -711,6 +711,30 @@ async def save_coupon_dashboard_settings(
 ):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+
+    # ── Entitlement check: advanced coupon rules need advanced_coupon_types ──
+    # Starter: only abandoned_cart rule allowed.
+    # Growth+: VIP, inactive recovery, coupon levels (bronze/silver/gold/vip).
+    from core.plan_entitlements import (  # noqa: PLC0415
+        get_entitlements, require_feature, entitlement_http_error, EntitlementError,
+    )
+    ent = get_entitlements(db, tenant_id)
+    # Rule IDs that require advanced_coupon_types (Growth+)
+    _ADVANCED_RULE_IDS = frozenset({
+        "vip_customers",
+        "customer_winback",
+        "repeat_purchase",
+        "first_purchase",
+    })
+    if body.rules:
+        for rule in body.rules:
+            if rule.enabled and rule.id in _ADVANCED_RULE_IDS:
+                try:
+                    require_feature(ent, "advanced_coupon_types")
+                except EntitlementError as exc:
+                    entitlement_http_error(exc)
+                break
+
     settings = get_or_create_settings(db, tenant_id)
     meta = dict(settings.extra_metadata or {})
 

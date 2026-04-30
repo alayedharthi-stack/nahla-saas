@@ -412,6 +412,17 @@ class SallaAdapter(BaseStoreAdapter):
             data = await self._get(f"/products/{product_id}")
             raw = data.get("data") or {}
             if not raw:
+                # Log what Salla actually returned — helps diagnose why the
+                # product is missing: stale id, wrong scope, archived item, etc.
+                logger.warning(
+                    "[SallaAdapter] get_product(%s) returned empty data | "
+                    "salla_success=%s salla_status=%s — "
+                    "product may be deleted, archived, or out of sync | tenant=%s",
+                    product_id,
+                    data.get("success"),
+                    data.get("status"),
+                    self._tenant_id,
+                )
                 return None
 
             # ── Always reconcile against /products/{id}/options ───────────

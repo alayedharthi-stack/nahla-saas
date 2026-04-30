@@ -842,3 +842,62 @@ async def hyperpay_create_payment_link(
         "result_code":        result_code,
         "payment_widget_url": hp.build_payment_page_url(checkout_id, body.brand),
     }
+
+
+# ── GET /billing/entitlements ──────────────────────────────────────────────────
+
+@router.get("/billing/entitlements")
+async def get_billing_entitlements(request: Request, db: Session = Depends(get_db)):
+    """
+    Return the tenant's current plan entitlements — features, limits, billing status.
+
+    Used by:
+    - Frontend useEntitlements() hook
+    - FeatureGate component (show/lock UI features)
+    - Any endpoint that needs to check plan before returning data
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+    ent = get_entitlements(db, tenant_id)
+
+    # ── Monthly usage counters ────────────────────────────────────────────────
+    from datetime import datetime, timezone  # noqa: PLC0415
+    from models import Conversation, Campaign  # noqa: PLC0415
+
+    now     = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    try:
+        conv_count = (
+            db.query(Conversation)
+            .filter(
+                Conversation.tenant_id >= tenant_id,
+                Conversation.tenant_id == tenant_id,
+                Conversation.created_at >= month_start.replace(tzinfo=None),
+            )
+            .count()
+        )
+    except Exception:
+        conv_count = 0
+
+    try:
+        camp_count = (
+            db.query(Campaign)
+            .filter(
+                Campaign.tenant_id == tenant_id,
+                Campaign.created_at >= month_start.replace(tzinfo=None),
+            )
+            .count()
+        )
+    except Exception:
+        camp_count = 0
+
+    result = ent.to_dict()
+    result["usage"] = {
+        "monthly_conversations": conv_count,
+        "campaigns_per_month":   camp_count,
+    }
+
+    return {"ok": True, **result}

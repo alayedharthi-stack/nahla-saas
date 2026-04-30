@@ -147,6 +147,7 @@ class DraftOrderHandler:
                 data={
                     "product_unsyncable": True,
                     "message": "product_missing_external_id",
+                    "product": product_info,
                     "order_prep": prep.to_dict(),
                 },
             )
@@ -555,16 +556,32 @@ class DraftOrderHandler:
             )
             await _ensure_product_options_loaded(prep, ctx, external_id)
             _missing_now = _missing_product_options(prep) or list(prep.product_options_meta or [])
-            return ActionResult(
-                success=True,
-                data={
-                    "product": product_info,
-                    "needs_options": True,
-                    "missing_option_groups": _missing_now,
-                    "selected_options": prep.product_options,
-                    "order_prep": prep.to_dict(),
-                },
-            )
+
+            # Guard: if Salla says options are required but we STILL can't load
+            # them (get_product keeps returning None), returning needs_options
+            # with an empty list causes the composer to say "تمام، سأجهز طلب"
+            # and then loop forever. Fall through to the retry/escalate path
+            # instead so a human agent can handle it.
+            if not _missing_now and not prep.product_options_meta:
+                logger.warning(
+                    "[ORDER FLOW] options required by Salla but metadata unavailable "
+                    "after reload — falling to salla_retry/escalate | "
+                    "tenant=%s product=%s",
+                    ctx.tenant_id, external_id,
+                )
+                prep.salla_failure_count = (prep.salla_failure_count or 0) + 1
+                # Fall through to retry/escalate handling below.
+            else:
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "needs_options": True,
+                        "missing_option_groups": _missing_now,
+                        "selected_options": prep.product_options,
+                        "order_prep": prep.to_dict(),
+                    },
+                )
 
         if prep.customer_first_name and prep.city:
             has_address = bool(prep.short_address_code or prep.google_maps_url or prep.latitude)
@@ -1121,16 +1138,19 @@ async def _ensure_product_options_loaded(
             return
         product = await adapter.get_product(external_id)
         if not product:
-            # Salla returned nothing for this id. We MUST be careful here:
-            #   • If we have NEVER successfully loaded this product
-            #     before, the id is genuinely wrong / the product was
-            #     deleted → safe to mark unsyncable.
-            #   • If we previously loaded it (`product_options_loaded`
-            #     was True) and somehow we're being called again, the
-            #     empty response is almost certainly transient — do NOT
-            #     overwrite a previously good state. The early return
-            #     above prevents this in normal flow, but we belt-and-
-            #     braces it here too.
+            # Salla returned nothing for this id.  Two possible causes:
+            #   1. Transient API issue (rate-limit, 200+null body, gateway hiccup)
+            #   2. Product was deleted from Salla after the last catalog sync.
+            #
+            # We CANNOT distinguish these two cases from a single None response,
+            # so we MUST NOT permanently block the order.  Instead we skip the
+            # options pre-check and let the actual POST /orders call surface the
+            # real error.  If the product truly doesn't exist, Salla returns a
+            # 422/404 which the retry/escalate flow handles gracefully.  If it
+            # was a transient hiccup, the order succeeds — much better UX.
+            #
+            # belt-and-braces: the early-return above already handles the case
+            # where product_options_loaded is True (product was good before).
             if prep.product_options_loaded:
                 logger.warning(
                     "[ORDER FLOW] transient empty get_product result — "
@@ -1139,12 +1159,15 @@ async def _ensure_product_options_loaded(
                     ctx.tenant_id, external_id,
                 )
                 return
-            logger.error(
-                "[ORDER FLOW] invalid product_id for Salla — get_product returned empty | "
-                "tenant=%s product_id=%s (this id does NOT exist on Salla)",
-                ctx.tenant_id, external_id,
+            logger.warning(
+                "[ORDER FLOW] get_product(%s) returned None — skipping options "
+                "pre-check and attempting order creation; Salla will surface "
+                "the real error if the product no longer exists | tenant=%s",
+                external_id, ctx.tenant_id,
             )
-            prep.product_unsyncable = True
+            # Mark as loaded so subsequent turns don't keep hammering Salla.
+            prep.product_options_loaded = True
+            prep.product_unsyncable = False
             return
         prep.product_unsyncable = False
         prep.product_options_loaded = True

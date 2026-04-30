@@ -163,7 +163,9 @@ from routers.billing           import router as _billing_router          # noqa:
 from routers.webhooks          import router as _webhooks_router         # noqa: E402
 from routers.handoff           import router as _handoff_router          # noqa: E402
 from routers.store_integration import router as _store_integration_router # noqa: E402
-from routers.salla_oauth       import router as _salla_oauth_router      # noqa: E402
+from routers.salla_oauth         import router as _salla_oauth_router        # noqa: E402
+from routers.salla_app_settings  import router as _salla_app_settings_router  # noqa: E402
+from routers.salla_subscription  import router as _salla_subscription_router   # noqa: E402
 from routers.system            import router as _system_router           # noqa: E402
 from routers.widget            import router as _widget_router           # noqa: E402
 from routers.tracking          import router as _tracking_router         # noqa: E402
@@ -207,6 +209,8 @@ app.include_router(_webhooks_router)
 app.include_router(_handoff_router)
 app.include_router(_store_integration_router)
 app.include_router(_salla_oauth_router)
+app.include_router(_salla_app_settings_router)
+app.include_router(_salla_subscription_router)
 app.include_router(_system_router)
 app.include_router(_widget_router)
 app.include_router(_tracking_router)

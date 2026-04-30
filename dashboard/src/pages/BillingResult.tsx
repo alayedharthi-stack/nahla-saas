@@ -6,11 +6,20 @@ import { billingApi, type PaymentResult } from '../api/billing'
 const MAX_POLLS  = 12
 const POLL_DELAY = 2500   // ms
 
+// Detect Salla embedded session — set by SallaEmbedded.tsx on login
+function isSallaEmbedded(): boolean {
+  try { return localStorage.getItem('nahla_salla_embedded') === '1' } catch { return false }
+}
+
 export default function BillingResult() {
   const navigate      = useNavigate()
   const [params]      = useSearchParams()
   const rawStatus     = params.get('status')      // 'paid' | 'failed' | null
   const subIdStr      = params.get('sub_id')
+
+  // Routes differ: Salla embedded → /app/pricing, regular → /overview or /billing
+  const dashboardRoute = isSallaEmbedded() ? '/app/pricing' : '/overview'
+  const billingRoute   = isSallaEmbedded() ? '/app/pricing' : '/billing'
 
   const [result,       setResult]       = useState<PaymentResult | null>(null)
   const [polling,      setPolling]      = useState(false)
@@ -116,7 +125,7 @@ export default function BillingResult() {
                 </p>
               </div>
               <button
-                onClick={() => navigate('/overview')}
+                onClick={() => navigate(dashboardRoute)}
                 className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
               >
                 الذهاب إلى لوحة التحكم
@@ -143,7 +152,7 @@ export default function BillingResult() {
                 )}
               </div>
               <button
-                onClick={() => navigate('/overview')}
+                onClick={() => navigate(dashboardRoute)}
                 className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
               >
                 الذهاب إلى لوحة التحكم
@@ -165,14 +174,14 @@ export default function BillingResult() {
               </div>
               <div className="flex flex-col gap-2">
                 <button
-                  onClick={() => navigate('/billing')}
+                  onClick={() => navigate(billingRoute)}
                   className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
                 >
                   <RefreshCw className="w-4 h-4" />
                   حاول مجدداً
                 </button>
                 <button
-                  onClick={() => navigate('/overview')}
+                  onClick={() => navigate(dashboardRoute)}
                   className="w-full border border-slate-200 hover:bg-slate-50 text-slate-600 font-medium py-2.5 rounded-xl text-sm transition-colors"
                 >
                   العودة للوحة التحكم
@@ -191,7 +200,7 @@ export default function BillingResult() {
               </div>
               <div className="flex flex-col gap-2">
                 <button
-                  onClick={() => navigate('/billing')}
+                  onClick={() => navigate(billingRoute)}
                   className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors"
                 >
                   الذهاب لصفحة الاشتراك

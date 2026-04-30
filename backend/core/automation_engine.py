@@ -514,6 +514,66 @@ async def _try_execute(
         )
         return existing.status  # type: ignore[return-value]
 
+    # ── Plan entitlement check ─────────────────────────────────────────────────
+    # Maps automation_type → required feature_key from plan_entitlements.py.
+    #
+    # Rules (matches authoritative Feature Map):
+    #   Starter:   order_confirmed, order_notifications, shipping/tracking — NO lock
+    #   Growth+:   full autopilot, cart_recovery_stage_3, growth engine, offers
+    #   Scale+:    store_brain_advanced, escalation_rules
+    #
+    # automation_type values come from SmartAutomation.automation_type column.
+    _AUTOMATION_FEATURE_MAP: Dict[str, str] = {
+        # ── Cart recovery stage 3 (Growth+) ───────────────────────────────────
+        "cart_recovery_stage_3":         "cart_recovery_stage_3",
+        "abandoned_cart_stage_3":        "cart_recovery_stage_3",
+        "abandoned_cart_recovery_stage_3": "cart_recovery_stage_3",
+
+        # ── Full autopilot (Growth+) ───────────────────────────────────────────
+        "customer_winback":              "autopilot_customer_recovery",
+        "cod_confirmation":              "autopilot_cod_confirmation",
+
+        # ── Growth engine (Growth+) ────────────────────────────────────────────
+        "predictive_reorder":            "predictive_reorder",
+        "vip_upgrade":                   "vip_rewards",
+        "back_in_stock":                 "back_in_stock_alerts",
+        "new_product_alert":             "new_products_alerts",
+
+        # ── Offers (Growth+) ──────────────────────────────────────────────────
+        "seasonal_offer":                "seasonal_smart_offers",
+        "salary_payday_offer":           "salary_offers",
+        "national_day_offer":            "seasonal_smart_offers",
+        "ramadan_offer":                 "seasonal_smart_offers",
+
+        # ── Conversion tools (Growth+) ────────────────────────────────────────
+        "smart_discount_popup":          "smart_discount_popup",
+
+        # ── Scale-only ────────────────────────────────────────────────────────
+        "escalation_rule":               "escalation_rules",
+        "advanced_discount_rule":        "advanced_discount_rules",
+    }
+
+    _atype = getattr(automation, "automation_type", "") or ""
+    _required_feature = _AUTOMATION_FEATURE_MAP.get(_atype)
+
+    if _required_feature:
+        try:
+            from core.plan_entitlements import get_entitlements as _get_ent  # noqa: PLC0415
+            _ent = _get_ent(db, tenant_id)
+            if not _ent.has_feature(_required_feature):
+                _write_execution(
+                    db, event.id, automation.id, event.customer_id, tenant_id,
+                    status="skipped",
+                    skip_reason=f"plan_locked:{_required_feature}:{_ent.plan_slug}",
+                )
+                logger.info(
+                    "[AutoEngine] Plan lock — automation=%s type=%s feature=%s plan=%s tenant=%s",
+                    automation.id, _atype, _required_feature, _ent.plan_slug, tenant_id,
+                )
+                return "skipped"
+        except Exception as _ent_exc:
+            logger.debug("[AutoEngine] entitlement check non-fatal: %s", _ent_exc)
+
     # ── Delay check ───────────────────────────────────────────────────────────
     config: Dict[str, Any] = automation.config or {}
     delay_minutes: int = _resolve_delay(config, event=event)

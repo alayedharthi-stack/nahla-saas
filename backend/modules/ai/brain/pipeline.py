@@ -39,7 +39,7 @@ from .types import (
     INTENT_GENERAL,
     INTENT_PICK_LIST_ITEM,
 )
-from .decision.actions import ACTION_HANDOFF
+from .decision.actions import ACTION_HANDOFF, ACTION_PROPOSE_DRAFT_ORDER
 from .protocols import (
     IntentClassifier,
     StateStore,
@@ -244,7 +244,9 @@ class MerchantBrain:
         if result.data.get("order_id"):
             new_state.draft_order_id = str(result.data["order_id"])
         if result.data.get("product") and (
-            decision.action == "search_products" or not new_state.current_product_focus
+            decision.action == "search_products"
+            or decision.action == ACTION_PROPOSE_DRAFT_ORDER
+            or not new_state.current_product_focus
         ):
             new_state.current_product_focus = result.data["product"]
         if result.data.get("order_prep"):
@@ -294,14 +296,19 @@ class MerchantBrain:
         # store (wrong / stale identifier, deleted, no external_id), drop
         # the focus so the next message lets the user pick a different
         # product and we don't loop on the same broken id.
+        # Also clear last_search_candidates: the products in that list came
+        # from the same catalog sync that produced the broken external_id, so
+        # they are equally suspect. Clearing forces the user to trigger a
+        # fresh search rather than looping on the same unavailable products.
         if result.data.get("product_unsyncable"):
             logger.warning(
-                "[ORDER FLOW] dropping product focus — product unsyncable on store | "
-                "previous_focus=%s",
+                "[ORDER FLOW] dropping product focus + search candidates — "
+                "product unsyncable on store | previous_focus=%s",
                 (new_state.current_product_focus or {}).get("title"),
             )
             new_state.current_product_focus = None
             new_state.order_prep = OrderPreparationState()
+            new_state.last_search_candidates = []
 
         # ── 6b. Persist search candidates so user can pick by number ─────────
         # IMPORTANT: the source of truth is the executor (search.py returns

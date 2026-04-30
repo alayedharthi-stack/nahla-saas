@@ -141,6 +141,54 @@ async def create_campaign(
     from core.billing import require_billing_access  # noqa: PLC0415
     require_billing_access(db, tenant_id)
 
+    # ── Entitlement checks ─────────────────────────────────────────────────────
+    from core.plan_entitlements import (  # noqa: PLC0415
+        get_entitlements,
+        require_feature,
+        require_limit_not_exceeded,
+        entitlement_http_error,
+        EntitlementError,
+    )
+    ent = get_entitlements(db, tenant_id)
+
+    # campaign_customer_segments is the base feature — available Starter+
+    # This also catches billing_blocked / no_active_subscription states.
+    try:
+        require_feature(ent, "campaign_customer_segments")
+    except EntitlementError as exc:
+        entitlement_http_error(exc)
+
+    # Monthly campaign limit (Starter capped, Growth/Scale unlimited)
+    from datetime import datetime as _dt2, timezone as _tz2  # noqa: PLC0415
+    _month_start = _dt2.now(_tz2.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    _camp_this_month = (
+        db.query(Campaign)
+        .filter(
+            Campaign.tenant_id == tenant_id,
+            Campaign.created_at >= _month_start.replace(tzinfo=None),
+        )
+        .count()
+    )
+    try:
+        require_limit_not_exceeded(ent, "campaigns_per_month", _camp_this_month)
+    except EntitlementError as exc:
+        entitlement_http_error(exc)
+
+    # Advanced coupons inside campaigns require advanced_coupon_types (Growth+).
+    # Abandoned-cart basic coupon is allowed for all plans via abandoned_cart_basic_coupon.
+    if body.auto_coupon and body.campaign_type not in ("abandoned_cart", "cart_recovery"):
+        try:
+            require_feature(ent, "advanced_coupon_types")
+        except EntitlementError as exc:
+            entitlement_http_error(exc)
+
+    # AI campaign optimization requires campaign_ai_optimization (Growth+)
+    if getattr(body, "ai_optimized", False):
+        try:
+            require_feature(ent, "campaign_ai_optimization")
+        except EntitlementError as exc:
+            entitlement_http_error(exc)
+
     try:
         template_db_id = int(body.template_id)
     except (TypeError, ValueError):
