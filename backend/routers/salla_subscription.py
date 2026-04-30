@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.tenant import resolve_tenant_id
+from models import Integration, SallaTrialLedger
 
 logger = logging.getLogger("nahla.salla_subscription")
 router = APIRouter(tags=["salla-subscription"])
@@ -167,8 +168,6 @@ async def get_salla_subscription_status(
     """Return current Salla subscription info for the authenticated tenant."""
     tenant_id = resolve_tenant_id(request)
 
-    from models import Integration  # noqa: PLC0415
-
     integration = (
         db.query(Integration)
         .filter(
@@ -179,6 +178,19 @@ async def get_salla_subscription_status(
     )
 
     cfg = (integration.config or {}) if integration else {}
+    billing_status = cfg.get("billing_status", "none")
+
+    # ── Trial-abuse guard ─────────────────────────────────────────────────────
+    # If Salla says 'trial' but the ledger shows trial already used by this
+    # store (possibly after reinstall), downgrade to 'trial_blocked'.
+    salla_store_id = cfg.get("store_id") or (integration.external_store_id if integration else "")
+    if billing_status == "trial" and salla_store_id:
+        if is_trial_blocked(db, salla_store_id):
+            billing_status = "trial_blocked"
+            logger.info(
+                "[SallaSub] trial_blocked applied for tenant=%s store=%s",
+                tenant_id, salla_store_id,
+            )
 
     return {
         "ok": True,
@@ -186,13 +198,73 @@ async def get_salla_subscription_status(
             "salla_subscription_id": cfg.get("salla_subscription_id"),
             "salla_plan_slug":       cfg.get("salla_plan_slug"),
             "salla_plan_name":       cfg.get("salla_plan_name"),
-            "billing_status":        cfg.get("billing_status", "none"),
+            "billing_status":        billing_status,
             "salla_valid_till":      cfg.get("salla_valid_till"),
             "billing_updated_at":    cfg.get("billing_updated_at"),
         },
         "plans":         PLAN_CATALOGUE,
         "app_store_url": SALLA_APP_STORE_URL,
     }
+
+
+# ── Trial Ledger helpers ──────────────────────────────────────────────────────
+
+def get_trial_ledger(db: Session, salla_store_id: str) -> Optional[SallaTrialLedger]:
+    """Return the ledger row for this store, or None if not yet recorded."""
+    return (
+        db.query(SallaTrialLedger)
+        .filter(SallaTrialLedger.salla_store_id == str(salla_store_id))
+        .first()
+    )
+
+
+def record_trial_used(
+    db: Session,
+    salla_store_id: str,
+    merchant_id: str = "",
+    plan_slug: str = "",
+) -> SallaTrialLedger:
+    """
+    Insert or touch the ledger row marking the trial as used for this store.
+    Idempotent — safe to call multiple times.
+    """
+    now = datetime.now(timezone.utc)
+    ledger = get_trial_ledger(db, salla_store_id)
+    if ledger is None:
+        ledger = SallaTrialLedger(
+            salla_store_id         = str(salla_store_id),
+            merchant_id            = merchant_id or None,
+            trial_used             = True,
+            first_trial_started_at = now,
+            first_trial_plan       = plan_slug or None,
+            source                 = "salla",
+        )
+        db.add(ledger)
+        logger.info(
+            "[TrialLedger] Created trial record | store=%s plan=%s merchant=%s",
+            salla_store_id, plan_slug, merchant_id,
+        )
+    else:
+        # Already recorded — just refresh updated_at (idempotent)
+        ledger.updated_at = now
+        logger.info(
+            "[TrialLedger] Trial already recorded | store=%s (no change)",
+            salla_store_id,
+        )
+    db.flush()
+    return ledger
+
+
+def is_trial_blocked(db: Session, salla_store_id: str) -> bool:
+    """
+    Return True if this store has already consumed its free trial
+    and has NO active paid subscription (billing_status not 'active').
+
+    This check is intentionally separate from Integration.config so it
+    survives tenant/integration deletion.
+    """
+    ledger = get_trial_ledger(db, salla_store_id)
+    return ledger is not None and ledger.trial_used
 
 
 # ── Webhook handler (called by webhook_dispatcher) ───────────────────────────
@@ -205,6 +277,7 @@ def handle_subscription_webhook(
 ) -> None:
     """
     Update Integration.config with subscription lifecycle info.
+    Also maintains salla_trial_ledger for trial-abuse prevention.
 
     Called from core/webhook_dispatcher.py for:
       subscription.created
@@ -213,8 +286,6 @@ def handle_subscription_webhook(
       subscription.cancelled
       subscription.updated
     """
-    from models import Integration  # noqa: PLC0415
-
     integration = (
         db.query(Integration)
         .filter(
@@ -243,7 +314,30 @@ def handle_subscription_webhook(
         # If total amount is 0 and trial_days in meta → trial
         total  = (data.get("total") or {}).get("amount", 1)
         meta   = data.get("meta") or {}
-        status = "trial" if (total == 0 and meta.get("trial_days")) else "active"
+        is_trial = total == 0 and bool(meta.get("trial_days"))
+        status = "trial" if is_trial else "active"
+
+        # ── Trial Ledger: record trial on first subscription.created ──────────
+        salla_store_id = str(
+            (integration.config or {}).get("store_id")
+            or integration.external_store_id
+            or ""
+        )
+        if is_trial and salla_store_id:
+            # Check if ledger already has a record (abuse guard)
+            existing = get_trial_ledger(db, salla_store_id)
+            if existing and existing.trial_used:
+                # Store has already used a trial → downgrade to trial_blocked
+                status = "trial_blocked"
+                logger.warning(
+                    "[TrialLedger] BLOCKED repeat trial | store=%s tenant=%s",
+                    salla_store_id, tenant_id,
+                )
+            else:
+                # First trial — record it
+                merchant_id = (integration.config or {}).get("salla_owner_email", "")
+                record_trial_used(db, salla_store_id, merchant_id=merchant_id, plan_slug=slug)
+
     elif event_type == "subscription.charge.succeeded":
         status = "active"
     elif event_type == "subscription.charge.failed":

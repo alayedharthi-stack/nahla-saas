@@ -282,8 +282,9 @@ export default function SallaEntryScreen() {
   const bootedRef = useRef(false)
   const [logoErr, setLogoErr]   = useState(false)
 
-  const [status,  setStatus]  = useState<EmbeddedStatus | null>(null)
-  const [sub,     setSub]     = useState<Subscription | null>(null)
+  const [status,      setStatus]      = useState<EmbeddedStatus | null>(null)
+  const [sub,         setSub]         = useState<Subscription | null>(null)
+  const [appStoreUrl, setAppStoreUrl] = useState<string>('https://s.salla.sa/apps')
   const [metrics, setMetrics] = useState<SyncStats | null>(null)
   const [metricPresence, setMetricPresence] = useState<MetricPresence>({
     conversations: false,
@@ -350,6 +351,7 @@ export default function SallaEntryScreen() {
       })
 
       if (subData?.subscription) setSub(subData.subscription)
+      if (subData?.app_store_url) setAppStoreUrl(subData.app_store_url)
 
       if (sync) {
         const pickNumber = (...vals: unknown[]): number | undefined => {
@@ -398,15 +400,17 @@ export default function SallaEntryScreen() {
 
   // ── Derived state ────────────────────────────────────────────────────────────
 
-  const waOk      = status?.whatsapp_connected ?? false
-  const autoOk    = status?.auto_reply_enabled ?? false
-  const nahlaOk   = waOk && autoOk
-  const subStatus = sub?.billing_status ?? 'none'
-  const subActive = subStatus === 'active' || subStatus === 'trial'
-  const subLabel  = subStatus === 'active'    ? 'نشط'
-                  : subStatus === 'trial'     ? 'تجريبي'
-                  : subStatus === 'cancelled' ? 'ملغى'
-                  : 'غير نشط'
+  const waOk         = status?.whatsapp_connected ?? false
+  const autoOk       = status?.auto_reply_enabled ?? false
+  const nahlaOk      = waOk && autoOk
+  const subStatus    = sub?.billing_status ?? 'none'
+  const trialBlocked = subStatus === 'trial_blocked'
+  const subActive    = subStatus === 'active' || subStatus === 'trial'
+  const subLabel     = subStatus === 'active'        ? 'نشط'
+                     : subStatus === 'trial'         ? 'تجريبي'
+                     : subStatus === 'trial_blocked' ? 'تجربة مستخدمة'
+                     : subStatus === 'cancelled'     ? 'ملغى'
+                     : 'غير نشط'
 
   const m        = metrics
   const hasConv  = metricPresence.conversations
@@ -724,7 +728,52 @@ export default function SallaEntryScreen() {
               )}
             </section>
 
-            {/* ─ 4. CTAs ─ */}
+            {/* ─ 4. Trial-blocked banner (shown when trial already consumed) ─ */}
+            {trialBlocked && (
+              <section
+                style={{
+                  background:   '#fff7ed',
+                  border:       '1.5px solid #f97316',
+                  borderRadius: 16,
+                  padding:      '16px 18px',
+                  textAlign:    'center',
+                  display:      'flex',
+                  flexDirection: 'column',
+                  gap:          12,
+                }}
+              >
+                <div style={{ fontSize: 28 }}>🔒</div>
+                <p style={{ margin: 0, fontWeight: 700, fontSize: 15, color: '#9a3412' }}>
+                  تم استخدام التجربة المجانية سابقاً
+                </p>
+                <p style={{ margin: 0, fontSize: 13, color: '#c2410c', lineHeight: 1.6 }}>
+                  يرجى الاشتراك في إحدى الباقات للاستمرار في استخدام نحلة.
+                </p>
+                <a
+                  href={appStoreUrl}
+                  target="_top"
+                  rel="noreferrer"
+                  style={{
+                    display:        'flex',
+                    alignItems:     'center',
+                    justifyContent: 'center',
+                    gap:            8,
+                    padding:        '13px 20px',
+                    borderRadius:   12,
+                    fontSize:       14,
+                    fontWeight:     800,
+                    background:     '#f97316',
+                    color:          '#fff',
+                    textDecoration: 'none',
+                    border:         'none',
+                  }}
+                >
+                  💳 اشترك الآن من سلة
+                </a>
+              </section>
+            )}
+
+            {/* ─ 5. CTAs ─ */}
             <section style={{ display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 }}>
               {/* Primary */}
               <a
@@ -750,28 +799,30 @@ export default function SallaEntryScreen() {
                 🚀 فتح لوحة نحلة المتقدمة
               </a>
 
-              {/* Secondary */}
-              <a
-                href={NAHLA_WA_SETTINGS}
-                target="_top"
-                rel="noreferrer"
-                style={{
-                  display:        'flex',
-                  alignItems:     'center',
-                  justifyContent: 'center',
-                  gap:            8,
-                  padding:        '13px 20px',
-                  borderRadius:   16,
-                  fontSize:       14,
-                  fontWeight:     700,
-                  background:     C.white,
-                  color:          C.amber,
-                  textDecoration: 'none',
-                  border:         `1.5px solid ${C.amber}`,
-                }}
-              >
-                💬 ربط واتساب الآن
-              </a>
+              {/* Secondary — hide if trial blocked to reduce noise */}
+              {!trialBlocked && (
+                <a
+                  href={NAHLA_WA_SETTINGS}
+                  target="_top"
+                  rel="noreferrer"
+                  style={{
+                    display:        'flex',
+                    alignItems:     'center',
+                    justifyContent: 'center',
+                    gap:            8,
+                    padding:        '13px 20px',
+                    borderRadius:   16,
+                    fontSize:       14,
+                    fontWeight:     700,
+                    background:     C.white,
+                    color:          C.amber,
+                    textDecoration: 'none',
+                    border:         `1.5px solid ${C.amber}`,
+                  }}
+                >
+                  💬 ربط واتساب الآن
+                </a>
+              )}
             </section>
           </>
         )}

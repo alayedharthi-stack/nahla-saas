@@ -1701,3 +1701,36 @@ class LearnedSalesPolicy(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class SallaTrialLedger(Base):
+    """
+    Permanent, tenant-agnostic ledger of Salla free-trial usage per store.
+
+    Survives tenant/integration deletion intentionally — never hard-deleted.
+    Guarantees one free trial per salla_store_id across all time, even if
+    the merchant deletes the app and reinstalls.
+    """
+    __tablename__ = "salla_trial_ledger"
+    __table_args__ = (
+        UniqueConstraint("salla_store_id", name="uq_salla_trial_ledger_store_id"),
+    )
+
+    id                     = Column(Integer, primary_key=True)
+    salla_store_id         = Column(String, nullable=False, index=True)
+    merchant_id            = Column(String, nullable=True)   # owner email or store_id
+    trial_used             = Column(Boolean, default=True, nullable=False)
+    first_trial_started_at = Column(DateTime(timezone=True), nullable=True)
+    first_trial_plan       = Column(String, nullable=True)
+    source                 = Column(String, default="salla", nullable=False)
+    created_at             = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at             = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
