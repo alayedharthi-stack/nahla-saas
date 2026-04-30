@@ -29,6 +29,9 @@ JWT_PUBLIC_PREFIXES = (
     "/api/version",                     # alias of /version
     "/debug/",                          # TEMPORARY: token-gated debug surface
                                         # (gated inside the handler via DEBUG_ADMIN_TOKEN)
+    "/admin/debug/",                    # TEMPORARY: env-flag-gated admin recovery
+                                        # (gated inside the handler via ENABLE_ADMIN_DEBUG
+                                        # + optional ADMIN_DEBUG_SECRET)
     "/webhook",
     "/auth",
     "/oauth",                           # Salla/WhatsApp OAuth callbacks
@@ -73,6 +76,7 @@ async def api_key_middleware(request: Request, call_next):
             or path.startswith("/version")
             or path.startswith("/api/version")
             or path.startswith("/debug/")    # TEMPORARY: token-gated debug surface
+            or path.startswith("/admin/debug/")  # TEMPORARY: env-flag-gated admin recovery
             or path.startswith("/webhook")
             or path.startswith("/auth")
             or path.startswith("/api/salla/diag/")  # public diagnostic
