@@ -209,24 +209,16 @@ export default function SallaEmbedded() {
     console.info('[SallaEmbedded] ✓ auth complete → waiting for user gesture')
   }, [clearWatchdog])
 
-  // Whether the merchant already linked WhatsApp.  Drives both the CTA copy
-  // and the navigation target so we never tell a connected merchant to
-  // "ربط واتساب".
-  const waAlreadyConnected =
-    typeof window !== 'undefined' &&
-    localStorage.getItem('nahla_salla_wa_connected') === '1'
-
   // ── goToDashboard: explicit navigation triggered by user click only ─────
-  // - WA not yet linked → /app/whatsapp-connect (the missing setup step)
-  // - WA already linked → /app/entry           (the mini-dashboard)
+  // Always lands on the mini-dashboard /app/entry — it already has its own
+  // "ربط واتساب الآن" CTA, so duplicating it here would just confuse the
+  // merchant.  Setup steps live inside the mini-dashboard, not before it.
   const goToDashboard = useCallback(() => {
     setPhase('success')
-    const destination = waAlreadyConnected ? '/app/entry' : '/app/whatsapp-connect'
-    console.info('[SallaEmbedded] user pressed CTA → navigating to', destination,
-      '| wa_connected:', waAlreadyConnected)
-    setStatusText(waAlreadyConnected ? 'جاري الدخول...' : 'جاري فتح صفحة ربط واتساب...')
-    setTimeout(() => navigate(destination, { replace: true }), 200)
-  }, [navigate, waAlreadyConnected])
+    console.info('[SallaEmbedded] user pressed CTA → navigating to /app/entry')
+    setStatusText('جاري الدخول...')
+    setTimeout(() => navigate('/app/entry', { replace: true }), 200)
+  }, [navigate])
 
   // ── Step 1: check existing Nahla session ──────────────────────────────────
 
@@ -521,61 +513,30 @@ export default function SallaEmbedded() {
           </div>
         )}
 
-        {/* ── Ready (auth complete, awaiting explicit user click) ──────── */}
+        {/* ── Ready (auth complete, awaiting explicit user click) ────────
+            One simple CTA → opens the mini-dashboard /app/entry.
+            Setup steps (WhatsApp, automation, etc.) are surfaced inside
+            the mini-dashboard itself — not duplicated here. */}
         {phase === 'ready' && (
           <div className="text-center space-y-5">
             <div className="text-4xl">🎉</div>
-
-            {waAlreadyConnected ? (
-              // ── Returning merchant: WhatsApp is already linked ─────────
-              <>
-                <p className="text-white font-bold text-lg leading-snug">
-                  مرحباً بعودتك
-                </p>
-                <p className="text-slate-300 text-sm leading-relaxed">
-                  متجرك مربوط وواتساب جاهز — يمكنك الدخول إلى لوحة التحكم الآن.
-                </p>
-                <button
-                  onClick={goToDashboard}
-                  className="w-full py-3 px-6 rounded-xl font-bold text-sm transition-all hover:opacity-90 active:scale-95"
-                  style={{
-                    background: '#f59e0b',
-                    color:      '#0f172a',
-                    boxShadow:  '0 4px 20px rgba(245,158,11,0.4)',
-                  }}
-                >
-                  ابدأ استخدام نحلة 🚀
-                </button>
-              </>
-            ) : (
-              // ── First-install path: WhatsApp still needs to be linked ──
-              <>
-                <p className="text-white font-bold text-lg leading-snug">
-                  تم ربط متجرك بنجاح!
-                </p>
-                <p className="text-slate-300 text-sm leading-relaxed">
-                  باقي خطوة واحدة لبدء استقبال الرسائل والرد على عملائك:
-                  <br />
-                  <span className="text-amber-400 font-semibold">
-                    قم بربط واتساب الآن لبدء استخدام نحلة.
-                  </span>
-                </p>
-                <button
-                  onClick={goToDashboard}
-                  className="w-full py-3 px-6 rounded-xl font-bold text-sm transition-all hover:opacity-90 active:scale-95"
-                  style={{
-                    background: '#f59e0b',
-                    color:      '#0f172a',
-                    boxShadow:  '0 4px 20px rgba(245,158,11,0.4)',
-                  }}
-                >
-                  ربط واتساب وبدء الاستخدام 🚀
-                </button>
-                <p className="text-slate-500 text-xs leading-relaxed">
-                  لن يتم تفعيل الردود التلقائية حتى يتم ربط واتساب.
-                </p>
-              </>
-            )}
+            <p className="text-white font-bold text-lg leading-snug">
+              تم ربط متجرك بنجاح!
+            </p>
+            <p className="text-slate-300 text-sm leading-relaxed">
+              نحلة جاهزة الآن — افتح لوحة التحكم لإكمال الإعداد ومتابعة متجرك.
+            </p>
+            <button
+              onClick={goToDashboard}
+              className="w-full py-3 px-6 rounded-xl font-bold text-sm transition-all hover:opacity-90 active:scale-95"
+              style={{
+                background: '#f59e0b',
+                color:      '#0f172a',
+                boxShadow:  '0 4px 20px rgba(245,158,11,0.4)',
+              }}
+            >
+              فتح لوحة نحلة 🚀
+            </button>
           </div>
         )}
 
