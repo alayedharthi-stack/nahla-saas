@@ -505,59 +505,81 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
 @router.post("/salla/session/launch-dashboard")
 async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
     """
-    PROTECTED — requires valid Nahla JWT (already issued by /salla/token-login).
+    PUBLIC — accepts the merchant's existing Nahla JWT in the request body
+    (NOT the Authorization header) so it works from inside the Salla iframe
+    even when the embedded session uses different cookies / CORS rules.
 
     Issues a one-time short-lived launch token (120 s) that the frontend can
     embed in a URL opened via target="_top".  The launch page exchanges it for
     a full-lifetime session token without showing a login screen.
 
-    Query param ?next= (optional) is forwarded to the launch URL so the user
-    lands on the right page inside the full dashboard.
+    Body: { "token": "<merchant's JWT>", "next": "/overview" }
+    OR    Authorization: Bearer ... (legacy path)
 
     Response:
       { "launch_url": "https://app.nahlah.ai/app/salla/launch?token=...&next=..." }
     """
-    from core.auth import require_authenticated  # noqa: PLC0415
+    from core.config import JWT_SECRET, JWT_ALGORITHM  # noqa: PLC0415
 
-    payload    = require_authenticated(request)
-    tenant_id  = int(payload.get("tenant_id", 0))
-    email      = str(payload.get("sub", ""))
-    role       = str(payload.get("role", "merchant"))
-    user_id    = payload.get("user_id")
-    next_path  = str(request.query_params.get("next", "/overview"))
+    # Try body first, then Authorization header (backward compatible)
+    body_token = ""
+    body_next  = ""
+    try:
+        body = await request.json()
+        body_token = str(body.get("token") or "").strip()
+        body_next  = str(body.get("next")  or "").strip()
+    except Exception:
+        body = {}
 
-    # Fetch the user row to get a stable user_id if JWT doesn't carry one
+    auth_header = request.headers.get("Authorization", "")
+    header_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+
+    nahla_jwt_input = body_token or header_token
+    next_path       = body_next or str(request.query_params.get("next", "/overview"))
+
+    if not nahla_jwt_input:
+        logger.warning("[LaunchDashboard] No JWT provided (neither body nor Authorization)")
+        raise HTTPException(status_code=401, detail="JWT required")
+
+    # Validate the JWT manually (independent of middleware)
+    try:
+        import jose.jwt as _jose_jwt  # noqa: PLC0415
+        decoded = _jose_jwt.decode(nahla_jwt_input, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception as _e:
+        logger.warning("[LaunchDashboard] JWT decode failed: %s", _e)
+        raise HTTPException(status_code=401, detail="invalid_or_expired_token")
+
+    tenant_id = int(decoded.get("tenant_id", 0))
+    email     = str(decoded.get("sub", ""))
+    role      = str(decoded.get("role", "merchant"))
+    user_id   = decoded.get("user_id")
+
+    if not tenant_id:
+        logger.warning("[LaunchDashboard] JWT missing tenant_id")
+        raise HTTPException(status_code=401, detail="token_missing_tenant")
+
+    # Fetch user_id if missing
     if not user_id:
         from models import User  # noqa: PLC0415
         u = db.query(User).filter(User.email == email).first()
         user_id = u.id if u else None
 
-    # Issue a SHORT-LIVED launch token (120 s) with a marker so the resolve
-    # endpoint can distinguish it from a normal session token.
-    from datetime import timedelta  # noqa: PLC0415
-    launch_jwt = create_token(
-        email=email,
-        role=role,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        extra_claims={
-            "launch_token": True,   # marker — resolve endpoint checks this
-            "exp_override": True,   # informational only
-        },
-    )
-    # Override the expiry to 120 seconds by re-encoding with a short window.
-    # We decode then re-encode with the short exp so we don't depend on any
-    # extra parameter on create_token.
+    # Build SHORT-LIVED launch token (120 s) with marker
+    from datetime import timedelta, timezone  # noqa: PLC0415
+    launch_payload = {
+        "sub":          email,
+        "role":         role,
+        "tenant_id":    tenant_id,
+        "user_id":      user_id,
+        "launch_token": True,
+        "exp":          int((datetime.now(timezone.utc) + timedelta(seconds=120)).timestamp()),
+    }
     try:
         import jose.jwt as _jose_jwt  # noqa: PLC0415
-        from core.config import JWT_SECRET, JWT_ALGORITHM  # noqa: PLC0415
-        from datetime import timezone  # noqa: PLC0415
-        decoded = _jose_jwt.decode(launch_jwt, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        decoded["exp"]          = int((datetime.now(timezone.utc) + timedelta(seconds=120)).timestamp())
-        decoded["launch_token"] = True
-        launch_jwt = _jose_jwt.encode(decoded, JWT_SECRET, algorithm=JWT_ALGORITHM)
+        launch_jwt = _jose_jwt.encode(launch_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     except Exception as _e:
-        logger.warning("[LaunchDashboard] Could not shorten token TTL: %s — using full TTL", _e)
+        logger.error("[LaunchDashboard] Failed to encode launch token: %s", _e)
+        raise HTTPException(status_code=500, detail="token_encoding_failed")
 
     import urllib.parse as _up  # noqa: PLC0415
     params = _up.urlencode({"token": launch_jwt, "next": next_path})

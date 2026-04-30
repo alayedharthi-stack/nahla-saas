@@ -355,11 +355,9 @@ export default function SallaEmbedded() {
     const alive = await checkSession()
     if (alive) return
 
-    // Cached session invalid / expired and no Salla token → error
-    showError(
-      'لم يتم استقبال رمز المصادقة من سلة.\n' +
-      'أعد فتح التطبيق من داخل سلة.',
-    )
+    // Last resort: try doLogin() in case Salla token is missing (might still
+    // work if Salla SDK fills it in via postMessage), otherwise show error.
+    await doLogin()
   }, [sallaToken, checkSession, doLogin, showError])
 
   // ── Mount effect ──────────────────────────────────────────────────────────

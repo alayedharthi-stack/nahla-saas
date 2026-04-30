@@ -330,12 +330,7 @@ export default function SallaEntryScreen() {
           if (err?.detail) detail = err.detail
         } catch { /* ignore */ }
         console.error('[OpenAdvanced] launch-dashboard failed:', detail)
-        if (res.status === 401) {
-          alert('انتهت الجلسة. أعد فتح التطبيق من سلة لتسجيل الدخول مجدداً.')
-          navigate('/app/salla', { replace: true })
-        } else {
-          alert(`تعذر فتح لوحة نحلة: ${detail}`)
-        }
+        alert(`تعذر فتح لوحة نحلة: ${detail}`)
         setLaunching(null)
         return
       }
