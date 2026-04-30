@@ -69,29 +69,50 @@ _DASHBOARD = _DASHBOARD.rstrip("/") or "https://app.nahlah.ai"
 # This must be the iframe URL registered in Salla partner portal
 _SALLA_APP  = SALLA_EMBEDDED_URL.rstrip("/")
 
-# The Salla callback page on the dashboard (for new merchants auto-logged in via Salla)
-_SALLA_CALLBACK_BASE = _SALLA_APP.rsplit("/", 1)[0] if "/" in _SALLA_APP else _SALLA_APP
+# Dashboard origin (always app.nahlah.ai in prod) — used to build the
+# post-OAuth redirect URL.  We deliberately use DASHBOARD_URL (origin only)
+# instead of SALLA_EMBEDDED_URL because the latter may include a path like
+# "/app/salla" which would break the rsplit("/") logic that used to derive
+# the callback base.  Explicit origin → predictable URLs.
+_DASHBOARD_ORIGIN = _DASHBOARD or "https://app.nahlah.ai"
+
+# Always land on the Salla mini-dashboard after OAuth — never on /landing
+# (which is the public marketing/registration page) and never on the iframe
+# embedded URL (which only works inside Salla's iframe context).
+_SALLA_POST_OAUTH_PATH = "/app/entry"
+
+# The Salla callback page on the dashboard (for new merchants auto-logged in
+# via Salla — it stores the JWT in localStorage then routes to /app/entry).
+_SALLA_CALLBACK_BASE = _DASHBOARD_ORIGIN
 
 # Prefix used in state param to identify new-merchant installs from Salla
 _NEW_MERCHANT_PREFIX = "salla_new_"
 
 
 def _success_url(store_id: str = "", store_name: str = "") -> str:
-    """Build the post-OAuth success redirect URL."""
+    """Build the post-OAuth success redirect URL.
+
+    Always lands on /app/entry (the Salla mini-dashboard), NEVER on /landing
+    or on the iframe URL.  The merchant has just authorised the app, so they
+    have a valid JWT in localStorage already (set during the earlier
+    salla_token_login call) and can enter the dashboard directly.
+    """
     params = urllib.parse.urlencode({
         "status": "connected",
         "store":  store_id,
         "name":   store_name,
     })
-    return f"{_SALLA_APP}?{params}"
+    return f"{_DASHBOARD_ORIGIN}{_SALLA_POST_OAUTH_PATH}?{params}"
 
 
 def _error_url(reason: str, detail: str = "") -> str:
-    """Build the post-OAuth error redirect URL."""
+    """Build the post-OAuth error redirect URL — also lands on /app/entry
+    so the merchant can retry from inside the mini-dashboard instead of
+    being dumped on the marketing landing page."""
     params: dict = {"status": "error", "reason": reason}
     if detail:
         params["detail"] = detail[:200]   # truncate to avoid oversized URLs
-    return f"{_SALLA_APP}?{urllib.parse.urlencode(params)}"
+    return f"{_DASHBOARD_ORIGIN}{_SALLA_POST_OAUTH_PATH}?{urllib.parse.urlencode(params)}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2147,8 +2168,12 @@ async def salla_oauth_callback(
         logger.warning("[Salla OAuth] Could not queue initial sync: %s", _exc)
 
     # ── Step 5: Redirect ────────────────────────────────────────────────────────
+    # ALL Salla merchants land on the mini-dashboard /app/entry after OAuth.
+    # Never on /landing (public marketing page) and never on the iframe URL.
     if auto_jwt:
-        # New merchant: redirect to /salla-callback with the JWT so they land logged-in
+        # New merchant: route through /salla-callback so it can persist the
+        # fresh JWT in localStorage on app.nahlah.ai BEFORE entering the
+        # mini-dashboard.  The callback page navigates to /app/entry on success.
         params = urllib.parse.urlencode({
             "token":     auto_jwt,
             "status":    "connected",
@@ -2156,13 +2181,22 @@ async def salla_oauth_callback(
             "name":      store_name,
             "new":       "1" if is_new_merchant else "0",
         })
-        redirect_url = f"{_SALLA_CALLBACK_BASE}/salla-callback?{params}"
-        logger.info("[Salla OAuth] New-merchant redirect → %s", redirect_url)
+        redirect_url = f"{_DASHBOARD_ORIGIN}/salla-callback?{params}"
+        logger.info(
+            "[SallaOAuth] callback success redirect_to=%s | path=/salla-callback "
+            "tenant=%s store=%s is_new=%s",
+            redirect_url, tenant_id, salla_store_id, is_new_merchant,
+        )
         return RedirectResponse(url=redirect_url, status_code=302)
 
-    # Existing merchant: original flow
+    # Existing merchant: they already have a valid JWT in localStorage from the
+    # earlier salla_token_login call — go straight to /app/entry.
     success_url = _success_url(salla_store_id, store_name)
-    logger.info("[Salla OAuth] Existing-merchant redirect → %s", success_url)
+    logger.info(
+        "[SallaOAuth] callback success redirect_to=%s | path=%s "
+        "tenant=%s store=%s",
+        success_url, _SALLA_POST_OAUTH_PATH, tenant_id, salla_store_id,
+    )
     return RedirectResponse(url=success_url, status_code=302)
 
 
@@ -2175,7 +2209,7 @@ async def salla_integration_success(request: Request):
     """
     store = request.query_params.get("store", "")
     name  = urllib.parse.quote(request.query_params.get("name", ""))
-    dest  = f"{_SALLA_APP}?status=connected&store={store}&name={name}"
+    dest  = f"{_DASHBOARD_ORIGIN}{_SALLA_POST_OAUTH_PATH}?status=connected&store={store}&name={name}"
     return HTMLResponse(content=_redirect_html(dest, "تم ربط المتجر بنجاح ✅", "جاري التحويل..."))
 
 
@@ -2188,7 +2222,7 @@ async def salla_integration_error(request: Request):
     """
     reason = request.query_params.get("reason", "unknown_error")
     detail = request.query_params.get("detail", "")
-    dest   = f"{_SALLA_APP}?status=error&reason={reason}"
+    dest   = f"{_DASHBOARD_ORIGIN}{_SALLA_POST_OAUTH_PATH}?status=error&reason={reason}"
     if detail:
         dest += f"&detail={urllib.parse.quote(detail)}"
     return HTMLResponse(content=_redirect_html(dest, "حدث خطأ أثناء ربط المتجر", f"السبب: {reason}"))
@@ -2411,7 +2445,12 @@ async def salla_test_oauth_callback(
         except Exception as _e:
             logger.warning("[SallaTest] Could not queue initial sync: %s", _e)
 
-    success_url = f"{_SALLA_APP}?salla_connected=true&name={urllib.parse.quote(store_name)}"
+    success_url = (
+        f"{_DASHBOARD_ORIGIN}{_SALLA_POST_OAUTH_PATH}"
+        f"?salla_connected=true&name={urllib.parse.quote(store_name)}"
+    )
+    logger.info("[SallaOAuth] callback success redirect_to=%s | path=%s (test app)",
+                success_url, _SALLA_POST_OAUTH_PATH)
     return RedirectResponse(url=success_url, status_code=302)
 
 
