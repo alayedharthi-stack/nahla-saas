@@ -121,6 +121,42 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         request.client.host if request.client else "unknown"
     )
 
+    # ── HIT LOG (very first thing — visible in Railway tail) ─────────────────
+    # This MUST appear in logs even if signature verification or JSON parsing
+    # fails below.  If you don't see this line for an Easy-mode reinstall,
+    # Salla is NOT delivering to https://api.nahlah.ai/webhook/salla — check
+    # Webhook URL in https://salla.dev/dashboard for your app.
+    _hit_event = "?"
+    _hit_store = "?"
+    _hit_has_access = False
+    _hit_has_refresh = False
+    try:
+        _peek = _json.loads(raw_body or b"{}") if raw_body else {}
+        if isinstance(_peek, dict):
+            _hit_event = str(_peek.get("event") or "?")
+            _hit_store = str(
+                _peek.get("merchant")
+                or _peek.get("store_id")
+                or (_peek.get("data") or {}).get("merchant")
+                or (_peek.get("data") or {}).get("store_id")
+                or "?"
+            )
+            _data = _peek.get("data") or {}
+            if isinstance(_data, dict):
+                _hit_has_access  = bool(_data.get("access_token") or _peek.get("access_token"))
+                _hit_has_refresh = bool(_data.get("refresh_token") or _peek.get("refresh_token"))
+    except Exception:
+        pass
+    logger.info(
+        "[Salla Webhook HIT] method=POST path=/webhook/salla ip=%s "
+        "event=%s store_id=%s has_access_token=%s has_refresh_token=%s "
+        "body_len=%s content_type=%s ua=%s",
+        client_ip, _hit_event, _hit_store, _hit_has_access, _hit_has_refresh,
+        len(raw_body),
+        request.headers.get("content-type", ""),
+        (request.headers.get("user-agent", "") or "")[:80],
+    )
+
     log_event(
         EVENTS.WEBHOOK_RECEIVED,
         provider="salla",

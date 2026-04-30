@@ -347,5 +347,124 @@ def salla_cleanup_execute(
             "list_integrations": f"/admin/salla/integrations?tenant_id={tenant_id}",
             "poller_diag":       f"/admin/salla/orders-poller/diag?tenant_id={tenant_id}",
             "force_poll":        f"/admin/salla/orders-poller/run-once?tenant_id={tenant_id}&lookback_minutes=1440",
+            "webhook_status":    "/admin/debug/salla/webhook-status",
         },
+    }
+
+
+# ── Webhook delivery diagnostic ─────────────────────────────────────────────
+
+
+@router.get("/salla/webhook-status")
+def salla_webhook_status(
+    limit: int = Query(20, ge=1, le=100),
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns proof of whether Salla is actually hitting POST /webhook/salla.
+
+    Includes:
+      • route_registered    — sanity check (always True if this endpoint
+                              responds, since both routes live in the same app)
+      • webhook_url         — the URL that MUST be set in Salla Partner
+                              Dashboard → Webhooks for the Nahla app
+      • event_counts        — last 24h counts grouped by event_type
+      • status_counts       — last 24h counts grouped by status
+      • recent_events       — newest `limit` rows from webhook_events
+                              (provider='salla') with the fields most useful
+                              for diagnosing missing app.store.authorize
+
+    If `recent_events` is empty (or none in the last 24h) and the merchant
+    has just reinstalled the app, the problem is on the Salla side — the
+    Webhook URL in https://salla.dev/dashboard is wrong, or the Nahla
+    Partner App is not the one the merchant installed.
+    """
+    _require_enabled(secret)
+    from models import WebhookEvent  # noqa: PLC0415
+    from sqlalchemy import func        # noqa: PLC0415
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    event_counts_q = (
+        db.query(WebhookEvent.event_type, func.count(WebhookEvent.id))
+        .filter(WebhookEvent.provider == "salla")
+        .filter(WebhookEvent.received_at >= cutoff)
+        .group_by(WebhookEvent.event_type)
+        .all()
+    )
+    event_counts = {
+        (et or "<none>"): int(c) for et, c in event_counts_q
+    }
+
+    status_counts_q = (
+        db.query(WebhookEvent.status, func.count(WebhookEvent.id))
+        .filter(WebhookEvent.provider == "salla")
+        .filter(WebhookEvent.received_at >= cutoff)
+        .group_by(WebhookEvent.status)
+        .all()
+    )
+    status_counts = {
+        (st or "<none>"): int(c) for st, c in status_counts_q
+    }
+
+    recent = (
+        db.query(WebhookEvent)
+        .filter(WebhookEvent.provider == "salla")
+        .order_by(WebhookEvent.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    def _row(ev) -> dict:
+        payload = ev.parsed_payload or {}
+        data    = payload.get("data") if isinstance(payload, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        return {
+            "id":                 ev.id,
+            "received_at":        ev.received_at.isoformat() if ev.received_at else None,
+            "event_type":         ev.event_type,
+            "store_id":           ev.store_id,
+            "status":             ev.status,
+            "attempts":           ev.attempts,
+            "signature_valid":    ev.signature_valid,
+            "tenant_id":          ev.tenant_id,
+            "external_event_id":  ev.external_event_id,
+            "has_access_token":   bool(data.get("access_token")  or payload.get("access_token")),
+            "has_refresh_token":  bool(data.get("refresh_token") or payload.get("refresh_token")),
+            "last_error":         (ev.last_error or "")[:300] if ev.last_error else None,
+            "processed_at":       ev.processed_at.isoformat() if ev.processed_at else None,
+        }
+
+    total = (
+        db.query(func.count(WebhookEvent.id))
+        .filter(WebhookEvent.provider == "salla")
+        .scalar()
+    ) or 0
+    last_24h = (
+        db.query(func.count(WebhookEvent.id))
+        .filter(WebhookEvent.provider == "salla")
+        .filter(WebhookEvent.received_at >= cutoff)
+        .scalar()
+    ) or 0
+
+    return {
+        "ok":               True,
+        "route_registered": True,
+        "webhook_url":      "https://api.nahlah.ai/webhook/salla",
+        "totals": {
+            "all_time":    int(total),
+            "last_24h":    int(last_24h),
+            "shown":       len(recent),
+        },
+        "event_counts_24h":  event_counts,
+        "status_counts_24h": status_counts,
+        "recent_events":     [_row(r) for r in recent],
+        "hint": (
+            "If recent_events is empty after a fresh reinstall, the Webhook "
+            "URL in Salla Partner Dashboard is not pointing at "
+            "https://api.nahlah.ai/webhook/salla — fix it there and reinstall again."
+        ),
     }
