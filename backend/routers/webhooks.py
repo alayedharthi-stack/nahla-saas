@@ -38,6 +38,7 @@ from core.config import (
     HYPERPAY_WEBHOOK_SECRET,
     MOYASAR_SECRET_KEY,
     MOYASAR_WEBHOOK_SECRET,
+    SALLA_OAUTH_WEBHOOK_SECRET,
     SALLA_WEBHOOK_SECRET,
     SALLA_WEBHOOK_ENFORCE_SIGNATURE,
     SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE,
@@ -92,6 +93,44 @@ def _verify_salla_signature(raw_body: bytes, request_headers) -> tuple[bool, str
         return True, "SIG_WARN: invalid signature, enforcement OFF — accepted anyway"
 
     return False, "SIG_REJECT: invalid signature"
+
+
+def _verify_salla_oauth_signature(raw_body: bytes, request_headers) -> tuple[bool, str]:
+    """Verify Salla webhook signature for the SECOND ("Sync") OAuth app.
+
+    Identical algorithm to ``_verify_salla_signature`` but uses the dedicated
+    ``SALLA_OAUTH_WEBHOOK_SECRET``.  Per the Dual Integration Architecture we
+    NEVER mix secrets across the two endpoints — this function is wired
+    exclusively to ``POST /webhook/salla-oauth``.
+
+    The global enforcement flags (``SALLA_WEBHOOK_ENFORCE_SIGNATURE`` and
+    ``SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE``) are reused intentionally —
+    they describe the deployment's overall webhook policy, not a per-app
+    setting.
+    """
+    sig_header = request_headers.get("x-salla-signature", "")
+    has_secret = bool(SALLA_OAUTH_WEBHOOK_SECRET)
+
+    if not has_secret:
+        return True, "SIG_SKIP: no SALLA_OAUTH_WEBHOOK_SECRET configured"
+
+    if not sig_header:
+        if not SALLA_WEBHOOK_ENFORCE_SIGNATURE:
+            return True, "SIG_SKIP: signature missing, enforcement OFF"
+        if SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE:
+            return True, "SIG_WARN: signature missing, allowed by ALLOW_MISSING_SIGNATURE"
+        return False, "SIG_REJECT: signature missing, enforcement ON + ALLOW_MISSING=false"
+
+    expected = hmac.new(SALLA_OAUTH_WEBHOOK_SECRET.encode(), raw_body, "sha256").hexdigest()
+    sig_ok = hmac.compare_digest(expected, sig_header)
+
+    if sig_ok:
+        return True, "SIG_PASS: valid signature (oauth-app secret)"
+
+    if not SALLA_WEBHOOK_ENFORCE_SIGNATURE:
+        return True, "SIG_WARN: invalid signature, enforcement OFF — accepted anyway"
+
+    return False, "SIG_REJECT: invalid signature (oauth-app secret)"
 
 
 # ── Salla ─────────────────────────────────────────────────────────────────────
@@ -260,6 +299,179 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
     }
 
 
+# ── Salla "Sync" OAuth app — separate webhook endpoint with its own secret ──
+
+@router.post("/webhook/salla-oauth")
+async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Durable receiver for the SECOND Salla app (Custom OAuth Sync app).
+
+    Why a separate endpoint?
+    ────────────────────────
+    The Sync OAuth app (SALLA_API_CLIENT_ID) has its OWN webhook secret in
+    Salla Partner Portal — completely independent from the Communication
+    App's secret.  Per the Dual Integration Architecture we keep the two
+    streams strictly separated:
+
+      • POST /webhook/salla       — Communication App,  SALLA_WEBHOOK_SECRET
+      • POST /webhook/salla-oauth — Sync OAuth App,     SALLA_OAUTH_WEBHOOK_SECRET
+
+    This handler MUST NOT fall back to SALLA_WEBHOOK_SECRET under any
+    circumstance — a request signed with the Communication App's secret
+    arriving here is treated as a wrong-app delivery and rejected.
+
+    Persistence model
+    ─────────────────
+    Events are persisted with ``provider='salla_oauth'`` so they show up as
+    a distinct stream in ``webhook_events`` (and are routed to the
+    ``salla_oauth`` dispatcher in ``core.webhook_dispatcher``).  The
+    business logic reuses ``_dispatch_salla`` because the event payload
+    schema is identical — but the dispatcher tags ``app_origin='sync_oauth'``
+    so the resulting Integration row carries ``api_sync_enabled=True``,
+    matching what ``/api/salla/oauth/callback`` writes for the synchronous
+    OAuth path.
+    """
+    raw_body  = await request.body()
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
+
+    # ── HIT LOG (mirrors /webhook/salla so ops can grep both streams) ────────
+    _hit_event = "?"
+    _hit_store = "?"
+    _hit_has_access  = False
+    _hit_has_refresh = False
+    try:
+        _peek = _json.loads(raw_body or b"{}") if raw_body else {}
+        if isinstance(_peek, dict):
+            _hit_event = str(_peek.get("event") or "?")
+            _hit_store = str(
+                _peek.get("merchant")
+                or _peek.get("store_id")
+                or (_peek.get("data") or {}).get("merchant")
+                or (_peek.get("data") or {}).get("store_id")
+                or "?"
+            )
+            _data = _peek.get("data") or {}
+            if isinstance(_data, dict):
+                _hit_has_access  = bool(_data.get("access_token") or _peek.get("access_token"))
+                _hit_has_refresh = bool(_data.get("refresh_token") or _peek.get("refresh_token"))
+    except Exception:
+        pass
+    logger.info(
+        "[Salla OAuth Webhook HIT] method=POST path=/webhook/salla-oauth ip=%s "
+        "event=%s store_id=%s has_access_token=%s has_refresh_token=%s "
+        "body_len=%s content_type=%s ua=%s",
+        client_ip, _hit_event, _hit_store, _hit_has_access, _hit_has_refresh,
+        len(raw_body),
+        request.headers.get("content-type", ""),
+        (request.headers.get("user-agent", "") or "")[:80],
+    )
+
+    log_event(
+        EVENTS.WEBHOOK_RECEIVED,
+        provider="salla_oauth",
+        ip=client_ip,
+        body_len=len(raw_body),
+        content_type=request.headers.get("content-type", ""),
+        user_agent=(request.headers.get("user-agent", "") or "")[:80],
+    )
+
+    # ── 1. Signature verification (USES THE OAUTH-APP SECRET ONLY) ───────────
+    sig_accepted, sig_reason = _verify_salla_oauth_signature(raw_body, request.headers)
+    signature_valid = sig_accepted
+
+    if not sig_accepted:
+        log_event(
+            EVENTS.WEBHOOK_SIGNATURE_INVALID,
+            provider="salla_oauth",
+            reason=sig_reason,
+            ip=client_ip,
+        )
+        try:
+            persist_event(
+                db,
+                provider="salla_oauth",
+                raw_body=raw_body,
+                headers=request.headers,
+                signature_valid=False,
+                initial_status=STATUS_FAILED,
+                initial_error=f"signature_invalid: {sig_reason}",
+            )
+        except Exception as _exc:
+            logger.exception("[Salla OAuth WH] Could not persist rejected event: %s", _exc)
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # ── 2. JSON parsing (tolerant) ───────────────────────────────────────────
+    parsed_payload: dict | None = None
+    parse_error: str | None = None
+    try:
+        parsed_payload = await request.json()
+        if not isinstance(parsed_payload, dict):
+            parse_error = f"payload_not_object: {type(parsed_payload).__name__}"
+            parsed_payload = None
+    except Exception as exc:
+        parse_error = f"invalid_json: {exc}"
+        log_event(
+            EVENTS.WEBHOOK_INVALID_JSON,
+            provider="salla_oauth",
+            ip=client_ip,
+            err=exc,
+            raw_preview=raw_body[:200].decode("utf-8", errors="replace") if raw_body else "",
+        )
+
+    # ── 3. Extract event metadata for indexing ───────────────────────────────
+    event_type: str | None = None
+    store_id: str | None = None
+    external_event_id: str | None = None
+    if parsed_payload is not None:
+        event_type = parsed_payload.get("event") or None
+        store_id = str(parsed_payload.get("merchant") or parsed_payload.get("store_id") or "") or None
+        data = parsed_payload.get("data") or {}
+        if isinstance(data, dict):
+            entity_id = data.get("id")
+            if entity_id is not None and event_type:
+                # Namespace under salla_oauth so it cannot collide with an
+                # event from the Communication App carrying the same id.
+                external_event_id = f"salla_oauth:{event_type}:{entity_id}"
+
+    audit(
+        "salla_oauth_webhook",
+        salla_event=event_type or "unknown",
+        store_id=store_id or "unknown",
+        ip=client_ip,
+    )
+
+    # ── 4. Persist with provider='salla_oauth' (separate stream) ─────────────
+    initial_status = STATUS_RECEIVED if parsed_payload is not None else STATUS_FAILED
+    initial_error = parse_error
+
+    try:
+        ev = persist_event(
+            db,
+            provider="salla_oauth",
+            raw_body=raw_body,
+            headers=request.headers,
+            parsed_payload=parsed_payload,
+            event_type=event_type,
+            external_event_id=external_event_id,
+            store_id=store_id,
+            signature_valid=signature_valid,
+            initial_status=initial_status,
+            initial_error=initial_error,
+        )
+    except Exception as exc:
+        logger.exception("[Salla OAuth WH] FATAL: could not persist webhook event: %s", exc)
+        raise HTTPException(status_code=500, detail="webhook persistence failure")
+
+    return {
+        "status": "received",
+        "webhook_event_id": ev.id,
+        "event": event_type or "unknown",
+        "app": "salla_oauth_sync",
+    }
+
+
 def _resolve_tenant_from_store(db, store_id) -> int | None:
     """Look up the Nahla tenant_id that owns a given Salla store_id."""
     from models import Integration  # noqa: PLC0415
@@ -353,7 +565,10 @@ def _trigger_easy_initial_sync(tenant_id: int, salla_store_id: str) -> None:
         )
 
 
-async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> None:
+async def _handle_salla_authorize(
+    db, store_id, data: dict, payload: dict,
+    *, app_origin: str = "easy_mode",
+) -> None:
     """
     Save Salla OAuth tokens received via webhook + trigger initial sync.
 
@@ -373,7 +588,20 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
       • Fires a background `StoreSyncService.full_sync` so products,
         customers, orders, and coupons are pre-loaded before the merchant
         clicks 'استخدام التطبيق' inside Salla.
+
+    ``app_origin`` controls which app-type fingerprint we stamp on the
+    Integration row:
+
+      • ``"easy_mode"`` (default) — Communication App / Easy Mode webhook.
+      • ``"sync_oauth"`` — the SECOND Custom OAuth app (Sync app).  In this
+        case the row is also flagged with ``api_sync_enabled=True`` and
+        ``api_canonical=True`` so ``pick_active_salla_integration`` treats
+        it as the canonical source of refresh_token (matches the markers
+        written by ``/api/salla/oauth/callback``).
     """
+    is_sync_oauth = (app_origin == "sync_oauth")
+    app_type_label    = "custom_oauth_sync" if is_sync_oauth else "easy"
+    api_key_src_label = "custom_oauth_sync_webhook" if is_sync_oauth else "easy_mode_webhook"
     from models import Integration, Tenant, User  # noqa: PLC0415
     from core.auth import hash_password, create_token  # noqa: PLC0415
     from core.tenant import get_or_create_tenant  # noqa: PLC0415
@@ -422,9 +650,15 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
             "store_id":        salla_store_id,
             "store_name":      store_name,
             "connected_at":    datetime.now(timezone.utc).isoformat(),
-            "app_type":        "easy",
-            "api_key_source":  "easy_mode_webhook",
+            "app_type":        app_type_label,
+            "api_key_source":  api_key_src_label,
         })
+        if is_sync_oauth:
+            # Mirror the markers written by /api/salla/oauth/callback so
+            # _score_integration treats this row as the canonical Sync row.
+            new_cfg["api_sync_enabled"] = True
+            new_cfg["api_canonical"]    = True
+            new_cfg["is_canonical"]     = True
         new_cfg.pop("soft_disabled",         None)
         new_cfg.pop("uninstalled_at",        None)
         new_cfg.pop("needs_reauth",          None)
@@ -494,20 +728,25 @@ async def _handle_salla_authorize(db, store_id, data: dict, payload: dict) -> No
         db.add(new_user)
         db.flush()
 
+        new_integ_cfg = {
+            "api_key":         access_token,
+            "refresh_token":   refresh_token,
+            "store_id":        salla_store_id,
+            "store_name":      store_name,
+            "expires_in":      expires_in,
+            "connected_at":    datetime.now(timezone.utc).isoformat(),
+            "app_type":        app_type_label,
+            "api_key_source":  api_key_src_label,
+        }
+        if is_sync_oauth:
+            new_integ_cfg["api_sync_enabled"] = True
+            new_integ_cfg["api_canonical"]    = True
+            new_integ_cfg["is_canonical"]     = True
         integration = Integration(
             tenant_id=tenant_id,
             provider="salla",
             external_store_id=salla_store_id,
-            config={
-                "api_key":         access_token,
-                "refresh_token":   refresh_token,
-                "store_id":        salla_store_id,
-                "store_name":      store_name,
-                "expires_in":      expires_in,
-                "connected_at":    datetime.now(timezone.utc).isoformat(),
-                "app_type":        "easy",
-                "api_key_source":  "easy_mode_webhook",
-            },
+            config=new_integ_cfg,
             enabled=True,
         )
         db.add(integration)

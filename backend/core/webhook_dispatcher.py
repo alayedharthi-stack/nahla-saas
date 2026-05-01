@@ -45,6 +45,15 @@ async def _dispatch_salla(db: Session, event) -> None:
     Execute the business handler for a single Salla webhook_event row.
 
     Raises on failure so mark_failed(...) records the error.
+
+    Handles both providers in the Dual Integration Architecture:
+      • ``provider='salla'``        → Communication App (Easy Mode tokens)
+      • ``provider='salla_oauth'``  → SECOND Custom OAuth Sync app
+
+    The same payload schema is used by both apps, so the only difference is
+    the ``app_origin`` we pass to ``_handle_salla_authorize`` — which in
+    turn flips the ``api_sync_enabled`` / ``api_canonical`` markers on the
+    Integration row.
     """
     from routers.webhooks import (  # noqa: PLC0415
         _handle_salla_authorize,
@@ -62,9 +71,11 @@ async def _dispatch_salla(db: Session, event) -> None:
     if not isinstance(data, dict):
         data = {}
 
+    app_origin = "sync_oauth" if event.provider == "salla_oauth" else "easy_mode"
+
     # ── OAuth / install / uninstall — don't need tenant to exist yet ────────
     if event_type in ("app.store.authorize", "app.store.token", "app.installed"):
-        await _handle_salla_authorize(db, store_id, data, payload)
+        await _handle_salla_authorize(db, store_id, data, payload, app_origin=app_origin)
         return
 
     if event_type == "app.uninstalled":
@@ -173,6 +184,10 @@ async def _dispatch_salla(db: Session, event) -> None:
 
 _DISPATCHERS: Dict[str, Callable[[Session, Any], Any]] = {
     "salla": _dispatch_salla,
+    # Sync OAuth app (SALLA_API_CLIENT_ID) — same payload schema, same
+    # business handler, but flagged via event.provider so the Integration
+    # row gets api_sync_enabled=True markers.
+    "salla_oauth": _dispatch_salla,
 }
 
 

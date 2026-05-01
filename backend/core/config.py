@@ -94,12 +94,40 @@ SALLA_WEBHOOK_SECRET = os.environ.get("SALLA_WEBHOOK_SECRET", "")
 SALLA_WEBHOOK_ENFORCE_SIGNATURE      = os.environ.get("SALLA_WEBHOOK_ENFORCE_SIGNATURE", "false").lower() == "true"
 SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE = os.environ.get("SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE", "true").lower() == "true"
 
+# ── Salla "Sync" Custom OAuth app — webhook secret (Dual Architecture) ───────
+# The SECOND Salla app (SALLA_API_CLIENT_ID below) has its OWN webhook
+# secret in Partner Portal, completely separate from SALLA_WEBHOOK_SECRET.
+# It is consumed by POST /webhook/salla-oauth — NEVER mixed with the
+# Communication App's webhook handler at POST /webhook/salla.
+SALLA_OAUTH_WEBHOOK_SECRET = os.environ.get("SALLA_OAUTH_WEBHOOK_SECRET", "")
+
 # ── Salla TEST app (separate credentials — does not affect production app) ──
 SALLA_TEST_CLIENT_ID     = os.environ.get("SALLA_TEST_CLIENT_ID", "")
 SALLA_TEST_CLIENT_SECRET = os.environ.get("SALLA_TEST_CLIENT_SECRET", "")
 SALLA_TEST_REDIRECT_URI  = os.environ.get(
     "SALLA_TEST_REDIRECT_URI",
     "https://api.nahlah.ai/oauth/salla/test/callback",
+)
+
+# ── Salla "Sync" Custom OAuth app (separate from Communication App) ───────────
+# Dual Integration Architecture:
+#   • SALLA_CLIENT_ID above    → Communication App (embedded iframe + introspect)
+#   • SALLA_API_CLIENT_ID here → SECOND, separate Custom OAuth app whose ONLY
+#                                 job is to deliver a long-lived refresh_token
+#                                 so that StoreSyncService / orders poller /
+#                                 background automations can keep calling
+#                                 https://api.salla.dev/admin/v2/* even when
+#                                 the merchant is not actively in the iframe.
+#
+# The Communication App's introspect endpoint returns an embedded session
+# token only — never a refresh_token. To get true offline_access we have
+# to register a SECOND app on https://salla.partners/ (General/Custom OAuth)
+# with its own client_id, client_secret, and callback URL.
+SALLA_API_CLIENT_ID     = os.environ.get("SALLA_API_CLIENT_ID", "")
+SALLA_API_CLIENT_SECRET = os.environ.get("SALLA_API_CLIENT_SECRET", "")
+SALLA_API_REDIRECT_URI  = os.environ.get(
+    "SALLA_API_REDIRECT_URI",
+    "https://api.nahlah.ai/api/salla/oauth/callback",
 )
 
 # Where to redirect after Salla OAuth completes (the embedded app landing page).

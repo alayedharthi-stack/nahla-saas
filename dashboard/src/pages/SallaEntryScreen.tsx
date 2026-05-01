@@ -51,6 +51,20 @@ interface SyncStats {
   ai_reply_rate:       number
 }
 
+interface IntegrationStatus {
+  embedded_connected:   boolean
+  embedded_store_name:  string
+  api_sync_enabled:     boolean
+  api_canonical:        boolean
+  api_connected_at:     string
+  easy_mode:            boolean
+  has_refresh_token:    boolean
+  has_api_key:          boolean
+  whatsapp_connected:   boolean
+  sync_app_configured:  boolean
+  oauth_start_url:      string
+}
+
 type StepState = 'completed' | 'current' | 'locked'
 interface MetricPresence {
   conversations: boolean
@@ -287,6 +301,7 @@ export default function SallaEntryScreen() {
   const [sub,         setSub]         = useState<Subscription | null>(null)
   const [appStoreUrl, setAppStoreUrl] = useState<string>('https://s.salla.sa/apps')
   const [metrics, setMetrics] = useState<SyncStats | null>(null)
+  const [integration, setIntegration] = useState<IntegrationStatus | null>(null)
   const [metricPresence, setMetricPresence] = useState<MetricPresence>({
     conversations: false,
     orders:        false,
@@ -358,6 +373,37 @@ export default function SallaEntryScreen() {
     }
   }, [navigate])
 
+  // ── Open the dedicated "Sync" OAuth flow (Dual Integration Architecture) ──
+  // Opens accounts.salla.sa at the TOP window — Salla's OAuth provider does
+  // not allow embedding in iframes.  The JWT is forwarded as a query param
+  // because window.top navigation strips Authorization headers.
+  const openOauthSync = useCallback(() => {
+    const token = getToken()
+    if (!token) {
+      alert('انتهت الجلسة، أعد فتح التطبيق من سلة.')
+      navigate('/app/salla', { replace: true })
+      return
+    }
+    const url = `${API_BASE}/api/salla/oauth/start?token=${encodeURIComponent(token)}`
+    // Verbose console logging so we can diagnose redirect_uri/client_id
+    // issues from the browser side.  The backend logs the EXACT Salla
+    // authorize URL it generates — see "[Salla API OAuth] FULL_AUTH_URL".
+    console.group('[SallaEntry] ربط المتجر عبر سلة OAuth — clicked')
+    console.info('opening at TOP window (escapes Salla iframe)')
+    console.info('start_url      :', url)
+    console.info('api_base       :', API_BASE)
+    console.info('has_token      :', !!token)
+    console.info('token_preview  :', token ? token.slice(0, 16) + '…' : '(none)')
+    console.info('next_step      : backend redirects to https://accounts.salla.sa/oauth2/auth?...')
+    console.info('               : check Railway logs for "[Salla API OAuth] FULL_AUTH_URL"')
+    console.groupEnd()
+    if (window.top) {
+      window.top.location.href = url
+    } else {
+      window.location.href = url
+    }
+  }, [navigate])
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -380,17 +426,19 @@ export default function SallaEntryScreen() {
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const [sessionR, settingsR, subR, syncR] = await Promise.allSettled<any>([
+      const [sessionR, settingsR, subR, syncR, integR] = await Promise.allSettled<any>([
         fetch(sessionUrl, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
         fetch(`${API_BASE}/salla/app-settings`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
         fetch(`${API_BASE}/salla/subscription/status`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
         fetch(`${API_BASE}/store-sync/status`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
+        fetch(`${API_BASE}/api/salla/integration-status`, { headers, signal }).then(async r => ({ ok: r.ok, data: r.ok ? await r.json() : null })),
       ])
 
       const sessionOk  = sessionR.status  === 'fulfilled' && !!sessionR.value?.ok
       const settingsOk = settingsR.status === 'fulfilled' && !!settingsR.value?.ok
       const subOk      = subR.status      === 'fulfilled' && !!subR.value?.ok
       const syncOk     = syncR.status     === 'fulfilled' && !!syncR.value?.ok
+      const integOk    = integR.status    === 'fulfilled' && !!integR.value?.ok
 
       // Required APIs for accurate status in the mini dashboard.
       if (!sessionOk || !subOk) setPartialFallback(true)
@@ -403,7 +451,9 @@ export default function SallaEntryScreen() {
       const subData: any = subOk      ? (subR.value?.data ?? {}) : {}
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const sync:    any = syncOk     ? (syncR.value?.data ?? null) : null
+      const integ: IntegrationStatus | null = integOk ? (integR.value?.data ?? null) : null
 
+      setIntegration(integ)
       localStorage.setItem('nahla_salla_wa_connected', wa.whatsapp_connected ? '1' : '0')
 
       setStatus({
@@ -460,11 +510,34 @@ export default function SallaEntryScreen() {
     load()
   }, [load])
 
+  // Listen for the success post-message from the OAuth Sync popup/window so
+  // we can refresh the status panel without forcing a manual reload.
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const data = e?.data
+      if (data && typeof data === 'object' && data.type === 'salla_api_connected') {
+        console.info('[SallaEntry] received salla_api_connected — reloading status')
+        load()
+      }
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+  }, [load])
+
   // ── Derived state ────────────────────────────────────────────────────────────
 
   const waOk         = status?.whatsapp_connected ?? false
   const autoOk       = status?.auto_reply_enabled ?? false
   const nahlaOk      = waOk && autoOk
+  // Dual Integration: embedded session is implicit when token-login succeeded;
+  // API Sync is true only when the Sync OAuth app has delivered a refresh_token.
+  // Fallback for older backends that don't yet expose /api/salla/integration-status:
+  // assume embedded=true (we have a JWT) and apiSync=false (so banner shows).
+  const embeddedOk     = integration?.embedded_connected ?? true
+  const apiSyncOk      = integration?.api_sync_enabled ?? false
+  const apiSyncEasy    = integration?.easy_mode ?? false
+  const apiSyncCounts  = apiSyncOk || apiSyncEasy   // either path gives us refresh
+  const syncAppReady   = integration?.sync_app_configured ?? true
   const subStatus    = sub?.billing_status ?? 'none'
   const trialBlocked = subStatus === 'trial_blocked'
   const subActive    = subStatus === 'active' || subStatus === 'trial'
@@ -668,12 +741,78 @@ export default function SallaEntryScreen() {
                 الحالة
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <MiniStatusCard icon="🏪" label="سلة"       active={true}      activeText="متصل"        inactiveText="غير متصل" />
+                <MiniStatusCard
+                  icon="🏪"
+                  label="سلة Embedded"
+                  active={embeddedOk}
+                  activeText="متصل"
+                  inactiveText="غير متصل"
+                />
+                <MiniStatusCard
+                  icon="🔑"
+                  label="ربط API الكامل"
+                  active={apiSyncCounts}
+                  activeText={apiSyncEasy && !apiSyncOk ? 'Easy Mode' : 'مكتمل'}
+                  inactiveText="غير مكتمل"
+                  warning={!apiSyncCounts}
+                />
                 <MiniStatusCard icon="💬" label="واتساب"    active={waOk}      activeText="متصل"        inactiveText="غير متصل" />
                 <MiniStatusCard icon="💳" label="الاشتراك"  active={subActive} activeText={subLabel}    inactiveText={subLabel} warning={trialBlocked} />
-                <MiniStatusCard icon="🤖" label="نحلة"      active={nahlaOk}   activeText="تعمل"        inactiveText="متوقفة"   />
+                <div style={{ gridColumn: '1 / span 2' }}>
+                  <MiniStatusCard icon="🤖" label="نحلة" active={nahlaOk} activeText="تعمل" inactiveText="متوقفة" />
+                </div>
               </div>
             </section>
+
+            {/* ─ API Sync OAuth CTA (Dual Integration) ─ */}
+            {!apiSyncCounts && (
+              <div
+                style={{
+                  background:    '#fff7ed',
+                  border:        '1.5px solid #fed7aa',
+                  borderRadius:  14,
+                  padding:       '14px 16px',
+                  display:       'flex',
+                  flexDirection: 'column',
+                  gap:           10,
+                }}
+              >
+                <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: '#9a3412' }}>
+                  🔑 لتمكين المزامنة الكاملة للمنتجات والطلبات والعملاء
+                </p>
+                <p style={{ margin: 0, fontSize: 12, color: '#c2410c', lineHeight: 1.7 }}>
+                  اربط متجرك عبر OAuth لتفعيل: مزامنة المنتجات والعملاء، إنشاء الطلبات من المحادثة،
+                  تتبع الطلبات، وتشغيل الأتمتة في الخلفية بدون انقطاع.
+                </p>
+                <button
+                  type="button"
+                  onClick={openOauthSync}
+                  disabled={!syncAppReady}
+                  style={{
+                    display:        'flex',
+                    alignItems:     'center',
+                    justifyContent: 'center',
+                    gap:            6,
+                    padding:        '12px 16px',
+                    borderRadius:   10,
+                    fontSize:       13,
+                    fontWeight:     900,
+                    background:     syncAppReady ? '#f97316' : '#fed7aa',
+                    color:          syncAppReady ? '#fff'    : '#9a3412',
+                    border:         'none',
+                    cursor:         syncAppReady ? 'pointer' : 'not-allowed',
+                    fontFamily:     'inherit',
+                  }}
+                >
+                  ربط المتجر لتفعيل جميع الميزات
+                </button>
+                {!syncAppReady && (
+                  <p style={{ margin: 0, fontSize: 11, color: '#9a3412', lineHeight: 1.6 }}>
+                    لم يتم تكوين تطبيق المزامنة بعد. تواصل مع الدعم لإكمال الإعداد.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* ─ Subscription-required notice (soft, non-blocking) ─ */}
             {trialBlocked && (

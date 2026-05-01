@@ -53,20 +53,36 @@ def _is_easy_mode(intg: Integration) -> bool:
     )
 
 
-def _score_integration(intg: Integration) -> Tuple[int, int, int, int]:
-    """
-    Higher tuple = higher priority.
+def _is_api_sync(intg: Integration) -> bool:
+    """True when this row was provisioned by the dedicated "Sync" Custom OAuth
+    app (see /api/salla/oauth/callback) AND still holds a valid refresh_token.
 
-    Order of preference:
-      1. enabled
-      2. easy_mode (Easy Mode token from webhook is canonical)
-      3. has refresh_token (we can refresh)
-      4. has api_key (we can call API right now)
-      5. higher row id (newer rows win all ties — fresh tokens beat stale)
+    The Dual Integration Architecture treats this as the canonical source of
+    Admin API access — it always outranks Easy Mode and embedded tokens.
+    """
+    cfg = intg.config or {}
+    return (
+        bool(cfg.get("api_sync_enabled"))
+        and bool(cfg.get("refresh_token"))
+        and bool(intg.enabled)
+    )
+
+
+def _score_integration(intg: Integration) -> Tuple[int, int, int, int, int, int]:
+    """
+    Higher tuple = higher priority.  Dual Integration Architecture order:
+
+      1. enabled                                (cannot pick a disabled row)
+      2. api_sync_enabled + has refresh_token   (Custom OAuth Sync App — canonical)
+      3. easy_mode (Easy Mode webhook tokens — legacy canonical)
+      4. has refresh_token (any other OAuth row that can self-refresh)
+      5. has api_key (embedded session token, last-resort fallback)
+      6. higher row id (newer rows win remaining ties — fresh tokens beat stale)
     """
     cfg = intg.config or {}
     return (
         1 if intg.enabled else 0,
+        1 if _is_api_sync(intg) else 0,        # NEW top tier
         1 if _is_easy_mode(intg) else 0,
         1 if cfg.get("refresh_token") else 0,
         1 if cfg.get("api_key") else 0,
@@ -113,10 +129,10 @@ def pick_active_salla_integration(db: Session, tenant_id: int) -> Optional[Integ
     # Log the contest exactly once so ops can see the dedupe decision
     logger.warning(
         "[Registry] tenant=%s has %d salla integrations — picked id=%s "
-        "(easy_mode=%s enabled=%s has_refresh=%s) | "
+        "(api_sync=%s easy_mode=%s enabled=%s has_refresh=%s) | "
         "superseding losers=%s",
         tenant_id, len(rows),
-        winner.id, _is_easy_mode(winner), winner.enabled,
+        winner.id, _is_api_sync(winner), _is_easy_mode(winner), winner.enabled,
         bool((winner.config or {}).get("refresh_token")),
         [l.id for l in losers],
     )
@@ -136,7 +152,9 @@ def pick_active_salla_integration(db: Session, tenant_id: int) -> Optional[Integ
             loser_cfg["superseded_at"]            = now
             loser_cfg["superseded_by_id"]         = winner.id
             loser_cfg["superseded_reason"]        = (
-                "Easy Mode integration is canonical for this tenant"
+                "Sync OAuth integration is canonical for this tenant"
+                if _is_api_sync(winner)
+                else "Easy Mode integration is canonical for this tenant"
                 if _is_easy_mode(winner)
                 else "newer integration row is canonical for this tenant"
             )
@@ -200,9 +218,10 @@ def get_adapter(tenant_id: int):
         has_refresh = bool(cfg.get("refresh_token"))
         logger.info(
             "[Registry] tenant=%s → adapter=salla integration_id=%s store_id=%s "
-            "easy_mode=%s has_token=%s has_refresh=%s",
+            "api_sync=%s easy_mode=%s has_token=%s has_refresh=%s",
             tenant_id, integration.id,
-            cfg.get("store_id", ""), _is_easy_mode(integration),
+            cfg.get("store_id", ""),
+            _is_api_sync(integration), _is_easy_mode(integration),
             has_token, has_refresh,
         )
         if not has_token:

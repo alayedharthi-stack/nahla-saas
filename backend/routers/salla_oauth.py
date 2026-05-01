@@ -41,9 +41,12 @@ from sqlalchemy.orm import Session
 from models import Integration, Product, SmartAutomation, Tenant, User, WhatsAppConnection
 
 from core.audit import audit
-from core.auth import create_token, get_jwt_tenant_id, hash_password
+from core.auth import create_token, decode_token, get_jwt_tenant_id, hash_password
 from core.config import (
     DASHBOARD_URL,
+    SALLA_API_CLIENT_ID,
+    SALLA_API_CLIENT_SECRET,
+    SALLA_API_REDIRECT_URI,
     SALLA_CLIENT_ID,
     SALLA_CLIENT_SECRET,
     SALLA_EMBEDDED_URL,
@@ -600,7 +603,21 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         owner_email, tenant_id, wa_connected, redirect_target,
     )
 
-    # ── Detect if OAuth tokens are missing (embedded-only) ───────────────────
+    # ── Detect integration shape (Dual Architecture) ─────────────────────────
+    #
+    # We surface TWO independent flags to the dashboard:
+    #
+    #   • needs_oauth   — legacy Custom OAuth path on the SAME (Communication)
+    #                     app.  Kept for backwards compatibility only — under
+    #                     the Dual Architecture we never expect this to fire
+    #                     for new merchants because Communication Apps cannot
+    #                     complete OAuth on themselves.
+    #
+    #   • needs_api_sync — TRUE whenever the active integration row does NOT
+    #                      yet hold a refresh_token from the dedicated "Sync"
+    #                      Custom OAuth app (SALLA_API_CLIENT_ID).  The
+    #                      dashboard renders a "Connect API" CTA in /app/entry
+    #                      when this is true.
     #
     # IMPORTANT: For Easy Mode merchants, OAuth authorize flow MUST NEVER be
     # triggered.  Easy Mode apps have no registered redirect_uri in Salla
@@ -609,12 +626,9 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # merchants arrive via the app.store.authorize webhook a few seconds
     # after install, so the correct behaviour when refresh_token is missing
     # is to wait (or ask the merchant to re-install), NOT to redirect.
-    #
-    # We only ever set needs_oauth=true for legacy Custom OAuth integrations
-    # — i.e. integrations whose api_key_source is NOT "easy_mode_webhook"
-    # AND whose app_type is NOT "easy".
-    needs_oauth = False
-    oauth_url   = ""
+    needs_oauth    = False
+    needs_api_sync = True   # default ON until we prove otherwise
+    oauth_url      = ""
     try:
         check_integ = db.query(Integration).filter(
             Integration.tenant_id == tenant_id,
@@ -629,6 +643,17 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 app_type == "easy"
                 or api_key_src == "easy_mode_webhook"
             )
+            api_sync_done = (
+                bool(cfg.get("api_sync_enabled"))
+                and has_refresh
+                and bool(check_integ.enabled)
+            )
+
+            # api_sync only counts the dedicated Sync OAuth row — Easy Mode
+            # tokens via webhook also qualify as "full Admin API access" so
+            # we don't nag those merchants either.
+            if api_sync_done or is_easy_mode:
+                needs_api_sync = False
 
             if is_easy_mode:
                 # Easy Mode: never OAuth.  If refresh_token is somehow
@@ -713,6 +738,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         "email":          owner_email,
         "needs_oauth":    needs_oauth,
         "oauth_url":      oauth_url,
+        "needs_api_sync": needs_api_sync,
+        "api_sync_start_url": "/api/salla/oauth/start",
         "is_new":         is_new,
         "wa_connected":   wa_connected,
         "redirect_to":    redirect_target,
@@ -1770,31 +1797,41 @@ async def salla_start(request: Request):
     return RedirectResponse(url=auth_url, status_code=302)
 
 
-@router.get("/api/salla/authorize")
+@router.get("/api/salla/authorize", deprecated=True)
 async def salla_authorize(request: Request):
     """
-    Returns the Salla OAuth authorization URL.
-    Frontend opens this URL to start the OAuth flow.
-    """
-    tenant_id = resolve_tenant_id(request)
-    if not SALLA_CLIENT_ID:
-        raise HTTPException(status_code=503, detail="SALLA_CLIENT_ID not configured")
+    *** DEPRECATED — DO NOT USE ***
 
-    normalized_redirect = (SALLA_REDIRECT_URI or "").strip().rstrip("/")
-    state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}"
-    params = urllib.parse.urlencode({
-        "client_id":     SALLA_CLIENT_ID,
-        "redirect_uri":  normalized_redirect,
-        "response_type": "code",
-        "scope":         "offline_access",
-        "state":         state,
-    })
-    auth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
-    logger.info(
-        "Salla authorize URL generated | tenant=%s redirect_uri=%r (raw=%r)",
-        tenant_id, normalized_redirect, SALLA_REDIRECT_URI,
+    This endpoint targets the Communication App's redirect_uri
+    (``https://api.nahlah.ai/oauth/salla/callback``) which is NOT the
+    callback URL registered in Salla Partner Portal for OAuth merchants.
+    Calling it produces a "redirect_uri mismatch" error from Salla.
+
+    Use the new Dual Integration flow instead:
+
+      • Dashboard:  GET /api/salla/oauth/start?token=<jwt>   (302 → Salla)
+      • Salla:      302 → /api/salla/oauth/callback           (handled here)
+
+    We return HTTP 410 Gone with a clear pointer so any old client that
+    still hits this URL fails fast and visibly, instead of silently
+    bouncing the merchant through a broken flow.
+    """
+    logger.warning(
+        "[Salla OAuth] DEPRECATED endpoint /api/salla/authorize was called — "
+        "redirect the caller to /api/salla/oauth/start instead | "
+        "ip=%s ua=%s",
+        request.headers.get("X-Real-IP") or (request.client.host if request.client else "?"),
+        (request.headers.get("user-agent", "") or "")[:80],
     )
-    return {"url": auth_url, "redirect_uri": normalized_redirect}
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error":          "endpoint_deprecated",
+            "message":        "Use /api/salla/oauth/start instead (Dual Integration Architecture).",
+            "new_endpoint":   "/api/salla/oauth/start",
+            "new_redirect_uri": "https://api.nahlah.ai/api/salla/oauth/callback",
+        },
+    )
 
 
 @router.get("/api/salla/diag/oauth-config")
@@ -1835,6 +1872,465 @@ async def salla_diag_oauth_config():
             "SALLA_REDIRECT_URI=https://api.nahlah.ai/oauth/salla/callback "
             "(NO trailing slash, MUST be https, MUST match Salla Partner Portal Callback URL exactly)"
         ),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DUAL INTEGRATION ARCHITECTURE — second "Sync" Custom OAuth app
+# ───────────────────────────────────────────────────────────────────────────────
+# These endpoints use SALLA_API_* credentials (a SEPARATE app registered in
+# Partner Portal as General/Custom OAuth) whose only purpose is to obtain a
+# real refresh_token for long-lived Admin API access.
+#
+#   /api/salla/oauth/start          → public, accepts ?token=<jwt>, redirects to
+#                                      accounts.salla.sa/oauth2/auth
+#   /api/salla/oauth/callback       → public, Salla redirects here with ?code=
+#   /api/salla/integration-status   → JWT-protected, returns granular state for
+#                                      the dashboard to render the "Connect API"
+#                                      banner.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+_API_SYNC_STATE_SUFFIX = "_apisync"
+
+
+def _api_oauth_success_html(store_id: str, store_name: str) -> str:
+    """Tiny HTML page shown after the Sync OAuth completes.
+
+    Posts a message to the parent/opener window and tries to close the popup.
+    Falls back to a plain Arabic confirmation line if no opener is available.
+    """
+    safe_store = (store_id or "").replace("<", "&lt;").replace(">", "&gt;")
+    safe_name  = (store_name or "").replace("<", "&lt;").replace(">", "&gt;")
+    return f"""<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>تم تفعيل المزامنة الكاملة</title>
+  <style>
+    html, body {{
+      margin: 0; padding: 0;
+      background: #ffffff; color: #1f2937;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                   Tahoma, Arial, sans-serif;
+    }}
+    body {{
+      min-height: 100dvh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 24px; text-align: center; gap: 12px;
+    }}
+    h1 {{ font-size: 18px; margin: 0; color: #15803d; }}
+    p  {{ font-size: 14px; line-height: 1.7; max-width: 420px; margin: 0; color: #374151; }}
+    button {{
+      margin-top: 14px; padding: 10px 22px;
+      background: #f59e0b; color: #0f172a; border: none;
+      border-radius: 10px; font-weight: 700; cursor: pointer;
+      font-family: inherit; font-size: 14px;
+    }}
+  </style>
+</head>
+<body>
+  <h1>تم تفعيل المزامنة الكاملة</h1>
+  <p>تم ربط متجرك بنحلة عبر OAuth بنجاح. يمكنك إغلاق هذه النافذة والعودة إلى لوحة التحكم.</p>
+  <button onclick="window.close()">إغلاق النافذة</button>
+  <script>
+    (function () {{
+      var payload = {{
+        type: 'salla_api_connected',
+        store_id: '{safe_store}',
+        store_name: '{safe_name}'
+      }};
+      try {{ if (window.opener) window.opener.postMessage(payload, '*'); }} catch (e) {{}}
+      try {{ if (window.parent && window.parent !== window) window.parent.postMessage(payload, '*'); }} catch (e) {{}}
+      setTimeout(function () {{ try {{ window.close(); }} catch (e) {{}} }}, 1500);
+    }})();
+  </script>
+</body>
+</html>"""
+
+
+def _resolve_tenant_from_query_token(token: str) -> int:
+    """Decode a JWT carried as a query-string parameter and return tenant_id.
+
+    Used by ``/api/salla/oauth/start`` because the OAuth flow opens at the
+    top window (escaping the Salla iframe) — the standard ``Authorization``
+    header is not delivered by browser top-level navigation, so the dashboard
+    embeds the JWT in the URL.  Only the signature and tenant_id claim
+    matter here; the resulting code is bound to the tenant via ``state``.
+    """
+    if not token:
+        raise HTTPException(status_code=401, detail="token query param required")
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="invalid or expired token")
+    tid = payload.get("tenant_id")
+    if tid is None:
+        raise HTTPException(status_code=401, detail="token missing tenant_id claim")
+    try:
+        return int(tid)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="token tenant_id is not an integer")
+
+
+@router.get("/api/salla/oauth/start")
+async def salla_api_oauth_start(request: Request, token: Optional[str] = None):
+    """
+    Start the Custom OAuth flow for the SECOND ("Sync") Salla app.
+
+    Public endpoint — accepts the merchant's JWT as ``?token=`` because this
+    URL is opened in ``window.top`` (the OAuth provider rejects iframes).
+    The JWT is decoded server-side to extract ``tenant_id`` which is then
+    embedded in the OAuth ``state`` so the callback can recover it without
+    re-authenticating the user.
+
+    Returns: 302 redirect to ``https://accounts.salla.sa/oauth2/auth``.
+    """
+    if not SALLA_API_CLIENT_ID:
+        logger.error("[Salla API OAuth] SALLA_API_CLIENT_ID not configured!")
+        raise HTTPException(
+            status_code=503,
+            detail="Salla Sync app not configured. Set SALLA_API_CLIENT_ID, "
+                   "SALLA_API_CLIENT_SECRET, and SALLA_API_REDIRECT_URI.",
+        )
+
+    tenant_id = _resolve_tenant_from_query_token(token or "")
+
+    normalized_redirect = (SALLA_API_REDIRECT_URI or "").strip().rstrip("/")
+    scope_value = "offline_access"
+    state  = f"t{tenant_id}_{_secrets.token_urlsafe(6)}{_API_SYNC_STATE_SUFFIX}"
+    oauth_params = {
+        "client_id":     SALLA_API_CLIENT_ID,
+        "redirect_uri":  normalized_redirect,
+        "response_type": "code",
+        "scope":         scope_value,
+        "state":         state,
+    }
+    params = urllib.parse.urlencode(oauth_params)
+    auth_url = f"https://accounts.salla.sa/oauth2/auth?{params}"
+
+    # Verbose logging of the EXACT OAuth URL being generated. The full
+    # client_id is logged here intentionally — it's a public identifier
+    # (Salla treats it as non-secret); only client_secret must be hidden.
+    # This matches the diagnostic style of /api/salla/diag/oauth-config.
+    client_id_masked = (SALLA_API_CLIENT_ID[:8] + "***") if SALLA_API_CLIENT_ID else "EMPTY"
+    logger.info(
+        "[Salla API OAuth] USING NEW FLOW\n"
+        "  endpoint     = /api/salla/oauth/start\n"
+        "  redirect_uri = %s",
+        normalized_redirect,
+    )
+    logger.info(
+        "[Salla API OAuth] BUTTON CLICKED — generating authorization URL | "
+        "tenant_id=%s",
+        tenant_id,
+    )
+    logger.info("[Salla API OAuth]   client_id (full)   = %s", SALLA_API_CLIENT_ID or "EMPTY")
+    logger.info("[Salla API OAuth]   client_id (masked) = %s", client_id_masked)
+    logger.info("[Salla API OAuth]   redirect_uri       = %r", normalized_redirect)
+    logger.info("[Salla API OAuth]   scope              = %r", scope_value)
+    logger.info("[Salla API OAuth]   response_type      = %r", oauth_params["response_type"])
+    logger.info("[Salla API OAuth]   state              = %r", state)
+    logger.info("[Salla API OAuth]   FULL_AUTH_URL      = %s", auth_url)
+
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
+@router.get("/api/salla/oauth/callback")
+async def salla_api_oauth_callback(
+    request: Request,
+    code:  Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    db:    Session = Depends(get_db),
+):
+    """
+    Callback for the SECOND ("Sync") Salla Custom OAuth app.
+
+    Distinct from ``/oauth/salla/callback`` (the legacy Communication-App
+    callback) because:
+      • Uses SALLA_API_CLIENT_ID / SALLA_API_CLIENT_SECRET / SALLA_API_REDIRECT_URI.
+      • Resolves tenant strictly from the ``state`` (we trust it because we
+        signed it ourselves a moment ago in ``/api/salla/oauth/start``).
+      • On success, marks the integration row with ``api_sync_enabled=True``
+        + ``api_canonical=True`` so ``pick_active_salla_integration`` will
+        treat it as the canonical source of refresh_token going forward.
+      • Returns a popup-friendly HTML that posts a message to the opener
+        and self-closes — designed to be opened in a new top-level tab from
+        inside the Salla iframe.
+    """
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "unknown"
+    )
+    logger.info(
+        "[Salla API OAuth] callback | code=%s state=%s error=%s ip=%s",
+        bool(code), state, error, client_ip,
+    )
+
+    if error:
+        logger.warning("[Salla API OAuth] provider error: %s", error)
+        return HTMLResponse(content=_install_error_html(error), status_code=400)
+
+    if not code:
+        return HTMLResponse(content=_install_error_html("missing_code"), status_code=400)
+
+    if not SALLA_API_CLIENT_ID or not SALLA_API_CLIENT_SECRET:
+        logger.error("[Salla API OAuth] credentials not configured")
+        return HTMLResponse(content=_install_error_html("app_not_configured"), status_code=503)
+
+    # ── Resolve tenant strictly from state (we minted it ourselves) ─────────
+    tenant_id = 0
+    raw_state = state or ""
+    if raw_state.startswith("t") and "_" in raw_state:
+        try:
+            tenant_id = int(raw_state.split("_", 1)[0][1:])
+        except ValueError:
+            tenant_id = 0
+    if tenant_id <= 0:
+        logger.error("[Salla API OAuth] cannot parse tenant from state=%r", raw_state)
+        return HTMLResponse(content=_install_error_html("invalid_state"), status_code=400)
+
+    if not raw_state.endswith(_API_SYNC_STATE_SUFFIX):
+        # Defensive: this callback is dedicated to the API Sync app — refuse
+        # any state that wasn't produced by /api/salla/oauth/start.
+        logger.warning(
+            "[Salla API OAuth] state without expected suffix — possible cross-app mix-up | state=%s",
+            raw_state,
+        )
+        return HTMLResponse(content=_install_error_html("wrong_callback"), status_code=400)
+
+    # ── Token exchange ──────────────────────────────────────────────────────
+    normalized_redirect = (SALLA_API_REDIRECT_URI or "").strip().rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            token_resp = await client.post(
+                "https://accounts.salla.sa/oauth2/token",
+                data={
+                    "grant_type":    "authorization_code",
+                    "client_id":     SALLA_API_CLIENT_ID,
+                    "client_secret": SALLA_API_CLIENT_SECRET,
+                    "code":          code,
+                    "redirect_uri":  normalized_redirect,
+                },
+                headers={
+                    "Accept":       "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+
+            if token_resp.status_code != 200:
+                try:
+                    err_json = token_resp.json()
+                    salla_err = err_json.get("error", "")
+                    salla_msg = err_json.get("error_description", token_resp.text[:200])
+                except Exception:
+                    salla_err = "http_error"
+                    salla_msg = token_resp.text[:200]
+                logger.error(
+                    "[Salla API OAuth] token exchange FAILED | http=%s err=%s desc=%s",
+                    token_resp.status_code, salla_err, salla_msg,
+                )
+                return HTMLResponse(
+                    content=_install_error_html(f"token_exchange_failed: {salla_err or salla_msg}"),
+                    status_code=400,
+                )
+
+            token_data    = token_resp.json()
+            access_token  = token_data.get("access_token", "")
+            refresh_token = token_data.get("refresh_token", "")
+            expires_in    = token_data.get("expires_in", 0)
+            token_type    = token_data.get("token_type", "Bearer")
+
+            if not refresh_token:
+                # The whole point of this app is to obtain refresh_token —
+                # if Salla didn't return one, the app config is wrong
+                # (most likely scope is missing offline_access).
+                logger.error(
+                    "[Salla API OAuth] no refresh_token in response — check scope=offline_access "
+                    "and that Partner Portal app is General/Custom OAuth (not Communication)"
+                )
+                return HTMLResponse(
+                    content=_install_error_html("no_refresh_token_returned"),
+                    status_code=400,
+                )
+
+            # ── Fetch store info to get the external store_id ───────────────
+            salla_store_id = ""
+            store_name     = ""
+            store_resp = await client.get(
+                "https://api.salla.dev/admin/v2/store/info",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept":        "application/json",
+                },
+            )
+            if store_resp.status_code == 200:
+                store_data = (store_resp.json() or {}).get("data", {}) or {}
+                salla_store_id = str(store_data.get("id") or store_data.get("store_id") or "")
+                store_name     = store_data.get("name") or store_data.get("store_name") or ""
+            else:
+                logger.warning(
+                    "[Salla API OAuth] store/info fetch failed: %s — will fall back to existing store_id",
+                    store_resp.status_code,
+                )
+
+    except httpx.TimeoutException as exc:
+        logger.error("[Salla API OAuth] token exchange timed out: %s", exc)
+        return HTMLResponse(content=_install_error_html("timeout"), status_code=504)
+    except Exception as exc:
+        logger.exception("[Salla API OAuth] unexpected error: %s", exc)
+        return HTMLResponse(content=_install_error_html("network_error"), status_code=502)
+
+    # ── Persist as the canonical Sync integration ───────────────────────────
+    try:
+        from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        existing = db.query(Integration).filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider  == "salla",
+        ).first()
+
+        # Fall back to whatever store_id we already have on file when Salla's
+        # store/info call did not resolve one in this exchange.
+        if not salla_store_id and existing:
+            salla_store_id = (existing.config or {}).get("store_id", "") or (existing.external_store_id or "")
+        if not store_name and existing:
+            store_name = (existing.config or {}).get("store_name", "") or store_name
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Merge with existing config so we don't blow away embedded session
+        # data (store_name, salla_owner_email, subscription metadata, etc.).
+        merged_config: dict = dict((existing.config or {}) if existing else {})
+        merged_config.update({
+            "api_key":             access_token,
+            "refresh_token":       refresh_token,
+            "token_type":          token_type,
+            "expires_in":          expires_in,
+            "store_id":            salla_store_id or merged_config.get("store_id", ""),
+            "store_name":          store_name or merged_config.get("store_name", ""),
+            "api_sync_enabled":    True,
+            "api_canonical":       True,
+            "is_canonical":        True,
+            "app_type":            "custom_oauth_sync",
+            "api_key_source":      "custom_oauth_sync",
+            "api_client_id":       SALLA_API_CLIENT_ID,
+            "api_redirect_uri":    SALLA_API_REDIRECT_URI,
+            "api_connected_at":    now_iso,
+            "api_key_received_at": now_iso,
+        })
+        # Clear stale reauth flags — we just refreshed.
+        for k in (
+            "needs_reauth", "needs_reauth_at", "needs_reauth_reason",
+            "no_auto_refresh", "no_auto_refresh_reason", "no_auto_refresh_at",
+            "soft_disabled", "uninstalled_at", "disabled_reason", "disabled_at",
+        ):
+            merged_config.pop(k, None)
+
+        if salla_store_id:
+            integration = claim_store_for_tenant(
+                db,
+                store_id=salla_store_id,
+                tenant_id=tenant_id,
+                new_config=merged_config,
+            )
+            flag_modified(integration, "config")
+        elif existing:
+            existing.config  = merged_config
+            existing.enabled = True
+            flag_modified(existing, "config")
+        else:
+            db.add(Integration(
+                tenant_id=tenant_id,
+                provider="salla",
+                config=merged_config,
+                enabled=True,
+            ))
+
+        db.commit()
+        logger.info(
+            "[Salla API OAuth] OK | tenant=%s store_id=%s store=%r api_sync_enabled=True",
+            tenant_id, salla_store_id, store_name,
+        )
+    except Exception as exc:
+        logger.exception("[Salla API OAuth] DB save FAILED: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return HTMLResponse(content=_install_error_html("db_save_failed"), status_code=500)
+
+    return HTMLResponse(content=_api_oauth_success_html(salla_store_id, store_name), status_code=200)
+
+
+@router.get("/api/salla/integration-status")
+async def salla_integration_status(request: Request, db: Session = Depends(get_db)):
+    """
+    Granular Salla integration state for the dashboard.
+
+    Returns the data needed to render two distinct status cards in
+    /app/entry: one for the Communication App (embedded session) and one
+    for the Sync OAuth app (refresh_token + Admin API).
+
+    Also returns ``oauth_start_url`` ready for the dashboard to open in
+    ``window.top`` when ``api_sync_enabled`` is False.
+    """
+    from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+
+    tenant_id = get_jwt_tenant_id(request)
+    integration = pick_active_salla_integration(db, tenant_id)
+
+    embedded_connected   = False
+    embedded_store_name  = ""
+    embedded_store_id    = ""
+    api_sync_enabled     = False
+    api_connected_at     = ""
+    api_canonical        = False
+    is_easy_mode         = False
+    has_refresh_token    = False
+    has_any_api_key      = False
+
+    if integration:
+        cfg = integration.config or {}
+        embedded_connected   = True
+        embedded_store_name  = cfg.get("store_name", "") or ""
+        embedded_store_id    = cfg.get("store_id", "") or (integration.external_store_id or "")
+        has_refresh_token    = bool(cfg.get("refresh_token"))
+        has_any_api_key      = bool(cfg.get("api_key"))
+        api_sync_enabled     = bool(cfg.get("api_sync_enabled")) and has_refresh_token and bool(integration.enabled)
+        api_canonical        = bool(cfg.get("api_canonical"))
+        api_connected_at     = cfg.get("api_connected_at", "") or ""
+        is_easy_mode         = (
+            (cfg.get("app_type") or "").lower() == "easy"
+            or (cfg.get("api_key_source") or "").lower() == "easy_mode_webhook"
+        )
+
+    # WhatsApp connection
+    wa_connected = False
+    try:
+        wa_conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+        wa_connected = bool(
+            wa_conn and wa_conn.status == "connected" and wa_conn.sending_enabled
+        )
+    except Exception as _exc:
+        logger.warning("[integration-status] WA lookup failed tenant=%s: %s", tenant_id, _exc)
+
+    sync_app_configured = bool(SALLA_API_CLIENT_ID and SALLA_API_CLIENT_SECRET)
+
+    return {
+        "embedded_connected":  embedded_connected,
+        "embedded_store_id":   embedded_store_id,
+        "embedded_store_name": embedded_store_name,
+        "api_sync_enabled":    api_sync_enabled,
+        "api_canonical":       api_canonical,
+        "api_connected_at":    api_connected_at,
+        "easy_mode":           is_easy_mode,
+        "has_refresh_token":   has_refresh_token,
+        "has_api_key":         has_any_api_key,
+        "whatsapp_connected":  wa_connected,
+        "sync_app_configured": sync_app_configured,
+        "oauth_start_url":     "/api/salla/oauth/start",
     }
 
 

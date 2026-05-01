@@ -16,7 +16,8 @@ import {
   type StoreIntegrationStatus,
   type StoreIntegrationTestResult,
 } from '../api/storeIntegration'
-import { apiCall } from '../api/client'
+import { apiCall, API_BASE } from '../api/client'
+import { getToken } from '../auth'
 import StoreSyncPanel from '../components/StoreSyncPanel'
 
 export default function StoreIntegration() {
@@ -120,15 +121,31 @@ export default function StoreIntegration() {
   }
 
   async function handleOAuthConnect() {
+    // ── Dual Integration Architecture: USE NEW FLOW ──────────────────────
+    // The legacy /api/salla/authorize endpoint targeted the Communication
+    // App's redirect_uri (https://api.nahlah.ai/oauth/salla/callback) which
+    // is NOT registered in Salla Partner Portal — that produced a
+    // "redirect_uri mismatch" error.  We now go through the dedicated
+    // Sync OAuth app via /api/salla/oauth/start which uses the registered
+    // redirect_uri https://api.nahlah.ai/api/salla/oauth/callback.
     setOauthLoading(true)
-    try {
-      const data = await apiCall<{ url: string }>('/api/salla/authorize')
-      window.location.href = data.url
-    } catch {
-      alert('تعذّر الحصول على رابط التفويض. تأكد من تهيئة SALLA_CLIENT_ID في الخادم.')
-    } finally {
+    const token = getToken()
+    if (!token) {
+      alert('انتهت الجلسة. الرجاء تسجيل الدخول مرة أخرى.')
       setOauthLoading(false)
+      return
     }
+    const startUrl = `${API_BASE}/api/salla/oauth/start?token=${encodeURIComponent(token)}`
+    console.group('[StoreIntegration] ربط المتجر عبر سلة OAuth — clicked')
+    console.info('[Salla API OAuth] USING NEW FLOW')
+    console.info('endpoint     : /api/salla/oauth/start')
+    console.info('redirect_uri : https://api.nahlah.ai/api/salla/oauth/callback')
+    console.info('start_url    :', startUrl)
+    console.info('next_step    : backend will 302 to https://accounts.salla.sa/oauth2/auth?...')
+    console.info('               check Railway logs for "[Salla API OAuth] FULL_AUTH_URL"')
+    console.groupEnd()
+    // Navigate at the top-level window — the OAuth provider rejects iframes.
+    window.location.href = startUrl
   }
 
   async function handleFixConnection() {
