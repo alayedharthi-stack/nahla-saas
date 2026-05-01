@@ -489,15 +489,48 @@ class MerchantBrain:
                     len(new_state.last_search_candidates), _first_before,
                     len(_pending_after_compose), _first_after,
                 )
-            new_state.last_search_candidates = list(_pending_after_compose)
+            # Normalise candidates: every saved entry MUST contain the fields
+            # section 3.5 reads to validate the pick.  If can_checkout/orderable
+            # are missing, the pick will be rejected even though the product
+            # was orderable when displayed.  Default to True for both because
+            # the composer only includes products that already passed the
+            # can_checkout=True filter (safe_products).
+            normalised_candidates = []
+            for _c in _pending_after_compose:
+                _c = dict(_c)
+                _c.setdefault("can_checkout", True)
+                _c.setdefault("orderable", _c.get("can_checkout", True))
+                normalised_candidates.append(_c)
+            new_state.last_search_candidates = normalised_candidates
+
+            # CRITICAL: also clear last_recommended_products. Otherwise
+            # section 3.5 of the engine may fall back to those (stale,
+            # field-missing) products if last_search_candidates is ever
+            # cleared prematurely.
+            new_state.last_recommended_products = []
+
             logger.info(
                 "[ORDER FLOW] product list state saved | "
-                "last_search_candidates_count=%d first=%r current_product_focus=%r",
+                "last_search_candidates_count=%d first=%r "
+                "current_product_focus=%r last_action=%s",
                 len(new_state.last_search_candidates),
                 (new_state.last_search_candidates[0] or {}).get("title")
                 if new_state.last_search_candidates else None,
                 (new_state.current_product_focus or {}).get("title"),
+                str(decision.action or ""),
             )
+            # Verbose dump of stored candidates so we can match them
+            # 1:1 with what the customer sees in WhatsApp.
+            for _idx, _cand in enumerate(new_state.last_search_candidates[:5], 1):
+                logger.info(
+                    "[CATALOG] candidate stored | index=%d name=%r "
+                    "external_id=%s can_checkout=%s orderable=%s "
+                    "stock_qty=%s in_stock=%s status=%s",
+                    _idx, _cand.get("title"), _cand.get("external_id"),
+                    _cand.get("can_checkout"), _cand.get("orderable"),
+                    _cand.get("stock_qty"), _cand.get("in_stock"),
+                    _cand.get("status"),
+                )
 
         asked_now = _infer_last_question(decision, result, suggestion)
         if asked_now:

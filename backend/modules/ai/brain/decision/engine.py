@@ -236,9 +236,17 @@ class DefaultDecisionEngine:
 
         # ── 3.5 Pick from numbered list ───────────────────────────────────────
         if intent.name == INTENT_PICK_LIST_ITEM:
-            candidates = (
-                list(state.last_search_candidates or [])
-                or list(state.last_recommended_products or [])
+            # CRITICAL: only fall back to last_recommended_products when
+            # last_search_candidates is empty AND we have NO active list
+            # context. Mixing the two lists causes the customer to see
+            # "1. بنطلون" (from search_candidates) but get "بلوزة" (from
+            # last_recommended_products) at index 0.
+            _search_cands = list(state.last_search_candidates or [])
+            _rec_cands = list(state.last_recommended_products or [])
+            candidates = _search_cands or _rec_cands
+            _candidate_source = (
+                "last_search_candidates" if _search_cands
+                else ("last_recommended_products" if _rec_cands else "none")
             )
 
             # ── Diagnostic: log numeric pick state before resolution ──────────
@@ -246,12 +254,12 @@ class DefaultDecisionEngine:
             logger.info(
                 "[ORDER FLOW] numeric pick debug | text=%r "
                 "last_candidates_count=%d first_candidate=%r "
-                "current_product_focus=%r intent=%s",
+                "current_product_focus=%r intent=%s source=%s",
                 _pick_msg,
                 len(candidates),
                 (candidates[0] or {}).get("title") if candidates else None,
                 (state.current_product_focus or {}).get("title"),
-                intent.name,
+                intent.name, _candidate_source,
             )
 
             if candidates:
@@ -266,19 +274,51 @@ class DefaultDecisionEngine:
                     _prod_orderable = product.get(
                         "can_checkout", product.get("orderable", True)
                     )
+
+                    # Log the FULL candidate so we can see exactly which
+                    # field is missing/false when section 3.5 rejects it.
                     logger.info(
                         "[ORDER FLOW] product selection validation | "
-                        "display_index=%d name=%r external_id=%s "
+                        "display_index=%d source=%s name=%r external_id=%s "
                         "stock_qty=%s in_stock=%s status=%s "
                         "can_checkout=%s orderable=%s tenant=%s "
-                        "candidates_count=%d",
-                        idx, product.get("title"), product.get("external_id"),
+                        "candidates_count=%d full_candidate=%s",
+                        idx, _candidate_source,
+                        product.get("title"), product.get("external_id"),
                         product.get("stock_qty"), product.get("in_stock"),
                         product.get("status"),
                         product.get("can_checkout"), product.get("orderable"),
                         ctx.tenant_id, len(candidates),
+                        {k: product.get(k) for k in (
+                            "id", "title", "external_id", "can_checkout",
+                            "orderable", "stock_qty", "in_stock", "status",
+                            "variants_in_stock",
+                        )},
                     )
-                    if not _prod_orderable or not product.get("external_id"):
+
+                    # ── Numeric pick source confirmation log (the line the
+                    #    user explicitly asked to see) ────────────────────
+                    logger.info(
+                        "[ORDER FLOW] numeric pick source | "
+                        "source=%s index=%d selected=%r external_id=%s "
+                        "can_checkout=%s",
+                        _candidate_source, idx,
+                        product.get("title"), product.get("external_id"),
+                        _prod_orderable,
+                    )
+
+                    # GUARD: when source is last_recommended_products, a
+                    # missing field is far more likely (those records can
+                    # come from sales-context pipelines that don't compute
+                    # can_checkout). Don't reject — let DraftOrderHandler
+                    # try and surface a coherent error if the product is
+                    # genuinely broken.
+                    _strict_reject = (
+                        _candidate_source == "last_search_candidates"
+                        and (not _prod_orderable or not product.get("external_id"))
+                    )
+
+                    if _strict_reject:
                         # A product that was shown in the numbered list is
                         # now failing validation — this is a catalog/state bug.
                         _alts = [
