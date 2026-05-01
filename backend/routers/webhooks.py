@@ -308,7 +308,7 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
 
     Why a separate endpoint?
     ────────────────────────
-    The Sync OAuth app (SALLA_API_CLIENT_ID) has its OWN webhook secret in
+    The Sync OAuth app (SALLA_OAUTH_CLIENT_ID) has its OWN webhook secret in
     Salla Partner Portal — completely independent from the Communication
     App's secret.  Per the Dual Integration Architecture we keep the two
     streams strictly separated:

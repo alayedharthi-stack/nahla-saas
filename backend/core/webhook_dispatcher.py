@@ -184,7 +184,7 @@ async def _dispatch_salla(db: Session, event) -> None:
 
 _DISPATCHERS: Dict[str, Callable[[Session, Any], Any]] = {
     "salla": _dispatch_salla,
-    # Sync OAuth app (SALLA_API_CLIENT_ID) — same payload schema, same
+    # Sync OAuth app (SALLA_OAUTH_CLIENT_ID) — same payload schema, same
     # business handler, but flagged via event.provider so the Integration
     # row gets api_sync_enabled=True markers.
     "salla_oauth": _dispatch_salla,
