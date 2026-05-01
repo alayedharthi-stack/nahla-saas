@@ -279,13 +279,27 @@ class CatalogContextBuilder:
                 if isinstance(v, dict)
             )
 
-        orderable = (
+        # ── Single source of truth for orderability ──────────────────────
+        # `can_checkout` is the ONE authoritative flag that decides whether
+        # a product may be shown in a numbered list AND accepted when the
+        # customer picks it by number.  Every downstream check (decision
+        # engine, order executor, debug endpoint) MUST read this field
+        # instead of re-computing the logic.
+        variants_in_stock = sum(
+            1 for v in variants
+            if isinstance(v, dict)
+            and _safe_int(v.get("stock_quantity") or v.get("quantity") or 0, 0) > 0
+        ) if variants else 0
+        can_checkout = (
             bool(ext_id)
             and status == "active"
             and bool(in_stock_flag)
             and (stock_qty is None or _safe_int(stock_qty, 0) > 0)
             and variants_ok
         )
+        # `orderable` is kept as an alias so existing code that reads it
+        # continues to work without modification.
+        orderable = can_checkout
         return {
             "id":              p.id,
             "external_id":     ext_id or None,
@@ -300,7 +314,9 @@ class CatalogContextBuilder:
             "stock_qty":       stock_qty,
             "image_url":       meta.get("image_url", ""),
             "orderable":       orderable,
+            "can_checkout":    can_checkout,
             "status":          status,
+            "variants_in_stock": variants_in_stock,
             # Variant/option names (e.g. "S, M, L" or "أحمر، أزرق") —
             # only in-stock combinations, max 6 entries.
             "variants_summary": _format_variants_for_llm(variants),
@@ -312,26 +328,36 @@ class CatalogContextBuilder:
         """Format product rows and drop non-orderable ones.
 
         Every product is logged with a [CATALOG] line for diagnostics.
+        Products that pass are assigned a 1-based display_index matching
+        the numbered list shown to the customer.
         """
         result: List[Dict] = []
+        display_index = 0
         for p in rows:
             fmt = self._format(p)
-            if fmt["orderable"]:
+            if fmt["can_checkout"]:
+                display_index += 1
+                fmt["display_index"] = display_index
                 logger.info(
-                    "[CATALOG] product listed | source=%s name=%r salla_id=%s "
-                    "stock=%s orderable=True status=%s",
-                    source, fmt["title"], fmt["external_id"],
-                    fmt["stock_qty"], fmt["status"],
+                    "[CATALOG] product listed | index=%d source=%s name=%r "
+                    "external_id=%s stock_qty=%s in_stock=%s status=%s "
+                    "can_checkout=True variants_in_stock=%s",
+                    display_index, source, fmt["title"],
+                    fmt["external_id"], fmt["stock_qty"],
+                    fmt["in_stock"], fmt["status"],
+                    fmt.get("variants_in_stock", 0),
                 )
                 result.append(fmt)
             else:
-                logger.debug(
-                    "[CATALOG] product SKIPPED (not orderable) | source=%s "
-                    "name=%r salla_id=%s stock=%s in_stock=%s status=%s "
-                    "has_external_id=%s",
+                # Log at WARNING so it surfaces in Railway/production logs
+                # without needing debug level.
+                logger.warning(
+                    "[CATALOG] product SKIPPED (can_checkout=False) | "
+                    "source=%s name=%r external_id=%s stock_qty=%s "
+                    "in_stock=%s status=%s has_external_id=%s variants_in_stock=%s",
                     source, fmt["title"], fmt["external_id"],
                     fmt["stock_qty"], fmt["in_stock"], fmt["status"],
-                    bool(fmt["external_id"]),
+                    bool(fmt["external_id"]), fmt.get("variants_in_stock", 0),
                 )
         return result
 

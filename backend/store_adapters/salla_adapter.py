@@ -42,11 +42,23 @@ class SallaTokenRevokedException(Exception):
 class SallaAdapter(BaseStoreAdapter):
     platform = "salla"
 
-    def __init__(self, api_key: str, store_id: str = "", refresh_token: str = "", tenant_id: int = 0):
+    def __init__(
+        self,
+        api_key: str,
+        store_id: str = "",
+        refresh_token: str = "",
+        tenant_id: int = 0,
+        integration_id: Optional[int] = None,
+    ):
         self.api_key = api_key
         self.store_id = store_id
         self._refresh_token = refresh_token
         self._tenant_id = tenant_id
+        # The exact DB row this adapter was built from.  MUST be used when
+        # persisting refreshed tokens or marking needs_reauth so we always
+        # update the correct row — not whichever `.first()` returns (which
+        # may be a different, older integration).
+        self._integration_id: Optional[int] = integration_id
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -169,6 +181,30 @@ class SallaAdapter(BaseStoreAdapter):
             )
             return False
 
+    def _require_auth(self, operation: str = "API call") -> None:
+        """Raise SallaTokenRevokedException if this adapter has no usable token.
+
+        Called as a preflight check before create_order, create_coupon,
+        sync_products and other write operations so we never fire a doomed
+        Salla API request.
+
+        Blocks when:
+          • access_token is empty
+          • refresh_token is empty
+        """
+        if not self.api_key or not self._refresh_token:
+            logger.error(
+                "[Salla] blocked API call — integration requires reauth | "
+                "tenant=%s integration_id=%s operation=%s "
+                "has_access_token=%s has_refresh_token=%s",
+                self._tenant_id, self._integration_id, operation,
+                bool(self.api_key), bool(self._refresh_token),
+            )
+            raise SallaTokenRevokedException(
+                f"Integration for tenant={self._tenant_id} has no usable token "
+                f"(operation={operation}). Merchant must reconnect Salla."
+            )
+
     def _mark_needs_reauth(self, reason: str = "unknown") -> None:
         """Mark integration as `needs_reauth=True` and stop syncing.
 
@@ -178,21 +214,25 @@ class SallaAdapter(BaseStoreAdapter):
           • config.needs_reauth_at      = ISO timestamp
           • config.refresh_token        = removed (revoked / unusable)
 
-        The schedulers (`_sync_all_stores`, `_refresh_all_salla_tokens`) and
-        the orders poller all check `needs_reauth` and skip the integration
-        when set, so this single flag gates sync.  The integration row stays
-        `enabled=True` so the merchant can simply click "إعادة الربط" and
-        resume — no admin intervention required.
+        Always targets self._integration_id when available, so we update
+        the CORRECT row — not whichever `.first()` returns.
         """
         try:
             from database.session import SessionLocal  # noqa: PLC0415
             from database.models import Integration as _Integration  # noqa: PLC0415
             _db = SessionLocal()
             try:
-                intg = _db.query(_Integration).filter(
-                    _Integration.tenant_id == self._tenant_id,
-                    _Integration.provider == "salla",
-                ).first()
+                q = _db.query(_Integration)
+                if self._integration_id:
+                    q = q.filter(_Integration.id == self._integration_id)
+                else:
+                    # Fallback: no id stored — update the canonical row only.
+                    # ORDER BY id DESC so newest (canonical) row is updated first.
+                    q = q.filter(
+                        _Integration.tenant_id == self._tenant_id,
+                        _Integration.provider == "salla",
+                    ).order_by(_Integration.id.desc())
+                intg = q.first()
                 if intg:
                     cfg = dict(intg.config or {})
                     cfg.pop("refresh_token", None)
@@ -202,9 +242,9 @@ class SallaAdapter(BaseStoreAdapter):
                     intg.config = cfg
                     _db.commit()
                     logger.warning(
-                        "[Salla Token] needs_reauth=true tenant=%s reason=%s — "
-                        "sync paused until merchant re-authorises",
-                        self._tenant_id, reason,
+                        "[Salla Token] needs_reauth=true tenant=%s integration_id=%s "
+                        "reason=%s — sync paused until merchant re-authorises",
+                        self._tenant_id, intg.id, reason,
                     )
             finally:
                 _db.close()
@@ -220,16 +260,28 @@ class SallaAdapter(BaseStoreAdapter):
         refresh_token: str,
         expires_in: Optional[int] = None,
     ) -> None:
-        """Save refreshed tokens back to the Integration row."""
+        """Save refreshed tokens back to the CORRECT Integration row.
+
+        Always uses self._integration_id (the exact row this adapter was
+        built from) so tokens are never accidentally written to a different
+        row that happened to be first in DB ordering.
+        """
         try:
             from database.session import SessionLocal
             from database.models import Integration
             db = SessionLocal()
             try:
-                intg = db.query(Integration).filter(
-                    Integration.tenant_id == self._tenant_id,
-                    Integration.provider == "salla",
-                ).first()
+                q = db.query(Integration)
+                if self._integration_id:
+                    q = q.filter(Integration.id == self._integration_id)
+                else:
+                    # No id — fall back to newest row so we update the
+                    # canonical integration, not the oldest stale one.
+                    q = q.filter(
+                        Integration.tenant_id == self._tenant_id,
+                        Integration.provider == "salla",
+                    ).order_by(Integration.id.desc())
+                intg = q.first()
                 if intg:
                     cfg = dict(intg.config or {})
                     cfg["api_key"]            = access_token
@@ -250,6 +302,10 @@ class SallaAdapter(BaseStoreAdapter):
                     cfg.pop("no_auto_refresh_at", None)
                     intg.config = cfg
                     db.commit()
+                    logger.info(
+                        "[Salla Token] tokens persisted → integration_id=%s tenant=%s",
+                        intg.id, self._tenant_id,
+                    )
             finally:
                 db.close()
         except Exception as exc:
@@ -887,6 +943,7 @@ class SallaAdapter(BaseStoreAdapter):
                 item.variant_id = vid
 
     async def create_order(self, order_input: OrderInput) -> NormalizedOrder:
+        self._require_auth("create_order")
         await self._assert_required_options_present(order_input)
         await self._enrich_items_with_variant_id(order_input)
         shipping_company_id = order_input.shipping_company_id
@@ -901,6 +958,7 @@ class SallaAdapter(BaseStoreAdapter):
             raise
 
     async def create_draft_order(self, order_input: OrderInput) -> NormalizedOrder:
+        self._require_auth("create_draft_order")
         await self._assert_required_options_present(order_input)
         await self._enrich_items_with_variant_id(order_input)
         # ── Shipping resolution ───────────────────────────────────────────────────
@@ -1475,12 +1533,15 @@ class SallaAdapter(BaseStoreAdapter):
     ) -> Optional[Dict[str, Any]]:
         """Create a coupon in Salla. Returns the created coupon data or None.
 
+        Requires a valid access_token + refresh_token.
+
         Salla Admin API v2 (verified live, April 2026) expects:
           type   = "percentage" | "fixed"   (lowercase)
           amount = numeric discount value   (single field; no percent_off/amount_off)
         The previous uppercase/split-field shape is rejected with
         422 alert.invalid_fields{type, amount}.
         """
+        self._require_auth("create_coupon")
         start_dt = datetime.now(timezone.utc)
         expiry_dt = start_dt + timedelta(days=expiry_days)
         start  = start_dt.strftime("%Y-%m-%d")

@@ -176,24 +176,39 @@ class DefaultDecisionEngine:
         ):
             _matched_product = _match_product_from_message(ctx.message, _candidates)
             if _matched_product:
-                _prod_orderable = _matched_product.get("orderable", True)
+                # Use can_checkout as the single source of truth; fall back to
+                # orderable for older state entries that pre-date can_checkout.
+                _prod_orderable = _matched_product.get(
+                    "can_checkout", _matched_product.get("orderable", True)
+                )
                 logger.info(
                     "[ORDER FLOW] product selection validation (by name) | "
-                    "name=%r orderable=%s stock=%s salla_id=%s tenant=%s",
-                    _matched_product.get("title"), _prod_orderable,
+                    "name=%r external_id=%s stock_qty=%s in_stock=%s status=%s "
+                    "can_checkout=%s orderable=%s tenant=%s",
+                    _matched_product.get("title"),
+                    _matched_product.get("external_id"),
                     _matched_product.get("stock_qty"),
-                    _matched_product.get("external_id"), ctx.tenant_id,
+                    _matched_product.get("in_stock"),
+                    _matched_product.get("status"),
+                    _matched_product.get("can_checkout"),
+                    _matched_product.get("orderable"),
+                    ctx.tenant_id,
                 )
                 if not _prod_orderable or not _matched_product.get("external_id"):
                     _alts = [
                         c for c in _candidates
-                        if c.get("orderable", True) and c.get("external_id")
+                        if c.get("can_checkout", c.get("orderable", True))
+                        and c.get("external_id")
                         and c.get("id") != _matched_product.get("id")
                     ][:3]
                     logger.warning(
-                        "[ORDER FLOW] picked product NOT orderable — "
-                        "suggesting %d alternatives | name=%r",
+                        "[ORDER FLOW] picked product NOT orderable (by name) — "
+                        "suggesting %d alternatives | name=%r external_id=%s "
+                        "can_checkout=%s has_external_id=%s",
                         len(_alts), _matched_product.get("title"),
+                        _matched_product.get("external_id"),
+                        _matched_product.get("can_checkout"),
+                        bool(_matched_product.get("external_id")),
                     )
                     return Decision(
                         action=ACTION_SEARCH_PRODUCTS,
@@ -230,26 +245,46 @@ class DefaultDecisionEngine:
                 idx = max(1, min(idx, len(candidates)))
                 product = candidates[idx - 1]
                 if product:
-                    _prod_orderable = product.get("orderable", True)
+                    # Use can_checkout as the single source of truth.
+                    # If the product was shown in the numbered list, it
+                    # MUST have can_checkout=True — any mismatch here
+                    # means the catalog or state has a bug.
+                    _prod_orderable = product.get(
+                        "can_checkout", product.get("orderable", True)
+                    )
                     logger.info(
                         "[ORDER FLOW] product selection validation | "
-                        "display_index=%d name=%r orderable=%s stock=%s "
-                        "salla_id=%s tenant=%s",
-                        idx, product.get("title"), _prod_orderable,
-                        product.get("stock_qty"),
-                        product.get("external_id"), ctx.tenant_id,
+                        "display_index=%d name=%r external_id=%s "
+                        "stock_qty=%s in_stock=%s status=%s "
+                        "can_checkout=%s orderable=%s tenant=%s "
+                        "candidates_count=%d",
+                        idx, product.get("title"), product.get("external_id"),
+                        product.get("stock_qty"), product.get("in_stock"),
+                        product.get("status"),
+                        product.get("can_checkout"), product.get("orderable"),
+                        ctx.tenant_id, len(candidates),
                     )
                     if not _prod_orderable or not product.get("external_id"):
+                        # A product that was shown in the numbered list is
+                        # now failing validation — this is a catalog/state bug.
                         _alts = [
                             c for c in candidates
-                            if c.get("orderable", True) and c.get("external_id")
+                            if c.get("can_checkout", c.get("orderable", True))
+                            and c.get("external_id")
                             and c.get("id") != product.get("id")
                         ][:3]
                         logger.warning(
-                            "[ORDER FLOW] picked product #%d NOT orderable — "
-                            "suggesting %d alternatives | name=%r stock=%s",
-                            idx, len(_alts), product.get("title"),
-                            product.get("stock_qty"),
+                            "[CATALOG] listed product failed validation | "
+                            "bug=True display_index=%d name=%r "
+                            "external_id=%s can_checkout=%s "
+                            "has_external_id=%s stock_qty=%s in_stock=%s status=%s "
+                            "— suggesting %d alternatives",
+                            idx, product.get("title"),
+                            product.get("external_id"),
+                            product.get("can_checkout"),
+                            bool(product.get("external_id")),
+                            product.get("stock_qty"), product.get("in_stock"),
+                            product.get("status"), len(_alts),
                         )
                         return Decision(
                             action=ACTION_SEARCH_PRODUCTS,

@@ -168,39 +168,50 @@ class DefaultComposer:
                 if self._is_duplicate(text, ctx):
                     text = T.no_products(variant=(variant + 1) % 3)
                 return text
-            # If many results and no specific intent, present as narrow choices
-            if data.get("suggest_narrow") and data.get("products"):
-                candidates = data["products"][:3]
-                wa_buttons = []
-                for i, p in enumerate(candidates, 1):
-                    raw_title = str(p.get("title") or "")
-                    price_str = f" {p['price']} ر" if p.get("price") else ""
-                    title = (raw_title[:17] + price_str)[:20] if price_str else raw_title[:20]
-                    wa_buttons.append({
-                        "type": "reply",
-                        "reply": {"id": f"pick_{i}", "title": title or str(i)},
-                    })
-                result.data["pending_buttons"] = wa_buttons
-                result.data["pending_candidates"] = candidates
-                variant = self._variant_idx(ctx)
-                text = T.narrow_choices(products=candidates, variant=variant)
-                if self._is_duplicate(text, ctx):
-                    text = T.narrow_choices(products=candidates, variant=(variant + 1) % 3)
-                return text
+            # Validate every product before we show it: if a product that
+            # the executor already filtered as orderable somehow lacks
+            # can_checkout=True, log it as a catalog bug and exclude it.
+            # This prevents "product listed then immediately rejected" UX.
+            raw_products = list(data.get("products") or [])
+            safe_products: list = []
+            for _p in raw_products:
+                if _p.get("can_checkout", _p.get("orderable", True)):
+                    safe_products.append(_p)
+                else:
+                    logger.warning(
+                        "[CATALOG] listed product failed validation | bug=True "
+                        "name=%r external_id=%s can_checkout=%s orderable=%s "
+                        "— removed from displayed list",
+                        _p.get("title"), _p.get("external_id"),
+                        _p.get("can_checkout"), _p.get("orderable"),
+                    )
+
+            if not safe_products:
+                return T.no_products(variant=self._variant_idx(ctx))
+
+            # INVARIANT: pending_candidates = EXACTLY the products shown in
+            # the numbered list.  The customer reads "1. بنطلون" and expects
+            # sending "1" to give them بنطلون — any mismatch causes the
+            # "بلوزة غير متوفر" bug.
+            # WA quick-reply buttons are capped at 3 (platform limit) but
+            # the candidates list holds ALL shown products.
+            candidates = safe_products   # all of them — shown & stored
+            wa_buttons = []
+            for i, p in enumerate(candidates[:3], 1):
+                raw_title = str(p.get("title") or "")
+                price_str = f" {p['price']} ر" if p.get("price") else ""
+                title = (raw_title[:17] + price_str)[:20] if price_str else raw_title[:20]
+                wa_buttons.append({
+                    "type": "reply",
+                    "reply": {"id": f"pick_{i}", "title": title or str(i)},
+                })
+            result.data["pending_buttons"] = wa_buttons
+            # Store ALL candidates so pick-by-number always resolves correctly.
+            result.data["pending_candidates"] = candidates
             variant = self._variant_idx(ctx)
-            text = T.product_results(
-                product_lines=data.get("product_lines", ""),
-                query=data.get("query", ""),
-                count=data.get("count", 0),
-                variant=variant,
-            )
+            text = T.narrow_choices(products=candidates, variant=variant)
             if self._is_duplicate(text, ctx):
-                text = T.product_results(
-                    product_lines=data.get("product_lines", ""),
-                    query=data.get("query", ""),
-                    count=data.get("count", 0),
-                    variant=(variant + 1) % 3,
-                )
+                text = T.narrow_choices(products=candidates, variant=(variant + 1) % 3)
             return text
 
         # ── Draft order ────────────────────────────────────────────────────

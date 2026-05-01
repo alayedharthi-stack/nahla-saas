@@ -895,6 +895,25 @@ async def debug_recent_whatsapp_turns(
             "pending_city":        bstate.get("pending_city"),
             "last_search_candidates_count": len(bstate.get("last_search_candidates") or []),
         },
+        # Full candidates list — the numbered list the customer last saw.
+        # Each entry shows name, nahla_db_id, external_id, stock_qty,
+        # status, orderable, can_checkout so you can diagnose mismatches
+        # between what was displayed and what is stored.
+        "last_search_candidates": [
+            {
+                "index":          i + 1,
+                "name":           c.get("title"),
+                "nahla_db_id":    c.get("id"),
+                "external_id":    c.get("external_id"),
+                "stock_qty":      c.get("stock_qty"),
+                "in_stock":       c.get("in_stock"),
+                "status":         c.get("status"),
+                "orderable":      c.get("orderable"),
+                "can_checkout":   c.get("can_checkout"),
+                "affinity_score": c.get("affinity_score"),
+            }
+            for i, c in enumerate(bstate.get("last_search_candidates") or [])
+        ],
         "turns": turns,
     }
 

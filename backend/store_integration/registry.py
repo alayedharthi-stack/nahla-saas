@@ -68,10 +68,17 @@ def _is_api_sync(intg: Integration) -> bool:
     )
 
 
-def _score_integration(intg: Integration) -> Tuple[int, int, int, int, int, int]:
+def _needs_reauth(intg: Integration) -> bool:
+    """True when the integration is permanently broken and needs merchant action."""
+    cfg = intg.config or {}
+    return bool(cfg.get("needs_reauth"))
+
+
+def _score_integration(intg: Integration) -> Tuple[int, int, int, int, int, int, int]:
     """
     Higher tuple = higher priority.  Dual Integration Architecture order:
 
+      0. NOT needs_reauth                       (broken integrations always lose)
       1. enabled                                (cannot pick a disabled row)
       2. api_sync_enabled + has refresh_token   (Custom OAuth Sync App — canonical)
       3. easy_mode (Easy Mode webhook tokens — legacy canonical)
@@ -81,8 +88,9 @@ def _score_integration(intg: Integration) -> Tuple[int, int, int, int, int, int]
     """
     cfg = intg.config or {}
     return (
+        0 if _needs_reauth(intg) else 1,        # MUST be first — broken = always lose
         1 if intg.enabled else 0,
-        1 if _is_api_sync(intg) else 0,        # NEW top tier
+        1 if _is_api_sync(intg) else 0,
         1 if _is_easy_mode(intg) else 0,
         1 if cfg.get("refresh_token") else 0,
         1 if cfg.get("api_key") else 0,
@@ -216,18 +224,29 @@ def get_adapter(tenant_id: int):
         cfg = integration.config or {}
         has_token   = bool(cfg.get("api_key"))
         has_refresh = bool(cfg.get("refresh_token"))
+        needs_reauth_flag = bool(cfg.get("needs_reauth"))
+
         logger.info(
             "[Registry] tenant=%s → adapter=salla integration_id=%s store_id=%s "
-            "api_sync=%s easy_mode=%s has_token=%s has_refresh=%s",
+            "api_sync=%s easy_mode=%s has_token=%s has_refresh=%s needs_reauth=%s",
             tenant_id, integration.id,
             cfg.get("store_id", ""),
             _is_api_sync(integration), _is_easy_mode(integration),
-            has_token, has_refresh,
+            has_token, has_refresh, needs_reauth_flag,
         )
+
+        if needs_reauth_flag:
+            logger.error(
+                "[Registry] tenant=%s integration_id=%s needs_reauth=True — "
+                "refusing to build adapter (merchant must reconnect Salla)",
+                tenant_id, integration.id,
+            )
+            return None
+
         if not has_token:
             logger.error(
-                "[Registry] tenant=%s — integration enabled but api_key is EMPTY — sync will fail",
-                tenant_id,
+                "[Registry] tenant=%s integration_id=%s api_key is EMPTY — sync will fail",
+                tenant_id, integration.id,
             )
 
         return adapter_cls(
@@ -235,9 +254,98 @@ def get_adapter(tenant_id: int):
             store_id=cfg.get("store_id", ""),
             refresh_token=cfg.get("refresh_token", ""),
             tenant_id=tenant_id,
+            integration_id=integration.id,
         )
     except Exception as exc:
         logger.error("[Registry] tenant=%s error: %s", tenant_id, exc)
         return None
     finally:
         db.close()
+
+
+def describe_integrations_for_tenant(db: Session, tenant_id: int) -> dict:
+    """Return a diagnostic dict for every Salla integration of this tenant.
+
+    Used by GET /admin/salla/integrations and POST /admin/salla/test-connection.
+    Shows which row was selected and why each row was accepted or rejected.
+    """
+    rows = _list_salla_integrations_for_tenant(db, tenant_id)
+    if not rows:
+        return {
+            "tenant_id": tenant_id,
+            "total": 0,
+            "selected_id": None,
+            "integrations": [],
+        }
+
+    sorted_rows = sorted(rows, key=_score_integration, reverse=True)
+    winner_id = sorted_rows[0].id
+
+    results = []
+    for intg in sorted_rows:
+        cfg = intg.config or {}
+        nr        = bool(cfg.get("needs_reauth"))
+        hr        = bool(cfg.get("refresh_token"))
+        ha        = bool(cfg.get("api_key"))
+        api_sync  = _is_api_sync(intg)
+        easy_mode = _is_easy_mode(intg)
+        selected  = intg.id == winner_id
+
+        # Build a human-readable reason string
+        if selected:
+            parts = ["enabled" if intg.enabled else "disabled"]
+            if api_sync:
+                parts.append("api_sync_enabled + has_refresh_token")
+            elif easy_mode:
+                parts.append("easy_mode")
+            if hr:
+                parts.append("has_refresh_token")
+            if ha:
+                parts.append("has_access_token")
+            parts.append(f"id={intg.id} (latest wins ties)")
+            reason = " + ".join(parts)
+        else:
+            reject_parts = []
+            if not intg.enabled:
+                reject_parts.append("disabled")
+            if nr:
+                reject_parts.append("needs_reauth=True")
+            if not hr:
+                reject_parts.append("missing_refresh_token")
+            if not ha:
+                reject_parts.append("missing_access_token")
+            if not reject_parts:
+                reject_parts.append(f"lower priority than id={winner_id}")
+            reason = " | ".join(reject_parts)
+
+        token_expiry = cfg.get("token_expires_at")
+        results.append({
+            "id":                 intg.id,
+            "enabled":            intg.enabled,
+            "external_store_id":  intg.external_store_id,
+            "store_id":           cfg.get("store_id"),
+            "has_access_token":   ha,
+            "has_refresh_token":  hr,
+            "needs_reauth":       nr,
+            "needs_reauth_reason": cfg.get("needs_reauth_reason"),
+            "needs_reauth_at":    cfg.get("needs_reauth_at"),
+            "token_expires_at":   token_expiry,
+            "last_token_refresh": cfg.get("last_token_refresh"),
+            "created_at":         str(getattr(intg, "created_at", None) or ""),
+            "updated_at":         str(getattr(intg, "updated_at", None) or ""),
+            "is_canonical":       bool(cfg.get("is_canonical")),
+            "easy_mode":          easy_mode,
+            "api_sync":           api_sync,
+            "superseded_by_id":   cfg.get("superseded_by_id"),
+            "superseded_at":      cfg.get("superseded_at"),
+            "score":              _score_integration(intg),
+            "selected":           selected,
+            "reason":             reason,
+        })
+
+    return {
+        "tenant_id":    tenant_id,
+        "total":        len(rows),
+        "selected_id":  winner_id,
+        "integrations": results,
+    }

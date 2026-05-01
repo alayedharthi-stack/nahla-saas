@@ -468,3 +468,119 @@ def salla_webhook_status(
             "https://api.nahlah.ai/webhook/salla — fix it there and reinstall again."
         ),
     }
+
+
+# ── Salla integration diagnostic ────────────────────────────────────────────
+
+
+@router.get("/salla/integrations")
+def salla_integrations_diagnostic(
+    tenant_id: int = Query(..., description="Tenant to inspect"),
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Show every Salla integration for a tenant, which one picker selects,
+    and why each row is accepted or rejected.
+
+    Returns:
+      selected_id          — the integration_id that get_adapter() would use
+      integrations[]       — sorted by score (best first), with fields:
+        id, enabled, has_access_token, has_refresh_token, needs_reauth,
+        needs_reauth_reason, token_expires_at, easy_mode, api_sync,
+        score, selected, reason
+    """
+    _require_enabled(secret)
+    from store_integration.registry import describe_integrations_for_tenant
+    return describe_integrations_for_tenant(db, tenant_id)
+
+
+# ── Salla live connection test ───────────────────────────────────────────────
+
+
+@router.post("/salla/test-connection")
+async def salla_test_connection(
+    tenant_id: int = Query(..., description="Tenant to test"),
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Run a live Salla API call using the integration picker for this tenant.
+
+    Selects the canonical integration, then calls GET /products?per_page=1.
+
+    Returns:
+      success             — True if Salla returned 2xx
+      status_code         — HTTP status from Salla
+      selected_integration_id
+      store_id
+      has_access_token
+      has_refresh_token
+      needs_reauth
+      error               — error message if failed
+    """
+    _require_enabled(secret)
+
+    from store_integration.registry import (
+        pick_active_salla_integration,
+        describe_integrations_for_tenant,
+    )
+    from store_adapters.salla_adapter import SallaAdapter
+
+    intg = pick_active_salla_integration(db, tenant_id)
+    if not intg:
+        return {
+            "success": False,
+            "error": "no Salla integration found for this tenant",
+            "selected_integration_id": None,
+        }
+
+    cfg = intg.config or {}
+    nr  = bool(cfg.get("needs_reauth"))
+    hr  = bool(cfg.get("refresh_token"))
+    ha  = bool(cfg.get("api_key"))
+
+    if nr:
+        return {
+            "success":               False,
+            "error":                 "integration needs_reauth=True — merchant must reconnect",
+            "selected_integration_id": intg.id,
+            "needs_reauth":          True,
+            "needs_reauth_reason":   cfg.get("needs_reauth_reason"),
+            "has_access_token":      ha,
+            "has_refresh_token":     hr,
+        }
+
+    adapter = SallaAdapter(
+        api_key=cfg.get("api_key", ""),
+        store_id=cfg.get("store_id", ""),
+        refresh_token=cfg.get("refresh_token", ""),
+        tenant_id=tenant_id,
+        integration_id=intg.id,
+    )
+    logger.info(
+        "[TestConnection] tenant=%s integration_id=%s has_token=%s has_refresh=%s",
+        tenant_id, intg.id, ha, hr,
+    )
+
+    import httpx as _httpx
+    try:
+        result = await adapter._get("/products?per_page=1")
+        return {
+            "success":               True,
+            "status_code":           200,
+            "selected_integration_id": intg.id,
+            "store_id":              cfg.get("store_id"),
+            "has_access_token":      ha,
+            "has_refresh_token":     hr,
+            "needs_reauth":          nr,
+            "salla_response_preview": str(result)[:300],
+        }
+    except Exception as exc:
+        return {
+            "success":               False,
+            "error":                 str(exc)[:400],
+            "selected_integration_id": intg.id,
+            "store_id":              cfg.get("store_id"),
+            "has_access_token":      ha,
+            "has_refresh_token":     hr,
+            "needs_reauth":          bool((intg.config or {}).get("needs_reauth")),
+        }

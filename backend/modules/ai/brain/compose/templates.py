@@ -540,11 +540,20 @@ _NARROW_CHOICES_CLOSINGS = [
 
 
 def narrow_choices(products: List[Dict[str, Any]], variant: int = 0, **_: Any) -> str:
+    """Show a numbered product list.
+
+    CRITICAL: the index shown here (1, 2, 3 …) MUST match the index stored
+    in last_search_candidates. Never slice this list differently from the
+    candidates stored in state — that mismatch is the root cause of the
+    "listed then immediately rejected" bug (e.g. customer sees "1. بنطلون"
+    but system rejects "بلوزة" because candidates were stored in a different
+    order or were truncated).
+    """
     if not products:
         return generic_fallback()
     v = variant % 3
     lines = [_NARROW_CHOICES_HEADERS[v] + "\n"]
-    for i, p in enumerate(products[:3], 1):
+    for i, p in enumerate(products, 1):   # show ALL — no [:3] truncation
         price_str = f"{p['price']} ريال" if p.get("price") else ""
         line = f"{i}. *{p['title']}*"
         if price_str:
