@@ -1336,32 +1336,79 @@ async def _execute_action(
         coupon_extras=coupon_extras,
     )
 
-    # Count how many {{N}} the BODY component actually contains so we
-    # only feed that many parameters to Meta. Templates where the URL
-    # button has its own {{1}} (independent from the BODY {{1}}) used
-    # to fail with Meta 132000 "parameter count mismatch" because the
-    # old code passed button-slot values as body parameters.
+    # ── Count placeholders in EVERY component (BODY/HEADER/BUTTONS) ──────────
+    # Meta's parameter count must EXACTLY match the approved template, per
+    # component, otherwise it returns 132000 / template_param_mismatch.
+    # The local `template.components` mirror the live Meta-approved structure
+    # because /templates/sync overwrites them on every cycle.
     import re as _re
-    _body_ph_count = 0
-    for _tcomp in (template.components or []):
-        if str(_tcomp.get("type", "")).upper() == "BODY":
-            _body_ph_count = len(_re.findall(r"\{\{[^{}]+\}\}", str(_tcomp.get("text") or "")))
-            break
+    _PLACEHOLDER_RE = _re.compile(r"\{\{[^{}]+\}\}")
 
+    def _ph_count(text: Any) -> int:
+        return len(_PLACEHOLDER_RE.findall(str(text or "")))
+
+    _body_ph_count = 0
+    _header_ph_count = 0
+    _header_format = ""
+    _button_ph_count = 0  # number of BUTTON components Meta expects (URL+COPY_CODE)
+    for _tcomp in (template.components or []):
+        _ttype = str(_tcomp.get("type", "")).upper()
+        if _ttype == "BODY":
+            _body_ph_count = _ph_count(_tcomp.get("text"))
+        elif _ttype == "HEADER":
+            _header_format = str(_tcomp.get("format", "")).upper()
+            if _header_format == "TEXT":
+                _header_ph_count = _ph_count(_tcomp.get("text"))
+        elif _ttype == "BUTTONS":
+            for _btn in (_tcomp.get("buttons") or []):
+                _btype = str(_btn.get("type", "")).upper()
+                if _btype == "COPY_CODE":
+                    _button_ph_count += 1
+                elif _btype == "URL" and "{{" in str(_btn.get("url", "") or ""):
+                    _button_ph_count += 1
+
+    # ── BODY parameters: pad/trim to EXACTLY body_ph_count ───────────────────
     _var_values = list(vars_map.values())
-    # If var_map has MORE slots than the BODY expects (e.g. because
-    # legacy `slots` included `checkout_url` alongside body vars),
-    # truncate to exactly what the body needs. This is the definitive
-    # guard against 132000.
     if _body_ph_count and len(_var_values) > _body_ph_count:
         logger.info(
             "[AutoEngine] trimming body_params from %d to %d for template %s",
             len(_var_values), _body_ph_count, template.name,
         )
         _var_values = _var_values[:_body_ph_count]
+    elif _body_ph_count and len(_var_values) < _body_ph_count:
+        # Pad with a single space so Meta accepts the call. An empty string
+        # ("") is rejected by Meta as "invalid parameter value".
+        _missing = _body_ph_count - len(_var_values)
+        logger.warning(
+            "[AutoEngine] padding body_params from %d to %d for template %s "
+            "(missing %d slot values — automation likely binds fewer slots "
+            "than Meta expects)",
+            len(_var_values), _body_ph_count, template.name, _missing,
+        )
+        _var_values = list(_var_values) + [" "] * _missing
 
-    body_params = [{"type": "text", "text": str(v)} for v in _var_values]
+    body_params = [{"type": "text", "text": (str(v) if str(v).strip() else " ")} for v in _var_values]
     components: List[Dict[str, Any]] = []
+
+    # ── HEADER parameters (only TEXT-format headers can carry {{N}}) ─────────
+    # Meta requires {"type":"header","parameters":[{"type":"text","text":...}]}
+    # whenever the approved header text contains {{N}} placeholders.
+    if _header_ph_count > 0 and _header_format == "TEXT":
+        # Reuse the same vars_map values; Salla/Nahla rarely needs a separate
+        # header slot. We take the first N body vars by convention. If the
+        # template actually has different header slots, this still avoids the
+        # hard failure and the merchant can edit the rendered text downstream.
+        _hdr_values = list(vars_map.values())[:_header_ph_count]
+        if len(_hdr_values) < _header_ph_count:
+            _hdr_values = list(_hdr_values) + [" "] * (_header_ph_count - len(_hdr_values))
+        components.append({
+            "type": "header",
+            "parameters": [
+                {"type": "text", "text": (str(v) if str(v).strip() else " ")}
+                for v in _hdr_values
+            ],
+        })
+
     if body_params:
         components.append({"type": "body", "parameters": body_params})
 
@@ -1463,6 +1510,43 @@ async def _execute_action(
         },
     }
 
+    # ── Pre-send diagnostic: counts MUST match the approved Meta template ────
+    # If you ever see a 132000 / template_param_mismatch in the next call,
+    # compare these counts against the WhatsApp Manager template UI.
+    _sent_header_params = 0
+    _sent_body_params = 0
+    _sent_button_params = 0
+    for _c in components:
+        _ctype = str(_c.get("type", "")).lower()
+        if _ctype == "header":
+            _sent_header_params = len(_c.get("parameters", []) or [])
+        elif _ctype == "body":
+            _sent_body_params = len(_c.get("parameters", []) or [])
+        elif _ctype == "button":
+            _sent_button_params += 1
+    logger.info(
+        "[AutoEngine][SEND] template=%s lang=%s | "
+        "expected: header=%d body=%d buttons=%d | "
+        "sending: header=%d body=%d buttons=%d",
+        template.name, template.language or "ar",
+        _header_ph_count, _body_ph_count, _button_ph_count,
+        _sent_header_params, _sent_body_params, _sent_button_params,
+    )
+    if (
+        _sent_body_params  != _body_ph_count
+        or _sent_header_params != _header_ph_count
+        or _sent_button_params != _button_ph_count
+    ):
+        logger.error(
+            "[AutoEngine][SEND] PARAM COUNT MISMATCH on template=%s — "
+            "Meta will likely reject with 132000. "
+            "expected(body=%d, header=%d, buttons=%d) "
+            "vs sending(body=%d, header=%d, buttons=%d)",
+            template.name,
+            _body_ph_count, _header_ph_count, _button_ph_count,
+            _sent_body_params, _sent_header_params, _sent_button_params,
+        )
+
     # ── Send ──────────────────────────────────────────────────────────────────
     try:
         from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
@@ -1494,9 +1578,13 @@ async def _execute_action(
             logger.error(
                 "[AutoEngine] Template send rejected by provider "
                 "tenant=%s event=%s automation=%s template=%s "
-                "code=%s label=%s raw=%s",
+                "code=%s label=%s raw=%s | "
+                "param_counts expected(body=%d header=%d buttons=%d) "
+                "sent(body=%d header=%d buttons=%d)",
                 tenant_id, event.id, automation.id, template.name,
                 code, label_ar, raw_meta,
+                _body_ph_count, _header_ph_count, _button_ph_count,
+                _sent_body_params, _sent_header_params, _sent_button_params,
             )
             return False, {
                 "error":       code,
@@ -1506,6 +1594,18 @@ async def _execute_action(
                 "template":    template.name,
                 "to":          to_phone,
                 "vars":        vars_map,
+                "param_counts": {
+                    "expected": {
+                        "body":    _body_ph_count,
+                        "header":  _header_ph_count,
+                        "buttons": _button_ph_count,
+                    },
+                    "sent": {
+                        "body":    _sent_body_params,
+                        "header":  _sent_header_params,
+                        "buttons": _sent_button_params,
+                    },
+                },
             }
 
         try:
