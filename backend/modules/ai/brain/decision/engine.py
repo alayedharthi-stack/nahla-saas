@@ -240,6 +240,20 @@ class DefaultDecisionEngine:
                 list(state.last_search_candidates or [])
                 or list(state.last_recommended_products or [])
             )
+
+            # ── Diagnostic: log numeric pick state before resolution ──────────
+            _pick_msg = (ctx.message or "").strip()
+            logger.info(
+                "[ORDER FLOW] numeric pick debug | text=%r "
+                "last_candidates_count=%d first_candidate=%r "
+                "current_product_focus=%r intent=%s",
+                _pick_msg,
+                len(candidates),
+                (candidates[0] or {}).get("title") if candidates else None,
+                (state.current_product_focus or {}).get("title"),
+                intent.name,
+            )
+
             if candidates:
                 idx = int(intent.slots.get("list_index", 1))
                 idx = max(1, min(idx, len(candidates)))
@@ -273,16 +287,14 @@ class DefaultDecisionEngine:
                             and c.get("external_id")
                             and c.get("id") != product.get("id")
                         ][:3]
-                        logger.warning(
-                            "[CATALOG] listed product failed validation | "
-                            "bug=True display_index=%d name=%r "
-                            "external_id=%s can_checkout=%s "
-                            "has_external_id=%s stock_qty=%s in_stock=%s status=%s "
-                            "— suggesting %d alternatives",
-                            idx, product.get("title"),
-                            product.get("external_id"),
+                        logger.error(
+                            "[ORDER FLOW] selected product mismatch | "
+                            "expected=%r (index=%d) can_checkout=%s external_id=%s "
+                            "stock_qty=%s in_stock=%s status=%s "
+                            "bug=True — rebuilding list with %d alternatives",
+                            product.get("title"), idx,
                             product.get("can_checkout"),
-                            bool(product.get("external_id")),
+                            product.get("external_id"),
                             product.get("stock_qty"), product.get("in_stock"),
                             product.get("status"), len(_alts),
                         )
@@ -311,13 +323,45 @@ class DefaultDecisionEngine:
                         confidence=0.90,
                     )
             # We saw a numeric pick but have no list to map it onto.
+            # GUARD: if the last bot action was a product list display
+            # (search_products / narrow_choices), the candidate state
+            # was lost (race condition or DB save failure). In that case
+            # we MUST NOT route to current_product_focus — that would
+            # show "بلوزة غير متوفر" for a customer who picked "بنطلون".
+            # Instead, ask the customer to pick by name or re-run the list.
+            _last_action = str(getattr(state, "last_action", "") or "")
+            _list_was_last = _last_action in (
+                "search_products", "narrow_choices",
+                "ACTION_SEARCH_PRODUCTS", "ACTION_NARROW",
+            )
+            if _list_was_last:
+                logger.warning(
+                    "[ORDER FLOW] numeric pick with NO candidates — "
+                    "last_action was a list display, candidates were lost | "
+                    "last_action=%r current_product_focus=%r "
+                    "— asking clarification to avoid wrong product",
+                    _last_action,
+                    (state.current_product_focus or {}).get("title"),
+                )
+                return Decision(
+                    action=ACTION_CLARIFY,
+                    args={
+                        "question": (
+                            "أرسل اسم المنتج الذي تريده، "
+                            "أو اكتب \"أكثر مبيعاً\" لأعرض لك القائمة مجدداً."
+                        ),
+                    },
+                    reason="numeric pick after list — candidates lost, re-ask",
+                    confidence=0.75,
+                )
+
             # ── If we already have a product focus + order_prep, the
             # number is likely a quantity ("1") rather than a product
             # pick — keep the order flow alive instead of breaking it.
             if state.current_product_focus and facts.orderable:
                 logger.info(
                     "[ORDER FLOW] number interpreted as quantity-or-option | "
-                    "product=%r — continuing order",
+                    "product=%r — continuing order (no active candidate list)",
                     (state.current_product_focus or {}).get("title"),
                 )
                 return Decision(
@@ -387,6 +431,21 @@ class DefaultDecisionEngine:
         # bug.
         _msg_text = (ctx.message or "").strip()
         _active_candidates = list(state.last_search_candidates or [])
+
+        # Log numeric pick state for ALL digit messages (even INTENT_PICK_LIST_ITEM
+        # cases already handled above) so we can diagnose state at entry.
+        if _msg_text.isdigit() and intent.name != INTENT_PICK_LIST_ITEM:
+            logger.info(
+                "[ORDER FLOW] numeric pick debug | text=%r "
+                "last_candidates_count=%d first_candidate=%r "
+                "current_product_focus=%r intent=%s",
+                _msg_text,
+                len(_active_candidates),
+                (_active_candidates[0] or {}).get("title") if _active_candidates else None,
+                (state.current_product_focus or {}).get("title"),
+                intent.name,
+            )
+
         if (
             _msg_text.isdigit()
             and _active_candidates
@@ -398,6 +457,19 @@ class DefaultDecisionEngine:
                 _forced_orderable = _forced_product.get(
                     "can_checkout", _forced_product.get("orderable", True)
                 )
+
+                # Guard: if stale current_product_focus differs from the
+                # candidate the customer is picking, clear it first so
+                # section 3.7 can never steal the message.
+                _stale_focus_title = (state.current_product_focus or {}).get("title")
+                _picked_title = _forced_product.get("title")
+                if state.current_product_focus and _stale_focus_title != _picked_title:
+                    logger.info(
+                        "[ORDER FLOW] clearing stale focus before numeric pick | "
+                        "stale_focus=%r picked_from_list=%r",
+                        _stale_focus_title, _picked_title,
+                    )
+
                 logger.info(
                     "[ORDER FLOW] numeric pick source | source=last_search_candidates "
                     "index=%d selected=%r external_id=%s can_checkout=%s "
@@ -406,7 +478,14 @@ class DefaultDecisionEngine:
                     _forced_product.get("external_id"), _forced_orderable,
                     intent.name,
                 )
-                if _forced_orderable and _forced_product.get("external_id"):
+
+                # ALWAYS route to draft-order from the candidate list —
+                # even if external_id is missing.  DraftOrderHandler will
+                # surface the correct "غير متوفر" message with the right
+                # product name.  NOT doing this causes fall-through to
+                # section 3.7 which uses the stale current_product_focus
+                # (بلوزة) and produces the wrong unavailable message.
+                if facts.orderable:
                     return Decision(
                         action=ACTION_PROPOSE_DRAFT_ORDER,
                         args={"product": _forced_product},
@@ -414,6 +493,17 @@ class DefaultDecisionEngine:
                                f"(intent={intent.name} overridden to list-pick)",
                         confidence=0.95,
                     )
+                # Store not orderable — still acknowledge the pick, don't
+                # silently fall through to an irrelevant template.
+                return Decision(
+                    action=ACTION_SEARCH_PRODUCTS,
+                    args={
+                        "query": _forced_product.get("title", ""),
+                        "selected_product": _forced_product,
+                    },
+                    reason=f"numeric pick #{_forced_idx} from list — store not orderable, show product",
+                    confidence=0.90,
+                )
 
         # ── 3.7 Continue order preparation while collecting checkout details ──
         # While ordering we treat slot-bearing messages and a small set of

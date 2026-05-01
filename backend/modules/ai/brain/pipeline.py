@@ -364,6 +364,25 @@ class MerchantBrain:
             # Cap to 16 so picks like "14" remain meaningful (top-seller lists
             # often exceed 8 items) while state stays small.
             new_state.last_search_candidates = list(_search_products)[:16]
+
+            # ── Diagnostic: log what we stored vs what was old focus ──────────
+            _old_focus_title = (new_state.current_product_focus or {}).get("title")
+            logger.info(
+                "[ORDER FLOW] product list displayed | "
+                "candidates=%s old_focus=%r action=%s",
+                [
+                    {
+                        "index": _i + 1,
+                        "name": _p.get("title"),
+                        "external_id": _p.get("external_id"),
+                        "can_checkout": _p.get("can_checkout", _p.get("orderable")),
+                    }
+                    for _i, _p in enumerate(new_state.last_search_candidates[:5])
+                ],
+                _old_focus_title,
+                decision.action,
+            )
+
             # CRITICAL: A new product list is now active.  Clear the stale
             # current_product_focus so that section 3.7 in the decision engine
             # (continuation-intent routing) cannot fire on the OLD focus when
@@ -374,15 +393,11 @@ class MerchantBrain:
                 logger.info(
                     "[ORDER FLOW] reset stale current_product_focus after product list display | "
                     "old_focus=%r new_candidates=%d action=%s",
-                    (new_state.current_product_focus or {}).get("title"),
+                    _old_focus_title,
                     len(new_state.last_search_candidates),
                     decision.action,
                 )
                 new_state.current_product_focus = None
-            logger.info(
-                "[ORDER FLOW] persisted product list for pick | count=%d action=%s",
-                len(new_state.last_search_candidates), decision.action,
-            )
 
         new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)
         ctx.state = new_state
@@ -451,6 +466,38 @@ class MerchantBrain:
 
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
+
+        # ── 7b. Sync candidates with EXACTLY what the composer displayed ──────
+        # The composer filters `result.data["products"]` to `safe_products`
+        # (only can_checkout=True items) and stores them as `pending_candidates`.
+        # If we stored the unfiltered executor list earlier (step 6), the stored
+        # candidates may not match the displayed list — causing "1" to resolve
+        # to a DIFFERENT product than the one shown. Overwrite with the exact
+        # displayed list whenever the composer set pending_candidates.
+        _pending_after_compose = result.data.get("pending_candidates")
+        if _pending_after_compose:
+            _first_before = (
+                (new_state.last_search_candidates[0] or {}).get("title")
+                if new_state.last_search_candidates else None
+            )
+            _first_after = (_pending_after_compose[0] or {}).get("title")
+            if new_state.last_search_candidates != list(_pending_after_compose):
+                logger.warning(
+                    "[ORDER FLOW] candidate list corrected after compose | "
+                    "before_count=%d first_before=%r after_count=%d first_after=%r "
+                    "— stored list now matches displayed list",
+                    len(new_state.last_search_candidates), _first_before,
+                    len(_pending_after_compose), _first_after,
+                )
+            new_state.last_search_candidates = list(_pending_after_compose)
+            logger.info(
+                "[ORDER FLOW] product list state saved | "
+                "last_search_candidates_count=%d first=%r current_product_focus=%r",
+                len(new_state.last_search_candidates),
+                (new_state.last_search_candidates[0] or {}).get("title")
+                if new_state.last_search_candidates else None,
+                (new_state.current_product_focus or {}).get("title"),
+            )
 
         asked_now = _infer_last_question(decision, result, suggestion)
         if asked_now:

@@ -190,6 +190,7 @@ class DraftOrderHandler:
                 data={
                     "product_unsyncable": True,
                     "message": "product_not_on_store",
+                    "product": product_info,
                     "order_prep": prep.to_dict(),
                 },
             )
