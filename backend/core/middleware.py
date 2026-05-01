@@ -39,6 +39,11 @@ JWT_PUBLIC_PREFIXES = (
     "/salla",                           # /salla/start (new merchant install entry point)
     "/api/salla/test/authorize",        # Salla TEST app OAuth start — public redirect
     "/api/salla/diag/",                 # public diagnostic endpoints (no secrets exposed)
+    "/api/salla/oauth/start",           # Sync (OAuth) app: 302 → accounts.salla.sa
+                                        # JWT validated inside handler from ?token=
+                                        # (Authorization header is stripped on top-level navigation)
+    "/api/salla/oauth/callback",        # Sync (OAuth) app: Salla redirects here with ?code=
+                                        # tenant resolved from signed state, no JWT needed
     "/zid",                             # /zid/app, /zid/redirect, /zid/token-login
     "/settings/validate",               # Salla Partner Portal validation probe
     "/snippet.js",

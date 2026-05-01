@@ -29,6 +29,26 @@ function getToken(): string {
   try { return localStorage.getItem('nahla_token') || '' } catch { return '' }
 }
 
+// Robust resolver for the merchant JWT — used before redirecting to
+// /api/salla/oauth/start.  That endpoint reads ?token=<JWT> from the query
+// string because top-level navigation strips Authorization headers.
+// Sources tried in order: localStorage → sessionStorage → cookie nahla_token.
+function resolveSessionToken(): string {
+  try {
+    const t1 = localStorage.getItem('nahla_token')
+    if (t1) return t1
+  } catch { /* localStorage blocked */ }
+  try {
+    const t2 = sessionStorage.getItem('nahla_token') || sessionStorage.getItem('token')
+    if (t2) return t2
+  } catch { /* sessionStorage blocked */ }
+  try {
+    const m = document.cookie.match(/(?:^|;\s*)nahla_token=([^;]+)/)
+    if (m && m[1]) return decodeURIComponent(m[1])
+  } catch { /* cookies blocked */ }
+  return ''
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 interface EmbeddedStatus {
@@ -378,25 +398,32 @@ export default function SallaEntryScreen() {
   // not allow embedding in iframes.  The JWT is forwarded as a query param
   // because window.top navigation strips Authorization headers.
   const openOauthSync = useCallback(() => {
-    const token = getToken()
-    if (!token) {
-      alert('انتهت الجلسة، أعد فتح التطبيق من سلة.')
+    const token = resolveSessionToken()
+    const hasToken = Boolean(token)
+    if (!hasToken) {
+      console.warn('[SallaEntry] aborted: no JWT in localStorage/sessionStorage/cookie')
+      console.info('  has_token     :', false)
+      console.info('  start_url     : (not opened — token missing)')
+      alert('انتهت الجلسة، الرجاء تسجيل الدخول مرة أخرى')
       navigate('/app/salla', { replace: true })
       return
     }
     const url = `${API_BASE}/api/salla/oauth/start?token=${encodeURIComponent(token)}`
-    // Verbose console logging so we can diagnose redirect_uri/client_id
-    // issues from the browser side.  The backend logs the EXACT Salla
-    // authorize URL it generates — see "[Salla API OAuth] FULL_AUTH_URL".
     console.group('[SallaEntry] ربط المتجر عبر سلة OAuth — clicked')
-    console.info('opening at TOP window (escapes Salla iframe)')
-    console.info('start_url      :', url)
-    console.info('api_base       :', API_BASE)
-    console.info('has_token      :', !!token)
-    console.info('token_preview  :', token ? token.slice(0, 16) + '…' : '(none)')
-    console.info('next_step      : backend redirects to https://accounts.salla.sa/oauth2/auth?...')
-    console.info('               : check Railway logs for "[Salla API OAuth] FULL_AUTH_URL"')
+    console.info('  opening at TOP window (escapes Salla iframe)')
+    console.info('  api_base      :', API_BASE)
+    console.info('  has_token     :', hasToken)
+    console.info('  token_preview :', token.slice(0, 15))
+    console.info('  start_url     :', url)
+    console.info('  next_step     : backend redirects to https://accounts.salla.sa/oauth2/auth?...')
+    console.info('                  check Railway logs for "[Salla API OAuth] FULL_AUTH_URL"')
     console.groupEnd()
+    // Defensive sanity check — never open the URL without ?token=
+    if (!/[?&]token=/.test(url)) {
+      console.error('[SallaEntry] refusing to open OAuth URL without ?token=')
+      alert('انتهت الجلسة، الرجاء تسجيل الدخول مرة أخرى')
+      return
+    }
     if (window.top) {
       window.top.location.href = url
     } else {

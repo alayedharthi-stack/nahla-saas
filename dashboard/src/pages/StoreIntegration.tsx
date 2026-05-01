@@ -20,6 +20,29 @@ import { apiCall, API_BASE } from '../api/client'
 import { getToken } from '../auth'
 import StoreSyncPanel from '../components/StoreSyncPanel'
 
+// Resolve the merchant JWT from any client-side location.  We MUST have a
+// token before redirecting to /api/salla/oauth/start because that endpoint
+// reads ?token=<JWT> from the query string (the Authorization header is
+// stripped by the browser on top-level navigation).  Sources tried in order:
+//   1. localStorage (default Nahla sign-in path)
+//   2. sessionStorage (some embedded handoffs)
+//   3. document.cookie nahla_token=...
+function resolveSessionToken(): string {
+  try {
+    const t1 = getToken()
+    if (t1) return t1
+  } catch { /* localStorage blocked */ }
+  try {
+    const t2 = sessionStorage.getItem('nahla_token') || sessionStorage.getItem('token')
+    if (t2) return t2
+  } catch { /* sessionStorage blocked */ }
+  try {
+    const m = document.cookie.match(/(?:^|;\s*)nahla_token=([^;]+)/)
+    if (m && m[1]) return decodeURIComponent(m[1])
+  } catch { /* cookies blocked */ }
+  return ''
+}
+
 export default function StoreIntegration() {
   const [status, setStatus] = useState<StoreIntegrationStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -129,21 +152,40 @@ export default function StoreIntegration() {
     // Sync OAuth app via /api/salla/oauth/start which uses the registered
     // redirect_uri https://api.nahlah.ai/api/salla/oauth/callback.
     setOauthLoading(true)
-    const token = getToken()
-    if (!token) {
-      alert('انتهت الجلسة. الرجاء تسجيل الدخول مرة أخرى.')
+
+    // Resolve token from any available client-side source. The middleware
+    // strips Authorization headers on top-level navigation so we MUST embed
+    // the JWT in the query string; therefore the URL is NEVER opened
+    // without a valid ?token=.
+    const token = resolveSessionToken()
+    const hasToken = Boolean(token)
+    if (!hasToken) {
+      console.warn('[StoreIntegration] aborted: no JWT in localStorage/sessionStorage/cookie')
+      console.info('  has_token     :', false)
+      console.info('  start_url     : (not opened — token missing)')
+      alert('انتهت الجلسة، الرجاء تسجيل الدخول مرة أخرى')
       setOauthLoading(false)
       return
     }
+
     const startUrl = `${API_BASE}/api/salla/oauth/start?token=${encodeURIComponent(token)}`
     console.group('[StoreIntegration] ربط المتجر عبر سلة OAuth — clicked')
     console.info('[Salla API OAuth] USING NEW FLOW')
-    console.info('endpoint     : /api/salla/oauth/start')
-    console.info('redirect_uri : https://api.nahlah.ai/api/salla/oauth/callback')
-    console.info('start_url    :', startUrl)
-    console.info('next_step    : backend will 302 to https://accounts.salla.sa/oauth2/auth?...')
-    console.info('               check Railway logs for "[Salla API OAuth] FULL_AUTH_URL"')
+    console.info('  endpoint      : /api/salla/oauth/start')
+    console.info('  redirect_uri  : https://api.nahlah.ai/api/salla/oauth/callback')
+    console.info('  has_token     :', hasToken)
+    console.info('  token_preview :', token.slice(0, 15))
+    console.info('  start_url     :', startUrl)
+    console.info('  next_step     : backend will 302 to https://accounts.salla.sa/oauth2/auth?...')
+    console.info('                  check Railway logs for "[Salla API OAuth] FULL_AUTH_URL"')
     console.groupEnd()
+    // Defensive sanity check — never open the URL without ?token=
+    if (!/[?&]token=/.test(startUrl)) {
+      console.error('[StoreIntegration] refusing to open OAuth URL without ?token=')
+      alert('انتهت الجلسة، الرجاء تسجيل الدخول مرة أخرى')
+      setOauthLoading(false)
+      return
+    }
     // Navigate at the top-level window — the OAuth provider rejects iframes.
     window.location.href = startUrl
   }
