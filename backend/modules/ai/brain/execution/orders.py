@@ -45,7 +45,25 @@ class DraftOrderHandler:
         from modules.ai.commerce.runtime import CommerceToolRuntime
 
         product_info = decision.args.get("product") or ctx.state.current_product_focus
+
+        # ── Entry log: proves the handler was reached ─────────────────────────
+        logger.info(
+            "[ORDER FLOW] DraftOrderHandler.handle() entered | tenant=%s "
+            "product=%r external_id=%s has_product_info=%s",
+            ctx.tenant_id,
+            (product_info or {}).get("title"),
+            (product_info or {}).get("external_id"),
+            bool(product_info),
+        )
+
         if not product_info:
+            logger.error(
+                "[ORDER FLOW] no product_info — no_product_focus | tenant=%s "
+                "decision_args=%s current_product_focus=%s",
+                ctx.tenant_id,
+                list(decision.args.keys()),
+                bool(ctx.state.current_product_focus),
+            )
             return ActionResult(
                 success=False,
                 error="no_product_focus",
@@ -403,6 +421,28 @@ class DraftOrderHandler:
             tenant_context=ctx.tenant_context,
         )
         _options_payload = _resolve_options_payload(prep)
+
+        # ── FINAL CHECK — log every condition before posting to Salla ─────────
+        # If any line here shows False/missing, that is why the order failed.
+        _has_city       = bool(prep.city and prep.city.strip())
+        _has_short_code = bool(prep.short_address_code and prep.short_address_code.strip())
+        _has_maps       = bool(prep.google_maps_url)
+        _has_lat_lng    = bool(prep.latitude and prep.longitude)
+        _has_address    = _has_short_code or _has_maps or _has_lat_lng
+        _has_name       = bool(prep.customer_first_name)
+        _has_options    = bool(_options_payload)
+        _needs_opts     = bool(prep.product_has_required_options)
+        _can_checkout   = product_info.get("can_checkout", product_info.get("orderable", True))
+        logger.error(
+            "[ORDER FLOW] FINAL CHECK | tenant=%s product_id=%s external_id=%s "
+            "has_name=%s has_city=%s has_short_code=%s has_maps=%s has_lat_lng=%s "
+            "has_address=%s has_options=%s needs_options=%s can_checkout=%s "
+            "quantity=%s shipping_id=%s previous_failed=%s",
+            ctx.tenant_id, product_info.get("id"), external_id,
+            _has_name, _has_city, _has_short_code, _has_maps, _has_lat_lng,
+            _has_address, _has_options, _needs_opts, _can_checkout,
+            max(int(prep.quantity or 1), 1), prep.shipping_company_id, previous_failed,
+        )
 
         # ── Mandatory diagnostic log: ALWAYS emit the final order options
         # so we can compare what we *think* we collected vs. what Salla

@@ -47,10 +47,36 @@ async def create_order(tenant_id: int, order_input: OrderInput) -> Optional[Norm
 
 
 async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optional[NormalizedOrder]:
+    # ── Entry: every call to this function must produce a log ────────────────
+    logger.error(
+        "[ORDER FLOW] attempting create_order | tenant=%s product=%s "
+        "has_city=%s has_address=%s has_options=%s qty=%s",
+        tenant_id,
+        (order_input.items[0].product_id if order_input.items else "?"),
+        bool(getattr(order_input, "city", None)),
+        bool(
+            getattr(order_input, "short_address_code", None)
+            or getattr(order_input, "google_maps_url", None)
+            or getattr(order_input, "latitude", None)
+        ),
+        bool(order_input.items and order_input.items[0].options),
+        (order_input.items[0].quantity if order_input.items else 0),
+    )
     adapter = get_adapter(tenant_id)
     if not adapter:
-        logger.warning("[OrderService] tenant=%s create_draft_order — no adapter found", tenant_id)
+        # This is a hard failure: no adapter = Salla not connected.
+        logger.error(
+            "[ORDER FLOW] create_order BLOCKED — no Salla adapter for tenant=%s "
+            "(integration missing, disabled, or needs_reauth=True)",
+            tenant_id,
+        )
         return None
+    logger.error(
+        "[ORDER FLOW] runtime create_order called | tenant=%s "
+        "adapter=%s integration_id=%s",
+        tenant_id, adapter.platform,
+        getattr(adapter, "_integration_id", "unknown"),
+    )
     try:
         order = await adapter.create_draft_order(order_input)
         logger.info(
