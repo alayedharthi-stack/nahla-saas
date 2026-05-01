@@ -364,6 +364,21 @@ class MerchantBrain:
             # Cap to 16 so picks like "14" remain meaningful (top-seller lists
             # often exceed 8 items) while state stays small.
             new_state.last_search_candidates = list(_search_products)[:16]
+            # CRITICAL: A new product list is now active.  Clear the stale
+            # current_product_focus so that section 3.7 in the decision engine
+            # (continuation-intent routing) cannot fire on the OLD focus when
+            # the customer sends a number like "1" that should resolve from the
+            # NEW candidate list.  Without this, "1" is routed as INTENT_GENERAL
+            # + old focus → ACTION_PROPOSE_DRAFT_ORDER with wrong product.
+            if new_state.current_product_focus:
+                logger.info(
+                    "[ORDER FLOW] reset stale current_product_focus after product list display | "
+                    "old_focus=%r new_candidates=%d action=%s",
+                    (new_state.current_product_focus or {}).get("title"),
+                    len(new_state.last_search_candidates),
+                    decision.action,
+                )
+                new_state.current_product_focus = None
             logger.info(
                 "[ORDER FLOW] persisted product list for pick | count=%d action=%s",
                 len(new_state.last_search_candidates), decision.action,

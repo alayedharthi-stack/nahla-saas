@@ -377,26 +377,60 @@ class DefaultDecisionEngine:
                 confidence=0.95,
             )
 
+        # ── 3.6 Numeric message with active candidate list ────────────────────
+        # Safety net: if the customer sent a bare number AND we have an
+        # active candidate list, treat it as a list pick even when the
+        # intent classifier returned INTENT_GENERAL / INTENT_HESITATION
+        # instead of INTENT_PICK_LIST_ITEM.  Without this guard, section
+        # 3.7 would grab the message and route to the OLD current_product_focus,
+        # producing the "listed بنطلون, customer sent 1, bot says بلوزة غير متوفر"
+        # bug.
+        _msg_text = (ctx.message or "").strip()
+        _active_candidates = list(state.last_search_candidates or [])
+        if (
+            _msg_text.isdigit()
+            and _active_candidates
+            and intent.name != INTENT_PICK_LIST_ITEM
+        ):
+            _forced_idx = int(_msg_text)
+            if 1 <= _forced_idx <= len(_active_candidates):
+                _forced_product = _active_candidates[_forced_idx - 1]
+                _forced_orderable = _forced_product.get(
+                    "can_checkout", _forced_product.get("orderable", True)
+                )
+                logger.info(
+                    "[ORDER FLOW] numeric pick source | source=last_search_candidates "
+                    "index=%d selected=%r external_id=%s can_checkout=%s "
+                    "(intent was %s — overriding to list-pick)",
+                    _forced_idx, _forced_product.get("title"),
+                    _forced_product.get("external_id"), _forced_orderable,
+                    intent.name,
+                )
+                if _forced_orderable and _forced_product.get("external_id"):
+                    return Decision(
+                        action=ACTION_PROPOSE_DRAFT_ORDER,
+                        args={"product": _forced_product},
+                        reason=f"numeric pick #{_forced_idx} from active candidate list "
+                               f"(intent={intent.name} overridden to list-pick)",
+                        confidence=0.95,
+                    )
+
         # ── 3.7 Continue order preparation while collecting checkout details ──
         # While ordering we treat slot-bearing messages and a small set of
         # "neutral" intents as continuation so the funnel doesn't reset.
         #
-        # Two rules to keep this from over-firing — the trap that produced
-        # "راجياً سجلت اهتمامك بـ فستان" when the customer actually asked
-        # "تعرض لي المنتجات بالصور؟":
+        # GUARD: Never fire this block when there is an active candidate list
+        # (last_search_candidates non-empty).  A pending list means the
+        # customer is browsing — the continuation intent should not hijack
+        # their next message and route it to a stale current_product_focus.
         #
+        # Two more rules to keep this from over-firing:
         #   a) ASK_PRODUCT / ASK_PRICE are NOT continuation intents on their
         #      own. A real product/price question mid-order is a request to
-        #      browse, not a slot fill — fall through to SEARCH_PRODUCTS so
-        #      the customer can actually compare. (They WILL still match the
-        #      slots clause below if the message also contains a city /
-        #      name / short_address_code, which is the legitimate
-        #      "الرياض ABCD1234" case.)
+        #      browse, not a slot fill.
         #   b) Greeting / general / hesitation stay in the list so a polite
         #      "هلا" or "تمام" doesn't bounce the customer to the greeting
-        #      template. The DraftOrderHandler will run
-        #      extract_address_signals on the raw text and decide whether
-        #      the message actually contained data.
+        #      template.
         _CONTINUATION_INTENTS = (
             INTENT_START_ORDER,
             INTENT_GENERAL,
@@ -407,11 +441,17 @@ class DefaultDecisionEngine:
             state.stage in (STAGE_ORDERING, STAGE_DECIDING)
             and state.current_product_focus
             and not state.checkout_url
+            and not _active_candidates          # GUARD: no pending list
             and (
                 intent.name in _CONTINUATION_INTENTS
                 or any(slot in intent.slots for slot in checkout_slots)
             )
         ):
+            logger.info(
+                "[ORDER FLOW] numeric pick source | source=current_product_focus "
+                "selected=%r (no active candidate list)",
+                (state.current_product_focus or {}).get("title"),
+            )
             return Decision(
                 action=ACTION_PROPOSE_DRAFT_ORDER,
                 args={"product": state.current_product_focus},
