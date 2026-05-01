@@ -1922,6 +1922,27 @@ async def salla_diag_oauth_config():
 
 _API_SYNC_STATE_SUFFIX = "_apisync"
 
+# Cookie used as a fallback when Salla strips the `state` query param.
+# Set on /api/salla/oauth/start and read on /api/salla/oauth/callback.
+# SameSite=Lax allows it to be sent on the top-level GET redirect from
+# accounts.salla.sa back to api.nahlah.ai.  HttpOnly + Secure since it
+# encodes the tenant_id and only the server should ever read it.
+_OAUTH_STATE_COOKIE = "nahla_oauth_state"
+_OAUTH_STATE_COOKIE_TTL_SECONDS = 600  # 10 minutes — OAuth flows complete in <60s
+
+
+def _api_oauth_redirect_url(status: str, **extras: str) -> str:
+    """Build the post-callback redirect URL on the dashboard origin.
+
+    ``status`` is one of: ``success`` | ``error``.
+    Extra kwargs are appended as query params (e.g. ``reason=<code>``).
+    The dashboard reads ``?salla_oauth=<status>`` on /app/entry to refresh
+    the integration status banner / show a toast.
+    """
+    qs = {"salla_oauth": status}
+    qs.update({k: v for k, v in extras.items() if v})
+    return f"{_DASHBOARD_ORIGIN}{_SALLA_POST_OAUTH_PATH}?{urllib.parse.urlencode(qs)}"
+
 
 def _api_oauth_success_html(store_id: str, store_name: str) -> str:
     """Tiny HTML page shown after the Sync OAuth completes.
@@ -2062,8 +2083,27 @@ async def salla_api_oauth_start(request: Request, token: Optional[str] = None):
     logger.info("[Salla API OAuth]   response_type      = %r", oauth_params["response_type"])
     logger.info("[Salla API OAuth]   state              = %r", state)
     logger.info("[Salla API OAuth]   FULL_AUTH_URL      = %s", auth_url)
+    # Defensive: confirm state IS in the URL we're about to redirect to.
+    if "&state=" not in auth_url and "?state=" not in auth_url:
+        logger.error("[Salla API OAuth] FULL_AUTH_URL is missing &state= — refusing to redirect")
+        raise HTTPException(status_code=500, detail="oauth_state_missing_from_url")
 
-    return RedirectResponse(url=auth_url, status_code=302)
+    # Set a fallback cookie so the callback can still recover tenant_id even
+    # if Salla's redirect strips the `state` query param.  SameSite=Lax is
+    # critical: it allows the cookie to be sent on the top-level GET that
+    # accounts.salla.sa issues back to api.nahlah.ai.
+    response = RedirectResponse(url=auth_url, status_code=302)
+    response.set_cookie(
+        key=_OAUTH_STATE_COOKIE,
+        value=state,
+        max_age=_OAUTH_STATE_COOKIE_TTL_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/api/salla/oauth/",
+    )
+    logger.info("[Salla API OAuth]   state cookie set   = %s (max_age=%ss, samesite=lax)", _OAUTH_STATE_COOKIE, _OAUTH_STATE_COOKIE_TTL_SECONDS)
+    return response
 
 
 @router.get("/api/salla/oauth/callback")
@@ -2080,45 +2120,79 @@ async def salla_api_oauth_callback(
     Distinct from ``/oauth/salla/callback`` (the legacy Communication-App
     callback) because:
       • Uses SALLA_OAUTH_CLIENT_ID / SALLA_OAUTH_CLIENT_SECRET / SALLA_OAUTH_REDIRECT_URI.
-      • Resolves tenant strictly from the ``state`` (we trust it because we
-        signed it ourselves a moment ago in ``/api/salla/oauth/start``).
+      • Resolves tenant from ``state`` (which encodes ``t{tenant_id}_..._apisync``)
+        OR from the ``nahla_oauth_state`` cookie set on /api/salla/oauth/start
+        as a fallback when Salla strips the state query param.
       • On success, marks the integration row with ``api_sync_enabled=True``
         + ``api_canonical=True`` so ``pick_active_salla_integration`` will
         treat it as the canonical source of refresh_token going forward.
-      • Returns a popup-friendly HTML that posts a message to the opener
-        and self-closes — designed to be opened in a new top-level tab from
-        inside the Salla iframe.
+      • Redirects (302) to ``{DASHBOARD_URL}/app/entry?salla_oauth=success``
+        on success or ``?salla_oauth=error&reason=<code>`` on failure.
+        This endpoint NEVER requires a session token — tenant is resolved
+        entirely from state/cookie.
     """
     client_ip = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
+
+    # ── CALLBACK HIT log (very first thing) ─────────────────────────────────
+    cookie_state = request.cookies.get(_OAUTH_STATE_COOKIE) or ""
     logger.info(
-        "[Salla API OAuth] callback | code=%s state=%s error=%s ip=%s",
-        bool(code), state, error, client_ip,
+        "[Salla API OAuth] CALLBACK HIT\n"
+        "  code_present  = %s\n"
+        "  state_present = %s\n"
+        "  state_in_query= %r\n"
+        "  state_in_cookie=%r\n"
+        "  error         = %r\n"
+        "  ip            = %s",
+        bool(code), bool(state), state, cookie_state, error, client_ip,
     )
 
     if error:
         logger.warning("[Salla API OAuth] provider error: %s", error)
-        return HTMLResponse(content=_install_error_html(error), status_code=400)
+        return RedirectResponse(
+            url=_api_oauth_redirect_url("error", reason=str(error)[:60]),
+            status_code=302,
+        )
 
     if not code:
-        return HTMLResponse(content=_install_error_html("missing_code"), status_code=400)
+        return RedirectResponse(
+            url=_api_oauth_redirect_url("error", reason="missing_code"),
+            status_code=302,
+        )
 
     if not SALLA_OAUTH_CLIENT_ID or not SALLA_OAUTH_CLIENT_SECRET:
         logger.error("[Salla API OAuth] credentials not configured")
-        return HTMLResponse(content=_install_error_html("app_not_configured"), status_code=503)
+        return RedirectResponse(
+            url=_api_oauth_redirect_url("error", reason="app_not_configured"),
+            status_code=302,
+        )
 
-    # ── Resolve tenant strictly from state (we minted it ourselves) ─────────
+    # ── Resolve tenant: query state first, cookie as fallback ───────────────
+    raw_state = (state or "").strip() or cookie_state.strip()
+    state_source = "query" if state else ("cookie" if cookie_state else "missing")
+
     tenant_id = 0
-    raw_state = state or ""
     if raw_state.startswith("t") and "_" in raw_state:
         try:
             tenant_id = int(raw_state.split("_", 1)[0][1:])
         except ValueError:
             tenant_id = 0
+
+    logger.info(
+        "[Salla API OAuth] state resolution | source=%s tenant_resolved=%s raw_state=%r",
+        state_source, tenant_id, raw_state,
+    )
+
     if tenant_id <= 0:
-        logger.error("[Salla API OAuth] cannot parse tenant from state=%r", raw_state)
-        return HTMLResponse(content=_install_error_html("invalid_state"), status_code=400)
+        logger.error(
+            "[Salla API OAuth] no tenant resolvable | query_state=%r cookie_state=%r",
+            state, cookie_state,
+        )
+        return RedirectResponse(
+            url=_api_oauth_redirect_url("error", reason="invalid_state"),
+            status_code=302,
+        )
 
     if not raw_state.endswith(_API_SYNC_STATE_SUFFIX):
         # Defensive: this callback is dedicated to the API Sync app — refuse
@@ -2127,7 +2201,10 @@ async def salla_api_oauth_callback(
             "[Salla API OAuth] state without expected suffix — possible cross-app mix-up | state=%s",
             raw_state,
         )
-        return HTMLResponse(content=_install_error_html("wrong_callback"), status_code=400)
+        return RedirectResponse(
+            url=_api_oauth_redirect_url("error", reason="wrong_callback"),
+            status_code=302,
+        )
 
     # ── Token exchange ──────────────────────────────────────────────────────
     normalized_redirect = (SALLA_OAUTH_REDIRECT_URI or "").strip().rstrip("/")
@@ -2160,9 +2237,9 @@ async def salla_api_oauth_callback(
                     "[Salla API OAuth] token exchange FAILED | http=%s err=%s desc=%s",
                     token_resp.status_code, salla_err, salla_msg,
                 )
-                return HTMLResponse(
-                    content=_install_error_html(f"token_exchange_failed: {salla_err or salla_msg}"),
-                    status_code=400,
+                return RedirectResponse(
+                    url=_api_oauth_redirect_url("error", reason=f"token_exchange_failed:{(salla_err or 'http')[:30]}"),
+                    status_code=302,
                 )
 
             token_data    = token_resp.json()
@@ -2170,6 +2247,11 @@ async def salla_api_oauth_callback(
             refresh_token = token_data.get("refresh_token", "")
             expires_in    = token_data.get("expires_in", 0)
             token_type    = token_data.get("token_type", "Bearer")
+
+            logger.info(
+                "[Salla API OAuth] token exchange OK | access_token_present=%s refresh_token_present=%s expires_in=%s",
+                bool(access_token), bool(refresh_token), expires_in,
+            )
 
             if not refresh_token:
                 # The whole point of this app is to obtain refresh_token —
@@ -2179,9 +2261,9 @@ async def salla_api_oauth_callback(
                     "[Salla API OAuth] no refresh_token in response — check scope=offline_access "
                     "and that Partner Portal app is General/Custom OAuth (not Communication)"
                 )
-                return HTMLResponse(
-                    content=_install_error_html("no_refresh_token_returned"),
-                    status_code=400,
+                return RedirectResponse(
+                    url=_api_oauth_redirect_url("error", reason="no_refresh_token"),
+                    status_code=302,
                 )
 
             # ── Fetch store info to get the external store_id ───────────────
@@ -2206,10 +2288,16 @@ async def salla_api_oauth_callback(
 
     except httpx.TimeoutException as exc:
         logger.error("[Salla API OAuth] token exchange timed out: %s", exc)
-        return HTMLResponse(content=_install_error_html("timeout"), status_code=504)
+        return RedirectResponse(
+            url=_api_oauth_redirect_url("error", reason="timeout"),
+            status_code=302,
+        )
     except Exception as exc:
         logger.exception("[Salla API OAuth] unexpected error: %s", exc)
-        return HTMLResponse(content=_install_error_html("network_error"), status_code=502)
+        return RedirectResponse(
+            url=_api_oauth_redirect_url("error", reason="network_error"),
+            status_code=302,
+        )
 
     # ── Persist as the canonical Sync integration ───────────────────────────
     try:
@@ -2288,9 +2376,20 @@ async def salla_api_oauth_callback(
             db.rollback()
         except Exception:
             pass
-        return HTMLResponse(content=_install_error_html("db_save_failed"), status_code=500)
+        return RedirectResponse(
+            url=_api_oauth_redirect_url("error", reason="db_save_failed"),
+            status_code=302,
+        )
 
-    return HTMLResponse(content=_api_oauth_success_html(salla_store_id, store_name), status_code=200)
+    success_url = _api_oauth_redirect_url("success", store=salla_store_id or "")
+    logger.info(
+        "[Salla API OAuth] CALLBACK COMPLETE | tenant=%s store_id=%s -> %s",
+        tenant_id, salla_store_id, success_url,
+    )
+    response = RedirectResponse(url=success_url, status_code=302)
+    # Clear the state cookie — flow is complete.
+    response.delete_cookie(_OAUTH_STATE_COOKIE, path="/api/salla/oauth/")
+    return response
 
 
 @router.get("/api/salla/integration-status")

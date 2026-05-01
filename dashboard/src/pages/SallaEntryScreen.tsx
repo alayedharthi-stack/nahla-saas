@@ -551,6 +551,28 @@ export default function SallaEntryScreen() {
     return () => window.removeEventListener('message', onMsg)
   }, [load])
 
+  // Handle the post-callback redirect from /api/salla/oauth/callback
+  // (?salla_oauth=success | error&reason=...).  When the OAuth flow opens
+  // at the top window, Salla sends the merchant back here directly — no
+  // postMessage path is available.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const status = params.get('salla_oauth')
+    if (!status) return
+    if (status === 'success') {
+      console.info('[SallaEntry] OAuth API sync success — reloading integration status')
+      alert('تم ربط المتجر عبر OAuth بنجاح. تم تفعيل المزامنة الكاملة.')
+    } else {
+      const reason = params.get('reason') || 'unknown'
+      console.warn('[SallaEntry] OAuth API sync failed | reason=%s', reason)
+      alert(`تعذّر إكمال ربط OAuth: ${reason}. أعد المحاولة من زر "ربط المتجر".`)
+    }
+    // Strip the query so a manual refresh doesn't re-show the alert.
+    const cleanUrl = window.location.pathname + window.location.hash
+    window.history.replaceState({}, '', cleanUrl)
+    load()
+  }, [load])
+
   // ── Derived state ────────────────────────────────────────────────────────────
 
   const waOk         = status?.whatsapp_connected ?? false
