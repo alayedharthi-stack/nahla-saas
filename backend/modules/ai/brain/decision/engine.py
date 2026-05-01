@@ -223,8 +223,13 @@ class DefaultDecisionEngine:
                 if facts.orderable:
                     return Decision(
                         action=ACTION_PROPOSE_DRAFT_ORDER,
-                        args={"product": _matched_product},
-                        reason=f"customer message matches candidate '{_matched_product.get('title')}' — start order",
+                        args={
+                            "product":        _matched_product,
+                            "forced_product": _matched_product,
+                            "source":         "name_match",
+                            "candidate_source": "last_search_candidates",
+                        },
+                        reason=f"customer message matches candidate '{_matched_product.get('title')}' — start order (forced_product set)",
                         confidence=0.92,
                     )
                 return Decision(
@@ -349,10 +354,21 @@ class DefaultDecisionEngine:
                             confidence=0.95,
                         )
                     if facts.orderable:
+                        # CRITICAL: pass the FULL chosen product as
+                        # `forced_product` (not just `product`).  The
+                        # executor MUST honour `forced_product` over
+                        # `state.current_product_focus` so a stale focus
+                        # (e.g. previous بلوزة) cannot win the race.
                         return Decision(
                             action=ACTION_PROPOSE_DRAFT_ORDER,
-                            args={"product": product},
-                            reason=f"customer picked option {idx} from list — start order",
+                            args={
+                                "product":        product,
+                                "forced_product": product,
+                                "source":         "list_pick",
+                                "list_index":     idx,
+                                "candidate_source": _candidate_source,
+                            },
+                            reason=f"customer picked option {idx} from list — start order (forced_product set)",
                             confidence=0.95,
                         )
                     return Decision(
@@ -528,9 +544,15 @@ class DefaultDecisionEngine:
                 if facts.orderable:
                     return Decision(
                         action=ACTION_PROPOSE_DRAFT_ORDER,
-                        args={"product": _forced_product},
+                        args={
+                            "product":        _forced_product,
+                            "forced_product": _forced_product,
+                            "source":         "list_pick",
+                            "list_index":     _forced_idx,
+                            "candidate_source": "last_search_candidates",
+                        },
                         reason=f"numeric pick #{_forced_idx} from active candidate list "
-                               f"(intent={intent.name} overridden to list-pick)",
+                               f"(intent={intent.name} overridden to list-pick, forced_product set)",
                         confidence=0.95,
                     )
                 # Store not orderable — still acknowledge the pick, don't

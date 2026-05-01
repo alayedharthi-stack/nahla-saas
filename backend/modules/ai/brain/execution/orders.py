@@ -44,17 +44,59 @@ class DraftOrderHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         from modules.ai.commerce.runtime import CommerceToolRuntime
 
-        product_info = decision.args.get("product") or ctx.state.current_product_focus
+        # ── Product source resolution (forced_product wins) ───────────────────
+        # When the engine routes from a numeric / name pick, it sets
+        # `forced_product` on the decision. That value MUST win over
+        # `state.current_product_focus` because the focus may still hold a
+        # stale product (e.g. previous بلوزة) from before the new list was
+        # displayed. Without this guard, "اخترت 1 = بنطلون" silently
+        # creates an order for the WRONG product.
+        _forced       = decision.args.get("forced_product") or {}
+        _arg_product  = decision.args.get("product") or {}
+        _focus        = ctx.state.current_product_focus or {}
+        _source       = decision.args.get("source", "")
 
-        # ── Entry log: proves the handler was reached ─────────────────────────
+        if _forced:
+            product_info = _forced
+            _resolved_source = f"forced_product (source={_source!r})"
+            # Update the canonical focus IMMEDIATELY so any downstream
+            # code that reads ctx.state inside this handler sees the
+            # corrected product, not the stale one.
+            try:
+                ctx.state.current_product_focus = dict(_forced)
+            except Exception:
+                pass
+        elif _arg_product:
+            product_info = _arg_product
+            _resolved_source = "decision.args[product]"
+        else:
+            product_info = _focus
+            _resolved_source = "state.current_product_focus (FALLBACK)"
+
+        # ── Entry log: proves the handler was reached + which source won ──────
         logger.info(
             "[ORDER FLOW] DraftOrderHandler.handle() entered | tenant=%s "
-            "product=%r external_id=%s has_product_info=%s",
+            "resolved_from=%s product=%r external_id=%s "
+            "forced_title=%r arg_title=%r focus_title=%r decision_source=%s",
             ctx.tenant_id,
+            _resolved_source,
             (product_info or {}).get("title"),
             (product_info or {}).get("external_id"),
-            bool(product_info),
+            (_forced or {}).get("title"),
+            (_arg_product or {}).get("title"),
+            (_focus or {}).get("title"),
+            _source or "(none)",
         )
+
+        # Mismatch alarm: if forced_product disagrees with focus, scream
+        # loudly so any future regression is visible from a single grep.
+        if _forced and _focus and (_forced.get("title") != _focus.get("title")):
+            logger.warning(
+                "[ORDER FLOW] forced_product overrode stale focus | "
+                "forced=%r (external_id=%s) was_focus=%r (external_id=%s) source=%s",
+                _forced.get("title"), _forced.get("external_id"),
+                _focus.get("title"), _focus.get("external_id"), _source,
+            )
 
         if not product_info:
             logger.error(
