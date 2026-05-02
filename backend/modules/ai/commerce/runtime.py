@@ -210,21 +210,36 @@ class CommerceToolRuntime:
         try:
             order = await create_draft_order(self.tenant_id, order_input)
         except ValueError as _exc:
-            # Pre-flight blocker (e.g. required_product_options_missing).
-            # Surface the exact reason so the brain can react — typically
-            # by asking the customer for product options rather than
-            # showing a generic "Salla failed" retry message.
+            # Pre-flight blocker (e.g. required_product_options_missing or
+            # SallaOrderValidationError). Surface the exact reason so the
+            # brain can react — typically by asking the customer for the
+            # named missing slot rather than showing a generic "Salla failed"
+            # retry message.
             _reason = str(_exc) or "draft_order_blocked"
+            _missing: List[str] = []
+            try:
+                from store_adapters.salla_adapter import SallaOrderValidationError  # noqa: PLC0415
+                if isinstance(_exc, SallaOrderValidationError):
+                    _missing = list(getattr(_exc, "missing", []) or [])
+                    _reason = "salla_payload_invalid"
+            except Exception:
+                pass
             logger.error(
-                "[ORDER FLOW] runtime create_draft_order blocked | tenant=%s product=%s reason=%s",
-                self.tenant_id, product_id, _reason,
+                "[ORDER FLOW] runtime create_draft_order blocked | "
+                "tenant=%s product=%s reason=%s missing=%s",
+                self.tenant_id, product_id, _reason, _missing,
             )
             return ToolExecutionResult(
                 ok=False,
                 tool_name="create_draft_order",
-                payload={"order": None},
+                payload={"order": None, "missing_fields": _missing},
                 error=_reason,
-                audit={"product_id": product_id, "quantity": quantity, "blocked": True},
+                audit={
+                    "product_id": product_id,
+                    "quantity":   quantity,
+                    "blocked":    True,
+                    "missing":    _missing,
+                },
             )
         return ToolExecutionResult(
             ok=bool(order),

@@ -38,6 +38,137 @@ class SallaTokenRevokedException(Exception):
     """Raised when Salla returns invalid_grant — token permanently revoked."""
 
 
+class SallaOrderValidationError(ValueError):
+    """Raised when an order payload is missing fields Salla requires.
+
+    The decision/composer layer catches this and re-asks the customer for
+    the named ``missing`` fields instead of letting the request blow up
+    inside Salla with a 422.
+
+    Attributes:
+        missing: list of canonical field names (e.g. ``["customer_first_name",
+            "city", "payment_method"]``) the order flow must collect before
+            retrying ``create_order``.
+        payload_keys: top-level keys present in the rejected payload — useful
+            in logs to confirm the payload shape we built.
+    """
+
+    def __init__(self, missing: List[str], payload_keys: Optional[List[str]] = None):
+        self.missing = list(missing or [])
+        self.payload_keys = list(payload_keys or [])
+        super().__init__(
+            "salla_order_payload_invalid: missing=" + ",".join(self.missing)
+        )
+
+
+# ── Required fields by section in the Salla create-order payload ──────────────
+# Sourced from real-world Salla 422 responses + the Admin API v2 docs.
+# Keep this list short — it represents what Salla *truly* refuses to accept,
+# not every nice-to-have field. Anything optional is enforced upstream by
+# the order-flow conversation, not here.
+_SALLA_REQUIRED_PAYLOAD_RULES: Dict[str, List[str]] = {
+    "products":          [],            # at least one item with identifier
+    "customer.first_name": [],
+    "customer.mobile":     [],
+    "payment.accepted_methods": [],     # at least one slug
+    "address.city":        [],          # required when shipping is needed
+    # `address.street` is required by Salla. We accept either an explicit
+    # street, the synthesised "city - الرمز الوطني XXXX" string, or a
+    # Maps URL fallback — the validator only ensures street is non-empty
+    # in the final payload.
+    "address.street":      [],
+}
+
+
+# ── Saudi city → region mapping (best-effort) ────────────────────────────────
+# Used for the optional `address.region` field. Salla also accepts the city
+# value here, so any miss falls back to the input city verbatim. The list
+# only covers the most common shipping destinations — we prefer "good
+# enough for the top 95%" over a full ISO 3166-2 mapping.
+_SAUDI_REGION_BY_CITY: Dict[str, str] = {
+    # Riyadh region
+    "الرياض": "منطقة الرياض",  "الخرج": "منطقة الرياض", "الدرعية": "منطقة الرياض",
+    "riyadh": "Riyadh Region", "ar-riyadh": "Riyadh Region",
+    # Makkah region
+    "مكة": "منطقة مكة المكرمة", "مكة المكرمة": "منطقة مكة المكرمة",
+    "جدة": "منطقة مكة المكرمة", "الطائف": "منطقة مكة المكرمة",
+    "makkah": "Makkah Region",  "jeddah": "Makkah Region", "taif": "Makkah Region",
+    # Madinah region
+    "المدينة": "منطقة المدينة المنورة", "المدينة المنورة": "منطقة المدينة المنورة",
+    "ينبع": "منطقة المدينة المنورة",
+    "madinah": "Madinah Region", "yanbu": "Madinah Region",
+    # Eastern Province
+    "الدمام": "المنطقة الشرقية", "الخبر": "المنطقة الشرقية",
+    "الظهران": "المنطقة الشرقية", "الأحساء": "المنطقة الشرقية", "الجبيل": "المنطقة الشرقية",
+    "dammam": "Eastern Province", "khobar": "Eastern Province",
+    # Asir
+    "أبها": "منطقة عسير", "خميس مشيط": "منطقة عسير", "abha": "Aseer Region",
+    # Qassim
+    "بريدة": "منطقة القصيم", "عنيزة": "منطقة القصيم",
+    "buraidah": "Qassim Region",
+    # Tabuk / Hail / Najran / Jazan / Northern / Bahah
+    "تبوك": "منطقة تبوك", "حائل": "منطقة حائل", "نجران": "منطقة نجران",
+    "جازان": "منطقة جازان", "الباحة": "منطقة الباحة", "عرعر": "الحدود الشمالية",
+}
+
+
+def _resolve_saudi_region(city: str) -> str:
+    """Return the Saudi region name for a given city, or the city itself
+    when no mapping exists. Case-insensitive on Latin characters."""
+    raw = (city or "").strip()
+    if not raw:
+        return ""
+    key = raw.lower() if raw.isascii() else raw
+    return _SAUDI_REGION_BY_CITY.get(key, raw)
+
+
+def validate_salla_order_payload(body: Dict[str, Any]) -> List[str]:
+    """Return the list of canonical field names missing from a Salla order
+    payload. Empty list means the payload satisfies Salla's hard requirements.
+
+    Canonical names map back to ``OrderInput`` slots so the conversation
+    layer can ask for them in Arabic without translating Salla-speak.
+    """
+    missing: List[str] = []
+
+    # ── Products ─────────────────────────────────────────────────────────────
+    products = body.get("products") or []
+    if not products or not isinstance(products, list):
+        missing.append("product")
+    else:
+        first = products[0] or {}
+        if not first.get("identifier"):
+            missing.append("product_id")
+
+    # ── Customer ─────────────────────────────────────────────────────────────
+    customer = body.get("customer") or {}
+    if not (customer.get("first_name") or "").strip():
+        missing.append("customer_first_name")
+    if not (customer.get("mobile") or "").strip():
+        missing.append("customer_phone")
+
+    # ── Payment ──────────────────────────────────────────────────────────────
+    pay = body.get("payment") or {}
+    accepted = pay.get("accepted_methods") or []
+    if not accepted:
+        missing.append("payment_method")
+
+    # ── Address (only when shipping is actually being requested) ──────────────
+    # If the body has no `address` block AND no shipping section, we treat
+    # this as a digital / pickup order and don't enforce address fields.
+    has_shipping = bool(body.get("shipping")) or bool(body.get("address"))
+    if has_shipping:
+        addr = body.get("address") or {}
+        if not (addr.get("city") or "").strip():
+            missing.append("city")
+        if not (addr.get("street") or "").strip():
+            missing.append("address")
+        # Country defaults to Saudi Arabia in _build_order_body — we don't
+        # add it to `missing` here because we control the default.
+
+    return missing
+
+
 @register_adapter("salla")
 class SallaAdapter(BaseStoreAdapter):
     platform = "salla"
@@ -950,9 +1081,28 @@ class SallaAdapter(BaseStoreAdapter):
         if not shipping_company_id:
             shipping_company_id = await self._get_default_shipping_company_id(order_input.city)
         body = self._build_order_body(order_input, draft=False, shipping_company_id=shipping_company_id)
+        # Hard validation BEFORE POST — never let Salla 422 us when we
+        # could have asked the customer for the missing field instead.
+        missing = validate_salla_order_payload(body)
+        if missing:
+            logger.error(
+                "[ORDER FLOW] BLOCKED create_order — payload missing required fields | "
+                "tenant=%s missing=%s payload_keys=%s",
+                self._tenant_id, missing, sorted(list(body.keys())),
+            )
+            raise SallaOrderValidationError(
+                missing=missing,
+                payload_keys=list(body.keys()),
+            )
+        self._log_outgoing_payload("create_order", body, shipping_company_id)
         try:
             data = await self._post("/orders", body)
-            return self._normalize_order(data.get("data", data), order_input)
+            order = self._normalize_order(data.get("data", data), order_input)
+            self._log_salla_response("create_order", 201, data, order)
+            return order
+        except httpx.HTTPStatusError as exc:
+            self._log_salla_failure("create_order", exc, body)
+            raise
         except Exception as exc:
             self._log_error("create_order", exc)
             raise
@@ -988,9 +1138,35 @@ class SallaAdapter(BaseStoreAdapter):
             )
 
         body = self._build_order_body(order_input, draft=True, shipping_company_id=shipping_company_id)
+
+        # ── HARD VALIDATION before POST ───────────────────────────────────────
+        # If anything Salla truly requires is missing, refuse to POST and let
+        # the conversation layer ask the customer for the missing slot. This
+        # turns silent 422s into actionable "ask for X" turns.
+        missing = validate_salla_order_payload(body)
+        if missing:
+            logger.error(
+                "[ORDER FLOW] BLOCKED create_draft_order — payload missing required fields | "
+                "tenant=%s missing=%s payload_keys=%s product=%s "
+                "city=%r short_code=%r",
+                self._tenant_id, missing, sorted(list(body.keys())),
+                (order_input.items[0].product_id if order_input.items else "?"),
+                order_input.city, order_input.short_address_code,
+            )
+            raise SallaOrderValidationError(
+                missing=missing,
+                payload_keys=list(body.keys()),
+            )
+
+        # ── Verbose pre-POST log: every field a merchant would want to see ───
+        self._log_outgoing_payload("create_draft_order", body, shipping_company_id)
+
         try:
             data = await self._post("/orders", body)
             order = self._normalize_order(data.get("data", data), order_input)
+
+            # ── Structured response log ─────────────────────────────────────
+            self._log_salla_response("create_draft_order", 201, data, order)
 
             # ── Payment URL fallback ──────────────────────────────────────────────
             # Salla does not always embed the payment URL in the create response.
@@ -1018,9 +1194,138 @@ class SallaAdapter(BaseStoreAdapter):
                     )
 
             return order
+        except httpx.HTTPStatusError as exc:
+            self._log_salla_failure("create_draft_order", exc, body)
+            raise
         except Exception as exc:
             self._log_error("create_draft_order", exc)
             raise
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Structured request / response logging for the create-order pipeline.
+    # Centralised here so both create_order() and create_draft_order() emit
+    # the EXACT same lines — operators only need to grep for one tag.
+    # ──────────────────────────────────────────────────────────────────────────
+    def _log_outgoing_payload(
+        self,
+        action: str,
+        body: Dict[str, Any],
+        shipping_company_id: Optional[int],
+    ) -> None:
+        """Emit a single structured log line summarising what we're about to
+        POST to Salla. The full body is logged separately at INFO so 12-factor
+        log aggregators can index it without polluting the hot path.
+
+        Secrets are not present in order payloads (no tokens, no card data),
+        so we log the body verbatim. Customer phone is only the last 4 digits.
+        """
+        try:
+            customer = body.get("customer") or {}
+            payment  = body.get("payment") or {}
+            shipping = body.get("shipping") or {}
+            address  = body.get("address") or {}
+            products = body.get("products") or []
+            first_p  = (products[0] if products else {}) or {}
+
+            phone_raw = customer.get("mobile") or ""
+            phone_masked = (
+                f"***{phone_raw[-4:]}" if isinstance(phone_raw, str) and len(phone_raw) >= 4
+                else phone_raw
+            )
+
+            logger.info(
+                "[SallaAdapter] ABOUT_TO_POST_ORDER | action=%s tenant=%s "
+                "product_id=%s variant_id=%s qty=%s "
+                "options_count=%d payment_methods=%s payment_status=%s "
+                "shipping_company_id=%s shipping_keys=%s "
+                "city=%r street_set=%s country=%r "
+                "customer_first=%r customer_last=%r email_set=%s mobile=%s "
+                "draft=%s top_level_keys=%s",
+                action, self._tenant_id,
+                first_p.get("identifier"), first_p.get("variant_id"),
+                first_p.get("quantity"),
+                len(first_p.get("options") or []),
+                payment.get("accepted_methods"), payment.get("status"),
+                shipping_company_id or shipping.get("company_id"),
+                sorted(list(shipping.keys())),
+                address.get("city"), bool(address.get("street")),
+                address.get("country"),
+                customer.get("first_name"), customer.get("last_name"),
+                bool(customer.get("email")), phone_masked,
+                body.get("status") == "under_review",
+                sorted(list(body.keys())),
+            )
+        except Exception as _exc:
+            logger.warning("[SallaAdapter] _log_outgoing_payload swallowed: %s", _exc)
+
+    def _log_salla_response(
+        self,
+        action: str,
+        status_code: int,
+        raw: Dict[str, Any],
+        order: NormalizedOrder,
+    ) -> None:
+        """Single structured line per successful Salla response."""
+        try:
+            data = raw.get("data") if isinstance(raw, dict) else {}
+            data = data if isinstance(data, dict) else {}
+            logger.info(
+                "[SallaAdapter] SALLA_RESPONSE_OK | action=%s tenant=%s "
+                "status_code=%s salla_order_id=%s reference_id=%s "
+                "order_number=%s status=%s total=%s currency=%s "
+                "has_payment_link=%s",
+                action, self._tenant_id, status_code,
+                order.id, order.reference_id,
+                data.get("reference_id") or data.get("order_number") or order.reference_id,
+                order.status, order.total, order.currency,
+                bool(order.payment_link),
+            )
+        except Exception as _exc:
+            logger.warning("[SallaAdapter] _log_salla_response swallowed: %s", _exc)
+
+    def _log_salla_failure(
+        self,
+        action: str,
+        exc: "httpx.HTTPStatusError",
+        body: Dict[str, Any],
+    ) -> None:
+        """Structured failure line — always paired with `[SallaAdapter] _log_error`
+        emitted by the existing handler. Designed so a single grep reveals the
+        full failure context (status, response, the payload we sent).
+        """
+        try:
+            status = exc.response.status_code
+            text   = (exc.response.text or "")[:1500]
+            try:
+                json_body = exc.response.json()
+            except Exception:
+                json_body = None
+            customer = body.get("customer") or {}
+            phone = customer.get("mobile") or ""
+            phone_masked = f"***{phone[-4:]}" if len(phone) >= 4 else phone
+            logger.error(
+                "[SallaAdapter] SALLA_RESPONSE_FAIL | action=%s tenant=%s "
+                "status_code=%s response_body=%s "
+                "sent_product=%s sent_payment=%s sent_shipping_company_id=%s "
+                "sent_city=%r sent_mobile=%s",
+                action, self._tenant_id, status, text,
+                ((body.get("products") or [{}])[0]).get("identifier"),
+                (body.get("payment") or {}).get("accepted_methods"),
+                (body.get("shipping") or {}).get("company_id"),
+                (body.get("address") or {}).get("city"),
+                phone_masked,
+            )
+            # Surface the structured 422 body if Salla returned one.
+            if isinstance(json_body, dict):
+                err = json_body.get("error") or {}
+                if isinstance(err, dict) and err.get("fields"):
+                    logger.error(
+                        "[SallaAdapter] SALLA_422_FIELDS | action=%s tenant=%s "
+                        "rejected_fields=%s",
+                        action, self._tenant_id, err.get("fields"),
+                    )
+        except Exception as _exc:
+            logger.warning("[SallaAdapter] _log_salla_failure swallowed: %s", _exc)
 
     async def _get_default_shipping_company_id(self, city: str = "") -> Optional[int]:
         """Return the Salla zone/company ID of the first available shipping option.
@@ -1174,8 +1479,20 @@ class SallaAdapter(BaseStoreAdapter):
             },
             "payment": payment_block,
         }
-        if order_input.customer_email:
-            body["customer"]["email"] = order_input.customer_email
+        # ── Customer email ───────────────────────────────────────────────────────
+        # Salla does not REQUIRE email for COD orders, but some workflows (auto
+        # invoice, abandoned-cart recovery, account creation) silently fail
+        # without one. We pass through the merchant-supplied email when
+        # available, otherwise generate a stable namespaced placeholder
+        # derived from the customer's WhatsApp number so the same person
+        # always maps to the same Salla customer record.
+        _email = (order_input.customer_email or "").strip()
+        if not _email:
+            _digits = "".join(ch for ch in (order_input.customer_phone or "") if ch.isdigit())
+            if _digits:
+                _email = f"wa{_digits[-9:]}@nahlah.local"
+        if _email:
+            body["customer"]["email"] = _email
 
         # ── Shipping ─────────────────────────────────────────────────────────────
         # Pass the resolved shipping company/zone ID to Salla.
@@ -1225,6 +1542,11 @@ class SallaAdapter(BaseStoreAdapter):
                 addr["additional_number"] = order_input.additional_number
             # Salla expects a country on shipping address; default to Saudi Arabia.
             addr.setdefault("country", "Saudi Arabia")
+            # Region helps Salla resolve a shipping zone when the merchant
+            # configured zones per region.  Best-effort mapping from the
+            # most common Saudi cities; falls back to the city itself,
+            # which is acceptable for Salla.
+            addr.setdefault("region", _resolve_saudi_region(order_input.city))
             body["address"] = addr
 
         # ── Notes (human-readable) ───────────────────────────────────────────────

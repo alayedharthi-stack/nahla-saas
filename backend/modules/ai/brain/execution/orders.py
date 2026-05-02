@@ -615,6 +615,74 @@ class DraftOrderHandler:
             previous_failed,
         )
 
+        # ── Salla payload validation failed BEFORE POST ───────────────────────
+        # The adapter pre-flight (validate_salla_order_payload) found that one
+        # or more fields Salla truly requires were missing.  We turn those
+        # canonical names into checkout slots so the conversation layer asks
+        # the customer for them — never fabricating a "تم إنشاء الطلب" line.
+        _missing_payload_fields = list(
+            (runtime_result.payload or {}).get("missing_fields") or []
+        )
+        if error_msg == "salla_payload_invalid" or _missing_payload_fields:
+            # Map the validator's canonical names back to OrderPreparation
+            # slots used by the conversation. Fields the customer cannot
+            # provide (product_id) are reported separately as a hard catalog
+            # error.
+            _slot_map = {
+                "customer_first_name": "customer_first_name",
+                "customer_last_name":  "customer_last_name",
+                "customer_phone":      "customer_phone",
+                "city":                "city",
+                "address":             "address_location",
+                "payment_method":      "payment_method",
+            }
+            _slots_to_collect = [
+                _slot_map[m] for m in _missing_payload_fields if m in _slot_map
+            ]
+            _hard_errors = [m for m in _missing_payload_fields if m not in _slot_map]
+
+            logger.error(
+                "[ORDER FLOW] Salla validation BLOCKED order | tenant=%s product=%s "
+                "missing=%s slots_to_collect=%s hard_errors=%s",
+                ctx.tenant_id, external_id,
+                _missing_payload_fields, _slots_to_collect, _hard_errors,
+            )
+
+            if _hard_errors:
+                # Catalog-level: cannot proceed — tell the customer the product
+                # is unavailable and break the loop instead of asking for slots
+                # they couldn't fill anyway.
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product_unsyncable": True,
+                        "message":  "product_payload_invalid",
+                        "product":  product_info,
+                        "missing":  _hard_errors,
+                        "order_prep": prep.to_dict(),
+                    },
+                )
+
+            # Mark which slots the conversation must collect next, then ask.
+            # The conversation layer reads `prep.missing_fields` and asks for
+            # the first one in Arabic.
+            prep.missing_fields = _slots_to_collect or list(prep.missing_fields or [])
+            return ActionResult(
+                success=True,
+                data={
+                    "product":         product_info,
+                    "needs_collection": True,
+                    "missing_fields":  prep.missing_fields,
+                    "is_first_ask":    not (
+                        prep.customer_first_name or prep.city or prep.short_address_code
+                    ),
+                    "question":        _ask_for_missing_field(prep.missing_fields),
+                    "external_create_failed": True,
+                    "external_failure_reason": "salla_payload_invalid",
+                    "order_prep":      prep.to_dict(),
+                },
+            )
+
         # ── Salla rejected the product because options are missing ────────────
         # Either our adapter pre-flight caught it, or Salla itself returned
         # 422 ("خيارات المنتج مطلوبة"). Either way: we now KNOW this product
@@ -1166,6 +1234,33 @@ def _build_order_notes(prep: OrderPreparationState) -> str:
     if prep.additional_number:
         lines.append(f"الرقم الإضافي: {prep.additional_number}")
     return " | ".join(lines)
+
+
+_MISSING_FIELD_PROMPTS_AR: Dict[str, str] = {
+    "customer_first_name": "ما اسمك الأول؟",
+    "customer_last_name":  "ما اسم العائلة؟",
+    "customer_phone":      "أرسل رقم جوال للتواصل عند التوصيل (مثال: 0555xxxxxx).",
+    "city":                "في أي مدينة سنوصل لك الطلب؟",
+    "address_location":    (
+        "أرسل عنوان التوصيل: يمكن الرمز الوطني (مثل TAPA7401) "
+        "أو رابط الموقع من خرائط Google."
+    ),
+    "payment_method":      (
+        "كيف تفضّل الدفع؟ \n• الدفع عند الاستلام\n• تحويل بنكي\n"
+        "اكتب اختيارك."
+    ),
+}
+
+
+def _ask_for_missing_field(missing: List[str]) -> str:
+    """Return the Arabic prompt for the FIRST missing field.  Designed for
+    the single-question UX used by the WhatsApp order flow — never asks for
+    more than one slot at a time."""
+    for slot in (missing or []):
+        prompt = _MISSING_FIELD_PROMPTS_AR.get(slot)
+        if prompt:
+            return prompt
+    return "هل يمكنك تأكيد بيانات التوصيل وطريقة الدفع؟"
 
 
 def _to_int(value: object) -> int:

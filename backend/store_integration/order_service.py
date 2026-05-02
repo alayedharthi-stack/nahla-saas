@@ -50,7 +50,8 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
     # ── Entry: every call to this function must produce a log ────────────────
     logger.error(
         "[ORDER FLOW] attempting create_order | tenant=%s product=%s "
-        "has_city=%s has_address=%s has_options=%s qty=%s",
+        "has_city=%s has_address=%s has_options=%s qty=%s "
+        "first_name=%s last_name=%s phone_set=%s",
         tenant_id,
         (order_input.items[0].product_id if order_input.items else "?"),
         bool(getattr(order_input, "city", None)),
@@ -61,6 +62,9 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
         ),
         bool(order_input.items and order_input.items[0].options),
         (order_input.items[0].quantity if order_input.items else 0),
+        bool(getattr(order_input, "customer_first_name", "")),
+        bool(getattr(order_input, "customer_last_name", "")),
+        bool(getattr(order_input, "customer_phone", "")),
     )
     adapter = get_adapter(tenant_id)
     if not adapter:
@@ -80,18 +84,30 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
     try:
         order = await adapter.create_draft_order(order_input)
         logger.info(
-            "[OrderService] tenant=%s created draft order id=%s on %s",
-            tenant_id, order.id, adapter.platform,
+            "[OrderService] tenant=%s created draft order id=%s reference=%s on %s",
+            tenant_id, order.id, getattr(order, "reference_id", None), adapter.platform,
         )
         return order
     except ValueError as exc:
-        # Adapter-level pre-flight guard (e.g. required_product_options_missing).
-        # No POST /orders was issued — surface the reason loudly and
-        # propagate so the runtime/brain can handle it explicitly.
-        logger.error(
-            "[OrderService] tenant=%s create_draft_order BLOCKED before POST | reason=%s",
-            tenant_id, exc,
-        )
+        # Adapter-level pre-flight guard (e.g. required_product_options_missing
+        # or SallaOrderValidationError). No POST /orders was issued — surface
+        # the reason loudly and propagate so the runtime/brain can handle it
+        # explicitly (ask the customer for the missing field).
+        try:
+            from store_adapters.salla_adapter import SallaOrderValidationError  # noqa: PLC0415
+        except Exception:
+            SallaOrderValidationError = None  # type: ignore
+        if SallaOrderValidationError and isinstance(exc, SallaOrderValidationError):
+            logger.error(
+                "[OrderService] tenant=%s create_draft_order BLOCKED before POST | "
+                "reason=salla_payload_invalid missing=%s",
+                tenant_id, getattr(exc, "missing", []),
+            )
+        else:
+            logger.error(
+                "[OrderService] tenant=%s create_draft_order BLOCKED before POST | reason=%s",
+                tenant_id, exc,
+            )
         raise
     except Exception as exc:
         # Surface Salla's HTTP status + full response body to make Railway logs actionable
