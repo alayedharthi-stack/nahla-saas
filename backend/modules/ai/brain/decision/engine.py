@@ -481,8 +481,21 @@ class DefaultDecisionEngine:
                     reason="numeric pick + existing product focus — continue order flow",
                     confidence=0.85,
                 )
-            # Otherwise: ask for clarification so the customer can
-            # name the product (or repeat the search).
+            # No candidates remembered → show top products so the customer
+            # can pick by number from a fresh list. Never show a bare
+            # "ما المنتج؟" clarification when we can show real options.
+            if facts.has_products:
+                logger.info(
+                    "[ORDER FLOW] numeric_pick_no_candidates → showing_top_products "
+                    "tenant=%s intent=%s",
+                    ctx.tenant_id, intent.name,
+                )
+                return Decision(
+                    action=ACTION_SEARCH_PRODUCTS,
+                    args={"query": "", "source": "top_products_numeric_fallback"},
+                    reason="numeric pick with no candidate list — show top products",
+                    confidence=0.80,
+                )
             return Decision(
                 action=ACTION_CLARIFY,
                 args={"question": "أي منتج تقصد؟ اكتب اسمه أو اطلب مني عرض المنتجات مرة ثانية."},
@@ -672,6 +685,111 @@ class DefaultDecisionEngine:
                 confidence=0.88,
             )
 
+        # ── 3.8 Text-pattern rules (message-level, intent-agnostic) ─────────
+        # These fire regardless of intent classification because the NLU
+        # sometimes misses Arabic commerce patterns. They run after the
+        # order-continuation blocks so they never interrupt an active checkout.
+        _msg_norm = _normalize_ar(ctx.message or "")
+
+        # ── 3.8a Top-sellers / "show me products" request ────────────────
+        _TOP_SELLER_PATTERNS = [
+            "الاكثر مبيعا", "اكثر مبيعا", "الاكثر مبيعًا", "اكثر مبيعًا",
+            "الاكثر طلبا", "اكثر طلبا", "الاكثر طلبًا",
+            "اعرض المنتجات", "اعرض المنتجات", "وريني المنتجات",
+            "ما المنتجات", "ما المتاح", "ما المتوفر", "ما عندكم",
+            "ما عندك", "ايش عندك", "ايش عندكم",
+            "show products", "show me", "top products", "best sellers",
+        ]
+        _is_top_seller_req = any(p in _msg_norm for p in _TOP_SELLER_PATTERNS)
+
+        # ── 3.8b Replay last list ─────────────────────────────────────────
+        _REPLAY_PATTERNS = [
+            "مره ثانيه", "مره اخرى", "مرة اخرى", "مرة ثانية",
+            "كرر", "اعد", "اعيد", "وريني الخيارات",
+            "وريني تاني", "وريني ثاني", "ارسل مره", "ارسل تاني",
+            "repeat", "show again", "list again",
+        ]
+        _is_replay_req = any(p in _msg_norm for p in _REPLAY_PATTERNS)
+
+        # ── 3.8c Extract product name from order phrases ──────────────────
+        # "أبغى أطلب X" / "ابي اطلب X" / "اطلب X" / "أريد X"
+        _ORDER_PREFIX_RE = re.compile(
+            r"(?:ابغى|ابي|أبغى|أبي|اريد|أريد|بغيت|عطني|عطيني)"
+            r"[\s\u0020]*"
+            r"(?:اطلب|أطلب|اشتري|أشتري|آخذ|اخذ|استلم)?"
+            r"[\s\u0020]+"
+            r"(.{2,30})",
+            re.UNICODE,
+        )
+        _extracted_product_query = ""
+        _order_match = _ORDER_PREFIX_RE.search(ctx.message or "")
+        if _order_match:
+            _extracted = (_order_match.group(1) or "").strip()
+            # Discard if extracted part looks like a filler/stop word
+            _STOP = {"شي", "شيء", "منتج", "بضاعه", "بضاعة", "حاجه", "حاجة", "طلب"}
+            _norm_extracted = _normalize_ar(_extracted)
+            if _norm_extracted and _norm_extracted not in _STOP and len(_norm_extracted) >= 2:
+                _extracted_product_query = _extracted
+
+        # ── 3.8a handler ─────────────────────────────────────────────────
+        if _is_top_seller_req and facts.has_products:
+            logger.info(
+                "[ORDER FLOW] intent_rule_matched | rule=top_products query='' "
+                "tenant=%s intent=%s msg=%r",
+                ctx.tenant_id, intent.name, (ctx.message or "")[:60],
+            )
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "", "source": "top_products"},
+                reason="text-pattern: top-sellers / show-products request",
+                confidence=0.92,
+            )
+
+        # ── 3.8b handler ─────────────────────────────────────────────────
+        if _is_replay_req and facts.has_products:
+            _last_cands = list(state.last_search_candidates or [])
+            if _last_cands:
+                logger.info(
+                    "[ORDER FLOW] replaying_last_candidates | count=%d tenant=%s",
+                    len(_last_cands), ctx.tenant_id,
+                )
+                # Re-emit the last search result so the pipeline re-saves it
+                return Decision(
+                    action=ACTION_SEARCH_PRODUCTS,
+                    args={
+                        "query": "",
+                        "source": "replay",
+                        "replay_candidates": _last_cands,
+                    },
+                    reason="text-pattern: replay last product list",
+                    confidence=0.90,
+                )
+            logger.info(
+                "[ORDER FLOW] replaying_last_candidates | count=0 → showing top_products "
+                "tenant=%s",
+                ctx.tenant_id,
+            )
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "", "source": "top_products_replay_fallback"},
+                reason="text-pattern: replay requested but no candidates — show top products",
+                confidence=0.88,
+            )
+
+        # ── 3.8c handler ─────────────────────────────────────────────────
+        if _extracted_product_query and facts.has_products:
+            logger.info(
+                "[ORDER FLOW] intent_rule_matched | rule=order_product_query "
+                "query=%r tenant=%s intent=%s",
+                _extracted_product_query, ctx.tenant_id, intent.name,
+            )
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": _extracted_product_query, "after_search": "propose_order"},
+                reason=f"text-pattern: extracted product query '{_extracted_product_query}' from order phrase",
+                confidence=0.88,
+            )
+
         # ── 4. Simple FAQ / identity / shipping / contact ──────────────────
         if intent.name == INTENT_WHO_ARE_YOU:
             return Decision(
@@ -743,15 +861,32 @@ class DefaultDecisionEngine:
                         reason="store not orderable (no integration or all out-of-stock)",
                     )
             elif facts.has_products:
-                query = intent.slots.get("product_query", "").strip()
+                # Prefer the slot-extracted query; fall back to text extraction
+                query = (
+                    intent.slots.get("product_query", "").strip()
+                    or intent.slots.get("product_name", "").strip()
+                    or _extracted_product_query
+                )
                 if not query:
-                    # Customer said "أبغى أطلب" with no product mentioned
+                    # Customer said "أبغى أطلب" with no product mentioned →
+                    # show top products instead of asking a clarifying question.
+                    # A product list is far more useful and converts better.
+                    logger.info(
+                        "[ORDER FLOW] intent_rule_matched | rule=top_products "
+                        "reason=start_order_no_query tenant=%s",
+                        ctx.tenant_id,
+                    )
                     return Decision(
-                        action=ACTION_CLARIFY,
-                        args={"question": "ما المنتج الذي تودّ طلبه؟ يمكنك ذكر الاسم أو الوصف."},
-                        reason="start_order with no product query — ask for clarification",
+                        action=ACTION_SEARCH_PRODUCTS,
+                        args={"query": "", "source": "top_products_start_order"},
+                        reason="start_order with no product query — show top products",
                         confidence=0.85,
                     )
+                logger.info(
+                    "[ORDER FLOW] intent_rule_matched | rule=order_product_query "
+                    "query=%r tenant=%s",
+                    query, ctx.tenant_id,
+                )
                 return Decision(
                     action=ACTION_SEARCH_PRODUCTS,
                     args={"query": query, "after_search": "propose_order"},
@@ -765,6 +900,7 @@ class DefaultDecisionEngine:
                 query = (
                     intent.slots.get("product_query")
                     or intent.slots.get("product_name")
+                    or _extracted_product_query
                     or ctx.message
                 )
                 return Decision(
