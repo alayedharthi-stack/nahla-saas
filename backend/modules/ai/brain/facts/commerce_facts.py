@@ -71,24 +71,33 @@ class DefaultFactsLoader:
         facts.product_count = product_count
         facts.has_products  = product_count > 0
 
-        # In-stock count (Phase 2)
+        # In-stock count — only count synced products (external_id required).
+        # Unsynced products cannot be ordered through Salla, so they must not
+        # inflate `orderable` or appear in top_products shown to customers.
         in_stock_count = (
             db.query(func.count(Product.id))
             .filter(
                 Product.tenant_id == tenant_id,
                 Product.in_stock.is_(True),
+                Product.external_id.isnot(None),
+                Product.external_id != "",
             )
             .scalar()
         ) or 0
         facts.in_stock_count = in_stock_count
         facts.orderable = facts.has_active_integration and in_stock_count > 0
 
-        # Top 5 in-stock products for greeting / discovery (Phase 2)
+        # Top 5 in-stock products for greeting / discovery (Phase 2).
+        # MUST include external_id so any numeric pick from this list can
+        # be resolved to a real Salla product. Products without external_id
+        # are unsynced and must never appear in customer-facing lists.
         top_rows = (
             db.query(Product)
             .filter(
                 Product.tenant_id == tenant_id,
                 Product.in_stock.is_(True),
+                Product.external_id.isnot(None),
+                Product.external_id != "",
             )
             .order_by(Product.id)
             .limit(5)

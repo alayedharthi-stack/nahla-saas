@@ -189,6 +189,7 @@ class CatalogContextBuilder:
             return []
 
         # -- Full-text search (tsvector, works with Arabic tokens) ------------
+        _results: List[Dict] = []
         try:
             fts_sql = sa_text("""
                 SELECT id FROM products
@@ -206,7 +207,15 @@ class CatalogContextBuilder:
                     .filter(Product.id.in_(ids))
                     .all()
                 )
-                return self._filter_orderable(rows, source="search")
+                _raw_count = len(rows)
+                _results = self._filter_orderable(rows, source="search")
+                logger.info(
+                    "[CATALOG SEARCH] tenant=%s query=%r method=fts "
+                    "db_rows=%d returned=%d filtered_unsynced=%d",
+                    self.tenant_id, q_clean, _raw_count, len(_results),
+                    _raw_count - len(_results),
+                )
+                return _results
         except Exception:
             pass  # fall through to ILIKE
 
@@ -222,7 +231,15 @@ class CatalogContextBuilder:
             .limit(limit)
             .all()
         )
-        return self._filter_orderable(rows, source="search_ilike")
+        _raw_count = len(rows)
+        _results = self._filter_orderable(rows, source="search_ilike")
+        logger.info(
+            "[CATALOG SEARCH] tenant=%s query=%r method=ilike "
+            "db_rows=%d returned=%d filtered_unsynced=%d",
+            self.tenant_id, q_clean, _raw_count, len(_results),
+            _raw_count - len(_results),
+        )
+        return _results
 
     def get_by_external_id(self, ext_id: str) -> Optional[Dict]:
         p = (
@@ -241,7 +258,18 @@ class CatalogContextBuilder:
             .limit(limit + 20)  # fetch extra to compensate for filtered-out rows
             .all()
         )
-        return self._filter_orderable(rows, source="top_products")[:limit]
+        _raw_count = len(rows)
+        _results = self._filter_orderable(rows, source="top_products")[:limit]
+        _unsynced = sum(
+            1 for p in rows
+            if not str(getattr(p, "external_id", "") or "").strip()
+        )
+        logger.info(
+            "[CATALOG SEARCH] tenant=%s query='(top_products)' method=top "
+            "db_rows=%d returned=%d filtered_unsynced=%d",
+            self.tenant_id, _raw_count, len(_results), _unsynced,
+        )
+        return _results
 
     def check_availability(self, ext_id: str) -> Dict:
         """Return {'available': bool, 'stock_qty': int|None} from synced data."""

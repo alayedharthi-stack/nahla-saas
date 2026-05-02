@@ -422,10 +422,37 @@ class MerchantBrain:
             or new_state.conversation_summary
             or ""
         )
+        # Only store products that have a valid Salla external_id.
+        # Products without external_id can never become orders — keeping them
+        # in last_recommended_products causes the stale-focus bug where the
+        # customer sees "بنطلون" but the bot replies about "بلوزة غير متوفر".
+        def _has_external_id(p: dict) -> bool:
+            return bool(str(p.get("external_id") or "").strip())
+
         if result.data.get("recommended_products"):
-            new_state.last_recommended_products = list(result.data["recommended_products"])
+            _raw_rec = list(result.data["recommended_products"])
+            _filtered_rec = [p for p in _raw_rec if _has_external_id(p)]
+            _skipped_rec = len(_raw_rec) - len(_filtered_rec)
+            if _skipped_rec:
+                logger.warning(
+                    "[CATALOG] filtered %d unsynced product(s) from recommended_products "
+                    "| tenant=%s skipped_titles=%s",
+                    _skipped_rec, ctx.tenant_id,
+                    [p.get("title") for p in _raw_rec if not _has_external_id(p)],
+                )
+            new_state.last_recommended_products = _filtered_rec
         elif sales_context.recommendations:
-            new_state.last_recommended_products = list(sales_context.recommendations[:5])
+            _raw_sales = list(sales_context.recommendations[:5])
+            _filtered_sales = [p for p in _raw_sales if _has_external_id(p)]
+            _skipped_sales = len(_raw_sales) - len(_filtered_sales)
+            if _skipped_sales:
+                logger.warning(
+                    "[CATALOG] filtered %d unsynced product(s) from sales_context.recommendations "
+                    "| tenant=%s skipped_titles=%s",
+                    _skipped_sales, ctx.tenant_id,
+                    [p.get("title") for p in _raw_sales if not _has_external_id(p)],
+                )
+            new_state.last_recommended_products = _filtered_sales
         new_state.recommended_next_step = suggestion.suggested_next_step
         new_state.pending_action = suggestion.suggested_next_step or new_state.pending_action
         ctx.suggestion = suggestion

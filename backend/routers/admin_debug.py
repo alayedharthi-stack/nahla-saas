@@ -584,3 +584,254 @@ async def salla_test_connection(
             "has_refresh_token":     hr,
             "needs_reauth":          bool((intg.config or {}).get("needs_reauth")),
         }
+
+
+# ── Catalog audit ──────────────────────────────────────────────────────────────
+
+@router.get("/catalog-audit")
+def catalog_audit(
+    tenant_id: int = Query(1),
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Audit the product catalog for a tenant.
+
+    Returns:
+      total_products          — all products in DB
+      synced                  — products with external_id (orderable)
+      missing_external_id     — products without external_id (cannot create Salla orders)
+      in_stock_synced         — synced + in_stock
+      ready_for_salla_order   — first 20 products ready to order (external_id + in_stock)
+      unsynced_products       — first 20 products missing external_id
+    """
+    _require_enabled(secret)
+
+    from models import Product as _Product  # noqa: PLC0415
+
+    all_products = (
+        db.query(_Product)
+        .filter(_Product.tenant_id == tenant_id)
+        .order_by(_Product.id)
+        .all()
+    )
+
+    synced, unsynced, ready, unavailable = [], [], [], []
+    for p in all_products:
+        ext_id = str(p.external_id or "").strip()
+        in_stock = bool(getattr(p, "in_stock", True))
+        price = str(getattr(p, "price", "") or "").strip()
+
+        row = {
+            "id": p.id,
+            "title": p.title,
+            "sku": getattr(p, "sku", "") or "",
+            "external_id": ext_id or None,
+            "in_stock": in_stock,
+            "stock_qty": getattr(p, "stock_quantity", None),
+            "price": price,
+            "status": str((getattr(p, "extra_metadata", {}) or {}).get("status", "unknown")),
+        }
+
+        if ext_id:
+            synced.append(row)
+            if in_stock and price:
+                ready.append(row)
+            else:
+                unavailable.append(row)
+        else:
+            unsynced.append(row)
+
+    logger.info(
+        "[CATALOG AUDIT] tenant=%s total=%d synced=%d unsynced=%d ready=%d",
+        tenant_id, len(all_products), len(synced), len(unsynced), len(ready),
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "total_products": len(all_products),
+        "synced_count": len(synced),
+        "missing_external_id_count": len(unsynced),
+        "in_stock_synced_count": len(ready),
+        "ready_for_salla_order": ready[:20],
+        "unsynced_products": unsynced[:20],
+        "unavailable_synced": unavailable[:10],
+    }
+
+
+# ── Resync products from Salla ─────────────────────────────────────────────────
+
+@router.post("/salla/resync-products")
+async def salla_resync_products(
+    tenant_id: int = Query(1),
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Pull ALL products from Salla and upsert into Nahla DB.
+
+    Match strategy (in order):
+      1. external_id exact match — update in place
+      2. SKU match              — link and update
+      3. Title match (exact)    — link by name, flag for review
+      4. No match               — create new row
+
+    Returns a summary with created/updated/skipped counts and which
+    products are now ready for Salla orders.
+    """
+    _require_enabled(secret)
+
+    from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+    from store_adapters.salla_adapter import SallaAdapter  # noqa: PLC0415
+    from models import Product as _Product  # noqa: PLC0415
+
+    intg = pick_active_salla_integration(db, tenant_id)
+    if not intg:
+        raise HTTPException(status_code=404, detail="No active Salla integration for this tenant")
+
+    cfg = intg.config or {}
+    if cfg.get("needs_reauth"):
+        raise HTTPException(status_code=403, detail="Integration needs_reauth — merchant must reconnect Salla")
+
+    adapter = SallaAdapter(
+        api_key=cfg.get("api_key", ""),
+        store_id=cfg.get("store_id", ""),
+        refresh_token=cfg.get("refresh_token", ""),
+        tenant_id=tenant_id,
+        integration_id=intg.id,
+    )
+
+    # Fetch from Salla — paginate through all pages
+    logger.info("[CATALOG SYNC] tenant=%s starting product resync from Salla", tenant_id)
+    try:
+        salla_products = await adapter.get_products()
+    except Exception as exc:
+        logger.error("[CATALOG SYNC] tenant=%s Salla fetch failed: %s", tenant_id, exc)
+        raise HTTPException(status_code=502, detail=f"Salla fetch failed: {exc}")
+
+    logger.info("[CATALOG SYNC] tenant=%s fetched_from_salla=%d", tenant_id, len(salla_products))
+
+    # Load all existing products for this tenant (keyed by external_id, sku, title)
+    existing = db.query(_Product).filter(_Product.tenant_id == tenant_id).all()
+    by_ext   = {str(p.external_id or "").strip(): p for p in existing if p.external_id}
+    by_sku   = {str(p.sku or "").strip().lower(): p for p in existing if p.sku}
+    by_title = {str(p.title or "").strip().lower(): p for p in existing}
+
+    created = 0
+    updated = 0
+    skipped = 0
+    ready   = 0
+
+    for raw in salla_products:
+        if hasattr(raw, "dict"):
+            raw = raw.dict()
+
+        salla_id  = str(raw.get("id") or raw.get("external_id") or "").strip()
+        title     = str(raw.get("title") or raw.get("name") or "").strip()
+        sku       = str(raw.get("sku") or "").strip()
+        price     = str(raw.get("price") or raw.get("regular_price") or "").strip()
+        in_stock  = bool(raw.get("in_stock", True))
+        stock_qty_raw = raw.get("quantity") or raw.get("stock_quantity")
+        try:
+            stock_qty = int(float(stock_qty_raw)) if stock_qty_raw is not None else None
+        except (TypeError, ValueError):
+            stock_qty = None
+
+        status_raw = raw.get("status")
+        if isinstance(status_raw, dict):
+            status = str(status_raw.get("slug") or status_raw.get("name") or "active")
+        else:
+            status = str(status_raw or "active")
+
+        if not salla_id:
+            skipped += 1
+            logger.warning("[CATALOG SYNC] tenant=%s skipping product without id | title=%r", tenant_id, title)
+            continue
+
+        # Match priority: ext_id → sku → title
+        product = (
+            by_ext.get(salla_id)
+            or (by_sku.get(sku.lower()) if sku else None)
+            or (by_title.get(title.lower()) if title else None)
+        )
+
+        extra = {
+            "external_id": salla_id,
+            "id": salla_id,
+            "title": title,
+            "sku": sku,
+            "price": price,
+            "status": status,
+            "in_stock": in_stock,
+            "stock_qty": stock_qty,
+            "variants": raw.get("variants") or [],
+            "options": raw.get("options") or [],
+        }
+
+        if product:
+            was_synced = bool(str(product.external_id or "").strip())
+            product.external_id    = salla_id
+            product.title          = title or product.title
+            product.sku            = sku or product.sku
+            product.price          = price or product.price
+            product.in_stock       = in_stock
+            product.stock_quantity = stock_qty
+            product.extra_metadata = extra
+            updated += 1
+            if not was_synced:
+                logger.info(
+                    "[CATALOG SYNC] linked existing product | tenant=%s "
+                    "nahla_id=%s title=%r external_id=%s",
+                    tenant_id, product.id, title, salla_id,
+                )
+        else:
+            product = _Product(
+                tenant_id      = tenant_id,
+                external_id    = salla_id,
+                title          = title,
+                sku            = sku,
+                price          = price,
+                in_stock       = in_stock,
+                stock_quantity = stock_qty,
+                extra_metadata = extra,
+            )
+            db.add(product)
+            created += 1
+
+        # Count as ready if it has a price and is in stock
+        if salla_id and in_stock and price:
+            ready += 1
+
+        logger.info(
+            "[CATALOG SYNC] synced product | tenant=%s external_id=%s title=%r "
+            "in_stock=%s price=%s status=%s",
+            tenant_id, salla_id, title, in_stock, price, status,
+        )
+
+        # Update lookup caches so subsequent iterations see the new state
+        by_ext[salla_id] = product
+        if sku:
+            by_sku[sku.lower()] = product
+        if title:
+            by_title[title.lower()] = product
+
+    db.commit()
+
+    logger.info(
+        "[CATALOG SYNC] tenant=%s done | fetched=%d created=%d updated=%d "
+        "skipped=%d products_ready_for_order=%d",
+        tenant_id, len(salla_products), created, updated, skipped, ready,
+    )
+
+    return {
+        "tenant_id":              tenant_id,
+        "fetched_from_salla":     len(salla_products),
+        "created":                created,
+        "updated":                updated,
+        "skipped":                skipped,
+        "products_ready_for_order": ready,
+        "message": (
+            f"Synced {len(salla_products)} products from Salla. "
+            f"{ready} are now ready for orders."
+        ),
+    }
