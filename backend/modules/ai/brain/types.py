@@ -222,6 +222,13 @@ class MerchantConversationState:
     # Used by RealPolicyGate._auto_escalate for a real streak check instead of
     # the crude turn-counter proxy.
     general_streak: int = 0
+    # Snapshot of the currently selected product options {group_name: value_name}.
+    # Set by the pipeline after each successful option pick so the decision engine
+    # can detect "options_pending" without importing orders.py.
+    current_selected_options: Dict[str, Any] = field(default_factory=dict)
+    # Names of option groups still pending (e.g. ["المقاس"]). Empty once all
+    # options have been collected. Set by the pipeline after each turn.
+    pending_option_groups: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -251,6 +258,8 @@ class MerchantConversationState:
             "pending_city": self.pending_city,
             "last_action": self.last_action,
             "general_streak": self.general_streak,
+            "current_selected_options": self.current_selected_options,
+            "pending_option_groups": list(self.pending_option_groups or []),
         }
 
     @staticmethod
@@ -282,6 +291,10 @@ class MerchantConversationState:
             pending_city=str(d.get("pending_city", "") or ""),
             last_action=str(d.get("last_action", "") or ""),
             general_streak=int(d.get("general_streak", 0) or 0),
+            current_selected_options=dict(d.get("current_selected_options") or {}),
+            pending_option_groups=[
+                str(g) for g in (d.get("pending_option_groups") or []) if g
+            ],
         )
 
 

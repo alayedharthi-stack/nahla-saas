@@ -282,6 +282,22 @@ class DraftOrderHandler:
                 len(prep.product_options or {}),
             )
 
+        # ── Always try to capture option selections from the message first ──────
+        # CRITICAL: call _merge_message_options BEFORE the checkout-fields check
+        # so that option picks (e.g. "بج", "1") are recorded even when the
+        # customer is still filling other slots. Previously this was called
+        # AFTER the `if missing: return` guard which meant any option text
+        # sent while checkout fields were still missing was silently dropped,
+        # causing the bot to re-ask for the same options on the next turn.
+        _options_captured_early = _merge_message_options(prep, ctx.message)
+        if _options_captured_early:
+            logger.info(
+                "[ORDER FLOW] options captured early (before checkout-field check) | "
+                "tenant=%s captured=%d selected=%s",
+                ctx.tenant_id, _options_captured_early,
+                {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+            )
+
         # Country-aware address rules
         is_sa = _is_saudi_customer(ctx.customer_phone)
         missing = _missing_checkout_fields(prep, is_sa=is_sa)
@@ -292,13 +308,14 @@ class DraftOrderHandler:
             "[ORDER FLOW] checkout fields status | tenant=%s product=%r "
             "first_name=%r last_name=%r city=%r "
             "short_code=%r maps_url=%s lat_lng=%s "
-            "missing=%s is_sa=%s",
+            "missing=%s is_sa=%s options_pending=%s",
             ctx.tenant_id, product_info.get("title"),
             bool(prep.customer_first_name), bool(prep.customer_last_name),
             prep.city or None,
             prep.short_address_code or None, bool(prep.google_maps_url),
             bool(prep.latitude and prep.longitude),
             missing, is_sa,
+            [g.get("name") for g in _missing_product_options(prep)],
         )
 
         if missing:
@@ -323,7 +340,11 @@ class DraftOrderHandler:
                 },
             )
 
-        _merge_message_options(prep, ctx.message)
+        # Second pass: if options were not captured in the early pass
+        # (because product_options_meta was not yet loaded), try again now
+        # that _ensure_product_options_loaded has run.
+        if not _options_captured_early and prep.product_options_meta:
+            _merge_message_options(prep, ctx.message)
 
         # ── Number-by-stage interpretation (quantity) ────────────────────────
         # When the customer sends a bare number ("2" / "3") AND the product
@@ -384,9 +405,11 @@ class DraftOrderHandler:
                 list(prep.product_options.keys()),
             )
             logger.info(
-                "[ORDER FLOW] missing product options | tenant=%s pending=%s values=%s",
+                "[ORDER FLOW] BLOCKED → needs_collection | missing=['product_options'] | "
+                "tenant=%s pending=%s values=%s selected_so_far=%s",
                 ctx.tenant_id, _next_group["name"],
                 [v["name"] for v in _next_group.get("values") or []],
+                {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
             )
             return ActionResult(
                 success=True,
@@ -708,8 +731,22 @@ class DraftOrderHandler:
         # ── Salla rejected the product because options are missing ────────────
         # Either our adapter pre-flight caught it, or Salla itself returned
         # 422 ("خيارات المنتج مطلوبة"). Either way: we now KNOW this product
-        # needs options. Persist the fact, force-reload metadata, and
-        # re-prompt the customer instead of looping the generic retry.
+        # needs options.
+        #
+        # CRITICAL FIX: Do NOT blindly clear prep.product_options — the
+        # customer may have already picked the correct values, but we sent
+        # them in the wrong format (e.g. value_name string instead of
+        # value_id integer). Clearing forces the customer to repeat the
+        # selection with no benefit and creates an infinite loop.
+        #
+        # Strategy:
+        #   1. Keep existing selections (prep.product_options) intact.
+        #   2. Force-reload metadata (option group IDs / value IDs) from
+        #      Salla so we have fresh numeric IDs for the next attempt.
+        #   3. Try to re-match the already-selected value names against the
+        #      newly loaded metadata to fill in any missing numeric IDs.
+        #   4. Only clear selections + re-ask if we truly have NO metadata
+        #      at all (product has options but we can't fetch the details).
         _options_missing_signal = (
             "required_product_options_missing" in error_msg
             or "options" in error_msg.lower()
@@ -717,17 +754,52 @@ class DraftOrderHandler:
         )
         if _options_missing_signal:
             prep.product_has_required_options = True
-            # Drop cached metadata so the next turn re-fetches from
-            # Salla via the dedicated /products/{id}/options endpoint.
+            _prev_selections = dict(prep.product_options or {})
+            # Force reload: drop cached meta so _ensure_product_options_loaded
+            # re-fetches from Salla (fresh IDs). Keep product_options so we
+            # can try to re-match existing selections against the new meta.
             prep.product_options_meta = []
-            prep.product_options = {}
             prep.product_options_loaded = False
             logger.error(
-                "[ORDER FLOW] options required by Salla — reloading metadata | "
-                "tenant=%s product=%s",
-                ctx.tenant_id, external_id,
+                "[ORDER FLOW] options required by Salla — reloading metadata "
+                "(keeping %d existing selections) | tenant=%s product=%s "
+                "prev_selections=%s",
+                len(_prev_selections), ctx.tenant_id, external_id,
+                {k: v.get("value_name") for k, v in _prev_selections.items()},
             )
             await _ensure_product_options_loaded(prep, ctx, external_id)
+
+            # Re-match previously selected value names against fresh metadata.
+            # This repairs the case where the customer already picked the right
+            # value but we had stale/missing IDs at the time we built the payload.
+            if _prev_selections and prep.product_options_meta:
+                prep.product_options = {}
+                for group in prep.product_options_meta:
+                    gname = (group.get("name") or "").strip()
+                    gkey = gname.lower()
+                    prev_sel = _prev_selections.get(gkey)
+                    if not prev_sel:
+                        continue
+                    prev_vname = (prev_sel.get("value_name") or "").strip().lower()
+                    for val in group.get("values") or []:
+                        vname = (val.get("name") or "").strip()
+                        if vname.lower() == prev_vname or _norm_ar(vname.lower()) == _norm_ar(prev_vname):
+                            prep.product_options[gkey] = {
+                                "option_id": group.get("id"),
+                                "option_name": gname,
+                                "value_id": val.get("id"),
+                                "value_name": vname,
+                            }
+                            logger.info(
+                                "[ORDER FLOW] re-matched option after Salla rejection → "
+                                "group=%r value=%r option_id=%s value_id=%s",
+                                gname, vname, group.get("id"), val.get("id"),
+                            )
+                            break
+            elif not _prev_selections:
+                # No previous selections → truly need to ask customer.
+                prep.product_options = {}
+
             _missing_now = _missing_product_options(prep) or list(prep.product_options_meta or [])
 
             # Guard: if Salla says options are required but we STILL can't load
@@ -1471,15 +1543,19 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
                     "value_name": vname,
                 }
                 captured += 1
+                _stored_vid = val.get("id")
+                _stored_oid = group.get("id")
                 if existing:
                     logger.info(
-                        "[ORDER FLOW] option updated | group=%r old=%r new=%r",
-                        gname, existing_value_name, vname,
+                        "[ORDER FLOW] option updated → group=%r old=%r new=%r "
+                        "option_id=%s value_id=%s",
+                        gname, existing_value_name, vname, _stored_oid, _stored_vid,
                     )
                 else:
                     logger.info(
-                        "[ORDER FLOW] product option selected | group=%r value=%r",
-                        gname, vname,
+                        "[ORDER FLOW] option selected → group=%r value=%r "
+                        "option_id=%s value_id=%s",
+                        gname, vname, _stored_oid, _stored_vid,
                     )
                 break
 
@@ -1510,8 +1586,8 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
             }
             captured += 1
             logger.info(
-                "[ORDER FLOW] number interpreted as option | group=%r idx=%d value=%r",
-                gname, idx, val.get("name") or "",
+                "[ORDER FLOW] option selected → group=%r value=%r option_id=%s value_id=%s (numeric pick idx=%d)",
+                gname, val.get("name") or "", group.get("id"), val.get("id"), idx,
             )
 
     if captured >= 2:

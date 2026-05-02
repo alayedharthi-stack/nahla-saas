@@ -280,6 +280,32 @@ class MerchantBrain:
             new_state.current_product_focus = result.data["product"]
         if result.data.get("order_prep"):
             new_state.order_prep = OrderPreparationState.from_dict(result.data.get("order_prep"))
+            # Sync option-selection state to top-level MerchantConversationState
+            # fields so the decision engine can read them without importing orders.py.
+            _op_opts = new_state.order_prep.product_options or {}
+            _op_meta = new_state.order_prep.product_options_meta or []
+            new_state.current_selected_options = {
+                k: v.get("value_name", "") for k, v in _op_opts.items()
+            }
+            # pending_option_groups: groups in meta that are NOT yet in product_options
+            _selected_keys = set(k.lower() for k in _op_opts.keys())
+            new_state.pending_option_groups = [
+                (g.get("name") or "").strip()
+                for g in _op_meta
+                if (g.get("values") or []) and (g.get("name") or "").strip().lower() not in _selected_keys
+            ]
+            if new_state.pending_option_groups:
+                logger.info(
+                    "[ORDER FLOW] pending_option_groups=%s selected=%s | tenant=%s",
+                    new_state.pending_option_groups,
+                    new_state.current_selected_options,
+                    tenant_id,
+                )
+            elif _op_opts:
+                logger.info(
+                    "[ORDER FLOW] options_pending=[] all options collected=%s | tenant=%s",
+                    new_state.current_selected_options, tenant_id,
+                )
             # Once the order_prep has captured the address values, the
             # pre-product stash has done its job — clear it so a future
             # browsing round doesn't accidentally inject stale codes.

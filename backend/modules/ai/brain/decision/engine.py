@@ -296,6 +296,24 @@ class DefaultDecisionEngine:
 
         # ── 3.5 Pick from numbered list ───────────────────────────────────────
         if intent.name == INTENT_PICK_LIST_ITEM:
+            # GUARD: if product options are pending, a numeric pick is an
+            # OPTION selection (e.g. "1" for المقاس, "2" for اللون), NOT a
+            # product selection. Route to ACTION_PROPOSE_DRAFT_ORDER so
+            # orders.py._merge_message_options handles it correctly.
+            _pending_opts = list(getattr(state, "pending_option_groups", None) or [])
+            if _pending_opts and state.current_product_focus and facts.orderable:
+                logger.info(
+                    "[ORDER FLOW] numeric pick → option selection (not product pick) | "
+                    "pending_options=%s product=%r",
+                    _pending_opts, (state.current_product_focus or {}).get("title"),
+                )
+                return Decision(
+                    action=ACTION_PROPOSE_DRAFT_ORDER,
+                    args={"product": state.current_product_focus},
+                    reason=f"numeric pick while options pending {_pending_opts} — treat as option selection",
+                    confidence=0.96,
+                )
+
             # CRITICAL: only fall back to last_recommended_products when
             # last_search_candidates is empty AND we have NO active list
             # context. Mixing the two lists causes the customer to see

@@ -455,6 +455,8 @@ class DefaultStateStore:
                 if intent.name == INTENT_GENERAL
                 else 0
             ),
+            current_selected_options=dict(getattr(state, "current_selected_options", None) or {}),
+            pending_option_groups=list(getattr(state, "pending_option_groups", None) or []),
         )
 
         action = decision.action
