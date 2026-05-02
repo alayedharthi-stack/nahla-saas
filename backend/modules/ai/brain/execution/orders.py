@@ -553,24 +553,63 @@ class DraftOrderHandler:
         # selection map got cleared, or an "أنشئ الطلب" message arriving
         # before the customer has actually picked size/colour).
         if prep.product_has_required_options and not _options_payload:
-            logger.error(
-                "[ORDER FLOW] blocking create_order: required options missing in final payload | "
-                "tenant=%s product=%s required_groups=%s selected=%s",
+            # _options_payload is empty — either because no options were selected,
+            # OR because selected options have option_id=None (stale early capture).
+            # Re-compute what is truly missing BEFORE deciding to re-ask.
+            _missing_now = _missing_product_options(prep)
+            # Fallback to full meta ONLY when NOTHING has been selected yet.
+            # If the customer already picked (prep.product_options is non-empty) but
+            # IDs are missing/stale, we should NOT re-ask — escalate instead.
+            if not _missing_now and not prep.product_options:
+                _missing_now = list(prep.product_options_meta or [])
+
+            if _missing_now:
+                logger.error(
+                    "[ORDER FLOW] blocking create_order: options missing | "
+                    "tenant=%s product=%s missing=%s selected=%s",
+                    ctx.tenant_id, external_id,
+                    [g.get("name") for g in _missing_now],
+                    list((prep.product_options or {}).keys()),
+                )
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "needs_options": True,
+                        "missing_option_groups": _missing_now,
+                        "selected_options": prep.product_options,
+                        "order_prep": prep.to_dict(),
+                    },
+                )
+            # All options selected but payload is empty (stale IDs) — reload meta
+            # so _resolve_options_payload can build a valid payload on next turn.
+            logger.warning(
+                "[ORDER FLOW] options selected but payload empty (stale IDs) — "
+                "forcing meta reload | tenant=%s product=%s selected=%s",
                 ctx.tenant_id, external_id,
-                [g.get("name") for g in (prep.product_options_meta or []) if g.get("required")],
                 list((prep.product_options or {}).keys()),
             )
-            _missing_now = _missing_product_options(prep) or list(prep.product_options_meta or [])
-            return ActionResult(
-                success=True,
-                data={
-                    "product": product_info,
-                    "needs_options": True,
-                    "missing_option_groups": _missing_now,
-                    "selected_options": prep.product_options,
-                    "order_prep": prep.to_dict(),
-                },
-            )
+            prep.product_options_loaded = False
+            prep.product_options_meta = []
+            await _ensure_product_options_loaded(prep, ctx, external_id)
+            # Re-resolve now with fresh IDs
+            _options_payload = _resolve_options_payload(prep)
+            if not _options_payload:
+                logger.error(
+                    "[ORDER FLOW] still no options payload after reload — escalating | "
+                    "tenant=%s product=%s",
+                    ctx.tenant_id, external_id,
+                )
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "needs_options": True,
+                        "missing_option_groups": list(prep.product_options_meta or []),
+                        "selected_options": prep.product_options,
+                        "order_prep": prep.to_dict(),
+                    },
+                )
 
         if _options_payload:
             logger.info(
@@ -800,13 +839,14 @@ class DraftOrderHandler:
                 # No previous selections → truly need to ask customer.
                 prep.product_options = {}
 
-            _missing_now = _missing_product_options(prep) or list(prep.product_options_meta or [])
+            _missing_now = _missing_product_options(prep)
+            # Fallback: only use full meta when NOTHING was collected yet.
+            # Do NOT use full meta when the customer already selected values —
+            # that would incorrectly re-show already-chosen groups.
+            if not _missing_now and not prep.product_options:
+                _missing_now = list(prep.product_options_meta or [])
 
-            # Guard: if Salla says options are required but we STILL can't load
-            # them (get_product keeps returning None), returning needs_options
-            # with an empty list causes the composer to say "تمام، سأجهز طلب"
-            # and then loop forever. Fall through to the retry/escalate path
-            # instead so a human agent can handle it.
+            # Guard A: options required but metadata could not be loaded at all.
             if not _missing_now and not prep.product_options_meta:
                 logger.warning(
                     "[ORDER FLOW] options required by Salla but metadata unavailable "
@@ -816,6 +856,30 @@ class DraftOrderHandler:
                 )
                 prep.salla_failure_count = (prep.salla_failure_count or 0) + 1
                 # Fall through to retry/escalate handling below.
+
+            # Guard B: ALL options are already selected — the rejection was due to
+            # stale IDs, not missing picks. Re-matched IDs are now fresh; continue
+            # to next turn where _resolve_options_payload will build a valid payload.
+            elif not _missing_now and prep.product_options:
+                logger.info(
+                    "[ORDER FLOW] all options re-matched after Salla rejection — "
+                    "will retry with fresh IDs on next message | "
+                    "tenant=%s product=%s selected=%s",
+                    ctx.tenant_id, external_id,
+                    {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+                )
+                # Save updated prep (with fresh IDs) and tell the customer to confirm.
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "needs_options": False,
+                        "missing_option_groups": [],
+                        "selected_options": prep.product_options,
+                        "order_prep": prep.to_dict(),
+                        "salla_retry": True,
+                    },
+                )
             else:
                 return ActionResult(
                     success=True,

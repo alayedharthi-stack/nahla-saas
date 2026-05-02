@@ -498,6 +498,48 @@ async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dic
 # CORE DISPATCH — Full Engine Pipeline
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _extract_wa_message_text(message: Dict[str, Any]):
+    """Universal WhatsApp message text extractor.
+
+    Returns (text, source) for ALL message types:
+      - "text"              → body
+      - "button"            → button.text  (template quick-reply tap)
+      - "interactive/button_reply" → button_reply.title  (interactive reply)
+      - "interactive/list_reply"   → list_reply.title
+    """
+    # 1. Plain text
+    _txt = message.get("text")
+    if _txt and _txt.get("body"):
+        return str(_txt["body"]).strip(), "text"
+
+    # 2. Template button reply (type="button")
+    _btn = message.get("button")
+    if _btn:
+        _payload = str(_btn.get("payload") or "").strip()
+        _text    = str(_btn.get("text") or "").strip()
+        # `payload` and `text` are both populated; `text` is human-readable
+        if _text:
+            return _text, "button"
+        if _payload:
+            return _payload, "button_payload"
+
+    # 3. Interactive reply (type="interactive")
+    _ia = message.get("interactive") or {}
+    if _ia.get("type") == "button_reply":
+        _br = _ia.get("button_reply") or {}
+        _title = str(_br.get("title") or "").strip()
+        if _title:
+            return _title, "button_reply"
+
+    if _ia.get("type") == "list_reply":
+        _lr = _ia.get("list_reply") or {}
+        _title = str(_lr.get("title") or "").strip()
+        if _title:
+            return _title, "list_reply"
+
+    return None, "unknown"
+
+
 async def _dispatch_message(
     phone_number_id: str,
     msg: Dict[str, Any],
@@ -508,25 +550,16 @@ async def _dispatch_message(
     sender   = msg.get("from", "")
     msg_id   = msg.get("id", "")
 
-    # Cheap text preview for the WEBHOOK_IN log — proper normalization
-    # happens later, but we want this snippet in Railway from the very
-    # first line so we can correlate "8 / TAPA7401 / 1" bursts even when
-    # downstream stages bail out early.
-    _text_preview = ""
-    try:
-        if msg_type == "text":
-            _text_preview = ((msg.get("text") or {}).get("body") or "")
-        elif msg_type == "interactive":
-            _ir = (msg.get("interactive") or {})
-            if _ir.get("type") == "button_reply":
-                _text_preview = ((_ir.get("button_reply") or {}).get("title") or "")
-            elif _ir.get("type") == "list_reply":
-                _text_preview = ((_ir.get("list_reply") or {}).get("title") or "")
-        elif msg_type == "button":
-            _text_preview = ((msg.get("button") or {}).get("text") or "")
-    except Exception:
-        _text_preview = ""
-    _text_preview = (_text_preview or "")[:80].replace("\n", " ")
+    # Universal text extraction — covers text, button, interactive.
+    # This is the SINGLE source of truth for "what did the customer say?"
+    # used for logging and for routing button taps to the merchant brain.
+    _wa_text, _wa_source = _extract_wa_message_text(msg)
+    _text_preview = (_wa_text or "")[:80].replace("\n", " ")
+
+    logger.info(
+        "[WA PARSER] extracted_text=%r source=%s msg_type=%s sender=%s",
+        _wa_text, _wa_source, msg_type, sender,
+    )
 
     # ── TRACE: log every incoming webhook ─────────────────────────────────────
     logger.info(
@@ -1080,8 +1113,25 @@ async def _dispatch_message(
                 # text reply.
                 if btn_id.startswith("opt_") and not _is_platform_tenant(db, resolved_tenant_id):
                     forwarded = (btn_txt or "").strip() or btn_id.split("_", 1)[-1]
+                    logger.info(
+                        "[WA PARSER] extracted_text=%r source=button_reply btn_id=%s tenant=%s",
+                        forwarded, btn_id, resolved_tenant_id,
+                    )
                     await _handle_merchant_message(
                         phone_id=used_pid, to=sender, text=forwarded,
+                        tenant_id=resolved_tenant_id, db=db,
+                    )
+                    return
+
+                # Generic interactive button from merchant tenant — forward the
+                # human-readable title to the brain so it behaves like typed text.
+                if not _is_platform_tenant(db, resolved_tenant_id) and btn_txt:
+                    logger.info(
+                        "[WA PARSER] extracted_text=%r source=button_reply (generic) btn_id=%s tenant=%s",
+                        btn_txt, btn_id, resolved_tenant_id,
+                    )
+                    await _handle_merchant_message(
+                        phone_id=used_pid, to=sender, text=btn_txt,
                         tenant_id=resolved_tenant_id, db=db,
                     )
                     return
@@ -1090,9 +1140,37 @@ async def _dispatch_message(
                     btn_id=btn_id, phone_id=used_pid, to=sender,
                     tenant_id=resolved_tenant_id, db=db,
                 )
+
+            elif interactive.get("type") == "list_reply":
+                lr       = interactive.get("list_reply", {}) or {}
+                lr_id    = lr.get("id", "")
+                lr_title = (lr.get("title", "") or lr_id).strip()
+                if lr_title and not _is_platform_tenant(db, resolved_tenant_id):
+                    logger.info(
+                        "[WA PARSER] extracted_text=%r source=list_reply lr_id=%s tenant=%s",
+                        lr_title, lr_id, resolved_tenant_id,
+                    )
+                    await _handle_merchant_message(
+                        phone_id=used_pid, to=sender, text=lr_title,
+                        tenant_id=resolved_tenant_id, db=db,
+                    )
             return
 
         if normalized_inbound.normalized_type not in {"text", "audio"}:
+            # ── Button-tap rescue: "button" type = customer tapped a template
+            # quick-reply.  The normalizer marks it unsupported, but we have
+            # already extracted human-readable text via _extract_wa_message_text.
+            # Treat it exactly like a text message so the Brain receives it.
+            if _wa_text and msg_type == "button" and not _is_platform_tenant(db, resolved_tenant_id):
+                logger.info(
+                    "[WA PARSER] button tap rescued | tenant=%s text=%r source=%s",
+                    resolved_tenant_id, _wa_text, _wa_source,
+                )
+                await _handle_merchant_message(
+                    phone_id=used_pid, to=sender, text=_wa_text,
+                    tenant_id=resolved_tenant_id, db=db,
+                )
+                return
             logger.info(
                 "[TRACE][4/6] INBOUND_IGNORED_UNSUPPORTED | tenant_id=%s sender=%s normalized_type=%s",
                 resolved_tenant_id, sender, normalized_inbound.normalized_type,
