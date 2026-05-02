@@ -835,3 +835,128 @@ async def salla_resync_products(
             f"{ready} are now ready for orders."
         ),
     }
+
+
+# ── Salla integration audit ────────────────────────────────────────────────────
+
+@router.get("/salla/integration-audit")
+def salla_integration_audit(
+    tenant_id: int = Query(1),
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Full audit of every Salla integration row for a tenant.
+
+    Shows for each integration:
+      id, enabled, easy_mode, api_sync, has_access_token, has_refresh_token,
+      needs_reauth, token_expires_at, scopes, is_canonical, superseded_by_id,
+      selected_for_orders (which row the order flow would actually use)
+
+    Also shows the reason the winning row was selected and why each other
+    row was rejected.  Use this to diagnose "no usable token" failures.
+    """
+    _require_enabled(secret)
+
+    from store_integration.registry import (  # noqa: PLC0415
+        describe_integrations_for_tenant,
+        _score_integration,
+        _is_easy_mode,
+        _is_api_sync,
+        _needs_reauth,
+    )
+    from models import Integration as _Integration  # noqa: PLC0415
+
+    audit = describe_integrations_for_tenant(db, tenant_id)
+
+    # Enrich with extra fields not in describe_integrations_for_tenant
+    rows = (
+        db.query(_Integration)
+        .filter(
+            _Integration.tenant_id == tenant_id,
+            _Integration.provider == "salla",
+        )
+        .order_by(_Integration.id.asc())
+        .all()
+    )
+    rows_by_id = {r.id: r for r in rows}
+
+    enriched = []
+    for entry in audit.get("integrations", []):
+        intg = rows_by_id.get(entry["id"])
+        if not intg:
+            enriched.append(entry)
+            continue
+        cfg = intg.config or {}
+
+        # Determine usability for orders
+        ha = bool(cfg.get("api_key"))
+        hr = bool(cfg.get("refresh_token"))
+        nr = _needs_reauth(intg)
+
+        if not ha:
+            order_usability = "BLOCKED — no access_token"
+        elif nr:
+            order_usability = "BLOCKED — needs_reauth (merchant must reconnect)"
+        elif not intg.enabled:
+            order_usability = "BLOCKED — integration disabled"
+        elif not hr:
+            order_usability = "DEGRADED — access_token only, no refresh_token (will fail if token expired)"
+        else:
+            order_usability = "OK — has access_token + refresh_token"
+
+        enriched.append({
+            **entry,
+            "api_key_source":    cfg.get("api_key_source", "unknown"),
+            "app_type":          cfg.get("app_type", "unknown"),
+            "scopes":            cfg.get("scopes", []),
+            "external_store_id": intg.external_store_id,
+            "order_usability":   order_usability,
+            "token_age_note": (
+                "Check token_expires_at — Salla access tokens last ~14 days"
+                if ha and not hr else
+                "Refresh token available — auto-renewal possible"
+                if ha and hr else
+                "No token at all — must reconnect"
+            ),
+        })
+
+    selected_id = audit.get("selected_id")
+    selected_entry = next((e for e in enriched if e["id"] == selected_id), None)
+
+    # Actionable recommendation
+    recommendation = "unknown"
+    if not enriched:
+        recommendation = "No Salla integrations found. Ask merchant to connect Salla from the dashboard."
+    elif selected_entry:
+        usability = selected_entry.get("order_usability", "")
+        if "BLOCKED — needs_reauth" in usability:
+            recommendation = (
+                "Selected integration needs_reauth. Run POST /admin/debug/salla/cleanup "
+                "then have the merchant reinstall the Nahla app from Salla App Store."
+            )
+        elif "BLOCKED — no access_token" in usability:
+            recommendation = "Selected integration has no token. Run salla/cleanup then reconnect."
+        elif "DEGRADED" in usability:
+            recommendation = (
+                "access_token is present but there is NO refresh_token. "
+                "Orders will work if the token is still valid (< 14 days old). "
+                "To fix permanently: run POST /admin/debug/salla/cleanup then have the "
+                "merchant reinstall the Nahla app from Salla App Store to get fresh OAuth tokens."
+            )
+        elif "OK" in usability:
+            recommendation = "Integration looks healthy. If orders still fail check Railway logs for 401."
+
+    logger.info(
+        "[Salla Integration Audit] tenant=%s total=%d selected_id=%s usability=%s",
+        tenant_id, len(enriched), selected_id,
+        selected_entry.get("order_usability") if selected_entry else "N/A",
+    )
+
+    return {
+        "tenant_id":         tenant_id,
+        "total_integrations": len(enriched),
+        "selected_id":       selected_id,
+        "recommendation":    recommendation,
+        "integrations":      enriched,
+    }

@@ -313,27 +313,45 @@ class SallaAdapter(BaseStoreAdapter):
             return False
 
     def _require_auth(self, operation: str = "API call") -> None:
-        """Raise SallaTokenRevokedException if this adapter has no usable token.
+        """Preflight check before write operations.
 
-        Called as a preflight check before create_order, create_coupon,
-        sync_products and other write operations so we never fire a doomed
-        Salla API request.
-
-        Blocks when:
-          • access_token is empty
-          • refresh_token is empty
+        Policy:
+          • NO access_token  → hard block (nothing we can do)
+          • access_token only (no refresh_token) → WARNING + proceed.
+            The token may still be valid. If Salla returns 401, the
+            caller's retry logic will attempt a refresh (which will fail
+            and then mark needs_reauth, prompting the merchant to reconnect).
+          • Both tokens present → normal operation; refresh is available.
         """
-        if not self.api_key or not self._refresh_token:
+        if not self.api_key:
             logger.error(
-                "[Salla] blocked API call — integration requires reauth | "
-                "tenant=%s integration_id=%s operation=%s "
-                "has_access_token=%s has_refresh_token=%s",
+                "[Salla] blocked API call — no access_token | "
+                "tenant=%s integration_id=%s operation=%s",
                 self._tenant_id, self._integration_id, operation,
-                bool(self.api_key), bool(self._refresh_token),
             )
             raise SallaTokenRevokedException(
-                f"Integration for tenant={self._tenant_id} has no usable token "
+                f"Integration for tenant={self._tenant_id} has no access_token "
                 f"(operation={operation}). Merchant must reconnect Salla."
+            )
+
+        if not self._refresh_token:
+            # access_token exists but cannot be auto-refreshed.
+            # Proceed optimistically — Salla access_tokens can last up to
+            # 14 days. If this one is expired, the 401 handler will fire
+            # and mark needs_reauth.
+            logger.warning(
+                "[Salla Integration] operating without refresh_token | "
+                "tenant=%s integration_id=%s operation=%s "
+                "has_access_token=True has_refresh_token=False "
+                "— will proceed; 401 will mark needs_reauth",
+                self._tenant_id, self._integration_id, operation,
+            )
+        else:
+            logger.info(
+                "[Salla Integration] selected for order creation | "
+                "tenant=%s integration_id=%s operation=%s "
+                "has_access_token=True has_refresh_token=True",
+                self._tenant_id, self._integration_id, operation,
             )
 
     def _mark_needs_reauth(self, reason: str = "unknown") -> None:

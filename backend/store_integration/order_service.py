@@ -39,6 +39,14 @@ async def create_order(tenant_id: int, order_input: OrderInput) -> Optional[Norm
             tenant_id,
         )
         return None
+    logger.info(
+        "[Salla Integration] selected for order creation | tenant=%s "
+        "adapter=%s integration_id=%s has_access_token=%s has_refresh_token=%s",
+        tenant_id, adapter.platform,
+        getattr(adapter, "_integration_id", "unknown"),
+        bool(getattr(adapter, "api_key", "")),
+        bool(getattr(adapter, "_refresh_token", "")),
+    )
     try:
         order = await adapter.create_order(order_input)
         logger.info(
@@ -94,6 +102,14 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
         "adapter=%s integration_id=%s",
         tenant_id, adapter.platform,
         getattr(adapter, "_integration_id", "unknown"),
+    )
+    logger.info(
+        "[Salla Integration] selected for order creation | tenant=%s "
+        "adapter=%s integration_id=%s has_access_token=%s has_refresh_token=%s",
+        tenant_id, adapter.platform,
+        getattr(adapter, "_integration_id", "unknown"),
+        bool(getattr(adapter, "api_key", "")),
+        bool(getattr(adapter, "_refresh_token", "")),
     )
     try:
         order = await adapter.create_draft_order(order_input)
