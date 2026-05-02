@@ -286,7 +286,29 @@ class DraftOrderHandler:
         is_sa = _is_saudi_customer(ctx.customer_phone)
         missing = _missing_checkout_fields(prep, is_sa=is_sa)
         prep.missing_fields = missing
+
+        # ── Verbose checkpoint: show exactly what's collected vs. missing ──────
+        logger.info(
+            "[ORDER FLOW] checkout fields status | tenant=%s product=%r "
+            "first_name=%r last_name=%r city=%r "
+            "short_code=%r maps_url=%s lat_lng=%s "
+            "missing=%s is_sa=%s",
+            ctx.tenant_id, product_info.get("title"),
+            bool(prep.customer_first_name), bool(prep.customer_last_name),
+            prep.city or None,
+            prep.short_address_code or None, bool(prep.google_maps_url),
+            bool(prep.latitude and prep.longitude),
+            missing, is_sa,
+        )
+
         if missing:
+            logger.info(
+                "[ORDER FLOW] BLOCKED → needs_collection | tenant=%s product=%r "
+                "missing=%s next_question=%r",
+                ctx.tenant_id, product_info.get("title"),
+                missing,
+                _checkout_question(missing[0], is_sa=is_sa),
+            )
             return ActionResult(
                 success=True,
                 data={

@@ -290,9 +290,17 @@ class DefaultActionExecutor:
             logger.error("[Executor] unknown action: %s — falling back to LLM", decision.action)
             handler = self._handlers[ACTION_LLM_REPLY]
 
-        logger.debug(
-            "[Executor] tenant=%s action=%s args=%s",
-            ctx.tenant_id, decision.action, decision.args,
+        # INFO-level so this always appears in Railway logs regardless of
+        # the log-level setting (debug is often suppressed in prod).
+        logger.info(
+            "[ORDER FLOW] decision=%s | tenant=%s reason=%r "
+            "confidence=%.2f forced_product=%r arg_product=%r",
+            decision.action,
+            ctx.tenant_id,
+            decision.reason,
+            decision.confidence,
+            (decision.args.get("forced_product") or {}).get("title"),
+            (decision.args.get("product") or {}).get("title"),
         )
         try:
             return await handler.handle(decision, ctx)

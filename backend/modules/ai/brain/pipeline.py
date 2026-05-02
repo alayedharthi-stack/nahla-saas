@@ -244,6 +244,20 @@ class MerchantBrain:
         reason_before_policy = decision.reason
         decision             = self._policy_gate.gate(decision, ctx)
 
+        # Visible in all Railway log levels — critical checkpoint.
+        _policy_changed = (decision.reason != reason_before_policy)
+        logger.info(
+            "[ORDER FLOW] pipeline decision | tenant=%s action=%s "
+            "reason=%r policy_changed=%s intent=%s candidates=%d focus=%r",
+            ctx.tenant_id,
+            decision.action,
+            decision.reason,
+            _policy_changed,
+            ctx.intent.name if ctx.intent else "(none)",
+            len(ctx.state.last_search_candidates or []),
+            (ctx.state.current_product_focus or {}).get("title"),
+        )
+
         # ── 5. Execute ────────────────────────────────────────────────────
         result: ActionResult = await self._executor.execute(decision, ctx)
 

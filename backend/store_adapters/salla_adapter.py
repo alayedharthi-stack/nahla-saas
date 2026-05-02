@@ -1075,6 +1075,17 @@ class SallaAdapter(BaseStoreAdapter):
 
     async def create_order(self, order_input: OrderInput) -> NormalizedOrder:
         self._require_auth("create_order")
+        logger.error(
+            "[ORDER FLOW] preparing payload for Salla | tenant=%s product=%s "
+            "first_name=%r last_name=%r phone=%s city=%r short_code=%r",
+            self._tenant_id,
+            (order_input.items[0].product_id if order_input.items else "?"),
+            bool(order_input.customer_first_name),
+            bool(order_input.customer_last_name),
+            bool(order_input.customer_phone),
+            order_input.city,
+            order_input.short_address_code,
+        )
         await self._assert_required_options_present(order_input)
         await self._enrich_items_with_variant_id(order_input)
         shipping_company_id = order_input.shipping_company_id
@@ -1109,6 +1120,17 @@ class SallaAdapter(BaseStoreAdapter):
 
     async def create_draft_order(self, order_input: OrderInput) -> NormalizedOrder:
         self._require_auth("create_draft_order")
+        logger.error(
+            "[ORDER FLOW] preparing payload for Salla (draft) | tenant=%s product=%s "
+            "first_name=%r last_name=%r phone=%s city=%r short_code=%r",
+            self._tenant_id,
+            (order_input.items[0].product_id if order_input.items else "?"),
+            bool(order_input.customer_first_name),
+            bool(order_input.customer_last_name),
+            bool(order_input.customer_phone),
+            order_input.city,
+            order_input.short_address_code,
+        )
         await self._assert_required_options_present(order_input)
         await self._enrich_items_with_variant_id(order_input)
         # ── Shipping resolution ───────────────────────────────────────────────────

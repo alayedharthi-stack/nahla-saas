@@ -22,8 +22,22 @@ logger = logging.getLogger("nahla.store_integration.order")
 
 
 async def create_order(tenant_id: int, order_input: OrderInput) -> Optional[NormalizedOrder]:
+    logger.error(
+        "[ORDER FLOW] entering create_order | tenant=%s product=%s qty=%s "
+        "first_name=%r phone_set=%s city=%r",
+        tenant_id,
+        (order_input.items[0].product_id if order_input.items else "?"),
+        (order_input.items[0].quantity if order_input.items else 0),
+        bool(getattr(order_input, "customer_first_name", "")),
+        bool(getattr(order_input, "customer_phone", "")),
+        getattr(order_input, "city", None),
+    )
     adapter = get_adapter(tenant_id)
     if not adapter:
+        logger.error(
+            "[ORDER FLOW] create_order BLOCKED — no Salla adapter | tenant=%s",
+            tenant_id,
+        )
         return None
     try:
         order = await adapter.create_order(order_input)

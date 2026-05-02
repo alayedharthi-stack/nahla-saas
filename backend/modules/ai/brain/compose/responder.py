@@ -157,6 +157,11 @@ class DefaultComposer:
             rejected = decision.args.get("rejected_product")
             if rejected:
                 alts = decision.args.get("alternatives") or data.get("products") or []
+                logger.error(
+                    "[ORDER FLOW] product_unavailable_alternatives fired | "
+                    "rejected=%r alts_count=%d",
+                    rejected.get("title"), len(alts),
+                )
                 return T.product_unavailable_alternatives(
                     rejected_title=rejected.get("title", ""),
                     alternatives=alts,
@@ -222,7 +227,14 @@ class DefaultComposer:
             # (wrong id, deleted, not synced). Ask the customer to choose
             # again — never silently push a doomed order to Salla.
             if data.get("product_unsyncable"):
-                return T.product_unsyncable(product=data.get("product", {}))
+                _unsync_prod = data.get("product") or {}
+                logger.error(
+                    "[ORDER FLOW] product_unsyncable fired | "
+                    "title=%r external_id=%r message=%r action=%s",
+                    _unsync_prod.get("title"), _unsync_prod.get("external_id"),
+                    data.get("message"), action,
+                )
+                return T.product_unsyncable(product=_unsync_prod)
             if data.get("needs_options"):
                 _missing_groups = data.get("missing_option_groups", []) or []
                 # WhatsApp quick-reply buttons for the FIRST pending group
