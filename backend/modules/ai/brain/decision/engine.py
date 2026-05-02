@@ -90,6 +90,61 @@ class DefaultDecisionEngine:
             "longitude",
         }
 
+        # ── 0. Deterministic checkout continuation (highest priority) ────────
+        # When the customer is actively in the ordering stage and sends a
+        # confirmation / continuation message, NEVER let it fall through to
+        # the LLM.  This block fires before anything else so that explicit
+        # checkout signals are never misrouted.
+        #
+        # Trigger conditions (ALL must be true):
+        #   • stage is ordering or deciding
+        #   • a product is already in focus (current_product_focus)
+        #   • the store can actually fulfil orders (facts.orderable)
+        #   • the message looks like a checkout continuation (keyword list
+        #     OR any message while order_prep exists — customer is answering
+        #     our slot-fill questions)
+        _CONFIRM_KEYWORDS = frozenset({
+            # Arabic: "confirm", "place order", "done", "continue", "go ahead",
+            # "yes", "agreed", "I agree", "OK", "sure", "proceed",
+            "تمم", "تمام", "اطلب", "اطلبه", "اطلبها", "تأكيد", "تأكد",
+            "اكمل", "أكمل", "نعم", "موافق", "موافقه", "حسنا", "حسناً",
+            "حسن", "صح", "صحيح", "شوف", "ابدأ", "إبدأ", "سر", "سري",
+            "قدّم", "قدم", "ارسل", "أرسل", "تقدم", "تقدّم", "أتمم",
+            "وافق", "أوافق", "أوافقك", "رائع", "ممتاز", "انشئ", "أنشئ",
+            "go", "ok", "okay", "yes", "confirm", "proceed", "sure",
+        })
+        _msg_lower  = (ctx.message or "").strip().lower()
+        _msg_words  = set(_msg_lower.split())
+        _is_confirm = bool(_msg_words & _CONFIRM_KEYWORDS)
+        _has_prep   = bool(getattr(state, "order_prep", None))
+
+        if (
+            state.stage in (STAGE_ORDERING, STAGE_DECIDING)
+            and state.current_product_focus
+            and facts.orderable
+            and not state.checkout_url
+            and (_is_confirm or _has_prep)
+            and intent.name not in (INTENT_TALK_HUMAN, INTENT_TRACK_ORDER)
+        ):
+            _focus_title = (state.current_product_focus or {}).get("title")
+            logger.info(
+                "[ORDER FLOW] FORCED action=propose_draft_order "
+                "reason=rule_based_checkout | tenant=%s product=%r "
+                "is_confirm=%s has_prep=%s intent=%s stage=%s",
+                ctx.tenant_id, _focus_title,
+                _is_confirm, _has_prep, intent.name, state.stage,
+            )
+            return Decision(
+                action=ACTION_PROPOSE_DRAFT_ORDER,
+                args={"product": state.current_product_focus},
+                reason=(
+                    "rule_based_checkout: confirmation keyword detected"
+                    if _is_confirm
+                    else "rule_based_checkout: order_prep active — continue collecting slots"
+                ),
+                confidence=0.97,
+            )
+
         # ── 1. Handoff ────────────────────────────────────────────────────
         # Guard: never escalate to a human if the customer is mid-order.
         # The classifier already blocks LLM-suggested INTENT_TALK_HUMAN
@@ -485,8 +540,14 @@ class DefaultDecisionEngine:
         # 3.7 would grab the message and route to the OLD current_product_focus,
         # producing the "listed بنطلون, customer sent 1, bot says بلوزة غير متوفر"
         # bug.
+        #
+        # Candidate priority: last_search_candidates (exact displayed list)
+        # then last_recommended_products (previous recommendation list).
         _msg_text = (ctx.message or "").strip()
-        _active_candidates = list(state.last_search_candidates or [])
+        _active_candidates = (
+            list(state.last_search_candidates or [])
+            or list(state.last_recommended_products or [])
+        )
 
         # Log numeric pick state for ALL digit messages (even INTENT_PICK_LIST_ITEM
         # cases already handled above) so we can diagnose state at entry.
@@ -755,6 +816,51 @@ class DefaultDecisionEngine:
                 reason="general knowledge question with weak store context",
                 confidence=0.55,
             )
+
+        # ── 9.5 Ordering-stage safety net ────────────────────────────────
+        # NEVER let a message reach the LLM when the customer is actively
+        # placing an order.  If all the specific rules above failed to match,
+        # we have a product in focus → continue collecting checkout slots.
+        # This is the last line of defence before LLM fallback.
+        if state.stage in (STAGE_ORDERING, STAGE_DECIDING):
+            if state.current_product_focus and facts.orderable and not state.checkout_url:
+                logger.info(
+                    "[ORDER FLOW] FORCED action=propose_draft_order "
+                    "reason=ordering_stage_safety_net | tenant=%s product=%r intent=%s "
+                    "— preventing llm_reply during active checkout",
+                    ctx.tenant_id,
+                    (state.current_product_focus or {}).get("title"),
+                    intent.name,
+                )
+                return Decision(
+                    action=ACTION_PROPOSE_DRAFT_ORDER,
+                    args={"product": state.current_product_focus},
+                    reason=f"ordering_stage_safety_net: intent={intent.name} fell through all rules — force checkout continuation",
+                    confidence=0.80,
+                )
+            # Product focus was lost (unsyncable product cleared it) but
+            # customer is still in ordering stage → search for a replacement.
+            if not state.current_product_focus and facts.has_products:
+                _query = (
+                    intent.slots.get("product_query")
+                    or intent.slots.get("product_name")
+                    or ""
+                )
+                logger.info(
+                    "[ORDER FLOW] ordering stage with no product focus — "
+                    "directing to search | tenant=%s intent=%s query=%r",
+                    ctx.tenant_id, intent.name, _query,
+                )
+                return Decision(
+                    action=ACTION_SEARCH_PRODUCTS if _query else ACTION_CLARIFY,
+                    args=(
+                        {"query": _query}
+                        if _query
+                        else {"question": "ما المنتج الذي تودّ طلبه؟ يمكنك ذكر الاسم أو قول «أكثر مبيعاً»."}
+                    ),
+                    reason="ordering_stage_safety_net: no product focus — ask customer to pick",
+                    confidence=0.75,
+                )
 
         # ── 9. Fallback: LLM ─────────────────────────────────────────────
         return Decision(
