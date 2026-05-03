@@ -10,8 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -160,6 +162,11 @@ _SUPPORTS_DELIVERY_METHOD_CACHE: Dict[int, bool] = {}
 
 # Ordered list of slugs to probe when the API doesn't tell us the valid values.
 _DELIVERY_METHOD_FALLBACKS = ["home_delivery", "delivery", "shipping", "pickup"]
+
+# Per-(tenant, product_id) cache: (tenant_id, product_id) → (fresh_option_map, timestamp)
+# fresh_option_map = {norm_group_name: {"id": group_id, "values": {norm_value_name: value_id}}}
+# TTL: 300 seconds (5 minutes). Bypassed on variant_match_failed.
+_FRESH_OPTIONS_CACHE: Dict[Tuple[int, str], Tuple[Dict[str, Any], float]] = {}
 
 
 def validate_salla_order_payload(body: Dict[str, Any]) -> List[str]:
@@ -1183,6 +1190,140 @@ class SallaAdapter(BaseStoreAdapter):
                 )
                 raise ValueError("required_product_options_missing")
 
+    # ── Arabic helpers ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _norm_ar(text: str) -> str:
+        """Normalize Arabic text for fuzzy comparison.
+
+        Steps:
+          1. Strip Unicode diacritics (tashkeel / harakat).
+          2. Unify hamza forms (أ إ آ → ا).
+          3. Unify taa marbuta (ة → ه) — for group/value name comparison only.
+          4. Lowercase + strip whitespace.
+        """
+        if not text:
+            return ""
+        # Remove combining marks (tashkeel)
+        text = "".join(
+            ch for ch in unicodedata.normalize("NFD", text)
+            if unicodedata.category(ch) != "Mn"
+        )
+        for src, tgt in [("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ة", "ه")]:
+            text = text.replace(src, tgt)
+        return text.strip().lower()
+
+    async def _fetch_fresh_product_options(
+        self,
+        product_id: str,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Fetch option groups + values directly from Salla and return a
+        normalised map::
+
+            {
+              norm_group_name: {
+                "id":     group_id,
+                "name":   raw_group_name,
+                "values": {norm_value_name: value_id, ...}
+              },
+              ...
+            }
+
+        Results are cached per (tenant, product) for 5 minutes.
+        Pass ``force=True`` to bypass the cache (used after a match failure).
+        """
+        cache_key: Tuple[int, str] = (self._tenant_id, str(product_id))
+        if not force:
+            cached = _FRESH_OPTIONS_CACHE.get(cache_key)
+            if cached and (time.time() - cached[1]) < 300:
+                return cached[0]
+
+        logger.error(
+            "[ORDER FLOW] refreshing product options from Salla | product=%s "
+            "tenant=%s force=%s",
+            product_id, self._tenant_id, force,
+        )
+        try:
+            resp = await self._get(f"/products/{product_id}")
+            product_data = resp.get("data") or resp
+            options_raw = product_data.get("options") or []
+
+            fresh_map: Dict[str, Any] = {}
+            for group in options_raw:
+                if not isinstance(group, dict):
+                    continue
+                gid   = group.get("id")
+                gname = (group.get("name") or "").strip()
+                if not gid or not gname:
+                    continue
+                norm_gname = self._norm_ar(gname)
+                values_raw = group.get("values") or []
+                value_map: Dict[str, int] = {}
+                for val in values_raw:
+                    if not isinstance(val, dict):
+                        continue
+                    vid   = val.get("id")
+                    vname = (val.get("name") or "").strip()
+                    if vid is not None and vname:
+                        value_map[self._norm_ar(vname)] = int(vid)
+                fresh_map[norm_gname] = {
+                    "id":     int(gid),
+                    "name":   gname,
+                    "values": value_map,
+                }
+
+            logger.error(
+                "[ORDER FLOW] fresh option map | product=%s map=%s",
+                product_id,
+                {k: {"id": v["id"], "values": list(v["values"].keys())}
+                 for k, v in fresh_map.items()},
+            )
+            _FRESH_OPTIONS_CACHE[cache_key] = (fresh_map, time.time())
+            return fresh_map
+
+        except Exception as exc:
+            logger.warning(
+                "[ORDER FLOW] failed to refresh product options from Salla | "
+                "product=%s err=%s tenant=%s",
+                product_id, exc, self._tenant_id,
+            )
+            return {}
+
+    @staticmethod
+    def _rebuild_wanted_from_names(
+        selected_options: List[Dict[str, Any]],
+        fresh_map: Dict[str, Any],
+        norm_ar_fn,  # callable: str → str
+    ) -> Optional[Dict[str, str]]:
+        """Build {str(fresh_option_id): str(fresh_value_id)} by matching
+        the customer's ``option_name`` / ``value_name`` strings (from state)
+        against the fresh Salla option map.
+
+        Returns None if any selection can't be matched (indicates stale/bad
+        data — caller should fall back to stale IDs).
+        """
+        wanted: Dict[str, str] = {}
+        for sel in selected_options:
+            if not isinstance(sel, dict):
+                continue
+            oname = (sel.get("option_name") or "").strip()
+            vname = (sel.get("value_name") or "").strip()
+            if not oname or not vname:
+                continue
+            norm_oname = norm_ar_fn(oname)
+            norm_vname = norm_ar_fn(vname)
+
+            group_info = fresh_map.get(norm_oname)
+            if not group_info:
+                return None   # group name unresolvable
+            fresh_vid = group_info["values"].get(norm_vname)
+            if fresh_vid is None:
+                return None   # value name unresolvable
+            wanted[str(group_info["id"])] = str(fresh_vid)
+
+        return wanted if wanted else None
+
     @staticmethod
     def _build_variant_options_map(variant: Dict[str, Any]) -> Dict[str, str]:
         """Build a {str(option_id): str(value_id)} map from a Salla variant object.
@@ -1209,23 +1350,36 @@ class SallaAdapter(BaseStoreAdapter):
         self,
         product_id: str,
         selected_options: List[Dict[str, Any]],
-    ) -> tuple:
+        force_refresh: bool = False,
+    ) -> Tuple[Optional[str], bool, List[Dict], Dict[str, Any]]:
         """Find the Salla variant whose option_values match the selection.
 
-        Returns a 3-tuple:
-            (variant_id: Optional[str], has_variants: bool, summaries: list)
+        Returns a 4-tuple:
+            (variant_id, has_variants, summaries, fresh_map)
 
-        ``has_variants`` is True when the /variants endpoint returned at
-        least one variant (even if none matched).  The caller should raise
-        ``SallaVariantMatchError`` when ``has_variants=True`` and
-        ``variant_id=None`` — this means the selected option values do not
-        correspond to any real Salla variant and the order would be rejected.
+        Resolution strategy:
+          1. Fetch fresh option groups from GET /products/{id} (5-min cache).
+          2. Rebuild ``wanted`` from customer's option_name/value_name strings
+             mapped to fresh Salla IDs — avoids stale IDs in state.
+          3. If name-based rebuild fails, fall back to stale IDs from state.
+          4. Scan /products/{id}/variants using _build_variant_options_map
+             (related_options + related_option_values parallel arrays).
+          5. On mismatch, force-refresh cache and retry once.
+
+        ``has_variants`` is True when /variants returned ≥1 item.
+        The caller raises ``SallaVariantMatchError`` when
+        ``has_variants=True`` and ``variant_id=None``.
         """
         if not (product_id and selected_options):
-            return None, False, []
+            return None, False, [], {}
 
-        # ── Build wanted = {option_id: value_id} ─────────────────────────────
-        wanted: Dict[str, str] = {}
+        # ── Step 1: Fetch fresh option map from Salla ─────────────────────────
+        fresh_map = await self._fetch_fresh_product_options(
+            product_id, force=force_refresh
+        )
+
+        # ── Step 2: Rebuild wanted using fresh Salla IDs (by name) ───────────
+        stale_wanted: Dict[str, str] = {}
         for sel in selected_options:
             if not isinstance(sel, dict):
                 continue
@@ -1233,65 +1387,82 @@ class SallaAdapter(BaseStoreAdapter):
             vid = sel.get("value_id") if "value_id" in sel else sel.get("value")
             if oid is None or vid is None:
                 continue
-            # Unwrap list values produced by Salla's array format
             if isinstance(vid, list):
                 vid = vid[0] if vid else None
             if vid is None:
                 continue
-            wanted[str(oid)] = str(vid)
+            stale_wanted[str(oid)] = str(vid)
+
+        fresh_wanted: Optional[Dict[str, str]] = None
+        if fresh_map:
+            fresh_wanted = self._rebuild_wanted_from_names(
+                selected_options, fresh_map, self._norm_ar
+            )
+
+        if fresh_wanted:
+            logger.error(
+                "[ORDER FLOW] rebuilt wanted options from fresh Salla IDs | "
+                "old=%s new=%s product=%s",
+                stale_wanted, fresh_wanted, product_id,
+            )
+            wanted = fresh_wanted
+        else:
+            logger.error(
+                "[ORDER FLOW] name-based wanted rebuild failed — using stale IDs | "
+                "stale=%s product=%s fresh_map_keys=%s",
+                stale_wanted, product_id, list(fresh_map.keys()),
+            )
+            wanted = stale_wanted
 
         if not wanted:
-            return None, False, []
+            return None, False, [], fresh_map
 
         logger.error(
-            "[ORDER FLOW] variant_resolve start | product=%s wanted=%s raw_opts=%s",
-            product_id, wanted, selected_options,
+            "[ORDER FLOW] variant_resolve start | product=%s wanted=%s",
+            product_id, wanted,
         )
 
-        # ── Fetch variants ────────────────────────────────────────────────────
-        try:
-            data = await self._get(f"/products/{product_id}/variants")
-        except httpx.HTTPStatusError as exc:
-            logger.info(
-                "[SallaAdapter] /products/%s/variants → %d — skipping variant resolution",
-                product_id, exc.response.status_code,
-            )
-            return None, False, []
-        except Exception as exc:
-            logger.info(
-                "[SallaAdapter] variant resolution failed | product=%s err=%s",
-                product_id, exc,
-            )
-            return None, False, []
+        # ── Step 3: Fetch variants list ───────────────────────────────────────
+        async def _get_variants() -> List[Dict]:
+            try:
+                data = await self._get(f"/products/{product_id}/variants")
+                raw = data.get("data") or []
+                return raw if isinstance(raw, list) else []
+            except httpx.HTTPStatusError as exc:
+                logger.info(
+                    "[SallaAdapter] /products/%s/variants → %d — skip",
+                    product_id, exc.response.status_code,
+                )
+                return []
+            except Exception as exc:
+                logger.info(
+                    "[SallaAdapter] variant fetch failed | product=%s err=%s",
+                    product_id, exc,
+                )
+                return []
 
-        variants = data.get("data") or []
-        if not isinstance(variants, list) or not variants:
-            logger.info(
-                "[SallaAdapter] no variants returned | product=%s", product_id,
-            )
-            return None, False, []
+        variants = await _get_variants()
+        if not variants:
+            return None, False, [], fresh_map
 
-        # ── Log raw structure of first variant so we can see key names ────────
+        # Log raw structure of first variant (helps debug Salla key names)
         logger.error(
-            "[ORDER FLOW] variants raw sample | product=%s total=%d first_keys=%s "
-            "first_variant=%s",
+            "[ORDER FLOW] variants raw sample | product=%s total=%d "
+            "first_keys=%s first_related_options=%s first_related_values=%s",
             product_id, len(variants),
             list(variants[0].keys()) if variants else [],
-            variants[0] if variants else {},
+            (variants[0].get("related_options") if variants else []),
+            (variants[0].get("related_option_values") if variants else []),
         )
 
+        # ── Step 4: Exact match using parallel arrays ─────────────────────────
         summaries: List[Dict[str, Any]] = []
         matched_variant_id: Optional[str] = None
 
         for v in variants:
             if not isinstance(v, dict):
                 continue
-
-            # ── Build options_map from Salla's parallel arrays ────────────────
-            # Salla uses:  related_options=[opt_id, ...]
-            #              related_option_values=[val_id, ...] (same order)
             options_map = self._build_variant_options_map(v)
-
             summary = {"id": v.get("id"), "options_map": options_map}
             summaries.append(summary)
 
@@ -1300,7 +1471,6 @@ class SallaAdapter(BaseStoreAdapter):
                 v.get("id"), options_map, wanted,
             )
 
-            # ── Strict exact match ────────────────────────────────────────────
             if options_map == wanted:
                 matched_variant_id = str(v.get("id") or "")
                 if matched_variant_id:
@@ -1308,27 +1478,39 @@ class SallaAdapter(BaseStoreAdapter):
                         "[ORDER FLOW] variant matched | variant_id=%s wanted=%s",
                         matched_variant_id, wanted,
                     )
-                    break   # found — stop scanning
+                    break
 
         if matched_variant_id:
-            return matched_variant_id, True, summaries
+            return matched_variant_id, True, summaries, fresh_map
 
-        # ── No match ──────────────────────────────────────────────────────────
+        # ── Step 5: First-attempt mismatch — force-refresh and retry once ─────
+        if not force_refresh:
+            logger.error(
+                "[ORDER FLOW] variant_match_failed on first attempt — retrying "
+                "with force-refresh | product=%s wanted=%s tenant=%s",
+                product_id, wanted, self._tenant_id,
+            )
+            return await self._resolve_variant_id(
+                product_id, selected_options, force_refresh=True
+            )
+
+        # ── Final failure ─────────────────────────────────────────────────────
         logger.error(
-            "[ORDER FLOW] variant_match_failed — blocking order | "
-            "product=%s wanted=%s available_variants=%s",
-            product_id, wanted, summaries,
+            "[ORDER FLOW] variant_match_failed | wanted=%s "
+            "available_variants=%s product=%s tenant=%s",
+            wanted, summaries, product_id, self._tenant_id,
         )
-        return None, True, summaries
+        return None, True, summaries, fresh_map
 
     async def _enrich_items_with_variant_id(self, order_input: OrderInput) -> None:
-        """Attach ``variant_id`` to each item with selected options.
+        """Attach ``variant_id`` to each item with selected options and refresh
+        the option IDs in ``item.options`` to the current Salla IDs.
 
         When a product has Salla variants and the customer's selected option
-        values match a known variant, we send *only* ``variant_id`` (omitting
-        the options array — Salla resolves the options from the variant).
+        values match a known variant, sets ``item.variant_id`` and updates
+        ``item.options`` with fresh Salla IDs so the payload is accurate.
 
-        When the product has variants but none matches, we raise
+        When the product has variants but none matches, raises
         ``SallaVariantMatchError`` so the order is blocked and the bot
         re-displays the options to the customer.
         """
@@ -1336,7 +1518,7 @@ class SallaAdapter(BaseStoreAdapter):
             if item.variant_id or not item.options:
                 continue
             try:
-                vid, has_variants, summaries = await self._resolve_variant_id(
+                vid, has_variants, summaries, fresh_map = await self._resolve_variant_id(
                     str(item.product_id), item.options
                 )
             except SallaVariantMatchError:
@@ -1351,9 +1533,26 @@ class SallaAdapter(BaseStoreAdapter):
 
             if vid:
                 item.variant_id = vid
+                # ── Update item.options with fresh Salla IDs ──────────────────
+                # The state may have stale option/value IDs. We re-map each
+                # selection's option_name + value_name to the IDs from the
+                # fresh product fetch so _build_order_body sends correct data.
+                if fresh_map:
+                    for sel in item.options:
+                        if not isinstance(sel, dict):
+                            continue
+                        oname = self._norm_ar(sel.get("option_name") or "")
+                        vname = self._norm_ar(sel.get("value_name") or "")
+                        group_info = fresh_map.get(oname)
+                        if group_info:
+                            sel["option_id"] = group_info["id"]
+                            fresh_vid = group_info["values"].get(vname)
+                            if fresh_vid is not None:
+                                sel["value_id"] = fresh_vid
                 logger.error(
-                    "[ORDER FLOW] variant matched | variant_id=%s product=%s",
-                    vid, item.product_id,
+                    "[ORDER FLOW] variant matched | variant_id=%s product=%s "
+                    "options_refreshed=%s",
+                    vid, item.product_id, bool(fresh_map),
                 )
             elif has_variants:
                 # Variants exist but nothing matched → block and ask again
