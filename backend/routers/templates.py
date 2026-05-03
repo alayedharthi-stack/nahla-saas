@@ -2632,10 +2632,23 @@ async def _sync_templates_for_tenant_inner(
             )
             db.add(row_for_bind)
 
+        # Auto-bind triggers when the Meta template name maps to a Nahla
+        # library entry and the template is APPROVED.  Most library
+        # templates target a single-step service (payment_reminder,
+        # cod_confirmation, vip_exclusive, new_arrivals, welcome_message,
+        # etc.) and intentionally have NO `step_number` field — only the
+        # multi-step `cart_recovery` series sets steps 1..4.  Previously
+        # the binding required `lib_step_number is not None`, which
+        # silently skipped every single-step service: the sync would
+        # create the row with `is_active=False` and the engine would then
+        # refuse to send because no APPROVED template was bound to the
+        # service slot.  Treat a missing step_number as the canonical
+        # value for single-step services (`step_number IS NULL` in DB),
+        # which the resolver and `ensure_single_active` already handle
+        # via SQLAlchemy IS NULL semantics.
         if (
             lib_match
             and lib_service_key
-            and lib_step_number is not None
             and normalized_status == "APPROVED"
         ):
             try:
@@ -2647,6 +2660,13 @@ async def _sync_templates_for_tenant_inner(
                     auto_bound += 1
                 ensure_single_active(
                     db, tenant_id, lib_service_key, lib_step_number, row_for_bind.id,
+                )
+                logger.info(
+                    "[templates/sync] AUTO-BOUND tenant=%s tpl_id=%s name=%s "
+                    "→ service=%s step=%s (single-step=%s)",
+                    tenant_id, row_for_bind.id, tpl_name_meta,
+                    lib_service_key, lib_step_number,
+                    lib_step_number is None,
                 )
             except Exception as exc:
                 logger.warning(

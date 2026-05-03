@@ -60,12 +60,18 @@ def ensure_single_active(
     db: Session,
     tenant_id: int,
     service_key: str,
-    step_number: int,
+    step_number: Optional[int],
     new_active_id: int,
 ) -> Optional[int]:
     """
     Activate *new_active_id* and deactivate every other template that shares
     the same (tenant_id, service_key, step_number).
+
+    ``step_number`` may be None for single-step services (e.g.
+    payment_reminder, cod_confirmation, vip_exclusive) — SQLAlchemy
+    converts the resulting ``column == None`` into ``column IS NULL``,
+    which is exactly what the partial unique index on
+    ``(tenant_id, service_key, step_number, is_active)`` expects.
 
     Returns the id of the previously-active template (or None).
     Must be called inside an existing transaction — caller commits.
@@ -114,7 +120,7 @@ def resolve_active_template(
     db: Session,
     tenant_id: int,
     service_key: str,
-    step_number: int,
+    step_number: Optional[int],
 ) -> Optional["WhatsAppTemplate"]:  # noqa: F821
     """
     Return the single active, visible, APPROVED template for a service slot.
@@ -218,7 +224,7 @@ def _name_matches_service(name: Optional[str], service_key: str) -> bool:
     return False
 
 
-def _library_keys_for_slot(service_key: str, step_number: int) -> List[str]:
+def _library_keys_for_slot(service_key: str, step_number: Optional[int]) -> List[str]:
     """Return every Nahla-library `key` that targets this service slot.
 
     Used to auto-bind an APPROVED template that was imported from the
@@ -242,7 +248,7 @@ def _autobind(
     *,
     tenant_id: int,
     service_key: str,
-    step_number: int,
+    step_number: Optional[int],
     reason: str,
 ) -> None:
     """Stamp `service_key` / `step_number` / `is_active=True` on a
@@ -285,7 +291,7 @@ def resolve_template_for_send(
     db: Session,
     tenant_id: int,
     service_key: str,
-    step_number: int,
+    step_number: Optional[int],
     *,
     fallback_template_name: Optional[str] = None,
 ) -> Optional["WhatsAppTemplate"]:  # noqa: F821

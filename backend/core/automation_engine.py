@@ -1208,17 +1208,31 @@ async def _execute_action(
         or config.get("template_name")
     )
 
-    if svc_key and step_num is not None:
+    # Single-step services (payment_reminder, cod_confirmation, vip_exclusive,
+    # welcome_message, new_arrivals, …) have no per-step config and resolve to
+    # `step_num=None`.  The resolver / DB use `step_number IS NULL` for the
+    # canonical row in that case; previously this branch required
+    # `step_num is not None` and silently bypassed the smart resolver for
+    # every single-step automation, causing template_not_approved /
+    # template_param_mismatch errors on otherwise-APPROVED templates.
+    if svc_key:
         try:
             from core.service_template_resolver import resolve_template_for_send  # noqa: PLC0415
+            _step_for_resolver = int(step_num) if step_num is not None else None
             template = resolve_template_for_send(
-                db, tenant_id, svc_key, int(step_num),
+                db, tenant_id, svc_key, _step_for_resolver,
                 fallback_template_name=tpl_name,
             )
             if template:
                 logger.info(
                     "[AutoEngine] Template resolved via service_key=%s step=%s → id=%s name=%s",
                     svc_key, step_num, template.id, template.name,
+                )
+            else:
+                logger.info(
+                    "[AutoEngine] No template resolved for service_key=%s step=%s "
+                    "(tenant=%s, fallback_name=%r) — see ServiceResolver MISS logs",
+                    svc_key, step_num, tenant_id, tpl_name,
                 )
         except Exception as exc:
             logger.warning("[AutoEngine] service_template_resolver error: %s", exc)
