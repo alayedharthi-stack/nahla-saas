@@ -1050,6 +1050,7 @@ def salla_get_checkout_profile(
     from store_adapters.salla_adapter import (                            # noqa: PLC0415
         _CHECKOUT_PROFILE_CACHE,
         _DELIVERY_METHOD_CACHE,
+        _SUPPORTS_DELIVERY_METHOD_CACHE,
     )
 
     intg = pick_active_salla_integration(db, tenant_id)
@@ -1075,13 +1076,16 @@ def salla_get_checkout_profile(
             readiness["ok"] = False
             readiness["issues"].append("default_delivery_method is null")
 
+    mem_supports = _SUPPORTS_DELIVERY_METHOD_CACHE.get(tenant_id)
+
     return {
-        "tenant_id":                  tenant_id,
-        "integration_id":             intg.id,
-        "readiness":                  readiness,
-        "db_profile":                 db_profile,
-        "in_memory_profile":          mem_profile,
-        "in_memory_delivery_method":  mem_dm,
+        "tenant_id":                        tenant_id,
+        "integration_id":                   intg.id,
+        "readiness":                        readiness,
+        "db_profile":                       db_profile,
+        "in_memory_profile":                mem_profile,
+        "in_memory_delivery_method":        mem_dm,
+        "in_memory_supports_delivery_method": mem_supports,
         "hint": (
             "Run POST /admin/debug/salla/sync-checkout-profile to refresh the profile."
             if not db_profile else

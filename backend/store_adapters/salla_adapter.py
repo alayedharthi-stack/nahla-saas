@@ -128,6 +128,9 @@ _DELIVERY_METHOD_CACHE: Dict[int, str] = {}
 # Per-tenant cache: tenant_id → full checkout profile dict
 _CHECKOUT_PROFILE_CACHE: Dict[int, Dict[str, Any]] = {}
 
+# Per-tenant cache: tenant_id → True if store supports delivery_method field, False if not
+_SUPPORTS_DELIVERY_METHOD_CACHE: Dict[int, bool] = {}
+
 # Ordered list of slugs to probe when the API doesn't tell us the valid values.
 _DELIVERY_METHOD_FALLBACKS = ["home_delivery", "delivery", "shipping", "pickup"]
 
@@ -1294,13 +1297,16 @@ class SallaAdapter(BaseStoreAdapter):
                 missing=missing,
                 payload_keys=list(body.keys()),
             )
-        # ── Hard guard: resolve delivery_method from Salla API and inject ───
+        # ── Delivery method: only inject if the store supports the field ─────
         _dm = await self._resolve_delivery_method()
-        body["delivery_method"] = _dm
+        if _dm is not None:
+            body["delivery_method"] = _dm
+        else:
+            body.pop("delivery_method", None)   # remove any stale value from _build_order_body
         logger.error(
             "[SallaAdapter] DELIVERY METHOD GUARDED BEFORE POST | action=create_order "
-            "method=%s tenant=%s top_level_keys=%s",
-            _dm, self._tenant_id, sorted(list(body.keys())),
+            "method=%s supported=%s tenant=%s top_level_keys=%s",
+            _dm, _dm is not None, self._tenant_id, sorted(list(body.keys())),
         )
 
         self._log_outgoing_payload("create_order", body, shipping_company_id)
@@ -1455,13 +1461,16 @@ class SallaAdapter(BaseStoreAdapter):
         except Exception as _fp_exc:
             logger.warning("[SallaAdapter] FINAL OUTGOING PAYLOAD log failed: %s", _fp_exc)
 
-        # ── Hard guard: resolve delivery_method from Salla API and inject ───
+        # ── Delivery method: only inject if the store supports the field ─────
         _dm = await self._resolve_delivery_method()
-        body["delivery_method"] = _dm
+        if _dm is not None:
+            body["delivery_method"] = _dm
+        else:
+            body.pop("delivery_method", None)   # remove stale value from _build_order_body
         logger.error(
             "[SallaAdapter] DELIVERY METHOD GUARDED BEFORE POST | action=create_draft_order "
-            "method=%s tenant=%s top_level_keys=%s",
-            _dm, self._tenant_id, sorted(list(body.keys())),
+            "method=%s supported=%s tenant=%s top_level_keys=%s",
+            _dm, _dm is not None, self._tenant_id, sorted(list(body.keys())),
         )
 
         # ── Assertion: options must be in products[0] when required ──────────
@@ -1479,31 +1488,40 @@ class SallaAdapter(BaseStoreAdapter):
             )
 
         # ── POST with delivery_method fallback on 422 ─────────────────────────
-        # If Salla rejects the delivery_method value, try remaining slugs from
-        # the checkout profile (max 1 fallback attempt — no infinite loops).
-        _dm_candidates = list(_CHECKOUT_PROFILE_CACHE.get(self._tenant_id, {}).get(
-            "delivery_methods", []
-        )) or list(_DELIVERY_METHOD_FALLBACKS)
-
-        # Ensure the already-resolved method is at the front, de-duplicated.
-        _current_dm = body.get("delivery_method", _dm_candidates[0] if _dm_candidates else "shipping")
-        _dm_queue = [_current_dm] + [m for m in _dm_candidates if m != _current_dm]
+        # If the store does not support delivery_method (_dm is None), use a
+        # single-element queue with a sentinel so the loop runs once without
+        # any delivery_method in the body.
+        # If supported, try remaining slugs from the checkout profile on 422.
+        if _dm is None:
+            # No delivery_method — run exactly one POST attempt
+            _dm_queue = [None]
+        else:
+            _dm_candidates = list(_CHECKOUT_PROFILE_CACHE.get(self._tenant_id, {}).get(
+                "delivery_methods", []
+            )) or list(_DELIVERY_METHOD_FALLBACKS)
+            _current_dm = _dm
+            _dm_queue = [_current_dm] + [m for m in _dm_candidates if m != _current_dm]
 
         _last_exc: Optional[Exception] = None
+        _first_dm = _dm_queue[0]   # None or the first slug we resolved
         for _attempt_dm in _dm_queue:
-            body["delivery_method"] = _attempt_dm
-            if _attempt_dm != _current_dm:
+            if _attempt_dm is not None:
+                body["delivery_method"] = _attempt_dm
+            else:
+                body.pop("delivery_method", None)
+
+            if _attempt_dm != _first_dm:
                 logger.error(
                     "[CHECKOUT PROFILE] delivery_method fallback attempt | "
                     "rejected=%s trying=%s tenant=%s",
-                    _current_dm, _attempt_dm, self._tenant_id,
+                    _first_dm, _attempt_dm, self._tenant_id,
                 )
             try:
                 data = await self._post("/orders", body)
                 order = self._normalize_order(data.get("data", data), order_input)
 
                 # Cache the winning value so future orders don't retry
-                if _attempt_dm != _current_dm:
+                if _attempt_dm is not None and _attempt_dm != _first_dm:
                     _DELIVERY_METHOD_CACHE[self._tenant_id] = _attempt_dm
                     # Also update the profile cache
                     _prof = _CHECKOUT_PROFILE_CACHE.get(self._tenant_id, {})
@@ -1835,10 +1853,14 @@ class SallaAdapter(BaseStoreAdapter):
             )
 
         # ── 3. Delivery methods (try two endpoints) ────────────────────────────
+        # 404 → endpoint does not exist → this store does not support delivery_method.
+        # Any other error (5xx, network) → we're unsure, keep supports=True for safety.
         dm_codes: List[str] = []
+        _dm_endpoint_found = False   # True if ANY endpoint returns non-404
         for _ep in ["/shipping/methods", "/delivery-methods"]:
             try:
                 data = await self._get(_ep)
+                _dm_endpoint_found = True   # 200 OK → field is supported
                 methods_raw = (data.get("data") or []) if isinstance(data, dict) else []
                 codes = [
                     m.get("code") or m.get("type") or m.get("slug")
@@ -1853,11 +1875,36 @@ class SallaAdapter(BaseStoreAdapter):
                         codes, _ep, self._tenant_id,
                     )
                     break
+            except httpx.HTTPStatusError as _exc:
+                if _exc.response.status_code == 404:
+                    logger.info(
+                        "[CHECKOUT PROFILE] delivery_method endpoint %s → 404 "
+                        "(not supported by this store) | tenant=%s",
+                        _ep, self._tenant_id,
+                    )
+                    # 404 means endpoint absent — keep _dm_endpoint_found=False
+                else:
+                    # Non-404 error — endpoint exists but something went wrong;
+                    # treat as "probably supported" to avoid silently dropping the field.
+                    _dm_endpoint_found = True
+                    logger.warning(
+                        "[CHECKOUT PROFILE] %s returned %d | err=%s tenant=%s",
+                        _ep, _exc.response.status_code, _exc, self._tenant_id,
+                    )
             except Exception as _exc:
+                # Network error etc — be conservative, assume supported
+                _dm_endpoint_found = True
                 logger.warning(
                     "[CHECKOUT PROFILE] %s failed | err=%s tenant=%s",
                     _ep, _exc, self._tenant_id,
                 )
+
+        profile["supports_delivery_method"] = _dm_endpoint_found
+        _SUPPORTS_DELIVERY_METHOD_CACHE[self._tenant_id] = _dm_endpoint_found
+        logger.error(
+            "[CHECKOUT PROFILE] supports_delivery_method=%s tenant=%s",
+            _dm_endpoint_found, self._tenant_id,
+        )
 
         # Derive delivery_method codes from company types when the endpoint is absent
         if not dm_codes and profile["shipping_companies"]:
@@ -1933,19 +1980,32 @@ class SallaAdapter(BaseStoreAdapter):
         )
         return profile
 
-    async def _resolve_delivery_method(self) -> str:
-        """Return the correct delivery_method slug for this merchant.
+    async def _resolve_delivery_method(self) -> Optional[str]:
+        """Return the correct delivery_method slug, or ``None`` if this store
+        does not support the ``delivery_method`` field at all.
 
         Resolution order:
-          1. In-memory ``_DELIVERY_METHOD_CACHE`` (set by sync_store_checkout_profile).
-          2. ``_CHECKOUT_PROFILE_CACHE`` default_delivery_method.
-          3. GET /shipping/methods  — Salla standard endpoint.
-          4. GET /delivery-methods  — alternative path some stores expose.
-          5. Ordered fallback list: home_delivery → delivery → shipping → pickup.
+          1. ``_SUPPORTS_DELIVERY_METHOD_CACHE`` — if explicitly False, skip field.
+          2. In-memory ``_DELIVERY_METHOD_CACHE`` (set by sync_store_checkout_profile).
+          3. ``_CHECKOUT_PROFILE_CACHE`` default_delivery_method.
+          4. GET /shipping/methods  — Salla standard endpoint.
+          5. GET /delivery-methods  — alternative path some stores expose.
+             → 404 on both = store does not support the field → return None.
+          6. Ordered fallback list when endpoint exists but returns empty list.
 
         The result is cached so we only hit Salla once per process lifetime.
         """
-        # 1. Fast path: direct slug cache
+        # 1. Explicit "not supported" cache (set after 404 on both endpoints)
+        if self._tenant_id in _SUPPORTS_DELIVERY_METHOD_CACHE:
+            if not _SUPPORTS_DELIVERY_METHOD_CACHE[self._tenant_id]:
+                logger.info(
+                    "[SallaAdapter] delivery_method disabled — store does not support it "
+                    "| tenant=%s",
+                    self._tenant_id,
+                )
+                return None
+
+        # 2. Fast path: direct slug cache (only reached if supported)
         cached = _DELIVERY_METHOD_CACHE.get(self._tenant_id)
         if cached:
             logger.info(
@@ -1954,22 +2014,32 @@ class SallaAdapter(BaseStoreAdapter):
             )
             return cached
 
-        # 2. Checkout profile cache
+        # 3. Checkout profile cache
         prof = _CHECKOUT_PROFILE_CACHE.get(self._tenant_id)
-        if prof and prof.get("default_delivery_method"):
-            chosen = prof["default_delivery_method"]
-            _DELIVERY_METHOD_CACHE[self._tenant_id] = chosen
-            logger.info(
-                "[SallaAdapter] delivery_method from checkout_profile cache | "
-                "method=%s tenant=%s",
-                chosen, self._tenant_id,
-            )
-            return chosen
+        if prof:
+            if not prof.get("supports_delivery_method", True):
+                _SUPPORTS_DELIVERY_METHOD_CACHE[self._tenant_id] = False
+                logger.info(
+                    "[SallaAdapter] delivery_method disabled (from profile cache) | tenant=%s",
+                    self._tenant_id,
+                )
+                return None
+            if prof.get("default_delivery_method"):
+                chosen = prof["default_delivery_method"]
+                _DELIVERY_METHOD_CACHE[self._tenant_id] = chosen
+                logger.info(
+                    "[SallaAdapter] delivery_method from checkout_profile cache | "
+                    "method=%s tenant=%s",
+                    chosen, self._tenant_id,
+                )
+                return chosen
 
-        # 3+4. Try known API endpoints
+        # 4+5. Try known API endpoints — track whether they exist
+        _any_endpoint_found = False
         for endpoint in ["/shipping/methods", "/delivery-methods"]:
             try:
                 data = await self._get(endpoint)
+                _any_endpoint_found = True
                 methods = (data.get("data") or []) if isinstance(data, dict) else []
                 if methods and isinstance(methods, list):
                     available_codes = [
@@ -1984,6 +2054,7 @@ class SallaAdapter(BaseStoreAdapter):
                     )
                     if available_codes:
                         chosen = available_codes[0]
+                        _SUPPORTS_DELIVERY_METHOD_CACHE[self._tenant_id] = True
                         _DELIVERY_METHOD_CACHE[self._tenant_id] = chosen
                         logger.error(
                             "[SallaAdapter] delivery_method resolved via API | "
@@ -1991,17 +2062,43 @@ class SallaAdapter(BaseStoreAdapter):
                             chosen, self._tenant_id,
                         )
                         return chosen
+            except httpx.HTTPStatusError as _exc:
+                if _exc.response.status_code == 404:
+                    logger.info(
+                        "[SallaAdapter] delivery_method endpoint %s → 404 | tenant=%s",
+                        endpoint, self._tenant_id,
+                    )
+                    # 404 = endpoint absent — don't set _any_endpoint_found
+                else:
+                    _any_endpoint_found = True
+                    logger.warning(
+                        "[SallaAdapter] delivery_method endpoint %s → %d | tenant=%s",
+                        endpoint, _exc.response.status_code, self._tenant_id,
+                    )
             except Exception as _exc:
+                _any_endpoint_found = True   # network error — be conservative
                 logger.warning(
                     "[SallaAdapter] delivery_method endpoint %s unavailable | "
                     "err=%s tenant=%s",
                     endpoint, _exc, self._tenant_id,
                 )
 
-        # 5. Hard fallback through known slug list
+        # Both endpoints returned 404 → store does not support this field
+        if not _any_endpoint_found:
+            _SUPPORTS_DELIVERY_METHOD_CACHE[self._tenant_id] = False
+            logger.error(
+                "[SallaAdapter] delivery_method disabled — store does not support it "
+                "(both endpoints 404) | tenant=%s",
+                self._tenant_id,
+            )
+            return None
+
+        # Endpoint exists but returned no codes → use fallback slugs
+        _SUPPORTS_DELIVERY_METHOD_CACHE[self._tenant_id] = True
         fallback = _DELIVERY_METHOD_FALLBACKS[0]
+        _DELIVERY_METHOD_CACHE[self._tenant_id] = fallback
         logger.error(
-            "[SallaAdapter] delivery_method API lookup failed — using fallback | "
+            "[SallaAdapter] delivery_method fallback (endpoint empty) | "
             "method=%s tenant=%s",
             fallback, self._tenant_id,
         )
@@ -2171,16 +2268,11 @@ class SallaAdapter(BaseStoreAdapter):
         if _sid:
             body["shipping"] = {"company_id": _sid}
 
-        # ── Delivery method — Salla REQUIRES this field ───────────────────────
-        # "shipping" for normal delivery, "pickup" for in-store collection.
-        # We default to "shipping"; if the merchant wants pickup they must
-        # pass delivery_method="pickup" through the OrderInput in the future.
-        _delivery_method = getattr(order_input, "delivery_method", None) or "shipping"
-        body["delivery_method"] = _delivery_method
-        logger.info(
-            "[SallaAdapter] DELIVERY METHOD SET | method=%s tenant=%s",
-            _delivery_method, self._tenant_id,
-        )
+        # NOTE: delivery_method is NOT set here.
+        # It is resolved asynchronously by _resolve_delivery_method() in
+        # create_order / create_draft_order and injected directly before POST.
+        # Some stores do not support this field at all (404 on /shipping/methods)
+        # and sending it causes a 422.
 
         # Build address block — include city and short address code whenever available.
         # ── Address ──────────────────────────────────────────────────────────────
@@ -2254,15 +2346,10 @@ class SallaAdapter(BaseStoreAdapter):
             bool(street_val),
         )
 
-        # ── Final-body diagnostic — fires on every call so we catch any gap ──
+        # ── Final-body diagnostic ─────────────────────────────────────────────
         logger.error(
-            "[SallaAdapter] FINAL BODY KEYS BEFORE RETURN | keys=%s tenant=%s "
-            "delivery_method=%s",
+            "[SallaAdapter] FINAL BODY KEYS BEFORE RETURN | keys=%s tenant=%s",
             sorted(list(body.keys())), self._tenant_id,
-            body.get("delivery_method"),
-        )
-        assert "delivery_method" in body, (
-            f"[SallaAdapter] delivery_method MISSING before return — tenant={self._tenant_id}"
         )
 
         return body
