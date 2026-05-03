@@ -485,9 +485,10 @@ class DraftOrderHandler:
             )
 
         logger.info(
-            "[ORDER FLOW] All data collected → creating order | tenant=%s "
+            "[ORDER FLOW] entering create_order (auto) | tenant=%s "
             "product=%s external_id=%s name=%r phone=%s city=%r "
-            "short_code=%r has_maps=%s quantity=%d shipping_id=%s previous_failed=%s",
+            "short_code=%r has_maps=%s quantity=%d shipping_id=%s previous_failed=%s "
+            "options_pending=[] missing_fields=[] — executing immediately",
             ctx.tenant_id,
             product_info.get("title", "?"),
             external_id,
@@ -581,23 +582,49 @@ class DraftOrderHandler:
                         "order_prep": prep.to_dict(),
                     },
                 )
-            # All options selected but payload is empty (stale IDs) — reload meta
-            # so _resolve_options_payload can build a valid payload on next turn.
+            # All options selected but payload empty (stale IDs): reload meta,
+            # re-match selections to fresh IDs, then fall through to create_order —
+            # NO salla_retry, NO extra customer message required.
             logger.warning(
                 "[ORDER FLOW] options selected but payload empty (stale IDs) — "
-                "forcing meta reload | tenant=%s product=%s selected=%s",
+                "reloading meta + re-matching | tenant=%s product=%s selected=%s",
                 ctx.tenant_id, external_id,
                 list((prep.product_options or {}).keys()),
             )
+            _stale_prev = dict(prep.product_options or {})
             prep.product_options_loaded = False
             prep.product_options_meta = []
             await _ensure_product_options_loaded(prep, ctx, external_id)
-            # Re-resolve now with fresh IDs
+            # Re-match preserved selections against fresh metadata to get valid IDs.
+            if prep.product_options_meta and _stale_prev:
+                prep.product_options = {}
+                for _sg in prep.product_options_meta:
+                    _sgname = (_sg.get("name") or "").strip()
+                    _sgkey  = _sgname.lower()
+                    _sprev  = _stale_prev.get(_sgkey)
+                    if not _sprev:
+                        continue
+                    _spvname = (_sprev.get("value_name") or "").strip().lower()
+                    for _sv in _sg.get("values") or []:
+                        _svname = (_sv.get("name") or "").strip()
+                        if _svname.lower() == _spvname or _norm_ar(_svname.lower()) == _norm_ar(_spvname):
+                            prep.product_options[_sgkey] = {
+                                "option_id":   _sg.get("id"),
+                                "option_name": _sgname,
+                                "value_id":    _sv.get("id"),
+                                "value_name":  _svname,
+                            }
+                            logger.info(
+                                "[ORDER FLOW] stale-ID re-match → group=%r value=%r id=%s",
+                                _sgname, _svname, _sg.get("id"),
+                            )
+                            break
+            # Re-resolve with fresh IDs
             _options_payload = _resolve_options_payload(prep)
             if not _options_payload:
                 logger.error(
-                    "[ORDER FLOW] still no options payload after reload — escalating | "
-                    "tenant=%s product=%s",
+                    "[ORDER FLOW] still no options payload after stale-ID re-match — "
+                    "escalating | tenant=%s product=%s",
                     ctx.tenant_id, external_id,
                 )
                 return ActionResult(
@@ -610,6 +637,11 @@ class DraftOrderHandler:
                         "order_prep": prep.to_dict(),
                     },
                 )
+            logger.info(
+                "[ORDER FLOW] stale-ID resolved — proceeding to create_order immediately | "
+                "tenant=%s product=%s payload=%s",
+                ctx.tenant_id, external_id, _options_payload,
+            )
 
         if _options_payload:
             logger.info(
@@ -617,9 +649,9 @@ class DraftOrderHandler:
                 ctx.tenant_id, external_id, _options_payload,
             )
 
-        runtime_result = await runtime.execute(
-            "create_draft_order",
-            {
+        # Build args once so Guard B (options re-match retry) can reuse them.
+        def _build_order_args(opts_payload):
+            return {
                 "product_id": external_id,
                 "quantity": max(int(prep.quantity or 1), 1),
                 "customer_name": _full_name(prep, ctx.profile.get("name", "عميل")),
@@ -640,8 +672,11 @@ class DraftOrderHandler:
                 "payment_method": "online",
                 "notes": _build_order_notes(prep),
                 "shipping_company_id": prep.shipping_company_id,
-                "options": _options_payload,
-            },
+                "options": opts_payload,
+            }
+
+        runtime_result = await runtime.execute(
+            "create_draft_order", _build_order_args(_options_payload),
         )
         order = runtime_result.payload.get("order")
 
@@ -858,28 +893,72 @@ class DraftOrderHandler:
                 # Fall through to retry/escalate handling below.
 
             # Guard B: ALL options are already selected — the rejection was due to
-            # stale IDs, not missing picks. Re-matched IDs are now fresh; continue
-            # to next turn where _resolve_options_payload will build a valid payload.
+            # stale IDs, not missing picks. Re-matched IDs are now fresh.
+            # Retry order creation IMMEDIATELY — no extra message from the customer.
             elif not _missing_now and prep.product_options:
+                _retry_payload = _resolve_options_payload(prep)
                 logger.info(
-                    "[ORDER FLOW] all options re-matched after Salla rejection — "
-                    "will retry with fresh IDs on next message | "
-                    "tenant=%s product=%s selected=%s",
+                    "[ORDER FLOW] all options re-matched — retrying create_order now | "
+                    "tenant=%s product=%s selected=%s retry_payload=%s",
                     ctx.tenant_id, external_id,
                     {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+                    _retry_payload,
                 )
-                # Save updated prep (with fresh IDs) and tell the customer to confirm.
-                return ActionResult(
-                    success=True,
-                    data={
-                        "product": product_info,
-                        "needs_options": False,
-                        "missing_option_groups": [],
-                        "selected_options": prep.product_options,
-                        "order_prep": prep.to_dict(),
-                        "salla_retry": True,
-                    },
-                )
+                if _retry_payload:
+                    logger.info(
+                        "[ORDER FLOW] entering create_order (auto-retry after re-match) | "
+                        "tenant=%s product=%s",
+                        ctx.tenant_id, external_id,
+                    )
+                    try:
+                        _retry_result = await runtime.execute(
+                            "create_draft_order", _build_order_args(_retry_payload),
+                        )
+                        _retry_order = (_retry_result.payload or {}).get("order")
+                        if _retry_order:
+                            _r_id = _retry_order.get("id") or ""
+                            _r_url = (
+                                _retry_order.get("payment_link")
+                                or _retry_order.get("payment_url")
+                                or _retry_order.get("checkout_url")
+                                or ((_retry_order.get("urls") or {}).get("payment"))
+                                or ""
+                            )
+                            logger.info(
+                                "[ORDER FLOW] order created (auto-retry) | order_id=%s tenant=%s",
+                                _r_id, ctx.tenant_id,
+                            )
+                            return ActionResult(
+                                success=True,
+                                data={
+                                    "order_id":    _r_id,
+                                    "reference":   _retry_order.get("reference_id") or _r_id,
+                                    "checkout_url": _r_url,
+                                    "total":       _retry_order.get("total"),
+                                    "currency":    _retry_order.get("currency", "SAR"),
+                                    "product":     product_info,
+                                    "order_prep":  prep.to_dict(),
+                                },
+                            )
+                        logger.error(
+                            "[ORDER FLOW] auto-retry failed — no order returned | "
+                            "tenant=%s err=%s",
+                            ctx.tenant_id, _retry_result.error,
+                        )
+                    except Exception as _retry_exc:
+                        logger.error(
+                            "[ORDER FLOW] auto-retry exception | tenant=%s err=%s",
+                            ctx.tenant_id, _retry_exc,
+                        )
+                else:
+                    logger.error(
+                        "[ORDER FLOW] re-matched but payload still empty — escalating | "
+                        "tenant=%s selected=%s",
+                        ctx.tenant_id,
+                        list((prep.product_options or {}).keys()),
+                    )
+                # Guard B failed — fall through to the escalate path below
+                prep.salla_failure_count = (prep.salla_failure_count or 0) + 1
             else:
                 return ActionResult(
                     success=True,
