@@ -306,6 +306,11 @@ class MerchantBrain:
                     "[ORDER FLOW] options_pending=[] all options collected=%s | tenant=%s",
                     new_state.current_selected_options, tenant_id,
                 )
+            # Sync prediction confirmation flag so the decision engine can
+            # route the next turn correctly without importing orders.py.
+            new_state.awaiting_option_confirmation = bool(
+                getattr(new_state.order_prep, "awaiting_option_confirmation", False)
+            )
             # Once the order_prep has captured the address values, the
             # pre-product stash has done its job — clear it so a future
             # browsing round doesn't accidentally inject stale codes.

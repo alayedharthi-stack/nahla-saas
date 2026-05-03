@@ -90,6 +90,38 @@ class DefaultDecisionEngine:
             "longitude",
         }
 
+        # ── -1. Prediction confirmation (absolute highest priority) ─────────
+        # When the system proposed predicted options and is waiting for the
+        # customer to confirm/reject, ALWAYS route to the draft-order handler
+        # so the handler can process the confirm/reject logic.  This MUST
+        # fire before any other rule to prevent the prediction confirmation
+        # turn from being misrouted to LLM_REPLY or search.
+        _awaiting_pred = getattr(state, "awaiting_option_confirmation", False)
+        if _awaiting_pred and state.current_product_focus:
+            _pred_source = "prediction_confirmation"
+            _SAME_BEFORE_KW = {"نفس السابق", "نفس الخيارات", "نفس اللي قبل",
+                               "زي المرة اللي فاتت", "نفس الاختيار", "نفس الطلب",
+                               "زي قبل", "نفسها", "نفسه"}
+            _msg_l = (ctx.message or "").strip().lower()
+            _is_same_before = any(kw in _msg_l for kw in _SAME_BEFORE_KW)
+            if _is_same_before:
+                _pred_source = "prediction_confirmation_same_as_before"
+
+            logger.info(
+                "[ORDER OPTIONS PREDICT] routing prediction response | "
+                "tenant=%s action=propose_draft_order source=%s message=%r",
+                ctx.tenant_id, _pred_source, _msg_l[:40],
+            )
+            return Decision(
+                action=ACTION_PROPOSE_DRAFT_ORDER,
+                args={
+                    "product": state.current_product_focus,
+                    "prediction_action": _pred_source,
+                },
+                reason=f"awaiting_option_confirmation — {_pred_source}",
+                confidence=0.99,
+            )
+
         # ── 0. Deterministic checkout continuation (highest priority) ────────
         # When the customer is actively in the ordering stage and sends a
         # confirmation / continuation message, NEVER let it fall through to
@@ -107,7 +139,7 @@ class DefaultDecisionEngine:
             # Arabic: "confirm", "place order", "done", "continue", "go ahead",
             # "yes", "agreed", "I agree", "OK", "sure", "proceed",
             "تمم", "تمام", "اطلب", "اطلبه", "اطلبها", "تأكيد", "تأكد",
-            "اكمل", "أكمل", "نعم", "موافق", "موافقه", "حسنا", "حسناً",
+            "اكمل", "أكمل", "كمل", "كمّل", "نعم", "موافق", "موافقه", "حسنا", "حسناً",
             "حسن", "صح", "صحيح", "شوف", "ابدأ", "إبدأ", "سر", "سري",
             "قدّم", "قدم", "ارسل", "أرسل", "تقدم", "تقدّم", "أتمم",
             "وافق", "أوافق", "أوافقك", "رائع", "ممتاز", "انشئ", "أنشئ",

@@ -300,6 +300,55 @@ def ask_product_options(
     return "\n".join(lines)
 
 
+_PREDICTION_SOURCE_LABELS = {
+    "last_customer_choice": "اختيارك السابق",
+    "top_variant":          "الأكثر طلباً",
+    "stock_heavy":          "المتوفر حالياً",
+}
+
+
+def confirm_predicted_options(
+    product: Dict[str, Any],
+    predicted_options: Dict[str, Any] | None = None,
+    selected_options: Dict[str, Any] | None = None,
+    prediction_source: str = "",
+    **_: Any,
+) -> str:
+    """Present predicted options to the customer for confirmation.
+
+    Shows already-selected options, then predicted ones with a source
+    label, and asks the customer to confirm or change.
+    """
+    title = product.get("title", "المنتج المحدد")
+    source_label = _PREDICTION_SOURCE_LABELS.get(prediction_source, "")
+
+    lines: List[str] = [f"تمام، اخترت لك *{title}*:"]
+
+    # Already-selected options (customer picked these explicitly)
+    for sel in (selected_options or {}).values():
+        if not isinstance(sel, dict):
+            continue
+        gname = (sel.get("option_name") or "").strip()
+        vname = (sel.get("value_name") or "").strip()
+        if gname and vname:
+            lines.append(f"• {gname}: {vname}")
+
+    # Predicted options
+    for psel in (predicted_options or {}).values():
+        if not isinstance(psel, dict):
+            continue
+        gname = (psel.get("option_name") or "").strip()
+        vname = (psel.get("value_name") or "").strip()
+        if gname and vname:
+            tag = f" ({source_label})" if source_label else ""
+            lines.append(f"• {gname}: *{vname}*{tag}")
+
+    lines.append("")
+    lines.append("نكمّل عليه؟ أو تبغى تغيّره؟")
+
+    return "\n".join(lines)
+
+
 def salla_retry_message(product: Dict[str, Any], code: str = "", **_: Any) -> str:
     """Soft retry message — never blame "خطأ تقني"; just say we're trying again."""
     title = product.get("title", "المنتج المحدد")

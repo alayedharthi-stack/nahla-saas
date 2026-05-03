@@ -155,6 +155,10 @@ class DraftOrderHandler:
             # was about the OLD product.
             prep.product_options_loaded = False
             prep.product_unsyncable = False
+            prep.predicted_options = {}
+            prep.prediction_source = ""
+            prep.prediction_confidence = 0.0
+            prep.awaiting_option_confirmation = False
 
         # Track which product this prep belongs to
         prep.product_id = current_product_id
@@ -282,6 +286,65 @@ class DraftOrderHandler:
                 len(prep.product_options or {}),
             )
 
+        # ── Prediction confirmation / rejection ─────────────────────────────
+        # If we sent predicted options last turn and the customer is
+        # responding, handle confirm / reject BEFORE the normal option merge.
+        if prep.awaiting_option_confirmation and prep.predicted_options:
+            if _is_option_confirmation(ctx.message) or _is_same_as_before(ctx.message):
+                # Promote predicted options → real selected options
+                for _pk, _pv in (prep.predicted_options or {}).items():
+                    prep.product_options[_pk] = _pv
+                logger.error(
+                    "[ORDER OPTIONS PREDICT] confirmed | tenant=%s product=%s "
+                    "promoted=%s source=%s confidence=%.2f",
+                    ctx.tenant_id, external_id,
+                    {k: v.get("value_name") for k, v in prep.predicted_options.items()},
+                    prep.prediction_source, prep.prediction_confidence,
+                )
+                _emit_predict_metric(
+                    "confirmed", ctx.tenant_id,
+                    product=external_id, source=prep.prediction_source,
+                )
+                prep.predicted_options = {}
+                prep.awaiting_option_confirmation = False
+                prep.prediction_source = ""
+                prep.prediction_confidence = 0.0
+                # Fall through — will pass the options gate now
+            elif _is_option_rejection(ctx.message):
+                logger.error(
+                    "[ORDER OPTIONS PREDICT] rejected | tenant=%s product=%s "
+                    "clearing_predicted=%s",
+                    ctx.tenant_id, external_id,
+                    {k: v.get("value_name") for k, v in prep.predicted_options.items()},
+                )
+                _emit_predict_metric(
+                    "rejected", ctx.tenant_id, product=external_id,
+                )
+                prep.predicted_options = {}
+                prep.awaiting_option_confirmation = False
+                prep.prediction_source = ""
+                prep.prediction_confidence = 0.0
+                # Fall through — will re-check missing options below
+            else:
+                # Not a clear confirm/reject — try to extract a new option
+                # value from the message (customer might be typing "M" or
+                # "أسود" directly).
+                _merge_message_options(prep, ctx.message)
+                _captured_after_prediction = {
+                    k: v.get("value_name")
+                    for k, v in (prep.product_options or {}).items()
+                }
+                logger.error(
+                    "[ORDER OPTIONS PREDICT] ambiguous response — extracted "
+                    "options from message | tenant=%s message=%r captured=%s",
+                    ctx.tenant_id, ctx.message[:60], _captured_after_prediction,
+                )
+                prep.predicted_options = {}
+                prep.awaiting_option_confirmation = False
+                prep.prediction_source = ""
+                prep.prediction_confidence = 0.0
+                # Fall through with whatever was captured
+
         # ── Always try to capture option selections from the message first ──────
         _options_captured_early = _merge_message_options(prep, ctx.message)
         _extracted_from_text = {
@@ -408,6 +471,54 @@ class DraftOrderHandler:
 
         _missing_options = _missing_product_options(prep)
         if _missing_options:
+            # ── Try prediction BEFORE asking the customer ─────────────────
+            if not prep.awaiting_option_confirmation:
+                try:
+                    _predicted = await predict_missing_options(
+                        prep, ctx, external_id, _missing_options,
+                    )
+                except Exception as _pred_exc:
+                    logger.debug(
+                        "[ORDER OPTIONS PREDICT] predict_missing_options raised | err=%s",
+                        _pred_exc,
+                    )
+                    _predicted = None
+
+                if _predicted and _predicted.get("confidence", 0) >= 0.7:
+                    prep.predicted_options = _predicted["options"]
+                    prep.prediction_source = _predicted["source"]
+                    prep.prediction_confidence = _predicted["confidence"]
+                    prep.awaiting_option_confirmation = True
+                    logger.error(
+                        "[ORDER OPTIONS PREDICT] proposing prediction | tenant=%s "
+                        "product=%s source=%s confidence=%.2f predicted=%s",
+                        ctx.tenant_id, external_id,
+                        _predicted["source"], _predicted["confidence"],
+                        {k: v.get("value_name") for k, v in _predicted["options"].items()},
+                    )
+                    _emit_predict_metric(
+                        "predicted", ctx.tenant_id,
+                        product=external_id, source=_predicted["source"],
+                        confidence=f"{_predicted['confidence']:.2f}",
+                    )
+                    return ActionResult(
+                        success=True,
+                        data={
+                            "product": product_info,
+                            "needs_prediction_confirm": True,
+                            "predicted_options": _predicted["options"],
+                            "prediction_source": _predicted["source"],
+                            "selected_options": prep.product_options,
+                            "order_prep": prep.to_dict(),
+                        },
+                    )
+
+            # No prediction or confidence too low — ask as before
+            _emit_predict_metric(
+                "fallback", ctx.tenant_id,
+                product=external_id,
+                missing=[g.get("name") for g in _missing_options],
+            )
             _next_group = _missing_options[0]
             logger.error(
                 "[ORDER OPTIONS] blocked_create_order reason=missing_options | "
@@ -1877,6 +1988,329 @@ def _missing_product_options(prep: OrderPreparationState) -> List[Dict[str, Any]
             continue
         out.append(group)
     return out
+
+
+# ── Intent-Driven Product Options Prediction ─────────────────────────────────
+
+# Structured metric counters emitted as log lines for aggregation.
+# Format: [METRIC] counter_name=1 | key=value ...
+_PREDICT_METRICS = {
+    "predicted":  "options_auto_predicted_count",
+    "confirmed":  "options_prediction_confirmed_count",
+    "rejected":   "options_prediction_rejected_count",
+    "no_predict": "options_prediction_skipped_count",
+    "fallback":   "options_prediction_fallback_count",
+}
+
+
+def _emit_predict_metric(metric_key: str, tenant_id: int, **extra: Any) -> None:
+    """Emit a structured metric log line for prediction tracking."""
+    counter = _PREDICT_METRICS.get(metric_key, metric_key)
+    parts = " ".join(f"{k}={v}" for k, v in extra.items())
+    logger.info("[METRIC] %s=1 | tenant=%s %s", counter, tenant_id, parts)
+
+
+_CONFIRM_PREDICTION_KEYWORDS = frozenset({
+    "نعم", "اي", "ايه", "أيه", "تمام", "تمم", "كمل", "اكمل", "أكمل",
+    "موافق", "موافقه", "صح", "صحيح", "حسنا", "حسناً", "حسن",
+    "نكمل", "نكمّل", "كملي", "كمّلي", "عليه", "نكمل عليه",
+    "أوكي", "أوكيه", "ماشي", "طيب", "زين", "تمّ",
+    "ok", "okay", "yes", "sure", "confirm", "go",
+})
+
+_REJECT_PREDICTION_KEYWORDS = frozenset({
+    "لا", "لأ", "غير", "غيّر", "غيري", "بدل", "بدّل", "أبغى أغير",
+    "ابغى اغير", "ابي اغير", "أبي أغير", "تغيير", "مو هذا",
+    "no", "change", "nope",
+})
+
+_SAME_AS_BEFORE_KEYWORDS = frozenset({
+    "نفس السابق", "نفس الخيارات", "نفس اللي قبل", "زي المرة اللي فاتت",
+    "نفس الاختيار", "نفس الطلب", "زي قبل", "نفسها", "نفسه",
+})
+
+
+def _is_option_confirmation(message: str) -> bool:
+    """True if the message confirms a prediction."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    words = set(text.split())
+    if words & _CONFIRM_PREDICTION_KEYWORDS:
+        return True
+    if text in _CONFIRM_PREDICTION_KEYWORDS:
+        return True
+    return False
+
+
+def _is_option_rejection(message: str) -> bool:
+    """True if the message rejects/wants to change a prediction."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    words = set(text.split())
+    return bool(words & _REJECT_PREDICTION_KEYWORDS) or text in _REJECT_PREDICTION_KEYWORDS
+
+
+def _is_same_as_before(message: str) -> bool:
+    """True if the customer wants the same options as their last order."""
+    text = (message or "").strip().lower()
+    return any(kw in text for kw in _SAME_AS_BEFORE_KEYWORDS)
+
+
+async def predict_missing_options(
+    prep: OrderPreparationState,
+    ctx: "BrainContext",
+    external_id: str,
+    missing_groups: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Predict missing product options from history, popularity, or stock.
+
+    Returns ``{"options": {...}, "source": str, "confidence": float}``
+    when a prediction with confidence >= 0.7 is found, or ``None``.
+
+    Sources (tried in order):
+      1. last_customer_choice (0.9) — same customer ordered same product before
+      2. top_variant          (0.75) — most popular variant across all orders
+      3. stock_heavy          (0.6)  — variant with highest stock (below threshold)
+    """
+    if not missing_groups or not external_id:
+        return None
+
+    db = getattr(ctx, "_db", None)
+    meta = prep.product_options_meta or []
+    if not meta:
+        return None
+
+    # Build a name→group lookup for quick mapping from variant data
+    _group_by_id: Dict[str, Dict[str, Any]] = {}
+    for g in meta:
+        gid = g.get("id")
+        if gid is not None:
+            _group_by_id[str(gid)] = g
+
+    def _variant_id_to_options(variant_id: str) -> Optional[Dict[str, Any]]:
+        """Map a variant_id to option selections using product_options_meta
+        and Salla's related_options/related_option_values parallel arrays.
+
+        Returns a dict keyed by lowercased group name → selection dict,
+        or None if the variant is not in the loaded metadata."""
+        # We need the product's variants to resolve the mapping.
+        # The adapter's get_product already loaded them; check if they're
+        # available via product_options_meta or the prep's cached product.
+        # Since we don't store full variant data on prep, we'll try to
+        # query from the adapter.
+        return None  # handled below per-source
+
+    # ── Source 1: Last customer choice ────────────────────────────────────
+    if db and ctx.customer_id:
+        try:
+            from models import Order  # noqa: PLC0415
+            from sqlalchemy import text as _text  # noqa: PLC0415
+
+            recent_order = (
+                db.query(Order)
+                .filter(
+                    Order.tenant_id == ctx.tenant_id,
+                    Order.line_items.isnot(None),
+                )
+                .filter(
+                    Order.customer_info["phone"].astext != "",
+                )
+                .order_by(Order.id.desc())
+                .limit(20)
+                .all()
+            )
+
+            customer_phone_digits = "".join(
+                c for c in (ctx.customer_phone or "") if c.isdigit()
+            )[-9:]
+
+            for order in recent_order:
+                # Match by phone suffix (last 9 digits)
+                order_phone = ""
+                if isinstance(order.customer_info, dict):
+                    order_phone = str(order.customer_info.get("phone", "") or "")
+                order_phone_digits = "".join(c for c in order_phone if c.isdigit())[-9:]
+                if not order_phone_digits or order_phone_digits != customer_phone_digits:
+                    continue
+
+                items = order.line_items if isinstance(order.line_items, list) else []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_product_id = str(
+                        item.get("product_id") or item.get("id") or ""
+                    )
+                    if item_product_id != external_id:
+                        continue
+
+                    # Found a past order for the same product by this customer
+                    item_options = item.get("options") or []
+                    if not item_options and not item.get("variant_id"):
+                        continue
+
+                    # Try to extract options from the raw Salla line item
+                    predicted: Dict[str, Any] = {}
+                    for opt in (item_options if isinstance(item_options, list) else []):
+                        if not isinstance(opt, dict):
+                            continue
+                        opt_name = str(opt.get("name") or "").strip().lower()
+                        opt_value = str(
+                            opt.get("value") or opt.get("value_name") or ""
+                        ).strip()
+                        if not opt_name or not opt_value:
+                            continue
+                        # Only predict groups that are actually missing
+                        for mg in missing_groups:
+                            mg_key = (mg.get("name") or "").strip().lower()
+                            if mg_key == opt_name:
+                                # Find the matching value in meta
+                                for v in mg.get("values") or []:
+                                    if (v.get("name") or "").strip().lower() == opt_value.lower():
+                                        predicted[mg_key] = {
+                                            "option_id": mg.get("id"),
+                                            "option_name": (mg.get("name") or "").strip(),
+                                            "value_id": v.get("id"),
+                                            "value_name": (v.get("name") or "").strip(),
+                                        }
+                                        break
+
+                    if predicted and len(predicted) == len(missing_groups):
+                        logger.error(
+                            "[ORDER OPTIONS PREDICT] product_id=%s source=last_customer_choice "
+                            "confidence=0.9 predicted=%s | tenant=%s customer=%s",
+                            external_id, {k: v.get("value_name") for k, v in predicted.items()},
+                            ctx.tenant_id, ctx.customer_id,
+                        )
+                        return {
+                            "options": predicted,
+                            "source": "last_customer_choice",
+                            "confidence": 0.9,
+                        }
+        except Exception as exc:
+            logger.debug(
+                "[ORDER OPTIONS PREDICT] source=last_customer_choice failed | err=%s",
+                exc,
+            )
+
+    # ── Source 2: Top-selling variant ─────────────────────────────────────
+    if db:
+        try:
+            from models import Order  # noqa: PLC0415
+            from collections import Counter
+
+            orders = (
+                db.query(Order)
+                .filter(
+                    Order.tenant_id == ctx.tenant_id,
+                    Order.line_items.isnot(None),
+                )
+                .order_by(Order.id.desc())
+                .limit(100)
+                .all()
+            )
+
+            variant_counter: Counter = Counter()
+            variant_options_cache: Dict[str, List] = {}
+            for order in orders:
+                items = order.line_items if isinstance(order.line_items, list) else []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_pid = str(item.get("product_id") or item.get("id") or "")
+                    if item_pid != external_id:
+                        continue
+                    vid = str(item.get("variant_id") or "")
+                    if vid:
+                        variant_counter[vid] += 1
+                        if vid not in variant_options_cache:
+                            variant_options_cache[vid] = item.get("options") or []
+
+            if variant_counter:
+                top_vid, _count = variant_counter.most_common(1)[0]
+                top_options_raw = variant_options_cache.get(top_vid) or []
+
+                predicted: Dict[str, Any] = {}
+                for opt in (top_options_raw if isinstance(top_options_raw, list) else []):
+                    if not isinstance(opt, dict):
+                        continue
+                    opt_name = str(opt.get("name") or "").strip().lower()
+                    opt_value = str(
+                        opt.get("value") or opt.get("value_name") or ""
+                    ).strip()
+                    if not opt_name or not opt_value:
+                        continue
+                    for mg in missing_groups:
+                        mg_key = (mg.get("name") or "").strip().lower()
+                        if mg_key == opt_name:
+                            for v in mg.get("values") or []:
+                                if (v.get("name") or "").strip().lower() == opt_value.lower():
+                                    predicted[mg_key] = {
+                                        "option_id": mg.get("id"),
+                                        "option_name": (mg.get("name") or "").strip(),
+                                        "value_id": v.get("id"),
+                                        "value_name": (v.get("name") or "").strip(),
+                                    }
+                                    break
+
+                if predicted and len(predicted) == len(missing_groups):
+                    logger.error(
+                        "[ORDER OPTIONS PREDICT] product_id=%s source=top_variant "
+                        "confidence=0.75 predicted=%s top_vid=%s count=%d | tenant=%s",
+                        external_id,
+                        {k: v.get("value_name") for k, v in predicted.items()},
+                        top_vid, _count, ctx.tenant_id,
+                    )
+                    return {
+                        "options": predicted,
+                        "source": "top_variant",
+                        "confidence": 0.75,
+                    }
+        except Exception as exc:
+            logger.debug(
+                "[ORDER OPTIONS PREDICT] source=top_variant failed | err=%s", exc,
+            )
+
+    # ── Source 3: Stock-heavy option ──────────────────────────────────────
+    # Pick the first value of each missing group (Salla typically returns
+    # values ordered by popularity/stock). Confidence is below the 0.7
+    # threshold, so this source is only used as a weak signal.
+    # We keep it at 0.6 to match the spec — callers skip it unless the
+    # threshold is explicitly lowered.
+    if len(missing_groups) == 1:
+        mg = missing_groups[0]
+        values = mg.get("values") or []
+        if len(values) == 1:
+            # Only one possible value — no ambiguity at all
+            v = values[0]
+            predicted = {
+                (mg.get("name") or "").strip().lower(): {
+                    "option_id": mg.get("id"),
+                    "option_name": (mg.get("name") or "").strip(),
+                    "value_id": v.get("id"),
+                    "value_name": (v.get("name") or "").strip(),
+                }
+            }
+            logger.error(
+                "[ORDER OPTIONS PREDICT] product_id=%s source=stock_heavy "
+                "confidence=0.95 predicted=%s reason=single_value_only | tenant=%s",
+                external_id,
+                {k: v_sel.get("value_name") for k, v_sel in predicted.items()},
+                ctx.tenant_id,
+            )
+            return {
+                "options": predicted,
+                "source": "stock_heavy",
+                "confidence": 0.95,
+            }
+
+    logger.info(
+        "[ORDER OPTIONS PREDICT] no prediction possible | product_id=%s "
+        "missing_groups=%s tenant=%s",
+        external_id, [g.get("name") for g in missing_groups], ctx.tenant_id,
+    )
+    return None
 
 
 def _resolve_options_payload(prep: OrderPreparationState) -> List[Dict[str, Any]]:

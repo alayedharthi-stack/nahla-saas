@@ -235,6 +235,17 @@ class DefaultComposer:
                     data.get("message"), action,
                 )
                 return T.product_unsyncable(product=_unsync_prod)
+            if data.get("needs_prediction_confirm"):
+                result.data["pending_buttons"] = [
+                    {"type": "reply", "reply": {"id": "pred_ok",     "title": "نكمل عليه"}},
+                    {"type": "reply", "reply": {"id": "pred_change", "title": "أبغى أغير"}},
+                ]
+                return T.confirm_predicted_options(
+                    product=data.get("product", {}),
+                    predicted_options=data.get("predicted_options", {}),
+                    selected_options=data.get("selected_options", {}),
+                    prediction_source=data.get("prediction_source", ""),
+                )
             if data.get("needs_options"):
                 _missing_groups = data.get("missing_option_groups", []) or []
                 # WhatsApp quick-reply buttons for the FIRST pending group.

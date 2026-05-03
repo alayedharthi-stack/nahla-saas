@@ -103,6 +103,15 @@ class OrderPreparationState:
     # re-fetch forever — and a single transient empty Salla response
     # mid-flow falsely flagged the product as unsyncable.
     product_options_loaded: bool = False
+    # ── Predicted options (Intent-Driven Prediction) ─────────────────────
+    # When options are missing and the system can predict them with
+    # sufficient confidence, the prediction is stored here INSTEAD of
+    # directly in product_options. The customer must confirm before
+    # predictions are promoted to real selections.
+    predicted_options: Dict[str, Any] = field(default_factory=dict)
+    prediction_source: str = ""       # last_customer_choice | top_variant | stock_heavy
+    prediction_confidence: float = 0.0
+    awaiting_option_confirmation: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -133,6 +142,10 @@ class OrderPreparationState:
             "product_has_required_options": self.product_has_required_options,
             "product_unsyncable": self.product_unsyncable,
             "product_options_loaded": self.product_options_loaded,
+            "predicted_options": dict(self.predicted_options or {}),
+            "prediction_source": self.prediction_source,
+            "prediction_confidence": self.prediction_confidence,
+            "awaiting_option_confirmation": self.awaiting_option_confirmation,
         }
 
     @staticmethod
@@ -171,6 +184,10 @@ class OrderPreparationState:
             product_has_required_options=bool(raw.get("product_has_required_options", False)),
             product_unsyncable=bool(raw.get("product_unsyncable", False)),
             product_options_loaded=bool(raw.get("product_options_loaded", False)),
+            predicted_options=dict(raw.get("predicted_options") or {}),
+            prediction_source=str(raw.get("prediction_source", "") or ""),
+            prediction_confidence=float(raw.get("prediction_confidence") or 0.0),
+            awaiting_option_confirmation=bool(raw.get("awaiting_option_confirmation", False)),
         )
 
 
@@ -229,6 +246,10 @@ class MerchantConversationState:
     # Names of option groups still pending (e.g. ["المقاس"]). Empty once all
     # options have been collected. Set by the pipeline after each turn.
     pending_option_groups: List[str] = field(default_factory=list)
+    # True when the system proposed predicted options and is waiting for
+    # the customer to confirm or reject them. Synced from order_prep by
+    # the pipeline after each turn.
+    awaiting_option_confirmation: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -260,6 +281,7 @@ class MerchantConversationState:
             "general_streak": self.general_streak,
             "current_selected_options": self.current_selected_options,
             "pending_option_groups": list(self.pending_option_groups or []),
+            "awaiting_option_confirmation": self.awaiting_option_confirmation,
         }
 
     @staticmethod
@@ -295,6 +317,7 @@ class MerchantConversationState:
             pending_option_groups=[
                 str(g) for g in (d.get("pending_option_groups") or []) if g
             ],
+            awaiting_option_confirmation=bool(d.get("awaiting_option_confirmation", False)),
         )
 
 
