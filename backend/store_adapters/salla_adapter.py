@@ -1676,10 +1676,15 @@ class SallaAdapter(BaseStoreAdapter):
                     _val = _vid if _vid is not None else sel.get("value_name")
                     if _val is None:
                         continue
-                    opts_payload.append({"id": _oid, "value": _val})
+                    # Salla schema requires value to be an array: {"id": X, "value": [Y]}
+                    opts_payload.append({"id": _oid, "value": [_val]})
                     opts_dict[str(_oid)] = _val
                 if opts_payload:
                     entry["options"] = opts_payload
+                logger.info(
+                    "[SallaAdapter] FINAL OPTIONS PAYLOAD | product=%s options=%s",
+                    item.product_id, opts_payload,
+                )
                 logger.info(
                     "[SallaAdapter] item options built | product=%s raw=%s "
                     "array_payload=%s dict_payload=%s variant_id=%s",
