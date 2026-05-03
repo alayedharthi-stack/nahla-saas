@@ -122,6 +122,13 @@ def _resolve_saudi_region(city: str) -> str:
     return _SAUDI_REGION_BY_CITY.get(key, raw)
 
 
+# Per-tenant cache: tenant_id → resolved delivery_method slug (e.g. "shipping")
+_DELIVERY_METHOD_CACHE: Dict[int, str] = {}
+
+# Ordered list of slugs to probe when the API doesn't tell us the valid values.
+_DELIVERY_METHOD_FALLBACKS = ["home_delivery", "delivery", "shipping", "pickup"]
+
+
 def validate_salla_order_payload(body: Dict[str, Any]) -> List[str]:
     """Return the list of canonical field names missing from a Salla order
     payload. Empty list means the payload satisfies Salla's hard requirements.
@@ -1284,12 +1291,13 @@ class SallaAdapter(BaseStoreAdapter):
                 missing=missing,
                 payload_keys=list(body.keys()),
             )
-        # ── Hard guard: delivery_method MUST be present before POST ─────────
-        body["delivery_method"] = body.get("delivery_method") or "shipping"
+        # ── Hard guard: resolve delivery_method from Salla API and inject ───
+        _dm = await self._resolve_delivery_method()
+        body["delivery_method"] = _dm
         logger.error(
             "[SallaAdapter] DELIVERY METHOD GUARDED BEFORE POST | action=create_order "
             "method=%s tenant=%s top_level_keys=%s",
-            body["delivery_method"], self._tenant_id, sorted(list(body.keys())),
+            _dm, self._tenant_id, sorted(list(body.keys())),
         )
 
         self._log_outgoing_payload("create_order", body, shipping_company_id)
@@ -1384,12 +1392,13 @@ class SallaAdapter(BaseStoreAdapter):
         except Exception as _fp_exc:
             logger.warning("[SallaAdapter] FINAL OUTGOING PAYLOAD log failed: %s", _fp_exc)
 
-        # ── Hard guard: delivery_method MUST be present before POST ─────────
-        body["delivery_method"] = body.get("delivery_method") or "shipping"
+        # ── Hard guard: resolve delivery_method from Salla API and inject ───
+        _dm = await self._resolve_delivery_method()
+        body["delivery_method"] = _dm
         logger.error(
             "[SallaAdapter] DELIVERY METHOD GUARDED BEFORE POST | action=create_draft_order "
             "method=%s tenant=%s top_level_keys=%s",
-            body["delivery_method"], self._tenant_id, sorted(list(body.keys())),
+            _dm, self._tenant_id, sorted(list(body.keys())),
         )
 
         # ── Assertion: options must be in products[0] when required ──────────
@@ -1614,6 +1623,66 @@ class SallaAdapter(BaseStoreAdapter):
                     city, attempt_city, exc,
                 )
         return None
+
+    async def _resolve_delivery_method(self) -> str:
+        """Return the correct delivery_method slug for this merchant.
+
+        Resolution order:
+          1. In-memory cache (per tenant).
+          2. GET /shipping/methods  — Salla standard endpoint.
+          3. GET /delivery-methods  — alternative path some stores expose.
+          4. Ordered fallback list: home_delivery → delivery → shipping → pickup.
+
+        The result is cached so we only hit Salla once per process lifetime.
+        """
+        cached = _DELIVERY_METHOD_CACHE.get(self._tenant_id)
+        if cached:
+            logger.info(
+                "[SallaAdapter] delivery_method from cache | method=%s tenant=%s",
+                cached, self._tenant_id,
+            )
+            return cached
+
+        # ── Try known API endpoints ───────────────────────────────────────────
+        for endpoint in ["/shipping/methods", "/delivery-methods"]:
+            try:
+                data = await self._get(endpoint)
+                methods = (data.get("data") or []) if isinstance(data, dict) else []
+                if methods and isinstance(methods, list):
+                    available_codes = [
+                        m.get("code") or m.get("type") or m.get("slug")
+                        for m in methods if isinstance(m, dict)
+                    ]
+                    available_codes = [c for c in available_codes if c]
+                    logger.error(
+                        "[SallaAdapter] AVAILABLE DELIVERY METHODS = %s "
+                        "endpoint=%s tenant=%s",
+                        available_codes, endpoint, self._tenant_id,
+                    )
+                    if available_codes:
+                        chosen = available_codes[0]
+                        _DELIVERY_METHOD_CACHE[self._tenant_id] = chosen
+                        logger.error(
+                            "[SallaAdapter] delivery_method resolved via API | "
+                            "method=%s tenant=%s",
+                            chosen, self._tenant_id,
+                        )
+                        return chosen
+            except Exception as _exc:
+                logger.warning(
+                    "[SallaAdapter] delivery_method endpoint %s unavailable | "
+                    "err=%s tenant=%s",
+                    endpoint, _exc, self._tenant_id,
+                )
+
+        # ── Hard fallback: use first slug from known list ─────────────────────
+        fallback = _DELIVERY_METHOD_FALLBACKS[0]   # "home_delivery"
+        logger.error(
+            "[SallaAdapter] delivery_method API lookup failed — using fallback | "
+            "method=%s tenant=%s",
+            fallback, self._tenant_id,
+        )
+        return fallback
 
     @staticmethod
     def _normalize_mobile(phone: str) -> str:
