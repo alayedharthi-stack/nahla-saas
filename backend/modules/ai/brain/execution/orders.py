@@ -283,19 +283,31 @@ class DraftOrderHandler:
             )
 
         # ── Always try to capture option selections from the message first ──────
-        # CRITICAL: call _merge_message_options BEFORE the checkout-fields check
-        # so that option picks (e.g. "بج", "1") are recorded even when the
-        # customer is still filling other slots. Previously this was called
-        # AFTER the `if missing: return` guard which meant any option text
-        # sent while checkout fields were still missing was silently dropped,
-        # causing the bot to re-ask for the same options on the next turn.
         _options_captured_early = _merge_message_options(prep, ctx.message)
+        _extracted_from_text = {
+            k: v.get("value_name")
+            for k, v in (prep.product_options or {}).items()
+        } if _options_captured_early else {}
+        _still_missing_after_extract = [
+            g.get("name") for g in _missing_product_options(prep)
+        ]
         if _options_captured_early:
-            logger.info(
-                "[ORDER FLOW] options captured early (before checkout-field check) | "
-                "tenant=%s captured=%d selected=%s",
-                ctx.tenant_id, _options_captured_early,
-                {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+            logger.error(
+                "[ORDER OPTIONS] extracted_from_text=%s | tenant=%s product=%s",
+                _extracted_from_text, ctx.tenant_id, external_id,
+            )
+        if prep.product_has_required_options:
+            _all_selected = {
+                k: v.get("value_name") for k, v in (prep.product_options or {}).items()
+            }
+            _all_required = [
+                g.get("name") for g in (prep.product_options_meta or [])
+                if g.get("values")
+            ]
+            logger.error(
+                "[ORDER OPTIONS] product_id=%s required=%s selected=%s missing=%s | tenant=%s",
+                external_id, _all_required, _all_selected,
+                _still_missing_after_extract, ctx.tenant_id,
             )
 
         # Country-aware address rules
@@ -397,19 +409,15 @@ class DraftOrderHandler:
         _missing_options = _missing_product_options(prep)
         if _missing_options:
             _next_group = _missing_options[0]
-            logger.info(
-                "[ORDER FLOW] product requires options | tenant=%s product=%s "
-                "missing=%s selected=%s",
+            logger.error(
+                "[ORDER OPTIONS] blocked_create_order reason=missing_options | "
+                "tenant=%s product=%s missing=%s selected=%s "
+                "next_group=%s values=%s",
                 ctx.tenant_id, external_id,
                 [g["name"] for g in _missing_options],
-                list(prep.product_options.keys()),
-            )
-            logger.info(
-                "[ORDER FLOW] BLOCKED → needs_collection | missing=['product_options'] | "
-                "tenant=%s pending=%s values=%s selected_so_far=%s",
-                ctx.tenant_id, _next_group["name"],
-                [v["name"] for v in _next_group.get("values") or []],
                 {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+                _next_group["name"],
+                [v["name"] for v in _next_group.get("values") or []],
             )
             return ActionResult(
                 success=True,
@@ -425,20 +433,15 @@ class DraftOrderHandler:
             _final_selection = {
                 k: v.get("value_name") for k, v in (prep.product_options or {}).items()
             }
-            logger.info(
-                "[ORDER FLOW] product options selected | tenant=%s product=%s selection=%s",
-                ctx.tenant_id, external_id, _final_selection,
-            )
-            # "all options collected" — emitted on the turn that completes
-            # the option set so we can trace the boundary between option-
-            # collection turns and order creation.
             _prev_selection_count = len(getattr(prev_prep, "product_options", None) or {})
-            if len(prep.product_options or {}) > _prev_selection_count:
-                logger.info(
-                    "[ORDER FLOW] all options collected | tenant=%s product=%s count=%d selection=%s",
-                    ctx.tenant_id, external_id,
-                    len(prep.product_options or {}), _final_selection,
-                )
+            _newly_completed = (
+                len(prep.product_options or {}) > _prev_selection_count
+                and not _missing_product_options(prep)
+            )
+            logger.error(
+                "[ORDER OPTIONS] product_id=%s all_selected=%s newly_completed=%s | tenant=%s",
+                external_id, _final_selection, _newly_completed, ctx.tenant_id,
+            )
 
         # Log phone resolution — phone is always taken from the WhatsApp conversation,
         # never asked from the customer.
@@ -1843,9 +1846,11 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
                 gname, val.get("name") or "", group.get("id"), val.get("id"), idx,
             )
 
-    if captured >= 2:
-        logger.info(
-            "[ORDER FLOW] multi-option parsed | captured=%d selection=%s",
+    if captured:
+        logger.error(
+            "[ORDER OPTIONS] extracted_from_text=%s | captured=%d total_selected=%s",
+            {k: v.get("value_name") for k, v in (prep.product_options or {}).items()
+             if k in [gk.lower() for gk in [g.get("name", "") for g in (prep.product_options_meta or [])]]},
             captured,
             {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
         )

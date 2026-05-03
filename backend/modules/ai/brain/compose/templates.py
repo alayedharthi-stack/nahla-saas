@@ -201,23 +201,20 @@ def ask_product_options(
     selected_options: Dict[str, Any] | None = None,
     **_: Any,
 ) -> str:
-    """Ask the customer to pick all missing option groups in one message.
+    """Ask the customer to pick missing option groups with smart UX.
 
-    Shows every pending option group at once (size, color, …) so the
-    customer can answer them in a single reply. The customer can:
+    Adapts the message style to how many groups remain:
+      - 1 group remaining (e.g. only colour left): short, focused prompt
+      - multiple groups remaining: lists all groups at once
+      - all options selected by caller: confirmation summary only
 
-      • name them: "M أسود"
-      • number them positionally: "2 1"  (= 2nd value of group 1, 1st of group 2)
-
-    Already-selected options are summarised at the top and never re-asked
-    (they're filtered out of `missing_option_groups` by the caller).
+    Already-selected options are summarised so the customer knows their
+    earlier picks were recorded.
     """
     title = product.get("title", "المنتج المحدد")
     groups = list(missing_option_groups or [])
-    if not groups:
-        return f"تمام، سأجهز طلب *{title}*."
 
-    # Confirmation summary of already-picked options (e.g. "اللون: أسود").
+    # Build confirmation summary of already-picked options.
     picked_lines: List[str] = []
     for sel in (selected_options or {}).values():
         if not isinstance(sel, dict):
@@ -227,25 +224,52 @@ def ask_product_options(
         if gname and vname:
             picked_lines.append(f"• {gname}: {vname}")
 
-    lines: List[str] = [f"تمام، *{title}* متوفر بعدة خيارات."]
+    # ── All options already collected → confirmation only ─────────────────
+    if not groups:
+        if picked_lines:
+            return (
+                f"تمام، اخترت لك *{title}*:\n"
+                + "\n".join(picked_lines)
+                + "\n✅"
+            )
+        return f"تمام، سأجهز طلب *{title}*."
+
+    lines: List[str] = []
+
+    # ── Single group remaining → focused short prompt ─────────────────────
+    if len(groups) == 1:
+        g = groups[0]
+        gname = (g.get("name") or "").strip() or "الخيار"
+        values = g.get("values") or []
+        if picked_lines:
+            lines.append(f"تمام 👍")
+            lines.extend(picked_lines)
+            lines.append("")
+            lines.append(f"باقي *{gname}* فقط:")
+        else:
+            lines.append(f"تمام 👍 اختر *{gname}* المناسب:")
+        for idx, val in enumerate(values, 1):
+            vname = (val.get("name") or "").strip()
+            if vname:
+                lines.append(f"{idx}. {vname}")
+        return "\n".join(lines)
+
+    # ── Multiple groups remaining → list all at once ──────────────────────
+    lines.append(f"تمام، *{title}* متوفر بعدة خيارات.")
     if picked_lines:
         lines.append("اختياراتك حتى الآن:")
         lines.extend(picked_lines)
 
-    # Header: "اختر المقاس واللون:" / "اختر المقاس:" / "اختر المقاس، اللون والمادة:"
     group_names = [(g.get("name") or "").strip() or "الخيار" for g in groups]
-    if len(group_names) == 1:
-        header = f"اختر {group_names[0]}:"
-    elif len(group_names) == 2:
+    if len(group_names) == 2:
         header = f"اختر {group_names[0]} و{group_names[1]}:"
     else:
         header = "اختر " + "، ".join(group_names[:-1]) + f" و{group_names[-1]}:"
     lines.append("")
     lines.append(header)
 
-    # Render each group with its numbered values.
-    name_examples: List[str] = []     # e.g. ["M", "أسود"]  — first value of each group
-    numeric_example: List[str] = []   # e.g. ["1", "1"]       — first index of each group
+    name_examples: List[str] = []
+    numeric_example: List[str] = []
     for g in groups:
         gname = (g.get("name") or "").strip() or "الخيار"
         values = g.get("values") or []
@@ -253,20 +277,19 @@ def ask_product_options(
         lines.append(f"*{gname}:*")
         for idx, val in enumerate(values, 1):
             vname = (val.get("name") or "").strip()
-            if not vname:
-                continue
-            lines.append(f"{idx}. {vname}")
-        # Build hint examples from the FIRST value of each group.
-        first_named = next(((v.get("name") or "").strip() for v in values if (v.get("name") or "").strip()), "")
+            if vname:
+                lines.append(f"{idx}. {vname}")
+        first_named = next(
+            ((v.get("name") or "").strip() for v in values if (v.get("name") or "").strip()),
+            "",
+        )
         if first_named:
             name_examples.append(first_named)
         if values:
             numeric_example.append("1")
 
-    # Hint line — only when there's more than one group (otherwise the
-    # single-group prompt is already self-explanatory).
     lines.append("")
-    if len(groups) >= 2 and name_examples and numeric_example:
+    if name_examples and numeric_example:
         lines.append(
             f"يمكنك الرد بالاسم مثل: *{' '.join(name_examples)}* "
             f"أو بالأرقام: *{' '.join(numeric_example)}*"

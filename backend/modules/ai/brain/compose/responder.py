@@ -237,17 +237,17 @@ class DefaultComposer:
                 return T.product_unsyncable(product=_unsync_prod)
             if data.get("needs_options"):
                 _missing_groups = data.get("missing_option_groups", []) or []
-                # WhatsApp quick-reply buttons for the FIRST pending group
-                # (≤3 values — WhatsApp's hard limit on reply buttons).
-                # The text body still lists every pending group so the
-                # customer can answer all of them at once if they prefer
-                # to type — buttons are an accelerator, not a replacement.
+                # WhatsApp quick-reply buttons for the FIRST pending group.
+                # Buttons are limited to 3 by WhatsApp; if the group has
+                # more values, take the first 3 as buttons (the text body
+                # still shows the full numbered list so nothing is hidden).
                 if _missing_groups:
                     _first = _missing_groups[0] or {}
                     _values = [v for v in (_first.get("values") or []) if (v.get("name") or "").strip()]
-                    if 1 <= len(_values) <= 3:
+                    _btn_values = _values[:3]  # WhatsApp limit: max 3 buttons
+                    if _btn_values:
                         wa_buttons = []
-                        for i, v in enumerate(_values, 1):
+                        for i, v in enumerate(_btn_values, 1):
                             title = ((v.get("name") or "").strip())[:20]
                             if not title:
                                 continue
