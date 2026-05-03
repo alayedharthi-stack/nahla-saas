@@ -61,6 +61,33 @@ class SallaOrderValidationError(ValueError):
         )
 
 
+class SallaVariantMatchError(ValueError):
+    """Raised when a product has Salla variants but none matches the selected options.
+
+    The order flow must re-display the available options to the customer
+    instead of proceeding with an order that Salla would reject.
+
+    Attributes:
+        product_id:  Salla product ID.
+        wanted:      {option_id: value_id} the customer selected.
+        available:   list of variant summaries for logging.
+    """
+
+    def __init__(
+        self,
+        product_id: str,
+        wanted: Dict[str, str],
+        available: List[Dict[str, Any]],
+    ):
+        self.product_id = product_id
+        self.wanted = wanted
+        self.available = available
+        super().__init__(
+            f"variant_match_failed: product={product_id} wanted={wanted} "
+            f"available_variants={len(available)}"
+        )
+
+
 # ── Required fields by section in the Salla create-order payload ──────────────
 # Sourced from real-world Salla 422 responses + the Admin API v2 docs.
 # Keep this list short — it represents what Salla *truly* refuses to accept,
@@ -1160,20 +1187,22 @@ class SallaAdapter(BaseStoreAdapter):
         self,
         product_id: str,
         selected_options: List[Dict[str, Any]],
-    ) -> Optional[str]:
+    ) -> tuple:
         """Find the Salla variant whose option_values match the selection.
 
-        Salla orders for products with size/colour variants accept either
-        an ``options`` array or an explicit ``variant_id``. Sending both
-        is the safest combination — ``variant_id`` is unambiguous and
-        bypasses any Salla-side options-resolution edge cases. This
-        helper queries ``/products/{id}/variants`` and looks for the
-        variant whose ``related_options`` (or equivalent) align with the
-        selected option_id+value_id pairs.
+        Returns a 3-tuple:
+            (variant_id: Optional[str], has_variants: bool, summaries: list)
+
+        ``has_variants`` is True when the /variants endpoint returned at
+        least one variant (even if none matched).  The caller should raise
+        ``SallaVariantMatchError`` when ``has_variants=True`` and
+        ``variant_id=None`` — this means the selected option values do not
+        correspond to any real Salla variant and the order would be rejected.
         """
         if not (product_id and selected_options):
-            return None
-        # Build a lookup of {option_id: value_id} from the picked options.
+            return None, False, []
+
+        # ── Build wanted = {option_id: value_id} ─────────────────────────────
         wanted: Dict[str, str] = {}
         for sel in selected_options:
             if not isinstance(sel, dict):
@@ -1182,88 +1211,169 @@ class SallaAdapter(BaseStoreAdapter):
             vid = sel.get("value_id") if "value_id" in sel else sel.get("value")
             if oid is None or vid is None:
                 continue
+            # Unwrap list values produced by Salla's array format
+            if isinstance(vid, list):
+                vid = vid[0] if vid else None
+            if vid is None:
+                continue
             wanted[str(oid)] = str(vid)
+
         if not wanted:
-            return None
+            return None, False, []
+
+        logger.error(
+            "[ORDER FLOW] variant_resolve start | product=%s wanted=%s raw_opts=%s",
+            product_id, wanted, selected_options,
+        )
+
+        # ── Fetch variants ────────────────────────────────────────────────────
         try:
             data = await self._get(f"/products/{product_id}/variants")
         except httpx.HTTPStatusError as exc:
             logger.info(
-                "[SallaAdapter] /products/%s/variants unavailable (%s) — skipping variant resolution",
+                "[SallaAdapter] /products/%s/variants → %d — skipping variant resolution",
                 product_id, exc.response.status_code,
             )
-            return None
+            return None, False, []
         except Exception as exc:
             logger.info(
                 "[SallaAdapter] variant resolution failed | product=%s err=%s",
                 product_id, exc,
             )
-            return None
+            return None, False, []
+
         variants = data.get("data") or []
-        if not isinstance(variants, list):
-            return None
+        if not isinstance(variants, list) or not variants:
+            logger.info(
+                "[SallaAdapter] no variants returned | product=%s", product_id,
+            )
+            return None, False, []
+
+        # ── Log raw structure of first variant so we can see key names ────────
+        logger.error(
+            "[ORDER FLOW] variants raw sample | product=%s total=%d first_keys=%s "
+            "first_variant=%s",
+            product_id, len(variants),
+            list(variants[0].keys()) if variants else [],
+            variants[0] if variants else {},
+        )
+
+        summaries: List[Dict[str, Any]] = []
         for v in variants:
             if not isinstance(v, dict):
                 continue
-            # Salla returns option_values under a few different keys
-            # depending on the API version: `related_options`,
-            # `options`, or `option_values`. Accept any of them.
+
+            # ── Extract option map from variant — try all known key names ────
             v_opts = (
                 v.get("related_options")
                 or v.get("option_values")
                 or v.get("options")
                 or []
             )
+            if isinstance(v_opts, dict):
+                # Some API versions return a dict keyed by option_id
+                v_opts = [{"id": k, "value": val} for k, val in v_opts.items()]
             if not isinstance(v_opts, list):
-                continue
+                v_opts = []
+
             v_map: Dict[str, str] = {}
             for vo in v_opts:
                 if not isinstance(vo, dict):
                     continue
-                vo_oid = vo.get("option_id") or vo.get("id")
+                # option group id — try multiple key names
+                vo_oid = (
+                    vo.get("option_id")
+                    or vo.get("group_id")
+                    or vo.get("id")
+                )
+                # option value id — try multiple key names
                 vo_vid = (
                     vo.get("value_id")
                     or vo.get("option_value_id")
+                    or vo.get("selected_value_id")
                     or vo.get("value")
                 )
+                if isinstance(vo_vid, list):
+                    vo_vid = vo_vid[0] if vo_vid else None
                 if vo_oid is not None and vo_vid is not None:
                     v_map[str(vo_oid)] = str(vo_vid)
+
+            summary = {"id": v.get("id"), "options_map": v_map}
+            summaries.append(summary)
+
+            # ── Exact match: every wanted key/value must appear in variant ────
             if v_map and all(v_map.get(k) == val for k, val in wanted.items()):
                 vid = str(v.get("id") or "")
                 if vid:
-                    logger.info(
-                        "[SallaAdapter] variant resolved | product=%s variant_id=%s selection=%s",
-                        product_id, vid, wanted,
+                    logger.error(
+                        "[ORDER FLOW] variant matched | variant_id=%s product=%s "
+                        "wanted=%s variant_map=%s",
+                        vid, product_id, wanted, v_map,
                     )
-                    return vid
-        logger.info(
-            "[SallaAdapter] no matching variant found | product=%s wanted=%s variants=%d",
-            product_id, wanted, len(variants),
+                    return vid, True, summaries
+
+        # ── No match ──────────────────────────────────────────────────────────
+        logger.error(
+            "[ORDER FLOW] variant_match_failed | product=%s wanted=%s "
+            "available_variants=%s",
+            product_id, wanted,
+            [s for s in summaries],
         )
-        return None
+        return None, True, summaries
 
     async def _enrich_items_with_variant_id(self, order_input: OrderInput) -> None:
-        """Best-effort: attach variant_id to each item with selected options.
+        """Attach ``variant_id`` to each item with selected options.
 
-        Sending Salla both ``options`` and ``variant_id`` is more reliable
-        than options alone — variant_id is unambiguous and removes any
-        Salla-side options-resolution edge cases that have been observed
-        to return 422 ("خيارات المنتج مطلوبة") even with options present.
+        When a product has Salla variants and the customer's selected option
+        values match a known variant, we send *only* ``variant_id`` (omitting
+        the options array — Salla resolves the options from the variant).
+
+        When the product has variants but none matches, we raise
+        ``SallaVariantMatchError`` so the order is blocked and the bot
+        re-displays the options to the customer.
         """
         for item in order_input.items or []:
             if item.variant_id or not item.options:
                 continue
             try:
-                vid = await self._resolve_variant_id(str(item.product_id), item.options)
+                vid, has_variants, summaries = await self._resolve_variant_id(
+                    str(item.product_id), item.options
+                )
+            except SallaVariantMatchError:
+                raise
             except Exception as exc:
                 logger.info(
-                    "[SallaAdapter] variant enrichment failed (non-blocking) | "
+                    "[SallaAdapter] variant enrichment error (non-blocking) | "
                     "product=%s err=%s",
                     item.product_id, exc,
                 )
                 continue
+
             if vid:
                 item.variant_id = vid
+                logger.error(
+                    "[ORDER FLOW] variant matched | variant_id=%s product=%s",
+                    vid, item.product_id,
+                )
+            elif has_variants:
+                # Variants exist but nothing matched → block and ask again
+                wanted: Dict[str, str] = {}
+                for sel in item.options or []:
+                    if isinstance(sel, dict):
+                        oid = sel.get("option_id") or sel.get("id")
+                        vid_raw = sel.get("value_id") or sel.get("value")
+                        if oid and vid_raw is not None:
+                            wanted[str(oid)] = str(vid_raw)
+                logger.error(
+                    "[ORDER FLOW] variant_match_failed | product=%s wanted=%s "
+                    "available_variants=%s tenant=%s",
+                    item.product_id, wanted, summaries, self._tenant_id,
+                )
+                raise SallaVariantMatchError(
+                    product_id=str(item.product_id),
+                    wanted=wanted,
+                    available=summaries,
+                )
 
     async def create_order(self, order_input: OrderInput) -> NormalizedOrder:
         self._require_auth("create_order")
@@ -1279,7 +1389,15 @@ class SallaAdapter(BaseStoreAdapter):
             order_input.short_address_code,
         )
         await self._assert_required_options_present(order_input)
-        await self._enrich_items_with_variant_id(order_input)
+        try:
+            await self._enrich_items_with_variant_id(order_input)
+        except SallaVariantMatchError as _vme:
+            logger.error(
+                "[ORDER FLOW] variant_match_failed — blocking order | "
+                "product=%s wanted=%s tenant=%s",
+                _vme.product_id, _vme.wanted, self._tenant_id,
+            )
+            raise SallaOrderValidationError(missing=["product_options"]) from _vme
         shipping_company_id = order_input.shipping_company_id
         if not shipping_company_id:
             shipping_company_id = await self._get_default_shipping_company_id(order_input.city)
@@ -1375,7 +1493,15 @@ class SallaAdapter(BaseStoreAdapter):
                 )
 
         await self._assert_required_options_present(order_input)
-        await self._enrich_items_with_variant_id(order_input)
+        try:
+            await self._enrich_items_with_variant_id(order_input)
+        except SallaVariantMatchError as _vme:
+            logger.error(
+                "[ORDER FLOW] variant_match_failed — blocking order | "
+                "product=%s wanted=%s tenant=%s",
+                _vme.product_id, _vme.wanted, self._tenant_id,
+            )
+            raise SallaOrderValidationError(missing=["product_options"]) from _vme
         # ── Shipping resolution ───────────────────────────────────────────────────
         # Priority: order_input → checkout_profile default → /shipping/zones lookup
         if not shipping_company_id:
@@ -2161,6 +2287,16 @@ class SallaAdapter(BaseStoreAdapter):
                     entry["variant_id"] = int(item.variant_id)
                 except (TypeError, ValueError):
                     entry["variant_id"] = item.variant_id
+                # variant_id is unambiguous — Salla resolves options from it.
+                # Sending options alongside causes ambiguity and 422s.
+                logger.error(
+                    "[ORDER FLOW] variant matched | variant_id=%s product=%s "
+                    "— options omitted from payload",
+                    item.variant_id, item.product_id,
+                )
+                products.append(entry)
+                continue   # skip options block below
+
             # Salla expects {"id": option_id, "value": value_id} per option
             # group. We accept either explicit value_id (preferred) or fall
             # back to value_name when the merchant uses free-text options.
