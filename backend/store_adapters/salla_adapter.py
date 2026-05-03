@@ -1763,6 +1763,17 @@ class SallaAdapter(BaseStoreAdapter):
         if _sid:
             body["shipping"] = {"company_id": _sid}
 
+        # ── Delivery method — Salla REQUIRES this field ───────────────────────
+        # "shipping" for normal delivery, "pickup" for in-store collection.
+        # We default to "shipping"; if the merchant wants pickup they must
+        # pass delivery_method="pickup" through the OrderInput in the future.
+        _delivery_method = getattr(order_input, "delivery_method", None) or "shipping"
+        body["delivery_method"] = _delivery_method
+        logger.info(
+            "[SallaAdapter] DELIVERY METHOD SET | method=%s tenant=%s",
+            _delivery_method, self._tenant_id,
+        )
+
         # Build address block — include city and short address code whenever available.
         # ── Address ──────────────────────────────────────────────────────────────
         # Saudi customers typically supply a national short address code (TAPA7401)
