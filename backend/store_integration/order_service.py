@@ -191,6 +191,19 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
                             tenant_id, _options_keys,
                         )
                         raise ValueError("required_product_options_missing") from exc
+                    # ── Mobile format rejection ───────────────────────────────
+                    _mobile_keys = [
+                        k for k in _fields.keys()
+                        if "mobile" in str(k).lower() or "phone" in str(k).lower()
+                        or "جوال" in str(k) or "هاتف" in str(k)
+                    ]
+                    if _mobile_keys:
+                        logger.error(
+                            "[OrderService] tenant=%s Salla 422 → customer.mobile rejected | "
+                            "fields=%s — re-raising as invalid_customer_phone",
+                            tenant_id, _mobile_keys,
+                        )
+                        raise ValueError("invalid_customer_phone") from exc
         else:
             logger.error(
                 "[OrderService] tenant=%s create_draft_order FAILED | error=%s",

@@ -188,11 +188,17 @@ def validate_salla_order_payload(body: Dict[str, Any]) -> List[str]:
             missing.append("product_id")
 
     # ── Customer ─────────────────────────────────────────────────────────────
+    import re as _re
     customer = body.get("customer") or {}
     if not (customer.get("first_name") or "").strip():
         missing.append("customer_first_name")
-    if not (customer.get("mobile") or "").strip():
+    _mobile = (customer.get("mobile") or "").strip()
+    if not _mobile:
         missing.append("customer_phone")
+    elif not _re.fullmatch(r"05\d{8}", _mobile):
+        # Mobile is present but Salla will reject it — surface as invalid so
+        # the conversation layer asks the customer to re-send the number.
+        missing.append("customer_phone_format")
 
     # ── Payment ──────────────────────────────────────────────────────────────
     pay = body.get("payment") or {}
@@ -2507,31 +2513,40 @@ class SallaAdapter(BaseStoreAdapter):
 
     @staticmethod
     def _normalize_mobile(phone: str) -> str:
-        """Normalise to E.164 (+966XXXXXXXXX) — Salla Admin API v2 requires this format.
+        """Normalise a Saudi mobile number to the format Salla Create-Order expects.
 
-        Salla's 422 response confirms:
-          "رقم الهاتف يجب ان يبدأ بـ + متبوعا برقم الدولة"
-          (Phone number must start with + followed by country code)
+        Salla POST /orders requires the **local Saudi format**: 05XXXXXXXX
+        (10 digits, starts with 05, no country code, no +).
 
-        WhatsApp gives us either +966XXXXXXXXX, 966XXXXXXXXX, or 0XXXXXXXXX.
-        All three must be normalised to +966XXXXXXXXX.
+        WhatsApp delivers numbers in E.164/international form; we convert them:
+          +966542980511  →  0542980511
+           966542980511  →  0542980511
+             542980511   →  0542980511   (9-digit local without leading zero)
+            0542980511   →  0542980511   (already correct)
 
-        Examples:
-          +966555906901  →  +966555906901  (already correct)
-           966555906901  →  +966555906901
-           0555906901    →  +966555906901  (Saudi local → E.164)
+        This normalisation is applied ONLY to the Salla payload and never
+        mutates the internal phone stored in the conversation / DB (which stays
+        in E.164 / WhatsApp canonical form).
         """
-        raw = (phone or "").strip().replace(" ", "").replace("-", "")
-        if raw.startswith("+"):
-            return raw                          # already E.164
-        if raw.startswith("966") and len(raw) >= 12:
-            return f"+{raw}"                   # 966XXXXXXXXX → +966XXXXXXXXX
-        if raw.startswith("0") and len(raw) == 10:
-            return f"+966{raw[1:]}"            # 0XXXXXXXXX  → +966XXXXXXXXX
-        # Fallback: prepend + if it looks like digits
-        if raw.isdigit():
-            return f"+{raw}"
-        return raw
+        if not phone:
+            return ""
+        p = str(phone).strip()
+        # Remove formatting characters
+        p = p.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        # Strip leading +
+        if p.startswith("+"):
+            p = p[1:]
+        # Strip 00966 prefix
+        if p.startswith("00966"):
+            p = p[5:]
+        # Strip 966 country code
+        elif p.startswith("966"):
+            p = p[3:]
+        # Now p should be 5XXXXXXXX (9 digits) or 05XXXXXXXX (10 digits)
+        # Add leading zero if needed (5XXXXXXXX → 05XXXXXXXX)
+        if p.startswith("5") and len(p) == 9:
+            p = "0" + p
+        return p
 
     def _build_order_body(
         self,
@@ -2609,12 +2624,29 @@ class SallaAdapter(BaseStoreAdapter):
                 )
             products.append(entry)
 
-        # ── Phone — Salla requires E.164 (+966XXXXXXXXX) ────────────────────────
-        mobile = self._normalize_mobile(order_input.customer_phone)
-        logger.info(
-            "[SallaAdapter] phone normalization | raw=%r normalized=%r tenant=%s",
-            order_input.customer_phone, mobile, self._tenant_id,
+        # ── Phone — Salla Create-Order requires local format: 05XXXXXXXX ──────────
+        import re as _re
+        raw_mobile  = order_input.customer_phone or ""
+        mobile      = self._normalize_mobile(raw_mobile)
+        # Safe log: show only first 4 chars + last 2 chars of the normalized number
+        _mob_masked = (mobile[:2] + "*" * (len(mobile) - 4) + mobile[-2:]) if len(mobile) >= 4 else "***"
+        logger.error(
+            "[SallaAdapter] MOBILE NORMALIZED FOR SALLA | tenant=%s "
+            "raw_prefix=%s normalized_masked=%s valid_format=%s",
+            self._tenant_id,
+            str(raw_mobile)[:4] if raw_mobile else None,
+            _mob_masked,
+            bool(_re.fullmatch(r"05\d{8}", mobile)),
         )
+        # Format guard: if the result is not 05XXXXXXXX, surface it as missing
+        # so the conversation layer asks the customer to re-send their number
+        # rather than hitting Salla's 422.
+        if mobile and not _re.fullmatch(r"05\d{8}", mobile):
+            logger.error(
+                "[SallaAdapter] customer.mobile rejected pre-POST — "
+                "does not match 05\\d{8} | tenant=%s raw=%r normalized=%r",
+                self._tenant_id, raw_mobile, mobile,
+            )
 
         # ── Customer name ────────────────────────────────────────────────────────
         _first = (order_input.customer_first_name or "").strip()

@@ -786,6 +786,33 @@ class DraftOrderHandler:
                 },
             )
 
+        # ── Salla rejected customer.mobile format ─────────────────────────────
+        # Salla returned 422 with a mobile-format error even though the field
+        # was present. Ask the customer to re-send their number in 05XXXXXXXX.
+        if "invalid_customer_phone" in error_msg.lower():
+            logger.error(
+                "[ORDER FLOW] customer.mobile rejected by Salla | tenant=%s product=%s",
+                ctx.tenant_id, external_id,
+            )
+            prep.missing_fields = ["customer_phone"]
+            prep.customer_phone = ""  # clear the invalid number so it is re-collected
+            return ActionResult(
+                success=True,
+                data={
+                    "product":          product_info,
+                    "needs_collection": True,
+                    "missing_fields":   ["customer_phone"],
+                    "is_first_ask":     False,
+                    "question": (
+                        "رقم الجوال غير مقبول لدى سلة. "
+                        "أرسله بصيغة 05XXXXXXXX (مثال: 0542980511)."
+                    ),
+                    "external_create_failed":   True,
+                    "external_failure_reason":  "invalid_customer_phone",
+                    "order_prep": prep.to_dict(),
+                },
+            )
+
         # ── Salla payload validation failed BEFORE POST ───────────────────────
         # The adapter pre-flight (validate_salla_order_payload) found that one
         # or more fields Salla truly requires were missing.  We turn those
