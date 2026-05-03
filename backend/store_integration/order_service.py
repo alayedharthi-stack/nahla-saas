@@ -111,6 +111,14 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
         bool(getattr(adapter, "api_key", "")),
         bool(getattr(adapter, "_refresh_token", "")),
     )
+    # Pre-import the auth exception so we can branch on it cleanly below.
+    try:
+        from store_adapters.salla_adapter import (  # noqa: PLC0415
+            SallaTokenRevokedException as _SallaAuthExc,
+        )
+    except Exception:
+        _SallaAuthExc = None  # type: ignore
+
     try:
         order = await adapter.create_draft_order(order_input)
         logger.info(
@@ -140,6 +148,18 @@ async def create_draft_order(tenant_id: int, order_input: OrderInput) -> Optiona
             )
         raise
     except Exception as exc:
+        # ── Salla auth failure: 401, no refresh_token, or refresh failed ─────
+        # Do NOT save a fake order. Propagate so the brain can tell the
+        # customer the merchant must reconnect Salla.
+        if _SallaAuthExc and isinstance(exc, _SallaAuthExc):
+            logger.error(
+                "[ORDER FLOW] external_create_failed | reason=salla_auth_failed "
+                "tenant=%s integration_id=%s err=%s",
+                tenant_id,
+                getattr(adapter, "_integration_id", None),
+                exc,
+            )
+            raise   # propagate untouched — brain treats it as auth failure
         # Surface Salla's HTTP status + full response body to make Railway logs actionable
         if _httpx and isinstance(exc, _httpx.HTTPStatusError):
             _status = exc.response.status_code

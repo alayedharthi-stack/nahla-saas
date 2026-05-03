@@ -762,6 +762,30 @@ class DraftOrderHandler:
             previous_failed,
         )
 
+        # ── Salla AUTH failure (401, no refresh, expired token) ───────────────
+        # The adapter raised SallaTokenRevokedException with a "salla_auth_failed:"
+        # prefix. Do NOT fake a success: tell the customer the merchant must
+        # reconnect and stop the order flow.
+        if "salla_auth_failed" in error_msg.lower() or "salla token" in error_msg.lower():
+            logger.error(
+                "[ORDER FLOW] external_create_failed | reason=salla_auth_failed "
+                "tenant=%s product=%s err=%s",
+                ctx.tenant_id, external_id, error_msg,
+            )
+            return ActionResult(
+                success=True,   # success=True so we still send a customer reply
+                data={
+                    "external_create_failed":   True,
+                    "external_failure_reason":  "salla_auth_failed",
+                    "product":                  product_info,
+                    "order_prep":               prep.to_dict(),
+                    "customer_message":         (
+                        "تعذر إنشاء الطلب الآن بسبب مشكلة ربط المتجر. "
+                        "بنراجعها ونرجع لك."
+                    ),
+                },
+            )
+
         # ── Salla payload validation failed BEFORE POST ───────────────────────
         # The adapter pre-flight (validate_salla_order_payload) found that one
         # or more fields Salla truly requires were missing.  We turn those

@@ -251,6 +251,55 @@ class SallaAdapter(BaseStoreAdapter):
             "Content-Type": "application/json",
         }
 
+    def _log_auth_debug_before_post(self) -> None:
+        """Emit a structured one-line diagnostic of the auth state immediately
+        before POST /orders. Token is logged as prefix+length only — never full.
+        """
+        # Pull the latest integration row from the DB so we see authoritative state.
+        cfg: Dict[str, Any] = {}
+        intg_enabled: Optional[bool] = None
+        try:
+            from core.database import get_db as _get_db   # noqa: PLC0415
+            from models import Integration as _Intg       # noqa: PLC0415
+            if self._integration_id:
+                _gen = _get_db()
+                _db = next(_gen)
+                try:
+                    _row = _db.query(_Intg).filter(_Intg.id == self._integration_id).first()
+                    if _row:
+                        cfg = _row.config or {}
+                        intg_enabled = bool(_row.enabled)
+                finally:
+                    try:
+                        next(_gen)
+                    except StopIteration:
+                        pass
+        except Exception:
+            pass
+
+        _ak = self.api_key or ""
+        token_prefix = (_ak[:12] + "...") if _ak else None
+        logger.error(
+            "[SALLA AUTH DEBUG] before POST /orders | tenant=%s integration_id=%s "
+            "enabled=%s is_canonical=%s easy_mode=%s api_sync=%s "
+            "has_access_token=%s has_refresh_token=%s needs_reauth=%s "
+            "token_expires_at=%s last_token_refresh=%s "
+            "token_prefix=%s token_len=%d",
+            self._tenant_id,
+            self._integration_id,
+            intg_enabled,
+            cfg.get("is_canonical"),
+            cfg.get("easy_mode"),
+            cfg.get("api_sync"),
+            bool(_ak),
+            bool(self._refresh_token),
+            cfg.get("needs_reauth"),
+            cfg.get("expires_at") or cfg.get("token_expires_at") or self._expires_at,
+            cfg.get("last_token_refresh"),
+            token_prefix,
+            len(_ak),
+        )
+
     async def _refresh_access_token(self) -> bool:
         """Use refresh_token to get a new access_token from Salla.
 
@@ -751,19 +800,42 @@ class SallaAdapter(BaseStoreAdapter):
                 self._tenant_id,
                 _payload_str,
             )
+            # ── Auth diagnostic: prove which integration + token we're using ─
+            # Helps diagnose 401s by surfacing token shape WITHOUT leaking the
+            # full token (only first 12 chars + length).
+            try:
+                self._log_auth_debug_before_post()
+            except Exception as _adb_exc:
+                logger.warning("[SALLA AUTH DEBUG] log failed: %s", _adb_exc)
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
             logger.info("[Salla API] POST %s → %d | tenant=%s", path, resp.status_code, self._tenant_id)
             if resp.status_code == 401:
-                logger.warning(
-                    "[Salla Token] 401 detected tenant=%s path=%s method=POST response=%s",
-                    self._tenant_id, path, resp.text[:200],
+                logger.error(
+                    "[SALLA AUTH] POST %s returned 401 — auth failure | tenant=%s "
+                    "integration_id=%s has_refresh_token=%s response=%s",
+                    path, self._tenant_id, self._integration_id,
+                    bool(self._refresh_token), resp.text[:300],
                 )
+                # Policy: only retry once. If no refresh_token, mark needs_reauth
+                # immediately and stop — do not POST a duplicate order.
+                if not self._refresh_token:
+                    logger.error(
+                        "[SALLA AUTH] no refresh_token available — marking integration "
+                        "needs_reauth | tenant=%s integration_id=%s",
+                        self._tenant_id, self._integration_id,
+                    )
+                    self._mark_needs_reauth("salla_401_no_refresh_token")
+                    raise SallaTokenRevokedException(
+                        f"salla_auth_failed: 401 with no refresh_token "
+                        f"(tenant={self._tenant_id} integration_id={self._integration_id})"
+                    )
+
                 refreshed = await self._refresh_access_token()
                 if refreshed:
                     logger.info(
-                        "[Salla Token] retry original request tenant=%s path=%s method=POST",
-                        self._tenant_id, path,
+                        "[SALLA AUTH] retry POST %s after token refresh | tenant=%s",
+                        path, self._tenant_id,
                     )
                     resp = await client.post(url, headers=self._headers(), json=body)
                     logger.info(
@@ -772,17 +844,20 @@ class SallaAdapter(BaseStoreAdapter):
                     )
                     if resp.status_code == 401:
                         logger.error(
-                            "[Salla Token] retry still returned 401 tenant=%s path=%s — "
-                            "marking needs_reauth",
-                            self._tenant_id, path,
+                            "[SALLA AUTH] POST %s still 401 after refresh — marking "
+                            "needs_reauth | tenant=%s integration_id=%s",
+                            path, self._tenant_id, self._integration_id,
                         )
-                        self._mark_needs_reauth("retry_still_401")
+                        self._mark_needs_reauth("salla_401_retry_still_unauth")
                         raise SallaTokenRevokedException(
-                            f"Salla still 401 after refresh for tenant={self._tenant_id}"
+                            f"salla_auth_failed: still 401 after refresh "
+                            f"(tenant={self._tenant_id})"
                         )
                 else:
+                    self._mark_needs_reauth("salla_401_refresh_failed")
                     raise SallaTokenRevokedException(
-                        f"Salla token refresh failed for tenant={self._tenant_id} on POST {path}"
+                        f"salla_auth_failed: refresh failed "
+                        f"(tenant={self._tenant_id} on POST {path})"
                     )
             if resp.status_code >= 400:
                 # Emit the FULL response body — DO NOT truncate. Salla's 422
