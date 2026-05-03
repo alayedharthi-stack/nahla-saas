@@ -791,7 +791,11 @@ async def _dispatch_message(
                 # unsubscribe message — inbound and outbound — appears in the
                 # merchant inbox just like normal AI conversations.
                 from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
-                from core.conversation_engine import StateManager              # noqa: PLC0415
+                # StateManager is imported at module level — no local re-import
+                # (a local `from … import StateManager` inside this try-block
+                # causes Python to treat StateManager as a local variable for the
+                # ENTIRE _dispatch_message scope, triggering UnboundLocalError at
+                # the idempotency guard on line ~705 which runs BEFORE this block.)
                 _unsub_convo = None
                 try:
                     _unsub_convo = _get_or_create_conversation(db, resolved_tenant_id, normalized_sender)
