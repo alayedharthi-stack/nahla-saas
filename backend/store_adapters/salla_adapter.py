@@ -1362,6 +1362,34 @@ class SallaAdapter(BaseStoreAdapter):
         # ── Verbose pre-POST log: every field a merchant would want to see ───
         self._log_outgoing_payload("create_draft_order", body, shipping_company_id)
 
+        # ── FULL PAYLOAD LOG (Railway-visible before every POST /orders) ──────
+        # This is the canonical diagnostic: copy the exact JSON and paste it
+        # into Salla's API explorer to reproduce the rejection locally.
+        try:
+            import json as _json
+            _full_payload_str = _json.dumps(body, ensure_ascii=False)
+            logger.error(
+                "[SallaAdapter] FINAL OUTGOING PAYLOAD FULL | action=create_draft_order "
+                "tenant=%s payload=%s",
+                self._tenant_id, _full_payload_str,
+            )
+        except Exception as _fp_exc:
+            logger.warning("[SallaAdapter] FINAL OUTGOING PAYLOAD log failed: %s", _fp_exc)
+
+        # ── Assertion: options must be in products[0] when required ──────────
+        _first_prod = ((body.get("products") or [{}])[0]) or {}
+        _payload_opts = _first_prod.get("options") or []
+        if order_input.items and order_input.items[0].options and not _payload_opts:
+            logger.error(
+                "[SallaAdapter] ASSERTION FAILED: options were in OrderInput but "
+                "NOT in final payload products[0] | tenant=%s product=%s "
+                "input_options=%s payload_product=%s",
+                self._tenant_id,
+                order_input.items[0].product_id,
+                order_input.items[0].options,
+                _first_prod,
+            )
+
         try:
             data = await self._post("/orders", body)
             order = self._normalize_order(data.get("data", data), order_input)
@@ -1495,8 +1523,9 @@ class SallaAdapter(BaseStoreAdapter):
         full failure context (status, response, the payload we sent).
         """
         try:
+            import json as _json
             status = exc.response.status_code
-            text   = (exc.response.text or "")[:1500]
+            text   = (exc.response.text or "")
             try:
                 json_body = exc.response.json()
             except Exception:
@@ -1504,27 +1533,44 @@ class SallaAdapter(BaseStoreAdapter):
             customer = body.get("customer") or {}
             phone = customer.get("mobile") or ""
             phone_masked = f"***{phone[-4:]}" if len(phone) >= 4 else phone
+            _first_prod = ((body.get("products") or [{}])[0]) or {}
             logger.error(
                 "[SallaAdapter] SALLA_RESPONSE_FAIL | action=%s tenant=%s "
-                "status_code=%s response_body=%s "
-                "sent_product=%s sent_payment=%s sent_shipping_company_id=%s "
+                "status_code=%s "
+                "sent_product_id=%s sent_options=%s "
+                "sent_payment=%s sent_shipping_company_id=%s "
                 "sent_city=%r sent_mobile=%s",
-                action, self._tenant_id, status, text,
-                ((body.get("products") or [{}])[0]).get("identifier"),
+                action, self._tenant_id, status,
+                _first_prod.get("identifier") or _first_prod.get("id"),
+                _first_prod.get("options"),
                 (body.get("payment") or {}).get("accepted_methods"),
                 (body.get("shipping") or {}).get("company_id"),
                 (body.get("address") or {}).get("city"),
                 phone_masked,
             )
+            # Log full response body as a separate line for easy copy-paste
+            logger.error(
+                "[SallaAdapter] SALLA_RESPONSE_BODY | action=%s tenant=%s "
+                "status_code=%s body=%s",
+                action, self._tenant_id, status, text,
+            )
             # Surface the structured 422 body if Salla returned one.
             if isinstance(json_body, dict):
                 err = json_body.get("error") or {}
-                if isinstance(err, dict) and err.get("fields"):
-                    logger.error(
-                        "[SallaAdapter] SALLA_422_FIELDS | action=%s tenant=%s "
-                        "rejected_fields=%s",
-                        action, self._tenant_id, err.get("fields"),
-                    )
+                if isinstance(err, dict):
+                    if err.get("fields"):
+                        logger.error(
+                            "[SallaAdapter] SALLA_422_FIELDS | action=%s tenant=%s "
+                            "rejected_fields=%s message=%s",
+                            action, self._tenant_id,
+                            err.get("fields"), err.get("message"),
+                        )
+                    elif err.get("message"):
+                        logger.error(
+                            "[SallaAdapter] SALLA_422_MESSAGE | action=%s tenant=%s "
+                            "message=%s",
+                            action, self._tenant_id, err.get("message"),
+                        )
         except Exception as _exc:
             logger.warning("[SallaAdapter] _log_salla_failure swallowed: %s", _exc)
 
@@ -1587,13 +1633,23 @@ class SallaAdapter(BaseStoreAdapter):
         draft: bool,
         shipping_company_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        # ── Products (Salla Admin API v2 requires identifier + identifier_type) ──
+        # ── Products ─────────────────────────────────────────────────────────────
+        # Send both `id` (what Salla /orders docs show in examples) AND the
+        # `identifier`/`identifier_type` pair (v2 Admin API).  Salla uses
+        # whichever it recognises — sending both is safe and avoids 422s when
+        # the merchant's plan/version only supports one form.
         products = []
         for item in order_input.items:
+            _pid_int: Any
+            try:
+                _pid_int = int(item.product_id)
+            except (TypeError, ValueError):
+                _pid_int = item.product_id
             entry: Dict[str, Any] = {
-                "identifier_type": "id",
-                "identifier": str(int(item.product_id)),
-                "quantity": item.quantity,
+                "id":              _pid_int,          # simple form (newer API)
+                "identifier_type": "id",              # v2 Admin API form
+                "identifier":      str(_pid_int),
+                "quantity":        item.quantity,
             }
             if item.variant_id:
                 try:
