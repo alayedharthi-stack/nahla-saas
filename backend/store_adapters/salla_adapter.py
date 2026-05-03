@@ -1284,6 +1284,14 @@ class SallaAdapter(BaseStoreAdapter):
                 missing=missing,
                 payload_keys=list(body.keys()),
             )
+        # ── Hard guard: delivery_method MUST be present before POST ─────────
+        body["delivery_method"] = body.get("delivery_method") or "shipping"
+        logger.error(
+            "[SallaAdapter] DELIVERY METHOD GUARDED BEFORE POST | action=create_order "
+            "method=%s tenant=%s top_level_keys=%s",
+            body["delivery_method"], self._tenant_id, sorted(list(body.keys())),
+        )
+
         self._log_outgoing_payload("create_order", body, shipping_company_id)
         try:
             data = await self._post("/orders", body)
@@ -1375,6 +1383,14 @@ class SallaAdapter(BaseStoreAdapter):
             )
         except Exception as _fp_exc:
             logger.warning("[SallaAdapter] FINAL OUTGOING PAYLOAD log failed: %s", _fp_exc)
+
+        # ── Hard guard: delivery_method MUST be present before POST ─────────
+        body["delivery_method"] = body.get("delivery_method") or "shipping"
+        logger.error(
+            "[SallaAdapter] DELIVERY METHOD GUARDED BEFORE POST | action=create_draft_order "
+            "method=%s tenant=%s top_level_keys=%s",
+            body["delivery_method"], self._tenant_id, sorted(list(body.keys())),
+        )
 
         # ── Assertion: options must be in products[0] when required ──────────
         _first_prod = ((body.get("products") or [{}])[0]) or {}
@@ -1845,6 +1861,18 @@ class SallaAdapter(BaseStoreAdapter):
             mobile,
             bool(street_val),
         )
+
+        # ── Final-body diagnostic — fires on every call so we catch any gap ──
+        logger.error(
+            "[SallaAdapter] FINAL BODY KEYS BEFORE RETURN | keys=%s tenant=%s "
+            "delivery_method=%s",
+            sorted(list(body.keys())), self._tenant_id,
+            body.get("delivery_method"),
+        )
+        assert "delivery_method" in body, (
+            f"[SallaAdapter] delivery_method MISSING before return — tenant={self._tenant_id}"
+        )
+
         return body
 
     async def get_order(self, order_id: str) -> Optional[NormalizedOrder]:
