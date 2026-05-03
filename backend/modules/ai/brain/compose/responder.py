@@ -248,10 +248,12 @@ class DefaultComposer:
                 )
             if data.get("needs_options"):
                 _missing_groups = data.get("missing_option_groups", []) or []
-                # WhatsApp quick-reply buttons for the FIRST pending group.
-                # Buttons are limited to 3 by WhatsApp; if the group has
-                # more values, take the first 3 as buttons (the text body
-                # still shows the full numbered list so nothing is hidden).
+                if not _missing_groups:
+                    logger.warning(
+                        "[RESPONDER GUARD] needs_options=True but missing_groups "
+                        "is empty — suppressing options prompt",
+                    )
+                    return None
                 if _missing_groups:
                     _first = _missing_groups[0] or {}
                     _values = [v for v in (_first.get("values") or []) if (v.get("name") or "").strip()]

@@ -550,16 +550,12 @@ class DraftOrderHandler:
             _final_selection = {
                 k: v.get("value_name") for k, v in (prep.product_options or {}).items()
             }
-            _prev_selection_count = len(getattr(prev_prep, "product_options", None) or {})
-            _newly_completed = (
-                len(prep.product_options or {}) > _prev_selection_count
-                and not _missing_product_options(prep)
-            )
             logger.error(
-                "[ORDER DEBUG] stage=options_complete | product_id=%s "
-                "all_selected=%s newly_completed=%s "
+                "[ORDER STATE] ready_to_create_order | product_id=%s "
+                "selected_options=%s city=%s short_code=%s "
                 "variants_cached=%d | tenant=%s",
-                external_id, _final_selection, _newly_completed,
+                external_id, _final_selection,
+                prep.city, prep.short_address_code,
                 len(prep.product_variants_raw or []),
                 ctx.tenant_id,
             )
@@ -608,15 +604,39 @@ class DraftOrderHandler:
                 prep.shipping_company_id, ctx.tenant_id,
             )
 
-        # ── LOCAL VARIANT RESOLUTION (mandatory for products with variants) ──
-        # Resolve variant_id using cached raw variants BEFORE calling Salla.
-        # If the product has variants but none matches → BLOCK the order but
-        # KEEP the customer's selections intact — never clear product_options.
+        # ── LOCAL VARIANT RESOLUTION ──────────────────────────────────────────
+        # Try to resolve variant_id from cached raw variants.  If local match
+        # succeeds → send variant_id only (no options in payload).  If local
+        # match FAILS → fall through to create_order with options so the
+        # adapter handles variant resolution remotely.  NEVER re-ask the
+        # customer about options that are already filled.
         _resolved_variant_id: Optional[str] = None
-        if prep.product_has_required_options and prep.product_variants_raw:
-            _resolved_variant_id = _resolve_variant_locally(
-                prep, external_id, ctx.tenant_id,
-            )
+        if prep.product_has_required_options:
+            # On-demand fetch if raw variants weren't cached during options load
+            if not prep.product_variants_raw:
+                try:
+                    from store_integration.registry import get_adapter as _get_adapter  # noqa: PLC0415
+                    _adapter = _get_adapter(ctx.tenant_id)
+                    if _adapter and hasattr(_adapter, "get_raw_variants"):
+                        _fetched = await _adapter.get_raw_variants(external_id)
+                        if _fetched:
+                            prep.product_variants_raw = _fetched
+                            logger.info(
+                                "[ORDER VARIANT] on-demand raw variants fetched | "
+                                "product_id=%s count=%d | tenant=%s",
+                                external_id, len(_fetched), ctx.tenant_id,
+                            )
+                except Exception as _od_exc:
+                    logger.debug(
+                        "[ORDER VARIANT] on-demand variant fetch failed | err=%s",
+                        _od_exc,
+                    )
+
+            if prep.product_variants_raw:
+                _resolved_variant_id = _resolve_variant_locally(
+                    prep, external_id, ctx.tenant_id,
+                )
+
             if _resolved_variant_id:
                 logger.error(
                     "[ORDER VARIANT] resolved_locally | product_id=%s "
@@ -626,81 +646,25 @@ class DraftOrderHandler:
                     ctx.tenant_id,
                 )
             else:
-                # Variant not matched — ask customer to re-check, but KEEP
-                # their current selections so we don't loop.
                 logger.error(
-                    "[ORDER VARIANT] no_local_match — asking customer to "
-                    "re-check options (selections preserved) | product_id=%s "
-                    "selected_options=%s variants_count=%d | tenant=%s",
+                    "[ORDER VARIANT] no_local_match — proceeding with remote "
+                    "enrichment (options in payload) | product_id=%s "
+                    "selected_options=%s variants_cached=%d | tenant=%s",
                     external_id,
                     {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
-                    len(prep.product_variants_raw),
+                    len(prep.product_variants_raw or []),
                     ctx.tenant_id,
                 )
-                return ActionResult(
-                    success=True,
-                    data={
-                        "product": product_info,
-                        "needs_options": True,
-                        "missing_option_groups": list(prep.product_options_meta or []),
-                        "selected_options": prep.product_options,
-                        "order_prep": prep.to_dict(),
-                    },
-                )
-        elif prep.product_has_required_options and not prep.product_variants_raw:
-            # Raw variants not cached — fetch them now before giving up.
-            logger.error(
-                "[ORDER DEBUG] variants_raw empty at order-time — "
-                "attempting on-demand fetch | product_id=%s | tenant=%s",
-                external_id, ctx.tenant_id,
-            )
-            try:
-                from store_integration.registry import get_adapter as _get_adapter  # noqa: PLC0415
-                _adapter = _get_adapter(ctx.tenant_id)
-                if _adapter and hasattr(_adapter, "get_raw_variants"):
-                    _fetched = await _adapter.get_raw_variants(external_id)
-                    if _fetched:
-                        prep.product_variants_raw = _fetched
-                        _resolved_variant_id = _resolve_variant_locally(
-                            prep, external_id, ctx.tenant_id,
-                        )
-                        if _resolved_variant_id:
-                            logger.error(
-                                "[ORDER VARIANT] resolved_locally (on-demand fetch) | "
-                                "product_id=%s variant_id=%s | tenant=%s",
-                                external_id, _resolved_variant_id, ctx.tenant_id,
-                            )
-                        else:
-                            logger.error(
-                                "[ORDER VARIANT] no_local_match after on-demand "
-                                "fetch — falling through to remote | product_id=%s "
-                                "| tenant=%s",
-                                external_id, ctx.tenant_id,
-                            )
-            except Exception as _od_exc:
-                logger.debug(
-                    "[ORDER DEBUG] on-demand variant fetch failed | err=%s",
-                    _od_exc,
-                )
 
-        logger.info(
-            "[ORDER FLOW] entering create_order (auto) | tenant=%s "
-            "product=%s external_id=%s name=%r phone=%s city=%r "
-            "short_code=%r has_maps=%s quantity=%d shipping_id=%s "
-            "variant_id=%s previous_failed=%s "
-            "options_pending=[] missing_fields=[] — executing immediately",
-            ctx.tenant_id,
-            product_info.get("title", "?"),
-            external_id,
-            (prep.customer_first_name + " " + prep.customer_last_name).strip(),
-            _resolved_phone[-4:] if _resolved_phone else "????",
-            prep.city,
-            prep.short_address_code,
-            bool(prep.google_maps_url),
-            max(int(prep.quantity or 1), 1),
+        logger.error(
+            "[ORDER CREATE] calling_salla | tenant=%s product_id=%s "
+            "variant_id=%s selected_options=%s city=%s short_code=%s "
+            "shipping_id=%s quantity=%d",
+            ctx.tenant_id, external_id, _resolved_variant_id,
+            {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+            prep.city, prep.short_address_code,
             prep.shipping_company_id,
-            _resolved_variant_id,
-            previous_failed,
+            max(int(prep.quantity or 1), 1),
         )
 
         runtime = CommerceToolRuntime(
