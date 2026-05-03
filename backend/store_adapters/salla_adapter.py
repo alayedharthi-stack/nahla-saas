@@ -1183,6 +1183,28 @@ class SallaAdapter(BaseStoreAdapter):
                 )
                 raise ValueError("required_product_options_missing")
 
+    @staticmethod
+    def _build_variant_options_map(variant: Dict[str, Any]) -> Dict[str, str]:
+        """Build a {str(option_id): str(value_id)} map from a Salla variant object.
+
+        Salla returns two **parallel** arrays on variant objects:
+          - ``related_options``       — list of option-group IDs
+          - ``related_option_values`` — list of option-value IDs (same order)
+
+        We zip them together.  If the lengths differ (corrupt data) we return {}.
+        This is the ONLY canonical source of truth; the old approach of parsing
+        dicts inside ``related_options`` was incorrect for these plain-ID arrays.
+        """
+        options = variant.get("related_options") or []
+        values  = variant.get("related_option_values") or []
+
+        if not isinstance(options, list) or not isinstance(values, list):
+            return {}
+        if len(options) != len(values):
+            return {}
+
+        return {str(opt_id): str(val_id) for opt_id, val_id in zip(options, values)}
+
     async def _resolve_variant_id(
         self,
         product_id: str,
@@ -1259,65 +1281,43 @@ class SallaAdapter(BaseStoreAdapter):
         )
 
         summaries: List[Dict[str, Any]] = []
+        matched_variant_id: Optional[str] = None
+
         for v in variants:
             if not isinstance(v, dict):
                 continue
 
-            # ── Extract option map from variant — try all known key names ────
-            v_opts = (
-                v.get("related_options")
-                or v.get("option_values")
-                or v.get("options")
-                or []
-            )
-            if isinstance(v_opts, dict):
-                # Some API versions return a dict keyed by option_id
-                v_opts = [{"id": k, "value": val} for k, val in v_opts.items()]
-            if not isinstance(v_opts, list):
-                v_opts = []
+            # ── Build options_map from Salla's parallel arrays ────────────────
+            # Salla uses:  related_options=[opt_id, ...]
+            #              related_option_values=[val_id, ...] (same order)
+            options_map = self._build_variant_options_map(v)
 
-            v_map: Dict[str, str] = {}
-            for vo in v_opts:
-                if not isinstance(vo, dict):
-                    continue
-                # option group id — try multiple key names
-                vo_oid = (
-                    vo.get("option_id")
-                    or vo.get("group_id")
-                    or vo.get("id")
-                )
-                # option value id — try multiple key names
-                vo_vid = (
-                    vo.get("value_id")
-                    or vo.get("option_value_id")
-                    or vo.get("selected_value_id")
-                    or vo.get("value")
-                )
-                if isinstance(vo_vid, list):
-                    vo_vid = vo_vid[0] if vo_vid else None
-                if vo_oid is not None and vo_vid is not None:
-                    v_map[str(vo_oid)] = str(vo_vid)
-
-            summary = {"id": v.get("id"), "options_map": v_map}
+            summary = {"id": v.get("id"), "options_map": options_map}
             summaries.append(summary)
 
-            # ── Exact match: every wanted key/value must appear in variant ────
-            if v_map and all(v_map.get(k) == val for k, val in wanted.items()):
-                vid = str(v.get("id") or "")
-                if vid:
+            logger.error(
+                "[ORDER FLOW] variant candidate | id=%s map=%s wanted=%s",
+                v.get("id"), options_map, wanted,
+            )
+
+            # ── Strict exact match ────────────────────────────────────────────
+            if options_map == wanted:
+                matched_variant_id = str(v.get("id") or "")
+                if matched_variant_id:
                     logger.error(
-                        "[ORDER FLOW] variant matched | variant_id=%s product=%s "
-                        "wanted=%s variant_map=%s",
-                        vid, product_id, wanted, v_map,
+                        "[ORDER FLOW] variant matched | variant_id=%s wanted=%s",
+                        matched_variant_id, wanted,
                     )
-                    return vid, True, summaries
+                    break   # found — stop scanning
+
+        if matched_variant_id:
+            return matched_variant_id, True, summaries
 
         # ── No match ──────────────────────────────────────────────────────────
         logger.error(
-            "[ORDER FLOW] variant_match_failed | product=%s wanted=%s "
-            "available_variants=%s",
-            product_id, wanted,
-            [s for s in summaries],
+            "[ORDER FLOW] variant_match_failed — blocking order | "
+            "product=%s wanted=%s available_variants=%s",
+            product_id, wanted, summaries,
         )
         return None, True, summaries
 
@@ -2287,15 +2287,11 @@ class SallaAdapter(BaseStoreAdapter):
                     entry["variant_id"] = int(item.variant_id)
                 except (TypeError, ValueError):
                     entry["variant_id"] = item.variant_id
-                # variant_id is unambiguous — Salla resolves options from it.
-                # Sending options alongside causes ambiguity and 422s.
                 logger.error(
-                    "[ORDER FLOW] variant matched | variant_id=%s product=%s "
-                    "— options omitted from payload",
+                    "[ORDER FLOW] variant matched | variant_id=%s product=%s",
                     item.variant_id, item.product_id,
                 )
-                products.append(entry)
-                continue   # skip options block below
+                # Fall through — also attach options below for Salla compatibility
 
             # Salla expects {"id": option_id, "value": value_id} per option
             # group. We accept either explicit value_id (preferred) or fall
