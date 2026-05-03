@@ -643,16 +643,37 @@ async def _handle_salla_authorize(
         was_disabled = not existing_integration.enabled
         tenant_id = existing_integration.tenant_id
         new_cfg = dict(existing_integration.config or {})
+        _now_utc = datetime.now(timezone.utc)
+        _expires_at: str | None = None
+        if expires_in:
+            try:
+                _expires_at = (_now_utc + timedelta(seconds=int(expires_in))).isoformat()
+            except Exception:
+                pass
+
         new_cfg.update({
             "api_key":         access_token or new_cfg.get("api_key", ""),
             "refresh_token":   refresh_token or new_cfg.get("refresh_token", ""),
             "expires_in":      expires_in,
             "store_id":        salla_store_id,
             "store_name":      store_name,
-            "connected_at":    datetime.now(timezone.utc).isoformat(),
+            "connected_at":    _now_utc.isoformat(),
             "app_type":        app_type_label,
             "api_key_source":  api_key_src_label,
+            # ── Easy Mode token tracking ─────────────────────────────────────
+            "token_source":    api_key_src_label,
+            "easy_mode":       not is_sync_oauth,
+            "token_refresh_attempts": 0,
         })
+        if _expires_at:
+            new_cfg["expires_at"]       = _expires_at
+            new_cfg["token_expires_at"] = _expires_at   # backward compat alias
+        if refresh_token:
+            new_cfg["refresh_token_received_at"] = _now_utc.isoformat()
+        # Clear stale refresh-failure markers — fresh token from Salla supersedes them
+        new_cfg.pop("token_refresh_status",   None)
+        new_cfg.pop("token_refresh_error",    None)
+        new_cfg.pop("token_refresh_failed_at",None)
         if is_sync_oauth:
             # Mirror the markers written by /api/salla/oauth/callback so
             # _score_integration treats this row as the canonical Sync row.
@@ -679,6 +700,12 @@ async def _handle_salla_authorize(
             db, store_id=salla_store_id, tenant_id=tenant_id, new_config=new_cfg,
         )
         db.commit()
+        logger.info(
+            "[SALLA TOKEN] authorize webhook token saved | "
+            "tenant=%s store=%s has_access=%s has_refresh=%s expires_in=%s expires_at=%s",
+            tenant_id, salla_store_id,
+            bool(access_token), bool(refresh_token), expires_in, _expires_at,
+        )
         if was_disabled:
             logger.info(
                 "[Salla Easy] tokens saved (RE-ACTIVATED) | tenant=%s store=%s",
@@ -728,16 +755,34 @@ async def _handle_salla_authorize(
         db.add(new_user)
         db.flush()
 
+        _now_utc2 = datetime.now(timezone.utc)
+        _expires_at2: str | None = None
+        if expires_in:
+            try:
+                _expires_at2 = (_now_utc2 + timedelta(seconds=int(expires_in))).isoformat()
+            except Exception:
+                pass
+
         new_integ_cfg = {
             "api_key":         access_token,
             "refresh_token":   refresh_token,
             "store_id":        salla_store_id,
             "store_name":      store_name,
             "expires_in":      expires_in,
-            "connected_at":    datetime.now(timezone.utc).isoformat(),
+            "connected_at":    _now_utc2.isoformat(),
             "app_type":        app_type_label,
             "api_key_source":  api_key_src_label,
+            # ── Easy Mode token tracking ──────────────────────────────────────
+            "token_source":    api_key_src_label,
+            "easy_mode":       not is_sync_oauth,
+            "enabled":         True,
+            "token_refresh_attempts": 0,
         }
+        if _expires_at2:
+            new_integ_cfg["expires_at"]       = _expires_at2
+            new_integ_cfg["token_expires_at"] = _expires_at2
+        if refresh_token:
+            new_integ_cfg["refresh_token_received_at"] = _now_utc2.isoformat()
         if is_sync_oauth:
             new_integ_cfg["api_sync_enabled"] = True
             new_integ_cfg["api_canonical"]    = True
@@ -751,6 +796,12 @@ async def _handle_salla_authorize(
         )
         db.add(integration)
         db.commit()
+        logger.info(
+            "[SALLA TOKEN] authorize webhook token saved | "
+            "tenant=%s store=%s has_access=%s has_refresh=%s expires_in=%s expires_at=%s (NEW)",
+            tenant_id, salla_store_id,
+            bool(access_token), bool(refresh_token), expires_in, _expires_at2,
+        )
         logger.info(
             "[Salla Easy] tokens saved (NEW tenant + integration) | "
             "tenant=%s email=%s store=%s",

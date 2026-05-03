@@ -23,7 +23,7 @@ _CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
 _SYNC_INTERVAL_SECONDS = 3600  # full store sync every 1 hour
 _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
-_SALLA_TOKEN_REFRESH_SECONDS = 6 * 3600  # Salla token refresh every 6 hours
+_SALLA_TOKEN_REFRESH_SECONDS = 24 * 3600  # Salla token refresh daily (smart conditions)
 _AUTOMATION_POLL_SECONDS = 60  # automation engine poll interval
 _TEMPLATE_SYNC_INTERVAL_SECONDS = 30 * 60  # WhatsApp template auto-sync every 30 min
 _CAMPAIGN_POLL_SECONDS = 30  # check for scheduled/delayed campaigns every 30s
@@ -257,9 +257,15 @@ async def run_webhook_guardian_scheduler() -> None:
 
 
 async def run_salla_token_refresh_scheduler() -> None:
-    """Proactively refresh Salla OAuth tokens and re-enable soft-disabled integrations."""
+    """Proactively refresh Salla OAuth tokens — runs daily.
+
+    Conditions checked per integration (either is enough to trigger refresh):
+      • access_token expires within 5 days (expires_at set)
+      • 10+ days since the last successful refresh (last_token_refresh_at set)
+      • refresh_token exists but expires_at/last_refresh unknown → refresh now
+    """
     await asyncio.sleep(240)
-    logger.info("[Salla Token Refresh] Started — checking every %ss", _SALLA_TOKEN_REFRESH_SECONDS)
+    logger.info("[Salla Token Refresh] Started — checking every %ss (daily)", _SALLA_TOKEN_REFRESH_SECONDS)
     while True:
         try:
             await _refresh_all_salla_tokens()
@@ -477,10 +483,16 @@ async def _refresh_all_wa_tokens() -> None:
 
 
 async def _refresh_all_salla_tokens() -> None:
-    """Proactively refresh Salla OAuth tokens for all integrations that have a refresh_token.
+    """Daily proactive refresh for all Salla integrations with a refresh_token.
 
-    Also re-enables integrations that were soft-disabled by app.uninstalled
-    if they still have valid credentials (api_key present).
+    Refresh is triggered when EITHER condition is met:
+      • access_token expires within 5 days (expires_at known)
+      • 10+ days since last successful refresh (last_token_refresh_at known)
+      • refresh_token exists but expiry/refresh history unknown → refresh now
+
+    On success  : saves new tokens + timestamps, sets token_refresh_status='success'.
+    On failure  : records error + increments attempt counter — NEVER disables integration.
+    invalid_grant: refresh_token revoked by Salla — remove it, keep access_token active.
     """
     import sys as _sys, os as _os  # noqa: PLC0415
     _sys.path.append(_os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..")))
@@ -488,7 +500,7 @@ async def _refresh_all_salla_tokens() -> None:
     from core.database import SessionLocal  # noqa: PLC0415
     from models import Integration  # noqa: PLC0415
 
-    client_id = _os.environ.get("SALLA_CLIENT_ID", "")
+    client_id     = _os.environ.get("SALLA_CLIENT_ID", "")
     client_secret = _os.environ.get("SALLA_CLIENT_SECRET", "")
 
     try:
@@ -497,28 +509,32 @@ async def _refresh_all_salla_tokens() -> None:
         logger.error("[Salla Token Refresh] Cannot open DB: %s", exc)
         return
 
-    refreshed = 0
-    reactivated = 0
-    failed = 0
-    skipped = 0
+    refreshed    = 0
+    reactivated  = 0
+    failed       = 0
+    skipped      = 0
+    due          = 0
+
     try:
         integrations = db.query(Integration).filter(
             Integration.provider == "salla",
         ).all()
 
-        logger.info("[Salla Token Refresh] Found %d Salla integrations to check", len(integrations))
+        logger.info("[Salla Token Refresh] Cycle started — %d Salla integrations to evaluate", len(integrations))
+
+        now = datetime.now(timezone.utc)
 
         for intg in integrations:
-            cfg = dict(intg.config or {})
-            api_key = cfg.get("api_key", "")
+            cfg           = dict(intg.config or {})
+            api_key       = cfg.get("api_key", "")
             refresh_token = cfg.get("refresh_token", "")
+            store_id      = cfg.get("store_id", "?")
 
-            # Skip permanently failed integrations — needs manual re-auth by merchant
+            # Skip permanently failed integrations — needs manual re-auth
             if cfg.get("needs_reauth"):
                 logger.info(
-                    "[Salla Token Refresh] tenant=%s — needs_reauth=True, skipping "
-                    "(waiting for merchant to re-authorize)",
-                    intg.tenant_id,
+                    "[Salla Token Refresh] tenant=%s store=%s — needs_reauth=True, skipping",
+                    intg.tenant_id, store_id,
                 )
                 skipped += 1
                 continue
@@ -527,13 +543,13 @@ async def _refresh_all_salla_tokens() -> None:
             if not intg.enabled and cfg.get("soft_disabled") and api_key:
                 intg.enabled = True
                 cfg.pop("soft_disabled", None)
-                cfg["reactivated_at"] = datetime.now(timezone.utc).isoformat()
+                cfg["reactivated_at"] = now.isoformat()
                 intg.config = cfg
                 db.commit()
                 reactivated += 1
                 logger.info(
                     "[Salla Token Refresh] RE-ACTIVATED soft-disabled integration | tenant=%s store=%s",
-                    intg.tenant_id, cfg.get("store_id", "?"),
+                    intg.tenant_id, store_id,
                 )
                 continue
 
@@ -541,81 +557,290 @@ async def _refresh_all_salla_tokens() -> None:
                 skipped += 1
                 continue
 
-            # Try to refresh the token if we have refresh_token + client credentials
-            if refresh_token and client_id and client_secret:
-                try:
-                    import httpx  # noqa: PLC0415
-                    async with httpx.AsyncClient(timeout=15) as client:
-                        resp = await client.post(
-                            "https://accounts.salla.sa/oauth2/token",
-                            data={
-                                "grant_type": "refresh_token",
-                                "client_id": client_id,
-                                "client_secret": client_secret,
-                                "refresh_token": refresh_token,
-                            },
-                            headers={
-                                "Accept": "application/json",
-                                "Content-Type": "application/x-www-form-urlencoded",
-                            },
-                        )
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            new_access = data.get("access_token", "")
-                            new_refresh = data.get("refresh_token", refresh_token)
-                            if new_access:
-                                cfg["api_key"] = new_access
-                                cfg["refresh_token"] = new_refresh
-                                cfg["last_token_refresh"] = datetime.now(timezone.utc).isoformat()
-                                intg.config = cfg
-                                db.commit()
-                                refreshed += 1
-                                logger.info(
-                                    "[Salla Token Refresh] tenant=%s — refreshed OK",
-                                    intg.tenant_id,
-                                )
-                            else:
-                                skipped += 1
-                        else:
-                            resp_text = resp.text[:300]
-                            if resp.status_code == 400 and "invalid_grant" in resp_text:
-                                # Refresh token revoked by Salla (app under review / reinstalled).
-                                # Keep the integration ENABLED so the existing access_token
-                                # continues to work for API calls.  Only remove the revoked
-                                # refresh_token so we stop retrying and wasting requests.
-                                logger.warning(
-                                    "[Salla Token Refresh] INVALID_GRANT — refresh_token revoked | "
-                                    "tenant=%s store=%s — removing refresh_token, keeping api_key active",
-                                    intg.tenant_id, cfg.get("store_id", "?"),
-                                )
-                                cfg.pop("refresh_token", None)
-                                cfg["no_auto_refresh"]        = True
-                                cfg["no_auto_refresh_reason"] = "invalid_grant"
-                                cfg["no_auto_refresh_at"]     = datetime.now(timezone.utc).isoformat()
-                                # Clear any stale reauth flags so the UI doesn't show a blocker
-                                cfg.pop("needs_reauth", None)
-                                cfg.pop("needs_reauth_at", None)
-                                cfg.pop("needs_reauth_reason", None)
-                                intg.config  = cfg
-                                intg.enabled = True   # keep active with existing access_token
-                                db.commit()
-                                skipped += 1
-                            else:
-                                failed += 1
-                                logger.warning(
-                                    "[Salla Token Refresh] tenant=%s — refresh failed %d: %s",
-                                    intg.tenant_id, resp.status_code, resp_text,
-                                )
-                except Exception as exc:
-                    db.rollback()
-                    failed += 1
-                    logger.warning("[Salla Token Refresh] tenant=%s error: %s", intg.tenant_id, exc)
-            else:
+            if not refresh_token:
                 skipped += 1
+                continue
+
+            if not client_id or not client_secret:
+                logger.warning(
+                    "[Salla Token Refresh] SALLA_CLIENT_ID/SECRET not configured — skipping all",
+                )
+                skipped += 1
+                continue
+
+            # ── Decide whether refresh is due ────────────────────────────────
+            needs_refresh   = False
+            refresh_reason  = ""
+            days_until_exp  = None
+            days_since_last = None
+
+            # Condition 1: token expiry within 5 days
+            _exp_raw = cfg.get("expires_at") or cfg.get("token_expires_at")
+            if _exp_raw:
+                try:
+                    _exp_dt = datetime.fromisoformat(_exp_raw.replace("Z", "+00:00"))
+                    if _exp_dt.tzinfo is None:
+                        _exp_dt = _exp_dt.replace(tzinfo=timezone.utc)
+                    days_until_exp = (_exp_dt - now).total_seconds() / 86400
+                    if days_until_exp < 5:
+                        needs_refresh  = True
+                        refresh_reason = f"expires_in_{days_until_exp:.1f}_days"
+                except Exception:
+                    pass
+
+            # Condition 2: 10+ days since last successful refresh
+            _last_raw = cfg.get("last_token_refresh_at") or cfg.get("last_token_refresh")
+            if _last_raw and not needs_refresh:
+                try:
+                    _last_dt = datetime.fromisoformat(_last_raw.replace("Z", "+00:00"))
+                    if _last_dt.tzinfo is None:
+                        _last_dt = _last_dt.replace(tzinfo=timezone.utc)
+                    days_since_last = (now - _last_dt).total_seconds() / 86400
+                    if days_since_last >= 10:
+                        needs_refresh  = True
+                        refresh_reason = f"last_refresh_{days_since_last:.1f}_days_ago"
+                except Exception:
+                    pass
+
+            # Condition 3: refresh_token present but no history → refresh now
+            if not needs_refresh and _exp_raw is None and _last_raw is None:
+                needs_refresh  = True
+                refresh_reason = "no_expiry_or_refresh_history"
+
+            if not needs_refresh:
+                skipped += 1
+                logger.info(
+                    "[Salla Token Refresh] tenant=%s store=%s — token OK "
+                    "(days_until_exp=%s days_since_last=%s), skipping",
+                    intg.tenant_id, store_id,
+                    f"{days_until_exp:.1f}" if days_until_exp is not None else "unknown",
+                    f"{days_since_last:.1f}" if days_since_last is not None else "unknown",
+                )
+                continue
+
+            due += 1
+            logger.info(
+                "[SALLA TOKEN] refresh due | tenant=%s store=%s reason=%s",
+                intg.tenant_id, store_id, refresh_reason,
+            )
+
+            # ── Acquire two-layer lock before touching OAuth endpoint ─────────
+            from core.salla_token_lock import SallaTokenLock  # noqa: PLC0415
+            _lock = SallaTokenLock(db, intg, caller="scheduler")
+            _lock_acquired = await _lock.acquire()
+            if not _lock_acquired:
+                skipped += 1
+                continue
+
+            # ── Perform refresh ──────────────────────────────────────────────
+            try:
+                import httpx  # noqa: PLC0415
+                async with httpx.AsyncClient(timeout=15) as http:
+                    resp = await http.post(
+                        "https://accounts.salla.sa/oauth2/token",
+                        data={
+                            "grant_type":    "refresh_token",
+                            "client_id":     client_id,
+                            "client_secret": client_secret,
+                            "refresh_token": refresh_token,
+                        },
+                        headers={
+                            "Accept":       "application/json",
+                            "Content-Type": "application/x-www-form-urlencoded",
+                        },
+                    )
+
+                # ── Import alert/metric helpers (local to avoid circular import) ──
+                from core.salla_token_alerts import (  # noqa: PLC0415
+                    should_escalate_to_needs_reauth,
+                    maybe_send_reauth_alert,
+                    log_metric_success,
+                    log_metric_failed,
+                    log_metric_needs_reauth,
+                )
+
+                if resp.status_code == 200:
+                    data       = resp.json()
+                    new_access = data.get("access_token", "")
+                    # Guard: never overwrite refresh_token with null/empty
+                    _raw_rt    = data.get("refresh_token")
+                    new_refresh = _raw_rt if _raw_rt else refresh_token
+                    new_exp_in  = data.get("expires_in")
+
+                    if not new_access:
+                        raise ValueError("Salla returned 200 but access_token is empty")
+
+                    cfg["api_key"]               = new_access
+                    cfg["refresh_token"]         = new_refresh
+                    cfg["last_token_refresh"]    = now.isoformat()  # backward compat
+                    cfg["last_token_refresh_at"] = now.isoformat()
+                    cfg["token_refresh_status"]  = "success"
+                    cfg["token_refresh_attempts"] = 0  # reset streak on success
+                    cfg.pop("token_refresh_error",             None)
+                    cfg.pop("token_refresh_failed_at",         None)
+                    cfg.pop("token_refresh_first_failed_at",   None)
+                    cfg.pop("needs_reauth",                    None)
+                    cfg.pop("needs_reauth_at",                 None)
+                    cfg.pop("needs_reauth_reason",             None)
+                    # Reset alert cooldown so a new failure streak triggers a fresh email
+                    cfg.pop("token_reauth_alert_sent_at",      None)
+
+                    if new_exp_in:
+                        try:
+                            _new_exp_at = (now + timedelta(seconds=int(new_exp_in))).isoformat()
+                            cfg["expires_at"]       = _new_exp_at
+                            cfg["token_expires_at"] = _new_exp_at
+                        except Exception:
+                            pass
+
+                    intg.config = cfg
+                    db.commit()
+                    refreshed += 1
+                    logger.info(
+                        "[SALLA TOKEN] refresh success | tenant=%s store=%s new_expires_in=%s",
+                        intg.tenant_id, store_id, new_exp_in,
+                    )
+                    log_metric_success(intg.tenant_id, store_id)
+
+                else:
+                    resp_text = resp.text[:400]
+                    if resp.status_code == 400 and "invalid_grant" in resp_text:
+                        # Refresh token definitively revoked by Salla.
+                        # Remove it (no point retrying) but keep access_token
+                        # so existing API calls may still work until it expires.
+                        logger.warning(
+                            "[Salla Token Refresh] INVALID_GRANT — refresh_token revoked | "
+                            "tenant=%s store=%s — removing refresh_token, keeping api_key",
+                            intg.tenant_id, store_id,
+                        )
+                        cfg.pop("refresh_token",       None)
+                        cfg["no_auto_refresh"]         = True
+                        cfg["no_auto_refresh_reason"]  = "invalid_grant"
+                        cfg["no_auto_refresh_at"]      = now.isoformat()
+                        cfg["token_refresh_status"]    = "failed"
+                        cfg["token_refresh_error"]     = "invalid_grant"
+                        cfg["token_refresh_failed_at"] = now.isoformat()
+                        cfg["needs_reauth"]            = True
+                        cfg["needs_reauth_reason"]     = "invalid_grant"
+                        cfg["needs_reauth_at"]         = now.isoformat()
+                        intg.config  = cfg
+                        intg.enabled = True
+                        db.commit()
+                        skipped += 1
+                        logger.critical(
+                            "[SALLA TOKEN] refresh failed 3 times; needs reauth | "
+                            "tenant=%s store=%s reason=invalid_grant",
+                            intg.tenant_id, store_id,
+                        )
+                        log_metric_needs_reauth(intg.tenant_id, store_id, "invalid_grant")
+                        await maybe_send_reauth_alert(
+                            tenant_id=intg.tenant_id,
+                            integration_id=intg.id,
+                            cfg=cfg,
+                            now=now,
+                        )
+                        # Persist updated cfg (may have token_reauth_alert_sent_at)
+                        intg.config = cfg
+                        db.commit()
+
+                    else:
+                        # Transient or unknown error — log failure, do NOT disable yet
+                        err_msg      = f"HTTP {resp.status_code}: {resp_text}"
+                        prev_attempts = cfg.get("token_refresh_attempts", 0)
+                        new_attempts  = prev_attempts + 1
+
+                        # Track start of failure streak for grace window
+                        if prev_attempts == 0:
+                            cfg["token_refresh_first_failed_at"] = now.isoformat()
+
+                        cfg["token_refresh_status"]    = "failed"
+                        cfg["token_refresh_error"]     = err_msg
+                        cfg["token_refresh_failed_at"] = now.isoformat()
+                        cfg["token_refresh_attempts"]  = new_attempts
+                        intg.config = cfg
+                        db.commit()
+                        failed += 1
+                        logger.warning(
+                            "[SALLA TOKEN] refresh failed | tenant=%s store=%s "
+                            "error=%s attempts=%s",
+                            intg.tenant_id, store_id, err_msg, new_attempts,
+                        )
+                        log_metric_failed(intg.tenant_id, store_id, new_attempts)
+
+                        # ── Grace-window escalation ──────────────────────────
+                        escalate, reauth_reason = should_escalate_to_needs_reauth(cfg, now)
+                        if escalate and not cfg.get("needs_reauth"):
+                            cfg["needs_reauth"]        = True
+                            cfg["needs_reauth_reason"] = reauth_reason
+                            cfg["needs_reauth_at"]     = now.isoformat()
+                            intg.config = cfg
+                            db.commit()
+                            logger.critical(
+                                "[SALLA TOKEN] refresh failed 3 times; needs reauth | "
+                                "tenant=%s store=%s attempts=%s reason=%s",
+                                intg.tenant_id, store_id, new_attempts, reauth_reason,
+                            )
+                            log_metric_needs_reauth(intg.tenant_id, store_id, reauth_reason)
+                            await maybe_send_reauth_alert(
+                                tenant_id=intg.tenant_id,
+                                integration_id=intg.id,
+                                cfg=cfg,
+                                now=now,
+                            )
+                            # Persist updated cfg (token_reauth_alert_sent_at)
+                            intg.config = cfg
+                            db.commit()
+
+            except Exception as exc:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                # Persist failure state after rollback
+                try:
+                    from core.salla_token_alerts import (  # noqa: PLC0415
+                        should_escalate_to_needs_reauth,
+                        log_metric_failed,
+                        log_metric_needs_reauth,
+                    )
+                    _cfg2 = dict(intg.config or {})
+                    prev2 = _cfg2.get("token_refresh_attempts", 0)
+                    new_attempts2 = prev2 + 1
+                    if prev2 == 0:
+                        _cfg2["token_refresh_first_failed_at"] = now.isoformat()
+                    _cfg2["token_refresh_status"]    = "failed"
+                    _cfg2["token_refresh_error"]     = str(exc)[:400]
+                    _cfg2["token_refresh_failed_at"] = now.isoformat()
+                    _cfg2["token_refresh_attempts"]  = new_attempts2
+                    log_metric_failed(intg.tenant_id, store_id, new_attempts2)
+
+                    escalate2, reason2 = should_escalate_to_needs_reauth(_cfg2, now)
+                    if escalate2 and not _cfg2.get("needs_reauth"):
+                        _cfg2["needs_reauth"]        = True
+                        _cfg2["needs_reauth_reason"] = reason2
+                        _cfg2["needs_reauth_at"]     = now.isoformat()
+                        logger.critical(
+                            "[SALLA TOKEN] refresh failed 3 times; needs reauth | "
+                            "tenant=%s store=%s attempts=%s reason=%s",
+                            intg.tenant_id, store_id, new_attempts2, reason2,
+                        )
+                        log_metric_needs_reauth(intg.tenant_id, store_id, reason2 or "exception")
+                    intg.config = _cfg2
+                    db.commit()
+                except Exception:
+                    pass
+                failed += 1
+                logger.warning(
+                    "[SALLA TOKEN] refresh failed | tenant=%s store=%s error=%s",
+                    intg.tenant_id, store_id, exc,
+                )
+            finally:
+                await _lock.release()
 
         logger.info(
-            "[Salla Token Refresh] Done — refreshed=%d reactivated=%d failed=%d skipped=%d total=%d",
-            refreshed, reactivated, failed, skipped, len(integrations),
+            "[Salla Token Refresh] Cycle complete — due=%d refreshed=%d "
+            "reactivated=%d failed=%d skipped=%d total=%d",
+            due, refreshed, reactivated, failed, skipped, len(integrations),
         )
     finally:
         db.close()

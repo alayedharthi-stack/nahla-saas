@@ -142,6 +142,7 @@ app.add_middleware(
 from routers.health       import router as _health_router        # noqa: E402
 from routers.admin        import router as _admin_router         # noqa: E402
 from routers.admin_debug  import router as _admin_debug_router   # noqa: E402
+from routers.admin_salla_token import router as _admin_salla_token_router  # noqa: E402
 from routers.auth         import router as _auth_router          # noqa: E402
 from routers.settings     import router as _settings_router      # noqa: E402
 from routers.templates    import router as _templates_router     # noqa: E402
@@ -190,6 +191,7 @@ app.include_router(_health_router)
 app.include_router(_debug_public_router)
 app.include_router(_admin_router)
 app.include_router(_admin_debug_router)
+app.include_router(_admin_salla_token_router)
 app.include_router(_auth_router)
 app.include_router(_settings_router)
 app.include_router(_templates_router)
