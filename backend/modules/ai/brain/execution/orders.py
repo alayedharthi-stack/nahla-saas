@@ -347,31 +347,36 @@ class DraftOrderHandler:
                 # Fall through with whatever was captured
 
         # ── Always try to capture option selections from the message first ──────
+        _selected_before_merge = {
+            k: v.get("value_name") for k, v in (prep.product_options or {}).items()
+        }
         _options_captured_early = _merge_message_options(prep, ctx.message)
-        _extracted_from_text = {
-            k: v.get("value_name")
-            for k, v in (prep.product_options or {}).items()
-        } if _options_captured_early else {}
+        _selected_after_merge = {
+            k: v.get("value_name") for k, v in (prep.product_options or {}).items()
+        }
         _still_missing_after_extract = [
             g.get("name") for g in _missing_product_options(prep)
         ]
-        if _options_captured_early:
-            logger.error(
-                "[ORDER OPTIONS] extracted_from_text=%s | tenant=%s product=%s",
-                _extracted_from_text, ctx.tenant_id, external_id,
-            )
+        _all_required = [
+            g.get("name") for g in (prep.product_options_meta or [])
+            if g.get("values")
+        ]
+
         if prep.product_has_required_options:
-            _all_selected = {
-                k: v.get("value_name") for k, v in (prep.product_options or {}).items()
-            }
-            _all_required = [
-                g.get("name") for g in (prep.product_options_meta or [])
-                if g.get("values")
-            ]
             logger.error(
-                "[ORDER OPTIONS] product_id=%s required=%s selected=%s missing=%s | tenant=%s",
-                external_id, _all_required, _all_selected,
-                _still_missing_after_extract, ctx.tenant_id,
+                "[ORDER DEBUG] stage=after_merge_options | product_id=%s "
+                "selected_before=%s selected_after=%s captured=%d "
+                "required=%s missing=%s "
+                "product_options_loaded=%s variants_cached=%d | tenant=%s",
+                external_id,
+                _selected_before_merge,
+                _selected_after_merge,
+                _options_captured_early,
+                _all_required,
+                _still_missing_after_extract,
+                prep.product_options_loaded,
+                len(prep.product_variants_raw or []),
+                ctx.tenant_id,
             )
 
         # Country-aware address rules
@@ -551,8 +556,12 @@ class DraftOrderHandler:
                 and not _missing_product_options(prep)
             )
             logger.error(
-                "[ORDER OPTIONS] product_id=%s all_selected=%s newly_completed=%s | tenant=%s",
-                external_id, _final_selection, _newly_completed, ctx.tenant_id,
+                "[ORDER DEBUG] stage=options_complete | product_id=%s "
+                "all_selected=%s newly_completed=%s "
+                "variants_cached=%d | tenant=%s",
+                external_id, _final_selection, _newly_completed,
+                len(prep.product_variants_raw or []),
+                ctx.tenant_id,
             )
 
         # Log phone resolution — phone is always taken from the WhatsApp conversation,
@@ -601,26 +610,77 @@ class DraftOrderHandler:
 
         # ── LOCAL VARIANT RESOLUTION (mandatory for products with variants) ──
         # Resolve variant_id using cached raw variants BEFORE calling Salla.
-        # If the product has variants but none matches → BLOCK the order.
+        # If the product has variants but none matches → BLOCK the order but
+        # KEEP the customer's selections intact — never clear product_options.
         _resolved_variant_id: Optional[str] = None
         if prep.product_has_required_options and prep.product_variants_raw:
             _resolved_variant_id = _resolve_variant_locally(
                 prep, external_id, ctx.tenant_id,
             )
-            if not _resolved_variant_id:
-                # No variant match — ask the customer to re-select options
-                prep.product_options = {}
-                prep.product_options_loaded = False
-                prep.product_variants_raw = []
+            if _resolved_variant_id:
+                logger.error(
+                    "[ORDER VARIANT] resolved_locally | product_id=%s "
+                    "variant_id=%s selected_options=%s | tenant=%s",
+                    external_id, _resolved_variant_id,
+                    {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+                    ctx.tenant_id,
+                )
+            else:
+                # Variant not matched — ask customer to re-check, but KEEP
+                # their current selections so we don't loop.
+                logger.error(
+                    "[ORDER VARIANT] no_local_match — asking customer to "
+                    "re-check options (selections preserved) | product_id=%s "
+                    "selected_options=%s variants_count=%d | tenant=%s",
+                    external_id,
+                    {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+                    len(prep.product_variants_raw),
+                    ctx.tenant_id,
+                )
                 return ActionResult(
                     success=True,
                     data={
                         "product": product_info,
                         "needs_options": True,
                         "missing_option_groups": list(prep.product_options_meta or []),
-                        "selected_options": {},
+                        "selected_options": prep.product_options,
                         "order_prep": prep.to_dict(),
                     },
+                )
+        elif prep.product_has_required_options and not prep.product_variants_raw:
+            # Raw variants not cached — fetch them now before giving up.
+            logger.error(
+                "[ORDER DEBUG] variants_raw empty at order-time — "
+                "attempting on-demand fetch | product_id=%s | tenant=%s",
+                external_id, ctx.tenant_id,
+            )
+            try:
+                from store_integration.registry import get_adapter as _get_adapter  # noqa: PLC0415
+                _adapter = _get_adapter(ctx.tenant_id)
+                if _adapter and hasattr(_adapter, "get_raw_variants"):
+                    _fetched = await _adapter.get_raw_variants(external_id)
+                    if _fetched:
+                        prep.product_variants_raw = _fetched
+                        _resolved_variant_id = _resolve_variant_locally(
+                            prep, external_id, ctx.tenant_id,
+                        )
+                        if _resolved_variant_id:
+                            logger.error(
+                                "[ORDER VARIANT] resolved_locally (on-demand fetch) | "
+                                "product_id=%s variant_id=%s | tenant=%s",
+                                external_id, _resolved_variant_id, ctx.tenant_id,
+                            )
+                        else:
+                            logger.error(
+                                "[ORDER VARIANT] no_local_match after on-demand "
+                                "fetch — falling through to remote | product_id=%s "
+                                "| tenant=%s",
+                                external_id, ctx.tenant_id,
+                            )
+            except Exception as _od_exc:
+                logger.debug(
+                    "[ORDER DEBUG] on-demand variant fetch failed | err=%s",
+                    _od_exc,
                 )
 
         logger.info(
@@ -1799,7 +1859,22 @@ async def _ensure_product_options_loaded(
     # with `data: null`) and we wrongly flip `product_unsyncable=True`
     # — which produced the "هذا المنتج غير متاح" message after the
     # customer had already given city + short address code.
-    if prep.product_options_loaded:
+    if prep.product_options_loaded and prep.product_options_meta:
+        logger.debug(
+            "[ORDER DEBUG] _ensure_product_options_loaded SKIPPED (already loaded) | "
+            "product=%s selected_options=%s meta_groups=%d variants_cached=%d",
+            external_id,
+            {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+            len(prep.product_options_meta or []),
+            len(prep.product_variants_raw or []),
+        )
+        return
+    if prep.product_options_loaded and not prep.product_options_meta:
+        logger.debug(
+            "[ORDER DEBUG] _ensure_product_options_loaded — loaded but meta empty "
+            "(simple product, no option groups) | product=%s",
+            external_id,
+        )
         return
     if not external_id:
         return
@@ -1929,6 +2004,13 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
     text = (message or "").strip()
     if not text:
         return 0
+    logger.debug(
+        "[ORDER DEBUG] _merge_message_options ENTER | message=%r "
+        "existing_keys=%s meta_groups=%s",
+        text[:80],
+        list((prep.product_options or {}).keys()),
+        [g.get("name") for g in (prep.product_options_meta or [])],
+    )
     text_lower = text.lower()
     text_norm = _norm_ar(text_lower)
     captured = 0
