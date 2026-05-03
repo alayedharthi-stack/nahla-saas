@@ -103,6 +103,10 @@ class OrderPreparationState:
     # re-fetch forever — and a single transient empty Salla response
     # mid-flow falsely flagged the product as unsyncable.
     product_options_loaded: bool = False
+    # Raw variant dicts from Salla (with related_options/related_option_values).
+    # Cached alongside product_options_meta so variant_id can be resolved
+    # locally without an extra API call before order creation.
+    product_variants_raw: List[Dict[str, Any]] = field(default_factory=list)
     # ── Predicted options (Intent-Driven Prediction) ─────────────────────
     # When options are missing and the system can predict them with
     # sufficient confidence, the prediction is stored here INSTEAD of
@@ -142,6 +146,7 @@ class OrderPreparationState:
             "product_has_required_options": self.product_has_required_options,
             "product_unsyncable": self.product_unsyncable,
             "product_options_loaded": self.product_options_loaded,
+            "product_variants_raw": list(self.product_variants_raw or []),
             "predicted_options": dict(self.predicted_options or {}),
             "prediction_source": self.prediction_source,
             "prediction_confidence": self.prediction_confidence,
@@ -184,6 +189,7 @@ class OrderPreparationState:
             product_has_required_options=bool(raw.get("product_has_required_options", False)),
             product_unsyncable=bool(raw.get("product_unsyncable", False)),
             product_options_loaded=bool(raw.get("product_options_loaded", False)),
+            product_variants_raw=list(raw.get("product_variants_raw") or []),
             predicted_options=dict(raw.get("predicted_options") or {}),
             prediction_source=str(raw.get("prediction_source", "") or ""),
             prediction_confidence=float(raw.get("prediction_confidence") or 0.0),

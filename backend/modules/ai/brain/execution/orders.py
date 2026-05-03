@@ -155,6 +155,7 @@ class DraftOrderHandler:
             # was about the OLD product.
             prep.product_options_loaded = False
             prep.product_unsyncable = False
+            prep.product_variants_raw = []
             prep.predicted_options = {}
             prep.prediction_source = ""
             prep.prediction_confidence = 0.0
@@ -598,10 +599,35 @@ class DraftOrderHandler:
                 prep.shipping_company_id, ctx.tenant_id,
             )
 
+        # ── LOCAL VARIANT RESOLUTION (mandatory for products with variants) ──
+        # Resolve variant_id using cached raw variants BEFORE calling Salla.
+        # If the product has variants but none matches → BLOCK the order.
+        _resolved_variant_id: Optional[str] = None
+        if prep.product_has_required_options and prep.product_variants_raw:
+            _resolved_variant_id = _resolve_variant_locally(
+                prep, external_id, ctx.tenant_id,
+            )
+            if not _resolved_variant_id:
+                # No variant match — ask the customer to re-select options
+                prep.product_options = {}
+                prep.product_options_loaded = False
+                prep.product_variants_raw = []
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "needs_options": True,
+                        "missing_option_groups": list(prep.product_options_meta or []),
+                        "selected_options": {},
+                        "order_prep": prep.to_dict(),
+                    },
+                )
+
         logger.info(
             "[ORDER FLOW] entering create_order (auto) | tenant=%s "
             "product=%s external_id=%s name=%r phone=%s city=%r "
-            "short_code=%r has_maps=%s quantity=%d shipping_id=%s previous_failed=%s "
+            "short_code=%r has_maps=%s quantity=%d shipping_id=%s "
+            "variant_id=%s previous_failed=%s "
             "options_pending=[] missing_fields=[] — executing immediately",
             ctx.tenant_id,
             product_info.get("title", "?"),
@@ -613,6 +639,7 @@ class DraftOrderHandler:
             bool(prep.google_maps_url),
             max(int(prep.quantity or 1), 1),
             prep.shipping_company_id,
+            _resolved_variant_id,
             previous_failed,
         )
 
@@ -792,8 +819,9 @@ class DraftOrderHandler:
                 _options_payload = []
 
         # Build args once so Guard B (options re-match retry) can reuse them.
+        # When variant_id is resolved locally, send it instead of options.
         def _build_order_args(opts_payload):
-            return {
+            args = {
                 "product_id": external_id,
                 "quantity": max(int(prep.quantity or 1), 1),
                 "customer_name": _full_name(prep, ctx.profile.get("name", "عميل")),
@@ -814,8 +842,13 @@ class DraftOrderHandler:
                 "payment_method": "online",
                 "notes": _build_order_notes(prep),
                 "shipping_company_id": prep.shipping_company_id,
-                "options": opts_payload,
             }
+            if _resolved_variant_id:
+                args["variant_id"] = _resolved_variant_id
+                # Don't send options — variant_id is the single source of truth
+            else:
+                args["options"] = opts_payload
+            return args
 
         runtime_result = await runtime.execute(
             "create_draft_order", _build_order_args(_options_payload),
@@ -1843,6 +1876,25 @@ async def _ensure_product_options_loaded(
                 external_id,
                 [o.get("name") for o in groups_with_values],
             )
+        # ── Also fetch raw variants for local variant resolution ──────────
+        # Raw variants preserve related_options/related_option_values which
+        # are needed to map selected options → variant_id locally, without
+        # a second Salla call at order-creation time.
+        if prep.product_has_required_options and hasattr(adapter, "get_raw_variants"):
+            try:
+                raw_variants = await adapter.get_raw_variants(external_id)
+                prep.product_variants_raw = raw_variants
+                logger.info(
+                    "[ORDER FLOW] raw variants cached | tenant=%s product_id=%s "
+                    "count=%d",
+                    ctx.tenant_id, external_id, len(raw_variants),
+                )
+            except Exception as _var_exc:
+                logger.debug(
+                    "[ORDER FLOW] raw variants fetch failed (non-blocking) | "
+                    "tenant=%s product=%s err=%s",
+                    ctx.tenant_id, external_id, _var_exc,
+                )
     except Exception as exc:
         logger.warning(
             "[ORDER FLOW] product options fetch failed (non-blocking) | "
@@ -2309,6 +2361,74 @@ async def predict_missing_options(
         "[ORDER OPTIONS PREDICT] no prediction possible | product_id=%s "
         "missing_groups=%s tenant=%s",
         external_id, [g.get("name") for g in missing_groups], ctx.tenant_id,
+    )
+    return None
+
+
+def _resolve_variant_locally(
+    prep: OrderPreparationState,
+    external_id: str,
+    tenant_id: int,
+) -> Optional[str]:
+    """Resolve variant_id locally from cached raw variants.
+
+    Maps the customer's selected options (option_id → value_id) against
+    each cached variant's ``related_options``/``related_option_values``
+    parallel arrays.  Returns the matching variant_id or None.
+
+    This MUST succeed before any order is sent to Salla when the product
+    has variants.  No remote calls are made — purely local lookup.
+    """
+    if not prep.product_variants_raw:
+        return None
+    if not prep.product_options:
+        return None
+
+    wanted: Dict[str, str] = {}
+    for sel in prep.product_options.values():
+        if not isinstance(sel, dict):
+            continue
+        oid = sel.get("option_id")
+        vid = sel.get("value_id")
+        if oid is not None and vid is not None:
+            wanted[str(oid)] = str(vid)
+
+    if not wanted:
+        return None
+
+    for variant in prep.product_variants_raw:
+        if not isinstance(variant, dict):
+            continue
+        options = variant.get("related_options") or []
+        values = variant.get("related_option_values") or []
+        if not isinstance(options, list) or not isinstance(values, list):
+            continue
+        if len(options) != len(values):
+            continue
+        variant_map = {str(o): str(v) for o, v in zip(options, values)}
+
+        logger.debug(
+            "[VARIANT LOCAL] candidate | variant_id=%s map=%s wanted=%s",
+            variant.get("id"), variant_map, wanted,
+        )
+
+        if variant_map == wanted:
+            matched_id = str(variant.get("id"))
+            logger.error(
+                "[VARIANT LOCAL] matched | variant_id=%s product=%s "
+                "wanted=%s tenant=%s",
+                matched_id, external_id, wanted, tenant_id,
+            )
+            return matched_id
+
+    logger.error(
+        "[ORDER BLOCKED] reason=no_variant_match | product=%s "
+        "selected_options=%s wanted=%s available_variants=%d tenant=%s",
+        external_id,
+        {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+        wanted,
+        len(prep.product_variants_raw),
+        tenant_id,
     )
     return None
 
