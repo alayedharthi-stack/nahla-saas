@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import os, sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.brain.execution.orders")
 
@@ -583,48 +583,64 @@ class DraftOrderHandler:
                     },
                 )
             # All options selected but payload empty (stale IDs): reload meta,
-            # re-match selections to fresh IDs, then fall through to create_order —
-            # NO salla_retry, NO extra customer message required.
+            # re-match selections to fresh IDs, validate, then fall through to
+            # create_order — NO salla_retry, NO extra customer message required.
+
+            # ── Retry guard ───────────────────────────────────────────────────────
+            _stale_retry_count = prep.salla_failure_count or 0
+            if _stale_retry_count >= 2:
+                logger.error(
+                    "[ORDER FLOW] retry aborted | reason=stale_id_re_match_limit "
+                    "attempts=%d tenant=%s product=%s — escalating to customer",
+                    _stale_retry_count, ctx.tenant_id, external_id,
+                )
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product": product_info,
+                        "needs_options": True,
+                        "missing_option_groups": list(prep.product_options_meta or []),
+                        "selected_options": prep.product_options,
+                        "order_prep": prep.to_dict(),
+                    },
+                )
+
             logger.warning(
-                "[ORDER FLOW] options selected but payload empty (stale IDs) — "
-                "reloading meta + re-matching | tenant=%s product=%s selected=%s",
-                ctx.tenant_id, external_id,
+                "[ORDER FLOW] re-match triggered | reason=stale_option_ids "
+                "attempt=%d tenant=%s product=%s selected=%s",
+                _stale_retry_count + 1, ctx.tenant_id, external_id,
                 list((prep.product_options or {}).keys()),
             )
             _stale_prev = dict(prep.product_options or {})
             prep.product_options_loaded = False
             prep.product_options_meta = []
             await _ensure_product_options_loaded(prep, ctx, external_id)
-            # Re-match preserved selections against fresh metadata to get valid IDs.
+
+            # Strict re-match: exact → arabic-normalized → reject
             if prep.product_options_meta and _stale_prev:
-                prep.product_options = {}
-                for _sg in prep.product_options_meta:
-                    _sgname = (_sg.get("name") or "").strip()
-                    _sgkey  = _sgname.lower()
-                    _sprev  = _stale_prev.get(_sgkey)
-                    if not _sprev:
-                        continue
-                    _spvname = (_sprev.get("value_name") or "").strip().lower()
-                    for _sv in _sg.get("values") or []:
-                        _svname = (_sv.get("name") or "").strip()
-                        if _svname.lower() == _spvname or _norm_ar(_svname.lower()) == _norm_ar(_spvname):
-                            prep.product_options[_sgkey] = {
-                                "option_id":   _sg.get("id"),
-                                "option_name": _sgname,
-                                "value_id":    _sv.get("id"),
-                                "value_name":  _svname,
-                            }
-                            logger.info(
-                                "[ORDER FLOW] stale-ID re-match → group=%r value=%r id=%s",
-                                _sgname, _svname, _sg.get("id"),
-                            )
-                            break
+                _rematched, _conf_map = _rematch_options(
+                    _stale_prev, prep.product_options_meta, external_id,
+                )
+                for _gk, _conf in _conf_map.items():
+                    _inp = (_stale_prev.get(_gk) or {}).get("value_name", "")
+                    _matched_id = (_rematched.get(_gk) or {}).get("value_id")
+                    logger.info(
+                        "[ORDER FLOW] re-match result | input=%r matched_id=%s "
+                        "confidence=%s group=%r tenant=%s",
+                        _inp, _matched_id, _conf, _gk, ctx.tenant_id,
+                    )
+                prep.product_options = _rematched
+
             # Re-resolve with fresh IDs
             _options_payload = _resolve_options_payload(prep)
-            if not _options_payload:
+            _payload_ok, _payload_errors = _validate_options_payload(_options_payload)
+
+            if not _options_payload or not _payload_ok:
+                prep.salla_failure_count = _stale_retry_count + 1
                 logger.error(
-                    "[ORDER FLOW] still no options payload after stale-ID re-match — "
-                    "escalating | tenant=%s product=%s",
+                    "[ORDER FLOW] re-match failed | reason=no_valid_payload "
+                    "errors=%s attempt=%d tenant=%s product=%s",
+                    _payload_errors, _stale_retry_count + 1,
                     ctx.tenant_id, external_id,
                 )
                 return ActionResult(
@@ -638,16 +654,28 @@ class DraftOrderHandler:
                     },
                 )
             logger.info(
-                "[ORDER FLOW] stale-ID resolved — proceeding to create_order immediately | "
-                "tenant=%s product=%s payload=%s",
+                "[ORDER FLOW] final payload validated | tenant=%s product=%s "
+                "payload=%s",
                 ctx.tenant_id, external_id, _options_payload,
             )
 
+        # ── Validate payload before first Salla call ──────────────────────────
         if _options_payload:
-            logger.info(
-                "[ORDER FLOW] creating order with options | tenant=%s product=%s options=%s",
-                ctx.tenant_id, external_id, _options_payload,
-            )
+            _init_ok, _init_errors = _validate_options_payload(_options_payload)
+            if _init_ok:
+                logger.info(
+                    "[ORDER FLOW] initial payload ready | tenant=%s product=%s "
+                    "options_count=%d options=%s",
+                    ctx.tenant_id, external_id, len(_options_payload), _options_payload,
+                )
+            else:
+                logger.warning(
+                    "[ORDER FLOW] initial payload has invalid IDs | tenant=%s "
+                    "product=%s errors=%s — will attempt stale-ID re-match",
+                    ctx.tenant_id, external_id, _init_errors,
+                )
+                # Force the hard-guard below to trigger the re-match path
+                _options_payload = []
 
         # Build args once so Guard B (options re-match retry) can reuse them.
         def _build_order_args(opts_payload):
@@ -892,73 +920,104 @@ class DraftOrderHandler:
                 prep.salla_failure_count = (prep.salla_failure_count or 0) + 1
                 # Fall through to retry/escalate handling below.
 
-            # Guard B: ALL options are already selected — the rejection was due to
-            # stale IDs, not missing picks. Re-matched IDs are now fresh.
-            # Retry order creation IMMEDIATELY — no extra message from the customer.
+            # Guard B: ALL options are already selected — Salla rejected due to
+            # stale IDs.  Re-matched IDs are now fresh; retry immediately.
             elif not _missing_now and prep.product_options:
-                _retry_payload = _resolve_options_payload(prep)
-                logger.info(
-                    "[ORDER FLOW] all options re-matched — retrying create_order now | "
-                    "tenant=%s product=%s selected=%s retry_payload=%s",
-                    ctx.tenant_id, external_id,
-                    {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
-                    _retry_payload,
-                )
-                if _retry_payload:
-                    logger.info(
-                        "[ORDER FLOW] entering create_order (auto-retry after re-match) | "
-                        "tenant=%s product=%s",
-                        ctx.tenant_id, external_id,
-                    )
-                    try:
-                        _retry_result = await runtime.execute(
-                            "create_draft_order", _build_order_args(_retry_payload),
-                        )
-                        _retry_order = (_retry_result.payload or {}).get("order")
-                        if _retry_order:
-                            _r_id = _retry_order.get("id") or ""
-                            _r_url = (
-                                _retry_order.get("payment_link")
-                                or _retry_order.get("payment_url")
-                                or _retry_order.get("checkout_url")
-                                or ((_retry_order.get("urls") or {}).get("payment"))
-                                or ""
-                            )
-                            logger.info(
-                                "[ORDER FLOW] order created (auto-retry) | order_id=%s tenant=%s",
-                                _r_id, ctx.tenant_id,
-                            )
-                            return ActionResult(
-                                success=True,
-                                data={
-                                    "order_id":    _r_id,
-                                    "reference":   _retry_order.get("reference_id") or _r_id,
-                                    "checkout_url": _r_url,
-                                    "total":       _retry_order.get("total"),
-                                    "currency":    _retry_order.get("currency", "SAR"),
-                                    "product":     product_info,
-                                    "order_prep":  prep.to_dict(),
-                                },
-                            )
-                        logger.error(
-                            "[ORDER FLOW] auto-retry failed — no order returned | "
-                            "tenant=%s err=%s",
-                            ctx.tenant_id, _retry_result.error,
-                        )
-                    except Exception as _retry_exc:
-                        logger.error(
-                            "[ORDER FLOW] auto-retry exception | tenant=%s err=%s",
-                            ctx.tenant_id, _retry_exc,
-                        )
-                else:
+                _gb_attempt = (prep.salla_failure_count or 0)
+
+                # ── Retry guard ───────────────────────────────────────────────
+                if _gb_attempt >= 2:
                     logger.error(
-                        "[ORDER FLOW] re-matched but payload still empty — escalating | "
-                        "tenant=%s selected=%s",
-                        ctx.tenant_id,
-                        list((prep.product_options or {}).keys()),
+                        "[ORDER FLOW] retry aborted | reason=guard_b_limit "
+                        "attempts=%d tenant=%s product=%s — escalating to customer",
+                        _gb_attempt, ctx.tenant_id, external_id,
                     )
-                # Guard B failed — fall through to the escalate path below
-                prep.salla_failure_count = (prep.salla_failure_count or 0) + 1
+                    prep.salla_failure_count = _gb_attempt + 1
+                    # Fall through to escalate path below.
+                else:
+                    logger.warning(
+                        "[ORDER FLOW] re-match triggered | reason=salla_options_rejected "
+                        "attempt=%d tenant=%s product=%s selected=%s",
+                        _gb_attempt + 1, ctx.tenant_id, external_id,
+                        {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+                    )
+                    # Strict re-match with confidence logging
+                    _gb_rematched, _gb_conf = _rematch_options(
+                        prep.product_options, prep.product_options_meta or [], external_id,
+                    )
+                    for _gbk, _gbc in _gb_conf.items():
+                        _gbinp = (prep.product_options.get(_gbk) or {}).get("value_name", "")
+                        _gbmid = (_gb_rematched.get(_gbk) or {}).get("value_id")
+                        logger.info(
+                            "[ORDER FLOW] re-match result | input=%r matched_id=%s "
+                            "confidence=%s group=%r tenant=%s",
+                            _gbinp, _gbmid, _gbc, _gbk, ctx.tenant_id,
+                        )
+                    prep.product_options = _gb_rematched
+                    _retry_payload = _resolve_options_payload(prep)
+                    _rp_ok, _rp_errors = _validate_options_payload(_retry_payload)
+
+                    if _retry_payload and _rp_ok:
+                        logger.info(
+                            "[ORDER FLOW] final payload validated | tenant=%s product=%s "
+                            "payload=%s",
+                            ctx.tenant_id, external_id, _retry_payload,
+                        )
+                        logger.info(
+                            "[ORDER FLOW] entering create_order (auto-retry after re-match) | "
+                            "tenant=%s product=%s attempt=%d",
+                            ctx.tenant_id, external_id, _gb_attempt + 1,
+                        )
+                        try:
+                            _retry_result = await runtime.execute(
+                                "create_draft_order", _build_order_args(_retry_payload),
+                            )
+                            _retry_order = (_retry_result.payload or {}).get("order")
+                            if _retry_order:
+                                _r_id = _retry_order.get("id") or ""
+                                _r_url = (
+                                    _retry_order.get("payment_link")
+                                    or _retry_order.get("payment_url")
+                                    or _retry_order.get("checkout_url")
+                                    or ((_retry_order.get("urls") or {}).get("payment"))
+                                    or ""
+                                )
+                                logger.info(
+                                    "[ORDER FLOW] order created (auto-retry) | "
+                                    "order_id=%s attempt=%d tenant=%s",
+                                    _r_id, _gb_attempt + 1, ctx.tenant_id,
+                                )
+                                return ActionResult(
+                                    success=True,
+                                    data={
+                                        "order_id":    _r_id,
+                                        "reference":   _retry_order.get("reference_id") or _r_id,
+                                        "checkout_url": _r_url,
+                                        "total":       _retry_order.get("total"),
+                                        "currency":    _retry_order.get("currency", "SAR"),
+                                        "product":     product_info,
+                                        "order_prep":  prep.to_dict(),
+                                    },
+                                )
+                            logger.error(
+                                "[ORDER FLOW] auto-retry failed — no order in response | "
+                                "attempt=%d tenant=%s err=%s",
+                                _gb_attempt + 1, ctx.tenant_id, _retry_result.error,
+                            )
+                        except Exception as _retry_exc:
+                            logger.error(
+                                "[ORDER FLOW] auto-retry exception | attempt=%d "
+                                "tenant=%s err=%s",
+                                _gb_attempt + 1, ctx.tenant_id, _retry_exc,
+                            )
+                    else:
+                        logger.error(
+                            "[ORDER FLOW] re-match failed | reason=invalid_payload "
+                            "errors=%s attempt=%d tenant=%s",
+                            _rp_errors, _gb_attempt + 1, ctx.tenant_id,
+                        )
+                    # Guard B failed — fall through to escalate path below
+                    prep.salla_failure_count = _gb_attempt + 1
             else:
                 return ActionResult(
                     success=True,
@@ -1799,4 +1858,104 @@ def _norm_ar(text: str) -> str:
         else:
             out.append(ch)
     return "".join(out)
+
+
+# ── Option ID re-match cache ───────────────────────────────────────────────
+# Keyed by (product_external_id, group_key, value_name_lower) → full entry dict.
+# Survives across turns for the same worker process; cleared on product change
+# (DraftOrderHandler resets prep.product_options on product_changed).
+_OPTION_ID_CACHE: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+
+
+def _rematch_options(
+    prev_options: Dict[str, Any],
+    meta: List[Dict[str, Any]],
+    product_id: str,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Re-match saved option value names against freshly-loaded Salla metadata.
+
+    Returns ``(new_product_options, confidence_map)``.
+
+    Matching is STRICT — three tiers, no fuzzy/substring:
+      1. ``exact``            — case-insensitive match (``v.lower() == saved.lower()``)
+      2. ``arabic_normalized``— after stripping diacritics / unifying alef forms
+      3. ``none``             — no match found → group is NOT included in result
+
+    The caller must treat ``confidence="none"`` groups as unresolved and ask the
+    customer again rather than guessing.
+    """
+    new_opts: Dict[str, Any] = {}
+    confidence: Dict[str, str] = {}
+
+    for group in meta:
+        gname = (group.get("name") or "").strip()
+        gkey  = gname.lower()
+        prev  = prev_options.get(gkey)
+        if not prev:
+            confidence[gkey] = "none"
+            continue
+
+        prev_vname  = (prev.get("value_name") or "").strip()
+        prev_lower  = prev_vname.lower()
+        prev_norm   = _norm_ar(prev_lower)
+
+        # Fast path: check the in-process cache
+        _cache_key = (product_id, gkey, prev_lower)
+        if _cache_key in _OPTION_ID_CACHE:
+            new_opts[gkey] = _OPTION_ID_CACHE[_cache_key]
+            confidence[gkey] = "cached"
+            continue
+
+        best_match: Optional[Dict[str, Any]] = None
+        best_conf  = "none"
+
+        for val in group.get("values") or []:
+            vname   = (val.get("name") or "").strip()
+            v_lower = vname.lower()
+            v_norm  = _norm_ar(v_lower)
+
+            if v_lower == prev_lower:
+                best_match = val
+                best_conf  = "exact"
+                break                           # nothing better than exact
+            if v_norm == prev_norm and best_conf == "none":
+                best_match = val
+                best_conf  = "arabic_normalized"
+                # keep scanning in case an exact match appears later
+
+        if best_match is not None:
+            entry = {
+                "option_id":   group.get("id"),
+                "option_name": gname,
+                "value_id":    best_match.get("id"),
+                "value_name":  best_match.get("name") or prev_vname,
+            }
+            new_opts[gkey]  = entry
+            confidence[gkey] = best_conf
+            _OPTION_ID_CACHE[_cache_key] = entry   # populate cache
+        else:
+            confidence[gkey] = "none"
+
+    return new_opts, confidence
+
+
+def _validate_options_payload(
+    payload: List[Dict[str, Any]],
+) -> Tuple[bool, List[str]]:
+    """Validate that every entry in the options payload has real IDs.
+
+    Returns ``(ok, error_list)``.  ``error_list`` is empty when ``ok=True``.
+    """
+    errors: List[str] = []
+    for entry in payload:
+        if entry.get("option_id") is None:
+            errors.append(
+                f"option_id is None for group={entry.get('option_name')!r}"
+            )
+        if entry.get("value_id") is None:
+            errors.append(
+                f"value_id is None for value={entry.get('value_name')!r} "
+                f"in group={entry.get('option_name')!r}"
+            )
+    return (len(errors) == 0, errors)
 
