@@ -243,34 +243,43 @@ def salla_cleanup_preview(
 def salla_cleanup_execute(
     tenant_id: int = Query(1, description="Tenant whose Salla rows to disable"),
     secret: Optional[str] = Query(None),
+    preview: bool = Query(
+        True,
+        description="True (default) returns a dry-run preview without DB changes. "
+                    "Pass preview=false to actually disable the integrations.",
+    ),
     db: Session = Depends(get_db),
 ):
     """
-    Soft-disable every Salla integration row for `tenant_id` so a fresh
-    Easy Mode install via app.store.authorize creates a clean new row.
+    Disable every Salla integration row for ``tenant_id`` so a fresh Easy
+    Mode reinstall via app.store.authorize creates valid tokens.
 
-    What this does (per-row):
-      • enabled                              = False
-      • config.superseded_by_oauth_reconnect = True
-      • config.disabled_reason               = "manual_cleanup_before_easy_mode_oauth"
-      • config.disabled_at                   = ISO timestamp
-      • Clears all needs_reauth / no_auto_refresh flags
-      • external_store_id is intentionally PRESERVED — the Easy-mode
-        webhook (_handle_salla_authorize) looks up by external_store_id
-        to find the right tenant.  When the merchant reinstalls from
-        Salla App Store, that handler finds this disabled row, scrubs
-        our cleanup markers, overwrites api_key + refresh_token with
-        the fresh ones from Salla, sets app_type='easy', and flips
-        enabled back to True — so the row stays attached to tenant 1
-        but every byte of stale state is replaced.
+    Modes:
+      • ``preview=true``  (default) — returns the snapshot, NO DB changes.
+      • ``preview=false``           — actually disables every row:
+            enabled                       = False
+            config.needs_reauth           = True
+            config.needs_reauth_reason    = "manual_cleanup_for_reinstall"
+            config.cleanup_at             = <ISO timestamp>
+            external_store_id is PRESERVED (Easy-mode webhook keys on it).
 
-    Returns the BEFORE snapshot (what was disabled) so an operator can
-    audit the change.
+    Response shape::
+
+        {
+          "ok": true,
+          "preview": false,
+          "disabled_count": 1,
+          "integrations": [
+            {"id": 3, "enabled_before": true, "enabled_after": false,
+             "needs_reauth": true, "needs_reauth_reason": "manual_cleanup_for_reinstall"}
+          ],
+          "next": "Reinstall Nahla app from Salla to receive fresh tokens with refresh_token."
+        }
     """
     _require_enabled(secret)
-    from models import Integration  # noqa: PLC0415
-    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-    from datetime import datetime, timezone               # noqa: PLC0415
+    from models import Integration                          # noqa: PLC0415
+    from sqlalchemy.orm.attributes import flag_modified     # noqa: PLC0415
+    from datetime import datetime, timezone                 # noqa: PLC0415
 
     rows = (
         db.query(Integration)
@@ -282,72 +291,83 @@ def salla_cleanup_execute(
         .all()
     )
 
-    if not rows:
-        logger.info("[admin-debug] salla cleanup tenant=%s — nothing to do", tenant_id)
-        return {
-            "ok":          True,
-            "tenant_id":   tenant_id,
-            "disabled":    0,
-            "before":      [],
-            "next":        (
-                "No existing Salla integration for this tenant. Install "
-                "the Nahla app from https://s.salla.sa/apps to create one."
+    # ── Build the integrations[] array showing before/after for each row ─────
+    integrations_summary = []
+    for r in rows:
+        cfg_before = r.config or {}
+        integrations_summary.append({
+            "id":                  r.id,
+            "enabled_before":      bool(r.enabled),
+            "enabled_after":       bool(r.enabled) if preview else False,
+            "needs_reauth":        cfg_before.get("needs_reauth") if preview else True,
+            "needs_reauth_reason": (
+                cfg_before.get("needs_reauth_reason") if preview
+                else "manual_cleanup_for_reinstall"
             ),
+            "external_store_id":   r.external_store_id,
+            "had_refresh_token":   bool(cfg_before.get("refresh_token")),
+        })
+
+    # ── Preview mode: return without modifying anything ──────────────────────
+    if preview:
+        logger.info(
+            "[Salla Cleanup] preview only | tenant=%s count=%d",
+            tenant_id, len(rows),
+        )
+        return {
+            "ok":             True,
+            "preview":        True,
+            "tenant_id":      tenant_id,
+            "disabled_count": 0,
+            "integrations":   integrations_summary,
+            "next":           "Run again with preview=false to apply cleanup.",
         }
 
-    before = [_snapshot_salla_integration(r) for r in rows]
-    now    = datetime.now(timezone.utc).isoformat()
-
+    # ── Execute: disable rows + mark needs_reauth ────────────────────────────
+    now_iso = datetime.now(timezone.utc).isoformat()
+    disabled_count = 0
     for r in rows:
         cfg = dict(r.config or {})
-        cfg["superseded_by_oauth_reconnect"] = True
-        cfg["disabled_reason"]               = "manual_cleanup_before_easy_mode_oauth"
-        cfg["disabled_at"]                   = now
-        # Clear all reauth/refresh flags so they don't pollute future state
-        cfg.pop("needs_reauth",           None)
-        cfg.pop("needs_reauth_reason",    None)
-        cfg.pop("needs_reauth_at",        None)
-        cfg.pop("no_auto_refresh",        None)
-        cfg.pop("no_auto_refresh_reason", None)
-        cfg.pop("no_auto_refresh_at",     None)
+        cfg["needs_reauth"]        = True
+        cfg["needs_reauth_reason"] = "manual_cleanup_for_reinstall"
+        cfg["cleanup_at"]          = now_iso
+        # Preserve diagnostic markers in case operators need history
+        cfg["disabled_at"]         = now_iso
+        cfg["disabled_reason"]     = "manual_cleanup_for_reinstall"
 
         r.config  = cfg
         r.enabled = False
-        # external_store_id is intentionally NOT cleared so Easy-mode
-        # reinstall webhook can find this row and reactivate it under
-        # the same tenant_id.
         flag_modified(r, "config")
+        disabled_count += 1
+
+        logger.warning(
+            "[Salla Cleanup] disabled integration | tenant=%s integration_id=%s "
+            "reason=manual_cleanup_for_reinstall",
+            tenant_id, r.id,
+        )
 
     db.commit()
-    logger.warning(
-        "[admin-debug] salla cleanup tenant=%s — disabled %d row(s) ids=%s",
-        tenant_id, len(rows), [r.id for r in rows],
-    )
     audit(
         "admin_debug_salla_cleanup",
-        tenant_id  = tenant_id,
-        disabled   = len(rows),
-        ids        = [r.id for r in rows],
+        tenant_id      = tenant_id,
+        preview        = False,
+        disabled_count = disabled_count,
+        ids            = [r.id for r in rows],
     )
 
     return {
-        "ok":         True,
-        "tenant_id":  tenant_id,
-        "disabled":   len(rows),
-        "before":     before,
-        "next": [
-            "1. Confirm Salla Partner Portal app is in Easy Mode and Application URL = https://app.nahlah.ai/app/salla",
-            "2. Ask the merchant to open https://s.salla.sa/apps in their Salla account",
-            "3. Find the Nahla app, click 'إلغاء التثبيت' if installed, then click 'تثبيت' again",
-            "4. Salla will hit POST /webhook/salla with event=app.store.authorize and fresh access_token + refresh_token",
-            "5. _handle_salla_authorize finds the disabled row by external_store_id, scrubs cleanup markers, overwrites tokens, sets app_type='easy', api_key_source='easy_mode_webhook', enabled=True — and keeps it attached to tenant 1",
-            "6. Verify with GET /admin/salla/integrations?tenant_id=1 — the row should show easy_mode=true, has_refresh_token=true, needs_reauth=false, enabled=true",
-        ],
+        "ok":             True,
+        "preview":        False,
+        "tenant_id":      tenant_id,
+        "disabled_count": disabled_count,
+        "integrations":   integrations_summary,
+        "next": (
+            "Reinstall Nahla app from Salla to receive fresh tokens with "
+            "refresh_token."
+        ),
         "verify": {
             "list_integrations": f"/admin/salla/integrations?tenant_id={tenant_id}",
-            "poller_diag":       f"/admin/salla/orders-poller/diag?tenant_id={tenant_id}",
-            "force_poll":        f"/admin/salla/orders-poller/run-once?tenant_id={tenant_id}&lookback_minutes=1440",
-            "webhook_status":    "/admin/debug/salla/webhook-status",
+            "integration_audit": f"/admin/debug/salla/integration-audit?tenant_id={tenant_id}",
         },
     }
 
