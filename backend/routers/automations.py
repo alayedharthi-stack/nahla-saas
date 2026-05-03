@@ -58,6 +58,7 @@ ORDER_STATUS_LABELS: Dict[str, str] = {
 
 from core.automations_seed import (
     ENGINE_BY_TYPE as _ENGINE_BY_TYPE,
+    ensure_cod_confirmation_schedule as _ensure_cod_confirmation_schedule,
     ensure_engine_for_tenant as _ensure_engine_for_tenant,
     ensure_order_notifications_automation as _ensure_order_notifications_automation,
     seed_automations_if_empty as _seed_automations_if_empty,
@@ -81,6 +82,10 @@ def _sync_automation_catalog_for_tenant(db: Session, tenant_id: int) -> None:
     _seed_automations_if_empty(db, tenant_id)
     _ensure_order_notifications_automation(db, tenant_id)
     _ensure_engine_for_tenant(db, tenant_id)
+    # Upgrade legacy single-step COD config (one reminder at T+6h) to the
+    # canonical 3-step schedule (T+2h / T+6h / T+12h, auto-cancel T+24h).
+    # No-op for tenants who have already customised their delays.
+    _ensure_cod_confirmation_schedule(db, tenant_id)
 
 
 # ── Feature flags (process-level, runtime-readable) ───────────────────────────

@@ -6,13 +6,15 @@ Coverage for the Cash-on-Delivery confirmation flow.
 Architectural contract under test:
 
     1. New COD order      → status = pending_confirmation
-    2. Customer confirms  → status → under_review
-    3. No confirmation
-       within 6 hours     → reminder template emitted via the engine
-    4. Still no answer
-       within 24 hours    → order auto-cancelled (state mutation, not a send)
+    2. Customer confirms  → status → under_review (reminders stop)
+    3. No confirmation:
+         T+2 h            → reminder #1 emitted via the engine
+         T+6 h            → reminder #2 emitted via the engine
+         T+12 h           → reminder #3 (final) emitted via the engine
+    4. Still no answer:
+         T+24 h           → order auto-cancelled (state mutation, not a send)
 
-This file pins the second half (timed reminder + auto-cancel) shipped via
+This file pins the second half (timed reminders + auto-cancel) shipped via
 `scan_cod_confirmations`. The synchronous half (initial template + reply
 classification) is covered by `tests/test_back_in_stock_and_cod.py`.
 
@@ -157,17 +159,31 @@ def test_cod_seed_exists_with_engine_and_default_off() -> None:
 
 
 def test_cod_seed_carries_required_timing_knobs() -> None:
-    """The two settings the sweeper reads — reminder_after_minutes and
-    cancel_after_minutes — must be present in the seed config."""
+    """The COD seed must ship with a 3-stage reminder schedule plus a
+    cancel window that comfortably outlives the last reminder."""
     seed = next(
         s for s in SEED_AUTOMATIONS if s["automation_type"] == "cod_confirmation"
     )
     cfg = seed["config"]
-    assert int(cfg["reminder_after_minutes"]) == 360   # 6h default
-    assert int(cfg["cancel_after_minutes"]) == 1440    # 24h default
-    # Cancel must outlive at least one reminder window. Otherwise the
-    # sweeper would auto-cancel before any customer ever got nudged.
-    assert int(cfg["cancel_after_minutes"]) > int(cfg["reminder_after_minutes"])
+
+    # New canonical shape — three stages at T+2h / T+6h / T+12h.
+    steps = cfg.get("steps") or []
+    delays = [int(s.get("delay_minutes") or 0) for s in steps]
+    assert delays == [120, 360, 720], (
+        f"COD reminder schedule drifted: expected [120, 360, 720], got {delays}"
+    )
+    # Last stage is the "final" notice; everything before it is a regular
+    # reminder. The engine reads message_type to pick the right copy.
+    assert steps[-1]["message_type"] == "final"
+
+    # Auto-cancel must outlive the last reminder by at least a 6-hour
+    # buffer so the customer has time to react to the final nudge.
+    assert int(cfg["cancel_after_minutes"]) == 1440
+    assert int(cfg["cancel_after_minutes"]) > delays[-1] + 60
+
+    # Legacy knob retained for backward-compat with merchants whose
+    # config was customised before the multi-step schedule shipped.
+    assert int(cfg["reminder_after_minutes"]) == 120
 
 
 def test_cod_reminder_template_ships_in_library() -> None:
@@ -190,7 +206,9 @@ def test_cod_reminder_template_ships_in_library() -> None:
 # 2. scan_cod_confirmations — reminder
 # ═════════════════════════════════════════════════════════════════════════════
 
-def test_no_reminder_inside_six_hour_window() -> None:
+def test_no_reminder_before_first_stage() -> None:
+    """The first reminder fires at T+2h. An order seen at T+1h must not
+    trigger any event yet."""
     db, engine = _make_db()
     try:
         tenant = _seed_tenant(db)
@@ -205,13 +223,14 @@ def test_no_reminder_inside_six_hour_window() -> None:
         db.close(); engine.dispose()
 
 
-def test_reminder_emitted_after_six_hours() -> None:
+def test_first_reminder_emitted_at_two_hours() -> None:
+    """At T+2h only step 0 is due; steps 1 and 2 must wait."""
     db, engine = _make_db()
     try:
         tenant = _seed_tenant(db)
         customer = _seed_customer(db, tenant.id)
         _seed_cod_automation(db, tenant.id)
-        order = _seed_cod_order(db, tenant_id=tenant.id, age=timedelta(hours=7))
+        order = _seed_cod_order(db, tenant_id=tenant.id, age=timedelta(hours=3))
 
         emitted = automation_emitters.scan_cod_confirmations(db, tenant.id)
         assert emitted == 1
@@ -223,20 +242,68 @@ def test_reminder_emitted_after_six_hours() -> None:
         assert ev.customer_id == customer.id
         payload = ev.payload or {}
         assert payload["step_idx"] == 0
+        assert payload["message_type"] == "reminder"
         assert payload["order_internal_id"] == order.id
         assert payload["source"] == "automation_emitters.cod_confirmation"
 
-        # Order metadata must record the reminder so the next sweep skips it.
         db.refresh(order)
-        meta = order.extra_metadata or {}
-        progress = meta.get("cod_reminders") or []
-        assert len(progress) == 1
-        assert progress[0]["step_idx"] == 0
+        progress = (order.extra_metadata or {}).get("cod_reminders") or []
+        assert [p["step_idx"] for p in progress] == [0]
     finally:
         db.close(); engine.dispose()
 
 
-def test_reminder_is_idempotent() -> None:
+def test_two_reminders_emitted_after_six_hours() -> None:
+    """At T+7h both step 0 (T+2h) and step 1 (T+6h) are due. Step 2
+    (T+12h) must wait."""
+    db, engine = _make_db()
+    try:
+        tenant = _seed_tenant(db)
+        _seed_customer(db, tenant.id)
+        _seed_cod_automation(db, tenant.id)
+        order = _seed_cod_order(db, tenant_id=tenant.id, age=timedelta(hours=7))
+
+        emitted = automation_emitters.scan_cod_confirmations(db, tenant.id)
+        assert emitted == 2
+
+        evs = db.query(AutomationEvent).order_by(AutomationEvent.id.asc()).all()
+        steps = [(e.payload or {}).get("step_idx") for e in evs]
+        msg_types = [(e.payload or {}).get("message_type") for e in evs]
+        assert steps == [0, 1]
+        assert msg_types == ["reminder", "reminder"]
+
+        db.refresh(order)
+        progress = (order.extra_metadata or {}).get("cod_reminders") or []
+        assert sorted(p["step_idx"] for p in progress) == [0, 1]
+    finally:
+        db.close(); engine.dispose()
+
+
+def test_third_reminder_is_marked_final() -> None:
+    """At T+13h all three steps are due. The last one is the 'final'
+    nudge so the engine can pick the right copy variant."""
+    db, engine = _make_db()
+    try:
+        tenant = _seed_tenant(db)
+        _seed_customer(db, tenant.id)
+        _seed_cod_automation(db, tenant.id)
+        _seed_cod_order(db, tenant_id=tenant.id, age=timedelta(hours=13))
+
+        emitted = automation_emitters.scan_cod_confirmations(db, tenant.id)
+        assert emitted == 3
+
+        evs = db.query(AutomationEvent).order_by(AutomationEvent.id.asc()).all()
+        steps = [(e.payload or {}).get("step_idx") for e in evs]
+        msg_types = [(e.payload or {}).get("message_type") for e in evs]
+        assert steps == [0, 1, 2]
+        assert msg_types == ["reminder", "reminder", "final"]
+    finally:
+        db.close(); engine.dispose()
+
+
+def test_reminders_are_idempotent_across_sweeps() -> None:
+    """Two consecutive sweeps for an order at T+7h must emit only the
+    two due steps once. The second sweep is a no-op."""
     db, engine = _make_db()
     try:
         tenant = _seed_tenant(db)
@@ -246,8 +313,38 @@ def test_reminder_is_idempotent() -> None:
 
         first = automation_emitters.scan_cod_confirmations(db, tenant.id)
         second = automation_emitters.scan_cod_confirmations(db, tenant.id)
-        assert (first, second) == (1, 0)
-        assert db.query(AutomationEvent).count() == 1
+        assert (first, second) == (2, 0)
+        assert db.query(AutomationEvent).count() == 2
+    finally:
+        db.close(); engine.dispose()
+
+
+def test_legacy_single_step_config_still_runs() -> None:
+    """Backward-compat: tenants whose config was seeded BEFORE the
+    multi-step schedule shipped (one stage at T+6h) keep working."""
+    db, engine = _make_db()
+    try:
+        tenant = _seed_tenant(db)
+        _seed_customer(db, tenant.id)
+        a = _seed_cod_automation(db, tenant.id)
+        a.config = {
+            "reminder_after_minutes": 360,
+            "cancel_after_minutes":   1440,
+            "steps": [{"delay_minutes": 360, "message_type": "reminder"}],
+        }
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(a, "config")
+        db.commit()
+
+        _seed_cod_order(db, tenant_id=tenant.id, age=timedelta(hours=7))
+        emitted = automation_emitters.scan_cod_confirmations(db, tenant.id)
+        assert emitted == 1
+
+        ev = db.query(AutomationEvent).first()
+        payload = ev.payload or {}
+        assert payload["step_idx"] == 0
+        # Single-step schedule → that one step IS the final.
+        assert payload["message_type"] == "final"
     finally:
         db.close(); engine.dispose()
 
@@ -441,8 +538,9 @@ def test_cod_sweeper_ignores_online_pending_orders() -> None:
 
 def test_sweepers_remain_independent_when_both_orders_exist() -> None:
     """A tenant that has BOTH a stale COD order and a stale online
-    pending order should see exactly one COD action (reminder/cancel)
-    and one unpaid-online action — never the same order twice."""
+    pending order should see each sweeper act on its own lane only.
+    Crucially, neither sweeper may emit an event tied to the other
+    sweeper's order."""
     db, engine = _make_db()
     try:
         tenant = _seed_tenant(db)
@@ -451,6 +549,7 @@ def test_sweepers_remain_independent_when_both_orders_exist() -> None:
         _seed_unpaid_automation(db, tenant.id)
         _seed_cod_automation(db, tenant.id)
 
+        # COD order at T+7h → due steps 0 (T+2h) and 1 (T+6h) — two emits.
         cod = _seed_cod_order(
             db, tenant_id=tenant.id, age=timedelta(hours=7),
             phone="+966555000222", external_id="O-COD-X",
@@ -463,8 +562,8 @@ def test_sweepers_remain_independent_when_both_orders_exist() -> None:
 
         cod_mut    = automation_emitters.scan_cod_confirmations(db, tenant.id)
         unpaid_mut = automation_emitters.scan_unpaid_orders(db, tenant.id)
-        assert cod_mut == 1
-        assert unpaid_mut == 1
+        assert cod_mut == 2     # two COD reminders due
+        assert unpaid_mut == 1  # one online reminder due
 
         evs = db.query(AutomationEvent).all()
         types = {e.event_type for e in evs}
@@ -472,7 +571,6 @@ def test_sweepers_remain_independent_when_both_orders_exist() -> None:
             AutomationTrigger.ORDER_COD_PENDING.value,
             AutomationTrigger.ORDER_PAYMENT_PENDING.value,
         }
-        # And neither sweeper crossed lanes.
         for e in evs:
             payload = e.payload or {}
             order_id = payload.get("order_internal_id")

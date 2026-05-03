@@ -292,30 +292,49 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             #
             #   T+0      synchronous template (handled outside this
             #            automation, by ai_sales_create_order)
-            #   T+6 h    reminder if order still in `pending_confirmation`
-            #   T+24 h   auto-cancel the order, fire a final notice
+            #   T+2 h    reminder #1 — gentle nudge
+            #   T+6 h    reminder #2 — moderate nudge
+            #   T+12 h   reminder #3 — final nudge before auto-cancel
+            #   T+24 h   auto-cancel the order, log a final notice
             #
             # The sweeper (`automation_emitters.scan_cod_confirmations`)
             # walks `Order.status == pending_confirmation` for tenants
             # with this automation enabled, emits ORDER_COD_PENDING with
-            # `step_idx` for the reminder, and performs the cancel
-            # transition itself (cancel is a state mutation, not a
-            # WhatsApp send, so it doesn't go through the engine).
+            # `step_idx` per stage, and performs the cancel transition
+            # itself (cancel is a state mutation, not a WhatsApp send,
+            # so it doesn't go through the engine).
             #
             # Conflict-free with `unpaid_order_reminder`: that sweeper
             # operates on `_PENDING_PAYMENT_STATUSES` (pending /
             # awaiting_payment / draft / new), which deliberately does
             # NOT include `pending_confirmation`. A COD order never
             # appears in both queues at once.
+            #
+            # Once the customer taps "تأكيد الطلب ✅" the order moves to
+            # `under_review` (Salla's slug for "بانتظار المراجعة") and
+            # falls OUT of this sweeper — no more reminders will fire,
+            # because the customer already confirmed.
             "language":            "ar",
             "template_name":       "cod_confirmation_reminder_ar",
             "template_name_en":    "cod_confirmation_reminder_en",
-            "reminder_after_minutes": 360,    # 6 hours
+            "reminder_after_minutes": 120,    # 2 hours (first reminder)
             "cancel_after_minutes":   1440,   # 24 hours total
             "steps": [
                 {
+                    "delay_minutes": 120,
+                    "message_type":  "reminder",
+                    "template_name":    "cod_confirmation_reminder_ar",
+                    "template_name_en": "cod_confirmation_reminder_en",
+                },
+                {
                     "delay_minutes": 360,
                     "message_type":  "reminder",
+                    "template_name":    "cod_confirmation_reminder_ar",
+                    "template_name_en": "cod_confirmation_reminder_en",
+                },
+                {
+                    "delay_minutes": 720,
+                    "message_type":  "final",
                     "template_name":    "cod_confirmation_reminder_ar",
                     "template_name_en": "cod_confirmation_reminder_en",
                 },
@@ -465,6 +484,66 @@ def ensure_order_notifications_automation(db: Session, tenant_id: int) -> None:
     )
     db.add(auto)
     db.flush()
+
+
+def ensure_cod_confirmation_schedule(db: Session, tenant_id: int) -> int:
+    """
+    Defensive runtime repair: upgrade tenants that were seeded with the
+    legacy single-step `cod_confirmation` config (one reminder at T+6h)
+    to the canonical 3-step schedule (T+2h, T+6h, T+12h, then auto-cancel
+    at T+24h).
+
+    We **only** upgrade when the existing config still looks exactly like
+    the legacy default — i.e. exactly one step at 360 minutes pointing at
+    `cod_confirmation_reminder_*`. This guarantees merchants who have
+    already tuned their delays in the dashboard never see their settings
+    silently rewritten.
+
+    Returns 1 if the row was upgraded, 0 otherwise. Safe to call on every
+    `/automations` GET (idempotent — the second call sees the new shape
+    and does nothing).
+    """
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    auto = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "cod_confirmation",
+        )
+        .first()
+    )
+    if auto is None:
+        return 0
+
+    config: Dict[str, Any] = dict(auto.config or {})
+    steps = list(config.get("steps") or [])
+
+    # Legacy fingerprint: exactly one step at 360 min using the default
+    # reminder template names. Anything else is treated as merchant-edited
+    # and we leave it alone.
+    if len(steps) != 1:
+        return 0
+    legacy_step = steps[0] or {}
+    if int(legacy_step.get("delay_minutes") or 0) != 360:
+        return 0
+    if legacy_step.get("template_name") not in (None, "cod_confirmation_reminder_ar"):
+        return 0
+
+    canonical_spec = next(
+        (s for s in SEED_AUTOMATIONS if s["automation_type"] == "cod_confirmation"),
+        None,
+    )
+    if canonical_spec is None:
+        return 0
+
+    canonical_cfg = dict(canonical_spec["config"])
+    config["steps"]                  = list(canonical_cfg.get("steps") or [])
+    config["reminder_after_minutes"] = canonical_cfg.get("reminder_after_minutes", 120)
+    config["cancel_after_minutes"]   = canonical_cfg.get("cancel_after_minutes",   1440)
+    auto.config = config
+    flag_modified(auto, "config")
+    return 1
 
 
 def ensure_engine_for_tenant(db: Session, tenant_id: int) -> int:

@@ -458,12 +458,48 @@ def scan_cod_confirmations(
         return 0
 
     config: Dict[str, Any] = auto.config or {}
-    reminder_after = int(config.get("reminder_after_minutes") or 360)  # 6 h
-    cancel_after   = int(config.get("cancel_after_minutes") or 1440)   # 24 h
-    if cancel_after <= reminder_after:
-        # Misconfigured — bump cancel out by one reminder window so a
-        # bad config can't cancel orders before any reminder ever fires.
-        cancel_after = reminder_after + max(60, reminder_after)
+
+    # Build the reminder schedule. We support two layouts so existing
+    # tenants whose `config` was seeded by the legacy single-step shape
+    # ({reminder_after_minutes, cancel_after_minutes, steps:[{...}]})
+    # still flow through here without a forced migration:
+    #
+    #   • New shape (preferred):  config.steps = [
+    #         {delay_minutes: 120, ...},   # T+2h
+    #         {delay_minutes: 360, ...},   # T+6h
+    #         {delay_minutes: 720, ...},   # T+12h
+    #     ]
+    #   • Legacy shape:           config.reminder_after_minutes = 360
+    #     (collapsed to a single-step schedule below.)
+    #
+    # `delay_minutes` is measured from the order's `created_at`, NOT
+    # from the previous reminder, so the schedule stays predictable for
+    # the merchant timeline view and reschedule_failed_reminders never
+    # has to chain offsets.
+    raw_steps = config.get("steps") or []
+    schedule: List[int] = []
+    for step in raw_steps:
+        try:
+            d = int(step.get("delay_minutes") or 0)
+        except (TypeError, ValueError):
+            d = 0
+        if d > 0:
+            schedule.append(d)
+    if not schedule:
+        # Legacy fallback — single reminder at the configured offset.
+        schedule = [int(config.get("reminder_after_minutes") or 360)]
+
+    # Sort defensively so `step_idx` always lines up with chronological
+    # order even if a merchant edited the steps out of sequence in the
+    # dashboard.
+    schedule.sort()
+
+    cancel_after = int(config.get("cancel_after_minutes") or 1440)   # 24 h
+    if cancel_after <= schedule[-1]:
+        # Misconfigured — bump cancel out past the last reminder so a
+        # bad config can't cancel orders before the final reminder ever
+        # fires.
+        cancel_after = schedule[-1] + max(60, schedule[-1])
 
     # Defensive is_abandoned=False guard — COD orders are always real store
     # orders (Salla requires a phone + address before confirming COD), but the
@@ -520,44 +556,52 @@ def scan_cod_confirmations(
             mutations += 1
             continue
 
-        # ── Reminder ─────────────────────────────────────────────────
-        if elapsed < timedelta(minutes=reminder_after):
-            continue
-        # We use step_idx=0 so the engine resolves `steps[0]` of the
-        # cod_confirmation seed — the reminder template. Idempotency is
-        # tracked here, not on AutomationExecution, because there is
-        # only ever one reminder per order in this flow and the engine's
-        # standard (event_id, automation_id) idempotency already covers
-        # the engine-side dedup of the emitted event.
-        if 0 in already_sent_steps:
-            continue
+        # ── Reminders ────────────────────────────────────────────────
+        # Walk the schedule and emit every stage whose delay window has
+        # elapsed but hasn't been emitted yet. We track per-step idempotency
+        # in `meta.cod_reminders` (the same shape /reminder-timeline reads),
+        # plus the engine's standard (event_id, automation_id) dedup covers
+        # us if a sweep races itself.
+        customer = None
+        for step_idx, delay_min in enumerate(schedule):
+            if elapsed < timedelta(minutes=delay_min):
+                # Not due yet; later stages won't be due either since the
+                # schedule is monotonically increasing.
+                break
+            if step_idx in already_sent_steps:
+                continue
 
-        customer = _resolve_order_customer(db, tenant_id, order)
-        if customer is None:
-            continue
+            if customer is None:
+                customer = _resolve_order_customer(db, tenant_id, order)
+                if customer is None:
+                    break
 
-        payload: Dict[str, Any] = {
-            "source":                "automation_emitters.cod_confirmation",
-            "order_internal_id":     order.id,
-            "order_id":              order.external_id,
-            "external_order_number": order.external_order_number,
-            "order_number":          order.external_order_number or order.external_id,
-            "step_idx":              0,
-            "message_type":          "reminder",
-        }
-        emit_automation_event(
-            db,
-            tenant_id=tenant_id,
-            event_type=AutomationTrigger.ORDER_COD_PENDING.value,
-            customer_id=customer.id,
-            payload=payload,
-            commit=False,
-        )
-        progress.append({"step_idx": 0, "emitted_at": now.isoformat()})
-        meta["cod_reminders"] = progress
-        order.extra_metadata = meta
-        flag_modified(order, "extra_metadata")
-        mutations += 1
+            # Last step in the schedule is the "final" notice; everything
+            # before it is a regular reminder. The engine uses this to pick
+            # the right copy variant when one is available.
+            is_final = (step_idx == len(schedule) - 1)
+            payload: Dict[str, Any] = {
+                "source":                "automation_emitters.cod_confirmation",
+                "order_internal_id":     order.id,
+                "order_id":              order.external_id,
+                "external_order_number": order.external_order_number,
+                "order_number":          order.external_order_number or order.external_id,
+                "step_idx":              step_idx,
+                "message_type":          "final" if is_final else "reminder",
+            }
+            emit_automation_event(
+                db,
+                tenant_id=tenant_id,
+                event_type=AutomationTrigger.ORDER_COD_PENDING.value,
+                customer_id=customer.id,
+                payload=payload,
+                commit=False,
+            )
+            progress.append({"step_idx": step_idx, "emitted_at": now.isoformat()})
+            meta["cod_reminders"] = progress
+            order.extra_metadata = meta
+            flag_modified(order, "extra_metadata")
+            mutations += 1
 
     if mutations:
         db.commit()
