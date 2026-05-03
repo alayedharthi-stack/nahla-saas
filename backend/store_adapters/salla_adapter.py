@@ -1737,7 +1737,7 @@ class SallaAdapter(BaseStoreAdapter):
                 from core.database import get_db as _get_db  # noqa: PLC0415
                 import contextlib as _cl                      # noqa: PLC0415
                 from models import Integration as _Intg       # noqa: PLC0415
-                with _cl.contextlib.suppress(Exception):
+                with _cl.suppress(Exception):
                     _db_gen = _get_db()
                     _db = next(_db_gen)
                     try:
@@ -1778,6 +1778,7 @@ class SallaAdapter(BaseStoreAdapter):
             raise SallaOrderValidationError(missing=["product_options"]) from _vme
         # ── Shipping resolution ───────────────────────────────────────────────────
         # Priority: order_input → checkout_profile default → /shipping/zones lookup
+        shipping_company_id = order_input.shipping_company_id
         if not shipping_company_id:
             _prof_company = (
                 _CHECKOUT_PROFILE_CACHE.get(self._tenant_id, {})
