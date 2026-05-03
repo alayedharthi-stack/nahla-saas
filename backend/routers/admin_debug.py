@@ -960,3 +960,131 @@ def salla_integration_audit(
         "recommendation":    recommendation,
         "integrations":      enriched,
     }
+
+
+# ── Store Checkout Profile ────────────────────────────────────────────────────
+
+
+@router.post("/salla/sync-checkout-profile")
+async def salla_sync_checkout_profile(
+    tenant_id: int = Query(..., description="Tenant to sync"),
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Fetch shipping companies, zones, delivery methods, and payment methods
+    from Salla and persist the result into ``Integration.config['checkout_profile']``.
+
+    This endpoint populates the ``store_checkout_profile`` so that order
+    creation no longer relies on hardcoded values.
+
+    Returns the full profile as stored.
+    """
+    _require_enabled(secret)
+
+    from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+    from store_adapters.salla_adapter import SallaAdapter                 # noqa: PLC0415
+    from models import Integration as _Integration                        # noqa: PLC0415
+    import sqlalchemy as _sa                                              # noqa: PLC0415
+
+    intg = pick_active_salla_integration(db, tenant_id)
+    if not intg:
+        return {"success": False, "error": "no Salla integration found for this tenant"}
+
+    cfg = intg.config or {}
+    adapter = SallaAdapter(
+        api_key=cfg.get("api_key", ""),
+        store_id=cfg.get("store_id", ""),
+        refresh_token=cfg.get("refresh_token", ""),
+        tenant_id=tenant_id,
+        integration_id=intg.id,
+    )
+
+    try:
+        profile = await adapter.sync_store_checkout_profile()
+    except Exception as exc:
+        logger.error(
+            "[CheckoutProfile] sync failed | tenant=%s err=%s", tenant_id, exc, exc_info=True,
+        )
+        return {"success": False, "error": str(exc)}
+
+    # Persist into Integration.config so it survives process restarts
+    new_config = dict(cfg)
+    new_config["checkout_profile"] = profile
+    db.execute(
+        _sa.update(_Integration)
+        .where(_Integration.id == intg.id)
+        .values(config=new_config),
+    )
+    db.commit()
+
+    logger.error(
+        "[CHECKOUT PROFILE] synced and saved | tenant=%s integration_id=%s "
+        "delivery_methods=%s default_delivery_method=%s default_company=%s",
+        tenant_id, intg.id,
+        profile.get("delivery_methods"),
+        profile.get("default_delivery_method"),
+        profile.get("default_shipping_company_id"),
+    )
+
+    return {
+        "success":        True,
+        "integration_id": intg.id,
+        "profile":        profile,
+    }
+
+
+@router.get("/salla/checkout-profile")
+def salla_get_checkout_profile(
+    tenant_id: int = Query(..., description="Tenant to inspect"),
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Return the last-synced ``store_checkout_profile`` for a tenant.
+
+    Also shows the in-memory cached delivery_method so you can compare what
+    is saved in the DB vs what the current process is using.
+    """
+    _require_enabled(secret)
+
+    from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+    from store_adapters.salla_adapter import (                            # noqa: PLC0415
+        _CHECKOUT_PROFILE_CACHE,
+        _DELIVERY_METHOD_CACHE,
+    )
+
+    intg = pick_active_salla_integration(db, tenant_id)
+    if not intg:
+        return {"success": False, "error": "no Salla integration found for this tenant"}
+
+    cfg = intg.config or {}
+    db_profile = cfg.get("checkout_profile")
+    mem_profile = _CHECKOUT_PROFILE_CACHE.get(tenant_id)
+    mem_dm      = _DELIVERY_METHOD_CACHE.get(tenant_id)
+
+    readiness: dict = {"ok": True, "issues": []}
+    if not db_profile:
+        readiness["ok"] = False
+        readiness["issues"].append("checkout_profile not synced — run POST /salla/sync-checkout-profile")
+    else:
+        if not db_profile.get("delivery_methods"):
+            readiness["ok"] = False
+            readiness["issues"].append("no delivery_methods in profile")
+        if not db_profile.get("shipping_companies"):
+            readiness["issues"].append("no shipping_companies — orders may lack shipping block")
+        if not db_profile.get("default_delivery_method"):
+            readiness["ok"] = False
+            readiness["issues"].append("default_delivery_method is null")
+
+    return {
+        "tenant_id":                  tenant_id,
+        "integration_id":             intg.id,
+        "readiness":                  readiness,
+        "db_profile":                 db_profile,
+        "in_memory_profile":          mem_profile,
+        "in_memory_delivery_method":  mem_dm,
+        "hint": (
+            "Run POST /admin/debug/salla/sync-checkout-profile to refresh the profile."
+            if not db_profile else
+            f"Profile looks healthy. Default delivery_method={db_profile.get('default_delivery_method')}"
+        ),
+    }

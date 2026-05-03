@@ -125,6 +125,9 @@ def _resolve_saudi_region(city: str) -> str:
 # Per-tenant cache: tenant_id → resolved delivery_method slug (e.g. "shipping")
 _DELIVERY_METHOD_CACHE: Dict[int, str] = {}
 
+# Per-tenant cache: tenant_id → full checkout profile dict
+_CHECKOUT_PROFILE_CACHE: Dict[int, Dict[str, Any]] = {}
+
 # Ordered list of slugs to probe when the API doesn't tell us the valid values.
 _DELIVERY_METHOD_FALLBACKS = ["home_delivery", "delivery", "shipping", "pickup"]
 
@@ -1326,33 +1329,93 @@ class SallaAdapter(BaseStoreAdapter):
             order_input.city,
             order_input.short_address_code,
         )
+
+        # ── Warm the checkout profile cache from Integration.config ──────────
+        # The admin sync-checkout-profile endpoint persists the profile to the
+        # DB.  Load it into the in-memory cache here so order creation always
+        # uses store-specific values without a Salla API round-trip.
+        if self._tenant_id not in _CHECKOUT_PROFILE_CACHE and self._integration_id:
+            try:
+                from core.database import get_db as _get_db  # noqa: PLC0415
+                import contextlib as _cl                      # noqa: PLC0415
+                from models import Integration as _Intg       # noqa: PLC0415
+                with _cl.contextlib.suppress(Exception):
+                    _db_gen = _get_db()
+                    _db = next(_db_gen)
+                    try:
+                        _intg = _db.query(_Intg).filter(_Intg.id == self._integration_id).first()
+                        if _intg:
+                            _saved_prof = (_intg.config or {}).get("checkout_profile")
+                            if _saved_prof:
+                                _CHECKOUT_PROFILE_CACHE[self._tenant_id] = _saved_prof
+                                _dm = _saved_prof.get("default_delivery_method")
+                                if _dm:
+                                    _DELIVERY_METHOD_CACHE[self._tenant_id] = _dm
+                                logger.info(
+                                    "[CHECKOUT PROFILE] loaded from DB | tenant=%s "
+                                    "default_dm=%s companies=%d",
+                                    self._tenant_id, _dm,
+                                    len(_saved_prof.get("shipping_companies", [])),
+                                )
+                    finally:
+                        try:
+                            next(_db_gen)
+                        except StopIteration:
+                            pass
+            except Exception as _prof_exc:
+                logger.debug(
+                    "[CHECKOUT PROFILE] DB warm-up skipped | tenant=%s err=%s",
+                    self._tenant_id, _prof_exc,
+                )
+
         await self._assert_required_options_present(order_input)
         await self._enrich_items_with_variant_id(order_input)
         # ── Shipping resolution ───────────────────────────────────────────────────
-        # Auto-resolve the default shipping company if not already cached.
-        # We never ask the customer for shipping; we just pick Salla's first zone.
-        shipping_company_id = order_input.shipping_company_id
+        # Priority: order_input → checkout_profile default → /shipping/zones lookup
         if not shipping_company_id:
-            logger.info(
-                "[ORDER FLOW] resolving shipping method | tenant=%s city=%r",
-                self._tenant_id, order_input.city,
+            _prof_company = (
+                _CHECKOUT_PROFILE_CACHE.get(self._tenant_id, {})
+                .get("default_shipping_company_id")
             )
-            shipping_company_id = await self._get_default_shipping_company_id(order_input.city)
-            if shipping_company_id:
+            if _prof_company:
+                shipping_company_id = int(_prof_company)
                 logger.info(
-                    "[ORDER FLOW] selected default shipping method | company_id=%s tenant=%s",
+                    "[CHECKOUT PROFILE] selected | shipping_company_id=%s tenant=%s "
+                    "(from checkout profile)",
                     shipping_company_id, self._tenant_id,
                 )
             else:
                 logger.info(
-                    "[ORDER FLOW] shipping method unavailable, proceeding without | tenant=%s city=%r",
+                    "[ORDER FLOW] resolving shipping method via zones | tenant=%s city=%r",
                     self._tenant_id, order_input.city,
                 )
+                shipping_company_id = await self._get_default_shipping_company_id(order_input.city)
+                if shipping_company_id:
+                    logger.info(
+                        "[ORDER FLOW] selected default shipping method | company_id=%s tenant=%s",
+                        shipping_company_id, self._tenant_id,
+                    )
+                else:
+                    logger.info(
+                        "[ORDER FLOW] shipping method unavailable, proceeding without | "
+                        "tenant=%s city=%r",
+                        self._tenant_id, order_input.city,
+                    )
         else:
             logger.info(
                 "[ORDER FLOW] using cached shipping method | company_id=%s tenant=%s",
                 shipping_company_id, self._tenant_id,
             )
+
+        _prof = _CHECKOUT_PROFILE_CACHE.get(self._tenant_id) or {}
+        logger.error(
+            "[CHECKOUT PROFILE] selected | delivery_method=%s "
+            "shipping_company_id=%s payment_method=%s tenant=%s",
+            _prof.get("default_delivery_method", "(resolving)"),
+            shipping_company_id,
+            (_prof.get("payment_methods") or ["cod"])[0],
+            self._tenant_id,
+        )
 
         body = self._build_order_body(order_input, draft=True, shipping_company_id=shipping_company_id)
 
@@ -1415,45 +1478,104 @@ class SallaAdapter(BaseStoreAdapter):
                 _first_prod,
             )
 
-        try:
-            data = await self._post("/orders", body)
-            order = self._normalize_order(data.get("data", data), order_input)
+        # ── POST with delivery_method fallback on 422 ─────────────────────────
+        # If Salla rejects the delivery_method value, try remaining slugs from
+        # the checkout profile (max 1 fallback attempt — no infinite loops).
+        _dm_candidates = list(_CHECKOUT_PROFILE_CACHE.get(self._tenant_id, {}).get(
+            "delivery_methods", []
+        )) or list(_DELIVERY_METHOD_FALLBACKS)
 
-            # ── Structured response log ─────────────────────────────────────
-            self._log_salla_response("create_draft_order", 201, data, order)
+        # Ensure the already-resolved method is at the front, de-duplicated.
+        _current_dm = body.get("delivery_method", _dm_candidates[0] if _dm_candidates else "shipping")
+        _dm_queue = [_current_dm] + [m for m in _dm_candidates if m != _current_dm]
 
-            # ── Payment URL fallback ──────────────────────────────────────────────
-            # Salla does not always embed the payment URL in the create response.
-            # If it is missing, make one extra GET /orders/{id} call to fetch it.
-            if not order.payment_link and order.id:
-                logger.info(
-                    "[ORDER FLOW] payment url absent in create response, fetching separately "
-                    "| order_id=%s tenant=%s",
-                    order.id, self._tenant_id,
+        _last_exc: Optional[Exception] = None
+        for _attempt_dm in _dm_queue:
+            body["delivery_method"] = _attempt_dm
+            if _attempt_dm != _current_dm:
+                logger.error(
+                    "[CHECKOUT PROFILE] delivery_method fallback attempt | "
+                    "rejected=%s trying=%s tenant=%s",
+                    _current_dm, _attempt_dm, self._tenant_id,
                 )
-                try:
-                    fetched_url = await self.generate_payment_link(order.id, order.total)
-                    if fetched_url:
-                        order.payment_link = fetched_url
-                        logger.info(
-                            "[ORDER FLOW] payment url fetched via GET /orders | "
-                            "order_id=%s url=%s tenant=%s",
-                            order.id, fetched_url, self._tenant_id,
-                        )
-                except Exception as _fetch_exc:
-                    logger.warning(
-                        "[ORDER FLOW] payment url fetch failed (non-blocking) | "
-                        "order_id=%s err=%s tenant=%s",
-                        order.id, _fetch_exc, self._tenant_id,
+            try:
+                data = await self._post("/orders", body)
+                order = self._normalize_order(data.get("data", data), order_input)
+
+                # Cache the winning value so future orders don't retry
+                if _attempt_dm != _current_dm:
+                    _DELIVERY_METHOD_CACHE[self._tenant_id] = _attempt_dm
+                    # Also update the profile cache
+                    _prof = _CHECKOUT_PROFILE_CACHE.get(self._tenant_id, {})
+                    _prof["default_delivery_method"] = _attempt_dm
+                    _CHECKOUT_PROFILE_CACHE[self._tenant_id] = _prof
+                    logger.error(
+                        "[CHECKOUT PROFILE] delivery_method fallback succeeded | "
+                        "winning=%s tenant=%s — cached for future orders",
+                        _attempt_dm, self._tenant_id,
                     )
 
-            return order
-        except httpx.HTTPStatusError as exc:
-            self._log_salla_failure("create_draft_order", exc, body)
-            raise
-        except Exception as exc:
-            self._log_error("create_draft_order", exc)
-            raise
+                # ── Structured response log ──────────────────────────────────
+                self._log_salla_response("create_draft_order", 201, data, order)
+
+                # ── Payment URL fallback ──────────────────────────────────────
+                if not order.payment_link and order.id:
+                    logger.info(
+                        "[ORDER FLOW] payment url absent in create response, fetching separately "
+                        "| order_id=%s tenant=%s",
+                        order.id, self._tenant_id,
+                    )
+                    try:
+                        fetched_url = await self.generate_payment_link(order.id, order.total)
+                        if fetched_url:
+                            order.payment_link = fetched_url
+                            logger.info(
+                                "[ORDER FLOW] payment url fetched via GET /orders | "
+                                "order_id=%s url=%s tenant=%s",
+                                order.id, fetched_url, self._tenant_id,
+                            )
+                    except Exception as _fetch_exc:
+                        logger.warning(
+                            "[ORDER FLOW] payment url fetch failed (non-blocking) | "
+                            "order_id=%s err=%s tenant=%s",
+                            order.id, _fetch_exc, self._tenant_id,
+                        )
+
+                return order
+
+            except httpx.HTTPStatusError as exc:
+                _resp_body = ""
+                try:
+                    _resp_body = exc.response.text
+                except Exception:
+                    pass
+
+                # Only retry on delivery_method-specific 422
+                _is_dm_error = (
+                    exc.response.status_code == 422
+                    and "delivery_method" in _resp_body
+                )
+                if _is_dm_error and _attempt_dm != _dm_queue[-1]:
+                    logger.error(
+                        "[CHECKOUT PROFILE] delivery_method rejected by Salla | "
+                        "field=delivery_method value=%s tenant=%s — will try next",
+                        _attempt_dm, self._tenant_id,
+                    )
+                    _last_exc = exc
+                    continue   # try the next slug
+                elif _is_dm_error:
+                    logger.error(
+                        "[CHECKOUT PROFILE] ALL delivery_method values rejected | "
+                        "tried=%s tenant=%s — escalating",
+                        _dm_queue, self._tenant_id,
+                    )
+
+                self._log_salla_failure("create_draft_order", exc, body)
+                raise
+
+            except Exception as exc:
+                self._log_error("create_draft_order", exc)
+                raise
 
     # ──────────────────────────────────────────────────────────────────────────
     # Structured request / response logging for the create-order pipeline.
@@ -1624,17 +1746,206 @@ class SallaAdapter(BaseStoreAdapter):
                 )
         return None
 
+    async def sync_store_checkout_profile(self) -> Dict[str, Any]:
+        """Fetch checkout capabilities from Salla and return a profile dict.
+
+        Calls (in order, best-effort — failures are logged and skipped):
+          GET /shipping/companies/   → shipping companies list
+          GET /shipping/zones        → shipping zones list
+          GET /shipping/methods      → delivery method slugs
+          GET /delivery-methods      → alternative delivery slugs endpoint
+
+        Returns a dict with the shape::
+
+            {
+              "delivery_methods":            ["home_delivery", "shipping"],
+              "shipping_companies":          [{"id": 123, "name": "Aramex", "active": True}],
+              "shipping_zones":              [{"id": 456, "name": "Riyadh"}],
+              "payment_methods":             ["cod"],
+              "pickup_branches":             [],
+              "default_delivery_method":     "home_delivery",
+              "default_shipping_company_id": 123,
+              "requires_national_address":   True,
+              "country":                     "SA",
+              "last_synced_at":              "2026-05-03T10:00:00Z",
+            }
+
+        Also populates ``_CHECKOUT_PROFILE_CACHE[tenant_id]`` and
+        ``_DELIVERY_METHOD_CACHE[tenant_id]`` so subsequent order calls reuse
+        the resolved values without hitting Salla again.
+        """
+        from datetime import datetime, timezone as _tz
+        import json as _json
+
+        profile: Dict[str, Any] = {
+            "delivery_methods":            [],
+            "shipping_companies":          [],
+            "shipping_zones":              [],
+            "payment_methods":             ["cod"],   # safe Salla universal default
+            "pickup_branches":             [],
+            "default_delivery_method":     None,
+            "default_shipping_company_id": None,
+            "requires_national_address":   True,
+            "country":                     "SA",
+            "last_synced_at":              datetime.now(_tz.utc).isoformat(),
+        }
+
+        # ── 1. Shipping companies ──────────────────────────────────────────────
+        try:
+            data = await self._get("/shipping/companies/")
+            companies_raw = (data.get("data") or []) if isinstance(data, dict) else []
+            companies = [
+                {
+                    "id":     c.get("id"),
+                    "name":   c.get("name") or c.get("courier_name") or "",
+                    "active": bool(c.get("is_active", True)),
+                    "type":   c.get("type") or c.get("delivery_type") or "shipping",
+                }
+                for c in companies_raw if isinstance(c, dict) and c.get("id")
+            ]
+            profile["shipping_companies"] = companies
+            logger.error(
+                "[CHECKOUT PROFILE] shipping_companies fetched | count=%d tenant=%s raw_keys=%s",
+                len(companies), self._tenant_id,
+                ([list(c.keys()) for c in companies_raw[:1]] if companies_raw else []),
+            )
+        except Exception as _exc:
+            logger.warning(
+                "[CHECKOUT PROFILE] /shipping/companies/ failed | err=%s tenant=%s",
+                _exc, self._tenant_id,
+            )
+
+        # ── 2. Shipping zones ──────────────────────────────────────────────────
+        try:
+            data = await self._get("/shipping/zones")
+            zones_raw = (data.get("data") or []) if isinstance(data, dict) else []
+            zones = [
+                {"id": z.get("id"), "name": z.get("name") or ""}
+                for z in zones_raw if isinstance(z, dict) and z.get("id")
+            ]
+            profile["shipping_zones"] = zones
+            logger.error(
+                "[CHECKOUT PROFILE] shipping_zones fetched | count=%d tenant=%s",
+                len(zones), self._tenant_id,
+            )
+        except Exception as _exc:
+            logger.warning(
+                "[CHECKOUT PROFILE] /shipping/zones failed | err=%s tenant=%s",
+                _exc, self._tenant_id,
+            )
+
+        # ── 3. Delivery methods (try two endpoints) ────────────────────────────
+        dm_codes: List[str] = []
+        for _ep in ["/shipping/methods", "/delivery-methods"]:
+            try:
+                data = await self._get(_ep)
+                methods_raw = (data.get("data") or []) if isinstance(data, dict) else []
+                codes = [
+                    m.get("code") or m.get("type") or m.get("slug")
+                    for m in methods_raw if isinstance(m, dict)
+                ]
+                codes = [c for c in codes if c]
+                if codes:
+                    dm_codes = codes
+                    logger.error(
+                        "[CHECKOUT PROFILE] delivery_methods fetched | codes=%s "
+                        "endpoint=%s tenant=%s",
+                        codes, _ep, self._tenant_id,
+                    )
+                    break
+            except Exception as _exc:
+                logger.warning(
+                    "[CHECKOUT PROFILE] %s failed | err=%s tenant=%s",
+                    _ep, _exc, self._tenant_id,
+                )
+
+        # Derive delivery_method codes from company types when the endpoint is absent
+        if not dm_codes and profile["shipping_companies"]:
+            type_map = {
+                "pickup":   "pickup",
+                "store":    "pickup",
+                "shipping": "shipping",
+                "home":     "home_delivery",
+                "delivery": "home_delivery",
+            }
+            derived = []
+            for c in profile["shipping_companies"]:
+                t = (c.get("type") or "").lower()
+                mapped = next((v for k, v in type_map.items() if k in t), "shipping")
+                if mapped not in derived:
+                    derived.append(mapped)
+            if derived:
+                dm_codes = derived
+                logger.error(
+                    "[CHECKOUT PROFILE] delivery_methods derived from companies | "
+                    "codes=%s tenant=%s",
+                    dm_codes, self._tenant_id,
+                )
+
+        # Fall back to known slug list if still nothing
+        if not dm_codes:
+            dm_codes = list(_DELIVERY_METHOD_FALLBACKS)
+            logger.warning(
+                "[CHECKOUT PROFILE] delivery_methods using hardcoded fallback | tenant=%s",
+                self._tenant_id,
+            )
+
+        profile["delivery_methods"] = dm_codes
+
+        # ── 4. Resolve defaults ────────────────────────────────────────────────
+        profile["default_delivery_method"] = dm_codes[0] if dm_codes else "shipping"
+
+        active_companies = [
+            c for c in profile["shipping_companies"] if c.get("active") and c.get("id")
+        ]
+        if active_companies:
+            profile["default_shipping_company_id"] = active_companies[0]["id"]
+
+        # ── 5. Payment methods — infer from store info when available ──────────
+        try:
+            data = await self._get("/store/settings")
+            pay_raw = data.get("data", data) if isinstance(data, dict) else {}
+            methods = pay_raw.get("payment_methods") or pay_raw.get("accepted_methods") or []
+            if methods:
+                profile["payment_methods"] = [
+                    m.get("code") or m.get("type") or m
+                    for m in methods
+                    if isinstance(m, (dict, str))
+                ]
+        except Exception:
+            pass   # payment methods stay as ["cod"]
+
+        # ── 6. Populate in-memory caches ──────────────────────────────────────
+        _CHECKOUT_PROFILE_CACHE[self._tenant_id] = profile
+        _DELIVERY_METHOD_CACHE[self._tenant_id] = profile["default_delivery_method"]
+
+        logger.error(
+            "[CHECKOUT PROFILE] synced | tenant=%s delivery_methods=%s "
+            "shipping_companies=%d shipping_zones=%d payment_methods=%s "
+            "default_delivery_method=%s default_shipping_company_id=%s",
+            self._tenant_id,
+            profile["delivery_methods"],
+            len(profile["shipping_companies"]),
+            len(profile["shipping_zones"]),
+            profile["payment_methods"],
+            profile["default_delivery_method"],
+            profile["default_shipping_company_id"],
+        )
+        return profile
+
     async def _resolve_delivery_method(self) -> str:
         """Return the correct delivery_method slug for this merchant.
 
         Resolution order:
-          1. In-memory cache (per tenant).
-          2. GET /shipping/methods  — Salla standard endpoint.
-          3. GET /delivery-methods  — alternative path some stores expose.
-          4. Ordered fallback list: home_delivery → delivery → shipping → pickup.
+          1. In-memory ``_DELIVERY_METHOD_CACHE`` (set by sync_store_checkout_profile).
+          2. ``_CHECKOUT_PROFILE_CACHE`` default_delivery_method.
+          3. GET /shipping/methods  — Salla standard endpoint.
+          4. GET /delivery-methods  — alternative path some stores expose.
+          5. Ordered fallback list: home_delivery → delivery → shipping → pickup.
 
         The result is cached so we only hit Salla once per process lifetime.
         """
+        # 1. Fast path: direct slug cache
         cached = _DELIVERY_METHOD_CACHE.get(self._tenant_id)
         if cached:
             logger.info(
@@ -1643,7 +1954,19 @@ class SallaAdapter(BaseStoreAdapter):
             )
             return cached
 
-        # ── Try known API endpoints ───────────────────────────────────────────
+        # 2. Checkout profile cache
+        prof = _CHECKOUT_PROFILE_CACHE.get(self._tenant_id)
+        if prof and prof.get("default_delivery_method"):
+            chosen = prof["default_delivery_method"]
+            _DELIVERY_METHOD_CACHE[self._tenant_id] = chosen
+            logger.info(
+                "[SallaAdapter] delivery_method from checkout_profile cache | "
+                "method=%s tenant=%s",
+                chosen, self._tenant_id,
+            )
+            return chosen
+
+        # 3+4. Try known API endpoints
         for endpoint in ["/shipping/methods", "/delivery-methods"]:
             try:
                 data = await self._get(endpoint)
@@ -1675,8 +1998,8 @@ class SallaAdapter(BaseStoreAdapter):
                     endpoint, _exc, self._tenant_id,
                 )
 
-        # ── Hard fallback: use first slug from known list ─────────────────────
-        fallback = _DELIVERY_METHOD_FALLBACKS[0]   # "home_delivery"
+        # 5. Hard fallback through known slug list
+        fallback = _DELIVERY_METHOD_FALLBACKS[0]
         logger.error(
             "[SallaAdapter] delivery_method API lookup failed — using fallback | "
             "method=%s tenant=%s",
