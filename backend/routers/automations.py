@@ -2427,6 +2427,11 @@ async def order_reminder_timeline(
             "error_label":   error_label,
             "error_code":    error_code,
             "template_name": action_taken.get("template_name") or action_taken.get("template"),
+            # Param-count mismatch details for template_param_mismatch errors.
+            # The engine stores these in action_taken["param_counts"] so the
+            # UI can show exactly which component (header/body/buttons) is
+            # mismatched without the user having to dig into raw Meta logs.
+            "param_counts":  action_taken.get("param_counts"),
         })
 
     ci = order.customer_info or {}

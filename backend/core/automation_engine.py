@@ -1342,11 +1342,13 @@ async def _execute_action(
         event_id=getattr(event, "id", None),
     )
 
+    _store_name_resolved = _resolve_store_name(db, tenant_id)
+
     # ── Build template variables ──────────────────────────────────────────────
     vars_map = _build_template_vars(
         event, customer, config,
         template_name=template.name,
-        store_name=_resolve_store_name(db, tenant_id),
+        store_name=_store_name_resolved,
         coupon_extras=coupon_extras,
     )
 
@@ -1382,24 +1384,72 @@ async def _execute_action(
                     _button_ph_count += 1
 
     # ── BODY parameters: pad/trim to EXACTLY body_ph_count ───────────────────
+    # When the template is NOT in the library (e.g. tenant-scoped names like
+    # nahla_payment_reminder_a653), _build_template_vars returns a 2-var
+    # positional fallback. If the stored components reveal _body_ph_count > 2,
+    # we need to fill the extra slots with meaningful values, not just spaces.
+    # The rich event payload is used to fill gaps in order: customer_name,
+    # order_number, store_name, amount, payment_url, coupon_code.
+    _payload_rich = dict(event.payload or {})
+    _rich_fallback_values = [
+        # slot 0 → customer_name (always available)
+        (getattr(customer, "name", None) or "عميلنا الكريم"),
+        # slot 1 → order number (very common in payment/COD templates)
+        str(
+            _payload_rich.get("order_number")
+            or _payload_rich.get("external_order_number")
+            or _payload_rich.get("order_id")
+            or _payload_rich.get("external_id")
+            or ""
+        ),
+        # slot 2 → store name
+        str(_store_name_resolved or _payload_rich.get("store_name") or "متجرنا"),
+        # slot 3 → amount / total
+        str(
+            _payload_rich.get("total")
+            or _payload_rich.get("order_total")
+            or _payload_rich.get("amount")
+            or _payload_rich.get("cart_total")
+            or ""
+        ),
+        # slot 4 → payment / checkout URL (body fallback when no URL button)
+        str(
+            _payload_rich.get("payment_url")
+            or _payload_rich.get("checkout_url")
+            or _payload_rich.get("cart_url")
+            or ""
+        ),
+        # slot 5 → coupon / discount code
+        str(
+            coupon_extras.get("discount_code")
+            or _payload_rich.get("coupon_code")
+            or ""
+        ),
+    ]
+
     _var_values = list(vars_map.values())
     if _body_ph_count and len(_var_values) > _body_ph_count:
         logger.info(
-            "[AutoEngine] trimming body_params from %d to %d for template %s",
+            "[WA TEMPLATE BUILD] trimming body_params from %d to %d for template=%s",
             len(_var_values), _body_ph_count, template.name,
         )
         _var_values = _var_values[:_body_ph_count]
     elif _body_ph_count and len(_var_values) < _body_ph_count:
-        # Pad with a single space so Meta accepts the call. An empty string
-        # ("") is rejected by Meta as "invalid parameter value".
+        # Pad using the rich fallback slots so template variables contain
+        # meaningful content instead of spaces. This prevents template_param_mismatch
+        # for tenant-scoped templates not in the library.
         _missing = _body_ph_count - len(_var_values)
+        _gap_start = len(_var_values)
+        _padding = []
+        for _fi in range(_gap_start, _gap_start + _missing):
+            _fv = _rich_fallback_values[_fi] if _fi < len(_rich_fallback_values) else " "
+            _padding.append(_fv if str(_fv).strip() else " ")
         logger.warning(
-            "[AutoEngine] padding body_params from %d to %d for template %s "
-            "(missing %d slot values — automation likely binds fewer slots "
-            "than Meta expects)",
-            len(_var_values), _body_ph_count, template.name, _missing,
+            "[WA TEMPLATE BUILD] padding body_params for template=%s "
+            "from %d to %d (gap filled with rich fallback values=%r)",
+            template.name, len(_var_values), _body_ph_count, _padding,
         )
-        _var_values = list(_var_values) + [" "] * _missing
+        _var_values = list(_var_values) + _padding
 
     body_params = [{"type": "text", "text": (str(v) if str(v).strip() else " ")} for v in _var_values]
     components: List[Dict[str, Any]] = []
@@ -1436,7 +1486,7 @@ async def _execute_action(
         "product_url", "reorder_url", "store_url",
     )
     _customer_name_for_btn = customer.name or ""
-    _store_name_for_btn    = _resolve_store_name(db, tenant_id)
+    _store_name_for_btn    = _store_name_resolved
     _payload_for_btn: Dict[str, Any] = dict(event.payload or {})
     _has_dynamic_url_btn = False
     _btn_suffix_resolved = False
@@ -1496,6 +1546,39 @@ async def _execute_action(
                     btn_suffix = _extract_button_url_suffix(btn_url_tpl, resolved)
                     if btn_suffix:
                         break
+            if not btn_suffix:
+                # ── CRITICAL FIX: never omit the button component ──────────
+                # If no URL was found in the event payload, try a chain of
+                # safe fallbacks so we ALWAYS emit the button param component.
+                # Skipping it entirely causes template_param_mismatch (Meta
+                # error 132000) because the approved template declares {{1}}
+                # in the button URL but we send 0 button-param components.
+                _btn_fallback_url = str(
+                    _payload_for_btn.get("payment_url")
+                    or _payload_for_btn.get("checkout_url")
+                    or _payload_for_btn.get("cart_url")
+                    or _payload_for_btn.get("tracking_url")
+                    or _payload_for_btn.get("store_url")
+                    or config.get("store_url")
+                    or ""
+                )
+                if _btn_fallback_url:
+                    btn_suffix = _extract_button_url_suffix(btn_url_tpl, _btn_fallback_url)
+                if not btn_suffix:
+                    # Last resort: use a single space so Meta accepts the
+                    # call. The button URL suffix will be empty/blank but the
+                    # parameter COUNT will be correct and the send won't fail
+                    # with 132000. A real URL should be populated in the event
+                    # payload by the store adapter or order enrichment step.
+                    btn_suffix = " "
+                logger.warning(
+                    "[WA TEMPLATE BUILD] Dynamic URL button on template=%s — "
+                    "primary URL slots empty; using fallback suffix=%r "
+                    "(tenant=%s). Populate payment_url/checkout_url in the "
+                    "order record to get the real link.",
+                    template.name, btn_suffix, tenant_id,
+                )
+
             if btn_suffix:
                 _btn_suffix_resolved = True
                 components.append({
@@ -1504,14 +1587,6 @@ async def _execute_action(
                     "index":      str(btn_idx),
                     "parameters": [{"type": "text", "text": btn_suffix}],
                 })
-            else:
-                logger.warning(
-                    "[AutoEngine] Dynamic URL button on template %s has no "
-                    "resolvable URL — none of %s found in event payload. "
-                    "Button will use the template's base URL without a "
-                    "dynamic suffix (customer=%s, tenant=%s).",
-                    template.name, _URL_SLOT_PRECEDENCE, to_phone, tenant_id,
-                )
 
     send_payload: Dict[str, Any] = {
         "messaging_product": "whatsapp",
@@ -1524,11 +1599,11 @@ async def _execute_action(
         },
     }
 
-    # ── Pre-send diagnostic: counts MUST match the approved Meta template ────
-    # If you ever see a 132000 / template_param_mismatch in the next call,
-    # compare these counts against the WhatsApp Manager template UI.
+    # ── Pre-send diagnostic ────────────────────────────────────────────────────
+    # Structured log for every component so operators can instantly compare
+    # against Meta's WhatsApp Manager without digging into the raw payload.
     _sent_header_params = 0
-    _sent_body_params = 0
+    _sent_body_params   = 0
     _sent_button_params = 0
     for _c in components:
         _ctype = str(_c.get("type", "")).lower()
@@ -1538,27 +1613,36 @@ async def _execute_action(
             _sent_body_params = len(_c.get("parameters", []) or [])
         elif _ctype == "button":
             _sent_button_params += 1
+
+    _svc_key_log = svc_key or "unknown"
     logger.info(
-        "[AutoEngine][SEND] template=%s lang=%s | "
-        "expected: header=%d body=%d buttons=%d | "
-        "sending: header=%d body=%d buttons=%d",
-        template.name, template.language or "ar",
-        _header_ph_count, _body_ph_count, _button_ph_count,
-        _sent_header_params, _sent_body_params, _sent_button_params,
+        "[WA TEMPLATE BUILD] template=%s lang=%s service=%s | "
+        "component=header expected=%d sent=%d | "
+        "component=body expected=%d sent=%d | "
+        "component=buttons expected=%d sent=%d",
+        template.name, template.language or "ar", _svc_key_log,
+        _header_ph_count, _sent_header_params,
+        _body_ph_count, _sent_body_params,
+        _button_ph_count, _sent_button_params,
     )
+
     if (
-        _sent_body_params  != _body_ph_count
+        _sent_body_params   != _body_ph_count
         or _sent_header_params != _header_ph_count
-        or _sent_button_params != _button_ph_count
+        or _sent_button_params  != _button_ph_count
     ):
         logger.error(
-            "[AutoEngine][SEND] PARAM COUNT MISMATCH on template=%s — "
-            "Meta will likely reject with 132000. "
-            "expected(body=%d, header=%d, buttons=%d) "
-            "vs sending(body=%d, header=%d, buttons=%d)",
-            template.name,
-            _body_ph_count, _header_ph_count, _button_ph_count,
-            _sent_body_params, _sent_header_params, _sent_button_params,
+            "[WA TEMPLATE PARAM MISMATCH] template=%s service=%s — "
+            "Meta will reject with 132000. "
+            "header: expected=%d sent=%d | "
+            "body: expected=%d sent=%d | "
+            "buttons: expected=%d sent=%d | "
+            "body_values=%r",
+            template.name, _svc_key_log,
+            _header_ph_count, _sent_header_params,
+            _body_ph_count, _sent_body_params,
+            _button_ph_count, _sent_button_params,
+            [str(v)[:40] for v in _var_values],
         )
 
     # ── Send ──────────────────────────────────────────────────────────────────
@@ -1745,14 +1829,42 @@ def _build_template_vars(
         }
 
     # Positional fallback for templates not in the library and without an
-    # explicit var_map. Keeps backwards-compat with merchant-authored
-    # templates whose body is just `Hi {{1}}, here: {{2}}`.
+    # explicit var_map.  The old fallback only produced 2 vars which caused
+    # template_param_mismatch for any tenant-scoped template with 3+ body
+    # variables (e.g. nahla_payment_reminder_a653 has 3+ vars but the name
+    # doesn't match a library key so numeric_var_map_for returns {}).
+    #
+    # The new rich fallback produces up to 6 slots in the most common order
+    # used by Nahla-generated payment/reminder templates so no space-padding
+    # is needed for the typical 3-slot case.
     return {
         "{{1}}": customer_name,
         "{{2}}": str(
-            payload.get("checkout_url")
+            payload.get("order_number")
+            or payload.get("external_order_number")
+            or payload.get("order_id")
+            or payload.get("external_id")
+            or ""
+        ),
+        "{{3}}": str(store_name or payload.get("store_name") or "متجرنا"),
+        "{{4}}": str(
+            payload.get("total")
+            or payload.get("order_total")
+            or payload.get("amount")
+            or payload.get("cart_total")
+            or ""
+        ),
+        "{{5}}": str(
+            payload.get("payment_url")
+            or payload.get("checkout_url")
+            or payload.get("cart_url")
             or coupon_extras.get("discount_code")
             or coupon_extras.get("vip_coupon")
+            or payload.get("coupon_code")
+            or ""
+        ),
+        "{{6}}": str(
+            coupon_extras.get("discount_code")
             or payload.get("coupon_code")
             or ""
         ),

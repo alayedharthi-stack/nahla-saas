@@ -172,6 +172,20 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
             if (now - created_at) < timedelta(minutes=delay):
                 # Steps are time-ordered — anything later is also too early.
                 break
+            # Include store_name and total in the payload so the engine's
+            # rich positional fallback can fill {{3}} and {{4}} correctly
+            # for tenant-scoped templates (e.g. nahla_payment_reminder_a653)
+            # whose names don't match a library key.
+            _store_meta: Dict[str, Any] = {}
+            try:
+                from core.settings_utils import get_or_create_settings, merge_defaults, DEFAULT_STORE  # noqa: PLC0415
+                _st = merge_defaults(
+                    get_or_create_settings(db, tenant_id).store_settings, DEFAULT_STORE
+                )
+                _store_meta = {"store_name": _st.get("store_name") or ""}
+            except Exception:
+                pass
+
             payload: Dict[str, Any] = {
                 "source":                "automation_emitters",
                 "order_internal_id":     order.id,
@@ -180,8 +194,10 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
                 "order_number":          order.external_order_number or order.external_id,
                 "payment_url":           order.checkout_url,
                 "checkout_url":          order.checkout_url,
+                "total":                 str(order.total or ""),
                 "step_idx":              step_idx,
                 "message_type":          step.get("message_type") or "reminder",
+                **_store_meta,
             }
             emit_automation_event(
                 db,
@@ -580,14 +596,30 @@ def scan_cod_confirmations(
             # before it is a regular reminder. The engine uses this to pick
             # the right copy variant when one is available.
             is_final = (step_idx == len(schedule) - 1)
+
+            # Enrich with store_name and order total so the engine's rich
+            # positional fallback populates {{3}}/{{4}} correctly for
+            # tenant-scoped templates not in the library.
+            _cod_store_meta: Dict[str, Any] = {}
+            try:
+                from core.settings_utils import get_or_create_settings, merge_defaults, DEFAULT_STORE  # noqa: PLC0415
+                _cod_st = merge_defaults(
+                    get_or_create_settings(db, tenant_id).store_settings, DEFAULT_STORE
+                )
+                _cod_store_meta = {"store_name": _cod_st.get("store_name") or ""}
+            except Exception:
+                pass
+
             payload: Dict[str, Any] = {
                 "source":                "automation_emitters.cod_confirmation",
                 "order_internal_id":     order.id,
                 "order_id":              order.external_id,
                 "external_order_number": order.external_order_number,
                 "order_number":          order.external_order_number or order.external_id,
+                "total":                 str(order.total or ""),
                 "step_idx":              step_idx,
                 "message_type":          "final" if is_final else "reminder",
+                **_cod_store_meta,
             }
             emit_automation_event(
                 db,

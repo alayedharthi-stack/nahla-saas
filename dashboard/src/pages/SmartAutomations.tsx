@@ -1073,29 +1073,64 @@ function OrderReminderDrawer({
                   </div>
                 </div>
               )}
-              {hasTemplateParamMismatch && !hasUnapprovedTemplate && (
-                <div className="rounded-lg border border-orange-200 bg-orange-50 p-3 flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-orange-500 shrink-0 mt-0.5" />
-                  <div className="text-xs text-orange-700">
-                    <p className="font-medium mb-0.5">متغيرات القالب غير مطابقة</p>
-                    <p className="mb-1">
-                      القالب معتمد لكن عدد المتغيرات
-                      <code className="font-mono mx-1 px-1 rounded bg-white/60">{'{{1}}, {{2}}, …'}</code>
-                      في نسخة Meta لا يطابق ما يرسله نحلة.
-                    </p>
-                    <p className="font-medium mb-0.5">الحل خطوة بخطوة:</p>
-                    <ol className="list-decimal list-inside space-y-0.5 text-orange-700">
-                      <li>افتح لوحة <strong>القوالب</strong> واحذف القالب الحالي.</li>
-                      <li>أنشئ قالباً جديداً من <strong>مكتبة نحلة</strong> (تذكير الدفع) — النسخة الجديدة تستخدم 3 متغيرات في النص + زر الدفع منفصل.</li>
-                      <li>قدّمه للاعتماد وانتظر الموافقة من Meta.</li>
-                      <li>عُد هنا واضغط <strong>إعادة جدولة الفاشلة</strong>.</li>
-                    </ol>
-                    <p className="mt-1 text-orange-600 text-[10px]">
-                      ملاحظة: الاعتماد لا يتحقق من عدد المتغيرات — Meta تتحقق منها فقط وقت الإرسال الفعلي.
-                    </p>
+              {hasTemplateParamMismatch && !hasUnapprovedTemplate && (() => {
+                // Collect detailed mismatch info from the step's action_taken
+                const mismatchSteps = timeline?.steps.filter(
+                  (s) => s.status === 'failed' &&
+                    (s.error_code === 'template_param_mismatch' ||
+                     s.error_message?.includes('template_param_mismatch'))
+                ) ?? []
+                const firstMismatch = mismatchSteps[0]
+                const paramCounts = (firstMismatch as any)?.param_counts as
+                  | { expected: { body: number; header: number; buttons: number }; sent: { body: number; header: number; buttons: number } }
+                  | undefined
+                const tplName = (firstMismatch as any)?.template_name as string | undefined
+
+                return (
+                  <div className="rounded-lg border border-orange-200 bg-orange-50 p-3 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-orange-500 shrink-0 mt-0.5" />
+                    <div className="text-xs text-orange-700 w-full">
+                      <p className="font-medium mb-1">متغيرات القالب غير مطابقة</p>
+
+                      {tplName && (
+                        <p className="mb-1 text-[11px]">
+                          القالب: <code className="font-mono px-1 rounded bg-white/60">{tplName}</code>
+                        </p>
+                      )}
+
+                      {paramCounts ? (
+                        <div className="mb-1.5 rounded bg-white/50 border border-orange-100 p-2 text-[11px] space-y-0.5">
+                          {paramCounts.expected.header !== paramCounts.sent.header && (
+                            <p><span className="font-medium text-red-600">HEADER</span>: متوقع {paramCounts.expected.header} — أُرسل {paramCounts.sent.header}</p>
+                          )}
+                          {paramCounts.expected.body !== paramCounts.sent.body && (
+                            <p><span className="font-medium text-red-600">BODY</span>: متوقع {paramCounts.expected.body} — أُرسل {paramCounts.sent.body}</p>
+                          )}
+                          {paramCounts.expected.buttons !== paramCounts.sent.buttons && (
+                            <p><span className="font-medium text-red-600">BUTTONS</span>: متوقع {paramCounts.expected.buttons} — أُرسل {paramCounts.sent.buttons}</p>
+                          )}
+                          {paramCounts.expected.header === paramCounts.sent.header &&
+                           paramCounts.expected.body === paramCounts.sent.body &&
+                           paramCounts.expected.buttons === paramCounts.sent.buttons && (
+                            <p className="text-orange-600">الأعداد متطابقة — قد يكون قيمة المتغير فارغة أو غير صالحة.</p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="mb-1 text-[11px]">
+                          القالب معتمد لكن عدد المتغيرات في Meta لا يطابق ما يرسله نحلة.
+                        </p>
+                      )}
+
+                      <p className="font-medium mb-0.5">الحل الموصى به:</p>
+                      <ol className="list-decimal list-inside space-y-0.5">
+                        <li>اضغط <strong>إعادة جدولة الفاشلة</strong> أدناه — نحلة ستحاول مجدداً مع الإصلاح التلقائي.</li>
+                        <li>إذا استمر الفشل: افتح لوحة <strong>القوالب</strong> ومزامن القوالب من Meta لتحديث عدد المتغيرات المخزّنة.</li>
+                        <li>إذا استمر بعد المزامنة: أنشئ قالباً جديداً من <strong>مكتبة نحلة</strong> (تذكير الدفع) واطلب اعتماده.</li>
+                      </ol>
+                    </div>
                   </div>
-                </div>
-              )}
+                )
+              })()}
 
               {/* Reschedule notice */}
               {rescheduleNotice && (
