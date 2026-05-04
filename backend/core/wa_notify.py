@@ -139,23 +139,45 @@ async def notify_payment_invoice(
     amount_sar: int,
     invoice_id: str,
     payment_date: Optional[datetime] = None,
+    *,
+    merchant_name: str = "",
+    billing_period: str = "شهري",
+    tenant_id: int = 0,
+    ends_at: str = "",
 ) -> bool:
-    """Send invoice details after payment."""
+    """
+    Send a full payment receipt to the merchant after a successful payment.
+
+    This is now the canonical rich receipt. Prefer calling
+    `services.billing_formatter.build_nahla_payment_receipt_message` + `_send`
+    for contexts where a full BillingContext dict is available. The signature
+    here stays backward-compatible with existing callers.
+    """
     if not phone:
         return False
+    divider  = "─" * 25
     date_str = (payment_date or datetime.now(timezone.utc)).strftime("%Y/%m/%d")
+    display  = merchant_name.strip() or store_name
+    tid_line = f"رقم التاجر: #{tenant_id}\n" if tenant_id else ""
+    period_line = f"المدة: {billing_period}\n" if billing_period else ""
+    ends_line   = f"الاشتراك حتى: {ends_at}\n" if ends_at else ""
     msg = (
-        f"🧾 *فاتورة نحلة AI*\n"
-        f"{'─' * 25}\n"
-        f"رقم الفاتورة: #{invoice_id}\n"
-        f"التاريخ: {date_str}\n"
-        f"المتجر: {store_name}\n"
-        f"الباقة: {plan_name}\n"
-        f"المبلغ: *{amount_sar:,} ريال سعودي*\n"
+        f"تم استلام دفعتك بنجاح ✅\n\n"
+        f"🧾 *فاتورة اشتراك نحلة AI*\n"
+        f"{divider}\n"
+        f"اسم التاجر: {display}\n"
+        f"اسم المتجر: {store_name}\n"
+        f"{tid_line}"
+        f"الباقة: *{plan_name}*\n"
+        f"{period_line}"
+        f"المبلغ: *{amount_sar:,} ريال*\n"
+        f"رقم العملية: {invoice_id}\n"
+        f"تاريخ الدفع: {date_str}\n"
+        f"{ends_line}"
         f"الحالة: ✅ مدفوعة\n"
-        f"{'─' * 25}\n\n"
-        f"شكراً لثقتك بنحلة 🍯\n"
-        f"nahlah.ai"
+        f"{divider}\n\n"
+        f"تم تفعيل الاشتراك بنجاح 🍯\n"
+        f"لوحة التحكم: https://app.nahlah.ai"
     )
     return await _send(phone, msg)
 
@@ -166,16 +188,36 @@ async def notify_payment_link(
     plan_name: str,
     amount_sar: int,
     payment_url: str,
+    *,
+    merchant_name: str = "",
+    billing_period: str = "شهري",
+    tenant_id: int = 0,
 ) -> bool:
-    """Send a payment link to the merchant."""
+    """
+    Send a payment link to the merchant.
+
+    If a pre-formatted message is passed via `services.billing_formatter`,
+    it will be used directly. Otherwise this function constructs its own
+    message from the supplied fields.
+
+    Prefer calling this via `services.billing_formatter.build_nahla_payment_link_message`
+    + `_send` for full context. This signature stays backward-compatible with
+    callers that only supply the basic 5-positional arguments.
+    """
     if not phone:
         return False
+
+    display_name = merchant_name.strip() or store_name
+    tid_suffix   = f"\nرقم التاجر: #{tenant_id}" if tenant_id else ""
     msg = (
-        f"💳 *رابط الدفع — نحلة AI*\n\n"
-        f"متجر: *{store_name}*\n"
+        f"مرحبًا {display_name} 👋\n\n"
+        f"هذا رابط سداد اشتراك نحلة AI لمتجر:\n"
+        f"*{store_name}*\n\n"
         f"الباقة: *{plan_name}*\n"
-        f"المبلغ: *{amount_sar:,} ريال سعودي*\n\n"
-        f"👇 أكمل الدفع عبر الرابط:\n"
+        f"المدة: {billing_period}\n"
+        f"المبلغ: *{amount_sar:,} ريال*"
+        f"{tid_suffix}\n\n"
+        f"رابط الدفع:\n"
         f"{payment_url}\n\n"
         f"⏳ الرابط صالح لمدة 24 ساعة\n"
         f"الدفع آمن عبر Moyasar 🔒"

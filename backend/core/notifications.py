@@ -210,24 +210,86 @@ def email_subscription_expired(store_name: str, plan_name: str) -> str:
 </div>"""
 
 
-def email_invoice(store_name: str, plan_name: str, amount_sar: float,
-                  invoice_id: str, payment_date: str) -> str:
+def email_invoice(
+    store_name: str,
+    plan_name: str,
+    amount_sar: float,
+    invoice_id: str,
+    payment_date: str,
+    *,
+    merchant_name: str = "",
+    billing_period: str = "شهري",
+    tenant_id: int = 0,
+    ends_at: str = "",
+) -> str:
+    """
+    Full HTML invoice email.
+
+    If a BillingContext dict is available prefer calling
+    `services.billing_formatter.build_nahla_email_invoice_html(ctx)` instead —
+    it produces a richer layout.  This function stays backward-compatible.
+    """
+    display   = merchant_name.strip() or store_name
+    tid_row   = (
+        f"<tr><td style='padding:10px;border:1px solid #e2e8f0'>رقم التاجر</td>"
+        f"<td style='padding:10px;border:1px solid #e2e8f0'>#{tenant_id}</td></tr>"
+        if tenant_id else ""
+    )
+    period_row = (
+        f"<tr style='background:#f8fafc'><td style='padding:10px;border:1px solid #e2e8f0'>المدة</td>"
+        f"<td style='padding:10px;border:1px solid #e2e8f0'>{billing_period}</td></tr>"
+        if billing_period else ""
+    )
+    ends_row = (
+        f"<tr><td style='padding:10px;border:1px solid #e2e8f0'>الاشتراك حتى</td>"
+        f"<td style='padding:10px;border:1px solid #e2e8f0'>{ends_at}</td></tr>"
+        if ends_at else ""
+    )
     return f"""
 <div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
-  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
-  <h3>فاتورة دفع #{{invoice_id}} 🧾</h3>
-  <p>مرحباً <strong>{store_name}</strong>،</p>
-  <table style="width:100%;border-collapse:collapse;margin:16px 0">
-    <tr style="background:#f8fafc"><td style="padding:10px;border:1px solid #e2e8f0">الخطة</td><td style="padding:10px;border:1px solid #e2e8f0"><strong>{plan_name}</strong></td></tr>
-    <tr><td style="padding:10px;border:1px solid #e2e8f0">المبلغ</td><td style="padding:10px;border:1px solid #e2e8f0"><strong>{amount_sar:.0f} ريال</strong></td></tr>
-    <tr style="background:#f8fafc"><td style="padding:10px;border:1px solid #e2e8f0">تاريخ الدفع</td><td style="padding:10px;border:1px solid #e2e8f0">{payment_date}</td></tr>
-    <tr><td style="padding:10px;border:1px solid #e2e8f0">رقم الفاتورة</td><td style="padding:10px;border:1px solid #e2e8f0">#{invoice_id}</td></tr>
+  <h2 style="color:#f59e0b">🍯 نحلة AI</h2>
+  <h3>تم استلام دفعتك بنجاح ✅</h3>
+  <p>مرحباً <strong>{display}</strong>،</p>
+  <p style="color:#64748b;font-size:13px">فيما يلي تفاصيل فاتورة اشتراكك في نحلة AI:</p>
+  <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:14px">
+    <tr style="background:#f8fafc">
+      <td style="padding:10px;border:1px solid #e2e8f0">اسم التاجر</td>
+      <td style="padding:10px;border:1px solid #e2e8f0"><strong>{display}</strong></td>
+    </tr>
+    <tr>
+      <td style="padding:10px;border:1px solid #e2e8f0">اسم المتجر</td>
+      <td style="padding:10px;border:1px solid #e2e8f0">{store_name}</td>
+    </tr>
+    {tid_row}
+    <tr style="background:#f8fafc">
+      <td style="padding:10px;border:1px solid #e2e8f0">الباقة</td>
+      <td style="padding:10px;border:1px solid #e2e8f0"><strong>{plan_name}</strong></td>
+    </tr>
+    {period_row}
+    <tr>
+      <td style="padding:10px;border:1px solid #e2e8f0">المبلغ</td>
+      <td style="padding:10px;border:1px solid #e2e8f0"><strong>{amount_sar:.0f} ريال</strong></td>
+    </tr>
+    <tr style="background:#f8fafc">
+      <td style="padding:10px;border:1px solid #e2e8f0">رقم العملية</td>
+      <td style="padding:10px;border:1px solid #e2e8f0">#{invoice_id}</td>
+    </tr>
+    <tr>
+      <td style="padding:10px;border:1px solid #e2e8f0">تاريخ الدفع</td>
+      <td style="padding:10px;border:1px solid #e2e8f0">{payment_date}</td>
+    </tr>
+    {ends_row}
+    <tr style="background:#f8fafc">
+      <td style="padding:10px;border:1px solid #e2e8f0">الحالة</td>
+      <td style="padding:10px;border:1px solid #e2e8f0;color:#10b981;font-weight:bold">✅ مدفوعة</td>
+    </tr>
   </table>
   <a href="https://app.nahlah.ai/billing"
      style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
             border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
-    عرض تفاصيل الاشتراك
+    إدارة اشتراكي
   </a>
+  <p style="color:#64748b;font-size:13px">للدعم: <a href="mailto:support@nahlah.ai" style="color:#f59e0b">support@nahlah.ai</a></p>
   <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
   <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI · <a href="https://nahlah.ai" style="color:#f59e0b">nahlah.ai</a></p>
 </div>"""

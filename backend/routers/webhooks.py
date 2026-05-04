@@ -1069,10 +1069,15 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
         m["paid_at"] = datetime.now(timezone.utc).isoformat()
         sub.extra_metadata = m
 
+        # amount_sar was computed at top of handler as `amount_h // 100`;
+        # prefer sub.extra_metadata["price_charged_sar"] when the webhook
+        # amount differs (e.g. refunds, launch discount).
+        final_amount_sar = amount_sar or int(m.get("price_charged_sar", 0))
+
         billing_payment = BillingPayment(
             tenant_id=sub.tenant_id,
             subscription_id=sub.id,
-            amount_sar=amount_sar or int(m.get("price_charged_sar", 0)),
+            amount_sar=final_amount_sar,
             currency="SAR",
             gateway="moyasar",
             transaction_reference=payment_id,
@@ -1082,52 +1087,72 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
         )
         db.add(billing_payment)
         db.flush()
+
         logger.info(
-            "[Billing Webhook] Subscription %s ACTIVATED for tenant %s (payment %s)",
-            subscription_id, sub.tenant_id, payment_id,
+            "[NAHLA PAYMENT ACTIVATED] tenant=%s sub=%s payment_id=%s amount=%s SAR billing_payment_id=%s",
+            sub.tenant_id, subscription_id, payment_id, final_amount_sar, billing_payment.id,
         )
 
+        # ── Notifications: receipt email + WA ─────────────────────────────
         try:
             import asyncio  # noqa: PLC0415
-            from core.notifications import send_email, email_subscription, email_invoice  # noqa: PLC0415
-            from core.wa_notify import notify_subscription_confirmed, notify_payment_invoice  # noqa: PLC0415
+            from core.notifications import send_email, email_invoice  # noqa: PLC0415
+            from core.wa_notify import notify_payment_invoice  # noqa: PLC0415
+            from services.billing_formatter import (  # noqa: PLC0415
+                resolve_billing_context,
+                build_nahla_payment_receipt_message,
+                build_nahla_email_invoice_html,
+            )
 
-            tenant_obj = db.query(Tenant).filter(Tenant.id == sub.tenant_id).first()
-            merchant   = db.query(User).filter(
-                User.tenant_id == sub.tenant_id,
-                User.role == "merchant",
-                User.is_active == True,  # noqa: E712
-            ).first()
-            plan_obj   = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first() if sub.plan_id else None
-            plan_name  = (plan_obj.name if plan_obj else None) or payment_meta.get("plan_slug", "الخطة")
-            store_name = tenant_obj.name if tenant_obj else f"Tenant {sub.tenant_id}"
-            ends_str   = sub.ends_at.strftime("%Y-%m-%d") if sub.ends_at else "—"
-            amount_sar = float(payment_meta.get("amount", 0)) / 100  # Moyasar stores in halalas
-            invoice_id = str(payment_id)[:12]
-            pay_date   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            paid_now = datetime.now(timezone.utc)
+            ctx = resolve_billing_context(
+                db,
+                tenant_id=sub.tenant_id,
+                sub=sub,
+                plan_obj=None,      # resolved inside
+                payment_id=payment_id,
+                payment_amount_sar=final_amount_sar,
+                paid_at=paid_now,
+            )
 
-            if merchant and merchant.email:
+            email_addr = ctx["merchant_email"]
+            phone      = ctx["merchant_phone"]
+
+            if email_addr:
                 asyncio.ensure_future(send_email(
-                    to=merchant.email,
-                    subject=f"✅ تم تفعيل اشتراك {plan_name} — نحلة AI",
-                    html=email_subscription(store_name, plan_name, ends_str),
-                ))
-                asyncio.ensure_future(send_email(
-                    to=merchant.email,
-                    subject=f"🧾 فاتورة دفع #{invoice_id} — نحلة AI",
-                    html=email_invoice(store_name, plan_name, amount_sar, invoice_id, pay_date),
+                    to=email_addr,
+                    subject=f"🧾 فاتورة اشتراك نحلة AI — {ctx['plan_name']} #{ctx['invoice_id']}",
+                    html=build_nahla_email_invoice_html(ctx),
                 ))
 
-            phone = getattr(merchant, "username", "") if merchant else ""
             if phone:
-                asyncio.ensure_future(notify_subscription_confirmed(
-                    phone, store_name, plan_name, amount_sar, ends_str,
-                ))
-                asyncio.ensure_future(notify_payment_invoice(
-                    phone, store_name, plan_name, amount_sar, invoice_id, pay_date,
-                ))
+                wa_ok = await notify_payment_invoice(
+                    phone,
+                    ctx["store_name"],
+                    ctx["plan_name"],
+                    ctx["amount_sar"],
+                    ctx["invoice_id"],
+                    paid_now,
+                    merchant_name=ctx["merchant_name"],
+                    billing_period=ctx["billing_period"],
+                    tenant_id=ctx["tenant_id"],
+                    ends_at=ctx["ends_at"],
+                )
+                if wa_ok:
+                    logger.info(
+                        "[NAHLA PAYMENT RECEIPT SENT] tenant=%s payment_id=%s phone=%s",
+                        sub.tenant_id, payment_id, phone[:6] + "****",
+                    )
+                else:
+                    logger.warning(
+                        "[NAHLA PAYMENT RECEIPT SEND FAILED] tenant=%s payment_id=%s phone=%s",
+                        sub.tenant_id, payment_id, phone[:6] + "****",
+                    )
         except Exception as notify_exc:
-            logger.warning("[Billing Webhook] Notification error: %s", notify_exc)
+            logger.warning(
+                "[NAHLA PAYMENT RECEIPT SEND FAILED] tenant=%s payment_id=%s error=%s",
+                sub.tenant_id, payment_id, notify_exc,
+            )
 
     elif status in _MOYASAR_FAIL_STATUSES:
         if sub.status == "active":

@@ -678,16 +678,31 @@ async def _do_checkout(
         # ── Send payment link via WhatsApp ────────────────────────────────────
         try:
             import asyncio  # noqa: PLC0415
-            _s        = get_or_create_settings(db, tenant_id)
-            _wa       = merge_defaults(_s.whatsapp_settings, DEFAULT_WHATSAPP)
-            _st       = merge_defaults(_s.store_settings,    DEFAULT_STORE)
-            _phone    = _wa.get("owner_whatsapp_number", "")
-            _sname    = _st.get("store_name") or f"متجر #{tenant_id}"
+            from services.billing_formatter import resolve_billing_context, build_nahla_payment_link_message  # noqa: PLC0415
+
+            _ctx = resolve_billing_context(
+                db,
+                tenant_id=int(tenant_id),
+                sub=sub,
+                plan_obj=plan,
+                payment_id=invoice_id,
+                payment_amount_sar=price_sar,
+            )
+            logger.info(
+                "[NAHLA PAYMENT LINK CREATED] tenant=%s merchant=%r store=%r "
+                "plan=%s amount=%s SAR invoice=%s",
+                tenant_id, _ctx["merchant_name"], _ctx["store_name"],
+                plan.slug, price_sar, invoice_id,
+            )
+            _phone = _ctx["merchant_phone"]
             if _phone and checkout_url:
+                _msg = build_nahla_payment_link_message(_ctx, checkout_url)
                 asyncio.create_task(notify_payment_link(
-                    _phone, _sname,
-                    plan_meta.get("name_ar", plan.name),
-                    price_sar, checkout_url,
+                    _phone, _ctx["store_name"],
+                    _ctx["plan_name"], price_sar, checkout_url,
+                    merchant_name=_ctx["merchant_name"],
+                    billing_period=_ctx["billing_period"],
+                    tenant_id=int(tenant_id),
                 ))
         except Exception as _exc:
             logger.warning("[Billing] WA payment link notify failed: %s", _exc)
