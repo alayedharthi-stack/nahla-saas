@@ -840,6 +840,53 @@ class DefaultDecisionEngine:
                 confidence=0.88,
             )
 
+        # ── 3.9: Refine existing search by price ──────────────────────────
+        # When the customer has already seen a product list (last_search_candidates
+        # is not empty) and their new message is a price-based refinement
+        # ("أرخص", "أقل من 100 ريال", "أغلى"), filter in-memory and emit
+        # ACTION_NARROW directly — no round-trip to the catalog needed.
+        _PRICE_REFINE_RE = re.compile(
+            r"أرخص|رخيص[ةه]?\b|أقل\s*(من|سعر)|بأقل|سعر?\s*أقل"
+            r"|أغلى|أعلى\s*(سعر|ثمن)|أجود|أفضل\s*(سعر|قيمة)",
+            re.UNICODE,
+        )
+        _last_cands: list = list(getattr(state, "last_search_candidates", None) or [])
+        if (
+            _last_cands
+            and facts.has_products
+            and intent.name in (INTENT_GENERAL, INTENT_ASK_PRODUCT, INTENT_ASK_PRICE)
+            and _PRICE_REFINE_RE.search(ctx.message or "")
+        ):
+            # Extract optional price ceiling (e.g. "أقل من 150 ريال")
+            _price_max: float | None = None
+            _num_match = re.search(r"(\d[\d,\.]{0,7})", ctx.message or "")
+            if _num_match:
+                try:
+                    _price_max = float(_num_match.group(1).replace(",", ""))
+                except ValueError:
+                    pass
+
+            _want_cheaper = bool(re.search(r"أرخص|رخيص|أقل|بأقل", ctx.message or "", re.UNICODE))
+            if _price_max:
+                _refined = [p for p in _last_cands if float(p.get("price") or 0) <= _price_max]
+            elif _want_cheaper:
+                _refined = sorted(_last_cands, key=lambda p: float(p.get("price") or 0))
+            else:
+                _refined = sorted(_last_cands, key=lambda p: float(p.get("price") or 0), reverse=True)
+
+            if _refined:
+                logger.info(
+                    "[ORDER FLOW] intent_rule_matched | rule=narrow_by_price "
+                    "original=%d refined=%d price_max=%s want_cheaper=%s tenant=%s",
+                    len(_last_cands), len(_refined), _price_max, _want_cheaper, ctx.tenant_id,
+                )
+                return Decision(
+                    action=ACTION_NARROW,
+                    args={"products": _refined},
+                    reason="customer filtered existing product list by price — narrowing in-memory",
+                    confidence=0.87,
+                )
+
         # ── 4. Simple FAQ / identity / shipping / contact ──────────────────
         if intent.name == INTENT_WHO_ARE_YOU:
             return Decision(
