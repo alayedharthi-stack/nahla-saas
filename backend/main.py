@@ -383,26 +383,42 @@ app.include_router(_product_interests_router)
 # ── Startup events ────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup() -> None:
-    """Run database migrations and start background scheduler."""
-    # ── Deployment fingerprint ────────────────────────────────────────────
-    # Emit the git commit SHA we are running on. Lets us prove from
-    # Railway logs whether a hot-fix actually shipped or if the platform
-    # is still serving an older build.
-    try:
-        import subprocess as _subp
-        _commit_sha = (
-            os.environ.get("RAILWAY_GIT_COMMIT_SHA")
-            or os.environ.get("GIT_COMMIT_SHA")
-            or os.environ.get("COMMIT_SHA")
-            or _subp.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=_REPO_ROOT,
-                stderr=_subp.DEVNULL,
-                timeout=5,
-            ).decode("utf-8").strip()
-        )
-    except Exception:
-        _commit_sha = "unknown"
+    """
+    Lifespan startup — MUST return as fast as possible.
+
+    Every line in this function runs *before* uvicorn starts dispatching
+    HTTP requests. If anything here blocks (sync I/O, slow import, DB
+    connect, subprocess), the entire worker is invisible to the network
+    even though TCP is bound. That is exactly the
+    ``api.nahlah.ai/alive returns 0 bytes`` symptom.
+
+    Hard rules for this function:
+
+    1. NO synchronous subprocess calls.
+    2. NO DB connections.
+    3. NO heavy imports beyond what is already imported at module load.
+    4. EVERY phase emits a ``[BOOT/lifespan]`` log line before AND after
+       so the operator can pinpoint the wedged step from Railway logs.
+    5. The function MUST reach ``[BOOT/lifespan] complete`` within a
+       few hundred milliseconds. Anything slower belongs in a background
+       task scheduled via ``asyncio.create_task``.
+    """
+    import time as _bt
+    _t_lifespan = _bt.monotonic()
+    logger.warning("[BOOT/lifespan] begin — preparing background tasks")
+
+    # ── Deployment fingerprint (env-only, no subprocess) ──────────────────
+    # We deliberately AVOID `git rev-parse HEAD` here: subprocess.check_output
+    # is synchronous and on a misbehaving container can stall the event loop
+    # for the full timeout (or longer if git itself is wedged on Railway's
+    # ephemeral filesystem). The deployment env vars are populated by Railway
+    # for every build, so we use them and only fall back to "unknown".
+    _commit_sha = (
+        os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+        or os.environ.get("GIT_COMMIT_SHA")
+        or os.environ.get("COMMIT_SHA")
+        or "unknown"
+    )
     _git_branch = (
         os.environ.get("RAILWAY_GIT_BRANCH")
         or os.environ.get("GIT_BRANCH")
@@ -414,6 +430,7 @@ async def on_startup() -> None:
         _git_branch,
         os.environ.get("RAILWAY_DEPLOYMENT_ID", "local"),
     )
+    logger.info("[BOOT/lifespan] phase=0_bootstrap_dispatch t+%.3fs", _bt.monotonic() - _t_lifespan)
     # 0. DB bootstrap — runs in BACKGROUND so it cannot block the ASGI
     #    lifespan startup event. Previously this was awaited inline,
     #    which meant uvicorn would not serve a single HTTP request
@@ -699,11 +716,17 @@ async def on_startup() -> None:
                 "[BOOT/db] Failed to schedule bootstrap (non-fatal): %s", exc,
             )
 
+    logger.info("[BOOT/lifespan] phase=1_safe_alters_dispatch t+%.3fs", _bt.monotonic() - _t_lifespan)
     # 1. DB table creation / column migrations (non-fatal)
+    #
+    # IMPORTANT: every import below is a *local* import. If something
+    # heavy in database.session or database.models hangs at module
+    # load (e.g. a top-level engine.connect()), it would freeze
+    # lifespan startup and produce the 0-bytes-received hang. We
+    # therefore push the imports themselves into the background task
+    # so even a wedged module load cannot block /alive.
     try:
-        from database.session import engine  # noqa: PLC0415
-        from database.models import Base     # noqa: PLC0415
-        from sqlalchemy import text          # noqa: PLC0415
+        from sqlalchemy import text          # noqa: PLC0415  (lightweight)
 
         def _run_migrations():
             Base.metadata.create_all(engine)
@@ -857,20 +880,50 @@ async def on_startup() -> None:
                 except Exception as exc:
                     logger.warning("Startup migration skipped statement: %s | error=%s", stmt[:120], exc)
 
-        # Fire-and-forget: run migrations in background so startup doesn't block healthcheck
+        # Fire-and-forget: run migrations on a *dedicated* executor so a
+        # wedged ALTER TABLE cannot starve the default executor used by
+        # bcrypt during /auth/login or any other asyncio.to_thread caller.
         async def _migrate_background():
+            from concurrent.futures import ThreadPoolExecutor as _TPX  # noqa: PLC0415
+            _exec = _TPX(max_workers=1, thread_name_prefix="nahla-safe-alters")
             try:
+                # Heavy imports moved here so a slow/wedged module load
+                # cannot block lifespan startup.
+                from database.session import engine as _engine_lazy  # noqa: PLC0415
+                from database.models import Base as _Base_lazy        # noqa: PLC0415
+                # Inject into the closure that _run_migrations expects.
+                # _run_migrations references `engine` and `Base` from the
+                # enclosing scope; bind them here lazily.
+                nonlocal_globals = globals()  # not used, kept for clarity
+                # Reassign module-level names via builtins:
+                _run_migrations.__globals__["engine"] = _engine_lazy
+                _run_migrations.__globals__["Base"] = _Base_lazy
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, _run_migrations)
-                logger.info("Database tables ready.")
+                await asyncio.wait_for(
+                    loop.run_in_executor(_exec, _run_migrations),
+                    timeout=int(os.environ.get("NAHLA_SAFE_ALTERS_TIMEOUT", "300")),
+                )
+                logger.info("[BOOT/safe_alters] Database tables ready.")
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[BOOT/safe_alters] timeout — safe_alters appear wedged. "
+                    "Worker remains responsive; DB-bound routes may 5xx until "
+                    "the operator drains the lock."
+                )
             except Exception as exc:
-                logger.warning("DB migration skipped (non-fatal): %s", exc)
+                logger.warning("[BOOT/safe_alters] skipped (non-fatal): %s", exc)
+            finally:
+                try:
+                    _exec.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
 
         asyncio.create_task(_migrate_background())
-        logger.info("Database migration task started in background.")
+        logger.info("[BOOT/safe_alters] task dispatched in background.")
     except Exception as exc:
-        logger.warning("DB migration skipped (non-fatal): %s", exc)
+        logger.warning("[BOOT/safe_alters] dispatch skipped (non-fatal): %s", exc)
 
+    logger.info("[BOOT/lifespan] phase=2_meta_subscribe_dispatch t+%.3fs", _bt.monotonic() - _t_lifespan)
     # 2. Subscribe platform phone number to app (ensures webhooks are delivered).
     #    Per Meta Cloud API docs the subscription must target the
     #    PHONE_NUMBER_ID, not the WABA_ID. Falls back to WABA only if no
@@ -905,6 +958,7 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("[Startup] webhook subscription skipped: %s", exc)
 
+    logger.info("[BOOT/lifespan] phase=3_heartbeat t+%.3fs", _bt.monotonic() - _t_lifespan)
     # ── Runtime heartbeat (always on) ───────────────────────────────────────
     # Emits a structured INFO line every 10s with event-loop lag, in-flight
     # background tasks, active HTTP requests, thread count and RSS. If the
@@ -917,6 +971,7 @@ async def on_startup() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RuntimeHeartbeat] could not start: %s", exc)
 
+    logger.info("[BOOT/lifespan] phase=4_kill_switch t+%.3fs", _bt.monotonic() - _t_lifespan)
     # ── Emergency kill-switch ───────────────────────────────────────────────
     # When NAHLA_DISABLE_SCHEDULERS=1 we skip every scheduler launch below,
     # leaving only the heartbeat + healthcheck. This is the surgical
@@ -931,6 +986,11 @@ async def on_startup() -> None:
             "DISABLED for this run. Only /alive, /healthz, /auth, and "
             "the runtime heartbeat are guaranteed to work. Unset the env "
             "var and redeploy to restore normal behaviour."
+        )
+        logger.warning(
+            "[BOOT/lifespan] complete (schedulers DISABLED) total=%.3fs — "
+            "uvicorn will now mark startup_complete and begin dispatching HTTP.",
+            _bt.monotonic() - _t_lifespan,
         )
         return
 
@@ -1054,6 +1114,12 @@ async def on_startup() -> None:
         logger.info("Post-deploy tenant integrity check scheduled.")
     except Exception as exc:
         logger.warning("Tenant integrity check could not start: %s", exc)
+
+    logger.warning(
+        "[BOOT/lifespan] complete total=%.3fs — uvicorn will now mark "
+        "startup_complete and begin dispatching HTTP.",
+        _bt.monotonic() - _t_lifespan,
+    )
 
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.
