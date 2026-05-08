@@ -223,6 +223,32 @@ def _set_coexistence_state(
     flag_modified(conn, "extra_metadata")
 
 
+def _has_recent_webhook_traffic(
+    conn: Optional[WhatsAppConnection],
+    *,
+    window_days: int = 14,
+) -> bool:
+    """True iff this connection received a 360dialog/Meta webhook recently.
+
+    Used as a "soft-connected" signal: when phone_number_id + access_token
+    are present and webhooks are arriving, the integration IS working in
+    practice — even if WABA ID hasn't been resolved into the DB yet. Use
+    this to soften the merchant banner from "غير متصل فعليًا" (hard fail)
+    to "التحقق المتقدم غير مكتمل" (warning).
+    """
+    if not conn:
+        return False
+    last = getattr(conn, "last_webhook_received_at", None)
+    if not last:
+        return False
+    try:
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last).days < window_days
+    except Exception:
+        return False
+
+
 def _coexistence_integration_complete(conn: Optional[WhatsAppConnection]) -> Dict[str, Any]:
     """Single source of truth for "is the Coexistence integration record complete
     enough that the merchant page should show it as truly connected?".
@@ -230,10 +256,23 @@ def _coexistence_integration_complete(conn: Optional[WhatsAppConnection]) -> Dic
     Returns the same `truly_connected / reason_code` shape as the merchant
     `/connection/live-verify` endpoint, but computed from the DB record only —
     cheap and identical for both the owner panel and the merchant page so
-    they cannot disagree."""
+    they cannot disagree.
+
+    Webhook-traffic softening
+    ─────────────────────────
+    When the only thing missing is ``waba_id`` (a deep-validation field used
+    for sending business templates) but ``phone_number_id`` + ``access_token``
+    are set AND webhooks are arriving from the provider, we report
+    ``reason_code='pending_advanced_verification'`` instead of the legacy
+    ``missing_waba_id``. The integration IS routing inbound traffic — the
+    merchant should NOT be told "غير متصل فعليًا" while messages keep
+    arriving. The owner panel still shows the missing field so the
+    integrity check is honest, but the merchant page banner softens.
+    """
     if not conn:
         return {"truly_connected": False, "reason_code": "no_record",
-                "missing_fields": ["whatsapp_connection"]}
+                "missing_fields": ["whatsapp_connection"],
+                "webhook_active": False}
 
     missing: list[str] = []
     if not conn.whatsapp_business_account_id:
@@ -245,15 +284,32 @@ def _coexistence_integration_complete(conn: Optional[WhatsAppConnection]) -> Dic
     if not conn.phone_number:
         missing.append("phone_number")
 
+    webhook_active = _has_recent_webhook_traffic(conn)
+
     if conn.status not in ("connected", "pending_activation", "review_pending"):
         return {
             "truly_connected": False,
             "reason_code": "status_invalid",
             "missing_fields": missing,
             "db_status": conn.status,
+            "webhook_active": webhook_active,
         }
 
     if missing:
+        # If the ONLY missing field is waba_id and webhooks are flowing,
+        # treat as "pending advanced verification" (soft warning) — sending
+        # inbound replies still works.
+        only_waba_missing = missing == ["waba_id"]
+        if only_waba_missing and webhook_active and conn.phone_number_id and conn.access_token:
+            return {
+                "truly_connected": True,
+                "reason_code": "pending_advanced_verification",
+                "missing_fields": missing,
+                "db_status": conn.status,
+                "webhook_active": True,
+                "soft_warning": True,
+            }
+
         # Highest-priority missing field gets the canonical reason code so the
         # merchant page banner reads the same way it always has.
         priority = ["api_key", "phone_number_id", "waba_id", "phone_number"]
@@ -269,6 +325,7 @@ def _coexistence_integration_complete(conn: Optional[WhatsAppConnection]) -> Dic
             "reason_code": code_by_field.get(first, "incomplete"),
             "missing_fields": missing,
             "db_status": conn.status,
+            "webhook_active": webhook_active,
         }
 
     return {
@@ -276,6 +333,7 @@ def _coexistence_integration_complete(conn: Optional[WhatsAppConnection]) -> Dic
         "reason_code": None if (conn.status == "connected" and conn.sending_enabled) else "not_active",
         "missing_fields": [],
         "db_status": conn.status,
+        "webhook_active": webhook_active,
     }
 
 
@@ -566,14 +624,26 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
     waba_id = conn.whatsapp_business_account_id or ""
     phone_id = conn.phone_number_id or ""
     has_token = bool(conn.access_token)
+    webhook_active = _has_recent_webhook_traffic(conn)
 
-    _add("has_waba_id",  bool(waba_id))
-    _add("has_phone_id", bool(phone_id))
-    _add("has_token",    has_token)
+    _add("has_waba_id",   bool(waba_id))
+    _add("has_phone_id",  bool(phone_id))
+    _add("has_token",     has_token)
+    _add(
+        "webhook_active", webhook_active,
+        last_webhook_received_at=(
+            conn.last_webhook_received_at.isoformat()
+            if getattr(conn, "last_webhook_received_at", None) else None
+        ),
+    )
 
-    # Decide blocking reason (priority order)
+    # Decide blocking reason (priority order). When webhooks are flowing
+    # we DOWNGRADE missing_waba_id from a hard fail to a soft warning —
+    # inbound routing works, the merchant should not see "غير متصل فعليًا"
+    # while messages keep arriving.
     reason_code: Optional[str] = None
     reason_msg = ""
+    soft_warning = False
     if not status_ok:
         reason_code = "status_invalid"
         reason_msg  = f"حالة الربط في النظام «{db_status}» — لا تسمح بالاستخدام."
@@ -583,6 +653,15 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
     elif not phone_id:
         reason_code = "missing_phone_id"
         reason_msg  = "phone_number_id مفقود — أعد ربط واتساب."
+    elif not waba_id and webhook_active:
+        # Soft path: webhooks are arriving, routing works → don't block.
+        reason_code  = "pending_advanced_verification"
+        reason_msg   = (
+            "الربط نشط — الرسائل تصل إلى نحلة بنجاح، "
+            "لكن التحقق المتقدم (WABA ID) لم يكتمل بعد. "
+            "إرسال القوالب الخارجية قد يكون محدودًا حتى يكتمل التحقق."
+        )
+        soft_warning = True
     elif not waba_id:
         reason_code = "missing_waba_id"
         reason_msg  = "WABA ID مفقود — لا يمكن إرسال القوالب أو رسائل الأعمال. يرجى إعادة الربط."
@@ -658,24 +737,42 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
             "حاول لاحقًا أو أعد الربط."
         )
 
+    # Soft path: when the only blocker is missing waba_id BUT webhooks are
+    # arriving, we mark truly_connected=True so the merchant page does NOT
+    # show "غير متصل فعليًا". The owner-side integrity panel still surfaces
+    # the missing field for repair.
     truly_connected = (
-        reason_code is None
-        and conn.status == "connected"
-        and bool(waba_id) and bool(phone_id) and has_token
-        and provider_reachable
+        conn.status == "connected"
+        and bool(phone_id) and has_token
+        and (
+            (bool(waba_id) and provider_reachable)  # canonical
+            or (
+                soft_warning
+                and reason_code == "pending_advanced_verification"
+            )
+        )
     )
 
     logger.info(
         "[WA live-verify] tenant=%s provider=%s db_status=%s "
-        "waba=%s phone=%s token=%s probe=%s code=%s truly_connected=%s",
+        "waba=%s phone=%s token=%s webhook_active=%s probe=%s code=%s truly_connected=%s",
         tenant_id, provider, db_status, bool(waba_id), bool(phone_id),
-        has_token, provider_status_code, reason_code, truly_connected,
+        has_token, webhook_active, provider_status_code, reason_code, truly_connected,
     )
+
+    if truly_connected and soft_warning:
+        default_msg = "الربط فعّال — التحقق المتقدم غير مكتمل."
+    elif truly_connected:
+        default_msg = "الربط فعّال."
+    else:
+        default_msg = "غير متصل فعليًا."
 
     return {
         "truly_connected": truly_connected,
+        "soft_warning":    soft_warning,
+        "webhook_active":  webhook_active,
         "reason_code":     reason_code,
-        "reason_message":  reason_msg or ("الربط فعّال." if truly_connected else "غير متصل فعليًا."),
+        "reason_message":  reason_msg or default_msg,
         "checks":          checks,
         "provider":        provider,
         "db_status":       db_status,

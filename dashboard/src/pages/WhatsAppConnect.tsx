@@ -1308,6 +1308,8 @@ export default function WhatsAppConnect() {
   // Live verification (real provider probe)
   const [liveVerify, setLiveVerify] = useState<{
     truly_connected: boolean
+    soft_warning?:   boolean
+    webhook_active?: boolean
     reason_code:     string | null
     reason_message:  string
     db_status:       string | null
@@ -1876,14 +1878,21 @@ export default function WhatsAppConnect() {
         // Honest verdict: DB says connected, but the live probe is the truth.
         // While the probe is running we show a neutral "checking" badge,
         // not a false green.
+        // Soft-warning state: integration IS routing webhooks but a non-
+        // blocking field (typically WABA ID for template sending) is still
+        // pending. We show amber + a softer message so merchants don't see
+        // "غير متصل فعليًا" while their messages are flowing.
         const verifyKnown   = liveVerify !== null
         const trulyOk       = verifyKnown && liveVerify!.truly_connected
+        const softWarning   = verifyKnown && Boolean(liveVerify!.soft_warning)
         const trulyBroken   = verifyKnown && !liveVerify!.truly_connected
         const palette = !verifyKnown
           ? { wrap: 'bg-slate-50 border-slate-200',  iconWrap: 'bg-slate-100',   iconColor: 'text-slate-500', title: 'text-slate-700' }
-          : trulyOk
-            ? { wrap: 'bg-emerald-50 border-emerald-200', iconWrap: 'bg-emerald-100', iconColor: 'text-emerald-600', title: 'text-emerald-800' }
-            : { wrap: 'bg-red-50 border-red-200',         iconWrap: 'bg-red-100',     iconColor: 'text-red-600',     title: 'text-red-800' }
+          : softWarning
+            ? { wrap: 'bg-amber-50 border-amber-200', iconWrap: 'bg-amber-100', iconColor: 'text-amber-600', title: 'text-amber-800' }
+            : trulyOk
+              ? { wrap: 'bg-emerald-50 border-emerald-200', iconWrap: 'bg-emerald-100', iconColor: 'text-emerald-600', title: 'text-emerald-800' }
+              : { wrap: 'bg-red-50 border-red-200',         iconWrap: 'bg-red-100',     iconColor: 'text-red-600',     title: 'text-red-800' }
 
         return (
         <div className="space-y-4">
@@ -1896,7 +1905,8 @@ export default function WhatsAppConnect() {
             <div>
               <p className={`font-bold text-lg ${palette.title}`}>
                 {!verifyKnown && (liveVerifying ? 'جارٍ التحقق من حالة الربط…' : 'واتساب مرتبط (لم يُتحقّق بعد)')}
-                {trulyOk      && 'واتساب مرتبط ومُتحقّق ✅'}
+                {softWarning  && 'واتساب مرتبط — التحقق المتقدم غير مكتمل ⚠️'}
+                {trulyOk && !softWarning && 'واتساب مرتبط ومُتحقّق ✅'}
                 {trulyBroken  && 'واتساب غير متصل فعليًا — يرجى إعادة الربط ❌'}
               </p>
               {connName && <p className="font-semibold text-slate-700 mt-1">{connName}</p>}
@@ -1940,6 +1950,20 @@ export default function WhatsAppConnect() {
               <div className="bg-white rounded-xl p-3 text-sm text-red-700 text-right border border-red-200">
                 <p className="font-semibold">السبب:</p>
                 <p className="mt-1">{liveVerify!.reason_message}</p>
+                {liveVerify!.reason_code && (
+                  <p className="text-[11px] text-slate-400 mt-1 font-mono">code: {liveVerify!.reason_code}</p>
+                )}
+              </div>
+            )}
+
+            {softWarning && (
+              <div className="bg-white rounded-xl p-3 text-sm text-amber-800 text-right border border-amber-200">
+                <p className="font-semibold">ملاحظة:</p>
+                <p className="mt-1">{liveVerify!.reason_message}</p>
+                <p className="text-xs text-slate-500 mt-2">
+                  الرسائل الواردة تصل إلى نحلة وتتم معالجتها كالمعتاد.
+                  المالك يستطيع إكمال التحقق المتقدم من لوحة المالك.
+                </p>
                 {liveVerify!.reason_code && (
                   <p className="text-[11px] text-slate-400 mt-1 font-mono">code: {liveVerify!.reason_code}</p>
                 )}

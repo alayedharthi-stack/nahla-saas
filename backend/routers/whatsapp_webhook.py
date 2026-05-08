@@ -999,25 +999,55 @@ async def _dispatch_message(
 
         wa_conn = wa_matches[0]
 
-        # Log successful tenant resolution
+        # ── Structured runtime resolver log ──────────────────────────────────
+        # Carries the canonical record's identity so log aggregators can
+        # compare runtime selection against the admin/status page selection.
+        # Adds `waba_id` to the tenant_integrity row (was always None before).
+        _runtime_provider = (wa_conn.provider or "").lower() or None
+        _runtime_waba_id  = wa_conn.whatsapp_business_account_id or None
+        _runtime_pid      = wa_conn.phone_number_id
         try:
             from core.tenant_integrity import log_integrity_event as _lie  # noqa: PLC0415
             _lie(
                 db, "tenant_resolved",
                 tenant_id=wa_conn.tenant_id,
                 phone_number_id=phone_number_id,
+                waba_id=_runtime_waba_id,
+                provider=_runtime_provider,
                 action="webhook_dispatch",
                 result="ok",
+                detail=(
+                    f"runtime_integration_id={wa_conn.id} "
+                    f"runtime_waba_id={_runtime_waba_id or 'missing'} "
+                    f"runtime_phone_number_id={_runtime_pid or 'missing'} "
+                    f"runtime_source=phone_number_id_lookup"
+                ),
             )
         except Exception:
             pass
 
-        used_pid           = wa_conn.phone_number_id
+        used_pid           = _runtime_pid
         resolved_tenant_id = wa_conn.tenant_id
         logger.info(
-            "[TRACE][2/6] TENANT_RESOLVED | phone_number_id=%s tenant_id=%s status=%s",
+            "[TRACE][2/6] TENANT_RESOLVED | phone_number_id=%s tenant_id=%s status=%s "
+            "runtime_integration_id=%s runtime_waba_id=%s runtime_provider=%s "
+            "runtime_source=phone_number_id_lookup",
             used_pid, resolved_tenant_id, wa_conn.status,
+            wa_conn.id, _runtime_waba_id or "missing", _runtime_provider or "unknown",
         )
+
+        # Loud warning when runtime resolved a record with NO waba_id — this
+        # is the exact mismatch tenant 33 hit. Webhook routing still works
+        # (phone_number_id was present), but business-template sending will
+        # fail until WABA ID is filled in. Owner can fix via admin sync/edit.
+        if not _runtime_waba_id:
+            logger.warning(
+                "[WA RUNTIME] tenant=%s integration=%s phone_number_id=%s "
+                "WABA ID missing on canonical record — webhooks still route, "
+                "but advanced sending features (templates) are limited until "
+                "owner runs admin/coexistence/sync-record or edit-record.",
+                resolved_tenant_id, wa_conn.id, used_pid,
+            )
 
         # ── Per-conversation processing lock ──────────────────────────────────
         # Serialise inbound turns from the same (tenant, phone) so two fast
