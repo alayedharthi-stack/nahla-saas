@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nahlah-v3'
+const CACHE_NAME = 'nahlah-v4'
 
 // Only pre-cache static binary assets (not the HTML shell)
 const STATIC_ASSETS = ['/logo.png', '/manifest.json']

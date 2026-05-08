@@ -1,10 +1,26 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2, ArrowRight } from 'lucide-react'
-import { loginDetailed, getDefaultRoute, pingAuth } from '../auth'
+import {
+  loginDetailed, getDefaultRoute, pingAuth,
+  getApiBase, setApiBaseOverride, clearServiceWorkersAndCaches,
+} from '../auth'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
 import TrustBlock from '../components/TrustBlock'
+
+// Railway-generated domain — used as the fallback host when the
+// custom domain edge (Cloudflare/Railway proxy in front of
+// api.nahlah.ai) is dropping requests. Keep this in sync with the
+// service name in Railway.
+const RAILWAY_FALLBACK_BASE = 'https://nahla-saas-production.up.railway.app'
+
+interface PingState {
+  status:     number
+  durationMs: number
+  ok:         boolean
+  error?:     string
+}
 
 export default function Login() {
   const navigate = useNavigate()
@@ -15,24 +31,73 @@ export default function Login() {
   const [error,    setError]    = useState('')
   const [loading,  setLoading]  = useState(false)
 
+  // ── Diagnostics state ───────────────────────────────────────────────────
+  // Visible to the operator on the page itself (not just DevTools).
+  // Refreshed on mount and after each user-triggered "Recheck".
+  const [diagOpen, setDiagOpen] = useState(false)
+  const [apiBase,  setApiBase]  = useState<string>(getApiBase())
+  const [ping,     setPing]     = useState<PingState | null>(null)
+  const [pinging,  setPinging]  = useState(false)
+  const [swStatus, setSwStatus] = useState<string>('')
+
+  const runPing = async () => {
+    setPinging(true)
+    try {
+      const r = await pingAuth()
+      const next: PingState = {
+        ok:         r.ok,
+        status:     r.status,
+        durationMs: r.durationMs,
+        error:      r.error,
+      }
+      setPing(next)
+      // eslint-disable-next-line no-console
+      if (r.ok) console.info('[auth] /auth/ping OK', r)
+      else      console.error('[auth] /auth/ping FAILED', r)
+    } finally {
+      setPinging(false)
+    }
+  }
+
   // ── Connectivity probe on mount ─────────────────────────────────────────
-  // Runs once when the login page mounts. Tells us in DevTools whether
-  // the browser can even reach the API host before the user types
-  // credentials. If this fails the issue is API base URL / CORS /
-  // service-worker cache, NOT the password.
+  // Runs once when the login page mounts. Tells us in DevTools AND on
+  // the page itself whether the browser can even reach the API host
+  // before the user types credentials. If this fails the issue is API
+  // base URL / CORS / service-worker cache, NOT the password.
   useEffect(() => {
     let cancelled = false
     void pingAuth().then(r => {
       if (cancelled) return
+      setPing({
+        ok: r.ok, status: r.status, durationMs: r.durationMs, error: r.error,
+      })
       // eslint-disable-next-line no-console
-      if (r.ok) {
-        console.info('[auth] /auth/ping OK', r)
-      } else {
-        console.error('[auth] /auth/ping FAILED', r)
-      }
+      if (r.ok) console.info('[auth] /auth/ping OK', r)
+      else      console.error('[auth] /auth/ping FAILED', r)
     })
     return () => { cancelled = true }
   }, [])
+
+  const switchToRailway = () => {
+    setApiBaseOverride(RAILWAY_FALLBACK_BASE)
+    window.location.reload()
+  }
+
+  const switchToCustomDomain = () => {
+    setApiBaseOverride(null)
+    window.location.reload()
+  }
+
+  const wipeServiceWorker = async () => {
+    setSwStatus(lang === 'ar' ? 'جارٍ المسح…' : 'Clearing…')
+    const r = await clearServiceWorkersAndCaches()
+    setSwStatus(lang === 'ar'
+      ? `تم المسح: ${r.swCount} SW + ${r.cacheCount} cache. أعد تحميل الصفحة.`
+      : `Cleared ${r.swCount} SW + ${r.cacheCount} caches. Please reload.`)
+  }
+
+  const usingOverride = apiBase !== 'https://api.nahlah.ai' &&
+                        apiBase !== (import.meta.env.VITE_API_BASE ?? '')
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -209,6 +274,96 @@ export default function Login() {
             {t(tr => tr.login.registerLink)}
           </Link>
         </p>
+
+        {/* ── Connection diagnostics ────────────────────────────────────
+            Always visible (collapsed) so the operator can fix a stuck
+            login WITHOUT opening DevTools. Shows the live API base,
+            ping result, and gives one-click access to:
+              - retry ping
+              - switch to the Railway-generated domain (when the
+                custom-domain edge is dropping OPTIONS/POSTs)
+              - switch back to the custom domain
+              - clear stale service workers + caches
+        */}
+        <div className="mt-4 text-xs text-slate-400">
+          <button
+            type="button"
+            onClick={() => setDiagOpen(v => !v)}
+            className="underline hover:text-slate-200"
+          >
+            {lang === 'ar' ? 'تشخيص الاتصال' : 'Connection diagnostics'}
+            {ping && !ping.ok && (
+              <span className="ms-2 text-red-400">
+                ({lang === 'ar' ? 'فشل' : 'failing'})
+              </span>
+            )}
+          </button>
+
+          {diagOpen && (
+            <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800/60 p-3 space-y-2">
+              <div className="font-mono break-all text-[11px] text-slate-300">
+                <span className="text-slate-500">API: </span>{apiBase}
+                {usingOverride && (
+                  <span className="ms-1 text-amber-400">
+                    ({lang === 'ar' ? 'تجاوز' : 'override'})
+                  </span>
+                )}
+              </div>
+              <div className="font-mono text-[11px]">
+                <span className="text-slate-500">/auth/ping: </span>
+                {!ping
+                  ? <span className="text-slate-400">{pinging ? '…' : '—'}</span>
+                  : ping.ok
+                    ? <span className="text-emerald-400">OK {ping.status} · {ping.durationMs}ms</span>
+                    : <span className="text-red-400">
+                        {lang === 'ar' ? 'فشل' : 'FAIL'} {ping.status || ''} · {ping.durationMs}ms
+                        {ping.error ? ` · ${ping.error}` : ''}
+                      </span>}
+              </div>
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={runPing}
+                  disabled={pinging}
+                  className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100 disabled:opacity-50"
+                >
+                  {pinging
+                    ? (lang === 'ar' ? 'جارٍ…' : 'Pinging…')
+                    : (lang === 'ar' ? 'إعادة فحص' : 'Recheck')}
+                </button>
+                {!usingOverride && (
+                  <button
+                    type="button"
+                    onClick={switchToRailway}
+                    className="px-2 py-1 rounded bg-amber-700/50 hover:bg-amber-600/60 text-amber-100"
+                    title={RAILWAY_FALLBACK_BASE}
+                  >
+                    {lang === 'ar' ? 'استخدم دومين Railway' : 'Use Railway domain'}
+                  </button>
+                )}
+                {usingOverride && (
+                  <button
+                    type="button"
+                    onClick={switchToCustomDomain}
+                    className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100"
+                  >
+                    {lang === 'ar' ? 'العودة للدومين الأصلي' : 'Back to custom domain'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={wipeServiceWorker}
+                  className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-100"
+                >
+                  {lang === 'ar' ? 'مسح Service Worker والكاش' : 'Clear SW + caches'}
+                </button>
+              </div>
+              {swStatus && (
+                <div className="text-[11px] text-slate-300">{swStatus}</div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Footer */}
         <div className="mt-6 pb-4 flex flex-col items-center gap-2">

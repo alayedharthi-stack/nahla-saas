@@ -1,11 +1,80 @@
 // Defined locally to avoid circular dependency with api/client.ts.
+//
+// Resolution order (first wins):
+//   1. localStorage["nahla_api_base_override"] — runtime override set
+//      by the diagnostics panel on the login page. Lets the operator
+//      switch to the Railway-generated domain
+//      (https://nahla-saas-production.up.railway.app) without a
+//      frontend rebuild when the custom domain edge is broken.
+//   2. import.meta.env.VITE_API_BASE  — build-time env from Railway.
+//   3. https://api.nahlah.ai          — the production default.
+//
 // We log the resolved base URL at module load so that a wrong build
-// (relative path, wrong env var) is obvious in the browser console
-// before the user even attempts to log in.
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://api.nahlah.ai'
+// (relative path, wrong env var, stale localStorage override) is
+// obvious in the browser console before the user even attempts to
+// log in.
+const _OVERRIDE_KEY = 'nahla_api_base_override'
+
+function _readApiBase(): string {
+  if (typeof window !== 'undefined') {
+    try {
+      const ovr = window.localStorage.getItem(_OVERRIDE_KEY)
+      if (ovr && /^https?:\/\//.test(ovr)) return ovr.replace(/\/+$/, '')
+    } catch { /* private mode etc. */ }
+  }
+  const env = (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
+  return (env || 'https://api.nahlah.ai').replace(/\/+$/, '')
+}
+
+const API_BASE = _readApiBase()
 if (typeof window !== 'undefined') {
   // eslint-disable-next-line no-console
   console.info('[auth] API_BASE =', API_BASE)
+}
+
+/** Runtime API_BASE override — used by the login-page diagnostics panel. */
+export function setApiBaseOverride(url: string | null): void {
+  try {
+    if (url && /^https?:\/\//.test(url)) {
+      window.localStorage.setItem(_OVERRIDE_KEY, url.replace(/\/+$/, ''))
+    } else {
+      window.localStorage.removeItem(_OVERRIDE_KEY)
+    }
+  } catch { /* ignore */ }
+}
+
+export function getApiBase(): string {
+  return API_BASE
+}
+
+/**
+ * Force-clear any registered service worker + all caches. Used by the
+ * login-page diagnostics panel when the user reports inconsistent
+ * fetch failures — a stale SW from a previous deploy is the most
+ * common cause of "ping works in address bar, fails from app".
+ */
+export async function clearServiceWorkersAndCaches(): Promise<{ swCount: number; cacheCount: number }> {
+  let swCount = 0
+  let cacheCount = 0
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations()
+      for (const r of regs) {
+        try { await r.unregister(); swCount++ } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+  try {
+    if ('caches' in window) {
+      const keys = await caches.keys()
+      for (const k of keys) {
+        try { await caches.delete(k); cacheCount++ } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+  // eslint-disable-next-line no-console
+  console.info('[auth] cleared service workers=%s caches=%s', swCount, cacheCount)
+  return { swCount, cacheCount }
 }
 
 /**
@@ -20,7 +89,13 @@ export async function pingAuth(): Promise<{ ok: boolean; status: number; body: u
   const controller = new AbortController()
   const timeoutId  = setTimeout(() => controller.abort(), 8_000)
   try {
-    const res = await fetch(url, { method: 'GET', signal: controller.signal })
+    const res = await fetch(url, {
+      method:      'GET',
+      signal:      controller.signal,
+      cache:       'no-store',
+      credentials: 'omit',
+      mode:        'cors',
+    })
     const txt = await res.text()
     let parsed: unknown = txt
     try { parsed = JSON.parse(txt) } catch { /* keep text */ }
@@ -144,10 +219,16 @@ async function _loginAttempt(
 
   try {
     const res = await fetch(url, {
-      method: 'POST',
+      method:      'POST',
       headers,
       body,
-      signal: controller.signal,
+      signal:      controller.signal,
+      cache:       'no-store',
+      // We use Authorization header tokens, not cookies. credentials:'omit'
+      // keeps the request a true CORS "simple request" for the form
+      // transport (cookies would force a preflight).
+      credentials: 'omit',
+      mode:        'cors',
     })
     const elapsed = Math.round(performance.now() - start)
     // eslint-disable-next-line no-console
