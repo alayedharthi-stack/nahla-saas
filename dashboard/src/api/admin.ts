@@ -491,4 +491,129 @@ export const adminApi = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  // ── Salla token health & diagnosis ─────────────────────────────────────
+  /** Aggregate token health across all tenants (or one). */
+  sallaTokenStatus: (params?: { tenant_id?: number; enabled_only?: boolean; secret?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.tenant_id !== undefined) qs.set('tenant_id', String(params.tenant_id))
+    if (params?.enabled_only) qs.set('enabled_only', 'true')
+    if (params?.secret) qs.set('secret', params.secret)
+    const query = qs.toString() ? `?${qs.toString()}` : ''
+    return apiCall<SallaTokenStatusResponse>(`/admin/salla/integrations/token-status${query}`)
+  },
+
+  /** Deep diagnosis: every Salla integration row + sibling/duplicate grouping. */
+  sallaDiagnose: (tenantId: number, secret?: string) => {
+    const qs = secret ? `?secret=${encodeURIComponent(secret)}` : ''
+    return apiCall<SallaDiagnoseResponse>(`/admin/salla/diagnose/${tenantId}${qs}`)
+  },
+
+  /** Manually trigger a Salla token refresh for one integration. */
+  sallaForceRefresh: (integrationId: number, opts?: { dry_run?: boolean; secret?: string }) => {
+    const qs = new URLSearchParams()
+    if (opts?.dry_run) qs.set('dry_run', 'true')
+    if (opts?.secret) qs.set('secret', opts.secret)
+    const query = qs.toString() ? `?${qs.toString()}` : ''
+    return apiCall<SallaForceRefreshResponse>(
+      `/admin/salla/integrations/${integrationId}/refresh${query}`,
+      { method: 'POST' },
+    )
+  },
+}
+
+// ── Salla token-health response shapes ─────────────────────────────────────
+
+export interface SallaTokenRow {
+  tenant_id: number
+  integration_id: number
+  store_id: string | null
+  store_name: string | null
+  enabled: boolean
+  easy_mode: boolean
+  app_type: string | null
+  token_source: string | null
+  has_access_token: boolean
+  has_refresh_token: boolean
+  created_at: string | null
+  updated_at: string | null
+  expires_at: string | null
+  token_expires_at: string | null
+  days_until_expiry: number | null
+  expiry_health: 'ok' | 'warning' | 'critical' | 'expired' | 'unknown'
+  refresh_token_received_at: string | null
+  last_successful_refresh: string | null
+  last_token_refresh_at: string | null
+  last_failed_refresh: string | null
+  token_refresh_status: string | null
+  token_refresh_error: string | null
+  token_refresh_failed_at: string | null
+  first_failure_at: string | null
+  refresh_attempts: number
+  token_refresh_attempts: number
+  needs_reauth: boolean
+  needs_reauth_reason: string | null
+  needs_reauth_at: string | null
+  reauth_reason: string | null
+  token_reauth_alert_sent_at: string | null
+  alert_suppressed: boolean
+  alert_suppressed_reason: string | null
+  alert_suppressed_by: number | null
+  superseded: boolean
+  superseded_by_integration_id: number | null
+  superseded_at: string | null
+  no_auto_refresh: boolean
+  no_auto_refresh_reason: string | null
+  connected_at: string | null
+  shadow?: boolean
+  newest_healthy_sibling_id?: number | null
+}
+
+export interface SallaTokenStatusResponse {
+  ok: boolean
+  summary: {
+    total: number
+    expiry_ok: number
+    expiry_warning: number
+    expiry_critical: number
+    expiry_expired: number
+    expiry_unknown: number
+    needs_reauth: number
+    failed_last_refresh: number
+    no_refresh_token: number
+  }
+  integrations: SallaTokenRow[]
+  hint?: string
+}
+
+export interface SallaDiagnoseResponse {
+  ok: boolean
+  tenant_id: number
+  selected: SallaTokenRow | null
+  all: SallaTokenRow[]
+  store_groups: Record<string, SallaTokenRow[]>
+  summary: {
+    total: number
+    stores: number
+    duplicate_stores: number
+    needs_reauth: number
+    superseded: number
+    alert_suppressed: number
+  }
+}
+
+export interface SallaForceRefreshResponse {
+  ok: boolean
+  outcome?: 'refreshed' | 'invalid_grant_needs_reauth' | 'superseded_invalid_grant' | 'transient_failure'
+  reason?: string
+  error?: string
+  dry_run?: boolean
+  superseded_by?: number
+  salla_response?: {
+    status: number | null
+    body: unknown
+  }
+  before?: SallaTokenRow
+  after?: SallaTokenRow
+  note?: string
 }

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("nahla.salla_alerts")
 
@@ -49,6 +49,107 @@ ALERT_EMAIL            = "alerts@nahlah.ai"
 GRACE_HOURS: int       = 24   # failure cluster window to trigger escalation
 EXPIRY_THRESHOLD_HOURS = 24.0 # escalate only when token expires within this window
 ALERT_COOLDOWN_HOURS   = 24.0 # minimum hours between duplicate alert emails
+
+
+# ── Counter normalisation ─────────────────────────────────────────────────────
+
+def stamp_refresh_failure(
+    cfg: dict,
+    *,
+    error: str,
+    now: datetime,
+    bump_attempts: bool = True,
+) -> dict:
+    """Persist refresh-failure metadata on ``cfg`` (in-place) consistently.
+
+    Guarantees the following invariants used by the alert email + dashboard:
+      • ``token_refresh_attempts`` is at least ``1`` whenever a real failure
+        was observed (no more "attempts=0 with last_error=invalid_grant").
+      • ``token_refresh_first_failed_at`` is set on the first failure of a
+        streak (and preserved on subsequent failures).
+      • ``token_refresh_status``, ``token_refresh_error``,
+        ``token_refresh_failed_at`` are stamped.
+
+    Returns the mutated ``cfg`` for chaining.
+    """
+    prev_attempts = int(cfg.get("token_refresh_attempts", 0) or 0)
+    new_attempts  = prev_attempts + 1 if bump_attempts else max(prev_attempts, 1)
+    if not cfg.get("token_refresh_first_failed_at"):
+        cfg["token_refresh_first_failed_at"] = now.isoformat()
+    cfg["token_refresh_status"]    = "failed"
+    cfg["token_refresh_error"]     = (error or "")[:400]
+    cfg["token_refresh_failed_at"] = now.isoformat()
+    cfg["token_refresh_attempts"]  = new_attempts
+    return cfg
+
+
+# ── Superseded-integration detection ──────────────────────────────────────────
+
+def find_superseding_integration(db, intg) -> Optional[Any]:
+    """Return a *newer* healthy integration row that supersedes ``intg``.
+
+    A row is considered "superseding" when **all** are true:
+      • Same ``store_id`` (in ``config.store_id`` or ``external_store_id``).
+      • Different DB id and ``id > intg.id`` (i.e. created later).
+      • ``enabled = True``.
+      • ``config.needs_reauth`` is falsy.
+      • ``config.api_key`` is present.
+
+    When such a sibling exists, the older row is effectively dead — the
+    merchant has already re-installed/re-authorised and a newer record is
+    serving traffic. We must not spam reauth alerts for the orphan record.
+    """
+    if intg is None:
+        return None
+    # Use the exact ORM class bound to ``intg`` so we hit the same mapper /
+    # registry the caller used (``models.Integration`` and
+    # ``database.models.Integration`` are two distinct classes loaded under
+    # two module names; mixing them causes empty queries).
+    Integration = type(intg)
+
+    cfg = dict(intg.config or {})
+    store_id = str(cfg.get("store_id") or getattr(intg, "external_store_id", "") or "").strip()
+    if not store_id:
+        return None
+
+    try:
+        candidates = (
+            db.query(Integration)
+            .filter(
+                Integration.provider == "salla",
+                Integration.tenant_id == intg.tenant_id,
+                Integration.id != intg.id,
+            )
+            .order_by(Integration.id.desc())
+            .all()
+        )
+    except Exception as exc:
+        logger.debug("[SALLA ALERT] superseded lookup failed: %s", exc)
+        return None
+
+    for cand in candidates:
+        if cand.id <= intg.id:
+            continue
+        if not cand.enabled:
+            continue
+        ccfg = cand.config or {}
+        if ccfg.get("needs_reauth"):
+            continue
+        cand_store = str(ccfg.get("store_id") or getattr(cand, "external_store_id", "") or "").strip()
+        if cand_store != store_id:
+            continue
+        if not ccfg.get("api_key"):
+            continue
+        return cand
+    return None
+
+
+def mark_superseded(cfg: dict, *, by_integration_id: int, now: datetime) -> dict:
+    """Mark ``cfg`` as superseded by a newer integration (in-place)."""
+    cfg["superseded"] = True
+    cfg["superseded_by_integration_id"] = int(by_integration_id)
+    cfg["superseded_at"] = now.isoformat()
+    return cfg
 
 
 # ── Grace Window ──────────────────────────────────────────────────────────────
@@ -138,6 +239,7 @@ async def maybe_send_reauth_alert(
     integration_id: Optional[int],
     cfg: dict,
     now: datetime,
+    superseded_by: Optional[int] = None,
 ) -> bool:
     """Send an internal ops alert when an integration transitions to needs_reauth.
 
@@ -145,10 +247,25 @@ async def maybe_send_reauth_alert(
     Updates ``cfg`` in-place with ``token_reauth_alert_sent_at`` so the
     caller can persist the timestamp in the DB.
 
+    When ``superseded_by`` is provided (i.e. a newer healthy integration
+    exists for the same store), the alert is **suppressed entirely** — the
+    merchant has already reconnected and the old row is harmless noise.
+
     Returns ``True`` if an email was actually dispatched.
     Fails silently (logs a warning) if RESEND_API_KEY is not set or the
     send fails — alert failures must not disrupt the token refresh flow.
     """
+    if superseded_by:
+        cfg["alert_suppressed"] = True
+        cfg["alert_suppressed_reason"] = "superseded_by_newer_integration"
+        cfg["alert_suppressed_by_integration_id"] = int(superseded_by)
+        cfg["alert_suppressed_at"] = now.isoformat()
+        logger.info(
+            "[SALLA ALERT] suppressed (superseded) | tenant=%s integration_id=%s "
+            "newer_integration_id=%s store=%s",
+            tenant_id, integration_id, superseded_by, cfg.get("store_id"),
+        )
+        return False
     if not should_send_alert(cfg, now):
         return False
 
@@ -162,10 +279,23 @@ async def maybe_send_reauth_alert(
     store_name   = cfg.get("store_name", "") or ""
     expires_at   = cfg.get("expires_at") or cfg.get("token_expires_at") or "unknown"
     last_refresh = cfg.get("last_token_refresh_at") or cfg.get("last_token_refresh") or "never"
-    attempts     = cfg.get("token_refresh_attempts", 0)
+    # Safeguard: if a real failure was recorded the counter must be ≥1.
+    # We never want the owner to see "Refresh Attempts = 0 / Last Error = invalid_grant"
+    # again — clamp to 1 in the alert payload as a last-resort display fallback.
+    raw_attempts = int(cfg.get("token_refresh_attempts", 0) or 0)
+    attempts     = max(raw_attempts, 1) if cfg.get("token_refresh_error") else raw_attempts
     error_msg    = cfg.get("token_refresh_error", "—") or "—"
     reason       = cfg.get("needs_reauth_reason", "—") or "—"
     first_failed = cfg.get("token_refresh_first_failed_at") or "—"
+    is_revoked   = error_msg == "invalid_grant" or reason == "invalid_grant"
+    revoked_note = (
+        '<p style="color:#b45309;background:#fef3c7;padding:10px 14px;'
+        'border-radius:6px;font-size:13px">'
+        '<strong>invalid_grant</strong> = Salla revoked this refresh_token '
+        '(single, definitive rejection). One attempt fully exhausts retries '
+        '— there is no point retrying. The merchant must reinstall the app.'
+        '</p>'
+    ) if is_revoked else ""
     admin_url    = (
         "https://app.nahlah.ai/admin/salla/integrations/token-status"
         f"?tenant_id={tenant_id}"
@@ -180,6 +310,7 @@ async def maybe_send_reauth_alert(
     An integration can no longer refresh its Salla access token automatically.
     The merchant must reinstall or reauthorise the Nahla app.
   </p>
+  {revoked_note}
   <table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:12px">
     <tr style="background:#f8fafc">
       <td style="padding:8px 12px;font-weight:bold;border:1px solid #e2e8f0;

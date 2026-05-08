@@ -545,16 +545,45 @@ class SallaAdapter(BaseStoreAdapter):
                 intg = q.first()
                 if intg:
                     cfg = dict(intg.config or {})
+                    _now = datetime.now(timezone.utc)
+                    # Stamp counters consistently — never display
+                    # "attempts=0 with last_error=invalid_grant" again.
+                    try:
+                        from core.salla_token_alerts import (  # noqa: PLC0415
+                            stamp_refresh_failure,
+                            find_superseding_integration,
+                            mark_superseded,
+                        )
+                        stamp_refresh_failure(cfg, error=reason, now=_now)
+                        superseder = find_superseding_integration(_db, intg)
+                    except Exception:
+                        superseder = None
                     cfg.pop("refresh_token", None)
-                    cfg["needs_reauth"]        = True
-                    cfg["needs_reauth_reason"] = reason
-                    cfg["needs_reauth_at"]     = datetime.now(timezone.utc).isoformat()
+                    if superseder is not None:
+                        try:
+                            mark_superseded(cfg, by_integration_id=superseder.id, now=_now)
+                            cfg.pop("needs_reauth", None)
+                            cfg.pop("needs_reauth_reason", None)
+                            cfg.pop("needs_reauth_at", None)
+                            intg.enabled = False
+                            logger.warning(
+                                "[Salla Token] tenant=%s integration_id=%s superseded by "
+                                "newer integration_id=%s — needs_reauth suppressed",
+                                self._tenant_id, intg.id, superseder.id,
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        cfg["needs_reauth"]        = True
+                        cfg["needs_reauth_reason"] = reason
+                        cfg["needs_reauth_at"]     = _now.isoformat()
                     intg.config = cfg
                     _db.commit()
                     logger.warning(
-                        "[Salla Token] needs_reauth=true tenant=%s integration_id=%s "
-                        "reason=%s — sync paused until merchant re-authorises",
-                        self._tenant_id, intg.id, reason,
+                        "[Salla Token] needs_reauth=%s tenant=%s integration_id=%s "
+                        "reason=%s attempts=%s — sync paused until merchant re-authorises",
+                        bool(cfg.get("needs_reauth")), self._tenant_id, intg.id,
+                        reason, cfg.get("token_refresh_attempts"),
                     )
             finally:
                 _db.close()

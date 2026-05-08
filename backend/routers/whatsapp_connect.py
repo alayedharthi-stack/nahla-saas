@@ -1570,6 +1570,15 @@ async def _resolve_and_apply_metadata(
     return resolved
 
 
+# ── Shared admin request body for tenant-scoped coexistence operations ──────
+# Defined here (before first use) so FastAPI/Pydantic v2 can resolve the
+# annotation during schema generation. Forward-referencing it caused
+# `PydanticUndefinedAnnotation: name '_TenantOnly' is not defined` at boot.
+
+class _TenantOnly(BaseModel):
+    tenant_id: int
+
+
 # ── Admin: Sync / Repair Integration Record ─────────────────────────────────
 # Re-reads channel metadata from 360dialog (Partner API + per-tenant API key)
 # and fills the integration record. Use this when activation finished without
@@ -1738,11 +1747,8 @@ async def admin_coexistence_edit_record(
 
 # ── Admin: per-tenant Coexistence webhook tooling ───────────────────────────
 # Test / Verify / Auto-Configure for each of the three 360dialog webhooks.
-# These endpoints are owner-panel only (require_admin).
-
-class _TenantOnly(BaseModel):
-    tenant_id: int
-
+# These endpoints are owner-panel only (require_admin). They share the
+# `_TenantOnly` request model defined earlier in the file.
 
 @router.post("/admin/coexistence/test-webhook")
 async def admin_coexistence_test_webhook(

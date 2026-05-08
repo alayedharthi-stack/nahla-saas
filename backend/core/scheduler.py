@@ -516,9 +516,15 @@ async def _refresh_all_salla_tokens() -> None:
     due          = 0
 
     try:
-        integrations = db.query(Integration).filter(
-            Integration.provider == "salla",
-        ).all()
+        # Ascending id order: older rows are processed first so they can see
+        # newer healthy siblings (find_superseding_integration only matches
+        # candidates with id > intg.id, i.e. created later).
+        integrations = (
+            db.query(Integration)
+            .filter(Integration.provider == "salla")
+            .order_by(Integration.id.asc())
+            .all()
+        )
 
         logger.info("[Salla Token Refresh] Cycle started — %d Salla integrations to evaluate", len(integrations))
 
@@ -713,13 +719,41 @@ async def _refresh_all_salla_tokens() -> None:
                             "tenant=%s store=%s — removing refresh_token, keeping api_key",
                             intg.tenant_id, store_id,
                         )
+                        # ── Counter invariants ───────────────────────────────
+                        # invalid_grant IS a real, definitive refresh attempt.
+                        # Stamp attempts/first_failed_at via shared helper so the
+                        # alert email + dashboard never display "attempts=0 with
+                        # last_error=invalid_grant" again.
+                        from core.salla_token_alerts import (  # noqa: PLC0415
+                            stamp_refresh_failure,
+                            find_superseding_integration,
+                            mark_superseded,
+                        )
+                        stamp_refresh_failure(cfg, error="invalid_grant", now=now)
                         cfg.pop("refresh_token",       None)
                         cfg["no_auto_refresh"]         = True
                         cfg["no_auto_refresh_reason"]  = "invalid_grant"
                         cfg["no_auto_refresh_at"]      = now.isoformat()
-                        cfg["token_refresh_status"]    = "failed"
-                        cfg["token_refresh_error"]     = "invalid_grant"
-                        cfg["token_refresh_failed_at"] = now.isoformat()
+
+                        # ── Superseded check: skip needs_reauth + alert when
+                        # a newer healthy integration already serves this store
+                        superseder = find_superseding_integration(db, intg)
+                        if superseder is not None:
+                            mark_superseded(cfg, by_integration_id=superseder.id, now=now)
+                            cfg.pop("needs_reauth",        None)
+                            cfg.pop("needs_reauth_reason", None)
+                            cfg.pop("needs_reauth_at",     None)
+                            intg.config  = cfg
+                            intg.enabled = False  # park the orphan record
+                            db.commit()
+                            skipped += 1
+                            logger.warning(
+                                "[SALLA TOKEN] orphan superseded by newer integration "
+                                "| tenant=%s store=%s old_id=%s new_id=%s — alert suppressed",
+                                intg.tenant_id, store_id, intg.id, superseder.id,
+                            )
+                            continue
+
                         cfg["needs_reauth"]            = True
                         cfg["needs_reauth_reason"]     = "invalid_grant"
                         cfg["needs_reauth_at"]         = now.isoformat()
@@ -728,9 +762,9 @@ async def _refresh_all_salla_tokens() -> None:
                         db.commit()
                         skipped += 1
                         logger.critical(
-                            "[SALLA TOKEN] refresh failed 3 times; needs reauth | "
-                            "tenant=%s store=%s reason=invalid_grant",
-                            intg.tenant_id, store_id,
+                            "[SALLA TOKEN] refresh_token revoked; needs reauth | "
+                            "tenant=%s store=%s reason=invalid_grant attempts=%s",
+                            intg.tenant_id, store_id, cfg.get("token_refresh_attempts"),
                         )
                         log_metric_needs_reauth(intg.tenant_id, store_id, "invalid_grant")
                         await maybe_send_reauth_alert(
@@ -745,18 +779,13 @@ async def _refresh_all_salla_tokens() -> None:
 
                     else:
                         # Transient or unknown error — log failure, do NOT disable yet
-                        err_msg      = f"HTTP {resp.status_code}: {resp_text}"
-                        prev_attempts = cfg.get("token_refresh_attempts", 0)
-                        new_attempts  = prev_attempts + 1
-
-                        # Track start of failure streak for grace window
-                        if prev_attempts == 0:
-                            cfg["token_refresh_first_failed_at"] = now.isoformat()
-
-                        cfg["token_refresh_status"]    = "failed"
-                        cfg["token_refresh_error"]     = err_msg
-                        cfg["token_refresh_failed_at"] = now.isoformat()
-                        cfg["token_refresh_attempts"]  = new_attempts
+                        err_msg = f"HTTP {resp.status_code}: {resp_text}"
+                        from core.salla_token_alerts import (  # noqa: PLC0415
+                            stamp_refresh_failure,
+                            find_superseding_integration,
+                        )
+                        stamp_refresh_failure(cfg, error=err_msg, now=now)
+                        new_attempts = cfg["token_refresh_attempts"]
                         intg.config = cfg
                         db.commit()
                         failed += 1
@@ -770,6 +799,7 @@ async def _refresh_all_salla_tokens() -> None:
                         # ── Grace-window escalation ──────────────────────────
                         escalate, reauth_reason = should_escalate_to_needs_reauth(cfg, now)
                         if escalate and not cfg.get("needs_reauth"):
+                            superseder = find_superseding_integration(db, intg)
                             cfg["needs_reauth"]        = True
                             cfg["needs_reauth_reason"] = reauth_reason
                             cfg["needs_reauth_at"]     = now.isoformat()
@@ -786,6 +816,7 @@ async def _refresh_all_salla_tokens() -> None:
                                 integration_id=intg.id,
                                 cfg=cfg,
                                 now=now,
+                                superseded_by=superseder.id if superseder else None,
                             )
                             # Persist updated cfg (token_reauth_alert_sent_at)
                             intg.config = cfg

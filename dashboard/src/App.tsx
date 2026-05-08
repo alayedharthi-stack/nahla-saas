@@ -40,6 +40,7 @@ import AdminTools from './pages/AdminTools'
 import AdminWebhookHealth from './pages/AdminWebhookHealth'
 import AdminTenantIntegrity from './pages/AdminTenantIntegrity'
 import AdminSallaActivations from './pages/AdminSallaActivations'
+import AdminSallaTokenStatus from './pages/AdminSallaTokenStatus'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
@@ -154,6 +155,8 @@ export default function App() {
             <Route path="admin/webhook-health"    element={<AdminWebhookHealth />} />
             <Route path="admin/tenant-integrity" element={<AdminTenantIntegrity />} />
             <Route path="admin/salla-activations" element={<AdminSallaActivations />} />
+            <Route path="admin/salla/integrations/token-status" element={<AdminSallaTokenStatus />} />
+            <Route path="admin/salla/diagnose/:tenantId" element={<AdminSallaTokenStatus />} />
             <Route path="billing"            element={<Billing />} />
             <Route path="widgets"            element={<MerchantWidgets />} />
             <Route path="help/whatsapp-manual-setup" element={<WhatsAppManualSetup />} />

@@ -1171,3 +1171,159 @@ class TestMetricLogs:
             "[SALLA METRIC] token_refresh_failed" in r.message
             for r in caplog.records
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# I — invalid_grant counter invariants & superseded suppression
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestInvalidGrantCounterInvariants:
+    """The fix for the 'Refresh Attempts = 0 / Last Error = invalid_grant' bug.
+
+    The legacy scheduler short-circuited on invalid_grant without bumping
+    ``token_refresh_attempts`` or stamping ``token_refresh_first_failed_at``.
+    The alert email then displayed an incoherent state. After the patch, every
+    real refresh failure stamps the counter via
+    ``stamp_refresh_failure`` so the alert + dashboard never lie again.
+    """
+
+    def test_invalid_grant_bumps_attempts_and_first_failed_at(self, db, session_factory):
+        """Scheduler observes 400/invalid_grant ⇒ attempts ≥ 1, first_failed_at set."""
+        soon = _iso(_now() + timedelta(days=3))
+        intg = _make_integration(db, store_id="IG-1", expires_at=soon)
+
+        mock_client = _mock_httpx_client(
+            400, text='{"error":"invalid_grant","error_description":"refresh_token revoked"}',
+        )
+
+        with (
+            patch("core.database.SessionLocal", session_factory),
+            patch("os.environ.get", side_effect=_env_getter(
+                SALLA_CLIENT_ID="cid", SALLA_CLIENT_SECRET="cs",
+            )),
+            patch("httpx.AsyncClient", return_value=mock_client),
+        ):
+            from core.scheduler import _refresh_all_salla_tokens
+            asyncio.run(_refresh_all_salla_tokens())
+
+        result = _reload(db, intg)
+        assert result.get("token_refresh_attempts", 0) >= 1, (
+            f"invalid_grant must bump attempts; got {result.get('token_refresh_attempts')}"
+        )
+        assert result.get("token_refresh_first_failed_at"), (
+            "first_failed_at must be stamped on first failure"
+        )
+        assert result.get("token_refresh_error") == "invalid_grant"
+        assert result.get("needs_reauth") is True
+        assert result.get("needs_reauth_reason") == "invalid_grant"
+        # access_token preserved; refresh_token removed
+        assert result.get("api_key") == "access-tok-001"
+        assert "refresh_token" not in result
+        assert result.get("no_auto_refresh") is True
+
+    def test_stamp_refresh_failure_helper_is_idempotent_on_first_failed_at(self):
+        """``token_refresh_first_failed_at`` is set once and preserved on subsequent calls."""
+        from core.salla_token_alerts import stamp_refresh_failure
+        cfg: dict = {}
+        t1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        t2 = datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
+        stamp_refresh_failure(cfg, error="HTTP 500", now=t1)
+        first1 = cfg["token_refresh_first_failed_at"]
+        assert cfg["token_refresh_attempts"] == 1
+        stamp_refresh_failure(cfg, error="HTTP 500", now=t2)
+        first2 = cfg["token_refresh_first_failed_at"]
+        assert first1 == first2, "first_failed_at must not be overwritten"
+        assert cfg["token_refresh_attempts"] == 2
+
+
+class TestSupersededSuppression:
+    """A newer healthy integration row supersedes the old failing one.
+
+    When the merchant reinstalls the app, Salla issues a new integration row.
+    The old row's refresh_token is revoked (Salla returns invalid_grant), but
+    we must NOT spam the owner — the merchant has already reconnected.
+    """
+
+    def test_find_superseding_returns_newer_healthy_sibling(self, db):
+        """Newer enabled, non-needs_reauth, has-api_key row supersedes the old one."""
+        from core.salla_token_alerts import find_superseding_integration
+        # Old failing integration
+        old = _make_integration(db, store_id="SS-1", api_key="old-key", refresh_token="old-rt")
+        old_cfg = dict(old.config or {})
+        old_cfg["needs_reauth"] = True
+        old.config = old_cfg
+        db.commit()
+        # Newer reinstall for the same store_id under the same tenant.
+        # The (provider, external_store_id) unique constraint forces the new
+        # row to leave external_store_id NULL — store_id lives in config.
+        new_intg = Integration(
+            tenant_id=old.tenant_id,
+            provider="salla",
+            external_store_id=None,
+            config={
+                "api_key":       "new-key",
+                "refresh_token": "new-rt",
+                "store_id":      "SS-1",
+                "store_name":    "Test Store",
+            },
+            enabled=True,
+        )
+        db.add(new_intg)
+        db.commit()
+        result = find_superseding_integration(db, old)
+        assert result is not None
+        assert result.id == new_intg.id
+
+    def test_find_superseding_skips_when_no_healthy_sibling(self, db):
+        from core.salla_token_alerts import find_superseding_integration
+        intg = _make_integration(db, store_id="SS-2")
+        assert find_superseding_integration(db, intg) is None
+
+    def test_invalid_grant_with_superseder_suppresses_alert_and_disables_old(
+        self, db, session_factory,
+    ):
+        """invalid_grant on the old row + a healthy newer sibling ⇒ alert suppressed."""
+        soon = _iso(_now() + timedelta(days=3))
+        old = _make_integration(db, store_id="SS-3", expires_at=soon, api_key="old-ak", refresh_token="old-rt")
+        # Newer healthy sibling for the same store — leaves external_store_id
+        # NULL to satisfy the (provider, external_store_id) unique constraint.
+        new_intg = Integration(
+            tenant_id=old.tenant_id,
+            provider="salla",
+            external_store_id=None,
+            config={
+                "api_key":       "fresh-key",
+                "refresh_token": "fresh-rt",
+                "store_id":      "SS-3",
+                "store_name":    "Test Store",
+            },
+            enabled=True,
+        )
+        db.add(new_intg)
+        db.commit()
+        new_id = new_intg.id
+
+        mock_client = _mock_httpx_client(
+            400, text='{"error":"invalid_grant"}',
+        )
+
+        with (
+            patch("core.database.SessionLocal", session_factory),
+            patch("os.environ.get", side_effect=_env_getter(
+                SALLA_CLIENT_ID="cid", SALLA_CLIENT_SECRET="cs",
+            )),
+            patch("httpx.AsyncClient", return_value=mock_client),
+        ):
+            from core.scheduler import _refresh_all_salla_tokens
+            asyncio.run(_refresh_all_salla_tokens())
+
+        old_cfg = _reload(db, old)
+        # The old record gets parked + marked superseded; needs_reauth is NOT set
+        assert old_cfg.get("superseded") is True
+        assert old_cfg.get("superseded_by_integration_id") == new_id
+        assert not old_cfg.get("needs_reauth"), (
+            "needs_reauth must be suppressed when a newer healthy sibling exists"
+        )
+        # The newer row keeps working normally
+        assert _reload(db, new_intg).get("api_key") == "fresh-key"
+
