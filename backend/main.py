@@ -235,6 +235,23 @@ async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResp
         headers=cors_headers,
     )
 
+# ── Optional ASGI stack isolation (binary search after proving networking OK) ──
+# minimal_asgi works but backend.main does not → bisect middleware layers.
+#   full             — default production stack (BaseHTTPMiddleware + FastPath + CORS)
+#   cors_only        — CORSMiddleware only (no FastPath, no BaseHTTPMiddleware)
+#   cors_fastpath    — FastPath + CORS only (isolates BaseHTTPMiddleware chain)
+#   full_no_fastpath — full BaseHTTPMiddleware but NO FastPath (isolates FastPath)
+_ASGI_STACK = os.environ.get("NAHLA_ASGI_STACK", "full").strip().lower()
+if _ASGI_STACK in ("", "production", "prod"):
+    _ASGI_STACK = "full"
+_VALID_ASGI_STACKS = frozenset({"full", "cors_only", "cors_fastpath", "full_no_fastpath"})
+if _ASGI_STACK not in _VALID_ASGI_STACKS:
+    logger.warning(
+        "[BOOT/asgi] Unknown NAHLA_ASGI_STACK=%r — falling back to full",
+        _ASGI_STACK,
+    )
+    _ASGI_STACK = "full"
+
 # ── Middleware stack ───────────────────────────────────────────────────────────
 # Registration order: LAST registered = OUTERMOST = first to process requests
 # and LAST to process responses.
@@ -247,39 +264,39 @@ async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResp
 # (every add_middleware call wraps all previously registered middleware).
 #
 # Inner middleware (registered first → innermost):
-app.middleware("http")(multi_tenant_middleware)
-app.middleware("http")(api_key_middleware)
-app.middleware("http")(global_rate_limit_middleware)
-app.middleware("http")(request_logging_middleware)
-# support_session_middleware runs AFTER jwt_enforcement so jwt_payload is already set.
-# It rejects revoked support tokens and blocks sensitive paths.
-app.middleware("http")(support_session_middleware)
-# owner_merchant_scope_middleware runs AFTER jwt_enforcement, BEFORE the route
-# handler. It is the framework-level guard that refuses platform-admin tokens
-# on merchant-scoped endpoints — defense in depth on top of any per-endpoint
-# require_merchant_scope dependency.
-app.middleware("http")(owner_merchant_scope_middleware)
-app.middleware("http")(jwt_enforcement_middleware)
-app.middleware("http")(salla_iframe_middleware)
+_use_http_mw = _ASGI_STACK in ("full", "full_no_fastpath")
+_use_fastpath = _ASGI_STACK in ("full", "cors_fastpath")
 
-# ── Pure-ASGI fast path ────────────────────────────────────────────────────
-# Sits OUTSIDE every BaseHTTPMiddleware layer above. For /alive, /healthz
-# and /auth/ping it synthesises the response directly with ASGI ``send``
-# events, bypassing every layer that could be blocked by:
-#   * a congested BaseHTTPMiddleware chain (the chain that produces
-#     "RuntimeError: No response returned" on client disconnect)
-#   * a JWT decode / DB session / rate-limit Redis lookup
-#   * a stuck downstream route handler
-# This is the ONE guarantee Railway and the dashboard depend on: liveness
-# and the connectivity probe ALWAYS answer in <5 ms regardless of what
-# the rest of the worker is doing.
-from core.fast_path_middleware import FastPathMiddleware, DEFAULT_FAST_PATHS  # noqa: E402
-app.add_middleware(FastPathMiddleware, fast_paths=DEFAULT_FAST_PATHS)
+if _use_http_mw:
+    app.middleware("http")(multi_tenant_middleware)
+    app.middleware("http")(api_key_middleware)
+    app.middleware("http")(global_rate_limit_middleware)
+    app.middleware("http")(request_logging_middleware)
+    app.middleware("http")(support_session_middleware)
+    app.middleware("http")(owner_merchant_scope_middleware)
+    app.middleware("http")(jwt_enforcement_middleware)
+    app.middleware("http")(salla_iframe_middleware)
+elif _ASGI_STACK in ("cors_only", "cors_fastpath"):
+    logger.warning(
+        "[BOOT/asgi] NAHLA_ASGI_STACK=%s — ALL BaseHTTPMiddleware layers DISABLED "
+        "(multi_tenant, api_key, rate_limit, request_logging, support_session, "
+        "owner_scope, jwt_enforcement, salla_iframe).",
+        _ASGI_STACK,
+    )
+
+if _use_fastpath:
+    from core.fast_path_middleware import FastPathMiddleware, DEFAULT_FAST_PATHS  # noqa: E402
+    app.add_middleware(FastPathMiddleware, fast_paths=DEFAULT_FAST_PATHS)
+elif _ASGI_STACK == "full_no_fastpath":
+    logger.warning(
+        "[BOOT/asgi] NAHLA_ASGI_STACK=full_no_fastpath — FastPathMiddleware DISABLED "
+        "(GET /alive goes through full BaseHTTPMiddleware chain).",
+    )
 
 # CORS must be outermost so it adds Access-Control-* headers to ALL responses,
-# including the FastPath responses above and the 401 / 429 error responses
-# returned by inner middleware. add_middleware() wraps everything above it
-# → the LAST add_middleware call becomes the outermost layer.
+# including FastPath responses and any error responses from inner middleware.
+# add_middleware() wraps everything above it → the LAST add_middleware call
+# becomes the outermost layer.
 from core.config import CORS_ORIGINS, CORS_ORIGIN_REGEX  # noqa: E402
 app.add_middleware(
     CORSMiddleware,
