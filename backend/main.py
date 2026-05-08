@@ -455,6 +455,26 @@ async def on_startup() -> None:
         os.environ.get("RAILWAY_DEPLOYMENT_ID", "local"),
     )
     logger.info("[BOOT/lifespan] phase=0_bootstrap_dispatch t+%.3fs", _bt.monotonic() - _t_lifespan)
+
+    async def _coexistence_client_id_repair_bg() -> None:
+        """Clear bogus coexistence client_id values (UI labels / JS sentinels)."""
+        await asyncio.sleep(5)
+        try:
+            from core.database import SessionLocal  # noqa: PLC0415
+            from core.coexistence_repair import repair_coexistence_placeholder_client_ids  # noqa: PLC0415
+
+            db = SessionLocal()
+            try:
+                n = repair_coexistence_placeholder_client_ids(db)
+                if n:
+                    logger.info("[BOOT/coexistence] startup repair cleared bogus client_id on %s row(s)", n)
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("[BOOT/coexistence] client_id startup repair skipped (non-fatal): %s", exc)
+
+    asyncio.create_task(_coexistence_client_id_repair_bg())
+
     # 0. DB bootstrap — runs in BACKGROUND so it cannot block the ASGI
     #    lifespan startup event. Previously this was awaited inline,
     #    which meant uvicorn would not serve a single HTTP request

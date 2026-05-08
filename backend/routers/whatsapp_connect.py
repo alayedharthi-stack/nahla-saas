@@ -20,6 +20,7 @@ Routes
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import os
@@ -47,6 +48,10 @@ from core.config import (
     META_APP_SECRET,
     META_GRAPH_API_VERSION,
     META_WA_CONFIG_ID,
+)
+from core.coexistence_client_id import (
+    client_id_is_present_for_integration,
+    sanitize_coexistence_client_id,
 )
 from core.database import get_db
 from core.tenant import get_or_create_settings, get_or_create_tenant, resolve_tenant_id
@@ -372,7 +377,9 @@ def _log_integration_state(
         "present" if conn.phone_number else "missing",
         "present" if conn.access_token else "missing",
         "present" if (conn.extra_metadata or {}).get("provider_details", {}).get("channel_id") else "missing",
-        "present" if (conn.extra_metadata or {}).get("provider_details", {}).get("client_id") else "missing",
+        "present" if client_id_is_present_for_integration(
+            (conn.extra_metadata or {}).get("provider_details", {}).get("client_id"),
+        ) else "missing",
         bool(conn.sending_enabled), bool(conn.webhook_verified),
         completeness["truly_connected"], completeness.get("reason_code"),
         ",".join(completeness.get("missing_fields") or []) or "-",
@@ -1433,7 +1440,7 @@ async def coexistence_partner_connect(
     meta = dict(conn.extra_metadata or {})
     meta["provider_details"] = {
         "channel_id": channel_id,
-        "client_id": body.client_id,
+        "client_id": sanitize_coexistence_client_id(body.client_id),
         "webhook_url": _coexistence_webhook_url(),
         "internal_header_name": "X-Nahla-Coexistence-Secret",
         "channel_status_at_connect": channel_status,
@@ -1447,11 +1454,16 @@ async def coexistence_partner_connect(
         conn.webhook_verified = False
         _set_coexistence_state(conn, status="pending_activation")
         # Configure webhook immediately if we have the API key
-        webhook_result = await dialog360_configure_webhook(
-            api_key=api_key,
-            url=_coexistence_webhook_url(),
-            headers={"X-Nahla-Coexistence-Secret": internal_secret},
-        )
+        try:
+            webhook_result = await dialog360_configure_webhook(
+                api_key=api_key,
+                url=_coexistence_webhook_url(),
+                headers={"X-Nahla-Coexistence-Secret": internal_secret},
+                timeout=5.0,
+            )
+        except Exception as exc:
+            logger.warning("[coexistence/partner-connect] webhook configure fail-open: %s", exc)
+            webhook_result = {"error": str(exc)[:500]}
         if "error" not in (webhook_result or {}):
             conn.webhook_verified = True
             if channel_status == "ready":
@@ -1481,7 +1493,7 @@ async def coexistence_partner_connect(
     return {
         "status": conn.status,
         "channel_id": channel_id,
-        "client_id": body.client_id,
+        "client_id": sanitize_coexistence_client_id(body.client_id),
         "api_key_obtained": bool(api_key),
         "channel_status": channel_status,
         **_coexistence_status_payload(conn),
@@ -1546,7 +1558,7 @@ async def admin_activate_coexistence(
     meta = dict(conn.extra_metadata or {})
     meta["provider_details"] = {
         "channel_id": body.channel_id,
-        "client_id": body.client_id,
+        "client_id": sanitize_coexistence_client_id(body.client_id),
         "webhook_url": _coexistence_webhook_url(),
         "internal_header_name": "X-Nahla-Coexistence-Secret",
     }
@@ -1560,11 +1572,16 @@ async def admin_activate_coexistence(
 
     webhook_result = None
     if body.configure_webhook:
-        webhook_result = await dialog360_configure_webhook(
-            api_key=body.api_key,
-            url=_coexistence_webhook_url(),
-            headers={"X-Nahla-Coexistence-Secret": internal_secret},
-        )
+        try:
+            webhook_result = await dialog360_configure_webhook(
+                api_key=body.api_key,
+                url=_coexistence_webhook_url(),
+                headers={"X-Nahla-Coexistence-Secret": internal_secret},
+                timeout=5.0,
+            )
+        except Exception as exc:
+            logger.warning("[coexistence/activate] webhook configure fail-open: %s", exc)
+            webhook_result = {"error": str(exc)[:500]}
         if "error" in (webhook_result or {}):
             conn.status = "action_required"
             conn.webhook_verified = False
@@ -1795,9 +1812,11 @@ async def admin_coexistence_edit_record(
     if body.channel_id is not None and body.channel_id != pd.get("channel_id"):
         pd["channel_id"] = body.channel_id.strip() or None
         changed.append("channel_id")
-    if body.client_id is not None and body.client_id != pd.get("client_id"):
-        pd["client_id"] = body.client_id.strip() or None
-        changed.append("client_id")
+    if body.client_id is not None:
+        new_cid = sanitize_coexistence_client_id(body.client_id)
+        if new_cid != pd.get("client_id"):
+            pd["client_id"] = new_cid
+            changed.append("client_id")
     pd["webhook_url"]          = _coexistence_webhook_url()
     pd["coexistence_url"]      = _coexistence_events_url()
     pd["status_url"]           = _coexistence_status_url()
@@ -1883,7 +1902,7 @@ async def admin_coexistence_test_webhook(
         "status":      "channel_status",
     }
     results: Dict[str, Dict[str, Any]] = {}
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=5.0) as client:
         for name, url in targets.items():
             payload = {
                 "object": "whatsapp_business_account",
@@ -1950,14 +1969,28 @@ async def admin_coexistence_verify_webhook(
         raise HTTPException(status_code=400, detail="مفتاح API لـ 360dialog غير مخزّن لهذا التاجر")
 
     expected_url = _coexistence_webhook_url()
-    cfg = await dialog360_get_webhook_config(api_key=conn.access_token)
+    cfg: Dict[str, object] = {}
+    verify_error: Optional[str] = None
+    try:
+        cfg = await asyncio.wait_for(
+            dialog360_get_webhook_config(api_key=conn.access_token, timeout=5.0),
+            timeout=6.0,
+        )
+    except Exception as exc:
+        verify_error = f"{type(exc).__name__}: {exc}"[:400]
+        logger.warning(
+            "[admin/coexistence/verify-webhook] fail-open tenant=%s: %s",
+            body.tenant_id,
+            verify_error,
+        )
+        cfg = {"error": "fail_open", "detail": verify_error}
 
     remote_url = ""
     if isinstance(cfg, dict):
         remote_url = (
-            cfg.get("url")
-            or (cfg.get("webhook") or {}).get("url")
-            or (cfg.get("data") or {}).get("url")
+            str(cfg.get("url") or "")
+            or str((cfg.get("webhook") or {}).get("url") or "")
+            or str((cfg.get("data") or {}).get("url") or "")
             or ""
         )
     matches = bool(remote_url) and remote_url.rstrip("/") == expected_url.rstrip("/")
@@ -1965,16 +1998,21 @@ async def admin_coexistence_verify_webhook(
     meta = dict(conn.extra_metadata or {})
     coex = dict(meta.get("coexistence") or {})
     webhook = dict(coex.get("webhook") or {})
-    webhook["channel_status"] = "verified" if matches else (
-        "url_mismatch" if remote_url else "unverified"
-    )
+    if verify_error:
+        webhook["channel_status"] = "failed"
+        webhook["channel_last_verify_error"] = verify_error
+    else:
+        webhook["channel_status"] = "verified" if matches else (
+            "url_mismatch" if remote_url else "unverified"
+        )
+        webhook.pop("channel_last_verify_error", None)
     webhook["channel_last_verified_at"] = datetime.now(timezone.utc).isoformat()
     webhook["channel_remote_url"] = remote_url or None
     coex["webhook"] = webhook
     meta["coexistence"] = coex
     conn.extra_metadata = meta
     flag_modified(conn, "extra_metadata")
-    if matches:
+    if matches and not verify_error:
         conn.webhook_verified = True
     db.commit()
 
@@ -1989,6 +2027,7 @@ async def admin_coexistence_verify_webhook(
         "expected_url":  expected_url,
         "remote_url":    remote_url,
         "matches":       matches,
+        "verify_error":  verify_error,
         "raw":           cfg,
         "webhooks":      _coexistence_webhook_block(conn),
     }
@@ -2018,11 +2057,19 @@ async def admin_coexistence_auto_configure(
     if not secret:
         secret = D360_WEBHOOK_INTERNAL_SECRET or secrets.token_urlsafe(24)
 
-    result = await dialog360_configure_webhook(
-        api_key=conn.access_token,
-        url=_coexistence_webhook_url(),
-        headers={"X-Nahla-Coexistence-Secret": secret},
-    )
+    try:
+        result = await asyncio.wait_for(
+            dialog360_configure_webhook(
+                api_key=conn.access_token,
+                url=_coexistence_webhook_url(),
+                headers={"X-Nahla-Coexistence-Secret": secret},
+                timeout=5.0,
+            ),
+            timeout=6.0,
+        )
+    except Exception as exc:
+        logger.warning("[admin/coexistence/auto-configure] fail-open tenant=%s: %s", body.tenant_id, exc)
+        result = {"error": str(exc)[:500]}
     ok = "error" not in (result or {})
 
     meta = dict(conn.extra_metadata or {})

@@ -2456,6 +2456,8 @@ async def admin_list_coexistence_requests(
             query = query.filter(WhatsAppConnection.status == status_filter)
         connections = query.order_by(WhatsAppConnection.last_attempt_at.desc().nullslast()).all()
 
+        from core.coexistence_client_id import sanitize_coexistence_client_id  # noqa: PLC0415
+
         rows = []
         for conn in connections:
             try:
@@ -2494,7 +2496,7 @@ async def admin_list_coexistence_requests(
                     "phone_number_id":    conn.phone_number_id,
                     "waba_id":            conn.whatsapp_business_account_id,
                     "channel_id":         provider_details.get("channel_id"),
-                    "client_id":          provider_details.get("client_id"),
+                    "client_id":          sanitize_coexistence_client_id(provider_details.get("client_id")),
                     # Never expose the API key — only whether it is stored.
                     "has_api_key":        bool(conn.access_token),
                     "last_attempt_at":    conn.last_attempt_at.isoformat() if conn.last_attempt_at else None,

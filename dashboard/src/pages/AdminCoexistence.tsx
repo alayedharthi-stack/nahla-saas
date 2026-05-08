@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -196,12 +196,16 @@ function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
     try {
       const res = await adminApi.verifyCoexistenceWebhook(tenantId)
       setWebhooks(res.webhooks)
-      setFeedback(res.matches
-        ? { kind: 'ok',   text: 'الرابط المسجّل لدى 360dialog مطابق للرابط الرسمي لنحلة.' }
-        : { kind: 'info', text: res.remote_url
-            ? `الرابط لدى 360dialog مختلف: ${res.remote_url}`
-            : 'لم يتم تسجيل أي Webhook في 360dialog بعد.' }
-      )
+      if (res.verify_error) {
+        setFeedback({ kind: 'err', text: `فشل التحقق من 360dialog (مهلة/شبكة): ${res.verify_error}` })
+      } else {
+        setFeedback(res.matches
+          ? { kind: 'ok',   text: 'الرابط المسجّل لدى 360dialog مطابق للرابط الرسمي لنحلة.' }
+          : { kind: 'info', text: res.remote_url
+              ? `الرابط لدى 360dialog مختلف: ${res.remote_url}`
+              : 'لم يتم تسجيل أي Webhook في 360dialog بعد.' }
+        )
+      }
     } catch (e: unknown) {
       setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشل التحقق' })
     } finally { setBusy(null) }
@@ -718,19 +722,23 @@ function IntegrationFieldsPanel({
             ['Channel ID',      req.channel_id,      'channel_id'],
             ['Client ID',       req.client_id,       'client_id'],
             ['API Key',         req.has_api_key ? '✓ مخزّن' : null, 'api_key'],
-          ] as Array<[string, string | null, string]>).map(([label, value, key]) => (
+          ] as Array<[string, string | null, string]>).map(([label, value, key]) => {
+            const optional = key === 'client_id'
+            const missing = !value && !optional
+            return (
             <div
               key={key}
               className={`rounded-lg border px-3 py-2 ${
-                value ? 'border-slate-200 bg-slate-50' : 'border-red-200 bg-red-50'
+                value ? 'border-slate-200 bg-slate-50' : missing ? 'border-red-200 bg-red-50' : 'border-slate-200 bg-slate-50'
               }`}
             >
               <p className="text-[10px] font-semibold text-slate-400 mb-0.5">{label}</p>
-              <p className={`font-mono text-xs truncate ${value ? 'text-slate-700' : 'text-red-600'}`} dir="ltr">
-                {value || '— مفقود —'}
+              <p className={`font-mono text-xs truncate ${value ? 'text-slate-700' : missing ? 'text-red-600' : 'text-slate-500'}`} dir="ltr">
+                {value || (optional ? '— (اختياري)' : '— مفقود —')}
               </p>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -1000,7 +1008,7 @@ export default function AdminCoexistence() {
   const [loadError, setLoadError] = useState('')
   const [statusFilter, setStatusFilter] = useState('request_submitted')
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true)
     setLoadError('')
     adminApi.coexistenceRequests(statusFilter)
@@ -1010,9 +1018,9 @@ export default function AdminCoexistence() {
         setLoadError(e instanceof Error ? e.message : 'فشل تحميل الطلبات')
       })
       .finally(() => setLoading(false))
-  }
+  }, [statusFilter])
 
-  useEffect(() => { load() }, [statusFilter])
+  useEffect(() => { load() }, [load])
 
   const pending   = requests.filter(r => r.wa_status === 'request_submitted').length
   const activated = requests.filter(r => r.wa_status === 'connected').length

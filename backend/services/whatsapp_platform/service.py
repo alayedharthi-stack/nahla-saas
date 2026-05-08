@@ -393,7 +393,7 @@ async def dialog360_configure_webhook(
     api_key: str,
     url: str,
     headers: Optional[Dict[str, str]] = None,
-    timeout: float = 20,
+    timeout: float = 5,
 ) -> Dict[str, Any]:
     """Register (POST) the channel webhook URL with 360dialog.
 
@@ -423,7 +423,7 @@ async def dialog360_configure_webhook(
 async def dialog360_get_webhook_config(
     *,
     api_key: str,
-    timeout: float = 15,
+    timeout: float = 5,
 ) -> Dict[str, Any]:
     """Read back the currently configured channel webhook from 360dialog.
 
@@ -453,7 +453,7 @@ async def dialog360_generate_api_key(
     *,
     partner_id: str,
     channel_id: str,
-    timeout: float = 20,
+    timeout: float = 5,
 ) -> Dict[str, Any]:
     """
     Generate (or retrieve) the D360-API-KEY for a channel the merchant connected
@@ -488,7 +488,7 @@ async def dialog360_get_channel_info(
     *,
     partner_id: str,
     channel_id: str,
-    timeout: float = 20,
+    timeout: float = 5,
 ) -> Dict[str, Any]:
     """
     Retrieve channel details (status, phone_number, waba_id, etc.) from Partner API.
@@ -515,7 +515,7 @@ async def dialog360_resolve_channel_metadata(
     phone_number_id: Optional[str] = None,
     channel_id: Optional[str] = None,
     partner_id: Optional[str] = None,
-    timeout: float = 15,
+    timeout: float = 5,
 ) -> Dict[str, Any]:
     """Best-effort resolver for missing 360dialog channel metadata.
 

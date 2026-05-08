@@ -78,6 +78,7 @@ export interface CoexistenceVerifyWebhookResult {
   expected_url: string
   remote_url: string
   matches: boolean
+  verify_error?: string | null
   raw: unknown
   webhooks: CoexistenceWebhookBlock
 }
@@ -409,7 +410,8 @@ export const adminApi = {
 
   coexistenceRequests: (statusFilter = 'request_submitted') =>
     apiCall<{ requests: CoexistenceRequest[]; total: number }>(
-      `/admin/coexistence/requests?status_filter=${statusFilter}`,
+      `/admin/coexistence/requests?status_filter=${encodeURIComponent(statusFilter)}`,
+      { signal: AbortSignal.timeout(25_000) },
     ),
 
   activateCoexistence: (payload: CoexistenceActivatePayload) =>
