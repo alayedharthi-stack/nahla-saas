@@ -120,23 +120,76 @@ async def global_rate_limit_middleware(request: Request, call_next):
 
 
 async def request_logging_middleware(request: Request, call_next):
-    """Log HTTP method, path, status code, and latency for every request."""
+    """Log HTTP method, path, status code, and latency for every request.
+
+    Routes can voluntarily increment ``request.state.db_ms`` /
+    ``request.state.ai_ms`` / ``request.state.lock_wait_ms`` to give the
+    operator a breakdown in the per-request log line. When unset they
+    default to 0 — we never crash a request because a route forgot to
+    seed the counters.
+
+    Slow requests (>1500 ms) are logged at WARNING with a
+    ``[SLOW REQUEST]`` prefix and forwarded to ``core.runtime_perf`` so
+    they show up in ``GET /admin/runtime/perf`` for live diagnostics.
+    """
     start = _time.monotonic()
+    request.state.db_ms = 0
+    request.state.ai_ms = 0
+    request.state.lock_wait_ms = 0
     response = await call_next(request)
     duration_ms = round((_time.monotonic() - start) * 1000)
-    tenant_id = getattr(request.state, "tenant_id", "-")
-    client_ip = request.headers.get("X-Real-IP") or (
+
+    db_ms        = int(getattr(request.state, "db_ms",        0) or 0)
+    ai_ms        = int(getattr(request.state, "ai_ms",        0) or 0)
+    lock_wait_ms = int(getattr(request.state, "lock_wait_ms", 0) or 0)
+    tenant_id    = getattr(request.state, "tenant_id", "-")
+    client_ip    = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
-    logger.info(
-        "%s %s %d %dms tenant=%s ip=%s",
-        request.method,
-        request.url.path,
-        response.status_code,
-        duration_ms,
-        tenant_id,
-        client_ip,
-    )
+
+    breakdown = ""
+    if db_ms or ai_ms or lock_wait_ms:
+        breakdown = f" db={db_ms}ms ai={ai_ms}ms lock_wait={lock_wait_ms}ms"
+
+    if duration_ms >= 1500:
+        logger.warning(
+            "[SLOW REQUEST] %s %s %d %dms%s tenant=%s ip=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+            breakdown,
+            tenant_id,
+            client_ip,
+        )
+    else:
+        logger.info(
+            "%s %s %d %dms%s tenant=%s ip=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+            breakdown,
+            tenant_id,
+            client_ip,
+        )
+
+    try:
+        from core.runtime_perf import record_request  # noqa: PLC0415
+        record_request(
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            total_ms=duration_ms,
+            db_ms=db_ms,
+            ai_ms=ai_ms,
+            lock_wait_ms=lock_wait_ms,
+            tenant_id=str(tenant_id),
+        )
+    except Exception:
+        # Telemetry must never affect the response path.
+        pass
+
     return response
 
 

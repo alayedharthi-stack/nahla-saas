@@ -2518,6 +2518,26 @@ async def admin_list_coexistence_requests(
         return _J(status_code=500, content={"detail": "خطأ في تحميل طلبات الربط", "error": str(exc)})
 
 
+# ── Admin: live runtime performance snapshot ────────────────────────────────
+# GET /admin/runtime/perf
+# Read-only, owner-panel only. Returns the live state of:
+#   • background_tasks       — webhook ack-first queue depth + lifetime totals
+#   • requests               — total counter, average duration, top-N slowest
+#                              recent requests with db / ai / lock_wait splits
+#   • conversation_locks     — number tracked + currently held / queued ones
+#   • inbound_dedup          — TTL cache size for the early webhook deduper
+#   • schedulers             — every staggered scheduler with last tick / errors
+# This is the endpoint used by ops to answer "is the worker stuck behind a
+# slow webhook?" without SSH'ing into Railway.
+
+@router.get("/admin/runtime/perf")
+async def admin_runtime_perf(
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    from core.runtime_perf import get_perf_snapshot  # noqa: PLC0415
+    return get_perf_snapshot()
+
+
 # ── Admin: trigger coupon pool generation immediately ────────────────────────
 
 @router.post("/admin/coupons/generate-pool")

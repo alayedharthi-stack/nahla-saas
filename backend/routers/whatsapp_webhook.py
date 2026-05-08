@@ -287,14 +287,22 @@ async def whatsapp_verify(
 
 @router.post("/webhook/whatsapp")
 async def whatsapp_incoming(request: Request):
+    """
+    Ack-first endpoint for the legacy Meta-direct webhook.
+
+    Returns 200 OK as soon as the JSON body is parsed; the AI / state
+    processing pipeline runs in a tracked background task. This guarantees
+    the worker is never blocked for >12 s on a single inbound message and
+    means /auth/login and /healthz stay responsive even under burst load.
+    Idempotency is already handled by core.inbound_dedup so the upstream
+    provider can retry safely while we hold the previous turn.
+    """
     try:
         body: Dict[str, Any] = await request.json()
     except Exception:
         return {"status": "ok"}
-    try:
-        await _handle_whatsapp_body(body)
-    except Exception as exc:
-        logger.error("[Webhook] Unhandled error: %s", exc, exc_info=True)
+    from core.runtime_perf import spawn_background  # noqa: PLC0415
+    spawn_background(_handle_whatsapp_body(body), name="webhook_meta")
     return {"status": "ok"}
 
 
@@ -311,14 +319,17 @@ async def whatsapp_incoming(request: Request):
 
 @router.post("/webhook/whatsapp/360dialog")
 async def whatsapp_incoming_360dialog(request: Request):
+    """Ack-first 360dialog channel webhook — see ack-first design note above."""
     try:
         body: Dict[str, Any] = await request.json()
     except Exception:
         return {"status": "ok"}
-    try:
-        await _handle_360dialog_body(body, request, scope="any")
-    except Exception as exc:
-        logger.error("[Webhook360] Unhandled error: %s", exc, exc_info=True)
+    headers = _capture_webhook_headers(request)
+    from core.runtime_perf import spawn_background  # noqa: PLC0415
+    spawn_background(
+        _handle_360dialog_body(body, headers, scope="any"),
+        name="webhook_360dialog_any",
+    )
     return {"status": "ok"}
 
 
@@ -334,14 +345,17 @@ async def whatsapp_incoming_360dialog(request: Request):
 
 @router.post("/webhook/whatsapp/360dialog/coexistence")
 async def whatsapp_incoming_360dialog_coexistence(request: Request):
+    """Ack-first 360dialog Coexistence webhook — see ack-first design note above."""
     try:
         body: Dict[str, Any] = await request.json()
     except Exception:
         return {"status": "ok"}
-    try:
-        await _handle_360dialog_body(body, request, scope="coexistence")
-    except Exception as exc:
-        logger.error("[Webhook360/coexistence] Unhandled error: %s", exc, exc_info=True)
+    headers = _capture_webhook_headers(request)
+    from core.runtime_perf import spawn_background  # noqa: PLC0415
+    spawn_background(
+        _handle_360dialog_body(body, headers, scope="coexistence"),
+        name="webhook_360dialog_coexistence",
+    )
     return {"status": "ok"}
 
 
@@ -352,15 +366,30 @@ async def whatsapp_incoming_360dialog_coexistence(request: Request):
 
 @router.post("/webhook/whatsapp/360dialog/status")
 async def whatsapp_incoming_360dialog_status(request: Request):
+    """Ack-first 360dialog Status/Health webhook — see ack-first design note above."""
     try:
         body: Dict[str, Any] = await request.json()
     except Exception:
         return {"status": "ok"}
-    try:
-        await _handle_360dialog_body(body, request, scope="status")
-    except Exception as exc:
-        logger.error("[Webhook360/status] Unhandled error: %s", exc, exc_info=True)
+    headers = _capture_webhook_headers(request)
+    from core.runtime_perf import spawn_background  # noqa: PLC0415
+    spawn_background(
+        _handle_360dialog_body(body, headers, scope="status"),
+        name="webhook_360dialog_status",
+    )
     return {"status": "ok"}
+
+
+# ── Internal helper: snapshot the headers we care about ────────────────────
+# We pull them from the live `Request` BEFORE spawning the background task
+# because Starlette will tear the request down once the response is sent.
+# All downstream code only reads two headers (the coexistence shared secret
+# + the incoming user-agent for diagnostics), so a tiny dict is enough.
+def _capture_webhook_headers(request: Request) -> Dict[str, str]:
+    return {
+        "x_nahla_coexistence_secret": request.headers.get("X-Nahla-Coexistence-Secret", ""),
+        "user_agent":                 request.headers.get("user-agent", ""),
+    }
 
 
 # ── Field classification ────────────────────────────────────────────────────
@@ -492,7 +521,7 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
 
 async def _handle_360dialog_body(
     body: Dict[str, Any],
-    request: Request,
+    headers: Dict[str, str],
     scope: str = "any",
 ) -> None:
     """Dispatch a 360dialog webhook delivery.
@@ -547,7 +576,7 @@ async def _handle_360dialog_body(
                     logger.warning("[Webhook360] phone_number_id=%s is not dialog360 provider", phone_number_id)
                     continue
                 expected_secret = str((wa_conn.extra_metadata or {}).get("coexistence_internal_secret") or "")
-                provided_secret = request.headers.get("X-Nahla-Coexistence-Secret", "")
+                provided_secret = headers.get("x_nahla_coexistence_secret", "")
                 if expected_secret and provided_secret != expected_secret:
                     logger.warning("[Webhook360] Invalid internal secret tenant=%s", wa_conn.tenant_id)
                     return

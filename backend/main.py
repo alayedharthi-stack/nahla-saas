@@ -570,148 +570,105 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("[Startup] webhook subscription skipped: %s", exc)
 
-    # 3. Background scheduler (billing/subscription checks)
-    try:
-        from core.scheduler import run_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_scheduler())
-        logger.info("Background scheduler started.")
-    except Exception as exc:
-        logger.warning("Scheduler could not start: %s", exc)
+    # ── Staggered scheduler startup ─────────────────────────────────────────
+    # Previously every scheduler was created via asyncio.create_task() at
+    # the same instant, so the first 5–10 s of process life was burnt
+    # importing heavy ORM modules and opening 10+ DB sessions in parallel.
+    # That latency sat directly on top of /healthz and the very first
+    # /auth/login response. We now register each scheduler through
+    # core.runtime_perf.schedule_with_delay(...) so the wall clock is
+    # spread out: hot path schedulers (webhook dispatcher, orders poller)
+    # come up first, latency-tolerant ones (token refresh, coupon pool,
+    # template sync, daily report) sit at the back of the queue. Each
+    # registration is wrapped in its own try/except so an import error
+    # in one scheduler can never take the rest of them down.
+    from core.runtime_perf import schedule_with_delay  # noqa: PLC0415
 
-    # 4. Hourly store sync scheduler
-    try:
-        from core.scheduler import run_store_sync_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_store_sync_scheduler())
-        logger.info("Store sync scheduler started (hourly).")
-    except Exception as exc:
-        logger.warning("Store sync scheduler could not start: %s", exc)
+    def _start(name: str, factory, delay_s: float) -> None:
+        try:
+            schedule_with_delay(factory, name=name, delay_seconds=delay_s)
+            logger.info("[Scheduler] %s queued (delay=%.0fs).", name, delay_s)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Scheduler] %s could not start: %s", name, exc)
 
-    # 4b-i. Dedicated Salla orders poller (every 60s, NEVER stops).
-    # This is the safety-net that guarantees every new order in Salla
-    # appears in Nahla within ~60s and triggers ORDER_NOTIFICATIONS,
-    # even if Salla's webhook for `order.created` is delayed or never
-    # delivered.  Multi-worker safe via Postgres advisory lock.
-    try:
-        from services.salla_orders_poller import (  # noqa: PLC0415
-            run_salla_orders_poller_scheduler,
-        )
-        asyncio.create_task(run_salla_orders_poller_scheduler())
-        logger.info("Salla orders poller started (every 60s, multi-worker safe).")
-    except Exception as exc:
-        logger.warning("Salla orders poller could not start: %s", exc)
-
-    # 4b. Dedicated abandoned-cart scheduler (every 5 min by default).
-    # The hourly full sync above ALSO runs sync_abandoned_carts as part
-    # of full_sync, but 1h is far too slow for a "near real-time"
-    # dashboard. This dedicated loop calls only sync_abandoned_carts
-    # per active Salla integration so merchants see new carts within
-    # minutes — not after the next full sync. Webhook ingestion (in
-    # core/webhook_dispatcher) remains the seconds-latency primary
-    # path; this loop is the reconciliation safety net.
-    try:
-        from core.abandoned_cart_scheduler import (  # noqa: PLC0415
-            run_abandoned_cart_scheduler, INTERVAL_SECONDS as _AC_INT,
-        )
-        asyncio.create_task(run_abandoned_cart_scheduler())
-        logger.info(
-            "Abandoned-cart scheduler started (every %ds).", _AC_INT,
-        )
-    except Exception as exc:
-        logger.warning("Abandoned-cart scheduler could not start: %s", exc)
-
-    # 5. Coupon pool generator scheduler (every 6h)
-    try:
-        from core.scheduler import run_coupon_generator_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_coupon_generator_scheduler())
-        logger.info("Coupon generator scheduler started (6h).")
-    except Exception as exc:
-        logger.warning("Coupon generator scheduler could not start: %s", exc)
-
-    # 5b. Webhook event dispatcher — drains webhook_events table with FSM + DLQ.
-    # This is the SINGLE async worker that owns all business processing for
-    # inbound webhooks. Receivers (e.g. /webhook/salla) only persist; the
-    # dispatcher does the real work and advances the FSM.
-    try:
+    # Tier 1 (≤ 5s) — critical, time-sensitive paths
+    def _f_dispatcher():
         from core.webhook_dispatcher import run_dispatcher_loop  # noqa: PLC0415
-        asyncio.create_task(run_dispatcher_loop())
-        logger.info("Webhook dispatcher started.")
-    except Exception as exc:
-        logger.warning("Webhook dispatcher could not start: %s", exc)
+        return run_dispatcher_loop()
+    _start("webhook_dispatcher", _f_dispatcher, 2)
 
-    # 6. WhatsApp token auto-refresh (every 12h)
-    try:
-        from core.scheduler import run_wa_token_refresh_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_wa_token_refresh_scheduler())
-        logger.info("WA token refresh scheduler started (12h).")
-    except Exception as exc:
-        logger.warning("WA token refresh scheduler could not start: %s", exc)
+    def _f_salla_poller():
+        from services.salla_orders_poller import run_salla_orders_poller_scheduler  # noqa: PLC0415
+        return run_salla_orders_poller_scheduler()
+    _start("salla_orders_poller", _f_salla_poller, 5)
 
-    try:
-        from core.scheduler import run_salla_token_refresh_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_salla_token_refresh_scheduler())
-        logger.info("Salla token refresh scheduler started (6h).")
-    except Exception as exc:
-        logger.warning("Salla token refresh scheduler could not start: %s", exc)
+    # Tier 2 (≤ 15s) — periodic business loops
+    def _f_scheduler():
+        from core.scheduler import run_scheduler  # noqa: PLC0415
+        return run_scheduler()
+    _start("billing_scheduler", _f_scheduler, 8)
 
-    # 6c. WhatsApp template auto-sync (every 30 min)
-    # Pulls APPROVED/REJECTED status changes from Meta into the local DB so
-    # merchants don't have to click "Sync from Meta" manually. Also auto-binds
-    # newly approved templates to their Nahla service slots.
-    try:
-        from core.scheduler import run_template_sync_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_template_sync_scheduler())
-        logger.info("WhatsApp template sync scheduler started (30min).")
-    except Exception as exc:
-        logger.warning("WhatsApp template sync scheduler could not start: %s", exc)
-
-    try:
-        from core.scheduler import run_campaign_dispatcher_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_campaign_dispatcher_scheduler())
-        logger.info("Campaign dispatcher scheduler started (30s).")
-    except Exception as exc:
-        logger.warning("Campaign dispatcher scheduler could not start: %s", exc)
-
-    # 7. Event-driven automation engine (every 60s)
-    try:
+    def _f_automation_engine():
         from core.scheduler import run_automation_engine_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_automation_engine_scheduler())
-        logger.info("Automation engine scheduler started (60s).")
-    except Exception as exc:
-        logger.warning("Automation engine scheduler could not start: %s", exc)
+        return run_automation_engine_scheduler()
+    _start("automation_engine", _f_automation_engine, 10)
 
-    # 7b. Time-based emitters (unpaid orders / predictive reorder /
-    # calendar-driven seasonal + salary payday). Runs every 5 min and
-    # writes AutomationEvent rows the engine above picks up next cycle.
-    try:
+    def _f_campaign_dispatcher():
+        from core.scheduler import run_campaign_dispatcher_scheduler  # noqa: PLC0415
+        return run_campaign_dispatcher_scheduler()
+    _start("campaign_dispatcher", _f_campaign_dispatcher, 12)
+
+    def _f_abandoned_cart():
+        from core.abandoned_cart_scheduler import run_abandoned_cart_scheduler  # noqa: PLC0415
+        return run_abandoned_cart_scheduler()
+    _start("abandoned_cart", _f_abandoned_cart, 15)
+
+    # Tier 3 (≤ 30s) — periodic syncs / lower-cadence loops
+    def _f_store_sync():
+        from core.scheduler import run_store_sync_scheduler  # noqa: PLC0415
+        return run_store_sync_scheduler()
+    _start("store_sync", _f_store_sync, 20)
+
+    def _f_emitters():
         from core.scheduler import run_automation_emitters_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_automation_emitters_scheduler())
-        logger.info("Automation emitters scheduler started (5min).")
-    except Exception as exc:
-        logger.warning("Automation emitters scheduler could not start: %s", exc)
+        return run_automation_emitters_scheduler()
+    _start("automation_emitters", _f_emitters, 25)
 
-    # 8. Webhook Guardian — stall detection + auto-resubscription (every 5 min)
-    try:
+    def _f_webhook_guardian():
         from core.scheduler import run_webhook_guardian_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_webhook_guardian_scheduler())
-        logger.info("Webhook Guardian started (5min interval).")
-    except Exception as exc:
-        logger.warning("Webhook Guardian could not start: %s", exc)
+        return run_webhook_guardian_scheduler()
+    _start("webhook_guardian", _f_webhook_guardian, 30)
 
-    # Daily report email scheduler
-    try:
+    # Tier 4 (≤ 60s) — slow housekeeping
+    def _f_template_sync():
+        from core.scheduler import run_template_sync_scheduler  # noqa: PLC0415
+        return run_template_sync_scheduler()
+    _start("template_sync", _f_template_sync, 40)
+
+    def _f_wa_refresh():
+        from core.scheduler import run_wa_token_refresh_scheduler  # noqa: PLC0415
+        return run_wa_token_refresh_scheduler()
+    _start("wa_token_refresh", _f_wa_refresh, 45)
+
+    def _f_salla_refresh():
+        from core.scheduler import run_salla_token_refresh_scheduler  # noqa: PLC0415
+        return run_salla_token_refresh_scheduler()
+    _start("salla_token_refresh", _f_salla_refresh, 50)
+
+    def _f_coupon_pool():
+        from core.scheduler import run_coupon_generator_scheduler  # noqa: PLC0415
+        return run_coupon_generator_scheduler()
+    _start("coupon_pool", _f_coupon_pool, 55)
+
+    def _f_daily_report():
         from core.scheduler import run_daily_report_scheduler  # noqa: PLC0415
-        asyncio.create_task(run_daily_report_scheduler())
-        logger.info("Daily report email scheduler started (sends at 08:00 KSA).")
-    except Exception as exc:
-        logger.warning("Daily report scheduler could not start: %s", exc)
+        return run_daily_report_scheduler()
+    _start("daily_report", _f_daily_report, 60)
 
-    # 9. Startup webhook health check — verify all merchant WABAs are subscribed
-    try:
+    def _f_startup_health():
         from core.webhook_guardian import run_startup_webhook_health_check  # noqa: PLC0415
-        asyncio.create_task(run_startup_webhook_health_check())
-        logger.info("Startup webhook health check scheduled.")
-    except Exception as exc:
-        logger.warning("Startup webhook health check could not start: %s", exc)
+        return run_startup_webhook_health_check()
+    _start("startup_webhook_health", _f_startup_health, 35)
 
     # 10. Post-deploy tenant integrity scan — detects cross-tenant conflicts
     async def _run_integrity_check():

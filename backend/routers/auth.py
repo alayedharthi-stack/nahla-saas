@@ -141,7 +141,13 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
             bool(user and getattr(user, "password_hash", None)),
         )
         if user and getattr(user, "password_hash", None):
-            if verify_password(body.password, user.password_hash):
+            # bcrypt is CPU-bound (deliberately ~50–200 ms per call). Running
+            # it inline in this async handler blocks the event loop, which
+            # under any concurrent traffic delays /healthz, /auth/login, and
+            # webhook acks. asyncio.to_thread punts the work to the default
+            # thread executor so the loop stays free.
+            import asyncio as _asyncio  # noqa: PLC0415
+            if await _asyncio.to_thread(verify_password, body.password, user.password_hash):
                 role = user.role or "merchant"
                 logger.info("[AUTH LOGIN] password verified email=%s role=%s", email, role)
 
