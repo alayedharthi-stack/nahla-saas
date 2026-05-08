@@ -26,7 +26,9 @@ async def _probe(request):
     )
 
 
-app = Starlette(
+# Inner Starlette graph — wrapped so browser GET shows up as RAW_SCOPE in logs
+# even though this module does not import backend.main (no FastAPI wrapper).
+_STARLETTE_APPLICATION = Starlette(
     debug=False,
     routes=[
         Route("/", _probe),
@@ -35,3 +37,15 @@ app = Starlette(
         Route("/auth/ping", _probe),
     ],
 )
+
+
+async def app(scope, receive, send):  # noqa: A001 — uvicorn entrypoint name
+    if scope.get("type") == "http":
+        print(
+            "RAW_SCOPE",
+            scope.get("type"),
+            scope.get("method"),
+            scope.get("path"),
+            flush=True,
+        )
+    await _STARLETTE_APPLICATION(scope, receive, send)

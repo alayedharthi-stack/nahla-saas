@@ -1132,19 +1132,20 @@ async def on_startup() -> None:
 def _raw_asgi_should_log(scope: dict) -> bool:
     """Outbound diagnostic before FastAPI. Controlled by NAHLA_RAW_ASGI_LOG.
 
-    * unset / ``get`` — log only GET + HEAD (default; avoids webhook spam).
-    * ``all`` / ``1`` / ``true`` — log every HTTP request.
-    * ``0`` / ``false`` / ``off`` — disable.
+    * **unset / ``0`` / ``off``** — disabled (default; quiet production logs).
+    * ``get`` — log only GET + HEAD (cheap probe for browser vs webhook).
+    * ``all`` / ``1`` / ``true`` — log every HTTP request (noisy).
     """
     if scope.get("type") != "http":
         return False
-    raw = os.environ.get("NAHLA_RAW_ASGI_LOG", "get").strip().lower()
-    if raw in ("0", "false", "off", "no"):
+    raw = os.environ.get("NAHLA_RAW_ASGI_LOG", "").strip().lower()
+    if raw in ("", "0", "false", "off", "no"):
         return False
     if raw in ("1", "true", "yes", "all"):
         return True
-    # default mode: GET probes only
-    return scope.get("method") in ("GET", "HEAD")
+    if raw == "get":
+        return scope.get("method") in ("GET", "HEAD")
+    return False
 
 
 # ── Outermost ASGI wrapper (edge / Railway diagnostics) ───────────────────────
