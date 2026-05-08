@@ -281,7 +281,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Nahla-Error-Code", "X-Nahla-Error-Type"],
+    expose_headers=["X-Nahla-Error-Code", "X-Nahla-Error-Type", "X-Fast-Path"],
 )
 
 

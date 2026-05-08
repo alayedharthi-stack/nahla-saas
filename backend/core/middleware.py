@@ -34,6 +34,7 @@ logger = logging.getLogger("nahla-backend")
 # Webhook paths are matched by prefix (``/webhook/``) further below;
 # only exact-match liveness/login paths live here.
 ULTRA_LIGHT_PATHS = frozenset({
+    "/",
     "/alive",
     "/healthz",
     "/auth/ping",

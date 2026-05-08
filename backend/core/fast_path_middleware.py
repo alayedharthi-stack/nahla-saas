@@ -45,17 +45,26 @@ single dict, and ``time.time()`` is the only syscall on the hot path.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import time
 from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple
 
 logger = logging.getLogger("nahla-backend.fast_path")
+
+# Some reverse proxies / HTTP/2 edge stacks deliver ``receive()`` late or
+# never for GET + empty-body probes. An unbounded ``await receive()`` then
+# freezes the connection from the browser's perspective (0 bytes) even
+# though POST webhooks on other paths work fine. Cap each ``receive()`` wait.
+_FASTPATH_RECV_TIMEOUT = float(os.environ.get("NAHLA_FASTPATH_RECEIVE_TIMEOUT", "3.0"))
 
 
 # Default routes served from the fast path. Keep this list short and
 # obvious — anything that needs DB / JWT / business logic does NOT
 # belong here.
 DEFAULT_FAST_PATHS: Tuple[str, ...] = (
+    "/",  # probes / misconfigured health checks hitting the bare host
     "/alive",
     "/healthz",
     "/auth/ping",
@@ -110,45 +119,39 @@ class FastPathMiddleware:
             return
 
         # ── Synthesize the response ─────────────────────────────────────
-        # We don't read the request body — these are GETs. We DO have
-        # to call ``receive`` once if the client uploaded anything (it
-        # shouldn't for a GET), so we drain a single message just in
-        # case. This keeps the connection state consistent for HTTP/2
-        # implementations that wait for the whole request before
-        # closing.
+        # Best-effort drain of the ASGI request stream. MUST NOT block
+        # indefinitely — see module-level comment on _FASTPATH_RECV_TIMEOUT.
+        async def _recv_once():
+            return await asyncio.wait_for(receive(), timeout=_FASTPATH_RECV_TIMEOUT)
+
         try:
-            # Drain any body messages that may already be queued. We
-            # don't block on additional ones — a GET should have an
-            # empty body that arrives as a single ``http.request`` with
-            # ``more_body=False``.
-            msg = await receive()
-            # If somehow more body chunks are coming, drain politely.
+            msg = await _recv_once()
             while msg.get("more_body", False):
-                msg = await receive()
+                msg = await _recv_once()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[FastPath] receive timeout (%.1fs) path=%s — sending response anyway",
+                _FASTPATH_RECV_TIMEOUT,
+                path,
+            )
         except Exception as exc:  # noqa: BLE001
-            # If receive() blows up (very rare; usually means the
-            # connection died), still try to send the response —
-            # Starlette tolerates send-after-receive-error in our
-            # tests. Worst case the client never gets it, which is
-            # exactly what would have happened with the old chain.
             logger.warning("[FastPath] receive() failed on %s: %s", path, exc)
 
-        body = _orjson_dumps({"ok": True, "ts": time.time(), "service": "fast-path"})
+        payload = {"ok": True, "ts": time.time(), "service": "fast-path"}
+        body = _orjson_dumps(payload)
+        is_head = method == "HEAD"
+        # RFC 9110: HEAD uses same headers as GET but no message body.
+        hdrs = [
+            (b"content-type", b"application/json"),
+            (b"cache-control", b"no-store"),
+            (b"x-fast-path", b"1"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ]
         try:
-            await send({
-                "type":    "http.response.start",
-                "status":  200,
-                "headers": [
-                    (b"content-type",   b"application/json"),
-                    (b"cache-control",  b"no-store"),
-                    # Hint to upstream proxies that this is a hot path
-                    # and should never be coalesced or buffered.
-                    (b"x-fast-path",    b"1"),
-                ],
-            })
+            await send({"type": "http.response.start", "status": 200, "headers": hdrs})
             await send({
                 "type":      "http.response.body",
-                "body":      body,
+                "body":      b"" if is_head else body,
                 "more_body": False,
             })
         except Exception as exc:  # noqa: BLE001
