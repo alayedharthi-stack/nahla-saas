@@ -1,5 +1,12 @@
 import { apiCall } from './client'
 
+export interface CoexistenceIntegrationCompleteness {
+  truly_connected: boolean
+  reason_code: string | null
+  missing_fields: string[]
+  db_status?: string | null
+}
+
 export interface CoexistenceRequest {
   tenant_id: number
   tenant_name: string | null
@@ -15,11 +22,16 @@ export interface CoexistenceRequest {
   has_whatsapp_business_app: boolean | null
   phone_number_id: string | null
   waba_id: string | null
+  channel_id: string | null
+  client_id: string | null
+  has_api_key: boolean
   last_attempt_at: string | null
   last_error: string | null
   sending_enabled: boolean
   webhook_verified: boolean
   connected_at: string | null
+  integration_complete: CoexistenceIntegrationCompleteness
+  webhooks: CoexistenceWebhookBlock
 }
 
 export interface CoexistenceActivatePayload {
@@ -425,5 +437,58 @@ export const adminApi = {
     apiCall<CoexistenceAutoConfigureResult>('/whatsapp/admin/coexistence/auto-configure', {
       method: 'POST',
       body: JSON.stringify({ tenant_id: tenantId }),
+    }),
+
+  /**
+   * Sync / Repair Integration Record.
+   * Re-reads channel metadata from 360dialog (Partner API + per-tenant API
+   * key) and fills any missing fields on the WhatsApp connection record so
+   * the merchant page stops reporting `missing_waba_id`.
+   */
+  syncCoexistenceRecord: (tenantId: number) =>
+    apiCall<{
+      tenant_id: number
+      request_id: string
+      before: CoexistenceIntegrationCompleteness
+      after: CoexistenceIntegrationCompleteness
+      resolved: {
+        waba_id: string | null
+        phone_number_id: string | null
+        phone_number: string | null
+        display_name: string | null
+        channel_status: string | null
+        sources: string[]
+        errors: Record<string, string>
+      }
+      integration_complete: CoexistenceIntegrationCompleteness
+    }>('/whatsapp/admin/coexistence/sync-record', {
+      method: 'POST',
+      body: JSON.stringify({ tenant_id: tenantId }),
+    }),
+
+  /**
+   * Manual edit of any field on the integration record (WABA ID, channel ID,
+   * phone number id, API key, …). Only fields explicitly provided are
+   * touched.
+   */
+  editCoexistenceRecord: (payload: {
+    tenant_id: number
+    waba_id?: string | null
+    phone_number_id?: string | null
+    phone_number?: string | null
+    channel_id?: string | null
+    client_id?: string | null
+    api_key?: string | null
+    display_name?: string | null
+    promote_to_connected?: boolean
+  }) =>
+    apiCall<{
+      tenant_id: number
+      request_id: string
+      changed: string[]
+      integration_complete: CoexistenceIntegrationCompleteness
+    }>('/whatsapp/admin/coexistence/edit-record', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
 }

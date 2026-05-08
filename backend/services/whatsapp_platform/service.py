@@ -509,6 +509,157 @@ async def dialog360_get_channel_info(
         return {"raw": resp.text}
 
 
+async def dialog360_resolve_channel_metadata(
+    *,
+    api_key: str,
+    phone_number_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    partner_id: Optional[str] = None,
+    timeout: float = 15,
+) -> Dict[str, Any]:
+    """Best-effort resolver for missing 360dialog channel metadata.
+
+    Calls every reasonable 360dialog endpoint we have credentials for and
+    merges the results into a single normalised payload:
+
+        {
+          "waba_id":         str | None,
+          "phone_number_id": str | None,
+          "phone_number":    str | None,
+          "display_name":    str | None,
+          "channel_status":  str | None,
+          "sources":         [str, ...],   # which endpoints contributed
+          "errors":          {endpoint: error_msg},
+          "raw":             {endpoint: raw response},
+        }
+
+    Resolution sources, in priority order:
+
+      1. **Partner API** (`hub.360dialog.com/api/v2/partners/.../channels/...`)
+         — Most authoritative when we have D360_PARTNER_API_KEY + channel_id.
+         Returns waba_id, phone_number, status, etc.
+      2. **Channel API: GET /v1/configs** with the per-tenant `D360-API-KEY`
+         — Returns webhook config + sometimes ``on_behalf_of_business_info``
+         and the channel's own phone metadata.
+      3. **Phone object endpoint**: ``GET /<phone_number_id>`` against the
+         WABA-V2 host using the api_key as a Meta-style bearer. 360dialog's
+         WABA-V2 cluster mirrors Meta Cloud API for this path and returns
+         ``display_phone_number`` + ``verified_name`` when the channel is
+         active.
+
+    The caller decides what to persist; the resolver itself is read-only."""
+    out: Dict[str, Any] = {
+        "waba_id":         None,
+        "phone_number_id": phone_number_id,
+        "phone_number":    None,
+        "display_name":    None,
+        "channel_status":  None,
+        "sources":         [],
+        "errors":          {},
+        "raw":             {},
+    }
+
+    if not api_key and not (partner_id and channel_id):
+        out["errors"]["resolver"] = "no credentials available"
+        return out
+
+    # ── 1. Partner API ─────────────────────────────────────────────────
+    if partner_id and channel_id and D360_PARTNER_API_KEY:
+        try:
+            info = await dialog360_get_channel_info(partner_id=partner_id, channel_id=channel_id)
+            out["raw"]["partner"] = info
+            if isinstance(info, dict) and "error" not in info:
+                out["waba_id"]        = out["waba_id"] or info.get("waba_id") or info.get("waba_account_id")
+                out["phone_number"]   = out["phone_number"] or info.get("phone_number") or info.get("phone")
+                out["display_name"]   = out["display_name"] or info.get("name") or info.get("verified_name")
+                out["channel_status"] = out["channel_status"] or info.get("status")
+                out["sources"].append("partner")
+            elif isinstance(info, dict) and "error" in info:
+                out["errors"]["partner"] = str(info.get("error"))[:200]
+        except Exception as exc:
+            out["errors"]["partner"] = f"{type(exc).__name__}: {exc}"[:200]
+
+    # ── 2. Channel-level GET /v1/configs ───────────────────────────────
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(
+                    f"{D360_BASE}/v1/configs",
+                    headers={"D360-API-KEY": api_key},
+                )
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {"raw": resp.text}
+            out["raw"]["v1_configs"] = {"status_code": resp.status_code, "body": data}
+            if 200 <= resp.status_code < 300 and isinstance(data, dict):
+                # 360dialog mixes flat + nested shapes across product
+                # versions. Probe both.
+                obo = data.get("on_behalf_of_business_info") or {}
+                phone = data.get("phone") or data.get("phone_number") or {}
+                out["waba_id"] = (
+                    out["waba_id"]
+                    or data.get("waba_id")
+                    or data.get("waba_account_id")
+                    or obo.get("waba_id")
+                    or obo.get("id")
+                )
+                out["phone_number_id"] = (
+                    out["phone_number_id"]
+                    or data.get("phone_number_id")
+                    or (phone.get("id") if isinstance(phone, dict) else None)
+                )
+                out["phone_number"] = (
+                    out["phone_number"]
+                    or data.get("display_phone_number")
+                    or (phone.get("display_phone_number") if isinstance(phone, dict) else None)
+                )
+                out["display_name"] = (
+                    out["display_name"]
+                    or data.get("verified_name")
+                    or (phone.get("verified_name") if isinstance(phone, dict) else None)
+                )
+                out["sources"].append("v1_configs")
+            elif resp.status_code >= 400:
+                out["errors"]["v1_configs"] = f"http_{resp.status_code}: {str(data)[:200]}"
+        except Exception as exc:
+            out["errors"]["v1_configs"] = f"{type(exc).__name__}: {exc}"[:200]
+
+    # ── 3. Phone object endpoint (WABA-V2 / Cloud API parity) ──────────
+    pnid = out["phone_number_id"]
+    if api_key and pnid:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(
+                    f"{D360_BASE}/{pnid}",
+                    headers={"D360-API-KEY": api_key},
+                    params={"fields": "id,display_phone_number,verified_name,quality_rating,whatsapp_business_account"},
+                )
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {"raw": resp.text}
+            out["raw"]["phone_object"] = {"status_code": resp.status_code, "body": data}
+            if 200 <= resp.status_code < 300 and isinstance(data, dict):
+                wba = data.get("whatsapp_business_account") or {}
+                out["waba_id"]      = out["waba_id"] or (wba.get("id") if isinstance(wba, dict) else None)
+                out["phone_number"] = out["phone_number"] or data.get("display_phone_number")
+                out["display_name"] = out["display_name"] or data.get("verified_name")
+                out["sources"].append("phone_object")
+            elif resp.status_code >= 400:
+                out["errors"]["phone_object"] = f"http_{resp.status_code}: {str(data)[:200]}"
+        except Exception as exc:
+            out["errors"]["phone_object"] = f"{type(exc).__name__}: {exc}"[:200]
+
+    logger.info(
+        "[D360 resolver] phone_number_id=%s channel_id=%s sources=%s errors=%s "
+        "→ waba=%s phone=%s name=%s",
+        phone_number_id, channel_id, out["sources"], list(out["errors"].keys()),
+        out["waba_id"], out["phone_number"], out["display_name"],
+    )
+    return out
+
+
 async def fetch_meta_phone_tier(
     conn: Any,
     ctx: WhatsAppTokenContext,

@@ -2468,6 +2468,16 @@ async def admin_list_coexistence_requests(
                 )
                 coex_meta = dict((conn.extra_metadata or {}).get("coexistence") or {})
                 request_data = dict(coex_meta.get("request") or {})
+                provider_details = dict((conn.extra_metadata or {}).get("provider_details") or {})
+
+                # Reuse the integration-completeness rule the merchant page
+                # consumes so the admin list cannot disagree with it.
+                from routers.whatsapp_connect import (  # noqa: PLC0415
+                    _coexistence_integration_complete,
+                    _coexistence_webhook_block,
+                )
+                completeness = _coexistence_integration_complete(conn)
+
                 rows.append({
                     "tenant_id":          conn.tenant_id,
                     "tenant_name":        tenant.name if tenant else None,
@@ -2483,11 +2493,19 @@ async def admin_list_coexistence_requests(
                     "has_whatsapp_business_app": request_data.get("has_whatsapp_business_app"),
                     "phone_number_id":    conn.phone_number_id,
                     "waba_id":            conn.whatsapp_business_account_id,
+                    "channel_id":         provider_details.get("channel_id"),
+                    "client_id":          provider_details.get("client_id"),
+                    # Never expose the API key — only whether it is stored.
+                    "has_api_key":        bool(conn.access_token),
                     "last_attempt_at":    conn.last_attempt_at.isoformat() if conn.last_attempt_at else None,
                     "last_error":         conn.last_error,
                     "sending_enabled":    bool(conn.sending_enabled),
                     "webhook_verified":   bool(conn.webhook_verified),
                     "connected_at":       conn.connected_at.isoformat() if conn.connected_at else None,
+                    # Authoritative completeness summary — same rule the
+                    # merchant page uses to render its red/green banner.
+                    "integration_complete": completeness,
+                    "webhooks":           _coexistence_webhook_block(conn),
                 })
             except Exception as row_exc:
                 logger.warning("[admin/coexistence] row error tenant=%s: %s", getattr(conn, "tenant_id", "?"), row_exc)

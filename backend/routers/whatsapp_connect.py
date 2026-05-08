@@ -70,6 +70,7 @@ from services.whatsapp_platform.service import (
     dialog360_configure_webhook,
     dialog360_generate_api_key,
     dialog360_get_channel_info,
+    dialog360_resolve_channel_metadata,
 )
 
 logger = logging.getLogger("nahla-backend")
@@ -222,6 +223,104 @@ def _set_coexistence_state(
     flag_modified(conn, "extra_metadata")
 
 
+def _coexistence_integration_complete(conn: Optional[WhatsAppConnection]) -> Dict[str, Any]:
+    """Single source of truth for "is the Coexistence integration record complete
+    enough that the merchant page should show it as truly connected?".
+
+    Returns the same `truly_connected / reason_code` shape as the merchant
+    `/connection/live-verify` endpoint, but computed from the DB record only —
+    cheap and identical for both the owner panel and the merchant page so
+    they cannot disagree."""
+    if not conn:
+        return {"truly_connected": False, "reason_code": "no_record",
+                "missing_fields": ["whatsapp_connection"]}
+
+    missing: list[str] = []
+    if not conn.whatsapp_business_account_id:
+        missing.append("waba_id")
+    if not conn.phone_number_id:
+        missing.append("phone_number_id")
+    if not conn.access_token:
+        missing.append("api_key")
+    if not conn.phone_number:
+        missing.append("phone_number")
+
+    if conn.status not in ("connected", "pending_activation", "review_pending"):
+        return {
+            "truly_connected": False,
+            "reason_code": "status_invalid",
+            "missing_fields": missing,
+            "db_status": conn.status,
+        }
+
+    if missing:
+        # Highest-priority missing field gets the canonical reason code so the
+        # merchant page banner reads the same way it always has.
+        priority = ["api_key", "phone_number_id", "waba_id", "phone_number"]
+        first = next((f for f in priority if f in missing), missing[0])
+        code_by_field = {
+            "api_key":         "missing_token",
+            "phone_number_id": "missing_phone_id",
+            "waba_id":         "missing_waba_id",
+            "phone_number":    "missing_phone_number",
+        }
+        return {
+            "truly_connected": False,
+            "reason_code": code_by_field.get(first, "incomplete"),
+            "missing_fields": missing,
+            "db_status": conn.status,
+        }
+
+    return {
+        "truly_connected": conn.status == "connected" and bool(conn.sending_enabled),
+        "reason_code": None if (conn.status == "connected" and conn.sending_enabled) else "not_active",
+        "missing_fields": [],
+        "db_status": conn.status,
+    }
+
+
+def _log_integration_state(
+    conn: Optional[WhatsAppConnection],
+    *,
+    tenant_id: int,
+    source: str,
+    request_id: Optional[str] = None,
+) -> None:
+    """Emit a single structured `[coexistence_state]` log line.
+
+    `source` identifies which code path produced this snapshot
+    (admin_activate, admin_sync, admin_edit, status_endpoint, ...). The
+    log shape is intentionally machine-readable — Railway / Datadog can
+    grep it without parsing the message body."""
+    if conn is None:
+        logger.info(
+            "[coexistence_state] tenant_id=%s source=%s request_id=%s "
+            "integration_id=missing record=absent",
+            tenant_id, source, request_id or "-",
+        )
+        return
+    completeness = _coexistence_integration_complete(conn)
+    logger.info(
+        "[coexistence_state] tenant_id=%s source=%s request_id=%s "
+        "integration_id=%s provider=%s connection_type=%s status=%s "
+        "waba_id=%s phone_number_id=%s phone_number=%s api_key=%s "
+        "channel_id=%s client_id=%s sending_enabled=%s webhook_verified=%s "
+        "truly_connected=%s reason=%s missing=%s",
+        tenant_id, source, request_id or "-",
+        conn.id,
+        conn.provider, conn.connection_type, conn.status,
+        "present" if conn.whatsapp_business_account_id else "missing",
+        "present" if conn.phone_number_id else "missing",
+        "present" if conn.phone_number else "missing",
+        "present" if conn.access_token else "missing",
+        "present" if (conn.extra_metadata or {}).get("provider_details", {}).get("channel_id") else "missing",
+        "present" if (conn.extra_metadata or {}).get("provider_details", {}).get("client_id") else "missing",
+        bool(conn.sending_enabled), bool(conn.webhook_verified),
+        completeness["truly_connected"], completeness.get("reason_code"),
+        ",".join(completeness.get("missing_fields") or []) or "-",
+    )
+
+
 def _coexistence_status_payload(conn: Optional[WhatsAppConnection]) -> dict:
     base = _build_wa_status(conn)
     state = _coexistence_state(conn)
@@ -244,6 +343,12 @@ def _coexistence_status_payload(conn: Optional[WhatsAppConnection]) -> dict:
         "last_coexistence_events_by_category": state.get("last_event_by_category") or {},
         "last_status_event":           (state.get("status") or {}).get("last_event")
                                        if isinstance(state.get("status"), dict) else None,
+        # ── Authoritative completeness summary ────────────────────────────
+        # The merchant page banner ("WABA ID مفقود — يرجى إعادة الربط") and
+        # the owner panel must derive the same verdict from the same fields.
+        # We expose it here so /whatsapp/status callers don't have to
+        # re-implement the rule.
+        "integration_complete":        _coexistence_integration_complete(conn),
     })
     return base
 
@@ -1322,6 +1427,7 @@ async def admin_activate_coexistence(
     db: Session = Depends(get_db),
     _admin: Dict[str, object] = Depends(require_admin),
 ):
+    request_id = secrets.token_hex(6)
     conn = _get_or_create_connection(db, body.tenant_id)
     _ensure_coexistence_allowed(db, body.tenant_id)
 
@@ -1378,10 +1484,254 @@ async def admin_activate_coexistence(
             conn.connected_at = datetime.now(timezone.utc)
             _set_coexistence_state(conn, status="connected")
 
+    # ── Auto-resolve missing WABA ID / phone metadata at activation time ──
+    # The activation form treats waba_id as optional ("الحقول الاختيارية")
+    # because operators usually only have the API key + phone_number_id at
+    # hand. Without WABA ID the merchant page would (correctly) refuse to
+    # claim the integration is healthy — see `_coexistence_integration_complete`.
+    # We try every 360dialog read endpoint we have credentials for and merge
+    # whatever we discover into the record. Failures are logged but never
+    # block activation: the operator can always run "Sync / Repair" later.
+    completeness = _coexistence_integration_complete(conn)
+    if not completeness["truly_connected"] and completeness.get("missing_fields"):
+        try:
+            await _resolve_and_apply_metadata(conn, request_id=request_id, source="activate")
+        except Exception as exc:
+            logger.warning("[coexistence/activate] auto-resolve failed tenant=%s err=%s", body.tenant_id, exc)
+
     db.commit()
+    _log_integration_state(conn, tenant_id=body.tenant_id, source="admin_activate", request_id=request_id)
+
     return {
         "status": conn.status,
         "webhook_result": webhook_result,
+        "request_id": request_id,
+        **_coexistence_status_payload(conn),
+    }
+
+
+# ── Resolver helper: pulls fresh metadata from 360dialog and persists it ────
+async def _resolve_and_apply_metadata(
+    conn: WhatsAppConnection,
+    *,
+    request_id: str,
+    source: str,
+) -> Dict[str, Any]:
+    """Call the 360dialog metadata resolver and apply any discovered fields
+    to ``conn`` in place. Returns the raw resolver payload for the caller
+    to surface to the operator.
+
+    Existing values on the record win — we only fill MISSING fields, so
+    this is safe to call repeatedly without losing manual overrides."""
+    api_key = conn.access_token
+    pnid = conn.phone_number_id
+    channel_id = (conn.extra_metadata or {}).get("provider_details", {}).get("channel_id")
+    if not channel_id:
+        # Pre-2026 tenants stored channel_id directly as phone_number_id; use
+        # that as the partner-API channel reference.
+        channel_id = pnid
+
+    resolved = await dialog360_resolve_channel_metadata(
+        api_key=api_key or "",
+        phone_number_id=pnid,
+        channel_id=channel_id,
+        partner_id=D360_PARTNER_ID or None,
+    )
+
+    if resolved.get("waba_id") and not conn.whatsapp_business_account_id:
+        conn.whatsapp_business_account_id = resolved["waba_id"]
+    if resolved.get("phone_number_id") and not conn.phone_number_id:
+        conn.phone_number_id = resolved["phone_number_id"]
+    if resolved.get("phone_number") and not conn.phone_number:
+        conn.phone_number = resolved["phone_number"]
+    if resolved.get("display_name") and not conn.business_display_name:
+        conn.business_display_name = resolved["display_name"]
+
+    meta = dict(conn.extra_metadata or {})
+    coex = dict(meta.get("coexistence") or {})
+    coex["last_resolver"] = {
+        "at":      datetime.now(timezone.utc).isoformat(),
+        "source":  source,
+        "request_id": request_id,
+        "sources_used": resolved.get("sources") or [],
+        "errors":  resolved.get("errors") or {},
+    }
+    meta["coexistence"] = coex
+    conn.extra_metadata = meta
+    flag_modified(conn, "extra_metadata")
+
+    logger.info(
+        "[coexistence/resolver] tenant=%s source=%s request_id=%s sources_used=%s "
+        "filled_waba=%s filled_phone=%s filled_pnid=%s",
+        conn.tenant_id, source, request_id, resolved.get("sources"),
+        bool(resolved.get("waba_id")), bool(resolved.get("phone_number")),
+        bool(resolved.get("phone_number_id")),
+    )
+    return resolved
+
+
+# ── Admin: Sync / Repair Integration Record ─────────────────────────────────
+# Re-reads channel metadata from 360dialog (Partner API + per-tenant API key)
+# and fills the integration record. Use this when activation finished without
+# a WABA ID, or when the merchant page reports `missing_waba_id`.
+
+@router.post("/admin/coexistence/sync-record")
+async def admin_coexistence_sync_record(
+    body: _TenantOnly,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, object] = Depends(require_admin),
+):
+    request_id = secrets.token_hex(6)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=body.tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد سجل واتساب لهذا المتجر")
+    if _wa_provider(conn) != WHATSAPP_PROVIDER_360DIALOG:
+        raise HTTPException(status_code=400, detail="هذا التاجر ليس على 360dialog")
+
+    before = _coexistence_integration_complete(conn)
+    resolved = await _resolve_and_apply_metadata(conn, request_id=request_id, source="admin_sync")
+
+    # If everything is now present, promote the record to `connected` so the
+    # merchant page no longer shows the "غير متصل فعليًا" banner.
+    after = _coexistence_integration_complete(conn)
+    if after["truly_connected"]:
+        conn.status = "connected"
+        conn.sending_enabled = True
+        if not conn.connected_at:
+            conn.connected_at = datetime.now(timezone.utc)
+        _set_coexistence_state(conn, status="connected")
+        conn.last_error = None
+    elif after.get("missing_fields"):
+        conn.last_error = (
+            f"sync_incomplete: missing {', '.join(after['missing_fields'])}"
+        )
+
+    db.commit()
+    _log_integration_state(conn, tenant_id=body.tenant_id, source="admin_sync", request_id=request_id)
+    audit(
+        "admin_coexistence_sync_record",
+        admin=_admin.get("sub") if isinstance(_admin, dict) else None,
+        tenant_id=body.tenant_id,
+        request_id=request_id,
+        before=before,
+        after=after,
+    )
+
+    return {
+        "tenant_id":   body.tenant_id,
+        "request_id":  request_id,
+        "before":      before,
+        "after":       after,
+        "resolved":    {
+            "waba_id":         resolved.get("waba_id"),
+            "phone_number_id": resolved.get("phone_number_id"),
+            "phone_number":    resolved.get("phone_number"),
+            "display_name":    resolved.get("display_name"),
+            "channel_status":  resolved.get("channel_status"),
+            "sources":         resolved.get("sources") or [],
+            "errors":          resolved.get("errors") or {},
+        },
+        "integration_complete": after,
+        **_coexistence_status_payload(conn),
+    }
+
+
+# ── Admin: manual edit of the integration record ────────────────────────────
+# Lets the operator override any of the canonical fields — used when 360dialog
+# can't auto-resolve (e.g. partner API not configured, or a value needs to be
+# fixed by hand). Only fields explicitly provided are touched; unspecified
+# fields keep their current value.
+
+class CoexistenceEditPayload(BaseModel):
+    tenant_id:       int
+    waba_id:         Optional[str] = None
+    phone_number_id: Optional[str] = None
+    phone_number:    Optional[str] = None
+    channel_id:      Optional[str] = None
+    client_id:       Optional[str] = None
+    api_key:         Optional[str] = None
+    display_name:    Optional[str] = None
+    # Operator can force-promote to connected after fixing fields by hand.
+    promote_to_connected: bool = True
+
+
+@router.post("/admin/coexistence/edit-record")
+async def admin_coexistence_edit_record(
+    body: CoexistenceEditPayload,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, object] = Depends(require_admin),
+):
+    request_id = secrets.token_hex(6)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=body.tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد سجل واتساب لهذا المتجر")
+
+    changed: list[str] = []
+    if body.waba_id is not None and body.waba_id != conn.whatsapp_business_account_id:
+        conn.whatsapp_business_account_id = body.waba_id.strip() or None
+        changed.append("waba_id")
+    if body.phone_number_id is not None and body.phone_number_id != conn.phone_number_id:
+        conn.phone_number_id = body.phone_number_id.strip() or None
+        changed.append("phone_number_id")
+    if body.phone_number is not None and body.phone_number != conn.phone_number:
+        conn.phone_number = body.phone_number.strip() or None
+        changed.append("phone_number")
+    if body.api_key is not None and body.api_key != conn.access_token:
+        conn.access_token = body.api_key.strip() or None
+        conn.token_type = "dialog360_api_key"
+        changed.append("api_key")
+    if body.display_name is not None and body.display_name != conn.business_display_name:
+        conn.business_display_name = body.display_name.strip() or None
+        changed.append("display_name")
+
+    meta = dict(conn.extra_metadata or {})
+    pd = dict(meta.get("provider_details") or {})
+    if body.channel_id is not None and body.channel_id != pd.get("channel_id"):
+        pd["channel_id"] = body.channel_id.strip() or None
+        changed.append("channel_id")
+    if body.client_id is not None and body.client_id != pd.get("client_id"):
+        pd["client_id"] = body.client_id.strip() or None
+        changed.append("client_id")
+    pd["webhook_url"]          = _coexistence_webhook_url()
+    pd["coexistence_url"]      = _coexistence_events_url()
+    pd["status_url"]           = _coexistence_status_url()
+    pd["internal_header_name"] = "X-Nahla-Coexistence-Secret"
+    meta["provider_details"]   = pd
+    conn.extra_metadata        = meta
+    flag_modified(conn, "extra_metadata")
+
+    # Make sure provider/connection_type are correctly typed even if the
+    # record was created in some other path.
+    conn.provider        = WHATSAPP_PROVIDER_360DIALOG
+    conn.connection_type = WHATSAPP_CONNECTION_TYPE_COEXISTENCE
+    if not conn.token_type:
+        conn.token_type = "dialog360_api_key"
+
+    completeness = _coexistence_integration_complete(conn)
+    if body.promote_to_connected and completeness["truly_connected"]:
+        conn.status = "connected"
+        conn.sending_enabled = True
+        if not conn.connected_at:
+            conn.connected_at = datetime.now(timezone.utc)
+        _set_coexistence_state(conn, status="connected")
+        conn.last_error = None
+
+    db.commit()
+    _log_integration_state(conn, tenant_id=body.tenant_id, source="admin_edit", request_id=request_id)
+    audit(
+        "admin_coexistence_edit_record",
+        admin=_admin.get("sub") if isinstance(_admin, dict) else None,
+        tenant_id=body.tenant_id,
+        request_id=request_id,
+        changed_fields=changed,
+        promote_to_connected=body.promote_to_connected,
+    )
+
+    return {
+        "tenant_id":   body.tenant_id,
+        "request_id":  request_id,
+        "changed":     changed,
+        "integration_complete": completeness,
         **_coexistence_status_payload(conn),
     }
 

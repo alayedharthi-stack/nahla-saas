@@ -7,17 +7,22 @@ import {
   Clock,
   Copy,
   Check,
+  Edit3,
+  Hammer,
+  KeyRound,
   Link,
   MessageSquare,
   Phone,
   PlugZap,
   RefreshCw,
+  Save,
   ShieldCheck,
   Smartphone,
   Store,
   TestTube2,
   User,
   Webhook,
+  XCircle,
   Zap,
 } from 'lucide-react'
 import {
@@ -533,6 +538,311 @@ function ActivateForm({
   )
 }
 
+// ── Integration integrity banner ─────────────────────────────────────────────
+// Surfaces the SAME completeness verdict the merchant page uses, so the owner
+// panel can never show "مفعّل" while the merchant sees "غير متصل فعليًا".
+// The verdict comes straight from the backend (single source of truth) — we
+// just render it.
+
+const _MISSING_FIELD_LABELS: Record<string, string> = {
+  waba_id:         'WABA ID',
+  phone_number_id: 'Phone Number ID',
+  phone_number:    'رقم واتساب',
+  api_key:         'مفتاح API',
+}
+
+function IntegrationIntegrityBanner({ req }: { req: CoexistenceRequest }) {
+  const ic = req.integration_complete
+  if (ic.truly_connected) {
+    return (
+      <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-700 flex items-start gap-2">
+        <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" />
+        <div>
+          <p className="font-bold">سجل الربط مكتمل</p>
+          <p className="text-emerald-600">
+            صفحة التاجر ولوحة المالك تعرضان نفس الحالة. لا يحتاج هذا التاجر إلى أي إصلاح.
+          </p>
+        </div>
+      </div>
+    )
+  }
+  const missingLabels = (ic.missing_fields || []).map(f => _MISSING_FIELD_LABELS[f] || f)
+  return (
+    <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-700 flex items-start gap-2">
+      <XCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+      <div className="flex-1">
+        <p className="font-bold">عدم تطابق بين لوحة المالك وصفحة التاجر</p>
+        <p className="text-red-600 mt-0.5">
+          سبب: <span className="font-mono">{ic.reason_code || 'incomplete'}</span>
+          {missingLabels.length ? ` — مفقود: ${missingLabels.join('، ')}` : ''}
+        </p>
+        <p className="text-red-500 mt-1">
+          استخدم زر «Sync / Repair Integration Record» أدناه أو افتح «تعديل الحقول» لإكمال السجل يدويًا.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+// ── Integration record fields panel ──────────────────────────────────────────
+// Read view + Edit view + Sync/Repair button. Operates entirely against the
+// new admin endpoints (sync-record, edit-record).
+
+function IntegrationFieldsPanel({
+  req, onRefresh,
+}: {
+  req: CoexistenceRequest
+  onRefresh: () => void
+}) {
+  const [editing, setEditing]   = useState(false)
+  const [syncing, setSyncing]   = useState(false)
+  const [saving,  setSaving]    = useState(false)
+  const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null)
+  const [form, setForm] = useState({
+    waba_id:         req.waba_id ?? '',
+    phone_number_id: req.phone_number_id ?? '',
+    phone_number:    req.requested_phone ?? '',
+    channel_id:      req.channel_id ?? '',
+    client_id:       req.client_id ?? '',
+    api_key:         '',
+    display_name:    req.display_name ?? '',
+    promote_to_connected: true,
+  })
+
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) =>
+    setForm(f => ({ ...f, [k]: v }))
+
+  const runSync = async () => {
+    setSyncing(true); setFeedback(null)
+    try {
+      const res = await adminApi.syncCoexistenceRecord(req.tenant_id)
+      const after = res.after
+      if (after.truly_connected) {
+        setFeedback({ kind: 'ok', text: 'تم إصلاح السجل — جميع الحقول مكتملة الآن.' })
+      } else {
+        const missing = (after.missing_fields || [])
+          .map(f => _MISSING_FIELD_LABELS[f] || f).join('، ')
+        setFeedback({
+          kind: 'info',
+          text: `لم تُحلّ كل الحقول تلقائيًا. ما زال ناقصًا: ${missing}. أكمِل من «تعديل الحقول».`,
+        })
+      }
+      onRefresh()
+    } catch (e: unknown) {
+      setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشلت عملية المزامنة' })
+    } finally { setSyncing(false) }
+  }
+
+  const submitEdit = async () => {
+    setSaving(true); setFeedback(null)
+    try {
+      // Build the payload with ONLY the fields the operator actually
+      // touched: undefined = "leave alone", "" = "clear field". The api_key
+      // field is never sent unchanged.
+      const payload: Parameters<typeof adminApi.editCoexistenceRecord>[0] = {
+        tenant_id: req.tenant_id,
+        promote_to_connected: form.promote_to_connected,
+      }
+      if (form.waba_id !== (req.waba_id ?? ''))                payload.waba_id = form.waba_id
+      if (form.phone_number_id !== (req.phone_number_id ?? '')) payload.phone_number_id = form.phone_number_id
+      if (form.phone_number !== (req.requested_phone ?? ''))   payload.phone_number = form.phone_number
+      if (form.channel_id !== (req.channel_id ?? ''))          payload.channel_id = form.channel_id
+      if (form.client_id !== (req.client_id ?? ''))            payload.client_id = form.client_id
+      if (form.display_name !== (req.display_name ?? ''))      payload.display_name = form.display_name
+      if (form.api_key.trim())                                  payload.api_key = form.api_key.trim()
+
+      const res = await adminApi.editCoexistenceRecord(payload)
+      if (res.integration_complete.truly_connected) {
+        setFeedback({ kind: 'ok', text: 'تم حفظ التعديلات وسجل الربط الآن مكتمل.' })
+      } else {
+        const missing = (res.integration_complete.missing_fields || [])
+          .map(f => _MISSING_FIELD_LABELS[f] || f).join('، ')
+        setFeedback({ kind: 'info', text: `تم الحفظ لكن لا يزال ناقصًا: ${missing}` })
+      }
+      setEditing(false)
+      onRefresh()
+    } catch (e: unknown) {
+      setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشل الحفظ' })
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <KeyRound className="w-4 h-4 text-slate-600" />
+          <p className="text-sm font-bold text-slate-700">حقول سجل الربط</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={runSync}
+            disabled={syncing || saving}
+            title="يقرأ بيانات القناة من 360dialog ويملأ الحقول الناقصة"
+            className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-violet-500 disabled:opacity-50"
+          >
+            <Hammer className="w-3.5 h-3.5" />
+            {syncing ? 'جارٍ الإصلاح…' : 'Sync / Repair Integration Record'}
+          </button>
+          <button
+            onClick={() => { setEditing(e => !e); setFeedback(null) }}
+            disabled={syncing || saving}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+          >
+            <Edit3 className="w-3.5 h-3.5" />
+            {editing ? 'إلغاء' : 'تعديل الحقول'}
+          </button>
+        </div>
+      </div>
+
+      {/* Read view */}
+      {!editing && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+          {([
+            ['WABA ID',         req.waba_id,         'waba_id'],
+            ['Phone Number ID', req.phone_number_id, 'phone_number_id'],
+            ['رقم واتساب',       req.requested_phone, 'phone_number'],
+            ['Channel ID',      req.channel_id,      'channel_id'],
+            ['Client ID',       req.client_id,       'client_id'],
+            ['API Key',         req.has_api_key ? '✓ مخزّن' : null, 'api_key'],
+          ] as Array<[string, string | null, string]>).map(([label, value, key]) => (
+            <div
+              key={key}
+              className={`rounded-lg border px-3 py-2 ${
+                value ? 'border-slate-200 bg-slate-50' : 'border-red-200 bg-red-50'
+              }`}
+            >
+              <p className="text-[10px] font-semibold text-slate-400 mb-0.5">{label}</p>
+              <p className={`font-mono text-xs truncate ${value ? 'text-slate-700' : 'text-red-600'}`} dir="ltr">
+                {value || '— مفقود —'}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Edit view */}
+      {editing && (
+        <div className="space-y-3 pt-1" dir="rtl">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">WABA ID</label>
+              <input
+                value={form.waba_id}
+                onChange={e => set('waba_id', e.target.value)}
+                placeholder="123456789012345"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-mono"
+                dir="ltr"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">Phone Number ID</label>
+              <input
+                value={form.phone_number_id}
+                onChange={e => set('phone_number_id', e.target.value)}
+                placeholder="123456789012345"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-mono"
+                dir="ltr"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">رقم واتساب</label>
+              <input
+                value={form.phone_number}
+                onChange={e => set('phone_number', e.target.value)}
+                placeholder="+9665XXXXXXXX"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
+                dir="ltr"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">Channel ID</label>
+              <input
+                value={form.channel_id}
+                onChange={e => set('channel_id', e.target.value)}
+                placeholder="ZVXPG8CH"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-mono"
+                dir="ltr"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">Client ID</label>
+              <input
+                value={form.client_id}
+                onChange={e => set('client_id', e.target.value)}
+                placeholder="(اختياري)"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-mono"
+                dir="ltr"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">اسم النشاط</label>
+              <input
+                value={form.display_name}
+                onChange={e => set('display_name', e.target.value)}
+                placeholder="اسم المتجر"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                مفتاح API لـ 360dialog {req.has_api_key && <span className="text-emerald-600 font-normal">(مخزّن — اتركه فارغًا للإبقاء)</span>}
+              </label>
+              <input
+                value={form.api_key}
+                onChange={e => set('api_key', e.target.value)}
+                placeholder="D360-XXXXXXXXXXXXXXXXXXXXXXXX"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-mono"
+                dir="ltr"
+              />
+            </div>
+          </div>
+
+          <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={form.promote_to_connected}
+              onChange={e => set('promote_to_connected', e.target.checked)}
+              className="rounded accent-violet-600 w-4 h-4"
+            />
+            <span>ترقية الحالة إلى <strong>مفعّل</strong> تلقائيًا إذا اكتملت الحقول</span>
+          </label>
+
+          <div className="flex gap-2">
+            <button
+              onClick={submitEdit}
+              disabled={saving}
+              className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-xs font-bold text-white hover:bg-violet-500 disabled:opacity-50"
+            >
+              <Save className="w-3.5 h-3.5" />
+              {saving ? 'جارٍ الحفظ…' : 'Save & Recheck'}
+            </button>
+            <button
+              onClick={() => setEditing(false)}
+              disabled={saving}
+              className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50 disabled:opacity-50"
+            >
+              إلغاء
+            </button>
+          </div>
+        </div>
+      )}
+
+      {feedback && (
+        <div className={`rounded-lg p-2.5 text-xs font-semibold flex items-start gap-2 ${
+          feedback.kind === 'ok'  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+          feedback.kind === 'err' ? 'bg-red-50 text-red-700 border border-red-200' :
+                                    'bg-amber-50 text-amber-700 border border-amber-200'
+        }`}>
+          {feedback.kind === 'ok'  && <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+          {feedback.kind === 'err' && <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+          {feedback.kind === 'info' && <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+          <span>{feedback.text}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Request card ──────────────────────────────────────────────────────────────
 
 function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: () => void }) {
@@ -648,6 +958,15 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
               onCancel={() => setActivating(false)}
             />
           )}
+
+          {/* Integrity banner — shows ONLY when the merchant page would
+              currently show "غير متصل فعليًا". This is the cure for the
+              owner panel and merchant page disagreeing. */}
+          <IntegrationIntegrityBanner req={req} />
+
+          {/* Editable integration record — Sync/Repair button + manual
+              field overrides + Save & Recheck. */}
+          <IntegrationFieldsPanel req={req} onRefresh={onRefresh} />
 
           {/* Webhook tooling — always visible. For tenants still in
               `request_submitted` the buttons will fail with a clear error
