@@ -101,23 +101,57 @@ export interface LoginResult {
  * is also logged to the browser console so the operator can paste
  * one screenshot of DevTools to diagnose any future hang.
  */
-export async function loginDetailed(email: string, password: string): Promise<LoginResult> {
-  const url        = `${API_BASE}/auth/login`
+/**
+ * One attempt against a specific transport (form-urlencoded or JSON).
+ * Form-urlencoded is a CORS "simple request" — no OPTIONS preflight is
+ * fired by the browser. JSON is a "non-simple" request and ALWAYS
+ * fires a preflight first.
+ *
+ * Returns a `LoginResult`. On AbortError (timeout) or fetch failure
+ * (TypeError "Failed to fetch", etc.) the caller can inspect
+ * `reason === 'timeout' | 'network'` and fall back to the other
+ * transport.
+ */
+async function _loginAttempt(
+  transport: 'form' | 'json',
+  email: string,
+  password: string,
+  timeoutMs: number,
+): Promise<LoginResult> {
+  const path = transport === 'form' ? '/auth/login-form' : '/auth/login'
+  const url = `${API_BASE}${path}`
   const controller = new AbortController()
-  const timeoutId  = setTimeout(() => controller.abort(), 20_000)
-  const start      = performance.now()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  const start = performance.now()
   // eslint-disable-next-line no-console
-  console.info('[auth] login → POST', url)
+  console.info('[auth] login → POST', url, `(transport=${transport})`)
+
+  let body: BodyInit
+  let headers: Record<string, string>
+  if (transport === 'form') {
+    const params = new URLSearchParams()
+    params.set('email', email)
+    params.set('password', password)
+    body = params
+    // Intentionally DO NOT set Content-Type — letting the browser set
+    // `application/x-www-form-urlencoded; charset=UTF-8` keeps this a
+    // "simple request" so no preflight is sent.
+    headers = {}
+  } else {
+    body = JSON.stringify({ email, password })
+    headers = { 'Content-Type': 'application/json' }
+  }
+
   try {
     const res = await fetch(url, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ email, password }),
-      signal:  controller.signal,
+      method: 'POST',
+      headers,
+      body,
+      signal: controller.signal,
     })
     const elapsed = Math.round(performance.now() - start)
     // eslint-disable-next-line no-console
-    console.info(`[auth] login response status=${res.status} elapsed=${elapsed}ms`)
+    console.info(`[auth] login response transport=${transport} status=${res.status} elapsed=${elapsed}ms`)
 
     if (res.status === 401) {
       return { ok: false, reason: 'unauthorized', status: 401 }
@@ -126,7 +160,7 @@ export async function loginDetailed(email: string, password: string): Promise<Lo
       let bodyText = ''
       try { bodyText = (await res.text()).slice(0, 400) } catch { /* ignore */ }
       // eslint-disable-next-line no-console
-      console.warn(`[auth] login non-OK body: ${bodyText}`)
+      console.warn(`[auth] login non-OK transport=${transport} body=${bodyText}`)
       return { ok: false, reason: 'http', status: res.status, message: bodyText || `HTTP ${res.status}` }
     }
 
@@ -145,16 +179,16 @@ export async function loginDetailed(email: string, password: string): Promise<Lo
       user_id:   data.user_id,
     })
     // eslint-disable-next-line no-console
-    console.info('[auth] login success role=%s tenant_id=%s', data.role, data.tenant_id)
+    console.info('[auth] login success transport=%s role=%s tenant_id=%s', transport, data.role, data.tenant_id)
     return { ok: true, status: res.status }
   } catch (e) {
     if (e instanceof Error && e.name === 'AbortError') {
       // eslint-disable-next-line no-console
-      console.warn('[auth] login TIMEOUT after 20s — backend or network unresponsive')
-      return { ok: false, reason: 'timeout', message: 'Login request timed out after 20s' }
+      console.warn(`[auth] login TIMEOUT transport=${transport} after ${timeoutMs}ms — backend or network unresponsive`)
+      return { ok: false, reason: 'timeout', message: `Login request timed out after ${timeoutMs}ms` }
     }
     // eslint-disable-next-line no-console
-    console.error('[auth] login network error', e)
+    console.error(`[auth] login network error transport=${transport}`, e)
     return {
       ok:      false,
       reason:  'network',
@@ -163,6 +197,41 @@ export async function loginDetailed(email: string, password: string): Promise<Lo
   } finally {
     clearTimeout(timeoutId)
   }
+}
+
+/**
+ * Attempt a login. Tries the form-urlencoded endpoint first because it
+ * does NOT trigger a CORS preflight — browsers send it as a "simple
+ * request". This bypasses the upstream proxies (Cloudflare / Railway
+ * edge / corporate firewalls) that have been observed to drop or
+ * reset OPTIONS requests with `NS_BINDING_ABORTED`.
+ *
+ * If the form transport fails for a reason that is consistent with a
+ * proxy/network issue (timeout, network error), automatically
+ * retries against the JSON endpoint. Auth-level failures
+ * (`unauthorized`, `http`, `parse`) are returned as-is.
+ */
+export async function loginDetailed(email: string, password: string): Promise<LoginResult> {
+  // 1) Form transport (no preflight) — this is the path that should
+  //    always succeed once the backend `/auth/login-form` endpoint is
+  //    deployed.
+  const formResult = await _loginAttempt('form', email, password, 20_000)
+  if (formResult.ok) return formResult
+
+  // Auth-level failures don't benefit from a retry.
+  if (formResult.reason === 'unauthorized' || formResult.reason === 'http' || formResult.reason === 'parse') {
+    return formResult
+  }
+
+  // 2) Form transport hit a network/timeout — fall back to JSON. If
+  //    the form endpoint isn't deployed yet (older backend) the
+  //    server returns a 404 which is `http`, NOT `network`, and we
+  //    won't get here. Network/timeout means the request never
+  //    reached the app — same problem the JSON endpoint has, but
+  //    worth one retry.
+  // eslint-disable-next-line no-console
+  console.warn('[auth] form transport failed (%s); retrying JSON', formResult.reason)
+  return _loginAttempt('json', email, password, 20_000)
 }
 
 /** Backwards-compatible wrapper — most callers just need a boolean. */

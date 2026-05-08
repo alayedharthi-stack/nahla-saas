@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 import sqlalchemy
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -113,31 +113,32 @@ async def auth_ping(request: Request) -> Dict[str, Any]:
     }
 
 
-@router.post("/auth/login")
-async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+async def _auth_login_impl(
+    *,
+    raw_email: str,
+    raw_password: str,
+    request: Request,
+    db: Session,
+    transport: str,
+) -> Dict[str, Any]:
     """
-    Exchange email + password for a signed JWT.
-    Merchant accounts are checked FIRST so the platform owner can log in as a
-    merchant (test store) with the same email. Admin fallback only if no merchant
-    account matched.
+    Shared login implementation used by both /auth/login (JSON, fires a
+    CORS preflight) and /auth/login-form (form-urlencoded, "simple
+    request", browser does NOT preflight). Identical behaviour and
+    structured logs — the only difference is how the body was decoded.
 
-    Structured logs (every login emits these in order so a hung login is
-    instantly diagnosable in Railway logs):
-
-        [AUTH LOGIN] start          email=… ip=…
-        [AUTH LOGIN] db ok          email=… user_found=…
-        [AUTH LOGIN] password verified email=… role=…
-        [AUTH LOGIN] token issued   email=… tenant_id=… user_id=…
-        [AUTH LOGIN] response sent  email=… role=… ms=…
+    ``transport`` is logged on every line so the operator can tell from
+    Railway whether the browser hit the JSON endpoint or fell back to
+    the form endpoint when CORS preflight is broken upstream.
     """
     import time as _time  # noqa: PLC0415
     _t0 = _time.monotonic()
 
-    email      = (body.email or "").strip().lower()
+    email      = (raw_email or "").strip().lower()
     client_ip  = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
-    logger.info("[AUTH LOGIN] start email=%s ip=%s", email, client_ip)
+    logger.info("[AUTH LOGIN] start email=%s ip=%s transport=%s", email, client_ip, transport)
 
     if not JWT_AVAILABLE:
         logger.error("[AUTH LOGIN] aborted email=%s reason=jwt_unavailable", email)
@@ -172,7 +173,7 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
             # webhook acks. asyncio.to_thread punts the work to the default
             # thread executor so the loop stays free.
             import asyncio as _asyncio  # noqa: PLC0415
-            if await _asyncio.to_thread(verify_password, body.password, user.password_hash):
+            if await _asyncio.to_thread(verify_password, raw_password, user.password_hash):
                 role = user.role or "merchant"
                 logger.info("[AUTH LOGIN] password verified email=%s role=%s", email, role)
 
@@ -234,8 +235,8 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
                 logger.info("[AUTH LOGIN] password mismatch email=%s", email)
 
     # 2. Admin credentials (env-var fallback — only if no merchant account matched)
-    email_ok    = hmac.compare_digest(email,         ADMIN_EMAIL.lower())
-    password_ok = hmac.compare_digest(body.password, ADMIN_PASSWORD)
+    email_ok    = hmac.compare_digest(email,        ADMIN_EMAIL.lower())
+    password_ok = hmac.compare_digest(raw_password, ADMIN_PASSWORD)
     if email_ok and password_ok:
         token = create_token(email=ADMIN_EMAIL, role="admin", tenant_id=1)
         logger.info("[AUTH LOGIN] token issued email=%s tenant_id=1 role=admin", ADMIN_EMAIL)
@@ -258,6 +259,60 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
     audit("login_failed", reason="invalid_credentials", sub=email, ip=client_ip)
     logger.warning("[AUTH LOGIN] FAILED email=%s ip=%s ms=%s", email, client_ip, _ms)
     raise _INVALID
+
+
+# ── Public route adapters ───────────────────────────────────────────────────
+# Two endpoints share the same _auth_login_impl helper above.
+#
+# /auth/login      — JSON body {email,password}. The browser fires a CORS
+#                    preflight (OPTIONS) before this request because
+#                    Content-Type is application/json. Used by JS clients
+#                    that can rely on a healthy preflight path.
+#
+# /auth/login-form — application/x-www-form-urlencoded body. Per CORS spec
+#                    this is a "simple request" — the browser does NOT
+#                    fire a preflight OPTIONS. This is the escape hatch
+#                    when an upstream proxy (Cloudflare / Railway edge /
+#                    ISP) drops or aborts OPTIONS requests
+#                    (NS_BINDING_ABORTED in Firefox, net::ERR_CONNECTION
+#                    _CLOSED in Chrome). Frontend tries the form
+#                    endpoint first when configured to do so.
+
+@router.post("/auth/login")
+async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+    """JSON login (preflight-required). See _auth_login_impl docstring."""
+    return await _auth_login_impl(
+        raw_email=body.email,
+        raw_password=body.password,
+        request=request,
+        db=db,
+        transport="json",
+    )
+
+
+@router.post("/auth/login-form")
+async def auth_login_form(
+    request: Request,
+    email:    str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Form-encoded login — bypasses CORS preflight entirely.
+
+    Posting application/x-www-form-urlencoded with Content-Type set
+    automatically by the browser is a CORS "simple request" per the
+    Fetch spec, so the browser sends it directly without firing an
+    OPTIONS preflight first. This is the path used by the dashboard
+    when the JSON preflight is blocked upstream of the application.
+    """
+    return await _auth_login_impl(
+        raw_email=email,
+        raw_password=password,
+        request=request,
+        db=db,
+        transport="form",
+    )
 
 
 @router.get("/auth/me")
