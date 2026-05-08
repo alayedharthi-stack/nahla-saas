@@ -433,28 +433,71 @@ async def on_startup() -> None:
     #    are unaffected.
     _skip = os.environ.get("NAHLA_SKIP_DB_BOOTSTRAP", "").lower() in ("1", "true", "yes")
     if _skip:
-        logger.info("NAHLA_SKIP_DB_BOOTSTRAP set — skipping cleanup + Alembic bootstrap.")
+        logger.info("[BOOT/db] NAHLA_SKIP_DB_BOOTSTRAP set — skipping cleanup + Alembic bootstrap.")
     else:
         try:
+            # ── Per-step timeouts (seconds) — every subprocess.run gets one,
+            # so a wedged migration can NEVER hold a thread forever.
+            _T_CLEANUP = int(os.environ.get("NAHLA_BOOTSTRAP_CLEANUP_TIMEOUT", "60"))
+            _T_STAMP   = int(os.environ.get("NAHLA_BOOTSTRAP_STAMP_TIMEOUT",   "30"))
+            _T_UPGRADE = int(os.environ.get("NAHLA_BOOTSTRAP_UPGRADE_TIMEOUT", "180"))
+            # Whole-bootstrap watchdog — if the entire chain exceeds this,
+            # we abandon it in the background. Defaults to 5 min, override
+            # via env if a one-off migration genuinely needs longer.
+            _T_OVERALL = int(os.environ.get("NAHLA_BOOTSTRAP_OVERALL_TIMEOUT", "300"))
 
             def _bootstrap_db_schema() -> None:
+                """
+                Idempotent DB bootstrap for the worker.
+
+                Hardened against the production hang we saw on
+                ``api.nahlah.ai/alive`` returning 0 bytes:
+
+                * Every subprocess.run carries an explicit ``timeout=``
+                  so a stuck Alembic upgrade cannot hold the executor
+                  thread indefinitely. ``TimeoutExpired`` is logged
+                  loudly and the function returns — bootstrap is
+                  always best-effort.
+                * Each step prints its OWN ``[BOOT/db] ...`` log line
+                  before AND after, so the operator can tell from
+                  Railway exactly which step (if any) hung.
+                * The single SQLAlchemy connection used for the
+                  Alembic-stamp pre-check is explicitly disposed,
+                  so a stuck migration cannot leak a DB connection
+                  into the live request pool.
+                """
                 import subprocess
+                import time as _t
                 from sqlalchemy import create_engine, text as _text
 
-                # ── Step A: Salla duplicate cleanup (must run before 0017) ──────────────
+                # ── Step A: Salla duplicate cleanup (must run before 0017) ──
                 cleanup = os.path.join(_REPO_ROOT, "scripts", "cleanup_salla_duplicates.py")
-                r1 = subprocess.run(
-                    [sys.executable, cleanup, "--execute"],
-                    cwd=_REPO_ROOT,
-                    check=False,
-                    env=os.environ.copy(),
-                )
-                if r1.returncode != 0:
-                    logger.warning(
-                        "cleanup_salla_duplicates.py exited %d — continuing to Alembic; "
-                        "migration 0017 will fail loudly if duplicates remain.",
-                        r1.returncode,
+                logger.info("[BOOT/db] Step A: cleanup_salla_duplicates.py (timeout=%ds)", _T_CLEANUP)
+                _t0 = _t.monotonic()
+                try:
+                    r1 = subprocess.run(
+                        [sys.executable, cleanup, "--execute"],
+                        cwd=_REPO_ROOT,
+                        check=False,
+                        env=os.environ.copy(),
+                        timeout=_T_CLEANUP,
                     )
+                    logger.info(
+                        "[BOOT/db] Step A: done rc=%d elapsed=%.1fs",
+                        r1.returncode, _t.monotonic() - _t0,
+                    )
+                    if r1.returncode != 0:
+                        logger.warning(
+                            "[BOOT/db] cleanup_salla_duplicates.py exited %d — continuing to Alembic; "
+                            "migration 0017 will fail loudly if duplicates remain.",
+                            r1.returncode,
+                        )
+                except subprocess.TimeoutExpired as _to:
+                    logger.error(
+                        "[BOOT/db] Step A TIMEOUT after %ds (cleanup hung) — abandoning bootstrap. err=%s",
+                        _T_CLEANUP, _to,
+                    )
+                    return
 
                 # ── Step B: Stamp Alembic to 0016 if tables exist but alembic_version
                 #    doesn't.  The DB was previously managed by Base.metadata.create_all();
@@ -462,95 +505,198 @@ async def on_startup() -> None:
                 #    immediately fails with "relation tenants already exists".
                 _db_url = os.environ.get("DATABASE_URL", "")
                 if _db_url:
+                    logger.info("[BOOT/db] Step B: alembic stamp pre-check")
                     try:
-                        _eng = create_engine(_db_url)
-                        with _eng.connect() as _conn:
-                            has_alembic = _conn.execute(_text(
-                                "SELECT 1 FROM information_schema.tables "
-                                "WHERE table_schema='public' AND table_name='alembic_version'"
-                            )).scalar()
-                            has_tenants = _conn.execute(_text(
-                                "SELECT 1 FROM information_schema.tables "
-                                "WHERE table_schema='public' AND table_name='tenants'"
-                            )).scalar()
-                        _eng.dispose()
+                        # connect_args.connect_timeout caps the libpq TCP connect.
+                        # Without it, a network blip can leave _eng.connect()
+                        # blocked for the kernel's TCP retry budget (~120s+).
+                        _eng = create_engine(
+                            _db_url,
+                            pool_pre_ping=False,
+                            pool_recycle=-1,
+                            connect_args={"connect_timeout": 10},
+                        )
+                        try:
+                            with _eng.connect() as _conn:
+                                has_alembic = _conn.execute(_text(
+                                    "SELECT 1 FROM information_schema.tables "
+                                    "WHERE table_schema='public' AND table_name='alembic_version'"
+                                )).scalar()
+                                has_tenants = _conn.execute(_text(
+                                    "SELECT 1 FROM information_schema.tables "
+                                    "WHERE table_schema='public' AND table_name='tenants'"
+                                )).scalar()
+                        finally:
+                            # Always dispose, even on exception, so a stuck
+                            # connection cannot leak into the request pool.
+                            try:
+                                _eng.dispose()
+                            except Exception:
+                                pass
 
                         if has_tenants and not has_alembic:
                             logger.warning(
-                                "alembic_version table missing but 'tenants' exists — "
-                                "DB was built by create_all().  Stamping to revision 0016 "
-                                "so that only new migrations (0017+) are applied."
+                                "[BOOT/db] Step B: alembic_version missing but 'tenants' exists — "
+                                "stamping to 0016 (timeout=%ds)", _T_STAMP,
                             )
-                            subprocess.run(
-                                [sys.executable, "-m", "alembic", "stamp", "0016"],
-                                cwd=_DATABASE_DIR,
-                                check=True,
-                                env=os.environ.copy(),
+                            try:
+                                _stamp = subprocess.run(
+                                    [sys.executable, "-m", "alembic", "stamp", "0016"],
+                                    cwd=_DATABASE_DIR,
+                                    check=False,
+                                    env=os.environ.copy(),
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=_T_STAMP,
+                                )
+                                logger.info(
+                                    "[BOOT/db] Step B: stamp done rc=%d", _stamp.returncode,
+                                )
+                                if _stamp.returncode != 0 and _stamp.stderr:
+                                    logger.warning(
+                                        "[BOOT/db] alembic stamp stderr:\n%s",
+                                        _stamp.stderr.strip(),
+                                    )
+                            except subprocess.TimeoutExpired as _to:
+                                logger.error(
+                                    "[BOOT/db] Step B TIMEOUT after %ds — abandoning bootstrap. err=%s",
+                                    _T_STAMP, _to,
+                                )
+                                return
+                        else:
+                            logger.info(
+                                "[BOOT/db] Step B: no stamp needed (has_alembic=%s has_tenants=%s)",
+                                bool(has_alembic), bool(has_tenants),
                             )
                     except Exception as _stamp_exc:
-                        logger.warning("Alembic stamp pre-check failed (non-fatal): %s", _stamp_exc)
+                        logger.warning(
+                            "[BOOT/db] Step B failed (non-fatal): %s — continuing to upgrade",
+                            _stamp_exc,
+                        )
 
-                # ── Step C: Apply any pending migrations (0017, 0018, …) ───────────────
-                # NOTE: capture stdout+stderr and surface them via the Python logger
-                # before re-raising. Previously we relied on `check=True` alone which
-                # crashed with `CalledProcessError` but left the actual Alembic stack
-                # trace (e.g. "Multiple head revisions present", "DuplicateColumn",
-                # "relation X already exists") only on Railway's raw stdout — invisible
-                # in the dashboard once `Application startup failed` was the last line
-                # the UI cropped to. Logging the captured output guarantees the real
-                # cause shows up in Railway's structured logs every time.
-                _alembic = subprocess.run(
-                    [sys.executable, "-m", "alembic", "upgrade", "head"],
-                    cwd=_DATABASE_DIR,
-                    check=False,
-                    env=os.environ.copy(),
-                    capture_output=True,
-                    text=True,
+                # ── Step C: Apply any pending migrations (0017, 0018, …) ────
+                # capture_output so the real Alembic error surfaces in
+                # Railway logs instead of being silently swallowed.
+                logger.info(
+                    "[BOOT/db] Step C: alembic upgrade head (timeout=%ds)", _T_UPGRADE,
                 )
+                _t0 = _t.monotonic()
+                try:
+                    _alembic = subprocess.run(
+                        [sys.executable, "-m", "alembic", "upgrade", "head"],
+                        cwd=_DATABASE_DIR,
+                        check=False,
+                        env=os.environ.copy(),
+                        capture_output=True,
+                        text=True,
+                        timeout=_T_UPGRADE,
+                    )
+                except subprocess.TimeoutExpired as _to:
+                    logger.error(
+                        "[BOOT/db] Step C TIMEOUT after %ds — alembic upgrade hung. "
+                        "Worker remains responsive but migrations did NOT run. err=%s",
+                        _T_UPGRADE, _to,
+                    )
+                    return
+                _elapsed = _t.monotonic() - _t0
                 if _alembic.stdout:
-                    logger.info("[alembic upgrade head] stdout:\n%s", _alembic.stdout.strip())
+                    logger.info(
+                        "[BOOT/db] Step C: alembic upgrade head stdout (rc=%d, elapsed=%.1fs):\n%s",
+                        _alembic.returncode, _elapsed, _alembic.stdout.strip(),
+                    )
                 if _alembic.returncode != 0:
                     logger.error(
-                        "[alembic upgrade head] FAILED rc=%d\n--- stderr ---\n%s\n--- stdout ---\n%s",
-                        _alembic.returncode,
+                        "[BOOT/db] Step C FAILED rc=%d elapsed=%.1fs\n"
+                        "--- stderr ---\n%s\n--- stdout ---\n%s",
+                        _alembic.returncode, _elapsed,
                         (_alembic.stderr or "").strip(),
                         (_alembic.stdout or "").strip(),
                     )
-                    raise RuntimeError(
-                        f"alembic upgrade head failed (rc={_alembic.returncode}); "
-                        "see logged stderr above"
-                    )
+                    return  # do NOT raise — caller already logs and continues
+                logger.info(
+                    "[BOOT/db] Step C: alembic upgrade head OK rc=0 elapsed=%.1fs",
+                    _elapsed,
+                )
 
             async def _bootstrap_db_schema_bg() -> None:
-                """Run the blocking bootstrap on a worker thread WITHOUT
-                gating the ASGI lifespan startup. Errors are logged
-                but never propagated — refusing to start the whole
-                worker on a migration glitch is exactly what produced
-                the 0-bytes-received hang in production. Routes that
-                rely on a fresh column will surface a clear DB error
-                instead, which the ops watcher can fix without
-                killing /alive."""
+                """
+                Background bootstrap runner.
+
+                Three guarantees, in order of importance:
+
+                1. **Isolated executor.** A dedicated single-thread
+                   ``ThreadPoolExecutor`` is used instead of the
+                   default executor. If this thread gets stuck on a
+                   wedged subprocess, the default executor (used by
+                   ``asyncio.to_thread`` for bcrypt during
+                   /auth/login, sync DB calls inside route handlers,
+                   etc.) is unaffected.
+
+                2. **Overall timeout.** ``asyncio.wait_for(...,
+                   timeout=NAHLA_BOOTSTRAP_OVERALL_TIMEOUT)``
+                   (default 5 min) ensures we never wait past a
+                   reasonable bound. On timeout we log loudly and
+                   return; the dedicated executor is shut down with
+                   ``cancel_futures=True`` so its thread can be
+                   reclaimed once the underlying subprocess
+                   terminates.
+
+                3. **Errors never propagate.** This task ALWAYS
+                   returns cleanly. Any exception is logged via
+                   ``logger.exception`` so /alive, /healthz,
+                   /auth/ping, and the ack-first webhooks keep
+                   serving regardless of what alembic decides to do.
+                """
+                from concurrent.futures import ThreadPoolExecutor as _TPX  # noqa: PLC0415
+                executor = _TPX(max_workers=1, thread_name_prefix="nahla-bootstrap")
+                logger.info(
+                    "[BOOT/db] Dispatching bootstrap on isolated executor "
+                    "(overall_timeout=%ds, cleanup=%ds, stamp=%ds, upgrade=%ds)",
+                    _T_OVERALL, _T_CLEANUP, _T_STAMP, _T_UPGRADE,
+                )
                 try:
                     loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, _bootstrap_db_schema)
-                    logger.info("Database bootstrap (Salla cleanup + Alembic) completed.")
+                    await asyncio.wait_for(
+                        loop.run_in_executor(executor, _bootstrap_db_schema),
+                        timeout=_T_OVERALL,
+                    )
+                    logger.info("[BOOT/db] Bootstrap completed cleanly.")
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "[BOOT/db] Overall bootstrap timeout (%ds) — alembic appears to be wedged. "
+                        "Abandoning bootstrap; /alive + ack-first webhooks remain available. "
+                        "Set NAHLA_SKIP_DB_BOOTSTRAP=1 and run migrations manually to clear the lock.",
+                        _T_OVERALL,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
-                        "[BOOT] Database bootstrap FAILED in background: %s — "
+                        "[BOOT/db] Bootstrap FAILED in background: %s — "
                         "/alive and ack-first webhooks remain available; "
                         "DB-bound routes may 5xx until the operator fixes the schema.",
                         exc,
                     )
+                finally:
+                    # cancel_futures=True prevents queued work from
+                    # running, but if the executor's only thread is
+                    # blocked in subprocess.wait(), shutdown will
+                    # wait until that subprocess returns. We pass
+                    # wait=False so this finally block returns
+                    # immediately; the OS will reap the thread once
+                    # the subprocess exits.
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
 
             asyncio.create_task(_bootstrap_db_schema_bg())
             logger.info(
-                "[BOOT] Database bootstrap dispatched as background task — "
-                "ASGI startup will complete now so /alive + /healthz can "
-                "answer immediately.",
+                "[BOOT/db] Bootstrap dispatched as background task — "
+                "ASGI startup completes immediately so /alive + /healthz "
+                "are reachable regardless of alembic state.",
             )
         except Exception as exc:
             logger.exception(
-                "[BOOT] Failed to schedule DB bootstrap (non-fatal): %s", exc,
+                "[BOOT/db] Failed to schedule bootstrap (non-fatal): %s", exc,
             )
 
     # 1. DB table creation / column migrations (non-fatal)
