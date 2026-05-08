@@ -25,6 +25,8 @@ logger = logging.getLogger("nahla-backend")
 # expose protected endpoints under the same prefix.
 JWT_PUBLIC_PREFIXES = (
     "/health",
+    "/healthz",                         # alias for upstream proxies
+    "/alive",                           # ultra-light liveness probe
     "/version",                         # public deploy-identity probe
     "/api/version",                     # alias of /version
     "/debug/",                          # TEMPORARY: token-gated debug surface
@@ -187,15 +189,49 @@ async def request_logging_middleware(request: Request, call_next):
     except Exception:
         _decr_active = None
 
+    # Hardened: catch CancelledError + every other exception so this
+    # middleware NEVER exits without a Response. Letting either escape
+    # surfaces as ``RuntimeError: No response returned`` from Starlette's
+    # BaseHTTPMiddleware and causes 360dialog to retry the same payload,
+    # multiplying load on the worker. We log the failure with the full
+    # path so the operator can correlate it with the route handler.
+    import asyncio as _asyncio  # noqa: PLC0415
+    response = None
+    raised: Exception | None = None
     try:
         response = await call_next(request)
+    except _asyncio.CancelledError as exc:
+        raised = exc
+        logger.warning(
+            "[request_logging] client cancelled path=%s method=%s",
+            request.url.path, request.method,
+        )
+        response = _safe_fallback_response(request, 499)
+    except Exception as exc:  # noqa: BLE001
+        raised = exc
+        logger.exception(
+            "[request_logging] downstream raised %s on path=%s method=%s",
+            type(exc).__name__, request.url.path, request.method,
+        )
+        response = _safe_fallback_response(request, 500)
     finally:
         if _decr_active is not None:
             try:
                 _decr_active()
             except Exception:
                 pass
+
     duration_ms = round((_time.monotonic() - start) * 1000)
+    # ``raised`` is informational only — kept on the line so a future
+    # reader can see the post-mortem path explicitly.
+    _ = raised
+
+    # Defensive: response should never be None at this point because
+    # both the success and the exception paths above assign it, but
+    # belt-and-suspenders so a future refactor can't reintroduce
+    # "No response returned".
+    if response is None:
+        response = _safe_fallback_response(request, 500)
 
     db_ms        = int(getattr(request.state, "db_ms",        0) or 0)
     ai_ms        = int(getattr(request.state, "ai_ms",        0) or 0)
@@ -204,6 +240,7 @@ async def request_logging_middleware(request: Request, call_next):
     client_ip    = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
+    status_code  = getattr(response, "status_code", 500)
 
     breakdown = ""
     if db_ms or ai_ms or lock_wait_ms:
@@ -214,7 +251,7 @@ async def request_logging_middleware(request: Request, call_next):
             "[SLOW REQUEST] %s %s %d %dms%s tenant=%s ip=%s",
             request.method,
             request.url.path,
-            response.status_code,
+            status_code,
             duration_ms,
             breakdown,
             tenant_id,
@@ -225,7 +262,7 @@ async def request_logging_middleware(request: Request, call_next):
             "%s %s %d %dms%s tenant=%s ip=%s",
             request.method,
             request.url.path,
-            response.status_code,
+            status_code,
             duration_ms,
             breakdown,
             tenant_id,
@@ -237,7 +274,7 @@ async def request_logging_middleware(request: Request, call_next):
         record_request(
             method=request.method,
             path=request.url.path,
-            status=response.status_code,
+            status=status_code,
             total_ms=duration_ms,
             db_ms=db_ms,
             ai_ms=ai_ms,
@@ -256,17 +293,69 @@ async def salla_iframe_middleware(request: Request, call_next):
     Allow app.nahlah.ai to be embedded in Salla's iframe viewer (s.salla.sa).
     Sets Content-Security-Policy frame-ancestors instead of X-Frame-Options
     so Salla can load the app inside their embedded app viewer.
+
+    Hardened: any exception (including ``asyncio.CancelledError``) raised
+    by ``call_next`` is converted into a JSONResponse so this middleware
+    can NEVER exit without returning a Response object — which is the
+    precondition for the dreaded ``RuntimeError: No response returned``
+    that Starlette's ``BaseHTTPMiddleware`` raises when its inner ASGI
+    task ends without sending. Webhook paths get a 200 (so 360dialog /
+    Meta don't enter retry-storm mode); everything else gets a 500 with
+    CORS headers so the browser sees the real error rather than a
+    masked CORS failure.
     """
-    response = await call_next(request)
-    # Allow embedding only from trusted Salla domains
-    response.headers["Content-Security-Policy"] = (
-        "frame-ancestors 'self' https://s.salla.sa https://*.salla.sa "
-        "https://store.salla.sa https://app.nahlah.ai https://apps.salla.sa"
-    )
-    # Remove restrictive X-Frame-Options if it was set
-    if "x-frame-options" in response.headers:
-        del response.headers["x-frame-options"]
+    import asyncio as _asyncio  # noqa: PLC0415
+    try:
+        response = await call_next(request)
+    except _asyncio.CancelledError:
+        logger.warning(
+            "[salla_iframe] client cancelled on path=%s — returning 499-equivalent",
+            request.url.path,
+        )
+        return _safe_fallback_response(request, 499)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[salla_iframe] downstream raised %s on path=%s — returning 200 (webhook) / 500",
+            type(exc).__name__, request.url.path,
+        )
+        return _safe_fallback_response(request, 500)
+
+    try:
+        response.headers["Content-Security-Policy"] = (
+            "frame-ancestors 'self' https://s.salla.sa https://*.salla.sa "
+            "https://store.salla.sa https://app.nahlah.ai https://apps.salla.sa"
+        )
+        if "x-frame-options" in response.headers:
+            del response.headers["x-frame-options"]
+    except Exception as exc:  # noqa: BLE001
+        # Header tweaks are nice-to-have. Never fail a successful
+        # downstream response over a header mutation.
+        logger.warning("[salla_iframe] header tweak failed: %s", exc)
     return response
+
+
+def _safe_fallback_response(request: Request, status_code: int) -> JSONResponse:
+    """
+    Build a JSONResponse with CORS headers as a last-resort fallback
+    when a middleware would otherwise exit without a response.
+
+    For webhook paths we override the requested ``status_code`` with
+    200 so upstream providers (360dialog, Meta) do not enter their
+    retry loop on what is almost always a transient cancellation.
+    The actual processing error (if any) has already been logged.
+    """
+    path = request.url.path or ""
+    if path.startswith("/webhook/"):
+        return JSONResponse(
+            status_code=200,
+            content={"ok": False, "error": "webhook_processing_error"},
+            headers=_cors_error_headers(request),
+        )
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": "Internal server error", "code": "internal_error"},
+        headers=_cors_error_headers(request),
+    )
 
 
 def _cors_error_headers(request: Request) -> dict:

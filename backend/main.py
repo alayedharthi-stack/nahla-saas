@@ -160,10 +160,44 @@ import re as _re  # noqa: E402
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResponse:
-    logger.error(
-        "[GlobalExceptionHandler] Unhandled exception on %s: %s",
-        _req.url.path, exc, exc_info=True,
-    )
+    """
+    Last-resort response builder for any exception that escapes the
+    middleware chain (or the route itself).
+
+    Two specific cases are handled deliberately here:
+
+    1. ``RuntimeError("No response returned.")`` — raised by
+       Starlette's BaseHTTPMiddleware when an inner ASGI task ends
+       without sending a response. Most often triggered by a client
+       disconnect mid-request (``asyncio.CancelledError`` in a
+       middleware that doesn't catch it). We log this loudly so the
+       operator can spot the pattern, then return a soft response.
+
+    2. Webhook paths (``/webhook/*``) — providers like 360dialog and
+       Meta interpret any non-2xx as a delivery failure and retry,
+       which compounds load on the worker that just failed. We
+       return HTTP 200 with ``ok=false`` so retries do NOT happen,
+       while keeping the failure visible in the logs and audit
+       trail. Non-webhook paths still get the canonical 500.
+    """
+    path = _req.url.path or ""
+    is_no_response = isinstance(exc, RuntimeError) and "No response returned" in str(exc)
+    is_webhook = path.startswith("/webhook/")
+
+    if is_no_response:
+        logger.error(
+            "[GlobalExceptionHandler] 'No response returned' on %s "
+            "(BaseHTTPMiddleware end-of-chain w/o response, usually a "
+            "client disconnect). Returning safe response.",
+            path,
+            exc_info=True,
+        )
+    else:
+        logger.error(
+            "[GlobalExceptionHandler] Unhandled exception on %s: %s",
+            path, exc, exc_info=True,
+        )
+
     from core.config import CORS_ORIGINS as _co, CORS_ORIGIN_REGEX as _cr  # noqa: E402
     origin = _req.headers.get("origin", "")
     cors_headers: dict = {}
@@ -176,6 +210,18 @@ async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResp
             "Access-Control-Allow-Origin":      origin,
             "Access-Control-Allow-Credentials": "true",
         }
+
+    if is_webhook:
+        # Always 200 for webhooks — provider must NOT retry on what is
+        # almost always a transient cancellation or a payload our BG
+        # task already accepted. The actual error is in the log line
+        # above.
+        return _JSONResponse(
+            status_code=200,
+            content={"ok": False, "error": "webhook_processing_error"},
+            headers=cors_headers,
+        )
+
     return _JSONResponse(
         status_code=500,
         content={"detail": "Internal server error", "code": "internal_error"},

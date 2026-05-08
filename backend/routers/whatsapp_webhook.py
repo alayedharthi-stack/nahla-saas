@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 import anthropic
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from models import MessageEvent, WhatsAppConnection
 
@@ -296,14 +296,32 @@ async def whatsapp_incoming(request: Request):
     means /auth/login and /healthz stay responsive even under burst load.
     Idempotency is already handled by core.inbound_dedup so the upstream
     provider can retry safely while we hold the previous turn.
+
+    Hardened with the same safety contract as the 360dialog routes —
+    ALWAYS returns 200 even on parse / spawn / cancellation, so the
+    middleware chain never ends with "No response returned".
     """
+    import asyncio as _asyncio  # noqa: PLC0415
+    body: Dict[str, Any] = {}
     try:
-        body: Dict[str, Any] = await request.json()
-    except Exception:
-        return {"status": "ok"}
-    from core.runtime_perf import spawn_background  # noqa: PLC0415
-    spawn_background(_handle_whatsapp_body(body), name="webhook_meta")
-    return {"status": "ok"}
+        try:
+            body = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[webhook/meta] body parse failed (returning 200): %s", exc)
+            body = {}
+        try:
+            from core.runtime_perf import spawn_background  # noqa: PLC0415
+            spawn_background(_handle_whatsapp_body(body), name="webhook_meta")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[webhook/meta] spawn_background failed: %s", exc)
+    except _asyncio.CancelledError:
+        logger.warning(
+            "[webhook/meta] client cancelled — returning 200 to protect "
+            "the middleware chain",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[webhook/meta] unexpected handler error (returning 200): %s", exc)
+    return JSONResponse({"status": "ok"}, status_code=200)
 
 
 # ── 360dialog Channel Webhook ────────────────────────────────────────────────
@@ -319,18 +337,16 @@ async def whatsapp_incoming(request: Request):
 
 @router.post("/webhook/whatsapp/360dialog")
 async def whatsapp_incoming_360dialog(request: Request):
-    """Ack-first 360dialog channel webhook — see ack-first design note above."""
-    try:
-        body: Dict[str, Any] = await request.json()
-    except Exception:
-        return {"status": "ok"}
-    headers = _capture_webhook_headers(request)
-    from core.runtime_perf import spawn_background  # noqa: PLC0415
-    spawn_background(
-        _handle_360dialog_body(body, headers, scope="any"),
-        name="webhook_360dialog_any",
-    )
-    return {"status": "ok"}
+    """Ack-first 360dialog channel webhook — see ack-first design note above.
+
+    Hardened to ALWAYS return HTTP 200 with a JSON body, even on
+    parse failures, BG-spawn failures, or client disconnects (which
+    arrive as ``asyncio.CancelledError`` and would otherwise unwind
+    the BaseHTTPMiddleware chain without a response, surfacing as
+    ``RuntimeError: No response returned`` in Railway logs and
+    triggering 360dialog retries that pile up on the worker).
+    """
+    return await _safe_360dialog_ack(request, scope="any", name="webhook_360dialog_any")
 
 
 # ── 360dialog Coexistence Webhook (dedicated) ───────────────────────────────
@@ -346,17 +362,9 @@ async def whatsapp_incoming_360dialog(request: Request):
 @router.post("/webhook/whatsapp/360dialog/coexistence")
 async def whatsapp_incoming_360dialog_coexistence(request: Request):
     """Ack-first 360dialog Coexistence webhook — see ack-first design note above."""
-    try:
-        body: Dict[str, Any] = await request.json()
-    except Exception:
-        return {"status": "ok"}
-    headers = _capture_webhook_headers(request)
-    from core.runtime_perf import spawn_background  # noqa: PLC0415
-    spawn_background(
-        _handle_360dialog_body(body, headers, scope="coexistence"),
-        name="webhook_360dialog_coexistence",
+    return await _safe_360dialog_ack(
+        request, scope="coexistence", name="webhook_360dialog_coexistence",
     )
-    return {"status": "ok"}
 
 
 # ── 360dialog Status / Health Webhook (dedicated) ───────────────────────────
@@ -367,17 +375,82 @@ async def whatsapp_incoming_360dialog_coexistence(request: Request):
 @router.post("/webhook/whatsapp/360dialog/status")
 async def whatsapp_incoming_360dialog_status(request: Request):
     """Ack-first 360dialog Status/Health webhook — see ack-first design note above."""
-    try:
-        body: Dict[str, Any] = await request.json()
-    except Exception:
-        return {"status": "ok"}
-    headers = _capture_webhook_headers(request)
-    from core.runtime_perf import spawn_background  # noqa: PLC0415
-    spawn_background(
-        _handle_360dialog_body(body, headers, scope="status"),
-        name="webhook_360dialog_status",
+    return await _safe_360dialog_ack(
+        request, scope="status", name="webhook_360dialog_status",
     )
-    return {"status": "ok"}
+
+
+# ── Internal: shared safe-ack wrapper ───────────────────────────────────────
+async def _safe_360dialog_ack(request: Request, *, scope: str, name: str):
+    """
+    Always-200 wrapper around the 360dialog ack-first webhook flow.
+
+    Catches ``Exception`` AND ``asyncio.CancelledError`` so the route
+    NEVER raises into the ASGI middleware chain. CancelledError in
+    particular fires when 360dialog (or any client) disconnects mid-
+    request; if that propagates, Starlette's ``BaseHTTPMiddleware``
+    finishes without sending a response and we see
+    ``RuntimeError: No response returned`` in Railway logs.
+
+    The contract with 360dialog is: a 200 within 5 s on every webhook
+    delivery. Any failure to read the body, capture headers, or
+    schedule the background processing is swallowed and surfaced via
+    structured logs instead of an HTTP error — 360dialog will retry
+    on non-200, which compounds the very congestion we're trying to
+    avoid.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+    body: Dict[str, Any] = {}
+    try:
+        try:
+            body = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[webhook/360dialog/%s] body parse failed (returning 200): %s",
+                scope, exc,
+            )
+            body = {}
+
+        try:
+            headers = _capture_webhook_headers(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[webhook/360dialog/%s] header capture failed: %s", scope, exc,
+            )
+            headers = {}
+
+        try:
+            from core.runtime_perf import spawn_background  # noqa: PLC0415
+            spawn_background(
+                _handle_360dialog_body(body, headers, scope=scope),
+                name=name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # If we can't even schedule the BG task, keep the 200 so the
+            # provider doesn't retry — but make this loud in the log.
+            logger.exception(
+                "[webhook/360dialog/%s] spawn_background failed: %s", scope, exc,
+            )
+    except _asyncio.CancelledError:
+        # Client disconnected. Returning a 200 here protects the
+        # middleware chain from ending without a response. Re-raising
+        # would be the textbook approach but Starlette's
+        # BaseHTTPMiddleware mishandles cancellation and surfaces it
+        # as "No response returned." The provider has already given
+        # up on this delivery anyway — the BG task we spawned (if it
+        # ran before cancellation) will still finish out-of-band.
+        logger.warning(
+            "[webhook/360dialog/%s] client cancelled — returning 200 to "
+            "protect the middleware chain", scope,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Defensive — any other unexpected exception path also returns
+        # 200 so the provider doesn't enter retry-storm mode.
+        logger.exception(
+            "[webhook/360dialog/%s] unexpected handler error (returning 200): %s",
+            scope, exc,
+        )
+    return JSONResponse({"status": "ok"}, status_code=200)
 
 
 # ── Internal helper: snapshot the headers we care about ────────────────────
