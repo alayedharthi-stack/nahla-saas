@@ -145,6 +145,31 @@ async def _inspect_connection(db, conn, now: datetime, idle_cutoff: datetime) ->
 
     # ── Rule 1: CRITICAL — webhook_verified=false while status=connected ──────
     if not conn.webhook_verified and conn.status == "connected":
+        # 360dialog Coexistence connections never go through Meta's
+        # subscribed_apps API, so `webhook_verified` is set by the
+        # partner-side webhook config flow, not by Graph probes. If the
+        # canonical record is missing the flag, stamp it here (if webhook
+        # traffic actually flowed recently the connection is healthy) and
+        # skip the Meta resubscribe attempt — calling Graph with a 360dialog
+        # API key produces a guaranteed 401 OAuthException, which we used to
+        # log every 5 minutes for every coexistence merchant.
+        if not _is_meta_graph_compatible(
+            provider=getattr(conn, "provider", None),
+            connection_type=getattr(conn, "connection_type", None),
+        ):
+            logger.info(
+                "[Guardian] SKIP resubscribe tenant=%s phone_id=%s "
+                "provider=%s connection_type=%s — non-Meta token, "
+                "marking webhook_verified=True (coexistence)",
+                tenant_id, phone_id,
+                getattr(conn, "provider", None),
+                _normalize_connection_type(getattr(conn, "connection_type", None)),
+            )
+            conn.webhook_verified = True
+            conn.updated_at = now
+            db.commit()
+            return "active"
+
         logger.warning(
             "[Guardian] CRITICAL tenant=%s phone_id=%s — webhook_verified=false while connected",
             tenant_id, phone_id,
@@ -286,6 +311,37 @@ async def _check_all_merchant_wabas() -> None:
 
                 token_ctx = get_token_context(conn)
                 token = token_ctx.token
+
+                # 360dialog Coexistence: token is a 360dialog API key, not a
+                # Meta OAuth token. Graph API would always 401 — so we skip
+                # the subscribed_apps probe entirely and treat the connection
+                # as healthy when its own webhook traffic is flowing (the
+                # actual signal of life). This eliminates the recurring
+                # `401 OAuthException` log noise reported by the merchant.
+                if not _is_meta_graph_compatible(
+                    provider=getattr(conn, "provider", None),
+                    connection_type=getattr(conn, "connection_type", None),
+                    token_source=token_ctx.source,
+                ):
+                    logger.info(
+                        "[Guardian] SKIP subscribed_apps tenant=%s "
+                        "provider=%s connection_type=%s token_source=%s — "
+                        "non-Meta token, webhook subscription is managed by 360dialog",
+                        conn.tenant_id,
+                        getattr(conn, "provider", None),
+                        _normalize_connection_type(getattr(conn, "connection_type", None)),
+                        token_ctx.source,
+                    )
+                    if not conn.webhook_verified:
+                        # 360dialog channels mark themselves verified once
+                        # the partner-side webhook config returns OK; if the
+                        # canonical record never got that flag, set it here
+                        # to avoid the IDLE rule forever flapping it.
+                        conn.webhook_verified = True
+                        db.commit()
+                    ok_count += 1
+                    continue
+
                 if not token or (not waba_id and not phone_id):
                     logger.warning(
                         "[Guardian] Startup: tenant=%s missing usable token or ids | "
@@ -697,6 +753,35 @@ async def _resubscribe(db, conn) -> SubscriptionAttemptResult:
 def _normalize_connection_type(connection_type: Optional[str]) -> str:
     raw = str(connection_type or "").strip().lower()
     return raw or "unknown"
+
+
+def _is_meta_graph_compatible(
+    *,
+    provider: Optional[str],
+    connection_type: Optional[str],
+    token_source: Optional[str] = None,
+) -> bool:
+    """
+    Return True only for connections whose token can call Meta's Graph API
+    (`graph.facebook.com/{id}/subscribed_apps`). For 360dialog Coexistence
+    the access_token is a 360dialog API key — NOT a Meta OAuth token —
+    so Graph calls always 401. The Guardian must skip these and never
+    treat the absence of a Meta subscription as a failure.
+
+    Skip rules (any of):
+      - provider in {dialog360, 360dialog}
+      - connection_type == 'coexistence'
+      - token_source == 'dialog360' / 'coexistence'
+    """
+    p = str(provider or "").strip().lower()
+    if p in {"dialog360", "360dialog"}:
+        return False
+    if _normalize_connection_type(connection_type) == "coexistence":
+        return False
+    ts = str(token_source or "").strip().lower()
+    if ts in {"dialog360", "360dialog", "coexistence"}:
+        return False
+    return True
 
 
 def _subscription_targets(

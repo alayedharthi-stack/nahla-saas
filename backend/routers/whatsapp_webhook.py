@@ -936,6 +936,37 @@ async def _dispatch_message(
         )
         return
 
+    # ── Strict in-memory dedup — runs BEFORE the conversation lock ─────────
+    # Both Meta and 360dialog retry inbound webhooks (same `msg_id`) within
+    # seconds of each other. Without this gate the duplicates entered the
+    # per-conversation lock queue (logged as `waiters_ahead=1`,
+    # `waiters_ahead=2`, …), occupied a DB session, and were only dropped
+    # later by `IdempotencyGuard` after a full state load. The DB guard
+    # remains the source of truth, but this O(1) fast path eliminates the
+    # queueing artefact and the wasted DB round-trips on retried deliveries.
+    #
+    # Key: (phone_number_id, msg_id) with a 10-minute TTL — comfortably
+    # longer than any provider retry window, far shorter than the 24 h
+    # conversation window so the cache cannot drift.
+    if msg_id:
+        try:
+            from core.inbound_dedup import is_duplicate_inbound  # noqa: PLC0415
+            if is_duplicate_inbound(phone_number_id=phone_number_id, msg_id=msg_id):
+                logger.info(
+                    "[Idempotency] DROP duplicate inbound (early/in-memory) "
+                    "msg_id=%s phone_number_id=%s from=%s — provider retry, "
+                    "skipping conversation lock + DB",
+                    msg_id, phone_number_id, sender,
+                )
+                return
+        except Exception as _early_dedup_exc:
+            # Never block real traffic on a dedup hiccup — fall through to
+            # the slower DB-backed guard, which has the same behaviour.
+            logger.warning(
+                "[Idempotency] early dedup failed phone_number_id=%s msg_id=%s err=%s",
+                phone_number_id, msg_id, _early_dedup_exc,
+            )
+
     # ── Open DB session early (needed for tenant lookup) ─────────────────────
     db = next(get_db(), None)
     if not db:

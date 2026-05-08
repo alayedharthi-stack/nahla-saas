@@ -627,7 +627,13 @@ function IntegrationFieldsPanel({
           text: `لم تُحلّ كل الحقول تلقائيًا. ما زال ناقصًا: ${missing}. أكمِل من «تعديل الحقول».`,
         })
       }
-      onRefresh()
+      // Free the spinner immediately; the list refresh fires in the
+      // background so the operator never waits on a second round-trip.
+      setSyncing(false)
+      void Promise.resolve()
+        .then(() => onRefresh())
+        .catch(err => console.warn('[AdminCoexistence] background refresh failed', err))
+      return
     } catch (e: unknown) {
       setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشلت عملية المزامنة' })
     } finally { setSyncing(false) }
@@ -660,7 +666,15 @@ function IntegrationFieldsPanel({
         setFeedback({ kind: 'info', text: `تم الحفظ لكن لا يزال ناقصًا: ${missing}` })
       }
       setEditing(false)
-      onRefresh()
+      // Save is the source of truth — release the spinner immediately so
+      // the operator sees confirmation. The list refresh runs in the
+      // background and updates the row when it returns; we never block
+      // the Save button on a recheck/probe round-trip.
+      setSaving(false)
+      void Promise.resolve()
+        .then(() => onRefresh())
+        .catch(err => console.warn('[AdminCoexistence] background refresh failed', err))
+      return
     } catch (e: unknown) {
       setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشل الحفظ' })
     } finally { setSaving(false) }
