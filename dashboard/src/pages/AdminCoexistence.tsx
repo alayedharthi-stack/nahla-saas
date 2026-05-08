@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -9,13 +10,24 @@ import {
   Link,
   MessageSquare,
   Phone,
+  PlugZap,
   RefreshCw,
+  ShieldCheck,
   Smartphone,
   Store,
+  TestTube2,
   User,
+  Webhook,
   Zap,
 } from 'lucide-react'
-import { adminApi, type CoexistenceRequest, type CoexistenceActivatePayload } from '../api/admin'
+import {
+  adminApi,
+  type CoexistenceRequest,
+  type CoexistenceActivatePayload,
+  type CoexistenceTestWebhookResult,
+  type CoexistenceVerifyWebhookResult,
+  type CoexistenceAutoConfigureResult,
+} from '../api/admin'
 
 // ── Status badge ─────────────────────────────────────────────────────────────
 
@@ -35,22 +47,43 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
-// ── Webhook URL copy box ───────────────────────────────────────────────────────
+// ── Canonical 360dialog webhook URLs ──────────────────────────────────────────
+// Channel = customer messages + statuses (always required).
+// Coexistence = device_sync, pairing, phone_app_handover, mobile_app state, …
+// Status = account / channel health callbacks.
 
-const WEBHOOK_URL = 'https://api.nahlah.ai/webhook/whatsapp/360dialog'
+const CHANNEL_WEBHOOK_URL     = 'https://api.nahlah.ai/webhook/whatsapp/360dialog'
+const COEXISTENCE_WEBHOOK_URL = 'https://api.nahlah.ai/webhook/whatsapp/360dialog/coexistence'
+const STATUS_WEBHOOK_URL      = 'https://api.nahlah.ai/webhook/whatsapp/360dialog/status'
 
-function WebhookUrlBox() {
+function CopyableUrl({ url, tone = 'dark' }: { url: string; tone?: 'dark' | 'light' }) {
   const [copied, setCopied] = useState(false)
   const copy = () => {
-    navigator.clipboard.writeText(WEBHOOK_URL).then(() => {
+    navigator.clipboard.writeText(url).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
   }
+  if (tone === 'light') {
+    return (
+      <div className="rounded-lg bg-white border border-slate-200 px-3 py-2 flex items-center gap-2">
+        <Link className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+        <span className="flex-1 text-xs font-mono text-slate-700 truncate" dir="ltr">{url}</span>
+        <button
+          type="button"
+          onClick={copy}
+          title="نسخ الرابط"
+          className="flex-shrink-0 p-1 rounded hover:bg-slate-100 transition text-slate-400 hover:text-slate-700"
+        >
+          {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+        </button>
+      </div>
+    )
+  }
   return (
     <div className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2.5 flex items-center gap-2">
       <Link className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-      <span className="flex-1 text-xs font-mono text-emerald-300 truncate" dir="ltr">{WEBHOOK_URL}</span>
+      <span className="flex-1 text-xs font-mono text-emerald-300 truncate" dir="ltr">{url}</span>
       <button
         type="button"
         onClick={copy}
@@ -59,6 +92,209 @@ function WebhookUrlBox() {
       >
         {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
       </button>
+    </div>
+  )
+}
+
+function WebhookUrlBox() {
+  return <CopyableUrl url={CHANNEL_WEBHOOK_URL} />
+}
+
+// ── Webhook management panel (per connected tenant) ───────────────────────────
+// Surfaces all three URLs Nahla supports and gives the operator one-click
+// Test / Verify / Auto-Configure tooling so a 360dialog mis-config can be
+// diagnosed without leaving the owner panel.
+
+function WebhookStatusPill({ status }: { status: string }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    verified:     { label: 'مفعّل',          cls: 'bg-emerald-100 text-emerald-700' },
+    unknown:      { label: 'غير مفحوص',      cls: 'bg-slate-100 text-slate-500' },
+    unverified:   { label: 'غير مفعّل',       cls: 'bg-amber-100 text-amber-700' },
+    url_mismatch: { label: 'الرابط مختلف',    cls: 'bg-amber-100 text-amber-700' },
+    failed:       { label: 'فشل',             cls: 'bg-red-100 text-red-700' },
+  }
+  const { label, cls } = map[status] ?? { label: status, cls: 'bg-slate-100 text-slate-500' }
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${cls}`}>
+      {label}
+    </span>
+  )
+}
+
+function WebhookRow({
+  icon, title, hint, url, status, lastReceivedAt,
+}: {
+  icon: React.ReactNode
+  title: string
+  hint: string
+  url: string
+  status: string
+  lastReceivedAt: string | null
+}) {
+  const fmtAgo = (iso: string | null) => {
+    if (!iso) return 'لم يصل أي حدث بعد'
+    const ts = new Date(iso).getTime()
+    if (Number.isNaN(ts)) return iso
+    const sec = Math.floor((Date.now() - ts) / 1000)
+    if (sec < 60)        return `منذ ${sec} ث`
+    if (sec < 3600)      return `منذ ${Math.floor(sec / 60)} د`
+    if (sec < 86_400)    return `منذ ${Math.floor(sec / 3600)} س`
+    return `منذ ${Math.floor(sec / 86_400)} يوم`
+  }
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center flex-shrink-0">
+            {icon}
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-bold text-slate-700 truncate">{title}</p>
+            <p className="text-[10px] text-slate-400 truncate">{hint}</p>
+          </div>
+        </div>
+        <WebhookStatusPill status={status} />
+      </div>
+      <CopyableUrl url={url} tone="light" />
+      <p className="text-[10px] text-slate-400 flex items-center gap-1">
+        <Clock className="w-3 h-3" /> آخر حدث: {fmtAgo(lastReceivedAt)}
+      </p>
+    </div>
+  )
+}
+
+function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
+  const [webhooks, setWebhooks] = useState<CoexistenceVerifyWebhookResult['webhooks'] | null>(null)
+  const [busy, setBusy] = useState<'test' | 'verify' | 'configure' | null>(null)
+  const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null)
+
+  const fmt = (label: string, payload: unknown): string => {
+    try { return `${label}: ${JSON.stringify(payload)}` } catch { return label }
+  }
+
+  const runTest = async () => {
+    setBusy('test'); setFeedback(null)
+    try {
+      const res: CoexistenceTestWebhookResult = await adminApi.testCoexistenceWebhook(tenantId)
+      const failed = Object.entries(res.results).filter(([, v]) => !v.ok).map(([k]) => k)
+      setFeedback(res.all_ok
+        ? { kind: 'ok',  text: 'جميع روابط Webhook تستجيب بشكل سليم.' }
+        : { kind: 'err', text: `فشل بعض الروابط: ${failed.join('، ')}` }
+      )
+    } catch (e: unknown) {
+      setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'تعذّر إجراء الاختبار' })
+    } finally { setBusy(null) }
+  }
+
+  const runVerify = async () => {
+    setBusy('verify'); setFeedback(null)
+    try {
+      const res = await adminApi.verifyCoexistenceWebhook(tenantId)
+      setWebhooks(res.webhooks)
+      setFeedback(res.matches
+        ? { kind: 'ok',   text: 'الرابط المسجّل لدى 360dialog مطابق للرابط الرسمي لنحلة.' }
+        : { kind: 'info', text: res.remote_url
+            ? `الرابط لدى 360dialog مختلف: ${res.remote_url}`
+            : 'لم يتم تسجيل أي Webhook في 360dialog بعد.' }
+      )
+    } catch (e: unknown) {
+      setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشل التحقق' })
+    } finally { setBusy(null) }
+  }
+
+  const runAutoConfigure = async () => {
+    setBusy('configure'); setFeedback(null)
+    try {
+      const res: CoexistenceAutoConfigureResult = await adminApi.autoConfigureCoexistenceWebhook(tenantId)
+      setWebhooks(res.webhooks)
+      setFeedback(res.ok
+        ? { kind: 'ok',  text: 'تم تسجيل الـ Webhook لدى 360dialog بنجاح.' }
+        : { kind: 'err', text: fmt('فشل التسجيل', res.result) }
+      )
+    } catch (e: unknown) {
+      setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشل الإعداد التلقائي' })
+    } finally { setBusy(null) }
+  }
+
+  const w = webhooks
+  return (
+    <div className="rounded-xl border border-violet-200 bg-violet-50/40 p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Webhook className="w-4 h-4 text-violet-700" />
+        <p className="text-sm font-bold text-violet-800">إدارة Webhooks لـ 360dialog</p>
+      </div>
+      <p className="text-xs text-slate-500">
+        نحلة تدعم ثلاث نقاط Webhook منفصلة: الرسائل العادية (Channel) — أحداث التعايش
+        (Coexistence) — حالة القناة (Status). يمكنك تسجيل أي منها يدويًا في 360dialog
+        أو استخدام «الإعداد التلقائي».
+      </p>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <WebhookRow
+          icon={<MessageSquare className="w-3.5 h-3.5" />}
+          title="Channel Webhook"
+          hint="رسائل العملاء + statuses"
+          url={w?.channel_url ?? CHANNEL_WEBHOOK_URL}
+          status={w?.channel_status ?? 'unknown'}
+          lastReceivedAt={w?.channel_last_received_at ?? null}
+        />
+        <WebhookRow
+          icon={<Smartphone className="w-3.5 h-3.5" />}
+          title="Coexistence Webhook"
+          hint="device sync — pairing — handover"
+          url={w?.coexistence_url ?? COEXISTENCE_WEBHOOK_URL}
+          status={w?.coexistence_status ?? 'unknown'}
+          lastReceivedAt={w?.coexistence_last_received_at ?? null}
+        />
+        <WebhookRow
+          icon={<ShieldCheck className="w-3.5 h-3.5" />}
+          title="Status Webhook"
+          hint="account health + quality"
+          url={w?.status_url ?? STATUS_WEBHOOK_URL}
+          status={w?.status_status ?? 'unknown'}
+          lastReceivedAt={w?.status_last_received_at ?? null}
+        />
+      </div>
+
+      <div className="flex flex-wrap gap-2 pt-1">
+        <button
+          onClick={runTest}
+          disabled={!!busy}
+          className="inline-flex items-center gap-2 rounded-lg bg-white border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+        >
+          <TestTube2 className="w-3.5 h-3.5" />
+          {busy === 'test' ? 'جارٍ الاختبار…' : 'Test Coexistence Webhook'}
+        </button>
+        <button
+          onClick={runVerify}
+          disabled={!!busy}
+          className="inline-flex items-center gap-2 rounded-lg bg-white border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+        >
+          <ShieldCheck className="w-3.5 h-3.5" />
+          {busy === 'verify' ? 'جارٍ التحقق…' : 'Verify'}
+        </button>
+        <button
+          onClick={runAutoConfigure}
+          disabled={!!busy}
+          className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-xs font-bold text-white hover:bg-violet-500 disabled:opacity-50"
+        >
+          <PlugZap className="w-3.5 h-3.5" />
+          {busy === 'configure' ? 'جارٍ الإعداد…' : 'Auto Configure'}
+        </button>
+      </div>
+
+      {feedback && (
+        <div className={`rounded-lg p-2.5 text-xs font-semibold flex items-start gap-2 ${
+          feedback.kind === 'ok'  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+          feedback.kind === 'err' ? 'bg-red-50 text-red-700 border border-red-200' :
+                                    'bg-amber-50 text-amber-700 border border-amber-200'
+        }`}>
+          {feedback.kind === 'ok'  && <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+          {feedback.kind === 'err' && <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+          {feedback.kind === 'info' && <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+          <span>{feedback.text}</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -412,6 +648,11 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
               onCancel={() => setActivating(false)}
             />
           )}
+
+          {/* Webhook tooling — always visible. For tenants still in
+              `request_submitted` the buttons will fail with a clear error
+              ("API key not stored yet"), which is the expected feedback. */}
+          <WebhookManagementPanel tenantId={req.tenant_id} />
         </div>
       )}
     </div>

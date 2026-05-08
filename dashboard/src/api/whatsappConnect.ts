@@ -48,6 +48,35 @@ export interface WaConnection {
   action_required_message?: string | null
   request_submitted_at?: string | null
   coexistence_available?: boolean
+  /** Per-URL Coexistence webhook block (channel / coexistence / status). */
+  webhooks?: CoexistenceWebhookBlock | null
+  coexistence_sync_state?: string | null
+  pairing_state?: string | null
+  mobile_app_connection_state?: string | null
+  phone_app_handover_at?: string | null
+  last_coexistence_event?: CoexistenceEvent | null
+  last_coexistence_events_by_category?: Record<string, CoexistenceEvent>
+  last_status_event?: CoexistenceEvent | null
+}
+
+export interface CoexistenceWebhookBlock {
+  channel_url: string
+  channel_status: string
+  channel_last_received_at: string | null
+  coexistence_url: string
+  coexistence_status: string
+  coexistence_last_received_at: string | null
+  status_url: string
+  status_status: string
+  status_last_received_at: string | null
+  internal_header_name: string
+}
+
+export interface CoexistenceEvent {
+  event_type: string
+  category?: string
+  received_at: string
+  payload_preview?: string
 }
 
 export interface WaStartResult {

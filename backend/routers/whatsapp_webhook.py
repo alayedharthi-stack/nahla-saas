@@ -298,6 +298,17 @@ async def whatsapp_incoming(request: Request):
     return {"status": "ok"}
 
 
+# ── 360dialog Channel Webhook ────────────────────────────────────────────────
+# Customer-originated messages and message status (delivered / read) callbacks.
+# Coexistence-specific events (smb_message_echoes, app-state sync, pairing
+# changes, …) are handled by the dedicated coexistence endpoint below — this
+# split lets merchants who run "WhatsApp Business App + API" side-by-side keep
+# the two streams cleanly separated in 360dialog's dashboard, exactly the way
+# 360dialog itself models them.
+#
+# The legacy single-URL behaviour is preserved when callers configure only
+# this endpoint: scope="any" still accepts every field for backward compat.
+
 @router.post("/webhook/whatsapp/360dialog")
 async def whatsapp_incoming_360dialog(request: Request):
     try:
@@ -305,10 +316,102 @@ async def whatsapp_incoming_360dialog(request: Request):
     except Exception:
         return {"status": "ok"}
     try:
-        await _handle_360dialog_body(body, request)
+        await _handle_360dialog_body(body, request, scope="any")
     except Exception as exc:
         logger.error("[Webhook360] Unhandled error: %s", exc, exc_info=True)
     return {"status": "ok"}
+
+
+# ── 360dialog Coexistence Webhook (dedicated) ───────────────────────────────
+# Receives ONLY the coexistence-specific event families:
+#   • smb_message_echoes            (outbound from merchant's mobile WA app)
+#   • smb_app_state_sync / device_sync / pairing_changes / phone_app_handover /
+#     mobile_app_connection_state   (Coexistence lifecycle events)
+#
+# Configuring this URL in 360dialog is *recommended* (cleaner separation) but
+# not required — the channel endpoint above will continue to accept these
+# events when scope="any" is used.
+
+@router.post("/webhook/whatsapp/360dialog/coexistence")
+async def whatsapp_incoming_360dialog_coexistence(request: Request):
+    try:
+        body: Dict[str, Any] = await request.json()
+    except Exception:
+        return {"status": "ok"}
+    try:
+        await _handle_360dialog_body(body, request, scope="coexistence")
+    except Exception as exc:
+        logger.error("[Webhook360/coexistence] Unhandled error: %s", exc, exc_info=True)
+    return {"status": "ok"}
+
+
+# ── 360dialog Status / Health Webhook (dedicated) ───────────────────────────
+# Channel-level health and operational callbacks: account alerts, account
+# review updates, phone number quality / name updates, and other lifecycle
+# events that do NOT belong on the message stream.
+
+@router.post("/webhook/whatsapp/360dialog/status")
+async def whatsapp_incoming_360dialog_status(request: Request):
+    try:
+        body: Dict[str, Any] = await request.json()
+    except Exception:
+        return {"status": "ok"}
+    try:
+        await _handle_360dialog_body(body, request, scope="status")
+    except Exception as exc:
+        logger.error("[Webhook360/status] Unhandled error: %s", exc, exc_info=True)
+    return {"status": "ok"}
+
+
+# ── Field classification ────────────────────────────────────────────────────
+# Three disjoint families. Anything we don't recognise lands in *coexistence*
+# by default — that endpoint is the catch-all for non-message provider events
+# so we never silently drop new event types 360dialog ships in the future.
+
+_CHANNEL_FIELDS: set = {"messages"}
+_COEXISTENCE_FIELDS: set = {
+    "smb_message_echoes",
+    "smb_app_state_sync",
+    "device_sync",
+    "coexistence_state",
+    "pairing_changes",
+    "phone_app_handover",
+    "mobile_app_connection_state",
+}
+_STATUS_FIELDS: set = {
+    "account_alerts",
+    "account_review_update",
+    "account_update",
+    "phone_number_quality_update",
+    "phone_number_name_update",
+    "channel_status",
+    "messaging_health",
+    "template_status_update",
+}
+
+
+def _classify_360dialog_field(field: str) -> str:
+    """Return the family (channel | coexistence | status) for a 360dialog
+    webhook field. Unknown fields are treated as coexistence so they are
+    surfaced to the operator instead of being silently discarded."""
+    if field in _CHANNEL_FIELDS:
+        return "channel"
+    if field in _STATUS_FIELDS:
+        return "status"
+    return "coexistence"
+
+
+def _scope_accepts(scope: str, family: str) -> bool:
+    """Whether the given endpoint scope should process events of this family."""
+    if scope == "any":
+        return True
+    if scope == "channel":
+        return family == "channel"
+    if scope == "coexistence":
+        return family == "coexistence"
+    if scope == "status":
+        return family == "status"
+    return False
 
 
 async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
@@ -387,7 +490,29 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
             pass
 
 
-async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None:
+async def _handle_360dialog_body(
+    body: Dict[str, Any],
+    request: Request,
+    scope: str = "any",
+) -> None:
+    """Dispatch a 360dialog webhook delivery.
+
+    ``scope`` selects which event families the caller (= the URL the merchant
+    or platform configured in 360dialog) is willing to process:
+
+      * ``"any"``         – legacy / single-URL setup. Accepts everything.
+                            This is the default so existing tests and merchants
+                            who only registered one URL keep working unchanged.
+      * ``"channel"``     – customer messages + message statuses only.
+      * ``"coexistence"`` – smb_message_echoes + Coexistence lifecycle events
+                            (device sync, pairing, phone-app handover, mobile
+                            app connection state).
+      * ``"status"``      – channel/account health + quality update events.
+
+    Events that do not match the scope are *recorded* (so we still see them
+    in the per-tenant audit trail) but not acted upon — they are expected to
+    arrive on a different URL.
+    """
     db = next(get_db(), None)
     if not db:
         logger.error("[Webhook360] Cannot open DB session")
@@ -399,7 +524,7 @@ async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None
                 field = str(change.get("field") or "")
                 phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
                 if not phone_number_id:
-                    logger.warning("[Webhook360] Missing phone_number_id field=%s", field)
+                    logger.warning("[Webhook360] Missing phone_number_id field=%s scope=%s", field, scope)
                     continue
                 wa_conns = (
                     db.query(WhatsAppConnection)
@@ -407,7 +532,7 @@ async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None
                     .all()
                 )
                 if not wa_conns:
-                    logger.warning("[Webhook360] Unknown phone_number_id=%s field=%s", phone_number_id, field)
+                    logger.warning("[Webhook360] Unknown phone_number_id=%s field=%s scope=%s", phone_number_id, field, scope)
                     continue
                 if len(wa_conns) > 1:
                     tenant_ids = [c.tenant_id for c in wa_conns]
@@ -427,16 +552,23 @@ async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None
                     logger.warning("[Webhook360] Invalid internal secret tenant=%s", wa_conn.tenant_id)
                     return
 
-                if field in ("messages", "smb_message_echoes"):
-                    # Stamp activity for guardian — one lightweight update per webhook delivery
-                    try:
-                        from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
-                        wa_conn.last_webhook_received_at = _dt.now(_tz.utc)
-                        db.add(wa_conn)
-                        db.flush()
-                    except Exception:
-                        pass
+                family = _classify_360dialog_field(field)
 
+                # Always record per-family receipt — even when the field does
+                # not belong to this endpoint's scope. The dashboard surfaces
+                # the timestamps so the operator can confirm "the coexistence
+                # webhook is alive even if the channel webhook went silent",
+                # and vice-versa.
+                _stamp_webhook_received(db, wa_conn, family)
+
+                if not _scope_accepts(scope, family):
+                    logger.info(
+                        "[Webhook360] field=%s family=%s arrived on scope=%s — recorded but not processed",
+                        field, family, scope,
+                    )
+                    continue
+
+                # ── Channel events ────────────────────────────────────────
                 if field == "messages":
                     for msg in value.get("messages", []):
                         await _dispatch_message(phone_number_id, msg, value)
@@ -444,8 +576,29 @@ async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None
                         await _handle_message_status(st_obj)
                     continue
 
+                # ── Coexistence events ────────────────────────────────────
                 if field == "smb_message_echoes":
                     await _ingest_smb_message_echoes(db, wa_conn, value)
+                    _record_coexistence_event(
+                        db, wa_conn,
+                        event_type=field,
+                        category="merchant_mobile_echo",
+                        value=value,
+                    )
+                    continue
+
+                if family == "coexistence":
+                    _record_coexistence_event(
+                        db, wa_conn,
+                        event_type=field,
+                        category=_coexistence_category_for(field),
+                        value=value,
+                    )
+                    continue
+
+                # ── Status / health events ────────────────────────────────
+                if family == "status":
+                    _record_status_event(db, wa_conn, event_type=field, value=value)
                     continue
 
                 logger.info("[Webhook360] Ignored field=%s tenant=%s phone_number_id=%s", field, wa_conn.tenant_id, phone_number_id)
@@ -454,6 +607,210 @@ async def _handle_360dialog_body(body: Dict[str, Any], request: Request) -> None
             db.close()
         except Exception:
             pass
+
+
+# ── Webhook receipt bookkeeping ─────────────────────────────────────────────
+
+def _stamp_webhook_received(db, wa_conn: WhatsAppConnection, family: str) -> None:
+    """Stamp the per-family `last_received_at` timestamp on the connection.
+
+    We update both the legacy `last_webhook_received_at` column (channel
+    events feed the existing webhook guardian) and a structured
+    `coexistence.webhook` block in `extra_metadata` so the dashboard can
+    show independent activity timestamps for each of the three URLs."""
+    try:
+        from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
+        now = _dt.now(_tz.utc)
+
+        if family == "channel":
+            wa_conn.last_webhook_received_at = now
+
+        meta = dict(wa_conn.extra_metadata or {})
+        coex = dict(meta.get("coexistence") or {})
+        webhook = dict(coex.get("webhook") or {})
+        webhook[f"{family}_last_received_at"] = now.isoformat()
+        # First successful receipt on a URL marks it as verified — 360dialog
+        # only delivers events to URLs it has accepted as valid.
+        if not webhook.get(f"{family}_status"):
+            webhook[f"{family}_status"] = "verified"
+        coex["webhook"] = webhook
+        meta["coexistence"] = coex
+        wa_conn.extra_metadata = meta
+
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        flag_modified(wa_conn, "extra_metadata")
+        db.add(wa_conn)
+        db.flush()
+    except Exception as exc:
+        logger.debug("[Webhook360] _stamp_webhook_received family=%s failed: %s", family, exc)
+
+
+def _coexistence_category_for(field: str) -> str:
+    """Map a raw coexistence field to a stable category identifier the
+    dashboard (and operators) can reason about."""
+    table = {
+        "smb_message_echoes":           "merchant_mobile_echo",
+        "smb_app_state_sync":           "device_sync",
+        "device_sync":                  "device_sync",
+        "coexistence_state":            "coexistence_state",
+        "pairing_changes":              "pairing_state",
+        "phone_app_handover":           "phone_app_handover",
+        "mobile_app_connection_state":  "mobile_app_connection_state",
+    }
+    return table.get(field, "coexistence_event")
+
+
+# Stable enum used to advertise the merchant-facing sync state.
+_COEX_SYNC_STATE_BY_CATEGORY = {
+    "device_sync":                "synced",
+    "pairing_state":              "paired",
+    "phone_app_handover":         "handover",
+    "mobile_app_connection_state": "mobile_app_connected",
+    "coexistence_state":          "synced",
+}
+
+
+def _record_coexistence_event(
+    db,
+    wa_conn: WhatsAppConnection,
+    *,
+    event_type: str,
+    category: str,
+    value: Dict[str, Any],
+) -> None:
+    """Persist a Coexistence lifecycle event onto the connection.
+
+    We record three things in `extra_metadata.coexistence`:
+
+      * `last_event`               — most recent event (any category)
+      * `last_event_by_category`   — last event for each category, so the
+        dashboard can show "device synced 2m ago / mobile app online 5s ago"
+        independently
+      * derived state fields       — `sync_state`, `pairing_state`,
+        `mobile_app_connection_state` based on the event payload
+
+    We deliberately keep the raw payload bounded (first ~2 KB serialised)
+    so a noisy device cannot bloat the JSONB column.
+    """
+    try:
+        from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+
+        now_iso = _dt.now(_tz.utc).isoformat()
+
+        try:
+            payload_preview = _json.dumps(value, ensure_ascii=False)[:2048]
+        except Exception:
+            payload_preview = ""
+
+        meta = dict(wa_conn.extra_metadata or {})
+        coex = dict(meta.get("coexistence") or {})
+        events = dict(coex.get("last_event_by_category") or {})
+
+        last = {
+            "event_type":  event_type,
+            "category":    category,
+            "received_at": now_iso,
+            "payload_preview": payload_preview,
+        }
+        coex["last_event"] = last
+        events[category] = last
+        coex["last_event_by_category"] = events
+
+        derived = _COEX_SYNC_STATE_BY_CATEGORY.get(category)
+        if derived:
+            coex["sync_state"] = derived
+
+        if category == "pairing_state":
+            coex["pairing_state"] = _extract_pairing_state(value) or "paired"
+        if category == "mobile_app_connection_state":
+            coex["mobile_app_connection_state"] = (
+                _extract_mobile_app_state(value) or "connected"
+            )
+        if category == "phone_app_handover":
+            coex["phone_app_handover_at"] = now_iso
+
+        meta["coexistence"] = coex
+        wa_conn.extra_metadata = meta
+
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        flag_modified(wa_conn, "extra_metadata")
+        db.add(wa_conn)
+        db.commit()
+        logger.info(
+            "[Webhook360/coex] tenant=%s event=%s category=%s sync_state=%s",
+            wa_conn.tenant_id, event_type, category, coex.get("sync_state"),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Webhook360/coex] failed to record event tenant=%s event=%s err=%s",
+            wa_conn.tenant_id, event_type, exc,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _record_status_event(
+    db,
+    wa_conn: WhatsAppConnection,
+    *,
+    event_type: str,
+    value: Dict[str, Any],
+) -> None:
+    """Persist a status / health event under `extra_metadata.coexistence.status`."""
+    try:
+        from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+
+        try:
+            payload_preview = _json.dumps(value, ensure_ascii=False)[:2048]
+        except Exception:
+            payload_preview = ""
+
+        meta = dict(wa_conn.extra_metadata or {})
+        coex = dict(meta.get("coexistence") or {})
+        status_block = dict(coex.get("status") or {})
+        status_block["last_event"] = {
+            "event_type":  event_type,
+            "received_at": _dt.now(_tz.utc).isoformat(),
+            "payload_preview": payload_preview,
+        }
+        coex["status"] = status_block
+        meta["coexistence"] = coex
+        wa_conn.extra_metadata = meta
+
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        flag_modified(wa_conn, "extra_metadata")
+        db.add(wa_conn)
+        db.commit()
+        logger.info(
+            "[Webhook360/status] tenant=%s event=%s",
+            wa_conn.tenant_id, event_type,
+        )
+    except Exception as exc:
+        logger.warning("[Webhook360/status] persist failed tenant=%s err=%s", wa_conn.tenant_id, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _extract_pairing_state(value: Dict[str, Any]) -> Optional[str]:
+    for key in ("pairing_state", "state", "status"):
+        v = value.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
+def _extract_mobile_app_state(value: Dict[str, Any]) -> Optional[str]:
+    for key in ("connection_state", "mobile_app_state", "state", "status"):
+        v = value.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return None
 
 
 async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dict[str, Any]) -> None:

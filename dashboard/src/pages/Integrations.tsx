@@ -456,9 +456,12 @@ export default function Integrations() {
             </p>
             <div className="space-y-2">
               {[
-                { label: 'Salla Webhooks',   url: 'https://api.nahlah.ai/integrations/salla/webhooks/{products|orders|customers}' },
-                { label: 'Zid Webhooks',     url: 'https://api.nahlah.ai/integrations/zid/webhooks/{products|orders|customers}' },
-                { label: 'WhatsApp Webhook', url: 'https://api.nahlah.ai/webhook/whatsapp' },
+                { label: 'Salla Webhooks',           url: 'https://api.nahlah.ai/integrations/salla/webhooks/{products|orders|customers}' },
+                { label: 'Zid Webhooks',             url: 'https://api.nahlah.ai/integrations/zid/webhooks/{products|orders|customers}' },
+                { label: 'WhatsApp Webhook (Meta)',  url: 'https://api.nahlah.ai/webhook/whatsapp' },
+                { label: 'WhatsApp Channel (360dialog)',     url: 'https://api.nahlah.ai/webhook/whatsapp/360dialog' },
+                { label: 'WhatsApp Coexistence (360dialog)', url: 'https://api.nahlah.ai/webhook/whatsapp/360dialog/coexistence' },
+                { label: 'WhatsApp Status (360dialog)',      url: 'https://api.nahlah.ai/webhook/whatsapp/360dialog/status' },
               ].map(({ label, url }) => (
                 <div key={label} className="flex items-center gap-3 bg-slate-50 rounded-lg px-3 py-2">
                   <span className="text-xs font-medium text-slate-500 w-36 shrink-0">{label}</span>

@@ -157,7 +157,49 @@ def _ensure_coexistence_allowed(db: Session, tenant_id: int) -> None:
 
 
 def _coexistence_webhook_url() -> str:
+    """Channel webhook — receives normal customer messages + statuses."""
     return f"{BACKEND_URL.rstrip('/')}/webhook/whatsapp/360dialog"
+
+
+def _coexistence_events_url() -> str:
+    """Dedicated Coexistence webhook — receives device sync, pairing,
+    phone-app handover and other Coexistence lifecycle events. Configuring
+    this URL on 360dialog is recommended for the WA-Business-App + API
+    side-by-side mode so message traffic and Coexistence events stay on
+    separate streams."""
+    return f"{BACKEND_URL.rstrip('/')}/webhook/whatsapp/360dialog/coexistence"
+
+
+def _coexistence_status_url() -> str:
+    """Channel/account health callbacks (account_alerts, quality updates …)."""
+    return f"{BACKEND_URL.rstrip('/')}/webhook/whatsapp/360dialog/status"
+
+
+def _coexistence_webhook_block(conn: Optional[WhatsAppConnection]) -> Dict[str, Any]:
+    """Return the dashboard-facing webhook block: per-URL state + timestamps.
+
+    Always includes the canonical URLs (so the owner panel can show the
+    "what to paste in 360dialog" hint even before the first event), then
+    layers the live receipt timestamps + status that the webhook handler
+    persists into `extra_metadata.coexistence.webhook` over the top.
+    """
+    meta = dict(getattr(conn, "extra_metadata", None) or {}) if conn else {}
+    coex = dict(meta.get("coexistence") or {})
+    webhook = dict(coex.get("webhook") or {})
+    return {
+        "channel_url":                _coexistence_webhook_url(),
+        "channel_status":             webhook.get("channel_status") or (
+            "verified" if (conn and conn.webhook_verified) else "unknown"
+        ),
+        "channel_last_received_at":   webhook.get("channel_last_received_at"),
+        "coexistence_url":            _coexistence_events_url(),
+        "coexistence_status":         webhook.get("coexistence_status") or "unknown",
+        "coexistence_last_received_at": webhook.get("coexistence_last_received_at"),
+        "status_url":                 _coexistence_status_url(),
+        "status_status":              webhook.get("status_status") or "unknown",
+        "status_last_received_at":    webhook.get("status_last_received_at"),
+        "internal_header_name":       "X-Nahla-Coexistence-Secret",
+    }
 
 
 def _set_coexistence_state(
@@ -186,7 +228,22 @@ def _coexistence_status_payload(conn: Optional[WhatsAppConnection]) -> dict:
     base.update({
         "coexistence_status": state.get("status"),
         "action_required_message": state.get("action_required_message"),
-        "request_submitted_at": ((state.get("request") or {}).get("submitted_at") if isinstance(state.get("request"), dict) else None),
+        "request_submitted_at": (
+            (state.get("request") or {}).get("submitted_at")
+            if isinstance(state.get("request"), dict) else None
+        ),
+        # ── New: per-URL webhook block + Coexistence runtime state ────────
+        # Surfaces all three webhooks (channel / coexistence / status) plus
+        # the live state the webhook handler updates on each receipt.
+        "webhooks":                    _coexistence_webhook_block(conn),
+        "coexistence_sync_state":      state.get("sync_state"),
+        "pairing_state":               state.get("pairing_state"),
+        "mobile_app_connection_state": state.get("mobile_app_connection_state"),
+        "phone_app_handover_at":       state.get("phone_app_handover_at"),
+        "last_coexistence_event":      state.get("last_event"),
+        "last_coexistence_events_by_category": state.get("last_event_by_category") or {},
+        "last_status_event":           (state.get("status") or {}).get("last_event")
+                                       if isinstance(state.get("status"), dict) else None,
     })
     return base
 
@@ -1326,6 +1383,230 @@ async def admin_activate_coexistence(
         "status": conn.status,
         "webhook_result": webhook_result,
         **_coexistence_status_payload(conn),
+    }
+
+
+# ── Admin: per-tenant Coexistence webhook tooling ───────────────────────────
+# Test / Verify / Auto-Configure for each of the three 360dialog webhooks.
+# These endpoints are owner-panel only (require_admin).
+
+class _TenantOnly(BaseModel):
+    tenant_id: int
+
+
+@router.post("/admin/coexistence/test-webhook")
+async def admin_coexistence_test_webhook(
+    body: _TenantOnly,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, object] = Depends(require_admin),
+):
+    """Send a Nahla-internal probe to each of the three Coexistence webhook
+    endpoints to confirm they're reachable from the public internet.
+
+    This does NOT involve 360dialog — it's a self-test. We POST a tiny
+    well-known payload with the tenant's `X-Nahla-Coexistence-Secret`
+    header. A 2xx response means our own router accepts the URL; a
+    non-2xx (or transport error) means the deployment / load balancer is
+    misconfigured. Use this BEFORE asking 360dialog to verify, so you
+    know the issue is on Nahla's side, not 360dialog's.
+    """
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=body.tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد اتصال واتساب لهذا المتجر")
+
+    secret = str((conn.extra_metadata or {}).get("coexistence_internal_secret") or "")
+    headers = {"Content-Type": "application/json"}
+    if secret:
+        headers["X-Nahla-Coexistence-Secret"] = secret
+
+    targets = {
+        "channel":     _coexistence_webhook_url(),
+        "coexistence": _coexistence_events_url(),
+        "status":      _coexistence_status_url(),
+    }
+    probe_field_by_target = {
+        "channel":     "messages",
+        "coexistence": "device_sync",
+        "status":      "channel_status",
+    }
+    results: Dict[str, Dict[str, Any]] = {}
+    async with httpx.AsyncClient(timeout=10) as client:
+        for name, url in targets.items():
+            payload = {
+                "object": "whatsapp_business_account",
+                "entry": [{
+                    "id": "nahla-self-test",
+                    "changes": [{
+                        "field": probe_field_by_target[name],
+                        "value": {
+                            "metadata": {
+                                "phone_number_id": conn.phone_number_id or "",
+                                "display_phone_number": conn.phone_number or "",
+                            },
+                            "_nahla_self_test": True,
+                        },
+                    }],
+                }],
+            }
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+                results[name] = {
+                    "ok":          200 <= resp.status_code < 300,
+                    "url":         url,
+                    "status_code": resp.status_code,
+                    "body":        resp.text[:300],
+                }
+            except Exception as exc:
+                results[name] = {"ok": False, "url": url, "error": str(exc)}
+
+    audit(
+        "admin_coexistence_test_webhook",
+        admin=_admin.get("sub") if isinstance(_admin, dict) else None,
+        tenant_id=body.tenant_id,
+        results={k: v.get("ok") for k, v in results.items()},
+    )
+    return {
+        "tenant_id": body.tenant_id,
+        "all_ok":    all(v.get("ok") for v in results.values()),
+        "results":   results,
+    }
+
+
+@router.post("/admin/coexistence/verify-webhook")
+async def admin_coexistence_verify_webhook(
+    body: _TenantOnly,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, object] = Depends(require_admin),
+):
+    """Read the channel webhook 360dialog has on file for this tenant and
+    compare it to the URL Nahla expects. Surfaces drift instead of relying
+    on the local cache.
+
+    Note: 360dialog's public WABA API only returns the *channel* webhook
+    config. The Coexistence and status URLs are configured by Nahla as
+    custom-headered routes pointing at the same channel — so a verified
+    channel URL implies the others are routable too. The webhook block in
+    `extra_metadata.coexistence.webhook` is updated to reflect the result.
+    """
+    from services.whatsapp_platform.service import dialog360_get_webhook_config  # noqa: PLC0415
+
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=body.tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد اتصال واتساب لهذا المتجر")
+    if not conn.access_token:
+        raise HTTPException(status_code=400, detail="مفتاح API لـ 360dialog غير مخزّن لهذا التاجر")
+
+    expected_url = _coexistence_webhook_url()
+    cfg = await dialog360_get_webhook_config(api_key=conn.access_token)
+
+    remote_url = ""
+    if isinstance(cfg, dict):
+        remote_url = (
+            cfg.get("url")
+            or (cfg.get("webhook") or {}).get("url")
+            or (cfg.get("data") or {}).get("url")
+            or ""
+        )
+    matches = bool(remote_url) and remote_url.rstrip("/") == expected_url.rstrip("/")
+
+    meta = dict(conn.extra_metadata or {})
+    coex = dict(meta.get("coexistence") or {})
+    webhook = dict(coex.get("webhook") or {})
+    webhook["channel_status"] = "verified" if matches else (
+        "url_mismatch" if remote_url else "unverified"
+    )
+    webhook["channel_last_verified_at"] = datetime.now(timezone.utc).isoformat()
+    webhook["channel_remote_url"] = remote_url or None
+    coex["webhook"] = webhook
+    meta["coexistence"] = coex
+    conn.extra_metadata = meta
+    flag_modified(conn, "extra_metadata")
+    if matches:
+        conn.webhook_verified = True
+    db.commit()
+
+    audit(
+        "admin_coexistence_verify_webhook",
+        admin=_admin.get("sub") if isinstance(_admin, dict) else None,
+        tenant_id=body.tenant_id,
+        matches=matches,
+    )
+    return {
+        "tenant_id":     body.tenant_id,
+        "expected_url":  expected_url,
+        "remote_url":    remote_url,
+        "matches":       matches,
+        "raw":           cfg,
+        "webhooks":      _coexistence_webhook_block(conn),
+    }
+
+
+@router.post("/admin/coexistence/auto-configure")
+async def admin_coexistence_auto_configure(
+    body: _TenantOnly,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, object] = Depends(require_admin),
+):
+    """Push Nahla's canonical channel webhook URL to 360dialog, including
+    the per-tenant `X-Nahla-Coexistence-Secret` header.
+
+    This is the one-click "Auto Configure" action. After it succeeds, the
+    Coexistence and status URLs are reachable too — they share the same
+    routing infrastructure — but operators should still configure them
+    explicitly in 360dialog if they want clean separation in 360dialog's
+    own dashboard."""
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=body.tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد اتصال واتساب لهذا المتجر")
+    if not conn.access_token:
+        raise HTTPException(status_code=400, detail="مفتاح API لـ 360dialog غير مخزّن لهذا التاجر")
+
+    secret = str((conn.extra_metadata or {}).get("coexistence_internal_secret") or "")
+    if not secret:
+        secret = D360_WEBHOOK_INTERNAL_SECRET or secrets.token_urlsafe(24)
+
+    result = await dialog360_configure_webhook(
+        api_key=conn.access_token,
+        url=_coexistence_webhook_url(),
+        headers={"X-Nahla-Coexistence-Secret": secret},
+    )
+    ok = "error" not in (result or {})
+
+    meta = dict(conn.extra_metadata or {})
+    meta["coexistence_internal_secret"] = secret
+    coex = dict(meta.get("coexistence") or {})
+    webhook = dict(coex.get("webhook") or {})
+    webhook["channel_status"] = "verified" if ok else "failed"
+    webhook["channel_last_configured_at"] = datetime.now(timezone.utc).isoformat()
+    if not ok:
+        webhook["channel_last_error"] = str((result or {}).get("error"))[:500]
+    coex["webhook"] = webhook
+    meta["coexistence"] = coex
+    meta.setdefault("provider_details", {}).update({
+        "webhook_url":           _coexistence_webhook_url(),
+        "coexistence_url":       _coexistence_events_url(),
+        "status_url":            _coexistence_status_url(),
+        "internal_header_name":  "X-Nahla-Coexistence-Secret",
+    })
+    conn.extra_metadata = meta
+    flag_modified(conn, "extra_metadata")
+    if ok:
+        conn.webhook_verified = True
+    else:
+        conn.last_error = str((result or {}).get("error"))[:500]
+    db.commit()
+
+    audit(
+        "admin_coexistence_auto_configure",
+        admin=_admin.get("sub") if isinstance(_admin, dict) else None,
+        tenant_id=body.tenant_id,
+        ok=ok,
+    )
+    return {
+        "tenant_id":  body.tenant_id,
+        "ok":         ok,
+        "result":     result,
+        "webhooks":   _coexistence_webhook_block(conn),
     }
 
 

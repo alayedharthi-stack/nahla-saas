@@ -395,6 +395,12 @@ async def dialog360_configure_webhook(
     headers: Optional[Dict[str, str]] = None,
     timeout: float = 20,
 ) -> Dict[str, Any]:
+    """Register (POST) the channel webhook URL with 360dialog.
+
+    The endpoint accepts a single URL plus optional custom headers that
+    360dialog will replay on every webhook delivery. Nahla uses this to
+    inject the per-tenant `X-Nahla-Coexistence-Secret` header.
+    """
     req_headers = {
         "D360-API-KEY": api_key,
         "Content-Type": "application/json",
@@ -404,8 +410,37 @@ async def dialog360_configure_webhook(
         payload["headers"] = headers
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(f"{D360_BASE}/v1/configs/webhook", headers=req_headers, json=payload)
-        data = resp.json()
-    logger.info("[WA dialog360 webhook] status=%s body=%s", resp.status_code, data)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+    logger.info("[WA dialog360 webhook] configure status=%s body=%s", resp.status_code, data)
+    if resp.status_code >= 400 and "error" not in data:
+        data = {"error": data, "status_code": resp.status_code}
+    return data
+
+
+async def dialog360_get_webhook_config(
+    *,
+    api_key: str,
+    timeout: float = 15,
+) -> Dict[str, Any]:
+    """Read back the currently configured channel webhook from 360dialog.
+
+    Used by the owner-panel "Verify" action: we compare the URL 360dialog has
+    on file against the URL Nahla expects and surface a mismatch instead of
+    silently trusting the local cache.
+    """
+    req_headers = {"D360-API-KEY": api_key}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(f"{D360_BASE}/v1/configs/webhook", headers=req_headers)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+    logger.info("[WA dialog360 webhook] read status=%s body=%s", resp.status_code, data)
+    if resp.status_code >= 400:
+        return {"error": data, "status_code": resp.status_code}
     return data
 
 

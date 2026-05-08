@@ -35,6 +35,48 @@ export interface CoexistenceActivatePayload {
   action_required_message?: string
 }
 
+/** Per-URL block describing each of the three 360dialog webhooks Nahla supports. */
+export interface CoexistenceWebhookBlock {
+  channel_url: string
+  channel_status: string
+  channel_last_received_at: string | null
+  coexistence_url: string
+  coexistence_status: string
+  coexistence_last_received_at: string | null
+  status_url: string
+  status_status: string
+  status_last_received_at: string | null
+  internal_header_name: string
+}
+
+export interface CoexistenceTestWebhookResult {
+  tenant_id: number
+  all_ok: boolean
+  results: Record<string, {
+    ok: boolean
+    url: string
+    status_code?: number
+    body?: string
+    error?: string
+  }>
+}
+
+export interface CoexistenceVerifyWebhookResult {
+  tenant_id: number
+  expected_url: string
+  remote_url: string
+  matches: boolean
+  raw: unknown
+  webhooks: CoexistenceWebhookBlock
+}
+
+export interface CoexistenceAutoConfigureResult {
+  tenant_id: number
+  ok: boolean
+  result: unknown
+  webhooks: CoexistenceWebhookBlock
+}
+
 export interface AdminPlatformStats {
   merchants: { total: number; active: number; trial: number; paid: number; suspended: number }
   tenants: { total: number }
@@ -362,5 +404,26 @@ export const adminApi = {
     apiCall<Record<string, unknown>>('/whatsapp/admin/coexistence/activate', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  /** Self-test: probe Nahla's three Coexistence URLs from the dashboard side. */
+  testCoexistenceWebhook: (tenantId: number) =>
+    apiCall<CoexistenceTestWebhookResult>('/whatsapp/admin/coexistence/test-webhook', {
+      method: 'POST',
+      body: JSON.stringify({ tenant_id: tenantId }),
+    }),
+
+  /** Read the channel webhook 360dialog has on file and compare with Nahla's. */
+  verifyCoexistenceWebhook: (tenantId: number) =>
+    apiCall<CoexistenceVerifyWebhookResult>('/whatsapp/admin/coexistence/verify-webhook', {
+      method: 'POST',
+      body: JSON.stringify({ tenant_id: tenantId }),
+    }),
+
+  /** One-click: push Nahla's URL + secret header to 360dialog. */
+  autoConfigureCoexistenceWebhook: (tenantId: number) =>
+    apiCall<CoexistenceAutoConfigureResult>('/whatsapp/admin/coexistence/auto-configure', {
+      method: 'POST',
+      body: JSON.stringify({ tenant_id: tenantId }),
     }),
 }
