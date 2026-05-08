@@ -44,11 +44,18 @@ function _persistSession(
 }
 
 export async function login(email: string, password: string): Promise<boolean> {
+  // Client-side timeout: when the API hangs (Railway cold start, network
+  // glitch, deploy in flight), give up after 20s so the UI never gets
+  // stuck on "جارٍ تسجيل الدخول…" indefinitely. The user gets a clear
+  // "invalid credentials / connection error" instead of a frozen spinner.
+  const controller = new AbortController()
+  const timeoutId  = setTimeout(() => controller.abort(), 20_000)
   try {
     const res = await fetch(`${API_BASE}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
+      signal: controller.signal,
     })
     if (!res.ok) return false
     const data = await res.json()
@@ -58,8 +65,15 @@ export async function login(email: string, password: string): Promise<boolean> {
       user_id:   data.user_id,
     })
     return true
-  } catch {
+  } catch (e) {
+    // AbortError → timeout. Surface a console warning so we can correlate
+    // with backend logs.
+    if (e instanceof Error && e.name === 'AbortError') {
+      console.warn('[auth] login request timed out after 20s')
+    }
     return false
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 

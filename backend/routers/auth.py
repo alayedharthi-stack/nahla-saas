@@ -95,23 +95,55 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
     Merchant accounts are checked FIRST so the platform owner can log in as a
     merchant (test store) with the same email. Admin fallback only if no merchant
     account matched.
-    """
-    if not JWT_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Auth service unavailable — python-jose not installed")
 
-    _INVALID   = HTTPException(status_code=401, detail="البريد الإلكتروني أو كلمة المرور غير صحيحة")
-    email      = body.email.strip().lower()
+    Structured logs (every login emits these in order so a hung login is
+    instantly diagnosable in Railway logs):
+
+        [AUTH LOGIN] start          email=… ip=…
+        [AUTH LOGIN] db ok          email=… user_found=…
+        [AUTH LOGIN] password verified email=… role=…
+        [AUTH LOGIN] token issued   email=… tenant_id=… user_id=…
+        [AUTH LOGIN] response sent  email=… role=… ms=…
+    """
+    import time as _time  # noqa: PLC0415
+    _t0 = _time.monotonic()
+
+    email      = (body.email or "").strip().lower()
     client_ip  = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
+    logger.info("[AUTH LOGIN] start email=%s ip=%s", email, client_ip)
+
+    if not JWT_AVAILABLE:
+        logger.error("[AUTH LOGIN] aborted email=%s reason=jwt_unavailable", email)
+        raise HTTPException(status_code=503, detail="Auth service unavailable — python-jose not installed")
+
+    _INVALID = HTTPException(status_code=401, detail="البريد الإلكتروني أو كلمة المرور غير صحيحة")
 
     # 1. Merchant credentials — checked FIRST so the platform owner can also
     #    log in as a regular merchant (e.g. test store) with the same email.
     if BCRYPT_AVAILABLE:
-        user = db.query(User).filter(User.email == email, User.is_active == True).first()  # noqa: E712
+        try:
+            user = db.query(User).filter(User.email == email, User.is_active == True).first()  # noqa: E712
+        except Exception as exc:
+            logger.error("[AUTH LOGIN] db error email=%s exc=%s", email, exc, exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=503,
+                detail="تعذّر الاتصال بقاعدة البيانات. حاول لاحقًا.",
+            ) from exc
+        logger.info(
+            "[AUTH LOGIN] db ok email=%s user_found=%s has_password_hash=%s",
+            email, bool(user),
+            bool(user and getattr(user, "password_hash", None)),
+        )
         if user and getattr(user, "password_hash", None):
             if verify_password(body.password, user.password_hash):
                 role = user.role or "merchant"
+                logger.info("[AUTH LOGIN] password verified email=%s role=%s", email, role)
 
                 # Use the tenant already assigned to this user. We REFUSE to
                 # invent or "snap" a tenant on the fly here — the previous
@@ -149,10 +181,15 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
                     tenant_id=tenant_id,
                     user_id=user.id,
                 )
-                audit("login_success", role=role, sub=user.email, tenant_id=tenant_id, ip=client_ip)
                 logger.info(
-                    "[auth/login] MERCHANT LOGIN | email=%s role=%s tenant_id=%s user_id=%s",
-                    user.email, role, tenant_id, user.id,
+                    "[AUTH LOGIN] token issued email=%s tenant_id=%s user_id=%s role=%s",
+                    user.email, tenant_id, user.id, role,
+                )
+                audit("login_success", role=role, sub=user.email, tenant_id=tenant_id, ip=client_ip)
+                _ms = int((_time.monotonic() - _t0) * 1000)
+                logger.info(
+                    "[AUTH LOGIN] response sent email=%s role=%s tenant_id=%s ms=%s",
+                    user.email, role, tenant_id, _ms,
                 )
                 return {
                     "access_token": token,
@@ -162,16 +199,20 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
                     "tenant_id":    tenant_id,
                     "user_id":      user.id,
                 }
+            else:
+                logger.info("[AUTH LOGIN] password mismatch email=%s", email)
 
     # 2. Admin credentials (env-var fallback — only if no merchant account matched)
     email_ok    = hmac.compare_digest(email,         ADMIN_EMAIL.lower())
     password_ok = hmac.compare_digest(body.password, ADMIN_PASSWORD)
     if email_ok and password_ok:
         token = create_token(email=ADMIN_EMAIL, role="admin", tenant_id=1)
+        logger.info("[AUTH LOGIN] token issued email=%s tenant_id=1 role=admin", ADMIN_EMAIL)
         audit("login_success", role="admin", sub=ADMIN_EMAIL, ip=client_ip)
+        _ms = int((_time.monotonic() - _t0) * 1000)
         logger.info(
-            "[auth/login] ADMIN LOGIN | email=%s tenant_id=1",
-            ADMIN_EMAIL,
+            "[AUTH LOGIN] response sent email=%s role=admin tenant_id=1 ms=%s",
+            ADMIN_EMAIL, _ms,
         )
         return {
             "access_token": token,
@@ -182,8 +223,9 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
         }
 
     # 3. Nothing matched
+    _ms = int((_time.monotonic() - _t0) * 1000)
     audit("login_failed", reason="invalid_credentials", sub=email, ip=client_ip)
-    logger.warning("[auth/login] FAILED | email=%s ip=%s", email, client_ip)
+    logger.warning("[AUTH LOGIN] FAILED email=%s ip=%s ms=%s", email, client_ip, _ms)
     raise _INVALID
 
 
