@@ -26,6 +26,13 @@ from fastapi.middleware.cors import CORSMiddleware
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("nahla-backend")
 
+# Railway / edge diagnostics: stdout is always visible in platform logs.
+print("[BOOT/net] PORT=", os.getenv("PORT"), flush=True)
+logger.warning(
+    "[BOOT/net] PORT=%s — uvicorn must bind host=0.0.0.0 port=$PORT (see start.sh)",
+    os.getenv("PORT"),
+)
+
 # ── Path setup ────────────────────────────────────────────────────────────────
 # Allow backend/ sub-packages to import from the repo root, database/ and each other.
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1121,6 +1128,51 @@ async def on_startup() -> None:
         _bt.monotonic() - _t_lifespan,
     )
 
+
+def _raw_asgi_should_log(scope: dict) -> bool:
+    """Outbound diagnostic before FastAPI. Controlled by NAHLA_RAW_ASGI_LOG.
+
+    * unset / ``get`` — log only GET + HEAD (default; avoids webhook spam).
+    * ``all`` / ``1`` / ``true`` — log every HTTP request.
+    * ``0`` / ``false`` / ``off`` — disable.
+    """
+    if scope.get("type") != "http":
+        return False
+    raw = os.environ.get("NAHLA_RAW_ASGI_LOG", "get").strip().lower()
+    if raw in ("0", "false", "off", "no"):
+        return False
+    if raw in ("1", "true", "yes", "all"):
+        return True
+    # default mode: GET probes only
+    return scope.get("method") in ("GET", "HEAD")
+
+
+# ── Outermost ASGI wrapper (edge / Railway diagnostics) ───────────────────────
+# Declared AFTER the full FastAPI graph is built (routes + middleware + events).
+# If Railway logs show POST traffic inside FastAPI but never print ``RAW_ASGI``
+# for GET, the connection is dying **before** this Python callable runs.
+_FASTAPI_APPLICATION = app
+
+
+async def app(scope, receive, send):  # noqa: A001 — intentional uvicorn export name
+    if _raw_asgi_should_log(scope):
+        meth = scope.get("method")
+        path = scope.get("path")
+        qs = scope.get("query_string", b"")
+        if isinstance(qs, bytes):
+            qs_preview = qs[:80]
+        else:
+            qs_preview = repr(qs)[:80]
+        msg = (
+            f"[RAW_ASGI] type=http method={meth!r} path={path!r} "
+            f"client={scope.get('client')!r} scheme={scope.get('scheme')!r} "
+            f"http_version={scope.get('http_version')!r} qs={qs_preview!r}"
+        )
+        print("RAW_SCOPE", scope.get("type"), meth, path, flush=True)
+        logger.warning(msg)
+    await _FASTAPI_APPLICATION(scope, receive, send)
+
+
 # ── Production startup guard ───────────────────────────────────────────────────
 # Fail fast if critical secrets are missing in production.
 _REQUIRED_PROD_VARS = ("JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD")
@@ -1150,6 +1202,12 @@ else:
 # ── Dev entrypoint ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn  # noqa: PLC0415
-    port = int(os.environ.get("PORT", 8000))
-    logger.info("Starting Nahla SaaS Backend API on port %s …", port)
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    port = int(os.environ.get("PORT", "8000"))
+    logger.info("Starting Nahla SaaS Backend API on 0.0.0.0:%s …", port)
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True,
+        http=os.environ.get("UVICORN_HTTP", os.environ.get("NAHLA_UVICORN_HTTP", "auto")),
+    )
