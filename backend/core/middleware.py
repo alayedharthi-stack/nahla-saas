@@ -63,6 +63,11 @@ JWT_PUBLIC_PREFIXES = (
 
 async def multi_tenant_middleware(request: Request, call_next):
     """Read X-Tenant-ID header and attach to request.state (dev routing only)."""
+    # Belt-and-suspenders: never inspect headers / state for OPTIONS — CORS
+    # preflight responses must always pass through cleanly. Same logic in
+    # every inner middleware below.
+    if request.method == "OPTIONS":
+        return await call_next(request)
     raw = request.headers.get("X-Tenant-ID")
     try:
         tenant_id = str(int(raw)) if raw is not None else None
@@ -74,10 +79,18 @@ async def multi_tenant_middleware(request: Request, call_next):
 
 async def api_key_middleware(request: Request, call_next):
     """Reject unauthenticated service calls without X-Nahla-Key when configured."""
+    if request.method == "OPTIONS":
+        # Preflight requests carry no Authorization header by design — they
+        # MUST be allowed through so CORSMiddleware can answer them. A 401
+        # here would surface to the browser as a CORS failure with no
+        # actionable message.
+        return await call_next(request)
     if API_SECRET_KEY:
         path = request.url.path
         if not (
             path.startswith("/health")
+            or path.startswith("/alive")
+            or path.startswith("/healthz")
             or path.startswith("/version")
             or path.startswith("/api/version")
             or path.startswith("/debug/")    # TEMPORARY: token-gated debug surface
@@ -99,8 +112,12 @@ async def api_key_middleware(request: Request, call_next):
 
 async def global_rate_limit_middleware(request: Request, call_next):
     """300 requests per minute per IP — exempts /health and /auth."""
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if not (
         request.url.path.startswith("/health")
+        or request.url.path.startswith("/alive")
+        or request.url.path.startswith("/healthz")
         or request.url.path.startswith("/auth")
     ):
         sys.path.insert(
@@ -131,7 +148,27 @@ async def request_logging_middleware(request: Request, call_next):
     Slow requests (>1500 ms) are logged at WARNING with a
     ``[SLOW REQUEST]`` prefix and forwarded to ``core.runtime_perf`` so
     they show up in ``GET /admin/runtime/perf`` for live diagnostics.
+
+    Every CORS preflight is also logged at INFO with a ``[CORS]`` prefix
+    so a browser-side CORS failure can be matched line-by-line against
+    the API logs:
+
+        [CORS] OPTIONS /auth/login origin=https://app.nahlah.ai
+               acr_method=POST acr_headers=content-type
     """
+    if request.method == "OPTIONS":
+        # Surface preflight requests at INFO so an ops watcher can spot
+        # missing/mistaken Origin or Access-Control-Request-* headers in
+        # one log line. We intentionally log BEFORE passing to call_next
+        # so the line appears even if a deeper handler hangs.
+        logger.info(
+            "[CORS] OPTIONS %s origin=%s acr_method=%s acr_headers=%s",
+            request.url.path,
+            request.headers.get("origin", "-"),
+            request.headers.get("access-control-request-method", "-"),
+            request.headers.get("access-control-request-headers", "-"),
+        )
+
     start = _time.monotonic()
     request.state.db_ms = 0
     request.state.ai_ms = 0
@@ -399,6 +436,9 @@ async def owner_merchant_scope_middleware(request: Request, call_next):
     payload attached), skips merchant tokens, skips support-impersonation
     tokens (which have already chosen an explicit, audited tenant scope).
 
+    OPTIONS preflight requests are passed through unconditionally so a
+    browser CORS check is never blocked by an authorization rule.
+
     For every other request, if the role is in :data:`PLATFORM_ADMIN_ROLES`
     and the path is NOT in :data:`OWNER_ALLOWED_PREFIXES`, the request is
     refused with HTTP 403 and an audit event is emitted. This blocks the
@@ -406,6 +446,8 @@ async def owner_merchant_scope_middleware(request: Request, call_next):
     the owner UI" bugs at the framework level instead of relying on every
     router to remember the per-endpoint dependency.
     """
+    if request.method == "OPTIONS":
+        return await call_next(request)
     payload = getattr(request.state, "jwt_payload", None)
     if not payload:
         return await call_next(request)
@@ -510,6 +552,11 @@ async def support_session_middleware(request: Request, call_next):
     only the backend enforces access control.
     """
     payload = getattr(request.state, "jwt_payload", None)
+
+    # OPTIONS preflight always passes through cleanly so a CORS check is
+    # never blocked by the support-session sensitive-paths rule.
+    if request.method == "OPTIONS":
+        return await call_next(request)
 
     # Not a support session — skip
     if not payload or not payload.get("impersonation"):

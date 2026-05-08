@@ -83,6 +83,67 @@ async def _healthz() -> dict:
     return {"ok": True, "ts": _t.time()}
 
 
+# ── Fallback CORS preflight handler ──────────────────────────────────────────
+# Belt-and-suspenders: CORSMiddleware (registered as the OUTERMOST layer
+# below) handles every well-formed OPTIONS preflight on its own. This
+# catch-all fires only when (a) CORSMiddleware decides not to intercept
+# (e.g. the Origin is missing / mismatched) or (b) some operator has
+# accidentally torn it out of the stack. We mirror the headers
+# CORSMiddleware would have emitted, manually validating the Origin
+# against CORS_ORIGINS / CORS_ORIGIN_REGEX so we never reflect an
+# untrusted origin. Returns 204 No Content with the standard CORS
+# preflight header set.
+from fastapi import Request as _CorsReq  # noqa: E402
+import re as _cors_re  # noqa: E402
+
+
+@app.options("/{full_path:path}", include_in_schema=False)
+async def _cors_preflight_fallback(full_path: str, _req: _CorsReq):
+    from core.config import CORS_ORIGINS as _co, CORS_ORIGIN_REGEX as _cr  # noqa: E402, PLC0415
+    from fastapi.responses import Response as _Resp  # noqa: PLC0415
+    origin = _req.headers.get("origin", "")
+    acr_method  = _req.headers.get("access-control-request-method",  "")
+    acr_headers = _req.headers.get("access-control-request-headers", "")
+    logger.info(
+        "[CORS] FALLBACK OPTIONS /%s origin=%s acr_method=%s acr_headers=%s",
+        full_path, origin, acr_method, acr_headers,
+    )
+
+    allowed_origin: str = ""
+    if origin:
+        if origin in _co or "*" in _co:
+            allowed_origin = origin
+        elif _cr:
+            try:
+                if _cors_re.fullmatch(_cr, origin):
+                    allowed_origin = origin
+            except Exception:
+                pass
+
+    headers: dict = {}
+    if allowed_origin:
+        headers["Access-Control-Allow-Origin"]      = allowed_origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"]     = (
+            acr_method or "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        )
+        headers["Access-Control-Allow-Headers"]     = (
+            acr_headers or "authorization, content-type, x-nahla-key, x-tenant-id"
+        )
+        headers["Access-Control-Max-Age"]           = "86400"
+        headers["Vary"]                             = "Origin"
+    else:
+        # Untrusted origin — reply 204 with NO CORS headers so the
+        # browser blocks the call. Same behaviour CORSMiddleware would
+        # produce for a non-allowlisted origin.
+        logger.warning(
+            "[CORS] preflight from untrusted origin=%s path=/%s — replying without CORS headers",
+            origin, full_path,
+        )
+
+    return _Resp(status_code=204, headers=headers)
+
+
 # ── Global exception handler ──────────────────────────────────────────────────
 # When an unhandled exception reaches ServerErrorMiddleware (the outermost layer),
 # it sends the error response using the raw ASGI send — OUTSIDE the CORSMiddleware
