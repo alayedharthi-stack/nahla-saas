@@ -12,6 +12,19 @@ Exposes:
   webhook handlers use to return 200 OK to Meta/360dialog instantly
   while the AI/state pipeline runs asynchronously behind the response.
 
+  The helper enforces a HARD CAP on simultaneously-in-flight tasks
+  (``MAX_BACKGROUND_TASKS``, default 100, override via env var
+  ``NAHLA_MAX_BG_TASKS``). Past the cap the new task is REJECTED:
+  the function logs ``[BG/rejected]`` and returns a no-op completed
+  task. This protects the worker from "task explosion" — e.g. when
+  Meta or 360dialog flush a backlog of thousands of webhooks at the
+  worker the moment a new deploy comes up — which would otherwise
+  saturate the event loop and freeze /healthz, /auth/ping, login, etc.
+
+* ``incr_active_request()`` / ``decr_active_request()`` — counters
+  surfaced in the heartbeat and ``/admin/runtime/perf`` so the operator
+  can see how many HTTP requests are mid-flight at any instant.
+
 * ``record_request(...)`` — append a finished request to a small
   rolling window of slowest requests (top-N kept by ``total_ms``). Used
   by the request timing middleware so the operator can spot which
@@ -29,12 +42,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional
 
 logger = logging.getLogger("nahla.runtime_perf")
+
+
+# Hard cap on simultaneously-in-flight background tasks (see module docstring).
+def _read_max_bg_tasks_env() -> int:
+    raw = os.environ.get("NAHLA_MAX_BG_TASKS", "").strip()
+    try:
+        v = int(raw) if raw else 100
+    except ValueError:
+        v = 100
+    return max(1, v)
+
+
+MAX_BACKGROUND_TASKS = _read_max_bg_tasks_env()
 
 
 # ── Background-task tracking ────────────────────────────────────────────────
@@ -44,8 +71,10 @@ class _BgState:
     total_spawned: int = 0
     total_completed: int = 0
     total_failed: int = 0
+    total_rejected: int = 0
     by_name_in_flight: Dict[str, int] = field(default_factory=dict)
     by_name_total: Dict[str, int] = field(default_factory=dict)
+    by_name_rejected: Dict[str, int] = field(default_factory=dict)
 
 
 _BG = _BgState()
@@ -60,24 +89,55 @@ def spawn_background(
 ) -> "asyncio.Task[Any]":
     """Schedule ``coro`` on the running event loop and instrument it.
 
+    A hard cap of ``MAX_BACKGROUND_TASKS`` simultaneous tasks is enforced.
+    When the cap is reached, the task is REJECTED rather than queued
+    indefinitely — preserving the event loop's ability to keep serving
+    /alive, /auth/ping, /auth/login. The rejected coroutine is closed so
+    Python doesn't emit an "unawaited coroutine" RuntimeWarning, and a
+    structured ``[BG/rejected]`` log line surfaces in Railway so the
+    operator can correlate the drop with upstream backlogs.
+
     Errors raised by the coroutine are logged via the module logger but
     are NEVER propagated to the caller — the calling request has
     already returned a 200 to the upstream provider, so the only
     correct error-handling strategy is to log and continue.
 
     Returns the asyncio.Task so callers can attach extra hooks if they
-    really want to (most won't).
+    really want to. Rejected calls return an already-completed dummy
+    task so the caller doesn't have to special-case the return value.
     """
     loop = asyncio.get_event_loop()
+    rid = request_id or "-"
 
     with _BG_LOCK:
+        if _BG.in_flight >= MAX_BACKGROUND_TASKS:
+            _BG.total_rejected += 1
+            _BG.by_name_rejected[name] = _BG.by_name_rejected.get(name, 0) + 1
+            in_flight_now = _BG.in_flight
+            cap = MAX_BACKGROUND_TASKS
+            # Close the coroutine so Python doesn't warn about a never-awaited
+            # coroutine on the next GC cycle.
+            try:
+                coro.close()
+            except Exception:
+                pass
+            # Build a no-op completed Task so the caller can keep its
+            # ``return spawn_background(...)`` shape.
+            done_future: "asyncio.Future[Any]" = loop.create_future()
+            done_future.set_result(None)
+            logger.warning(
+                "[BG/rejected] name=%s request_id=%s in_flight=%d cap=%d — "
+                "task explosion guard tripped",
+                name, rid, in_flight_now, cap,
+            )
+            return asyncio.ensure_future(done_future)
+
         _BG.in_flight += 1
         _BG.total_spawned += 1
         _BG.by_name_in_flight[name] = _BG.by_name_in_flight.get(name, 0) + 1
         _BG.by_name_total[name] = _BG.by_name_total.get(name, 0) + 1
 
     started = time.monotonic()
-    rid = request_id or "-"
     logger.debug("[BG/spawn] name=%s request_id=%s", name, rid)
 
     async def _runner() -> None:
@@ -110,12 +170,39 @@ def background_snapshot() -> Dict[str, Any]:
     with _BG_LOCK:
         return {
             "in_flight":       _BG.in_flight,
+            "cap":             MAX_BACKGROUND_TASKS,
             "total_spawned":   _BG.total_spawned,
             "total_completed": _BG.total_completed,
             "total_failed":    _BG.total_failed,
+            "total_rejected":  _BG.total_rejected,
             "by_name_in_flight": dict(_BG.by_name_in_flight),
             "by_name_total":     dict(_BG.by_name_total),
+            "by_name_rejected":  dict(_BG.by_name_rejected),
         }
+
+
+# ── Active-request counter ──────────────────────────────────────────────────
+_ACTIVE_REQUESTS = 0
+_ACTIVE_REQUESTS_LOCK = threading.Lock()
+
+
+def incr_active_request() -> int:
+    global _ACTIVE_REQUESTS
+    with _ACTIVE_REQUESTS_LOCK:
+        _ACTIVE_REQUESTS += 1
+        return _ACTIVE_REQUESTS
+
+
+def decr_active_request() -> int:
+    global _ACTIVE_REQUESTS
+    with _ACTIVE_REQUESTS_LOCK:
+        _ACTIVE_REQUESTS = max(0, _ACTIVE_REQUESTS - 1)
+        return _ACTIVE_REQUESTS
+
+
+def active_request_count() -> int:
+    with _ACTIVE_REQUESTS_LOCK:
+        return _ACTIVE_REQUESTS
 
 
 # ── Request timing ───────────────────────────────────────────────────────────
@@ -301,16 +388,91 @@ def scheduler_snapshot() -> Dict[str, Any]:
         }
 
 
+# ── Process-level snapshot (threads / memory / event-loop lag) ──────────────
+def process_snapshot() -> Dict[str, Any]:
+    """Best-effort introspection: thread count, RSS in MB, current loop lag.
+
+    Never raises — falls back to ``None`` for any value we can't read on
+    the running platform. Container-friendly: uses /proc when psutil is
+    not available so it works on the slim Railway base image.
+    """
+    out: Dict[str, Any] = {
+        "thread_count": threading.active_count(),
+        "memory_rss_mb": None,
+        "active_requests": active_request_count(),
+        "event_loop_lag_ms": _last_loop_lag_ms,
+    }
+    try:
+        import resource  # noqa: PLC0415  (POSIX only)
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux returns kB, macOS returns bytes — heuristically detect.
+        out["memory_rss_mb"] = round(rss_kb / 1024) if rss_kb > 1024 * 1024 else round(rss_kb / 1024)
+    except Exception:
+        pass
+    return out
+
+
 # ── Aggregate snapshot ──────────────────────────────────────────────────────
 def get_perf_snapshot() -> Dict[str, Any]:
     return {
         "as_of":               time.time(),
+        "process":             process_snapshot(),
         "background_tasks":    background_snapshot(),
         "requests":            request_snapshot(),
         "conversation_locks":  conversation_lock_snapshot(),
         "inbound_dedup":       inbound_dedup_snapshot(),
         "schedulers":          scheduler_snapshot(),
     }
+
+
+# ── Runtime heartbeat ───────────────────────────────────────────────────────
+# Background task that emits one INFO log line every ~10s with a snapshot
+# of the worker's vitals. If the heartbeats stop showing up in Railway,
+# we know precisely WHEN the event loop froze — and can correlate with
+# whatever request / scheduler tick was last observed before the gap.
+_last_loop_lag_ms: int = 0
+
+
+async def run_runtime_heartbeat(interval_seconds: float = 10.0) -> None:
+    """Forever-loop: log a structured heartbeat every ``interval_seconds``.
+
+    Also measures event-loop responsiveness: we sleep for the requested
+    interval and compare wall-clock elapsed vs the requested interval.
+    A loop fully starved by sync work in another task will sleep
+    significantly longer than asked, surfacing as ``event_loop_lag_ms``
+    in the heartbeat (and in /admin/runtime/perf).
+    """
+    global _last_loop_lag_ms
+    logger.info("[RuntimeHeartbeat] starting, interval=%.1fs cap=%d", interval_seconds, MAX_BACKGROUND_TASKS)
+    while True:
+        slept_at = time.monotonic()
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            return
+        actual = time.monotonic() - slept_at
+        lag_ms = max(0, int((actual - interval_seconds) * 1000))
+        _last_loop_lag_ms = lag_ms
+
+        try:
+            bg = background_snapshot()
+            proc = process_snapshot()
+            logger.info(
+                "[RuntimeHeartbeat] loop_lag_ms=%d active_requests=%d bg_in_flight=%d/%d "
+                "bg_total_spawned=%d bg_total_failed=%d bg_total_rejected=%d "
+                "threads=%s memory_rss_mb=%s",
+                lag_ms,
+                proc.get("active_requests", -1),
+                bg.get("in_flight", -1),
+                bg.get("cap", MAX_BACKGROUND_TASKS),
+                bg.get("total_spawned", -1),
+                bg.get("total_failed", -1),
+                bg.get("total_rejected", -1),
+                proc.get("thread_count"),
+                proc.get("memory_rss_mb"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RuntimeHeartbeat] sample failed: %s", exc)
 
 
 # ── Convenience: schedule with a delay and register ──────────────────────────

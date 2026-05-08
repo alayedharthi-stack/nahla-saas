@@ -136,7 +136,28 @@ async def request_logging_middleware(request: Request, call_next):
     request.state.db_ms = 0
     request.state.ai_ms = 0
     request.state.lock_wait_ms = 0
-    response = await call_next(request)
+
+    # Track concurrent in-flight HTTP requests so the runtime heartbeat
+    # and /admin/runtime/perf can answer "how many requests is the
+    # worker servicing right now?". Always paired in a try/finally so
+    # the counter cannot leak if the route raises.
+    try:
+        from core.runtime_perf import (  # noqa: PLC0415
+            incr_active_request, decr_active_request,
+        )
+        incr_active_request()
+        _decr_active = decr_active_request
+    except Exception:
+        _decr_active = None
+
+    try:
+        response = await call_next(request)
+    finally:
+        if _decr_active is not None:
+            try:
+                _decr_active()
+            except Exception:
+                pass
     duration_ms = round((_time.monotonic() - start) * 1000)
 
     db_ms        = int(getattr(request.state, "db_ms",        0) or 0)

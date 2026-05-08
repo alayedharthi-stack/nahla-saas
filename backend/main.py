@@ -56,6 +56,33 @@ app = FastAPI(
 )
 
 
+# ── Ultra-light liveness probe ────────────────────────────────────────────────
+# Registered BEFORE every middleware/router so it lives outside the CORS,
+# rate-limit, JWT-enforcement, and request_logging layers. /alive does:
+#
+#   * NO database query           — cannot block on a stalled connection
+#   * NO middleware ingestion     — proves the event loop and Starlette
+#                                    request-cycle are still alive even
+#                                    when one of our middlewares hangs
+#   * NO async dependencies       — pure dict return
+#
+# Used by Railway's healthcheck and by ops when /healthz, /auth/ping or
+# the rest of the API stop responding. If /alive itself stops responding
+# the worker is genuinely frozen (event-loop deadlock, OS-level hang) —
+# at which point the only correct response is a process restart.
+@app.get("/alive", include_in_schema=False)
+async def _alive() -> dict:
+    import time as _t  # noqa: PLC0415
+    return {"ok": True, "ts": _t.time()}
+
+
+@app.get("/healthz", include_in_schema=False)
+async def _healthz() -> dict:
+    """Alias of /alive for upstream proxies that expect /healthz."""
+    import time as _t  # noqa: PLC0415
+    return {"ok": True, "ts": _t.time()}
+
+
 # ── Global exception handler ──────────────────────────────────────────────────
 # When an unhandled exception reaches ServerErrorMiddleware (the outermost layer),
 # it sends the error response using the raw ASGI send — OUTSIDE the CORSMiddleware
@@ -569,6 +596,35 @@ async def on_startup() -> None:
             asyncio.create_task(_subscribe_platform_phone())
     except Exception as exc:
         logger.warning("[Startup] webhook subscription skipped: %s", exc)
+
+    # ── Runtime heartbeat (always on) ───────────────────────────────────────
+    # Emits a structured INFO line every 10s with event-loop lag, in-flight
+    # background tasks, active HTTP requests, thread count and RSS. If the
+    # heartbeats stop, the event loop is frozen — at which point we know
+    # exactly *when* the freeze happened.
+    try:
+        from core.runtime_perf import run_runtime_heartbeat  # noqa: PLC0415
+        asyncio.create_task(run_runtime_heartbeat())
+        logger.info("[RuntimeHeartbeat] task scheduled.")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RuntimeHeartbeat] could not start: %s", exc)
+
+    # ── Emergency kill-switch ───────────────────────────────────────────────
+    # When NAHLA_DISABLE_SCHEDULERS=1 we skip every scheduler launch below,
+    # leaving only the heartbeat + healthcheck. This is the surgical
+    # isolation switch ops uses when the worker is saturated to prove
+    # whether the load comes from the schedulers or from inbound HTTP.
+    _skip_schedulers = (
+        os.environ.get("NAHLA_DISABLE_SCHEDULERS", "").strip().lower() in ("1", "true", "yes")
+    )
+    if _skip_schedulers:
+        logger.warning(
+            "[Startup] NAHLA_DISABLE_SCHEDULERS=1 — every scheduler is "
+            "DISABLED for this run. Only /alive, /healthz, /auth, and "
+            "the runtime heartbeat are guaranteed to work. Unset the env "
+            "var and redeploy to restore normal behaviour."
+        )
+        return
 
     # ── Staggered scheduler startup ─────────────────────────────────────────
     # Previously every scheduler was created via asyncio.create_task() at
