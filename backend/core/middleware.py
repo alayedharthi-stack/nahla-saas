@@ -6,19 +6,138 @@ Register these in main.py — never import from here in routers.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
 import time as _time
+from typing import Awaitable, Callable
 
 from fastapi import HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from core.auth import JWT_AVAILABLE, PLATFORM_ADMIN_ROLES, decode_token
 from core.audit import audit
 from core.config import API_SECRET_KEY
 
 logger = logging.getLogger("nahla-backend")
+
+
+# ── Cross-middleware safety contract ────────────────────────────────────────
+# Paths that must never be touched by a heavy middleware (DB session,
+# JWT decode, rate-limit Redis lookup, support-session DB read, etc.).
+# Each middleware below checks this set EARLY and short-circuits to
+# ``call_next`` when the path matches, so a congested chain cannot
+# starve liveness probes, the dashboard's connectivity check, or the
+# webhook ack-first path.
+#
+# Webhook paths are matched by prefix (``/webhook/``) further below;
+# only exact-match liveness/login paths live here.
+ULTRA_LIGHT_PATHS = frozenset({
+    "/alive",
+    "/healthz",
+    "/auth/ping",
+    "/auth/login-form",   # form-encoded login (no preflight); must
+                          # stay snappy when the JSON path is blocked
+})
+
+
+def _is_bypass_path(path: str) -> bool:
+    """True for paths that should skip every non-essential middleware.
+
+    Exact match on ULTRA_LIGHT_PATHS, plus prefix match on /webhook/
+    so providers (Meta / 360dialog) always get a fast 200 even when
+    the rest of the chain is congested.
+    """
+    if path in ULTRA_LIGHT_PATHS:
+        return True
+    if path.startswith("/webhook/"):
+        return True
+    return False
+
+
+# Optional anyio import — used by the safety wrapper below to
+# recognise an EndOfStream that was raised through call_next when a
+# client disconnected mid-request.
+try:
+    from anyio import EndOfStream as _AnyioEndOfStream  # type: ignore
+except Exception:  # pragma: no cover — anyio is a Starlette dep
+    _AnyioEndOfStream = ()  # type: ignore[assignment]
+
+
+async def _safe_call_next(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+    *,
+    name: str,
+) -> Response:
+    """
+    Wrap ``await call_next(request)`` so this middleware can NEVER
+    exit without returning a Response.
+
+    Without this wrapper, the BaseHTTPMiddleware machinery raises
+    ``RuntimeError: No response returned`` whenever the inner ASGI
+    task ends without sending — which happens routinely when the
+    client disconnects (``asyncio.CancelledError``,
+    ``anyio.EndOfStream``) or when an inner middleware itself
+    misbehaves. The exception unwinds through every outer middleware
+    and surfaces in the ASGI server, congesting the worker because
+    Starlette retries the send.
+
+    Behaviour:
+    * Successful response               → returned unchanged.
+    * ``CancelledError``                → log + 499-shaped fallback.
+    * ``anyio.EndOfStream``             → log + 499-shaped fallback.
+    * ``RuntimeError("No response …")`` → log + 500-shaped fallback.
+    * Any other ``Exception``           → log + 500-shaped fallback.
+
+    Webhook paths (``/webhook/*``) get a 200 ``ok=false`` body
+    instead of 499/500 so 360dialog / Meta do NOT enter retry-storm
+    mode on a transient cancellation. See ``_safe_fallback_response``.
+
+    Note that we re-import ``anyio.EndOfStream`` lazily here in case
+    the symbol gets relocated in a future anyio release; production
+    must keep working even if the type check fails.
+    """
+    try:
+        return await call_next(request)
+    except asyncio.CancelledError:
+        logger.warning(
+            "[%s] CancelledError on %s %s — client disconnected",
+            name, request.method, request.url.path,
+        )
+        return _safe_fallback_response(request, 499)
+    except RuntimeError as exc:
+        if "No response returned" in str(exc):
+            logger.error(
+                "[%s] BaseHTTPMiddleware end-of-chain w/o response on %s %s: %s",
+                name, request.method, request.url.path, exc,
+            )
+            return _safe_fallback_response(request, 500)
+        # Other RuntimeErrors are real bugs — keep the stack trace.
+        logger.exception(
+            "[%s] RuntimeError on %s %s",
+            name, request.method, request.url.path,
+        )
+        return _safe_fallback_response(request, 500)
+    except BaseException as exc:  # noqa: BLE001
+        # Catch BaseException so anyio.EndOfStream (which subclasses
+        # Exception today but may evolve) and other low-level cancel
+        # markers cannot escape. Re-raise SystemExit/KeyboardInterrupt.
+        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            raise
+        is_eos = bool(_AnyioEndOfStream) and isinstance(exc, _AnyioEndOfStream)
+        if is_eos:
+            logger.warning(
+                "[%s] anyio.EndOfStream on %s %s — client gone",
+                name, request.method, request.url.path,
+            )
+            return _safe_fallback_response(request, 499)
+        logger.exception(
+            "[%s] downstream raised %s on %s %s",
+            name, type(exc).__name__, request.method, request.url.path,
+        )
+        return _safe_fallback_response(request, 500)
 
 # Public path prefixes that never require a JWT token.
 # Keep these as specific as possible — broad prefixes can accidentally
@@ -69,14 +188,16 @@ async def multi_tenant_middleware(request: Request, call_next):
     # preflight responses must always pass through cleanly. Same logic in
     # every inner middleware below.
     if request.method == "OPTIONS":
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="multi_tenant")
+    if _is_bypass_path(request.url.path):
+        return await _safe_call_next(request, call_next, name="multi_tenant")
     raw = request.headers.get("X-Tenant-ID")
     try:
         tenant_id = str(int(raw)) if raw is not None else None
     except (ValueError, TypeError):
         tenant_id = None
     request.state.tenant_id = tenant_id
-    return await call_next(request)
+    return await _safe_call_next(request, call_next, name="multi_tenant")
 
 
 async def api_key_middleware(request: Request, call_next):
@@ -86,7 +207,9 @@ async def api_key_middleware(request: Request, call_next):
         # MUST be allowed through so CORSMiddleware can answer them. A 401
         # here would surface to the browser as a CORS failure with no
         # actionable message.
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="api_key")
+    if _is_bypass_path(request.url.path):
+        return await _safe_call_next(request, call_next, name="api_key")
     if API_SECRET_KEY:
         path = request.url.path
         if not (
@@ -109,13 +232,18 @@ async def api_key_middleware(request: Request, call_next):
                     content={"detail": "Unauthorized"},
                     headers=_cors_error_headers(request),
                 )
-    return await call_next(request)
+    return await _safe_call_next(request, call_next, name="api_key")
 
 
 async def global_rate_limit_middleware(request: Request, call_next):
     """300 requests per minute per IP — exempts /health and /auth."""
     if request.method == "OPTIONS":
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="global_rate_limit")
+    # Webhooks + liveness paths are exempted explicitly — providers
+    # ALWAYS exceed any per-IP threshold during a burst, and the
+    # ack-first contract requires a sub-100 ms response.
+    if _is_bypass_path(request.url.path):
+        return await _safe_call_next(request, call_next, name="global_rate_limit")
     if not (
         request.url.path.startswith("/health")
         or request.url.path.startswith("/alive")
@@ -135,7 +263,7 @@ async def global_rate_limit_middleware(request: Request, call_next):
                 content={"detail": "Too many requests"},
                 headers=_cors_error_headers(request),
             )
-    return await call_next(request)
+    return await _safe_call_next(request, call_next, name="global_rate_limit")
 
 
 async def request_logging_middleware(request: Request, call_next):
@@ -189,31 +317,13 @@ async def request_logging_middleware(request: Request, call_next):
     except Exception:
         _decr_active = None
 
-    # Hardened: catch CancelledError + every other exception so this
-    # middleware NEVER exits without a Response. Letting either escape
-    # surfaces as ``RuntimeError: No response returned`` from Starlette's
-    # BaseHTTPMiddleware and causes 360dialog to retry the same payload,
-    # multiplying load on the worker. We log the failure with the full
-    # path so the operator can correlate it with the route handler.
-    import asyncio as _asyncio  # noqa: PLC0415
-    response = None
-    raised: Exception | None = None
+    # Hardened: _safe_call_next NEVER lets an exception escape — it
+    # returns a fallback Response for CancelledError, EndOfStream,
+    # RuntimeError("No response returned"), or any other exception.
+    # This is the most important safety property of this middleware.
+    response: Response
     try:
-        response = await call_next(request)
-    except _asyncio.CancelledError as exc:
-        raised = exc
-        logger.warning(
-            "[request_logging] client cancelled path=%s method=%s",
-            request.url.path, request.method,
-        )
-        response = _safe_fallback_response(request, 499)
-    except Exception as exc:  # noqa: BLE001
-        raised = exc
-        logger.exception(
-            "[request_logging] downstream raised %s on path=%s method=%s",
-            type(exc).__name__, request.url.path, request.method,
-        )
-        response = _safe_fallback_response(request, 500)
+        response = await _safe_call_next(request, call_next, name="request_logging")
     finally:
         if _decr_active is not None:
             try:
@@ -222,16 +332,6 @@ async def request_logging_middleware(request: Request, call_next):
                 pass
 
     duration_ms = round((_time.monotonic() - start) * 1000)
-    # ``raised`` is informational only — kept on the line so a future
-    # reader can see the post-mortem path explicitly.
-    _ = raised
-
-    # Defensive: response should never be None at this point because
-    # both the success and the exception paths above assign it, but
-    # belt-and-suspenders so a future refactor can't reintroduce
-    # "No response returned".
-    if response is None:
-        response = _safe_fallback_response(request, 500)
 
     db_ms        = int(getattr(request.state, "db_ms",        0) or 0)
     ai_ms        = int(getattr(request.state, "ai_ms",        0) or 0)
@@ -294,32 +394,20 @@ async def salla_iframe_middleware(request: Request, call_next):
     Sets Content-Security-Policy frame-ancestors instead of X-Frame-Options
     so Salla can load the app inside their embedded app viewer.
 
-    Hardened: any exception (including ``asyncio.CancelledError``) raised
-    by ``call_next`` is converted into a JSONResponse so this middleware
-    can NEVER exit without returning a Response object — which is the
-    precondition for the dreaded ``RuntimeError: No response returned``
-    that Starlette's ``BaseHTTPMiddleware`` raises when its inner ASGI
-    task ends without sending. Webhook paths get a 200 (so 360dialog /
-    Meta don't enter retry-storm mode); everything else gets a 500 with
-    CORS headers so the browser sees the real error rather than a
-    masked CORS failure.
-    """
-    import asyncio as _asyncio  # noqa: PLC0415
-    try:
-        response = await call_next(request)
-    except _asyncio.CancelledError:
-        logger.warning(
-            "[salla_iframe] client cancelled on path=%s — returning 499-equivalent",
-            request.url.path,
-        )
-        return _safe_fallback_response(request, 499)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "[salla_iframe] downstream raised %s on path=%s — returning 200 (webhook) / 500",
-            type(exc).__name__, request.url.path,
-        )
-        return _safe_fallback_response(request, 500)
+    Uses ``_safe_call_next`` so this middleware NEVER exits without a
+    Response, even on CancelledError / EndOfStream / RuntimeError("No
+    response returned"). This is the precondition for not surfacing
+    ``RuntimeError`` from BaseHTTPMiddleware on a client disconnect,
+    and the safety contract every middleware in the chain shares.
 
+    The frame-ancestors CSP only matters for HTML page responses, so
+    we skip the header tweak entirely for /webhook/* and ultra-light
+    paths to keep the hot path allocation-free.
+    """
+    if _is_bypass_path(request.url.path):
+        return await _safe_call_next(request, call_next, name="salla_iframe")
+
+    response = await _safe_call_next(request, call_next, name="salla_iframe")
     try:
         response.headers["Content-Security-Policy"] = (
             "frame-ancestors 'self' https://s.salla.sa https://*.salla.sa "
@@ -408,10 +496,17 @@ async def jwt_enforcement_middleware(request: Request, call_next):
                     "Access-Control-Max-Age": "86400",
                 },
             )
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="jwt_enforcement")
+
+    # Ultra-light + webhook paths skip JWT entirely. Without this,
+    # /alive and /healthz would 401 because they're not under the
+    # public-prefix tree, defeating the "no blocking I/O on liveness"
+    # promise.
+    if _is_bypass_path(path):
+        return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
     if any(path.startswith(p) for p in JWT_PUBLIC_PREFIXES):
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
     # Public store scripts + store-facing widget APIs — no JWT possible from external stores
     # Pattern: /merchant/widgets/{id}/*.js | *.json | /create-coupon
@@ -420,17 +515,23 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         or path.endswith(".json")
         or path.endswith("/create-coupon")
     ):
-        response = await call_next(request)
+        response = await _safe_call_next(request, call_next, name="jwt_enforcement")
         # Allow ANY store domain to call these public endpoints (CORS wildcard)
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        try:
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        except Exception:
+            pass
         return response
 
     # Legacy addon embed scripts
     if path.startswith("/merchant/addons/widget/") and path.endswith(".js"):
-        response = await call_next(request)
-        response.headers["Access-Control-Allow-Origin"] = "*"
+        response = await _safe_call_next(request, call_next, name="jwt_enforcement")
+        try:
+            response.headers["Access-Control-Allow-Origin"] = "*"
+        except Exception:
+            pass
         return response
 
     if not JWT_AVAILABLE:
@@ -483,7 +584,7 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         )
 
     request.state.tenant_id = str(int(tid))
-    return await call_next(request)
+    return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
 
 # ── Owner ↔ merchant scope isolation middleware ────────────────────────────────
@@ -536,21 +637,23 @@ async def owner_merchant_scope_middleware(request: Request, call_next):
     router to remember the per-endpoint dependency.
     """
     if request.method == "OPTIONS":
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="owner_scope")
+    if _is_bypass_path(request.url.path):
+        return await _safe_call_next(request, call_next, name="owner_scope")
     payload = getattr(request.state, "jwt_payload", None)
     if not payload:
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="owner_scope")
 
     role = str(payload.get("role") or "").strip()
     if role not in PLATFORM_ADMIN_ROLES:
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="owner_scope")
 
     if payload.get("impersonation"):
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="owner_scope")
 
     path = request.url.path
     if any(path.startswith(p) for p in OWNER_ALLOWED_PREFIXES):
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="owner_scope")
 
     client_ip = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
@@ -645,11 +748,16 @@ async def support_session_middleware(request: Request, call_next):
     # OPTIONS preflight always passes through cleanly so a CORS check is
     # never blocked by the support-session sensitive-paths rule.
     if request.method == "OPTIONS":
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="support_session")
+
+    # Bypass for ultra-light + webhook paths so a heavy DB session
+    # check never blocks a liveness probe or a 360dialog ack.
+    if _is_bypass_path(request.url.path):
+        return await _safe_call_next(request, call_next, name="support_session")
 
     # Not a support session — skip
     if not payload or not payload.get("impersonation"):
-        return await call_next(request)
+        return await _safe_call_next(request, call_next, name="support_session")
 
     role = payload.get("role", "")
     if role != "support_impersonation":
@@ -744,7 +852,7 @@ async def support_session_middleware(request: Request, call_next):
         details={"path": path, "method": request.method, "ip": ip, "sv": token_sv},
     )
 
-    return await call_next(request)
+    return await _safe_call_next(request, call_next, name="support_session")
 
 
 # ── Activity Tracking helpers ──────────────────────────────────────────────────
