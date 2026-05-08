@@ -1,7 +1,7 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2, ArrowRight } from 'lucide-react'
-import { login, getDefaultRoute } from '../auth'
+import { loginDetailed, getDefaultRoute, pingAuth } from '../auth'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
 import TrustBlock from '../components/TrustBlock'
@@ -15,18 +15,75 @@ export default function Login() {
   const [error,    setError]    = useState('')
   const [loading,  setLoading]  = useState(false)
 
+  // ── Connectivity probe on mount ─────────────────────────────────────────
+  // Runs once when the login page mounts. Tells us in DevTools whether
+  // the browser can even reach the API host before the user types
+  // credentials. If this fails the issue is API base URL / CORS /
+  // service-worker cache, NOT the password.
+  useEffect(() => {
+    let cancelled = false
+    void pingAuth().then(r => {
+      if (cancelled) return
+      // eslint-disable-next-line no-console
+      if (r.ok) {
+        console.info('[auth] /auth/ping OK', r)
+      } else {
+        console.error('[auth] /auth/ping FAILED', r)
+      }
+    })
+    return () => { cancelled = true }
+  }, [])
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
     setLoading(true)
-    const ok = await login(email, password)
-    if (ok) {
-      // Route strictly by role — owners never land on merchant /overview, which would
-      // call merchant-scoped endpoints with the owner JWT (whose tenant_id is the
-      // demo tenant by convention) and surface that tenant's data inside the owner UI.
-      navigate(getDefaultRoute(), { replace: true })
-    } else {
-      setError(t(tr => tr.login.invalidCreds))
+    try {
+      const r = await loginDetailed(email, password)
+      if (r.ok) {
+        // Route strictly by role — owners never land on merchant /overview, which
+        // would call merchant-scoped endpoints with the owner JWT.
+        navigate(getDefaultRoute(), { replace: true })
+        return
+      }
+      // Map the structured failure to a specific Arabic message so the
+      // operator can tell credential-bad from network-down at a glance.
+      switch (r.reason) {
+        case 'unauthorized':
+          setError(t(tr => tr.login.invalidCreds))
+          break
+        case 'timeout':
+          setError(lang === 'ar'
+            ? 'تأخر الخادم في الرد (٢٠ ثانية). تأكد من اتصال الإنترنت ثم حاول مرة أخرى.'
+            : 'Server did not respond within 20s. Check your connection and retry.')
+          break
+        case 'network':
+          setError(lang === 'ar'
+            ? 'تعذّر الاتصال بالخادم. تحقق من الإنترنت أو حالة الخدمة.'
+            : 'Could not reach the server. Check your network or service status.')
+          break
+        case 'http':
+          setError(lang === 'ar'
+            ? `فشل تسجيل الدخول (HTTP ${r.status ?? '??'}).`
+            : `Login failed (HTTP ${r.status ?? '??'}).`)
+          break
+        case 'parse':
+          setError(lang === 'ar'
+            ? 'استجابة الخادم غير صحيحة. حاول مرة أخرى.'
+            : 'Bad server response. Try again.')
+          break
+        default:
+          setError(t(tr => tr.login.invalidCreds))
+      }
+    } catch (err) {
+      // Defensive — loginDetailed already swallows everything, but a
+      // try/finally here means setLoading(false) ALWAYS runs.
+      // eslint-disable-next-line no-console
+      console.error('[auth] handleSubmit unexpected error', err)
+      setError(lang === 'ar'
+        ? 'حدث خطأ غير متوقع. حاول مرة أخرى.'
+        : 'An unexpected error occurred. Try again.')
+    } finally {
       setLoading(false)
     }
   }

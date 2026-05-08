@@ -88,6 +88,31 @@ class ResetPasswordIn(BaseModel):
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+@router.get("/auth/ping")
+async def auth_ping(request: Request) -> Dict[str, Any]:
+    """
+    Diagnostic ping — no DB, no JWT, no bcrypt.
+
+    Used by the login page to verify that the frontend can actually reach
+    `https://api.nahlah.ai` over CORS before submitting credentials. If
+    the spinner gets stuck on "جارٍ تسجيل الدخول…" but `/auth/ping`
+    returns OK, the auth path itself is the problem (DB / bcrypt /
+    password). If `/auth/ping` itself fails, the issue is the network
+    layer (API base URL, CORS allow-list, service-worker cache, proxy)
+    and the credentials never had a chance.
+
+    Always returns 200 with the request method + a server timestamp.
+    Cheap enough to be called on every page load if needed.
+    """
+    import time as _time  # noqa: PLC0415
+    return {
+        "ok":     True,
+        "service": "auth",
+        "ts":     _time.time(),
+        "origin": request.headers.get("origin", ""),
+    }
+
+
 @router.post("/auth/login")
 async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     """

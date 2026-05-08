@@ -1,5 +1,47 @@
-// Defined locally to avoid circular dependency with api/client.ts
+// Defined locally to avoid circular dependency with api/client.ts.
+// We log the resolved base URL at module load so that a wrong build
+// (relative path, wrong env var) is obvious in the browser console
+// before the user even attempts to log in.
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://api.nahlah.ai'
+if (typeof window !== 'undefined') {
+  // eslint-disable-next-line no-console
+  console.info('[auth] API_BASE =', API_BASE)
+}
+
+/**
+ * Diagnostic ping — verifies that the browser can talk to the API at
+ * all (DNS, TLS, CORS, service-worker cache). Returns the server JSON
+ * on success and an Error otherwise. Never throws unless the caller
+ * explicitly rethrows.
+ */
+export async function pingAuth(): Promise<{ ok: boolean; status: number; body: unknown; durationMs: number; error?: string }> {
+  const start = performance.now()
+  const url   = `${API_BASE}/auth/ping`
+  const controller = new AbortController()
+  const timeoutId  = setTimeout(() => controller.abort(), 8_000)
+  try {
+    const res = await fetch(url, { method: 'GET', signal: controller.signal })
+    const txt = await res.text()
+    let parsed: unknown = txt
+    try { parsed = JSON.parse(txt) } catch { /* keep text */ }
+    return {
+      ok:         res.ok,
+      status:     res.status,
+      body:       parsed,
+      durationMs: Math.round(performance.now() - start),
+    }
+  } catch (e) {
+    return {
+      ok:         false,
+      status:     0,
+      body:       null,
+      durationMs: Math.round(performance.now() - start),
+      error:      e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    }
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
 
 const AUTH_KEY        = 'nahla_auth'
 const TOKEN_KEY       = 'nahla_token'
@@ -43,38 +85,90 @@ function _persistSession(
   }
 }
 
-export async function login(email: string, password: string): Promise<boolean> {
-  // Client-side timeout: when the API hangs (Railway cold start, network
-  // glitch, deploy in flight), give up after 20s so the UI never gets
-  // stuck on "جارٍ تسجيل الدخول…" indefinitely. The user gets a clear
-  // "invalid credentials / connection error" instead of a frozen spinner.
+export interface LoginResult {
+  ok:       boolean
+  reason?:  'timeout' | 'network' | 'http' | 'unauthorized' | 'parse'
+  status?:  number
+  message?: string
+}
+
+/**
+ * Attempt a login. Returns a structured result so the UI can render a
+ * specific error message and console can show exactly what happened.
+ *
+ * Hard 20-second timeout via AbortController guarantees the UI is
+ * never stuck on the spinner indefinitely. Every interesting outcome
+ * is also logged to the browser console so the operator can paste
+ * one screenshot of DevTools to diagnose any future hang.
+ */
+export async function loginDetailed(email: string, password: string): Promise<LoginResult> {
+  const url        = `${API_BASE}/auth/login`
   const controller = new AbortController()
   const timeoutId  = setTimeout(() => controller.abort(), 20_000)
+  const start      = performance.now()
+  // eslint-disable-next-line no-console
+  console.info('[auth] login → POST', url)
   try {
-    const res = await fetch(`${API_BASE}/auth/login`, {
-      method: 'POST',
+    const res = await fetch(url, {
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-      signal: controller.signal,
+      body:    JSON.stringify({ email, password }),
+      signal:  controller.signal,
     })
-    if (!res.ok) return false
-    const data = await res.json()
+    const elapsed = Math.round(performance.now() - start)
+    // eslint-disable-next-line no-console
+    console.info(`[auth] login response status=${res.status} elapsed=${elapsed}ms`)
+
+    if (res.status === 401) {
+      return { ok: false, reason: 'unauthorized', status: 401 }
+    }
+    if (!res.ok) {
+      let bodyText = ''
+      try { bodyText = (await res.text()).slice(0, 400) } catch { /* ignore */ }
+      // eslint-disable-next-line no-console
+      console.warn(`[auth] login non-OK body: ${bodyText}`)
+      return { ok: false, reason: 'http', status: res.status, message: bodyText || `HTTP ${res.status}` }
+    }
+
+    let data: { access_token?: string; role?: string; tenant_id?: number; user_id?: number }
+    try {
+      data = await res.json()
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('[auth] login response JSON parse failed', e)
+      return { ok: false, reason: 'parse', status: res.status, message: 'Bad server response' }
+    }
+
     _persistSession(data.access_token ?? '', {
       role:      data.role,
       tenant_id: data.tenant_id,
       user_id:   data.user_id,
     })
-    return true
+    // eslint-disable-next-line no-console
+    console.info('[auth] login success role=%s tenant_id=%s', data.role, data.tenant_id)
+    return { ok: true, status: res.status }
   } catch (e) {
-    // AbortError → timeout. Surface a console warning so we can correlate
-    // with backend logs.
     if (e instanceof Error && e.name === 'AbortError') {
-      console.warn('[auth] login request timed out after 20s')
+      // eslint-disable-next-line no-console
+      console.warn('[auth] login TIMEOUT after 20s — backend or network unresponsive')
+      return { ok: false, reason: 'timeout', message: 'Login request timed out after 20s' }
     }
-    return false
+    // eslint-disable-next-line no-console
+    console.error('[auth] login network error', e)
+    return {
+      ok:      false,
+      reason:  'network',
+      message: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    }
   } finally {
     clearTimeout(timeoutId)
   }
+}
+
+/** Backwards-compatible wrapper — most callers just need a boolean. */
+export async function login(email: string, password: string): Promise<boolean> {
+  const r = await loginDetailed(email, password)
+  return r.ok
 }
 
 export function logout(): void {
