@@ -414,9 +414,23 @@ async def on_startup() -> None:
         _git_branch,
         os.environ.get("RAILWAY_DEPLOYMENT_ID", "local"),
     )
-    # 0. Blocking bootstrap — MUST run before any code issues SQL that references
-    #    new columns (e.g. integrations.external_store_id).  Railway may start
-    #    `uvicorn …` directly without start.sh; background safe_alters are too late.
+    # 0. DB bootstrap — runs in BACKGROUND so it cannot block the ASGI
+    #    lifespan startup event. Previously this was awaited inline,
+    #    which meant uvicorn would not serve a single HTTP request
+    #    (not even /alive, /healthz, /auth/ping) until the entire
+    #    cleanup_salla_duplicates + ``alembic upgrade head`` chain
+    #    finished. On Railway this is observed as: TCP connects fine,
+    #    request bytes are sent fine, but the client gets ``0 bytes
+    #    received`` and times out — because uvicorn refuses to
+    #    dispatch HTTP requests until lifespan.startup.complete.
+    #
+    #    Running it in the background means the worker is responsive
+    #    INSTANTLY. The trade-off: routes that issue SQL referencing
+    #    columns added by a pending migration will fail until the
+    #    migration completes, but those failures surface as a clear
+    #    SQL error instead of a service-wide hang. Liveness endpoints
+    #    + the ack-first webhooks do NOT touch DB columns, so they
+    #    are unaffected.
     _skip = os.environ.get("NAHLA_SKIP_DB_BOOTSTRAP", "").lower() in ("1", "true", "yes")
     if _skip:
         logger.info("NAHLA_SKIP_DB_BOOTSTRAP set — skipping cleanup + Alembic bootstrap.")
@@ -507,11 +521,37 @@ async def on_startup() -> None:
                         "see logged stderr above"
                     )
 
-            await asyncio.get_running_loop().run_in_executor(None, _bootstrap_db_schema)
-            logger.info("Database bootstrap (Salla cleanup + Alembic) completed.")
+            async def _bootstrap_db_schema_bg() -> None:
+                """Run the blocking bootstrap on a worker thread WITHOUT
+                gating the ASGI lifespan startup. Errors are logged
+                but never propagated — refusing to start the whole
+                worker on a migration glitch is exactly what produced
+                the 0-bytes-received hang in production. Routes that
+                rely on a fresh column will surface a clear DB error
+                instead, which the ops watcher can fix without
+                killing /alive."""
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, _bootstrap_db_schema)
+                    logger.info("Database bootstrap (Salla cleanup + Alembic) completed.")
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "[BOOT] Database bootstrap FAILED in background: %s — "
+                        "/alive and ack-first webhooks remain available; "
+                        "DB-bound routes may 5xx until the operator fixes the schema.",
+                        exc,
+                    )
+
+            asyncio.create_task(_bootstrap_db_schema_bg())
+            logger.info(
+                "[BOOT] Database bootstrap dispatched as background task — "
+                "ASGI startup will complete now so /alive + /healthz can "
+                "answer immediately.",
+            )
         except Exception as exc:
-            logger.exception("Database bootstrap failed — refusing to start: %s", exc)
-            raise
+            logger.exception(
+                "[BOOT] Failed to schedule DB bootstrap (non-fatal): %s", exc,
+            )
 
     # 1. DB table creation / column migrations (non-fatal)
     try:
