@@ -21,8 +21,10 @@ Routes
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import secrets
+import time
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -87,6 +89,26 @@ GRAPH_BASE = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
 _TENANT_FEATURES_KEY = "tenant_features"
 _PLATFORM_FEATURES_KEY = "platform_features"
 _COEX_FEATURE_KEY = "whatsapp_coexistence_beta"
+
+_LIVE_VERIFY_CACHE_TTL_SEC = float(os.environ.get("NAHLA_LIVE_VERIFY_CACHE_SEC", "45"))
+_LIVE_VERIFY_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
+
+
+def _live_verify_cache_get(tenant_id: int) -> Optional[dict[str, Any]]:
+    hit = _LIVE_VERIFY_CACHE.get(tenant_id)
+    if not hit:
+        return None
+    age = time.monotonic() - hit[0]
+    if age >= _LIVE_VERIFY_CACHE_TTL_SEC:
+        return None
+    logger.debug("[WA live-verify] cache_hit tenant=%s age_sec=%.2f", tenant_id, age)
+    return copy.deepcopy(hit[1])
+
+
+def _live_verify_cache_put(tenant_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    _LIVE_VERIFY_CACHE[tenant_id] = (time.monotonic(), copy.deepcopy(payload))
+    return payload
+
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
@@ -182,29 +204,59 @@ def _coexistence_status_url() -> str:
     return f"{BACKEND_URL.rstrip('/')}/webhook/whatsapp/360dialog/status"
 
 
+def _dt_iso_utc(dt: Optional[datetime]) -> Optional[str]:
+    if not dt:
+        return None
+    try:
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
 def _coexistence_webhook_block(conn: Optional[WhatsAppConnection]) -> Dict[str, Any]:
     """Return the dashboard-facing webhook block: per-URL state + timestamps.
 
-    Always includes the canonical URLs (so the owner panel can show the
-    "what to paste in 360dialog" hint even before the first event), then
-    layers the live receipt timestamps + status that the webhook handler
-    persists into `extra_metadata.coexistence.webhook` over the top.
-    """
+    Receipt times prefer narrow DB columns (``last_webhook_received_at``,
+    ``webhook_coexistence_received_at``, ``webhook_status_received_at``) so we
+    do not depend on ``extra_metadata.coexistence.webhook`` mirrors that used to
+    be rewritten on every webhook."""
     meta = dict(getattr(conn, "extra_metadata", None) or {}) if conn else {}
     coex = dict(meta.get("coexistence") or {})
     webhook = dict(coex.get("webhook") or {})
+
+    channel_last = (
+        _dt_iso_utc(getattr(conn, "last_webhook_received_at", None))
+        if conn else None
+    ) or webhook.get("channel_last_received_at")
+    coexist_last = (
+        _dt_iso_utc(getattr(conn, "webhook_coexistence_received_at", None))
+        if conn else None
+    ) or webhook.get("coexistence_last_received_at")
+    status_last = (
+        _dt_iso_utc(getattr(conn, "webhook_status_received_at", None))
+        if conn else None
+    ) or webhook.get("status_last_received_at")
+
+    channel_status = webhook.get("channel_status") or (
+        "verified" if (conn and conn.webhook_verified) else "unknown"
+    )
+    coexist_status = webhook.get("coexistence_status") or (
+        "verified" if coexist_last else "unknown"
+    )
+    status_status = webhook.get("status_status") or (
+        "verified" if status_last else "unknown"
+    )
+
     return {
         "channel_url":                _coexistence_webhook_url(),
-        "channel_status":             webhook.get("channel_status") or (
-            "verified" if (conn and conn.webhook_verified) else "unknown"
-        ),
-        "channel_last_received_at":   webhook.get("channel_last_received_at"),
+        "channel_status":             channel_status,
+        "channel_last_received_at":   channel_last,
         "coexistence_url":            _coexistence_events_url(),
-        "coexistence_status":         webhook.get("coexistence_status") or "unknown",
-        "coexistence_last_received_at": webhook.get("coexistence_last_received_at"),
+        "coexistence_status":         coexist_status,
+        "coexistence_last_received_at": coexist_last,
         "status_url":                 _coexistence_status_url(),
-        "status_status":              webhook.get("status_status") or "unknown",
-        "status_last_received_at":    webhook.get("status_last_received_at"),
+        "status_status":              status_status,
+        "status_last_received_at":    status_last,
         "internal_header_name":       "X-Nahla-Coexistence-Secret",
     }
 
@@ -601,6 +653,10 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
     }
     """
     tenant_id = resolve_tenant_id(request)
+    _cached = _live_verify_cache_get(tenant_id)
+    if _cached is not None:
+        return _cached
+
     conn = db.query(WhatsAppConnection).filter(
         WhatsAppConnection.tenant_id == tenant_id,
     ).first()
@@ -614,15 +670,18 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
     # ── Local checks ─────────────────────────────────────────────────────────
     _add("has_record", conn is not None)
     if not conn:
-        return {
-            "truly_connected": False,
-            "reason_code":     "no_record",
-            "reason_message":  "لا يوجد سجل ربط واتساب لهذا المتجر.",
-            "checks":          checks,
-            "provider":        None,
-            "db_status":       None,
-            "verified_at":     now_iso,
-        }
+        return _live_verify_cache_put(
+            tenant_id,
+            {
+                "truly_connected": False,
+                "reason_code":     "no_record",
+                "reason_message":  "لا يوجد سجل ربط واتساب لهذا المتجر.",
+                "checks":          checks,
+                "provider":        None,
+                "db_status":       None,
+                "verified_at":     now_iso,
+            },
+        )
 
     provider = _wa_provider(conn)
     db_status = conn.status or "unknown"
@@ -828,18 +887,21 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
     else:
         default_msg = "غير متصل فعليًا."
 
-    return {
-        "truly_connected": truly_connected,
-        "soft_warning":    soft_warning,
-        "webhook_active":  webhook_active,
-        "reason_code":     reason_code,
-        "reason_message":  reason_msg or default_msg,
-        "checks":          checks,
-        "provider":        provider,
-        "db_status":       db_status,
-        "verified_at":     now_iso,
-        "provider_probe":  provider_probe,
-    }
+    return _live_verify_cache_put(
+        tenant_id,
+        {
+            "truly_connected": truly_connected,
+            "soft_warning":    soft_warning,
+            "webhook_active":  webhook_active,
+            "reason_code":     reason_code,
+            "reason_message":  reason_msg or default_msg,
+            "checks":          checks,
+            "provider":        provider,
+            "db_status":       db_status,
+            "verified_at":     now_iso,
+            "provider_probe":  provider_probe,
+        },
+    )
 
 
 @router.post("/connection/start")

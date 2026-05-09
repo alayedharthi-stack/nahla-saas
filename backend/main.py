@@ -252,6 +252,32 @@ if _ASGI_STACK not in _VALID_ASGI_STACKS:
     )
     _ASGI_STACK = "full"
 
+# Partial stacks (cors_only / cors_fastpath / full_no_fastpath) DISABLE
+# tenant + JWT + owner middleware. That caused production breakage when
+# `cors_fastpath` was set on a live deploy: every merchant route started
+# erroring out with `resolve_tenant_id: no tenant scope` (no customers,
+# AI panel blank). Refuse to honour a partial stack unless an operator
+# explicitly opts in via NAHLA_ALLOW_PARTIAL_STACK=1 — meant for local /
+# bisect debugging only.
+if _ASGI_STACK != "full":
+    _allow_partial = os.environ.get("NAHLA_ALLOW_PARTIAL_STACK", "").strip().lower() in ("1", "true", "yes")
+    if not _allow_partial:
+        logger.critical(
+            "[BOOT/asgi] NAHLA_ASGI_STACK=%s requested but NAHLA_ALLOW_PARTIAL_STACK is NOT set — "
+            "forcing back to 'full'. Partial stacks disable multi_tenant/jwt/owner middleware "
+            "and break merchant routes (resolve_tenant_id no scope, customers blank, AI panel blank). "
+            "Set NAHLA_ALLOW_PARTIAL_STACK=1 only for local middleware bisect debugging.",
+            _ASGI_STACK,
+        )
+        _ASGI_STACK = "full"
+    else:
+        logger.warning(
+            "[BOOT/asgi] NAHLA_ASGI_STACK=%s with NAHLA_ALLOW_PARTIAL_STACK=1 — "
+            "DEBUG mode: tenant/JWT/owner middleware will be DISABLED. "
+            "DO NOT use this in production.",
+            _ASGI_STACK,
+        )
+
 # ── Middleware stack ───────────────────────────────────────────────────────────
 # Registration order: LAST registered = OUTERMOST = first to process requests
 # and LAST to process responses.

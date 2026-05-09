@@ -1262,6 +1262,10 @@ class WhatsAppConnection(Base):
     # Guardian: last time a real inbound webhook was received for this tenant
     last_webhook_received_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Per-endpoint receipt (360dialog multi-URL setup) — avoids rewriting JSONB on every ping.
+    webhook_coexistence_received_at = Column(DateTime(timezone=True), nullable=True)
+    webhook_status_received_at = Column(DateTime(timezone=True), nullable=True)
+
     # Meta account health (fetched periodically from Graph API)
     meta_messaging_limit = Column(String, nullable=True)     # e.g. "TIER_1K", "TIER_10K", "TIER_100K", "UNLIMITED"
     meta_quality_rating  = Column(String, nullable=True)     # "GREEN", "YELLOW", "RED"

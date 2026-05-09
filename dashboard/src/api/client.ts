@@ -46,14 +46,25 @@ export const API_BASE = {
   valueOf: () => getApiBase(),
 } as unknown as string
 
-// Error codes that mean the session is truly invalid and the user must re-login.
-// Do NOT logout on every 401 — some endpoints may return 401 for reasons unrelated
-// to the session (e.g. support-access checks, impersonation guards).
-const SESSION_EXPIRED_CODES = new Set([
-  'missing_token',
+// Error codes that mean the JWT itself is invalid — caller MUST re-login.
+// These are rare and unambiguous; safe to act on regardless of which endpoint
+// surfaced them.
+const HARD_LOGOUT_CODES = new Set([
+  'token_expired',
   'invalid_token',
+])
+
+// Soft codes — only force logout when the FAILING URL is an auth/session route.
+// A 401 on a secondary endpoint (support-access, access-requests, notifications,
+// /whatsapp/* status, etc.) was previously dragging the whole UI to /login and
+// erasing every page mid-session, even when the user's token was perfectly valid.
+const SOFT_LOGOUT_CODES = new Set([
+  'missing_token',
   'no_tenant_claim',
 ])
+
+// Endpoints whose 401 conclusively means "the session is gone".
+const AUTH_PATH_RE = /\/auth\/(me|session|refresh|verify|whoami|login)\b/i
 
 function classifyNetworkError(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error ?? '')
@@ -118,20 +129,41 @@ export async function apiCall<T>(path: string, options?: RequestInit): Promise<T
     return err
   }
 
-  // 401 — only logout when the backend signals the session/token itself is invalid.
-  // A 401 for other reasons (e.g. permission checks) should surface as a normal error.
+  // 401 — narrowly scoped logout policy.
+  //
+  // We previously logged the user out on ANY 401 that carried one of a handful
+  // of error codes. That dragged the whole dashboard back to /login whenever
+  // a secondary endpoint (e.g. /merchant/support-access, /merchant/notifications,
+  // /whatsapp/connection/...) refused the request for non-session reasons —
+  // the user perceived it as "the platform keeps logging me out".
+  //
+  // New policy:
+  //   * `token_expired` / `invalid_token` are unambiguous — log out.
+  //   * `missing_token` / `no_tenant_claim` are *also* used by the JWT
+  //     middleware, but only mean "session lost" when the FAILING request
+  //     is an auth-class route (/auth/me, /auth/session, /auth/refresh, ...).
+  //   * Anything else surfaces as a normal API error so the affected page
+  //     can show a banner without nuking the whole app.
   if (res.status === 401) {
     let body: any = null
     try { body = await res.clone().json() } catch { /* ignore */ }
     const code = body?.code ?? body?.detail?.code ?? ''
 
-    if (SESSION_EXPIRED_CODES.has(code)) {
+    const isHardLogout = HARD_LOGOUT_CODES.has(code)
+    const isSoftLogout = SOFT_LOGOUT_CODES.has(code) && AUTH_PATH_RE.test(path)
+
+    if (isHardLogout || isSoftLogout) {
       // eslint-disable-next-line no-console
-      console.warn('[auth] session invalid / refresh — forcing logout', { code, url })
+      console.warn('[auth] session invalid / refresh — forcing logout', { code, url, hard: isHardLogout })
       logout()
       window.location.href = '/login'
       throw new Error('انتهت صلاحية الجلسة — يرجى تسجيل الدخول مجدداً')
     }
+
+    // 401 from a non-auth endpoint with a soft code or no code: keep the
+    // session intact, surface as a normal error for the caller to render.
+    // eslint-disable-next-line no-console
+    console.warn('[auth] 401 on secondary endpoint — keeping session', { code, url })
     throw buildApiError(body, 'غير مصرح')
   }
 

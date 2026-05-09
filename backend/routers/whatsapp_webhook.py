@@ -67,6 +67,16 @@ from core.conversation_engine import (
 from services.whatsapp_platform.service import provider_send_message
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
 from core.database import get_db
+from core.wa_conn_write_metrics import (
+    WA_STAMP_THROTTLE_SEC,
+    approx_json_bytes,
+    record_row_flush,
+    reset_stamp_marker,
+    should_stamp_now,
+    submit_stamp_background,
+)
+from session import SessionLocal
+from sqlalchemy import text
 from core.nahla_knowledge import build_nahla_system_prompt
 from core.wa_usage import track_conversation
 from modules.ai.media.normalizer import normalize_whatsapp_inbound
@@ -75,6 +85,10 @@ from services.customer_intelligence import CustomerIntelligenceService, normaliz
 
 logger = logging.getLogger("nahla-backend")
 router = APIRouter(tags=["WhatsApp Webhook"])
+
+# Bound coexistence audit JSON — full webhook payloads were blowing JSONB + triggering PG timeouts.
+_COEX_PAYLOAD_PREVIEW_MAX = 512
+_COEX_MAX_EVENT_CATEGORIES = 10
 
 
 # ─── Platform-vs-merchant routing ────────────────────────────────────────────
@@ -615,10 +629,7 @@ async def _handle_360dialog_body(
     in the per-tenant audit trail) but not acted upon — they are expected to
     arrive on a different URL.
     """
-    db = next(get_db(), None)
-    if not db:
-        logger.error("[Webhook360] Cannot open DB session")
-        return
+    db = SessionLocal()
     try:
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
@@ -679,6 +690,11 @@ async def _handle_360dialog_body(
                     continue
 
                 # ── Coexistence events ────────────────────────────────────
+                # Each event is committed individually so the row-level lock
+                # on `whatsapp_connections` is released quickly. Holding the
+                # lock across multiple events (e.g. coex + status arriving in
+                # the same delivery) was producing `statement_timeout` on
+                # the next webhook delivery for the same tenant.
                 if field == "smb_message_echoes":
                     await _ingest_smb_message_echoes(db, wa_conn, value)
                     _record_coexistence_event(
@@ -687,6 +703,7 @@ async def _handle_360dialog_body(
                         category="merchant_mobile_echo",
                         value=value,
                     )
+                    db.commit()
                     continue
 
                 if family == "coexistence":
@@ -696,14 +713,25 @@ async def _handle_360dialog_body(
                         category=_coexistence_category_for(field),
                         value=value,
                     )
+                    db.commit()
                     continue
 
                 # ── Status / health events ────────────────────────────────
                 if family == "status":
                     _record_status_event(db, wa_conn, event_type=field, value=value)
+                    db.commit()
                     continue
 
                 logger.info("[Webhook360] Ignored field=%s tenant=%s phone_number_id=%s", field, wa_conn.tenant_id, phone_number_id)
+        # Final no-op commit guarantees we close the implicit tx the SELECTs opened,
+        # even if no event branches above wrote anything.
+        db.commit()
+    except Exception as exc:
+        logger.exception("[Webhook360] batch failed — rolled back: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     finally:
         try:
             db.close()
@@ -713,38 +741,106 @@ async def _handle_360dialog_body(
 
 # ── Webhook receipt bookkeeping ─────────────────────────────────────────────
 
-def _stamp_webhook_received(db, wa_conn: WhatsAppConnection, family: str) -> None:
-    """Stamp the per-family `last_received_at` timestamp on the connection.
+_STAMP_COLUMN_BY_FAMILY = {
+    "channel":     "last_webhook_received_at",
+    "coexistence": "webhook_coexistence_received_at",
+    "status":      "webhook_status_received_at",
+}
 
-    We update both the legacy `last_webhook_received_at` column (channel
-    events feed the existing webhook guardian) and a structured
-    `coexistence.webhook` block in `extra_metadata` so the dashboard can
-    show independent activity timestamps for each of the three URLs."""
+# Per-statement timeout used by the background stamp. Kept short on purpose —
+# if `whatsapp_connections.id=N` is contended, we'd rather drop the stamp than
+# pile up waiters that then cascade into request-thread timeouts.
+_BG_STAMP_TIMEOUT_MS = 1500
+
+
+def _bg_stamp_run(conn_id: int, tenant_id: int | None, family: str, column: str) -> None:
+    """Worker body — runs on the shared ``wa-stamp`` thread pool.
+
+    Owns its own SQLAlchemy session/connection so no row lock or
+    ``statement_timeout`` here can ever bleed into the webhook's main
+    transaction. Worst case: this UPDATE fails, the next webhook (after the
+    throttle window) retries. Stamping is purely informational.
+    """
+    bg_db = SessionLocal()
+    t0 = time.perf_counter()
     try:
-        from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
-        now = _dt.now(_tz.utc)
-
-        if family == "channel":
-            wa_conn.last_webhook_received_at = now
-
-        meta = dict(wa_conn.extra_metadata or {})
-        coex = dict(meta.get("coexistence") or {})
-        webhook = dict(coex.get("webhook") or {})
-        webhook[f"{family}_last_received_at"] = now.isoformat()
-        # First successful receipt on a URL marks it as verified — 360dialog
-        # only delivers events to URLs it has accepted as valid.
-        if not webhook.get(f"{family}_status"):
-            webhook[f"{family}_status"] = "verified"
-        coex["webhook"] = webhook
-        meta["coexistence"] = coex
-        wa_conn.extra_metadata = meta
-
-        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-        flag_modified(wa_conn, "extra_metadata")
-        db.add(wa_conn)
-        db.flush()
+        # Bound this single UPDATE so we cannot block the worker thread for
+        # longer than the timeout, even if PG is under heavy lock pressure.
+        bg_db.execute(
+            text("SET LOCAL statement_timeout = :ms"),
+            {"ms": _BG_STAMP_TIMEOUT_MS},
+        )
+        result = bg_db.execute(
+            text(
+                f"UPDATE whatsapp_connections "
+                f"SET {column} = now() "
+                f"WHERE id = :id "
+                f"AND (COALESCE({column}, 'epoch'::timestamptz) "
+                f"     < now() - make_interval(secs => :thr))"
+            ),
+            {"id": conn_id, "thr": float(WA_STAMP_THROTTLE_SEC)},
+        )
+        bg_db.commit()
+        elapsed = int((time.perf_counter() - t0) * 1000)
+        record_row_flush(
+            source=f"webhook_stamp_bg:{family}",
+            tenant_id=tenant_id,
+            conn_id=conn_id,
+            flush_ms=elapsed,
+        )
+        if (result.rowcount or 0) == 0:
+            logger.debug(
+                "[Webhook360/stamp_bg] noop family=%s conn_id=%s rowcount=0 (sql_guard hit)",
+                family, conn_id,
+            )
     except Exception as exc:
-        logger.debug("[Webhook360] _stamp_webhook_received family=%s failed: %s", family, exc)
+        try:
+            bg_db.rollback()
+        except Exception:
+            pass
+        # Allow the next inbound to retry instead of waiting out the throttle.
+        reset_stamp_marker(conn_id, family)
+        logger.warning(
+            "[Webhook360/stamp_bg] SKIPPED family=%s conn_id=%s tenant=%s elapsed_ms=%s err=%s",
+            family,
+            conn_id,
+            tenant_id,
+            int((time.perf_counter() - t0) * 1000),
+            exc,
+        )
+    finally:
+        try:
+            bg_db.close()
+        except Exception:
+            pass
+
+
+def _stamp_webhook_received(db, wa_conn: WhatsAppConnection, family: str) -> None:
+    """Schedule a fire-and-forget stamp on the shared background pool.
+
+    Returns immediately — never blocks the message pipeline. The previous
+    in-line implementation, even with a SAVEPOINT, still held a row lock on
+    ``whatsapp_connections`` for the duration of the surrounding webhook
+    batch. Under burst traffic that surfaced as
+    ``QueryCanceled: canceling statement due to statement timeout`` on
+    parallel deliveries for the same connection. Moving the UPDATE to a
+    dedicated session removes that interaction entirely.
+
+    The ``db`` argument is intentionally unused — kept for API stability.
+    """
+    column = _STAMP_COLUMN_BY_FAMILY.get(family)
+    if not column:
+        return
+    if not should_stamp_now(wa_conn.id, family):
+        return
+
+    submit_stamp_background(
+        _bg_stamp_run,
+        int(wa_conn.id),
+        getattr(wa_conn, "tenant_id", None),
+        family,
+        column,
+    )
 
 
 def _coexistence_category_for(field: str) -> str:
@@ -782,76 +878,79 @@ def _record_coexistence_event(
 ) -> None:
     """Persist a Coexistence lifecycle event onto the connection.
 
-    We record three things in `extra_metadata.coexistence`:
+    Stored under ``extra_metadata.coexistence`` but bounded — previews are
+    truncated and ``last_event_by_category`` keeps only the newest N keys so
+    webhook bursts cannot grow JSONB without bound.
 
-      * `last_event`               — most recent event (any category)
-      * `last_event_by_category`   — last event for each category, so the
-        dashboard can show "device synced 2m ago / mobile app online 5s ago"
-        independently
-      * derived state fields       — `sync_state`, `pairing_state`,
-        `mobile_app_connection_state` based on the event payload
-
-    We deliberately keep the raw payload bounded (first ~2 KB serialised)
-    so a noisy device cannot bloat the JSONB column.
+    Does **not** commit — the enclosing 360dialog webhook batch commits once.
     """
+    from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    now_iso = _dt.now(_tz.utc).isoformat()
+
     try:
-        from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
-        import json as _json  # noqa: PLC0415
+        payload_preview = _json.dumps(value, ensure_ascii=False)[:_COEX_PAYLOAD_PREVIEW_MAX]
+    except Exception:
+        payload_preview = ""
 
-        now_iso = _dt.now(_tz.utc).isoformat()
+    meta = dict(wa_conn.extra_metadata or {})
+    coex = dict(meta.get("coexistence") or {})
+    events = dict(coex.get("last_event_by_category") or {})
 
-        try:
-            payload_preview = _json.dumps(value, ensure_ascii=False)[:2048]
-        except Exception:
-            payload_preview = ""
-
-        meta = dict(wa_conn.extra_metadata or {})
-        coex = dict(meta.get("coexistence") or {})
-        events = dict(coex.get("last_event_by_category") or {})
-
-        last = {
-            "event_type":  event_type,
-            "category":    category,
-            "received_at": now_iso,
-            "payload_preview": payload_preview,
-        }
-        coex["last_event"] = last
-        events[category] = last
-        coex["last_event_by_category"] = events
-
-        derived = _COEX_SYNC_STATE_BY_CATEGORY.get(category)
-        if derived:
-            coex["sync_state"] = derived
-
-        if category == "pairing_state":
-            coex["pairing_state"] = _extract_pairing_state(value) or "paired"
-        if category == "mobile_app_connection_state":
-            coex["mobile_app_connection_state"] = (
-                _extract_mobile_app_state(value) or "connected"
-            )
-        if category == "phone_app_handover":
-            coex["phone_app_handover_at"] = now_iso
-
-        meta["coexistence"] = coex
-        wa_conn.extra_metadata = meta
-
-        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-        flag_modified(wa_conn, "extra_metadata")
-        db.add(wa_conn)
-        db.commit()
-        logger.info(
-            "[Webhook360/coex] tenant=%s event=%s category=%s sync_state=%s",
-            wa_conn.tenant_id, event_type, category, coex.get("sync_state"),
+    last = {
+        "event_type":  event_type,
+        "category":    category,
+        "received_at": now_iso,
+        "payload_preview": payload_preview,
+    }
+    coex["last_event"] = last
+    events[category] = last
+    if len(events) > _COEX_MAX_EVENT_CATEGORIES:
+        ranked = sorted(
+            events.items(),
+            key=lambda kv: kv[1].get("received_at") or "",
+            reverse=True,
         )
-    except Exception as exc:
-        logger.warning(
-            "[Webhook360/coex] failed to record event tenant=%s event=%s err=%s",
-            wa_conn.tenant_id, event_type, exc,
+        events = dict(ranked[:_COEX_MAX_EVENT_CATEGORIES])
+    coex["last_event_by_category"] = events
+
+    derived = _COEX_SYNC_STATE_BY_CATEGORY.get(category)
+    if derived:
+        coex["sync_state"] = derived
+
+    if category == "pairing_state":
+        coex["pairing_state"] = _extract_pairing_state(value) or "paired"
+    if category == "mobile_app_connection_state":
+        coex["mobile_app_connection_state"] = (
+            _extract_mobile_app_state(value) or "connected"
         )
-        try:
-            db.rollback()
-        except Exception:
-            pass
+    if category == "phone_app_handover":
+        coex["phone_app_handover_at"] = now_iso
+
+    meta["coexistence"] = coex
+    wa_conn.extra_metadata = meta
+
+    flag_modified(wa_conn, "extra_metadata")
+    db.add(wa_conn)
+
+    approx = approx_json_bytes(meta)
+    t_flush = time.perf_counter()
+    db.flush()
+    flush_ms = int((time.perf_counter() - t_flush) * 1000)
+    record_row_flush(
+        source="webhook360_coex_event",
+        tenant_id=wa_conn.tenant_id,
+        conn_id=wa_conn.id,
+        flush_ms=flush_ms,
+        approx_meta_json_bytes=approx,
+    )
+    logger.info(
+        "[Webhook360/coex] tenant=%s event=%s category=%s sync_state=%s",
+        wa_conn.tenant_id, event_type, category, coex.get("sync_state"),
+    )
 
 
 def _record_status_event(
@@ -861,42 +960,50 @@ def _record_status_event(
     event_type: str,
     value: Dict[str, Any],
 ) -> None:
-    """Persist a status / health event under `extra_metadata.coexistence.status`."""
+    """Persist a status / health event under ``extra_metadata.coexistence.status``.
+
+    Flushes only — caller commits the 360dialog webhook batch.
+    """
+    from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
     try:
-        from datetime import timezone as _tz, datetime as _dt  # noqa: PLC0415
-        import json as _json  # noqa: PLC0415
+        payload_preview = _json.dumps(value, ensure_ascii=False)[:_COEX_PAYLOAD_PREVIEW_MAX]
+    except Exception:
+        payload_preview = ""
 
-        try:
-            payload_preview = _json.dumps(value, ensure_ascii=False)[:2048]
-        except Exception:
-            payload_preview = ""
+    meta = dict(wa_conn.extra_metadata or {})
+    coex = dict(meta.get("coexistence") or {})
+    status_block = dict(coex.get("status") or {})
+    status_block["last_event"] = {
+        "event_type":  event_type,
+        "received_at": _dt.now(_tz.utc).isoformat(),
+        "payload_preview": payload_preview,
+    }
+    coex["status"] = status_block
+    meta["coexistence"] = coex
+    wa_conn.extra_metadata = meta
 
-        meta = dict(wa_conn.extra_metadata or {})
-        coex = dict(meta.get("coexistence") or {})
-        status_block = dict(coex.get("status") or {})
-        status_block["last_event"] = {
-            "event_type":  event_type,
-            "received_at": _dt.now(_tz.utc).isoformat(),
-            "payload_preview": payload_preview,
-        }
-        coex["status"] = status_block
-        meta["coexistence"] = coex
-        wa_conn.extra_metadata = meta
+    flag_modified(wa_conn, "extra_metadata")
+    db.add(wa_conn)
 
-        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-        flag_modified(wa_conn, "extra_metadata")
-        db.add(wa_conn)
-        db.commit()
-        logger.info(
-            "[Webhook360/status] tenant=%s event=%s",
-            wa_conn.tenant_id, event_type,
-        )
-    except Exception as exc:
-        logger.warning("[Webhook360/status] persist failed tenant=%s err=%s", wa_conn.tenant_id, exc)
-        try:
-            db.rollback()
-        except Exception:
-            pass
+    approx = approx_json_bytes(meta)
+    t_flush = time.perf_counter()
+    db.flush()
+    flush_ms = int((time.perf_counter() - t_flush) * 1000)
+    record_row_flush(
+        source="webhook360_status_event",
+        tenant_id=wa_conn.tenant_id,
+        conn_id=wa_conn.id,
+        flush_ms=flush_ms,
+        approx_meta_json_bytes=approx,
+    )
+    logger.info(
+        "[Webhook360/status] tenant=%s event=%s",
+        wa_conn.tenant_id, event_type,
+    )
 
 
 def _extract_pairing_state(value: Dict[str, Any]) -> Optional[str]:
@@ -950,7 +1057,7 @@ async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dic
         ))
         convo.status = "active"
         db.add(convo)
-    db.commit()
+    db.flush()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
