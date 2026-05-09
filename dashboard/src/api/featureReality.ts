@@ -224,6 +224,13 @@ export interface CouponDashboardSettings {
   ai_policy?: CouponAiPolicy
 }
 
+export type AIPauseReason =
+  | 'manual'
+  | 'human_handoff'
+  | 'bot_loop_detected'
+  | 'rate_limit'
+  | 'internal_number'
+
 export interface DashboardConversation {
   id: string
   customer: string
@@ -238,6 +245,9 @@ export interface DashboardConversation {
   handoffReason?: string | null
   isUnsubscribed?: boolean
   pendingUnsubscribe?: boolean
+  aiPaused?: boolean
+  aiPausedReason?: AIPauseReason | null
+  aiPausedAt?: string | null
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'
@@ -325,6 +335,45 @@ export const featureRealityApi = {
   },
   closeConversation(body: { customer_phone: string }): Promise<{ closed: boolean }> {
     return apiCall('/conversations/close', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+  pauseConversationAI(body: { customer_phone: string; reason?: AIPauseReason }): Promise<{
+    ok: boolean
+    ai_paused: boolean
+    ai_paused_reason: AIPauseReason | null
+    ai_paused_at: string | null
+    ai_paused_by: string | null
+  }> {
+    return apiCall('/conversations/ai-pause', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+  resumeConversationAI(body: { customer_phone: string }): Promise<{
+    ok: boolean
+    ai_paused: boolean
+    ai_paused_reason: AIPauseReason | null
+    ai_paused_at: string | null
+    ai_paused_by: string | null
+  }> {
+    return apiCall('/conversations/ai-resume', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+  getBlocklist(): Promise<{ numbers: string[] }> {
+    return apiCall('/conversations/blocklist')
+  },
+  addToBlocklist(body: { phone: string; customer_phone?: string }): Promise<{ ok: boolean; numbers: string[] }> {
+    return apiCall('/conversations/blocklist/add', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+  removeFromBlocklist(body: { phone: string }): Promise<{ ok: boolean; numbers: string[] }> {
+    return apiCall('/conversations/blocklist/remove', {
       method: 'POST',
       body: JSON.stringify(body),
     })

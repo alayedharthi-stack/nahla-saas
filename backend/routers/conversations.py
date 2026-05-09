@@ -44,6 +44,20 @@ class CloseIn(BaseModel):
     customer_phone: str
 
 
+class AIPauseIn(BaseModel):
+    customer_phone: str
+    reason: str = "manual"
+
+
+class AIResumeIn(BaseModel):
+    customer_phone: str
+
+
+class BlocklistIn(BaseModel):
+    phone: str
+    customer_phone: str | None = None  # optional: also pause that conversation
+
+
 def _get_or_create_customer(db: Session, tenant_id: int, customer_phone: str, customer_name: str = "") -> Customer:
     """
     Create or retrieve a customer via the single unified identity path.
@@ -279,7 +293,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "phone": phone,
             "lastMsg": "",
             "time": "",
-            "isAI": status != "human",
+            "isAI": status != "human" and not bool(getattr(convo, "ai_paused", False)),
             "status": status,
             "unread": 0,
             "lastMsgType": "",
@@ -287,6 +301,12 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "handoffReason": _handoff_reason_for(phone),
             "isUnsubscribed": False,
             "pendingUnsubscribe": False,
+            "aiPaused": bool(getattr(convo, "ai_paused", False)),
+            "aiPausedReason": getattr(convo, "ai_paused_reason", None),
+            "aiPausedAt": (
+                convo.ai_paused_at.isoformat()
+                if getattr(convo, "ai_paused_at", None) else None
+            ),
             "_conv_id": convo.id,
         }
         norm_to_key[n] = phone
@@ -408,6 +428,9 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 "handoffReason": _handoff_reason_for(phone),
                 "isUnsubscribed": False,
                 "pendingUnsubscribe": False,
+                "aiPaused": False,
+                "aiPausedReason": None,
+                "aiPausedAt": None,
                 "_conv_id": None,
             }
 
@@ -725,6 +748,13 @@ async def handoff_conversation(body: HandoffIn, request: Request, db: Session = 
     convo.paused_by_human = True
     db.add(convo)
     db.commit()
+    # Also flip the AI loop guard so subsequent inbound messages don't
+    # trigger token-spending replies after the dashboard takeover.
+    try:
+        from core.ai_pause_guard import pause_ai as _pause_ai, REASON_HUMAN_HANDOFF as _R_HOFF  # noqa: PLC0415
+        _pause_ai(db, convo, reason=_R_HOFF, by="dashboard:handoff")
+    except Exception as exc:
+        _log.debug("[ai_pause] handoff_conversation pause failed: %s", exc)
     return {"handoff": True, "session_id": session.id}
 
 
@@ -751,3 +781,97 @@ async def close_conversation(body: CloseIn, request: Request, db: Session = Depe
     db.add(convo)
     db.commit()
     return {"closed": True}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# AI loop / cost guard endpoints (used by the Conversations panel buttons)
+# ──────────────────────────────────────────────────────────────────────────
+def _serialize_ai_state(convo: Conversation) -> Dict[str, Any]:
+    return {
+        "ai_paused": bool(getattr(convo, "ai_paused", False)),
+        "ai_paused_reason": getattr(convo, "ai_paused_reason", None),
+        "ai_paused_at": (
+            convo.ai_paused_at.isoformat()
+            if getattr(convo, "ai_paused_at", None) else None
+        ),
+        "ai_paused_by": getattr(convo, "ai_paused_by", None),
+    }
+
+
+@router.post("/ai-pause")
+async def pause_conversation_ai(body: AIPauseIn, request: Request, db: Session = Depends(get_db)):
+    """Pause AI replies for one customer's conversation. Inbound messages
+    will still be stored, but the LLM is never called and no outbound
+    reply is sent until the merchant resumes the AI from the dashboard."""
+    from core.ai_pause_guard import pause_ai as _pause_ai, VALID_REASONS as _VALID  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    customer_phone = normalize_phone(body.customer_phone) or body.customer_phone
+    convo = _get_or_create_conversation(db, tenant_id, customer_phone)
+    reason = body.reason if body.reason in _VALID else "manual"
+    _pause_ai(db, convo, reason=reason, by=f"dashboard:{reason}")
+    return {"ok": True, **_serialize_ai_state(convo)}
+
+
+@router.post("/ai-resume")
+async def resume_conversation_ai(body: AIResumeIn, request: Request, db: Session = Depends(get_db)):
+    """Resume AI replies for one customer's conversation."""
+    from core.ai_pause_guard import resume_ai as _resume_ai  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    customer_phone = normalize_phone(body.customer_phone) or body.customer_phone
+    convo = _get_or_create_conversation(db, tenant_id, customer_phone)
+    # Resume also clears legacy paused_by_human / human_handoff so the
+    # merchant gets a single "AI back online" toggle instead of three.
+    if convo.is_human_handoff or convo.paused_by_human or convo.status == "human":
+        convo.is_human_handoff = False
+        convo.paused_by_human = False
+        convo.status = "active"
+        db.add(convo)
+    _resume_ai(db, convo, by="dashboard:resume")
+    return {"ok": True, **_serialize_ai_state(convo)}
+
+
+@router.get("/blocklist")
+async def get_blocklist(request: Request, db: Session = Depends(get_db)):
+    from core.ai_pause_guard import list_blocked_numbers as _list_blocked  # noqa: PLC0415
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    return {"numbers": _list_blocked(db, tenant_id)}
+
+
+@router.post("/blocklist/add")
+async def add_to_blocklist(body: BlocklistIn, request: Request, db: Session = Depends(get_db)):
+    """Add a phone number to the merchant's AI blocklist. Optionally also
+    pauses the matching conversation right away (recommended)."""
+    from core.ai_pause_guard import (  # noqa: PLC0415
+        add_blocked_number as _add_blocked,
+        pause_ai as _pause_ai,
+        REASON_INTERNAL_NUMBER as _R_INT,
+    )
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    if not (body.phone or "").strip():
+        raise HTTPException(status_code=400, detail="phone is required")
+    numbers = _add_blocked(db, tenant_id, body.phone)
+    target_phone = body.customer_phone or body.phone
+    target_norm = normalize_phone(target_phone) or target_phone
+    if target_norm:
+        try:
+            convo = _get_or_create_conversation(db, tenant_id, target_norm)
+            _pause_ai(db, convo, reason=_R_INT, by="dashboard:blocklist")
+        except Exception as exc:
+            _log.debug("[ai_pause] blocklist add — convo pause failed: %s", exc)
+    return {"ok": True, "numbers": numbers}
+
+
+@router.post("/blocklist/remove")
+async def remove_from_blocklist(body: BlocklistIn, request: Request, db: Session = Depends(get_db)):
+    from core.ai_pause_guard import remove_blocked_number as _rem_blocked  # noqa: PLC0415
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    numbers = _rem_blocked(db, tenant_id, body.phone)
+    return {"ok": True, "numbers": numbers}

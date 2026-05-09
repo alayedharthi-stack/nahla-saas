@@ -40,6 +40,11 @@ class Tenant(Base):
     branding = Column(JSONB, nullable=True)
     recommendation_controls = Column(JSONB, nullable=True)
     coupon_policy = Column(JSONB, nullable=True)
+    # AI loop guard — list of normalized phone numbers (digits-only) whose
+    # inbound messages must NEVER be passed to the LLM. Set/cleared via the
+    # /conversations/blocklist endpoints. The system also adds well-known
+    # internal numbers (Nahla / Shawahid / staff) at runtime via env config.
+    ai_blocked_numbers = Column(JSONB, nullable=True)
 
     # ── Billing provider fields ───────────────────────────────────────────────
     # billing_provider: 'stripe' (auto recurring) | 'hyperpay' (local manual)
@@ -546,6 +551,16 @@ class Conversation(Base):
     is_human_handoff = Column(Boolean, default=False)
     is_urgent = Column(Boolean, default=False)
     paused_by_human = Column(Boolean, default=False)
+    # ── AI pause state (loop guard) ─────────────────────────────────────────
+    # When ai_paused is True the webhook records the inbound message and
+    # returns BEFORE calling any LLM. ai_paused_reason carries one of:
+    #   manual | human_handoff | bot_loop_detected | rate_limit | internal_number
+    # Set/cleared by core/ai_pause_guard. Independent from `paused_by_human`
+    # which is the legacy flag for dashboard takeover.
+    ai_paused = Column(Boolean, default=False, nullable=False, server_default='false')
+    ai_paused_reason = Column(String, nullable=True)
+    ai_paused_at = Column(DateTime(timezone=True), nullable=True)
+    ai_paused_by = Column(String, nullable=True)
     extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class MessageEvent(Base):

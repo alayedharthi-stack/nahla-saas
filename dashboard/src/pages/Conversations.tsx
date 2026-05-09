@@ -4,6 +4,7 @@ import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, ArrowRight, Check, CheckCheck,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
+  Pause, Play, Ban,
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType } from '../api/featureReality'
@@ -190,6 +191,67 @@ export default function Conversations() {
       await loadList()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر إعادة المحادثة للذكاء')
+    }
+  }
+
+  const handlePauseAI = async () => {
+    if (!selected) return
+    try {
+      await featureRealityApi.pauseConversationAI({
+        customer_phone: selected.phone,
+        reason: 'manual',
+      })
+      _optimisticUpdate(selected.phone, {
+        aiPaused: true,
+        aiPausedReason: 'manual',
+        isAI: false,
+      })
+      await loadList()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر إيقاف الذكاء')
+    }
+  }
+
+  const handleResumeAI = async () => {
+    if (!selected) return
+    try {
+      await featureRealityApi.resumeConversationAI({
+        customer_phone: selected.phone,
+      })
+      _optimisticUpdate(selected.phone, {
+        aiPaused: false,
+        aiPausedReason: null,
+        aiPausedAt: null,
+        isAI: true,
+        status: 'active',
+        handoffReason: null,
+      })
+      await loadList()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر تشغيل الذكاء')
+    }
+  }
+
+  const handleBlockNumber = async () => {
+    if (!selected) return
+    const ok = window.confirm(
+      `سيتم إضافة الرقم ${selected.phone} لقائمة الأرقام الممنوعة، ` +
+      'ولن يتلقى الذكاء أي رسالة من هذا الرقم. متابعة؟',
+    )
+    if (!ok) return
+    try {
+      await featureRealityApi.addToBlocklist({
+        phone: selected.phone,
+        customer_phone: selected.phone,
+      })
+      _optimisticUpdate(selected.phone, {
+        aiPaused: true,
+        aiPausedReason: 'internal_number',
+        isAI: false,
+      })
+      await loadList()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر حظر الرقم')
     }
   }
 
@@ -443,10 +505,30 @@ export default function Conversations() {
 
               {/* Actions */}
               <div className="flex items-center gap-1">
+                {selected.aiPaused ? (
+                  <button
+                    className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
+                    onClick={handleResumeAI}
+                    title="استئناف الردود الآلية للذكاء"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    تشغيل الذكاء
+                  </button>
+                ) : (
+                  <button
+                    className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
+                    onClick={handlePauseAI}
+                    title="إيقاف الردود الآلية لهذا العميل (بدون استهلاك توكنات)"
+                  >
+                    <Pause className="w-3.5 h-3.5" />
+                    إيقاف الذكاء
+                  </button>
+                )}
                 {selected.status !== 'human' && (
                   <button
                     className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3"
                     onClick={handleHandoff}
+                    title="تحويل المحادثة لموظف بشري"
                   >
                     <UserCheck className="w-3.5 h-3.5" />
                     تولّ
@@ -456,11 +538,20 @@ export default function Conversations() {
                   <button
                     className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-brand-600 border-brand-200 bg-brand-50 hover:bg-brand-100"
                     onClick={handleClose}
+                    title="إعادة المحادثة للذكاء الاصطناعي"
                   >
                     <Bot className="w-3.5 h-3.5" />
                     إعادة للذكاء
                   </button>
                 )}
+                <button
+                  className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-rose-600 border-rose-200 bg-rose-50 hover:bg-rose-100"
+                  onClick={handleBlockNumber}
+                  title="إضافة الرقم لقائمة الأرقام الممنوعة (الذكاء لن يرد عليه أبداً)"
+                >
+                  <Ban className="w-3.5 h-3.5" />
+                  حظر الرقم
+                </button>
                 <button
                   className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 active:bg-slate-200"
                   onClick={() => {
@@ -471,6 +562,29 @@ export default function Conversations() {
                 </button>
               </div>
             </div>
+
+            {/* AI paused banner */}
+            {selected.aiPaused && (
+              <div className="flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700">
+                <Pause className="w-4 h-4 shrink-0 text-amber-500" />
+                <span>
+                  الذكاء <strong>متوقف لهذه المحادثة</strong>
+                  {selected.aiPausedReason && (
+                    <>
+                      {' '}— السبب:{' '}
+                      <strong>
+                        {selected.aiPausedReason === 'manual' && 'إيقاف يدوي'}
+                        {selected.aiPausedReason === 'human_handoff' && 'تحويل لموظف'}
+                        {selected.aiPausedReason === 'bot_loop_detected' && 'تم اكتشاف دوامة ردود آلية'}
+                        {selected.aiPausedReason === 'rate_limit' && 'تجاوز الحد الأقصى للردود'}
+                        {selected.aiPausedReason === 'internal_number' && 'رقم داخلي / محظور'}
+                      </strong>
+                    </>
+                  )}
+                  . الرسائل تُحفظ بدون إرسال أي رد آلي. اضغط «تشغيل الذكاء» للاستئناف.
+                </span>
+              </div>
+            )}
 
             {/* Unsubscribe banner */}
             {selected.isUnsubscribed && (

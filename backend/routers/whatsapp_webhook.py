@@ -134,6 +134,111 @@ def _reset_platform_tenant_cache() -> None:
     _PLATFORM_TENANT_CACHE["loaded"] = False
 
 
+# ── Outbound semantic dedup ────────────────────────────────────────────────
+#
+# Why this lives at the webhook layer and not inside the Brain Composer:
+# the Composer already has a per-template "exact-prefix" duplicate check
+# (`DefaultComposer._is_duplicate`), but it only catches templates we
+# repeat verbatim. The real-world failure was different: an automation
+# message ("سلتك في انتظارك! 🛒…") arrives, then the customer says
+# "السلام عليكم" and the legacy LLM path produces a fresh-looking reply
+# that is *semantically* the same cart-recovery copy. To the customer,
+# that reads as the bot ignoring them and re-sending the campaign.
+#
+# So this guard runs AFTER reply generation (Brain or legacy), BEFORE
+# we hit the WhatsApp send. It's intentionally a tiny lexical heuristic
+# rather than embeddings:
+#   * extracts the last two outbound messages from the recorded history
+#   * tokenises both into Arabic word stems (whitespace + punctuation)
+#   * if the new reply shares > 60% of its content words with EITHER of
+#     those previous outbound messages, we mark it as a repeat
+# The caller can then short-circuit to a short follow-up instead.
+#
+# 60% chosen empirically on the failing transcripts: high enough that
+# a normal "هل تحتاج مساعدة في طلبك؟" follow-up after a draft order
+# does not trip (those typically share < 40% of stems with the draft
+# template), low enough that "نفس رسالة استرجاع السلة بصياغة مختلفة"
+# trips reliably.
+
+_DEDUP_OVERLAP_THRESHOLD = 0.60
+_DEDUP_MIN_TOKENS = 6  # ignore very short replies — they always overlap
+_DEDUP_LOOKBACK_OUTBOUND = 2  # how many recent outbound turns to check
+
+
+def _dedup_tokenise(text: str) -> set:
+    """Lowercase + strip Arabic diacritics, drop punctuation, return the
+    set of distinct content tokens. Pure helper, no I/O."""
+    if not text:
+        return set()
+    import re as _re  # noqa: PLC0415
+    # Strip Arabic tatweel + harakat so "سَلَّتُك" and "سلتك" match.
+    stripped = _re.sub(r"[\u064B-\u0652\u0670\u0640]", "", str(text))
+    # Replace anything that isn't an Arabic / Latin word char with a space.
+    cleaned = _re.sub(r"[^\w\u0600-\u06FF]+", " ", stripped, flags=_re.UNICODE)
+    tokens = {t for t in cleaned.lower().split() if len(t) >= 2}
+    return tokens
+
+
+def _is_repeat_reply(new_reply: str, history: list) -> bool:
+    """True when ``new_reply`` overlaps too much with one of the most
+    recent outbound messages.
+
+    ``history`` is the same list the brain pipeline receives — each
+    turn is ``{"direction": "in"/"inbound" | "out"/"outbound", "body": str}``.
+    Robust to either spelling. Falls back to a safe ``False`` on any
+    unexpected shape so the dedup never blocks a real reply.
+    """
+    new_tokens = _dedup_tokenise(new_reply)
+    if len(new_tokens) < _DEDUP_MIN_TOKENS:
+        return False
+
+    outbound_seen = 0
+    try:
+        for turn in reversed(history or []):
+            direction = str((turn or {}).get("direction") or "").lower()
+            if direction not in ("out", "outbound"):
+                continue
+            outbound_seen += 1
+            prev_tokens = _dedup_tokenise(turn.get("body") or "")
+            if len(prev_tokens) < _DEDUP_MIN_TOKENS:
+                if outbound_seen >= _DEDUP_LOOKBACK_OUTBOUND:
+                    break
+                continue
+            overlap = len(new_tokens & prev_tokens) / max(1, len(new_tokens))
+            if overlap >= _DEDUP_OVERLAP_THRESHOLD:
+                return True
+            if outbound_seen >= _DEDUP_LOOKBACK_OUTBOUND:
+                break
+    except Exception:  # noqa: BLE001 silent-ok
+        # Dedup is a best-effort safety net — never block a real reply
+        # because of an unexpected history shape. Any malformed turn
+        # just falls through to the normal send path.
+        return False
+    return False
+
+
+_DEDUP_FALLBACK_REPLIES = [
+    "وش أقدر أخدمك فيه الحين؟ 🌸",
+    "أنا هنا — قول وش تحتاج وأكمّل معك.",
+    "تأمر بشيء أكمّل لك؟",
+]
+
+
+def _short_followup_instead_of_repeat(history: list) -> str:
+    """Pick a varied short follow-up to substitute when the generated
+    reply was flagged as a repeat. Uses the count of outbound turns in
+    the history as a deterministic rotation key so a customer who keeps
+    poking the bot does not see the SAME fallback every time either."""
+    try:
+        out_count = sum(
+            1 for t in (history or [])
+            if str((t or {}).get("direction") or "").lower() in ("out", "outbound")
+        )
+    except Exception:  # noqa: BLE001 silent-ok
+        out_count = 0
+    return _DEDUP_FALLBACK_REPLIES[out_count % len(_DEDUP_FALLBACK_REPLIES)]
+
+
 # ── Smart notification helpers ────────────────────────────────────────────────
 
 def _should_notify_merchant_email(
@@ -2143,6 +2248,39 @@ async def _handle_merchant_message(
 
         # Persist inbound immediately for inbox visibility and history continuity.
         StateManager.save_message(db, to, text, "inbound", conversation_id=convo.id, tenant_id=tenant_id)
+
+        # ── AI loop / cost guard ─────────────────────────────────────────
+        # Runs BEFORE any LLM/Brain call. If the conversation is paused
+        # (manual takeover, internal/blocked number, prior bot-loop
+        # detection, rate-limit cap, or human handoff already issued), we
+        # store the inbound message above and return without spending any
+        # tokens. See `core/ai_pause_guard` for the full policy.
+        try:
+            from core.ai_pause_guard import should_skip_ai as _ai_should_skip  # noqa: PLC0415
+            _skip, _skip_reason = _ai_should_skip(
+                db, convo,
+                tenant_id=tenant_id,
+                customer_phone=to,
+                inbound_text=text,
+            )
+        except Exception as _guard_exc:
+            logger.warning("[ai_pause] guard failed (open): %s", _guard_exc)
+            _skip, _skip_reason = False, None
+
+        if _skip:
+            logger.info(
+                "[ai_pause] SKIP_LLM tenant=%s convo=%s to=%s reason=%s — inbound stored, no reply",
+                tenant_id, convo.id, to, _skip_reason,
+            )
+            try:
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            return
+
         if inbound_metadata:
             try:
                 latest_event = (
@@ -2174,6 +2312,7 @@ async def _handle_merchant_message(
         # Load recent conversation history for both paths
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
+        _brain_handoff: bool = False  # set True only by the brain handoff branch
 
         # ── Top-level Conversation Mode Controller ───────────────────────────
         # Decides who owns this turn (live chat, automation recovery,
@@ -2344,6 +2483,13 @@ async def _handle_merchant_message(
                     logger.info("[TRACE][5/6] HUMAN_HANDOFF_ACK_SENT | tenant=%s to=%s", tenant_id, to)
                 else:
                     logger.error("[TRACE][5/6] HUMAN_HANDOFF_ACK_SEND_FAILED | tenant=%s to=%s", tenant_id, to)
+                # Pause AI for this conversation so subsequent inbound
+                # messages don't keep replaying the same handoff acknowledgement.
+                try:
+                    from core.ai_pause_guard import pause_ai as _pause_ai, REASON_HUMAN_HANDOFF as _R_HOFF  # noqa: PLC0415
+                    _pause_ai(db, convo, reason=_R_HOFF, by="system:human_handoff")
+                except Exception as _hoff_exc:
+                    logger.debug("[ai_pause] handoff pause failed: %s", _hoff_exc)
                 return
 
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
@@ -2575,6 +2721,27 @@ async def _handle_merchant_message(
                 store_context_text=store_context_text,
             )
 
+            # ── Anti-repeat + recent-message-priority overlay ─────────────
+            # The legacy path has none of the structured intent / state /
+            # dedup protections that the Brain provides, so without these
+            # explicit instructions the LLM happily re-sends the
+            # automation copy whenever the customer's reply is short or
+            # unrelated. Keep the rules in plain Arabic — Claude follows
+            # an Arabic system prompt better than a switched-language one.
+            _CHAT_BEHAVIOR_OVERLAY = (
+                "تعليمات سلوك المحادثة (مهمة جداً):\n"
+                "- أهم رسالة هي آخر رسالة من العميل — رد عليها مباشرة.\n"
+                "- لا تكرر رسائل التذكير أو الحملات الترويجية أو رسائل "
+                "استرجاع السلة إذا كانت ظاهرة في سجل المحادثة.\n"
+                "- إذا حيّاك العميل بـ«السلام عليكم» أو «هلا» أو ما يشبهها، "
+                "رد بتحية قصيرة دافئة دون إعادة تقديم نفسك بالكامل.\n"
+                "- إذا سألك «من أنت؟» عرّف نفسك باسم المساعد المحدد للمتجر "
+                "بإيجاز، ثم اسأله عن حاجته.\n"
+                "- لا تعد إرسال نفس الرسالة التي أرسلتها للعميل قبل قليل، "
+                "حتى لو بصياغة مختلفة — تابع من حيث توقّفت المحادثة."
+            )
+            system_prompt = f"{system_prompt}\n\n{_CHAT_BEHAVIOR_OVERLAY}"
+
             if mode_overlay:
                 system_prompt = f"{system_prompt}\n\n{mode_overlay}"
             if tenant_overlay:
@@ -2605,6 +2772,24 @@ async def _handle_merchant_message(
                     provider_hint="anthropic",
                 )
                 reply = payload.reply_text.strip() or "كيف أقدر أساعدك؟"
+
+        # ── Outbound dedup guard ─────────────────────────────────────────
+        # Last-mile safety net for BOTH paths (Brain + legacy). If the
+        # generated reply overlaps too much with a recent outbound
+        # message we substitute a short follow-up so the customer does
+        # not see the same automation / cart-recovery copy twice in a
+        # row. See `_is_repeat_reply` for the heuristic + threshold
+        # rationale. Skipped for empty replies (already handled
+        # upstream — billing_denied, etc.) and for the handoff path
+        # (_brain_handoff replies are intentionally distinct).
+        if reply and not _brain_handoff and _is_repeat_reply(reply, history):
+            _orig_len = len(reply)
+            reply = _short_followup_instead_of_repeat(history)
+            logger.info(
+                "[CHAT_DEDUP] tenant=%s to=%s replaced near-duplicate outbound "
+                "(orig_len=%d new_len=%d brain=%s)",
+                tenant_id, to, _orig_len, len(reply), _brain_active,
+            )
 
         # Save outbound reply after generation.
         StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)
@@ -2645,6 +2830,12 @@ async def _handle_merchant_message(
         if _send_ok:
             logger.info("[TRACE][5/6] MERCHANT_AI_SENT | tenant=%s to=%s", tenant_id, to)
             logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
+            # Increment per-contact rate counters; auto-pause if cap exceeded.
+            try:
+                from core.ai_pause_guard import after_ai_reply as _after_ai_reply  # noqa: PLC0415
+                _after_ai_reply(db, convo, tenant_id=tenant_id)
+            except Exception as _rate_exc:
+                logger.debug("[ai_pause] post-reply tracker failed: %s", _rate_exc)
         else:
             logger.error(
                 "[TRACE][5/6] MERCHANT_AI_SEND_FAILED | tenant=%s to=%s reply_len=%s",
