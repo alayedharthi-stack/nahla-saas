@@ -16,7 +16,9 @@ import {
   Plus, Trash2, ThumbsUp, Pencil, X,
   BarChart2, Activity, Timer,
   Shield,
+  Tag, Image as ImageIcon,
 } from 'lucide-react'
+import { ManualCouponsPanel, AIMediaLibraryPanel } from './IntelligenceLibraries'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
@@ -1383,7 +1385,7 @@ export default function Intelligence() {
   // dashboard / merchant-knowledge tabs and reporting "the AI page is read-only,
   // there is no save button". The settings tab is where the textareas + save
   // controls actually live, so it should be the entry point.
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant' | 'analytics'>('settings')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant' | 'analytics' | 'coupons' | 'media'>('settings')
   const [data, setData] = useState<IntelligenceDashboard | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -1433,6 +1435,14 @@ export default function Intelligence() {
             <span className="text-xs text-slate-400 flex items-center gap-1.5">
               <BarChart2 className="w-3.5 h-3.5" /> أداء الذكاء وجودة الردود
             </span>
+          ) : activeTab === 'coupons' ? (
+            <span className="text-xs text-slate-400 flex items-center gap-1.5">
+              <Tag className="w-3.5 h-3.5" /> أكواد خصم تستخدمها نحلة
+            </span>
+          ) : activeTab === 'media' ? (
+            <span className="text-xs text-slate-400 flex items-center gap-1.5">
+              <ImageIcon className="w-3.5 h-3.5" /> صور وملفات ترسلها نحلة مع ردودها
+            </span>
           ) : undefined
         }
       />
@@ -1474,6 +1484,28 @@ export default function Intelligence() {
             ذكاء المتجر
           </button>
           <button
+            onClick={() => setActiveTab('coupons')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+              activeTab === 'coupons'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <Tag className="w-4 h-4 shrink-0" />
+            الكوبونات اليدوية
+          </button>
+          <button
+            onClick={() => setActiveTab('media')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+              activeTab === 'media'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <ImageIcon className="w-4 h-4 shrink-0" />
+            مكتبة الوسائط
+          </button>
+          <button
             onClick={() => setActiveTab('analytics')}
             className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
               activeTab === 'analytics'
@@ -1494,6 +1526,12 @@ export default function Intelligence() {
       {activeTab === 'merchant' && (
         <MerchantKnowledgePanel onEditSettings={() => setActiveTab('settings')} />
       )}
+
+      {/* ── Manual Coupons Tab ─────────────────────────────────────────────── */}
+      {activeTab === 'coupons' && <ManualCouponsPanel />}
+
+      {/* ── AI Media Library Tab ───────────────────────────────────────────── */}
+      {activeTab === 'media' && <AIMediaLibraryPanel />}
 
       {/* ── Brain Analytics Tab ────────────────────────────────────────────── */}
       {activeTab === 'analytics' && <BrainAnalyticsPanel />}

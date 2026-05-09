@@ -3116,6 +3116,40 @@ async def _handle_merchant_message(
         except Exception:
             pass
 
+        # ── AI media library attachments ───────────────────────────────
+        # Strip [MEDIA:<id>] markers from the reply BEFORE we ship the
+        # text. Each id resolves to a row in ai_media_library; matching
+        # rows are dispatched as image/video/document/audio messages
+        # AFTER the primary text/interactive reply has been sent. The
+        # cleaned reply is what we send + persist (so the customer never
+        # sees the marker, and the dashboard transcript matches what
+        # they actually received on WhatsApp).
+        _media_attachments: List[Dict[str, Any]] = []
+        if reply:
+            try:
+                from core.ai_libraries import extract_media_markers as _extract_media  # noqa: PLC0415
+                _cleaned_reply, _media_attachments = _extract_media(
+                    db, tenant_id, reply, max_attachments=2,
+                )
+                if _media_attachments:
+                    logger.info(
+                        "[AIMedia.attach] tenant=%s conversation_id=%s "
+                        "attachments=%d ids=%s",
+                        tenant_id, getattr(convo, "id", None),
+                        len(_media_attachments),
+                        [a.get("id") for a in _media_attachments],
+                    )
+                    reply = _cleaned_reply
+                elif "[MEDIA:" in reply.upper():
+                    # Marker present but didn't resolve — strip it so the
+                    # customer never sees the placeholder.
+                    reply = _cleaned_reply
+            except Exception as _media_exc:
+                logger.warning(
+                    "[AIMedia.attach] extract failed tenant=%s err=%s",
+                    tenant_id, _media_exc,
+                )
+
         if _brain_buttons and reply:
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
@@ -3203,6 +3237,31 @@ async def _handle_merchant_message(
                 str(_loop_replaced_with_recovery).lower(),
                 len(_brain_buttons or []), len(reply or ""),
             )
+
+            # Dispatch any media library attachments now that the text /
+            # interactive reply has been delivered. We send them in order
+            # so the customer sees the explanation first, then the file.
+            for _att in _media_attachments:
+                try:
+                    _media_ok = await _send_media_message(
+                        phone_id=phone_id,
+                        to=to,
+                        media_type=_att.get("media_type") or "image",
+                        media_url=_att.get("file_url") or "",
+                        filename=_att.get("title") if (_att.get("media_type") or "").lower() in ("document", "pdf") else None,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+                    logger.info(
+                        "[AIMedia.send] tenant=%s to=%s id=%s type=%s ok=%s",
+                        tenant_id, to, _att.get("id"),
+                        _att.get("media_type"), _media_ok,
+                    )
+                except Exception as _media_send_exc:
+                    logger.warning(
+                        "[AIMedia.send] tenant=%s id=%s failed: %s",
+                        tenant_id, _att.get("id"), _media_send_exc,
+                    )
             # Track this reply for similarity-based loop scoring on the
             # next turn. Never auto-pauses on counts alone.
             try:
@@ -3536,6 +3595,56 @@ async def _send_cta_url(
             "action": {"name": "cta_url", "parameters": {"display_text": btn_label, "url": btn_url}},
         },
     }, _tenant_id=_tenant_id, _db=_db)
+
+
+# Map merchant-library media_type → WhatsApp Cloud API outer "type" key.
+# "pdf" is a UX-only label; on the wire it's a document.
+_WA_MEDIA_OUTER_TYPE = {
+    "image": "image",
+    "video": "video",
+    "audio": "audio",
+    "document": "document",
+    "pdf": "document",
+}
+
+
+async def _send_media_message(
+    phone_id: str,
+    to: str,
+    media_type: str,
+    media_url: str,
+    *,
+    caption: Optional[str] = None,
+    filename: Optional[str] = None,
+    _tenant_id: Optional[int] = None,
+    _db=None,
+) -> bool:
+    """Send an image / video / audio / document message via WhatsApp Cloud.
+
+    ``media_type`` is the merchant-library label (image, video, pdf,
+    document, audio); ``media_url`` MUST be publicly reachable by Meta.
+    Caption is silently ignored for audio (unsupported by the API).
+    """
+    outer = _WA_MEDIA_OUTER_TYPE.get((media_type or "").strip().lower())
+    if not outer:
+        logger.warning("[WA] _send_media_message unsupported type=%s", media_type)
+        return False
+    media_block: Dict[str, Any] = {"link": media_url}
+    if caption and outer in ("image", "video", "document"):
+        media_block["caption"] = caption[:1024]
+    if outer == "document" and filename:
+        media_block["filename"] = filename[:255]
+    return await _post_wa(
+        phone_id,
+        {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": outer,
+            outer: media_block,
+        },
+        _tenant_id=_tenant_id,
+        _db=_db,
+    )
 
 
 async def _send_welcome_menu(

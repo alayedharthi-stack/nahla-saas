@@ -885,6 +885,26 @@ def build_merchant_context(
         context_verbosity,
     )
 
+    # Merchant-curated libraries (independent of Salla / automatic
+    # coupons) — surface the active rows so the brain can cite a coupon
+    # code verbatim and attach a media file to its reply via the
+    # ``[MEDIA:<id>]`` marker convention defined in
+    # ``core.ai_libraries.extract_media_markers``.
+    try:
+        from core.ai_libraries import (  # noqa: PLC0415
+            list_active_manual_coupons,
+            list_active_ai_media,
+        )
+        manual_coupons_active = list_active_manual_coupons(db, tenant_id)
+        ai_media_active = list_active_ai_media(db, tenant_id)
+    except Exception as _lib_exc:  # pragma: no cover — defensive
+        logger.warning(
+            "[MerchantContext] libraries fetch failed tenant=%s err=%s",
+            tenant_id, _lib_exc,
+        )
+        manual_coupons_active = []
+        ai_media_active = []
+
     return {
         "tenant_profile": store_profile,
         "customer": customer_profile,
@@ -900,11 +920,15 @@ def build_merchant_context(
         "pages": pages,
         "insights": insights,
         "brain_profile": brain_profile,
+        "manual_coupons": manual_coupons_active,
+        "ai_media_library": ai_media_active,
         "retrieval_rules": {
             "products_are_orderable_only": True,
             "do_not_invent_missing_policies": True,
             "faq_suggested_requires_approval": True,
             "short_whatsapp_reply": True,
+            "manual_coupons_only_from_list": True,
+            "media_attach_via_marker": True,
         },
         "context_verbosity": context_verbosity,
     }

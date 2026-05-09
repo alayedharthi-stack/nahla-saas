@@ -1780,3 +1780,81 @@ class SallaTrialLedger(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class ManualCoupon(Base):
+    """Merchant-curated coupon code the AI can cite verbatim.
+
+    Independent of automatic coupon generators and Salla integration —
+    works even for merchants selling manually over WhatsApp only.
+    """
+
+    __tablename__ = "manual_coupons"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code", name="uq_manual_coupons_tenant_code"),
+        Index("ix_manual_coupons_tenant_active_priority", "tenant_id", "is_active", "priority"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    code = Column(String(64), nullable=False)
+    title = Column(String(255), nullable=True)
+    description = Column(Text, nullable=True)
+    discount_text = Column(String(255), nullable=True)
+    usage_context = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
+    priority = Column(Integer, default=100, nullable=False, server_default="100")
+    starts_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class AIMediaItem(Base):
+    """Merchant-uploaded media the AI can attach to its WhatsApp replies.
+
+    Each row carries enough metadata for the brain to decide *when* to
+    attach it (``usage_context`` + ``tags``) and how to send it via the
+    WhatsApp Cloud API (``media_type`` → image/video/document/audio).
+    """
+
+    __tablename__ = "ai_media_library"
+    __table_args__ = (
+        Index("ix_ai_media_library_tenant_active_priority", "tenant_id", "is_active", "priority"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    media_type = Column(String(32), nullable=False, server_default="image")
+    file_url = Column(Text, nullable=False)
+    thumbnail_url = Column(Text, nullable=True)
+    usage_context = Column(Text, nullable=True)
+    tags = Column(JSONB, nullable=False, default=list, server_default="[]")
+    is_active = Column(Boolean, default=True, nullable=False, server_default="true")
+    priority = Column(Integer, default=100, nullable=False, server_default="100")
+    storage_kind = Column(String(16), nullable=False, server_default="external")
+    storage_path = Column(Text, nullable=True)
+    mime_type = Column(String(128), nullable=True)
+    file_size_bytes = Column(sa.BigInteger, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
