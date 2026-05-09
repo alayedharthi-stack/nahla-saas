@@ -2356,6 +2356,142 @@ async def _handle_merchant_message(
             extra_metadata=_live_in_meta,
         )
 
+        # ── PAYMENT-ASSET EARLY BYPASS ───────────────────────────────────
+        #
+        # This block runs BEFORE the AI pause guard and BEFORE the mode
+        # resolver. The merchant reported (with screenshots) that asking
+        # "ارسل لي حساب الراجحي" produced a generic handoff message even
+        # though the bank-transfer barcode was active in the AI Media
+        # Library. Root cause analysis:
+        #
+        #   1. The conversation had been previously flagged for human
+        #      handoff (via support_escalation or ai_pause_guard), which
+        #      causes ``should_skip_ai`` to return True and the webhook
+        #      to ``return`` without ever reaching the brain (the
+        #      "AI stopped" symptom the merchant noticed).
+        #   2. Even when the pause guard let the message through, the
+        #      mode resolver returned MODE_SUPPORT_ESCALATION and the
+        #      hard-coded handoff acknowledgement fired ("وصلت رسالتك.
+        #      تم تحويل المحادثة لفريق المتجر…") before the brain ran.
+        #
+        # The merchant's explicit requirement was: "إذا وجد AI Asset
+        # مناسب، يجب أن يتغلب على TEMPLATE fallbacks، contact_owner
+        # fallback، generic escalation". So if the inbound is a
+        # payment-info request AND we have a high-relevance active
+        # media asset, we deterministically:
+        #
+        #   * send a warm short text + the asset image, then
+        #   * stamp a "payment_asset_served" marker on the conversation,
+        #   * skip every other branch and return.
+        #
+        # We deliberately do NOT clear the human-handoff flags here —
+        # if the merchant manually took over the conversation, they
+        # keep ownership for everything else. The only escape we make
+        # is for THIS specific kind of question, which the merchant
+        # explicitly authorised by uploading the asset in the first
+        # place.
+        try:
+            from core.ai_libraries import (  # noqa: PLC0415
+                find_best_payment_asset as _find_payment_asset,
+                is_payment_query as _is_payment_query,
+                validate_media_for_send as _validate_media,
+            )
+            _early_payment_intent = _is_payment_query(text or "")
+            _early_payment_asset = (
+                _find_payment_asset(db, tenant_id, text or "")
+                if _early_payment_intent else None
+            )
+            logger.info(
+                "[PAYMENT_INFO] early-gate tenant=%s convo=%s to=%s "
+                "intent_detected=%s asset_found=%s asset_id=%s "
+                "asset_score=%s",
+                tenant_id, getattr(convo, "id", None), to,
+                _early_payment_intent,
+                bool(_early_payment_asset),
+                (_early_payment_asset or {}).get("id"),
+                f"{(_early_payment_asset or {}).get('_relevance_score') or 0:.2f}"
+                if _early_payment_asset else None,
+            )
+            if _early_payment_intent and _early_payment_asset:
+                # Validate the asset (HTTPS upgrade, tenant scope, file
+                # presence, mime check, size cap) before we touch
+                # WhatsApp. On any validation failure we fall through
+                # to the normal pipeline so the customer still gets a
+                # response.
+                _ok, _err, _normalised = _validate_media(
+                    _early_payment_asset,
+                    expected_tenant_id=tenant_id,
+                    db=db,
+                )
+                if _ok and _normalised:
+                    _intro_text = "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                    # 1) warm text reply
+                    _text_ok = await _send_whatsapp_message(
+                        phone_id=phone_id, to=to, text=_intro_text,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    StateManager.save_message(
+                        db, to, _intro_text, "outbound",
+                        conversation_id=convo.id, tenant_id=tenant_id,
+                    )
+                    # 2) the media itself
+                    _media_ok = await _send_media_message(
+                        phone_id=phone_id, to=to,
+                        media_type=_normalised.get("media_type") or "image",
+                        media_url=_normalised.get("file_url") or "",
+                        caption=None,
+                        filename=_normalised.get("filename"),
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    logger.info(
+                        "[PAYMENT_INFO] early-bypass APPLIED tenant=%s convo=%s "
+                        "asset_id=%s media_type=%s text_send_ok=%s "
+                        "media_send_ok=%s url_scheme=%s "
+                        "transfer_fallback_skipped=true hard_override=true",
+                        tenant_id, getattr(convo, "id", None),
+                        _normalised.get("id"),
+                        _normalised.get("media_type"),
+                        _text_ok, _media_ok,
+                        (_normalised.get("file_url") or "").split(":", 1)[0],
+                    )
+                    # Stamp the conversation so the brain knows we just
+                    # served the payment asset (used by future dedup +
+                    # by analytics).
+                    try:
+                        _meta = dict(getattr(convo, "extra_metadata", None) or {})
+                        from datetime import datetime as _dtn, timezone as _tzn  # noqa: PLC0415
+                        _meta["last_payment_asset_served_at"] = _dtn.now(_tzn.utc).isoformat()
+                        _meta["last_payment_asset_id"] = int(_normalised.get("id") or 0)
+                        convo.extra_metadata = _meta
+                        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                        flag_modified(convo, "extra_metadata")
+                        db.add(convo)
+                        db.commit()
+                    except Exception as _stamp_exc:
+                        logger.debug(
+                            "[PAYMENT_INFO] stamp failed: %s — non-fatal",
+                            _stamp_exc,
+                        )
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                    return  # short-circuit — never run the brain for this turn
+                else:
+                    logger.warning(
+                        "[PAYMENT_INFO] early-bypass SKIPPED tenant=%s convo=%s "
+                        "asset_id=%s reason=validation_failed err=%s — "
+                        "falling through to normal pipeline",
+                        tenant_id, getattr(convo, "id", None),
+                        _early_payment_asset.get("id"), _err,
+                    )
+        except Exception as _early_exc:  # noqa: BLE001
+            logger.warning(
+                "[PAYMENT_INFO] early-bypass FAILED tenant=%s err=%s — "
+                "falling through to normal pipeline",
+                tenant_id, _early_exc,
+            )
+
         # ── AI loop / cost guard ─────────────────────────────────────────
         # Runs BEFORE any LLM/Brain call. If the conversation is paused
         # (manual takeover, internal/blocked number, prior bot-loop
@@ -3187,13 +3323,34 @@ async def _handle_merchant_message(
                     _r_low = (reply or "").strip()
                     _looks_like_owner_fallback = bool(_r_low) and any(
                         marker in _r_low for marker in (
+                            # Direct refusals — GPT saying it doesn't have the info.
                             "ما عندي بيانات الحساب",
                             "ما عندي معلومات",
+                            "ما أقدر أوفرها",
+                            "ما اقدر اوفرها",
+                            "أعتذر إني ما أقدر",
+                            "اعتذر اني ما اقدر",
+                            "أعتذر، ما",
+                            "اعتذر، ما",
+                            "لا أستطيع تقديم",
+                            "لا استطيع تقديم",
+                            "لا أملك معلومات",
+                            "لا املك معلومات",
+                            # Generic owner-contact / handoff phrases.
                             "هذه وسائل التواصل",
                             "تواصل مع المتجر",
+                            "تواصلي مع المتجر",
                             "سأحوّلك للفريق",
                             "سأحولك للفريق",
+                            "أحوّلك للفريق",
+                            "احولك للفريق",
                             "تواصل مع المالك",
+                            "الفريق راح يتواصل",
+                            "راح يتواصل معك",
+                            "سيتواصل معك الفريق",
+                            "وصل طلبك للفريق",
+                            "طلبك وصل للفريق",
+                            "وصلت رسالتك",
                         )
                     )
                     if _looks_like_owner_fallback or not _r_low:
