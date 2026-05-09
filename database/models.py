@@ -561,6 +561,14 @@ class Conversation(Base):
     ai_paused_reason = Column(String, nullable=True)
     ai_paused_at = Column(DateTime(timezone=True), nullable=True)
     ai_paused_by = Column(String, nullable=True)
+    # ── Unified human-takeover state ────────────────────────────────────────
+    # Filled when the merchant clicks "تولّي / تحويل لموظف" from the
+    # conversations panel. Any of these (or the legacy is_human_handoff /
+    # paused_by_human columns) flips the inbox row into the human filter.
+    needs_human = Column(Boolean, default=False, nullable=False, server_default='false')
+    handoff_active = Column(Boolean, default=False, nullable=False, server_default='false')
+    taken_over_at = Column(DateTime(timezone=True), nullable=True)
+    taken_over_by = Column(String, nullable=True)
     extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class MessageEvent(Base):

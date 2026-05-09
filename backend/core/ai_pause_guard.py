@@ -70,9 +70,26 @@ REASON_HUMAN_HANDOFF = "human_handoff"
 REASON_BOT_LOOP = "bot_loop_detected"
 REASON_RATE_LIMIT = "rate_limit"
 REASON_INTERNAL_NUMBER = "internal_number"
+REASON_MANUAL_TAKEOVER = "manual_takeover"
+REASON_SUPPORT_ESCALATION = "support_escalation"
 
 VALID_REASONS = frozenset(
-    {REASON_MANUAL, REASON_HUMAN_HANDOFF, REASON_BOT_LOOP, REASON_RATE_LIMIT, REASON_INTERNAL_NUMBER}
+    {
+        REASON_MANUAL,
+        REASON_HUMAN_HANDOFF,
+        REASON_BOT_LOOP,
+        REASON_RATE_LIMIT,
+        REASON_INTERNAL_NUMBER,
+        REASON_MANUAL_TAKEOVER,
+        REASON_SUPPORT_ESCALATION,
+    }
+)
+
+# Reasons that imply "a human is on this conversation now". Used by the
+# inbox to populate the unified "بشري" filter regardless of how the
+# pause was set (dashboard takeover button, escalation flow, etc.).
+HUMAN_PRESENCE_REASONS = frozenset(
+    {REASON_HUMAN_HANDOFF, REASON_MANUAL_TAKEOVER, REASON_SUPPORT_ESCALATION}
 )
 
 
@@ -901,6 +918,9 @@ __all__ = [
     "REASON_BOT_LOOP",
     "REASON_RATE_LIMIT",
     "REASON_INTERNAL_NUMBER",
+    "REASON_MANUAL_TAKEOVER",
+    "REASON_SUPPORT_ESCALATION",
+    "HUMAN_PRESENCE_REASONS",
     "VALID_REASONS",
     "LOOP_SCORE_RECOVERY",
     "LOOP_SCORE_PAUSE",

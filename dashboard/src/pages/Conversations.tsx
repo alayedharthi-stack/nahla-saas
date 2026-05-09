@@ -174,7 +174,16 @@ export default function Conversations() {
         customer_name: selected.customer,
         last_message: selected.lastMsg,
       })
-      _optimisticUpdate(selected.phone, { status: 'human', isAI: false, handoffReason: 'customer_request' })
+      _optimisticUpdate(selected.phone, {
+        status: 'human',
+        isAI: false,
+        handoffReason: 'customer_request',
+        needsHuman: true,
+        handoffActive: true,
+        takenOverAt: new Date().toISOString(),
+        aiPaused: true,
+        aiPausedReason: 'manual_takeover',
+      })
       await loadList()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر تحويل المحادثة')
@@ -213,6 +222,10 @@ export default function Conversations() {
       // UI stays in sync with what the backend just reset.
       patch.status = 'active'
       patch.handoffReason = null
+      patch.needsHuman = false
+      patch.handoffActive = false
+      patch.takenOverAt = null
+      patch.takenOverBy = null
     }
     _optimisticUpdate(phone, patch)
   }
@@ -281,13 +294,33 @@ export default function Conversations() {
     }
   }
 
-  // "يطلب موظف": conversation handed off AND no human has replied yet (lastMsgType !== 'manual')
-  // This catches ALL handoff reasons (customer_request, cart human-help button, etc.)
+  // "بشري": unified — the conversation is owned by a human right now.
+  // Either an explicit dashboard takeover (needs_human / handoff_active /
+  // taken_over_at), or AI paused with a human-presence reason
+  // (manual_takeover, support_escalation, human_handoff), or a manual
+  // outbound was actually sent. We DO NOT require the manual reply to
+  // ship before the row appears in the filter — the merchant should see
+  // it the moment they click "تولّي".
+  const HUMAN_PRESENCE_REASONS: AIPauseReason[] = [
+    'manual_takeover',
+    'support_escalation',
+    'human_handoff',
+  ]
+  const _isHumanResponding = (c: DashboardConversation) => {
+    if (c.needsHuman) return true
+    if (c.handoffActive) return true
+    if (c.takenOverAt) return true
+    if (c.aiPaused && c.aiPausedReason && HUMAN_PRESENCE_REASONS.includes(c.aiPausedReason)) {
+      return true
+    }
+    if (c.status === 'human') return true
+    return false
+  }
+  // "يطلب موظف": same surface as above EXCEPT we still treat it as
+  // pending until a human has actually replied. Used for the small
+  // "agent_req" tab (kept for backwards-compat of the existing pill).
   const _isAwaitingAgent = (c: DashboardConversation) =>
-    c.status === 'human' && c.lastMsgType !== 'manual'
-  // "رد بشري": a human agent has actually sent at least one manual reply
-  const _isHumanResponding = (c: DashboardConversation) =>
-    c.status === 'human' && c.lastMsgType === 'manual'
+    _isHumanResponding(c) && c.lastMsgType !== 'manual'
 
   const _isUnsubscribed = (c: DashboardConversation) =>
     !!(c.isUnsubscribed || c.pendingUnsubscribe)

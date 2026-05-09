@@ -3124,10 +3124,69 @@ async def _handle_merchant_message(
                 _tenant_id=tenant_id, _db=db,
             )
         else:
-            _send_ok = await _send_whatsapp_message(
-                phone_id=phone_id, to=to, text=reply,
-                _tenant_id=tenant_id, _db=db,
-            )
+            # ── URL → CTA-button normaliser ─────────────────────────
+            # If the AI reply embeds a long product / payment / tracking
+            # / location URL, lift it into a single ``cta_url`` button.
+            # Brain replies that already attached quick-reply buttons
+            # are skipped (handled above). General URLs (e.g. a wa.me
+            # contact link inside marketing copy) stay inline.
+            _cta_extraction = None
+            try:
+                from core.wa_link_buttons import extract_first_cta_url as _extract_cta  # noqa: PLC0415
+                # We don't pass store_domain here: product detection by
+                # path pattern (/products/, /p/, …) is enough for the
+                # current AI-reply shapes. A future enhancement can plug
+                # the merchant's known domain in for stricter matching.
+                _cta_extraction = _extract_cta(reply or "")
+            except Exception as _cta_exc:
+                logger.debug("[CTA_BUTTON] extract failed tenant=%s: %s", tenant_id, _cta_exc)
+
+            _send_ok = False
+            if _cta_extraction and _cta_extraction.classification.kind != "general":
+                _cls = _cta_extraction.classification
+                logger.info(
+                    "[CTA_BUTTON] tenant=%s conversation_id=%s url_type=%s "
+                    "button_title=%r url_domain=%s body_len=%d",
+                    tenant_id, getattr(convo, "id", None), _cls.kind,
+                    _cls.button_title, _cls.domain, len(_cta_extraction.cleaned_text or ""),
+                )
+                try:
+                    _send_ok = await _send_cta_url(
+                        phone_id=phone_id, to=to,
+                        body_text=_cta_extraction.cleaned_text or reply,
+                        btn_label=_cls.button_title,
+                        btn_url=_cls.url,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                except Exception as _cta_send_exc:
+                    logger.warning(
+                        "[CTA_BUTTON_FALLBACK] tenant=%s reason=%s url_type=%s",
+                        tenant_id, _cta_send_exc, _cls.kind,
+                    )
+                    _send_ok = False
+                if _send_ok:
+                    # Replace the persisted reply body with the cleaned
+                    # version so the dashboard transcript matches what
+                    # the customer saw on WhatsApp.
+                    reply = _cta_extraction.cleaned_text or reply
+                else:
+                    # WhatsApp rejected the interactive (e.g. outside the
+                    # 24h window): fall back to the original plain text
+                    # send so the customer still receives the link.
+                    logger.info(
+                        "[CTA_BUTTON_FALLBACK] tenant=%s reason=interactive_send_failed "
+                        "url_type=%s — sending plain text",
+                        tenant_id, _cls.kind,
+                    )
+                    _send_ok = await _send_whatsapp_message(
+                        phone_id=phone_id, to=to, text=reply,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+            else:
+                _send_ok = await _send_whatsapp_message(
+                    phone_id=phone_id, to=to, text=reply,
+                    _tenant_id=tenant_id, _db=db,
+                )
         if _send_ok:
             logger.info("[TRACE][5/6] MERCHANT_AI_SENT | tenant=%s to=%s", tenant_id, to)
             logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)

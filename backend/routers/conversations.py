@@ -332,9 +332,26 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     ).all():
         _open_windows.add(_norm(w.customer_phone))
 
+    def _is_human_takeover(convo: Optional[Conversation]) -> bool:
+        if convo is None:
+            return False
+        if bool(getattr(convo, "is_human_handoff", False)):
+            return True
+        if bool(getattr(convo, "needs_human", False)):
+            return True
+        if bool(getattr(convo, "handoff_active", False)):
+            return True
+        if getattr(convo, "taken_over_at", None) is not None:
+            return True
+        if bool(getattr(convo, "ai_paused", False)):
+            from core.ai_pause_guard import HUMAN_PRESENCE_REASONS  # noqa: PLC0415
+            if (getattr(convo, "ai_paused_reason", None) or "") in HUMAN_PRESENCE_REASONS:
+                return True
+        return False
+
     def _status_for(phone: str, convo: Optional[Conversation]) -> str:
         n = _norm(phone)
-        if n in active_handoffs or (convo and convo.is_human_handoff):
+        if n in active_handoffs or _is_human_takeover(convo):
             return "human"
         if convo and str(convo.status).lower() == "closed":
             return "closed"
@@ -368,8 +385,9 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
         existing_key = norm_to_key.get(n)
         if existing_key and existing_key in phone_info:
             prev = phone_info[existing_key]
-            # Aggregate: if THIS row is paused, the merged display row
-            # should reflect that even when another sibling row isn't.
+            # If THIS row is paused or in human takeover, the merged
+            # display row should reflect that even when another sibling
+            # row isn't.
             if bool(getattr(convo, "ai_paused", False)):
                 prev_at = prev.get("aiPausedAt") or ""
                 this_at = (
@@ -381,6 +399,16 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                     prev["aiPausedReason"] = getattr(convo, "ai_paused_reason", None)
                     prev["aiPausedAt"] = this_at or prev.get("aiPausedAt")
                     prev["isAI"] = False
+            if _is_human_takeover(convo) or n in active_handoffs:
+                prev["needsHuman"] = True
+                prev["status"] = "human"
+                prev["isAI"] = False
+                if bool(getattr(convo, "handoff_active", False)):
+                    prev["handoffActive"] = True
+                if getattr(convo, "taken_over_at", None) and not prev.get("takenOverAt"):
+                    prev["takenOverAt"] = convo.taken_over_at.isoformat()
+                if getattr(convo, "taken_over_by", None) and not prev.get("takenOverBy"):
+                    prev["takenOverBy"] = convo.taken_over_by
             prev_has_name = prev["customer"] and prev["customer"] != prev["phone"]
             if name and not prev_has_name:
                 phone_info.pop(existing_key)
@@ -392,6 +420,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 continue
 
         ai_paused_now = bool(getattr(convo, "ai_paused", False))
+        needs_human_now = _is_human_takeover(convo) or n in active_handoffs
         display_name = name or phone
         phone_info[phone] = {
             "id": str(convo.id),
@@ -399,7 +428,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "phone": phone,
             "lastMsg": "",
             "time": "",
-            "isAI": status != "human" and not ai_paused_now,
+            "isAI": status != "human" and not ai_paused_now and not needs_human_now,
             "status": status,
             "unread": 0,
             "lastMsgType": "",
@@ -413,6 +442,13 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 convo.ai_paused_at.isoformat()
                 if getattr(convo, "ai_paused_at", None) else None
             ),
+            "needsHuman": needs_human_now,
+            "handoffActive": bool(getattr(convo, "handoff_active", False)),
+            "takenOverAt": (
+                convo.taken_over_at.isoformat()
+                if getattr(convo, "taken_over_at", None) else None
+            ),
+            "takenOverBy": getattr(convo, "taken_over_by", None),
             "_conv_id": convo.id,
         }
         norm_to_key[n] = phone
@@ -841,6 +877,19 @@ async def handoff_conversation(body: HandoffIn, request: Request, db: Session = 
     get_or_create_tenant(db, tenant_id)
 
     from handoff.manager import create_handoff_session  # noqa: PLC0415
+    from core.ai_pause_guard import (  # noqa: PLC0415
+        pause_ai as _pause_ai,
+        REASON_HUMAN_HANDOFF as _R_HOFF,
+        REASON_MANUAL_TAKEOVER as _R_MANUAL,
+        REASON_SUPPORT_ESCALATION as _R_ESCAL,
+    )
+    from core.auth import get_jwt_user_id  # noqa: PLC0415
+
+    actor_user_id = None
+    try:
+        actor_user_id = get_jwt_user_id(request)
+    except Exception:
+        actor_user_id = None
 
     convo = _get_or_create_conversation(db, tenant_id, body.customer_phone, body.customer_name)
     session = create_handoff_session(
@@ -851,19 +900,55 @@ async def handoff_conversation(body: HandoffIn, request: Request, db: Session = 
         last_message=body.last_message or "",
         reason=body.reason,
     )
-    convo.status = "human"
-    convo.is_human_handoff = True
-    convo.paused_by_human = True
-    db.add(convo)
+    now = datetime.now(timezone.utc)
+
+    if body.reason == "support_escalation":
+        pause_reason = _R_ESCAL
+    elif body.reason in {"manual_takeover", "staff_takeover"}:
+        pause_reason = _R_MANUAL
+    else:
+        pause_reason = _R_HOFF
+
+    # Update EVERY conversation row for this customer so the inbox view
+    # (which dedupes by phone) is consistent regardless of which row was
+    # picked first.
+    convos = _find_conversations_for_phone(db, tenant_id, body.customer_phone) or [convo]
+    for c in convos:
+        c.status = "human"
+        c.is_human_handoff = True
+        c.paused_by_human = True
+        c.needs_human = True
+        c.handoff_active = True
+        c.taken_over_at = now
+        c.taken_over_by = (
+            f"user:{actor_user_id}" if actor_user_id is not None else "dashboard:handoff"
+        )
+        db.add(c)
     db.commit()
-    # Also flip the AI loop guard so subsequent inbound messages don't
-    # trigger token-spending replies after the dashboard takeover.
-    try:
-        from core.ai_pause_guard import pause_ai as _pause_ai, REASON_HUMAN_HANDOFF as _R_HOFF  # noqa: PLC0415
-        _pause_ai(db, convo, reason=_R_HOFF, by="dashboard:handoff")
-    except Exception as exc:
-        _log.debug("[ai_pause] handoff_conversation pause failed: %s", exc)
-    return {"handoff": True, "session_id": session.id}
+
+    # Flip the AI loop guard so subsequent inbound messages don't trigger
+    # token-spending replies after the dashboard takeover. We do this in
+    # a second pass so the human-state columns above are persisted first.
+    for c in convos:
+        try:
+            _pause_ai(db, c, reason=pause_reason, by="dashboard:handoff", commit=False)
+        except Exception as exc:
+            _log.debug("[ai_pause] handoff_conversation pause failed: %s", exc)
+    db.commit()
+
+    _log.info(
+        "[HANDOFF_API] tenant=%s phone=%r reason=%s pause_reason=%s by=%s rows=%d",
+        tenant_id, body.customer_phone, body.reason, pause_reason,
+        actor_user_id or "dashboard", len(convos),
+    )
+    return {
+        "handoff": True,
+        "session_id": session.id,
+        "needsHuman": True,
+        "handoffActive": True,
+        "takenOverAt": now.isoformat(),
+        "takenOverBy": str(actor_user_id) if actor_user_id is not None else "dashboard",
+    }
 
 
 @router.post("/close")
@@ -1001,11 +1086,22 @@ async def resume_conversation_ai(body: AIResumeIn, request: Request, db: Session
 
     now = datetime.now(timezone.utc)
     for c in convos:
-        # Clear legacy human-takeover flags so the resume is total — one
-        # toggle on the dashboard restores AI fully.
-        if c.is_human_handoff or c.paused_by_human or c.status == "human":
+        # Clear legacy human-takeover flags AND new explicit columns so the
+        # resume is total — one toggle on the dashboard restores AI fully.
+        if (
+            c.is_human_handoff
+            or c.paused_by_human
+            or c.status == "human"
+            or getattr(c, "needs_human", False)
+            or getattr(c, "handoff_active", False)
+            or getattr(c, "taken_over_at", None) is not None
+        ):
             c.is_human_handoff = False
             c.paused_by_human = False
+            c.needs_human = False
+            c.handoff_active = False
+            c.taken_over_at = None
+            c.taken_over_by = None
             c.status = "active"
             db.add(c)
         # Stamp a resume marker on the conversation so the bot-loop

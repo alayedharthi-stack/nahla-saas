@@ -230,6 +230,8 @@ export type AIPauseReason =
   | 'bot_loop_detected'
   | 'rate_limit'
   | 'internal_number'
+  | 'manual_takeover'
+  | 'support_escalation'
 
 export interface AIPauseStateResponse {
   ok: boolean
@@ -262,6 +264,11 @@ export interface DashboardConversation {
   aiPaused?: boolean
   aiPausedReason?: AIPauseReason | null
   aiPausedAt?: string | null
+  // Unified human-takeover signals (mirrors the backend list payload).
+  needsHuman?: boolean
+  handoffActive?: boolean
+  takenOverAt?: string | null
+  takenOverBy?: string | null
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'
