@@ -87,6 +87,24 @@ _PROMPT_USAGE_MAXLEN = 220
 # hint is ignored by the parser, only the numeric id is honoured.
 _MEDIA_MARKER_RE = re.compile(r"\[MEDIA:\s*(\d+)(?:\s*\|[^\]]*)?\]", re.IGNORECASE)
 
+# Catch-all scrubber for ANY internal-shaped marker that survives past the
+# media extraction step. The merchant reported customers literally seeing
+# tokens like ``[TRANSFER]`` or ``[TEMPLATE:contact_owner]`` in WhatsApp
+# — those are GPT hallucinations (it sees ``[MEDIA:<id>]`` in the prompt
+# and extrapolates similar-looking placeholders). The webhook calls
+# :func:`scrub_internal_markers` AFTER :func:`extract_media_markers`, so
+# legitimate ``[MEDIA:N]`` tokens have already been consumed and only
+# leaks remain.
+#
+# Pattern: ``[`` + one or more uppercase letters / digits / underscore /
+# space (so ``[TRANSFER]``, ``[CTA URL]``, ``[ESCALATE_HUMAN]`` all
+# match), optionally followed by ``:...`` (so ``[TEMPLATE:contact_owner]``
+# and ``[CTA_URL:title=...|url=...]`` also match), then a closing ``]``.
+# We deliberately require the leading word to be ALL-CAPS so we don't
+# accidentally clobber Arabic content the merchant might have wrapped
+# in brackets like "[ملاحظة]".
+_INTERNAL_MARKER_RE = re.compile(r"\[[A-Z][A-Z0-9_ ]{0,40}(?::[^\]\n]{0,300})?\]")
+
 
 # ── WhatsApp Cloud API limits per media type ─────────────────────────────────
 #
@@ -602,7 +620,188 @@ def extract_media_markers(
     return cleaned, attachments
 
 
+def scrub_internal_markers(text: str) -> str:
+    """Remove any internal ``[MARKER]`` / ``[MARKER:payload]`` token that
+    survived past :func:`extract_media_markers`.
+
+    Called by the WhatsApp webhook as the LAST step before sending, so by
+    the time we run, every legitimate ``[MEDIA:N]`` marker has already
+    been consumed. Anything still bracketed is a leak — most often a GPT
+    hallucination of a placeholder it saw in the prompt or in earlier
+    turns (the merchant reported customers receiving ``[TRANSFER]``
+    literally; this scrubber is what makes that impossible).
+
+    Returns the cleaned text with whitespace tidied. Empty / non-string
+    input is returned unchanged.
+    """
+    if not isinstance(text, str) or not text:
+        return text or ""
+    cleaned = _INTERNAL_MARKER_RE.sub("", text)
+    if cleaned == text:
+        return text  # nothing to do — preserve original whitespace
+    # Tidy stranded whitespace where the marker used to sit.
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+# ── Payment-asset hard override ─────────────────────────────────────────────
+#
+# When the customer asks for bank/IBAN/transfer/QR info AND a relevant
+# media item is active for this tenant, we attach it unconditionally —
+# even if GPT's reply didn't include a ``[MEDIA:<id>]`` marker. This
+# closes the failure mode reported by the merchant where GPT replied
+# "ما عندي بيانات الحساب البنكي" while a "باركود التحويل البنكي
+# الراجحي" item was sitting active in the library: GPT can't be trusted
+# to always pick the asset, so the webhook double-checks.
+_PAYMENT_QUERY_RE = re.compile(
+    r"("
+    # Banks / accounts
+    r"الراجحي|راجحي|الأهلي|اهلي|الرياض|"
+    r"حساب\s*(الـ?بنك|بنكي?|الراجحي|الأهلي)|رقم\s*الحساب|"
+    # IBAN
+    r"آيبان|الآيبان|ايبان|الايبان|iban|"
+    # Transfer / deposit
+    r"تحويل\s*بنك|التحويل\s*البنكي|بيانات\s*التحويل|بيانات\s*الدفع|إيداع|"
+    # Barcode / QR
+    r"باركود\s*(التحويل|الدفع|البنك|الراجحي)|qr\s*code|كيوار|كيو\s*ار|"
+    # English mirrors for customers who switch to Latin script.
+    r"\bbank\s*(account|details|transfer|info)\b|"
+    r"\b(send|share|give|need|want)\s+(me|us|the)?\s*(your\s+)?bank\b|"
+    r"\bpayment\s*(barcode|qr|details)\b|"
+    r"\biban\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_payment_query(message: str) -> bool:
+    """Cheap rule-based check used by the webhook to decide whether to
+    consult :func:`find_best_payment_asset`. False positives are fine —
+    the asset finder filters by tag relevance — but false negatives are
+    not, since the whole point is to recover when GPT misses the asset."""
+    if not message:
+        return False
+    return bool(_PAYMENT_QUERY_RE.search(str(message)))
+
+
+def find_best_payment_asset(
+    db: Session,
+    tenant_id: int,
+    customer_message: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the highest-relevance active media item that looks like
+    payment / bank / barcode / QR, or ``None`` if no item passes the
+    score threshold.
+
+    Used as a HARD OVERRIDE: when the customer asks for bank info and
+    GPT's reply doesn't include the corresponding ``[MEDIA:<id>]``, the
+    webhook attaches the result of this function regardless. Returning
+    ``None`` is normal — many merchants don't have a barcode uploaded —
+    in which case the webhook just lets GPT's text reply go through.
+
+    The returned dict has the same shape as :func:`extract_media_markers`
+    output entries so it can be mixed into the attachments list with no
+    extra adapters.
+    """
+    from models import AIMediaItem  # noqa: PLC0415 — avoid circular import
+
+    if not is_payment_query(customer_message):
+        return None
+
+    rows = (
+        db.query(AIMediaItem)
+        .filter(
+            AIMediaItem.tenant_id == int(tenant_id),
+            AIMediaItem.is_active.is_(True),
+        )
+        .all()
+    )
+    if not rows:
+        return None
+
+    # Score each row against the customer message using the public
+    # relevance helper (the synonym cluster handles "الراجحي" → "بنك /
+    # تحويل / آيبان"). Rows whose description / title hints they are
+    # payment-related but whose tags are sparse still score on title.
+    scored: List[Tuple[float, AIMediaItem]] = []
+    for r in rows:
+        item_dict = {
+            "title": r.title or "",
+            "tags": list(r.tags or []),
+            "usage_context": r.usage_context or "",
+        }
+        score = _relevance_score(item_dict, customer_message)
+        # Boost if the title or tags explicitly mention a payment word —
+        # the merchant who uploads "باركود التحويل البنكي" deserves to
+        # have it picked even if their tags are minimal.
+        haystack = (
+            f"{r.title or ''} {' '.join(str(t) for t in (r.tags or []))} "
+            f"{r.usage_context or ''}"
+        ).lower()
+        if _PAYMENT_QUERY_RE.search(haystack):
+            score += 2.0
+        if score > 0:
+            scored.append((score, r))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda t: (t[0], int(t[1].priority or 0)), reverse=True)
+    best_score, best_row = scored[0]
+    # Threshold: require either a synonym-cluster hit (>=1.5) or a
+    # payment-word boost (>=2.0). A bare 0.4 token-overlap match would
+    # otherwise pull in unrelated images.
+    if best_score < 1.5:
+        return None
+
+    logger.info(
+        "[PAYMENT_INFO] tenant=%s asset_found=true asset_id=%s "
+        "asset_score=%.2f title=%r",
+        tenant_id, int(best_row.id), best_score, (best_row.title or "")[:80],
+    )
+    return {
+        "id": int(best_row.id),
+        "tenant_id": int(best_row.tenant_id),
+        "title": best_row.title,
+        "media_type": best_row.media_type,
+        "file_url": best_row.file_url,
+        "mime_type": best_row.mime_type,
+        "storage_kind": best_row.storage_kind,
+        "storage_path": best_row.storage_path,
+        "file_size_bytes": (
+            int(best_row.file_size_bytes)
+            if best_row.file_size_bytes is not None
+            else None
+        ),
+        "_relevance_score": best_score,
+    }
+
+
 # ── Pre-send validation ──────────────────────────────────────────────────────
+
+
+_PROD_HTTPS_HOSTS = (
+    "railway.app", "herokuapp.com", "vercel.app", "fly.dev", "render.com",
+)
+
+
+def _maybe_force_https(url: str) -> str:
+    """Mirror of :func:`routers.intelligence_libraries._force_https_for_production`
+    used at validate-time for rows already persisted with an http:// URL.
+    Kept as a private helper here so :func:`validate_media_for_send`
+    can run without pulling the router module into scope.
+    """
+    if not url or not url.lower().startswith("http://"):
+        return url
+    lower = url.lower()
+    for host in _PROD_HTTPS_HOSTS:
+        if host in lower:
+            return "https://" + url[len("http://"):]
+    if os.environ.get("NAHLA_FORCE_HTTPS_MEDIA", "").lower() in ("1", "true", "yes"):
+        return "https://" + url[len("http://"):]
+    return url
 
 
 def _safe_filename(title: str, default: str = "file") -> str:
@@ -706,6 +905,22 @@ def validate_media_for_send(
     storage_kind = (item.get("storage_kind") or "external").lower()
     file_url = (item.get("file_url") or "").strip()
     storage_path = (item.get("storage_path") or "").strip()
+
+    # Auto-upgrade http:// → https:// for managed-platform hosts. Many
+    # rows in the DB were created when ``request.base_url`` returned an
+    # http:// scheme (Railway terminates TLS upstream so the inner app
+    # sees plain HTTP), and Meta's WhatsApp Cloud API silently rejects
+    # non-HTTPS media URLs in production.
+    if file_url:
+        upgraded = _maybe_force_https(file_url)
+        if upgraded != file_url:
+            logger.info(
+                "[AIMedia.validate] upgraded url scheme tenant=%s id=%s "
+                "from=http -> to=https",
+                expected_tenant_id, media_id,
+            )
+            file_url = upgraded
+            item["file_url"] = upgraded
 
     if storage_kind == "local":
         # Locally-uploaded asset: the public URL must be HTTPS *and* the

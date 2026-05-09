@@ -91,15 +91,50 @@ def _ensure_upload_dir(tenant_id: int) -> Path:
     return target
 
 
+_PROD_HTTPS_HOSTS = ("railway.app", "herokuapp.com", "vercel.app", "fly.dev", "render.com")
+
+
+def _force_https_for_production(url: str) -> str:
+    """Upgrade ``http://...`` → ``https://...`` when the host is clearly
+    a managed-platform domain that already terminates TLS upstream.
+
+    The merchant reported that the AI Media Library was emitting
+    ``http://nahla-saas-production.up.railway.app/...`` URLs, which
+    Meta's WhatsApp Cloud API silently rejects. Railway/Heroku/Vercel
+    all serve the SAME absolute URL over HTTPS, so the upgrade is safe
+    and fixes the ingest at the source. Local dev (``http://localhost``,
+    ``127.0.0.1``, plain ``http://192.168.*``) is left untouched.
+    """
+    if not url:
+        return url
+    if not url.lower().startswith("http://"):
+        return url
+    lower = url.lower()
+    # Always upgrade for known managed-platform hosts.
+    for host in _PROD_HTTPS_HOSTS:
+        if host in lower:
+            return "https://" + url[len("http://"):]
+    # Honour explicit opt-in for any other host (env-controlled so the
+    # merchant can flip this on for a custom domain without a code
+    # change).
+    if os.environ.get("NAHLA_FORCE_HTTPS_MEDIA", "").lower() in ("1", "true", "yes"):
+        return "https://" + url[len("http://"):]
+    return url
+
+
 def _public_file_url(request: Request, media_id: int) -> str:
     """Build the absolute public URL for a stored media row.
 
     Uses ``NAHLA_PUBLIC_BASE_URL`` if set, otherwise derives from the
-    incoming request. WhatsApp Cloud requires HTTPS-accessible URLs.
+    incoming request. WhatsApp Cloud requires HTTPS-accessible URLs, so
+    we force-upgrade ``http://`` to ``https://`` for managed-platform
+    hosts (Railway / Heroku / Vercel / Fly / Render) where the platform
+    terminates TLS upstream.
     """
     base = (os.environ.get("NAHLA_PUBLIC_BASE_URL") or "").rstrip("/")
     if not base:
         base = str(request.base_url).rstrip("/")
+    base = _force_https_for_production(base)
     return f"{base}/intelligence/ai-media/file/{int(media_id)}"
 
 

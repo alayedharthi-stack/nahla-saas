@@ -3150,6 +3150,104 @@ async def _handle_merchant_message(
                     tenant_id, _media_exc,
                 )
 
+        # ── Payment-asset HARD OVERRIDE ─────────────────────────────────
+        # If the customer's inbound looks like a bank/IBAN/QR/transfer
+        # request AND we have a relevant active media item BUT GPT didn't
+        # cite it, attach the asset anyway. This is the recovery path for
+        # the bug where GPT replied "ما عندي بيانات الحساب البنكي" while
+        # a "باركود التحويل البنكي الراجحي" item was sitting active in
+        # ai_media_library. Detection is rule-based (cheap), and we
+        # require the relevance score to clear a threshold so unrelated
+        # uploads can't accidentally pre-empt the conversation.
+        try:
+            from core.ai_libraries import (  # noqa: PLC0415
+                find_best_payment_asset as _find_payment_asset,
+                is_payment_query as _is_payment_query,
+            )
+            _payment_intent = _is_payment_query(text or "")
+            if _payment_intent:
+                _already_attached_ids = {a.get("id") for a in _media_attachments}
+                _payment_asset = _find_payment_asset(db, tenant_id, text or "")
+                if _payment_asset and _payment_asset.get("id") not in _already_attached_ids:
+                    _media_attachments.append(_payment_asset)
+                    logger.info(
+                        "[PAYMENT_INFO] tenant=%s conversation_id=%s "
+                        "intent_detected=true asset_found=true asset_id=%s "
+                        "asset_score=%.2f transfer_fallback_skipped=true "
+                        "gpt_cited_marker=%s — hard override applied",
+                        tenant_id, getattr(convo, "id", None),
+                        _payment_asset.get("id"),
+                        float(_payment_asset.get("_relevance_score") or 0.0),
+                        bool(_already_attached_ids),
+                    )
+                    # If GPT's reply was a generic "I can't help" / contact
+                    # owner template, replace it with a warm short text so
+                    # the barcode lands with proper context. We detect that
+                    # by checking for canonical contact-owner phrases.
+                    _r_low = (reply or "").strip()
+                    _looks_like_owner_fallback = bool(_r_low) and any(
+                        marker in _r_low for marker in (
+                            "ما عندي بيانات الحساب",
+                            "ما عندي معلومات",
+                            "هذه وسائل التواصل",
+                            "تواصل مع المتجر",
+                            "سأحوّلك للفريق",
+                            "سأحولك للفريق",
+                            "تواصل مع المالك",
+                        )
+                    )
+                    if _looks_like_owner_fallback or not _r_low:
+                        reply = "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                        logger.info(
+                            "[PAYMENT_INFO] tenant=%s replaced owner-fallback "
+                            "reply with payment intro text",
+                            tenant_id,
+                        )
+                elif _payment_asset is None:
+                    logger.info(
+                        "[PAYMENT_INFO] tenant=%s conversation_id=%s "
+                        "intent_detected=true asset_found=false — "
+                        "no relevant active media; letting GPT reply through",
+                        tenant_id, getattr(convo, "id", None),
+                    )
+                else:
+                    logger.info(
+                        "[PAYMENT_INFO] tenant=%s conversation_id=%s "
+                        "intent_detected=true asset_found=true asset_id=%s "
+                        "already_cited_by_gpt=true — no override needed",
+                        tenant_id, getattr(convo, "id", None),
+                        _payment_asset.get("id"),
+                    )
+        except Exception as _pi_exc:  # noqa: BLE001 — never crash on the override
+            logger.warning(
+                "[PAYMENT_INFO] override failed tenant=%s err=%s",
+                tenant_id, _pi_exc,
+            )
+
+        # ── Universal marker scrubber ───────────────────────────────────
+        # Final safety net: strip ANY ``[FOO]`` / ``[FOO:bar]`` token
+        # that survived past the media-marker extractor. The merchant
+        # reported customers seeing ``[TRANSFER]`` literally in WhatsApp
+        # — that's GPT hallucinating placeholders it sees in the prompt.
+        # Anything bracketed here is a leak by definition.
+        if reply:
+            try:
+                from core.ai_libraries import scrub_internal_markers as _scrub  # noqa: PLC0415
+                _orig = reply
+                reply = _scrub(reply)
+                if reply != _orig:
+                    logger.info(
+                        "[MARKER_SCRUB] tenant=%s conversation_id=%s "
+                        "stripped_chars=%d",
+                        tenant_id, getattr(convo, "id", None),
+                        len(_orig) - len(reply or ""),
+                    )
+            except Exception as _scrub_exc:
+                logger.warning(
+                    "[MARKER_SCRUB] failed tenant=%s err=%s",
+                    tenant_id, _scrub_exc,
+                )
+
         if _brain_buttons and reply:
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
