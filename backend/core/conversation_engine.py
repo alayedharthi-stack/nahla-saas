@@ -880,17 +880,26 @@ class StateManager:
     @classmethod
     def save_message(cls, db, phone: str, body: str, direction: str,
                      conversation_id: Optional[int] = None,
-                     tenant_id: Optional[int] = None) -> None:
+                     tenant_id: Optional[int] = None,
+                     *,
+                     event_type: Optional[str] = None,
+                     created_at: Optional[datetime] = None,
+                     extra_metadata: Optional[Dict[str, Any]] = None) -> None:
         _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
         try:
             from models import MessageEvent  # noqa: PLC0415
+            meta: Dict[str, Any] = {"phone": phone}
+            if extra_metadata:
+                meta.update(extra_metadata)
+            ts = created_at if created_at is not None else datetime.utcnow()
             db.add(MessageEvent(
                 tenant_id=_tid,
                 conversation_id=conversation_id,
                 direction=direction,
                 body=body,
-                event_type="whatsapp",
-                extra_metadata={"phone": phone},
+                event_type=event_type or "whatsapp",
+                created_at=ts,
+                extra_metadata=meta,
             ))
             db.commit()
         except Exception as exc:

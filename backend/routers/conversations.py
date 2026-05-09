@@ -297,7 +297,16 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     2. Latest ``MessageEvent`` per conversation (actual last message)
     3. ``ConversationTrace`` fallback for phones without MessageEvent
     """
-    from sqlalchemy import func  # noqa: PLC0415
+    from sqlalchemy import and_, func, or_  # noqa: PLC0415
+
+    def _inbox_live_only_clause():
+        """Rows stamped as historical/backfill must not drive inbox surface."""
+        hi = MessageEvent.extra_metadata["historical_import"].astext
+        mo = MessageEvent.extra_metadata["message_origin"].astext
+        return and_(
+            or_(hi.is_(None), hi != "true"),
+            or_(mo.is_(None), mo != "historical_sync"),
+        )
 
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
@@ -420,6 +429,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             .filter(
                 MessageEvent.tenant_id == tenant_id,
                 MessageEvent.conversation_id.in_(conv_ids),
+                _inbox_live_only_clause(),
             )
             .group_by(MessageEvent.conversation_id)
             .subquery()
@@ -479,6 +489,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 MessageEvent.tenant_id == tenant_id,
                 MessageEvent.conversation_id.in_(conv_ids),
                 MessageEvent.direction != "outbound",
+                _inbox_live_only_clause(),
                 (MessageEvent.created_at > last_out_sq.c.last_out) | (last_out_sq.c.last_out.is_(None)),
             )
             .group_by(MessageEvent.conversation_id)

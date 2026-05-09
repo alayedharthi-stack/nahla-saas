@@ -1281,6 +1281,20 @@ class WhatsAppConnection(Base):
     webhook_coexistence_received_at = Column(DateTime(timezone=True), nullable=True)
     webhook_status_received_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Inbound messages with WhatsApp business timestamp *before* this instant are
+    # historical-only: persisted for inbox visibility but MUST NOT run Brain / AI.
+    # Set once when the integration first reaches ``connected`` (NULL → now).
+    # Advanced only via explicit merchant/admin reset endpoint.
+    whatsapp_ai_live_since = Column(DateTime(timezone=True), nullable=True)
+
+    # Bulk WhatsApp history import bookkeeping (explicit sync phase).
+    # pending | syncing | completed | failed — default ``completed`` keeps legacy behaviour.
+    whatsapp_history_sync_status = Column(String, nullable=False, server_default="completed")
+    history_sync_started_at = Column(DateTime(timezone=True), nullable=True)
+    history_sync_completed_at = Column(DateTime(timezone=True), nullable=True)
+    synced_conversations_count = Column(Integer, nullable=False, server_default="0")
+    synced_messages_count = Column(Integer, nullable=False, server_default="0")
+
     # Meta account health (fetched periodically from Graph API)
     meta_messaging_limit = Column(String, nullable=True)     # e.g. "TIER_1K", "TIER_10K", "TIER_100K", "UNLIMITED"
     meta_quality_rating  = Column(String, nullable=True)     # "GREEN", "YELLOW", "RED"

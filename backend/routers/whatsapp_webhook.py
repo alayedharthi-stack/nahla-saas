@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import anthropic
@@ -1345,6 +1346,14 @@ async def _dispatch_message(
 
         wa_conn = wa_matches[0]
 
+        # WhatsApp business timestamp + AI live cutoff (ignore backlog before activation).
+        from core.whatsapp_ai_live import (  # noqa: PLC0415
+            is_inbound_before_ai_live_since as _hist_before_ai_live,
+            parse_whatsapp_message_timestamp_utc as _parse_wa_msg_ts,
+        )
+        _wa_msg_ts = _parse_wa_msg_ts(msg.get("timestamp"))
+        _hist_skip_live = _hist_before_ai_live(wa_conn, _wa_msg_ts)
+
         # ── Structured runtime resolver log ──────────────────────────────────
         # Carries the canonical record's identity so log aggregators can
         # compare runtime selection against the admin/status page selection.
@@ -1703,67 +1712,68 @@ async def _dispatch_message(
             #   1. Truly first message from this customer ever → send
             #   2. Customer returns after 24h silence         → send
             #   3. Anything else                              → skip + log
-            try:
-                _notify_result = _should_notify_merchant_email(
-                    db=db,
-                    tenant_id=resolved_tenant_id,
-                    customer=_lead,
-                    silence_hours=24,
-                )
-                if _notify_result["send"]:
-                    from services.email_service import enqueue_email as _enq  # noqa: PLC0415
-                    from database.models import User as _U                     # noqa: PLC0415
-                    _mu = db.query(_U).filter(
-                        _U.tenant_id == resolved_tenant_id, _U.role == "merchant",
-                    ).first()
-                    if _mu and _mu.email:
-                        _msg_text = ""
-                        if msg_type == "text":
-                            _msg_text = (msg.get("text") or {}).get("body", "")
-                        _is_new   = _notify_result["reason"] == "first_message"
-                        _enq(
-                            to=_mu.email,
-                            subject=(
-                                "🎉 أول رسالة واتساب وصلت لمتجرك!"
-                                if _is_new else
-                                "💬 عميل عاد ليتواصل معك على واتساب"
-                            ),
-                            template="first_whatsapp_message",
-                            sender_type="growth",
-                            variables={
-                                "merchant_name":   _mu.username or "",
-                                "customer_name":   contact_name or "",
-                                "customer_phone":  normalized_sender,
-                                "message_preview": _msg_text,
-                                "conversation_url": f"{__import__('core.config', fromlist=['DASHBOARD_URL']).DASHBOARD_URL}/conversations",
-                            },
-                        )
+            if not _hist_skip_live:
+                try:
+                    _notify_result = _should_notify_merchant_email(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        customer=_lead,
+                        silence_hours=24,
+                    )
+                    if _notify_result["send"]:
+                        from services.email_service import enqueue_email as _enq  # noqa: PLC0415
+                        from database.models import User as _U                     # noqa: PLC0415
+                        _mu = db.query(_U).filter(
+                            _U.tenant_id == resolved_tenant_id, _U.role == "merchant",
+                        ).first()
+                        if _mu and _mu.email:
+                            _msg_text = ""
+                            if msg_type == "text":
+                                _msg_text = (msg.get("text") or {}).get("body", "")
+                            _is_new   = _notify_result["reason"] == "first_message"
+                            _enq(
+                                to=_mu.email,
+                                subject=(
+                                    "🎉 أول رسالة واتساب وصلت لمتجرك!"
+                                    if _is_new else
+                                    "💬 عميل عاد ليتواصل معك على واتساب"
+                                ),
+                                template="first_whatsapp_message",
+                                sender_type="growth",
+                                variables={
+                                    "merchant_name":   _mu.username or "",
+                                    "customer_name":   contact_name or "",
+                                    "customer_phone":  normalized_sender,
+                                    "message_preview": _msg_text,
+                                    "conversation_url": f"{__import__('core.config', fromlist=['DASHBOARD_URL']).DASHBOARD_URL}/conversations",
+                                },
+                            )
+                            _log_notification(
+                                db=db, tenant_id=resolved_tenant_id,
+                                customer_id=getattr(_lead, "id", None),
+                                event="returning_customer" if not _is_new else "new_whatsapp_message",
+                                status="sent",
+                                details={"phone": normalized_sender, "preview": _msg_text[:80]},
+                            )
+                    else:
                         _log_notification(
                             db=db, tenant_id=resolved_tenant_id,
                             customer_id=getattr(_lead, "id", None),
-                            event="returning_customer" if not _is_new else "new_whatsapp_message",
-                            status="sent",
-                            details={"phone": normalized_sender, "preview": _msg_text[:80]},
+                            event="new_whatsapp_message",
+                            status="skipped",
+                            reason=_notify_result.get("reason_ar", ""),
+                            details={"phone": normalized_sender},
                         )
-                else:
-                    _log_notification(
-                        db=db, tenant_id=resolved_tenant_id,
-                        customer_id=getattr(_lead, "id", None),
-                        event="new_whatsapp_message",
-                        status="skipped",
-                        reason=_notify_result.get("reason_ar", ""),
-                        details={"phone": normalized_sender},
-                    )
-            except Exception as _em:
-                logger.debug("[Webhook] smart-notify email error: %s", _em)
+                except Exception as _em:
+                    logger.debug("[Webhook] smart-notify email error: %s", _em)
 
-            track_conversation(
-                db,
-                resolved_tenant_id,
-                normalized_sender,
-                source="inbound",
-                category="service",
-            )
+                track_conversation(
+                    db,
+                    resolved_tenant_id,
+                    normalized_sender,
+                    source="inbound",
+                    category="service",
+                )
         except Exception as exc:
             logger.warning(
                 "[Webhook] Failed to sync inbound customer lead | tenant=%s sender=%s err=%s",
@@ -1771,22 +1781,23 @@ async def _dispatch_message(
             )
 
         # Emit automation event for inbound WhatsApp message (non-blocking)
-        try:
-            from core.automation_engine import emit_automation_event  # noqa: PLC0415
-            emit_automation_event(
-                db,
-                resolved_tenant_id,
-                "whatsapp_message_received",
-                customer_id=_inbound_customer_id,
-                payload={
-                    "phone": normalized_sender,
-                    "msg_type": msg_type,
-                    "phone_number_id": phone_number_id,
-                },
-                commit=True,
-            )
-        except Exception as exc:
-            logger.debug("[Webhook] emit whatsapp_message_received failed: %s", exc)
+        if not _hist_skip_live:
+            try:
+                from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                emit_automation_event(
+                    db,
+                    resolved_tenant_id,
+                    "whatsapp_message_received",
+                    customer_id=_inbound_customer_id,
+                    payload={
+                        "phone": normalized_sender,
+                        "msg_type": msg_type,
+                        "phone_number_id": phone_number_id,
+                    },
+                    commit=True,
+                )
+            except Exception as exc:
+                logger.debug("[Webhook] emit whatsapp_message_received failed: %s", exc)
 
         normalized_inbound = await normalize_whatsapp_inbound(
             db=db,
@@ -1840,6 +1851,8 @@ async def _dispatch_message(
                     await _handle_merchant_message(
                         phone_id=used_pid, to=sender, text=pick_num,
                         tenant_id=resolved_tenant_id, db=db,
+                        wa_message_ts=_wa_msg_ts,
+                        wa_msg_id=msg_id or None,
                     )
                     return
 
@@ -1857,6 +1870,8 @@ async def _dispatch_message(
                     await _handle_merchant_message(
                         phone_id=used_pid, to=sender, text=forwarded,
                         tenant_id=resolved_tenant_id, db=db,
+                        wa_message_ts=_wa_msg_ts,
+                        wa_msg_id=msg_id or None,
                     )
                     return
 
@@ -1870,6 +1885,8 @@ async def _dispatch_message(
                     await _handle_merchant_message(
                         phone_id=used_pid, to=sender, text=btn_txt,
                         tenant_id=resolved_tenant_id, db=db,
+                        wa_message_ts=_wa_msg_ts,
+                        wa_msg_id=msg_id or None,
                     )
                     return
 
@@ -1890,6 +1907,8 @@ async def _dispatch_message(
                     await _handle_merchant_message(
                         phone_id=used_pid, to=sender, text=lr_title,
                         tenant_id=resolved_tenant_id, db=db,
+                        wa_message_ts=_wa_msg_ts,
+                        wa_msg_id=msg_id or None,
                     )
             return
 
@@ -1906,6 +1925,8 @@ async def _dispatch_message(
                 await _handle_merchant_message(
                     phone_id=used_pid, to=sender, text=_wa_text,
                     tenant_id=resolved_tenant_id, db=db,
+                    wa_message_ts=_wa_msg_ts,
+                    wa_msg_id=msg_id or None,
                 )
                 return
             logger.info(
@@ -1945,6 +1966,8 @@ async def _dispatch_message(
                 phone_id=used_pid, to=sender, text=text,
                 tenant_id=resolved_tenant_id, db=db,
                 inbound_metadata=normalized_inbound.metadata,
+                wa_message_ts=_wa_msg_ts,
+                wa_msg_id=msg_id or None,
             )
             return
 
@@ -2199,6 +2222,8 @@ async def _handle_merchant_message(
     tenant_id: int,
     db,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    wa_message_ts: Optional[datetime] = None,
+    wa_msg_id: Optional[str] = None,
 ) -> None:
     """
     For merchant tenants (tenant_id > 1): reply using the store's own AI context.
@@ -2224,6 +2249,55 @@ async def _handle_merchant_message(
         "[Merchant/INBOUND_TRIGGER] tenant=%s from=%s direction=inbound text_len=%d snippet=%r",
         tenant_id, to, len(text or ""), (text or "")[:60],
     )
+
+    # ── Strict AI activation cutoff (WhatsApp business timestamp) ───────────
+    # Anything strictly before ``whatsapp_ai_live_since`` is persisted for
+    # inbox/history only — never COD / Brain / outbound automation side-effects.
+    from datetime import timezone as _tz_hist  # noqa: PLC0415
+
+    from core.whatsapp_ai_live import is_inbound_before_ai_live_since  # noqa: PLC0415
+
+    wa_conn_hist = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == tenant_id)
+        .first()
+    )
+    if is_inbound_before_ai_live_since(wa_conn_hist, wa_message_ts):
+        from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+
+        convo_hist = _get_or_create_conversation(db, tenant_id, to)
+        if convo_hist.status != "human" and not convo_hist.is_human_handoff:
+            convo_hist.status = "active"
+        db.add(convo_hist)
+        db.flush()
+
+        _cutoff = getattr(wa_conn_hist, "whatsapp_ai_live_since", None)
+        _msg_iso = wa_message_ts.isoformat() if wa_message_ts else ""
+        _cut_iso = _cutoff.isoformat() if _cutoff else ""
+
+        _created_naive = wa_message_ts
+        if _created_naive is not None and _created_naive.tzinfo is not None:
+            _created_naive = _created_naive.astimezone(_tz_hist.utc).replace(tzinfo=None)
+
+        _hist_meta = {
+            "historical_import": True,
+            "message_origin": "historical_sync",
+            "wa_message_id": wa_msg_id or "",
+            "whatsapp_timestamp": _msg_iso,
+        }
+        StateManager.save_message(
+            db, to, text, "inbound",
+            conversation_id=convo_hist.id,
+            tenant_id=tenant_id,
+            created_at=_created_naive,
+            extra_metadata=_hist_meta,
+        )
+        logger.info(
+            "[HISTORICAL_MESSAGE_SKIP_AI] tenant_id=%s conversation_id=%s message_id=%s "
+            "message_ts=%s ai_live_since=%s",
+            tenant_id, convo_hist.id, wa_msg_id or "", _msg_iso, _cut_iso,
+        )
+        return
 
     # ── COD reply interception ────────────────────────────────────────────────
     # Some WhatsApp clients render QUICK_REPLY taps as plain text rather
@@ -2267,7 +2341,20 @@ async def _handle_merchant_message(
         db.flush()
 
         # Persist inbound immediately for inbox visibility and history continuity.
-        StateManager.save_message(db, to, text, "inbound", conversation_id=convo.id, tenant_id=tenant_id)
+        _live_in_meta: Dict[str, Any] = {
+            "message_origin": "live_webhook",
+            "historical_import": False,
+        }
+        if wa_msg_id:
+            _live_in_meta["wa_message_id"] = wa_msg_id
+        if wa_message_ts:
+            _live_in_meta["whatsapp_timestamp"] = wa_message_ts.isoformat()
+        StateManager.save_message(
+            db, to, text, "inbound",
+            conversation_id=convo.id,
+            tenant_id=tenant_id,
+            extra_metadata=_live_in_meta,
+        )
 
         # ── AI loop / cost guard ─────────────────────────────────────────
         # Runs BEFORE any LLM/Brain call. If the conversation is paused

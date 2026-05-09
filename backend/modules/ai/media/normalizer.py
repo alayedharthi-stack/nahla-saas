@@ -40,19 +40,21 @@ async def normalize_whatsapp_inbound(
     message: Dict[str, Any],
 ) -> MediaNormalizationResult:
     msg_type = str(message.get("type") or "").strip()
+    ts_raw = message.get("timestamp")
+
     if msg_type == "text":
         text = str((message.get("text") or {}).get("body") or "").strip()
         return MediaNormalizationResult(
             normalized_type="text",
             text=text,
-            metadata={"source_type": "text"},
+            metadata={"source_type": "text", "wa_timestamp": ts_raw},
             should_process=bool(text),
         )
 
     if msg_type == "interactive":
         return MediaNormalizationResult(
             normalized_type="interactive",
-            metadata={"source_type": "interactive", "interactive": message.get("interactive", {})},
+            metadata={"source_type": "interactive", "interactive": message.get("interactive", {}), "wa_timestamp": ts_raw},
             should_process=True,
         )
 
@@ -63,6 +65,8 @@ async def normalize_whatsapp_inbound(
             tenant_id=tenant_id,
             audio_payload=message.get("audio") or {},
         )
+        transcription = dict(transcription)
+        transcription["wa_timestamp"] = ts_raw
         return MediaNormalizationResult(
             normalized_type="audio",
             text=transcription.get("text", ""),
@@ -72,7 +76,7 @@ async def normalize_whatsapp_inbound(
 
     return MediaNormalizationResult(
         normalized_type=msg_type or "unsupported",
-        metadata={"source_type": msg_type or "unsupported"},
+        metadata={"source_type": msg_type or "unsupported", "wa_timestamp": ts_raw},
         should_process=False,
     )
 

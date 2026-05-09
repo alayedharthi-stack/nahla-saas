@@ -57,6 +57,7 @@ from core.coexistence_client_id import (
 )
 from core.database import get_db
 from core.tenant import get_or_create_settings, get_or_create_tenant, resolve_tenant_id
+from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty
 from services.whatsapp_platform.provider_utils import (
     WHATSAPP_CONNECTION_TYPE_COEXISTENCE,
     WHATSAPP_CONNECTION_TYPE_DIRECT,
@@ -1362,6 +1363,25 @@ async def disconnect(request: Request, db: Session = Depends(get_db)):
     return {"status": "disconnected"}
 
 
+@router.post("/connection/reset-ai-live-since")
+async def reset_whatsapp_ai_live_since_endpoint(request: Request, db: Session = Depends(get_db)):
+    """Advance the AI cut-off to *now* so only newer WhatsApp traffic runs Brain.
+
+    Use when a merchant finishes onboarding / wants to ignore backlog that
+    already landed in Nahla after linking.
+    """
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد ربط واتساب لهذا المتجر")
+    now = datetime.now(timezone.utc)
+    conn.whatsapp_ai_live_since = now
+    db.add(conn)
+    db.commit()
+    logger.info("[whatsapp_ai_live] merchant RESET tenant=%s new_cutoff=%s", tenant_id, now.isoformat())
+    return {"ok": True, "whatsapp_ai_live_since": now.isoformat()}
+
+
 @router.post("/connection/reconnect")
 async def reconnect(request: Request, db: Session = Depends(get_db)):
     """Reset the connection to 'pending' so the merchant can run Embedded Signup again."""
@@ -1588,6 +1608,7 @@ async def coexistence_partner_connect(
                 conn.sending_enabled = True
                 conn.connected_at = datetime.now(timezone.utc)
                 _set_coexistence_state(conn, status="connected")
+                stamp_whatsapp_ai_live_since_if_empty(conn)
         meta["last_webhook_setup"] = webhook_result
     else:
         # Channel not ready yet — store pending state, webhook from 360dialog will follow
@@ -1714,6 +1735,7 @@ async def admin_activate_coexistence(
             conn.webhook_verified = True
             conn.connected_at = datetime.now(timezone.utc)
             _set_coexistence_state(conn, status="connected")
+            stamp_whatsapp_ai_live_since_if_empty(conn)
 
     # ── Auto-resolve missing WABA ID / phone metadata at activation time ──
     # The activation form treats waba_id as optional ("الحقول الاختيارية")
@@ -1840,6 +1862,7 @@ async def admin_coexistence_sync_record(
         if not conn.connected_at:
             conn.connected_at = datetime.now(timezone.utc)
         _set_coexistence_state(conn, status="connected")
+        stamp_whatsapp_ai_live_since_if_empty(conn)
         conn.last_error = None
     elif after.get("missing_fields"):
         conn.last_error = (
@@ -1956,6 +1979,7 @@ async def admin_coexistence_edit_record(
         if not conn.connected_at:
             conn.connected_at = datetime.now(timezone.utc)
         _set_coexistence_state(conn, status="connected")
+        stamp_whatsapp_ai_live_since_if_empty(conn)
         conn.last_error = None
 
     db.commit()
@@ -3265,6 +3289,11 @@ def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
             or ("verified" if conn.status == "connected" else conn.status)
         ),
         "connected_at":           conn.connected_at.isoformat() if conn.connected_at else None,
+        "whatsapp_ai_live_since": (
+            conn.whatsapp_ai_live_since.isoformat()
+            if getattr(conn, "whatsapp_ai_live_since", None) else None
+        ),
+        "whatsapp_history_sync_status": getattr(conn, "whatsapp_history_sync_status", None) or "completed",
         "last_verified_at":       conn.last_verified_at.isoformat() if conn.last_verified_at else None,
         "last_error":             conn.last_error,
         "sending_enabled":        bool(conn.sending_enabled),
@@ -3454,6 +3483,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         conn.business_display_name = verified_name or conn.business_display_name
         conn.connected_at          = datetime.now(_tz.utc)
         conn.last_error            = None
+        stamp_whatsapp_ai_live_since_if_empty(conn)
         conn.extra_metadata        = {
             **(conn.extra_metadata or {}),
             "meta_code_verification_status": sync_state.get("verification_status"),

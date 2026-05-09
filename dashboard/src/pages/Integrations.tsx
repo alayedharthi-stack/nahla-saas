@@ -63,12 +63,14 @@ interface CardProps {
   externalHref?: string
   externalLabel?: string
   hideExternal?: boolean
+  footerNote?: string
 }
 
 function IntegrationCard({
   logo, name, description, connected, loading,
   accountLabel, accountValue, syncLabel, syncValue,
   onConnect, onReconnect, reconnecting, onDisconnect, externalHref, externalLabel, hideExternal,
+  footerNote,
 }: CardProps) {
   const [syncing, setSyncing] = useState(false)
 
@@ -93,6 +95,12 @@ function IntegrationCard({
                 : <Badge label="غير متصل"  variant="slate" />}
           </div>
           <p className="text-xs text-slate-500 mt-1">{description}</p>
+
+          {!loading && connected && footerNote && (
+            <p className="text-xs text-slate-600 mt-2 leading-relaxed bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+              {footerNote}
+            </p>
+          )}
 
           {!loading && connected && (
             <div className="mt-3 grid sm:grid-cols-2 gap-3">
@@ -442,6 +450,11 @@ export default function Integrations() {
           onConnect={() => navigate('/whatsapp-connect')}
           onDisconnect={() => navigate('/whatsapp-connect')}
           hideExternal
+          footerNote={
+            waStatus.connected
+              ? 'سيبدأ الذكاء بالرد على الرسائل الجديدة فقط من لحظة تفعيل الربط، ولن يرد على رسائل أرشيف واتساب التي سبقت ذلك.'
+              : undefined
+          }
         />
       </div>
 

@@ -224,6 +224,11 @@ def commit_connection(
     conn.updated_at                   = now
     conn.disconnect_reason            = None
     conn.disconnected_at              = None
+    try:
+        from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty  # noqa: PLC0415
+        stamp_whatsapp_ai_live_since_if_empty(conn)
+    except Exception:
+        pass
     if hasattr(conn, "disconnected_by_user_id"):
         conn.disconnected_by_user_id = None
     if phone_number:
