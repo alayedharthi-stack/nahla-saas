@@ -569,6 +569,11 @@ class Conversation(Base):
     handoff_active = Column(Boolean, default=False, nullable=False, server_default='false')
     taken_over_at = Column(DateTime(timezone=True), nullable=True)
     taken_over_by = Column(String, nullable=True)
+    # Set by the dashboard when the merchant opens this conversation.
+    # The unread counter excludes inbound messages older than this
+    # timestamp, so opening the conversation zeros the badge even
+    # without a manual reply.
+    last_read_at = Column(DateTime(timezone=True), nullable=True)
     extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class MessageEvent(Base):

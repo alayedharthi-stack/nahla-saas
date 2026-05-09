@@ -25,7 +25,12 @@ from core.ai_pause_guard import (  # noqa: E402
 
 
 def _is_human_takeover(convo) -> bool:
-    """Mirror of ``backend.routers.conversations._is_human_takeover``."""
+    """Mirror of ``backend.routers.conversations._is_human_takeover``.
+
+    The new contract: human takeover is determined ONLY by the
+    explicit columns. ``ai_paused`` / ``ai_paused_reason`` do not
+    contribute on their own.
+    """
     if convo is None:
         return False
     if getattr(convo, "is_human_handoff", False):
@@ -36,9 +41,6 @@ def _is_human_takeover(convo) -> bool:
         return True
     if getattr(convo, "taken_over_at", None) is not None:
         return True
-    if getattr(convo, "ai_paused", False):
-        if (getattr(convo, "ai_paused_reason", None) or "") in HUMAN_PRESENCE_REASONS:
-            return True
     return False
 
 
@@ -54,9 +56,59 @@ def test_reasons_registered():
     assert REASON_MANUAL_TAKEOVER in HUMAN_PRESENCE_REASONS
     assert REASON_SUPPORT_ESCALATION in HUMAN_PRESENCE_REASONS
     assert REASON_HUMAN_HANDOFF in HUMAN_PRESENCE_REASONS
-    # MANUAL alone is NOT a human-presence pause (it's the merchant
-    # silencing the AI temporarily without a human takeover).
+    # MANUAL aliases (manual / manual_pause) are NOT human-presence
+    # reasons — they're pure "stop the AI" without a human takeover.
     assert REASON_MANUAL not in HUMAN_PRESENCE_REASONS
+    from core.ai_pause_guard import REASON_MANUAL_PAUSE  # noqa: PLC0415
+    assert REASON_MANUAL_PAUSE in VALID_REASONS
+    assert REASON_MANUAL_PAUSE not in HUMAN_PRESENCE_REASONS
+
+
+def test_manual_pause_reason_is_not_human():
+    # The new ``manual_pause`` reason path: AI is paused but the
+    # conversation is NOT in human takeover. Must NOT appear in the
+    # human filter.
+    c = _StubConvo(ai_paused=True, ai_paused_reason="manual_pause")
+    assert not _is_human_takeover(c)
+
+
+def test_ai_paused_human_handoff_reason_alone_is_not_human():
+    # With the new contract the human filter is driven SOLELY by the
+    # explicit columns (needs_human / handoff_active / taken_over_at /
+    # is_human_handoff). Pause-reason metadata cannot pull a row into
+    # the filter on its own — the takeover endpoint always sets the
+    # explicit columns alongside the reason, so a row without them is
+    # not a takeover.
+    c = _StubConvo(ai_paused=True, ai_paused_reason="manual_takeover")
+    # ↳ needs_human / handoff_active / taken_over_at all NOT set.
+    assert not _is_human_takeover(c)
+
+
+def test_takeover_button_state_sets_all_columns():
+    # Real takeover row as written by ``POST /conversations/handoff``:
+    # AI paused + needs_human + handoff_active + taken_over_at all
+    # populated together. Must classify as human.
+    c = _StubConvo(
+        ai_paused=True, ai_paused_reason="manual_takeover",
+        needs_human=True, handoff_active=True,
+        taken_over_at=object(), taken_over_by="user:42",
+        status="human", is_human_handoff=True,
+    )
+    assert _is_human_takeover(c)
+
+
+def test_resume_after_manual_pause_does_not_clear_human_state():
+    # When the merchant ran "إيقاف الذكاء" (manual_pause) on a
+    # conversation that was ALSO previously in a human takeover (edge
+    # case), resuming AI must not silently undo the takeover. We
+    # simulate the post-resume state: ai_paused=False but human flags
+    # untouched. This row should still be human.
+    c = _StubConvo(
+        ai_paused=False, ai_paused_reason=None,
+        needs_human=True, handoff_active=True,
+        taken_over_at=object(),
+    )
+    assert _is_human_takeover(c)
 
 
 def test_takeover_via_explicit_flag():
@@ -75,17 +127,30 @@ def test_takeover_via_taken_over_at():
 
 
 def test_takeover_via_ai_paused_manual_takeover():
-    c = _StubConvo(ai_paused=True, ai_paused_reason="manual_takeover")
+    # Reason ALONE is no longer enough — the row must also have at
+    # least one explicit column (needs_human / handoff_active /
+    # taken_over_at / is_human_handoff). The handoff endpoint always
+    # writes both, so this still works in production.
+    c = _StubConvo(
+        ai_paused=True, ai_paused_reason="manual_takeover",
+        needs_human=True,
+    )
     assert _is_human_takeover(c)
 
 
 def test_takeover_via_ai_paused_support_escalation():
-    c = _StubConvo(ai_paused=True, ai_paused_reason="support_escalation")
+    c = _StubConvo(
+        ai_paused=True, ai_paused_reason="support_escalation",
+        handoff_active=True,
+    )
     assert _is_human_takeover(c)
 
 
 def test_takeover_via_ai_paused_human_handoff():
-    c = _StubConvo(ai_paused=True, ai_paused_reason="human_handoff")
+    c = _StubConvo(
+        ai_paused=True, ai_paused_reason="human_handoff",
+        is_human_handoff=True,
+    )
     assert _is_human_takeover(c)
 
 

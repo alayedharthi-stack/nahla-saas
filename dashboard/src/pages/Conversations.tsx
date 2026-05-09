@@ -130,6 +130,17 @@ export default function Conversations() {
     setSelected(c)
     setMobileView('chat')
     loadMessages(c.phone)
+    // Zero the unread badge locally the moment we open the
+    // conversation, then ask the backend to stamp last_read_at so the
+    // count stays at 0 across refetches. Failures are non-fatal — the
+    // legacy "newer than last outbound" rule still applies.
+    if (c.unread > 0) {
+      setConversations(prev => prev.map(x => x.phone === c.phone ? { ...x, unread: 0 } : x))
+      setSelected(prev => prev && prev.phone === c.phone ? { ...prev, unread: 0 } : prev)
+    }
+    void featureRealityApi.markConversationRead({ customer_phone: c.phone }).catch((err) => {
+      console.warn('[MARK_READ_UI] failed phone=%s err=%o', c.phone, err)
+    })
   }
 
   const goBackToList = () => {
@@ -204,8 +215,9 @@ export default function Conversations() {
   }
 
   // Apply server-returned AI state to BOTH the conversations list and
-  // the currently selected conversation. We trust the API response (not
-  // optimistic guesses) so the button never flickers back on refetch.
+  // the currently selected conversation. ONLY touches AI columns —
+  // human-takeover state is managed independently via
+  // ``handleHandoff`` and ``handleReturnToAI``.
   const _applyAIState = (phone: string, state: {
     aiPaused: boolean
     aiPausedReason: AIPauseReason | null
@@ -215,28 +227,38 @@ export default function Conversations() {
       aiPaused: state.aiPaused,
       aiPausedReason: state.aiPausedReason,
       aiPausedAt: state.aiPausedAt,
+      // ``isAI`` reflects the merged state: AI is "on" only when not
+      // paused AND there's no human takeover in progress.
       isAI: !state.aiPaused,
-    }
-    if (!state.aiPaused) {
-      // Resume also clears the legacy human-takeover indicators so the
-      // UI stays in sync with what the backend just reset.
-      patch.status = 'active'
-      patch.handoffReason = null
-      patch.needsHuman = false
-      patch.handoffActive = false
-      patch.takenOverAt = null
-      patch.takenOverBy = null
     }
     _optimisticUpdate(phone, patch)
   }
 
+  // Apply the full takeover-cleared state. Used by "إعادة الذكاء"
+  // (return-to-ai) which clears both the AI pause and the human
+  // takeover columns in a single dashboard click.
+  const _applyReturnToAIState = (phone: string) => {
+    _optimisticUpdate(phone, {
+      aiPaused: false,
+      aiPausedReason: null,
+      aiPausedAt: null,
+      isAI: true,
+      status: 'active',
+      handoffReason: null,
+      needsHuman: false,
+      handoffActive: false,
+      takenOverAt: null,
+      takenOverBy: null,
+    })
+  }
+
   const handlePauseAI = async () => {
     if (!selected) return
-    console.log('[AI_PAUSE_UI] request pause phone=', selected.phone)
+    console.log('[AI_PAUSE_UI] request pause phone=', selected.phone, 'reason=manual_pause')
     try {
       const res = await featureRealityApi.pauseConversationAI({
         customer_phone: selected.phone,
-        reason: 'manual',
+        reason: 'manual_pause',
       })
       console.log('[AI_PAUSE_UI] response', res)
       _applyAIState(selected.phone, {
@@ -251,6 +273,8 @@ export default function Conversations() {
   }
 
   const handleResumeAI = async () => {
+    // Only valid path: AI is paused but the conversation is NOT in a
+    // human takeover. The button isn't rendered in the takeover state.
     if (!selected) return
     console.log('[AI_PAUSE_UI] request resume phone=', selected.phone)
     try {
@@ -267,6 +291,24 @@ export default function Conversations() {
       await loadMessages(selected.phone)
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر تشغيل الذكاء')
+    }
+  }
+
+  const handleReturnToAI = async () => {
+    // Only valid path: conversation is currently in a human takeover.
+    // Clears human columns + ai_paused in a single backend call.
+    if (!selected) return
+    console.log('[AI_RETURN_UI] request return-to-ai phone=', selected.phone)
+    try {
+      const res = await featureRealityApi.returnHandoffToAI({
+        customer_phone: selected.phone,
+      })
+      console.log('[AI_RETURN_UI] response', res)
+      _applyReturnToAIState(selected.phone)
+      await loadList()
+      await loadMessages(selected.phone)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر إعادة الذكاء')
     }
   }
 
@@ -295,24 +337,12 @@ export default function Conversations() {
   }
 
   // "بشري": unified — the conversation is owned by a human right now.
-  // Either an explicit dashboard takeover (needs_human / handoff_active /
-  // taken_over_at), or AI paused with a human-presence reason
-  // (manual_takeover, support_escalation, human_handoff), or a manual
-  // outbound was actually sent. We DO NOT require the manual reply to
-  // ship before the row appears in the filter — the merchant should see
-  // it the moment they click "تولّي".
-  const HUMAN_PRESENCE_REASONS: AIPauseReason[] = [
-    'manual_takeover',
-    'support_escalation',
-    'human_handoff',
-  ]
+  // ONLY driven by the explicit human-state columns (needs_human,
+  // handoff_active, status='human'). NOT influenced by ``aiPaused`` —
+  // a manual pause is a different UX path and must not appear here.
   const _isHumanResponding = (c: DashboardConversation) => {
     if (c.needsHuman) return true
     if (c.handoffActive) return true
-    if (c.takenOverAt) return true
-    if (c.aiPaused && c.aiPausedReason && HUMAN_PRESENCE_REASONS.includes(c.aiPausedReason)) {
-      return true
-    }
     if (c.status === 'human') return true
     return false
   }
@@ -562,47 +592,62 @@ export default function Conversations() {
                 </p>
               </div>
 
-              {/* Actions */}
+              {/* Actions — three distinct UX paths:
+                  1) Active AI:        [تولّي] [إيقاف الذكاء مؤقتاً]
+                  2) Human takeover:   [إعادة الذكاء]
+                  3) Manual pause only: [تشغيل الذكاء]
+                  Plus the always-on [حظر الرقم].                       */}
               <div className="flex items-center gap-1">
-                {selected.aiPaused ? (
-                  <button
-                    className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
-                    onClick={handleResumeAI}
-                    title="استئناف الردود الآلية للذكاء"
-                  >
-                    <Play className="w-3.5 h-3.5" />
-                    تشغيل الذكاء
-                  </button>
-                ) : (
-                  <button
-                    className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
-                    onClick={handlePauseAI}
-                    title="إيقاف الردود الآلية لهذا العميل (بدون استهلاك توكنات)"
-                  >
-                    <Pause className="w-3.5 h-3.5" />
-                    إيقاف الذكاء
-                  </button>
-                )}
-                {selected.status !== 'human' && (
-                  <button
-                    className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3"
-                    onClick={handleHandoff}
-                    title="تحويل المحادثة لموظف بشري"
-                  >
-                    <UserCheck className="w-3.5 h-3.5" />
-                    تولّ
-                  </button>
-                )}
-                {selected.status === 'human' && (
-                  <button
-                    className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-brand-600 border-brand-200 bg-brand-50 hover:bg-brand-100"
-                    onClick={handleClose}
-                    title="إعادة المحادثة للذكاء الاصطناعي"
-                  >
-                    <Bot className="w-3.5 h-3.5" />
-                    إعادة للذكاء
-                  </button>
-                )}
+                {(() => {
+                  const inHumanTakeover =
+                    !!selected.needsHuman ||
+                    !!selected.handoffActive ||
+                    selected.status === 'human'
+                  if (inHumanTakeover) {
+                    return (
+                      <button
+                        className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-brand-600 border-brand-200 bg-brand-50 hover:bg-brand-100"
+                        onClick={handleReturnToAI}
+                        title="إنهاء التولّي البشري وإعادة المحادثة للذكاء"
+                      >
+                        <Bot className="w-3.5 h-3.5" />
+                        إعادة الذكاء
+                      </button>
+                    )
+                  }
+                  if (selected.aiPaused) {
+                    return (
+                      <button
+                        className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
+                        onClick={handleResumeAI}
+                        title="استئناف الردود الآلية للذكاء (لم تُحوَّل المحادثة لموظف)"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        تشغيل الذكاء
+                      </button>
+                    )
+                  }
+                  return (
+                    <>
+                      <button
+                        className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3"
+                        onClick={handleHandoff}
+                        title="تولّي المحادثة بدلاً من الذكاء (تنتقل لتبويب «بشري»)"
+                      >
+                        <UserCheck className="w-3.5 h-3.5" />
+                        تولّي
+                      </button>
+                      <button
+                        className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
+                        onClick={handlePauseAI}
+                        title="إيقاف الردود الآلية مؤقتاً بدون تحويل للموظف"
+                      >
+                        <Pause className="w-3.5 h-3.5" />
+                        إيقاف الذكاء مؤقتاً
+                      </button>
+                    </>
+                  )
+                })()}
                 <button
                   className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-rose-600 border-rose-200 bg-rose-50 hover:bg-rose-100"
                   onClick={handleBlockNumber}
@@ -622,18 +667,34 @@ export default function Conversations() {
               </div>
             </div>
 
-            {/* AI paused banner */}
-            {selected.aiPaused && (
+            {/* Human-takeover banner — shown above the AI-paused banner so
+                the merchant always sees the takeover state explicitly. */}
+            {(selected.needsHuman || selected.handoffActive || selected.status === 'human') && (
+              <div className="flex items-center gap-2.5 px-4 py-2.5 bg-blue-50 border-b border-blue-200 text-sm text-blue-700">
+                <UserCheck className="w-4 h-4 shrink-0 text-blue-500" />
+                <span>
+                  هذه المحادثة <strong>تحت إشراف موظف بشري</strong>
+                  {selected.takenOverBy && <> — بواسطة <strong>{selected.takenOverBy}</strong></>}
+                  . لن يرد الذكاء حتى تضغط «إعادة الذكاء».
+                </span>
+              </div>
+            )}
+
+            {/* AI paused banner (manual pause path only — takeover has its
+                own banner above). */}
+            {selected.aiPaused && !(selected.needsHuman || selected.handoffActive || selected.status === 'human') && (
               <div className="flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700">
                 <Pause className="w-4 h-4 shrink-0 text-amber-500" />
                 <span>
-                  الذكاء <strong>متوقف لهذه المحادثة</strong>
+                  الذكاء <strong>متوقف مؤقتاً لهذه المحادثة</strong>
                   {selected.aiPausedReason && (
                     <>
                       {' '}— السبب:{' '}
                       <strong>
-                        {selected.aiPausedReason === 'manual' && 'إيقاف يدوي'}
+                        {(selected.aiPausedReason === 'manual' || selected.aiPausedReason === 'manual_pause') && 'إيقاف يدوي'}
                         {selected.aiPausedReason === 'human_handoff' && 'تحويل لموظف'}
+                        {selected.aiPausedReason === 'manual_takeover' && 'تولّي بشري'}
+                        {selected.aiPausedReason === 'support_escalation' && 'تصعيد للدعم'}
                         {selected.aiPausedReason === 'bot_loop_detected' && 'تم اكتشاف دوامة ردود آلية'}
                         {selected.aiPausedReason === 'rate_limit' && 'تجاوز الحد الأقصى للردود'}
                         {selected.aiPausedReason === 'internal_number' && 'رقم داخلي / محظور'}

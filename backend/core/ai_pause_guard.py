@@ -65,7 +65,8 @@ logger = logging.getLogger("nahla-backend")
 # ────────────────────────────────────────────────────────────────────────────
 # Reasons (mirror the values documented in the migration & UI)
 # ────────────────────────────────────────────────────────────────────────────
-REASON_MANUAL = "manual"
+REASON_MANUAL = "manual"  # legacy alias, kept for backward compat
+REASON_MANUAL_PAUSE = "manual_pause"  # NEW — pure "stop AI" without human takeover
 REASON_HUMAN_HANDOFF = "human_handoff"
 REASON_BOT_LOOP = "bot_loop_detected"
 REASON_RATE_LIMIT = "rate_limit"
@@ -76,6 +77,7 @@ REASON_SUPPORT_ESCALATION = "support_escalation"
 VALID_REASONS = frozenset(
     {
         REASON_MANUAL,
+        REASON_MANUAL_PAUSE,
         REASON_HUMAN_HANDOFF,
         REASON_BOT_LOOP,
         REASON_RATE_LIMIT,
@@ -88,6 +90,12 @@ VALID_REASONS = frozenset(
 # Reasons that imply "a human is on this conversation now". Used by the
 # inbox to populate the unified "بشري" filter regardless of how the
 # pause was set (dashboard takeover button, escalation flow, etc.).
+#
+# IMPORTANT: ``REASON_MANUAL`` and ``REASON_MANUAL_PAUSE`` are deliberately
+# NOT in this set. Pausing AI alone is *not* a human takeover — the
+# merchant is just silencing the bot temporarily. The human-filter is
+# now driven by the explicit ``needs_human`` / ``handoff_active`` /
+# ``taken_over_at`` columns on Conversation, NOT by the pause reason.
 HUMAN_PRESENCE_REASONS = frozenset(
     {REASON_HUMAN_HANDOFF, REASON_MANUAL_TAKEOVER, REASON_SUPPORT_ESCALATION}
 )
@@ -914,6 +922,7 @@ def detect_bot_loop(
 
 __all__ = [
     "REASON_MANUAL",
+    "REASON_MANUAL_PAUSE",
     "REASON_HUMAN_HANDOFF",
     "REASON_BOT_LOOP",
     "REASON_RATE_LIMIT",

@@ -46,10 +46,14 @@ class CloseIn(BaseModel):
 
 class AIPauseIn(BaseModel):
     customer_phone: str
-    reason: str = "manual"
+    reason: str = "manual_pause"
 
 
 class AIResumeIn(BaseModel):
+    customer_phone: str
+
+
+class MarkReadIn(BaseModel):
     customer_phone: str
 
 
@@ -333,6 +337,14 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
         _open_windows.add(_norm(w.customer_phone))
 
     def _is_human_takeover(convo: Optional[Conversation]) -> bool:
+        """Single source of truth for the "بشري" filter.
+
+        A conversation is considered a human takeover ONLY when one of
+        the explicit human-state columns is set. ``ai_paused`` is *not*
+        consulted here on purpose — manual pause (REASON_MANUAL_PAUSE)
+        is a different UX path than human takeover and must never make
+        the conversation appear in the human-reply filter.
+        """
         if convo is None:
             return False
         if bool(getattr(convo, "is_human_handoff", False)):
@@ -343,10 +355,6 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             return True
         if getattr(convo, "taken_over_at", None) is not None:
             return True
-        if bool(getattr(convo, "ai_paused", False)):
-            from core.ai_pause_guard import HUMAN_PRESENCE_REASONS  # noqa: PLC0415
-            if (getattr(convo, "ai_paused_reason", None) or "") in HUMAN_PRESENCE_REASONS:
-                return True
         return False
 
     def _status_for(phone: str, convo: Optional[Conversation]) -> str:
@@ -515,6 +523,17 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             .group_by(MessageEvent.conversation_id)
             .subquery()
         )
+        # Per-conversation last_read_at (set by /mark-read when the
+        # merchant opens the conversation). When NULL we fall back to
+        # the legacy "newer than last outbound" rule.
+        last_read_map: dict[int, datetime] = {}
+        for cid, lra in (
+            db.query(Conversation.id, Conversation.last_read_at)
+            .filter(Conversation.tenant_id == tenant_id, Conversation.id.in_(conv_ids))
+            .all()
+        ):
+            if lra is not None:
+                last_read_map[cid] = lra
         unread_rows = (
             db.query(
                 MessageEvent.conversation_id,
@@ -531,6 +550,36 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             .group_by(MessageEvent.conversation_id)
             .all()
         )
+        # Per-row second pass: drop messages older than last_read_at,
+        # since postgres can't do per-row column comparisons across the
+        # outerjoin without a complex subquery and the in-memory pass
+        # is fine for inbox sizes.
+        if last_read_map:
+            adjusted: list[tuple[int, int]] = []
+            for cid, _cnt in unread_rows:
+                lra = last_read_map.get(cid)
+                if lra is None:
+                    adjusted.append((cid, _cnt))
+                    continue
+                live_cnt = (
+                    db.query(func.count(MessageEvent.id))
+                    .outerjoin(
+                        last_out_sq,
+                        MessageEvent.conversation_id == last_out_sq.c.conversation_id,
+                    )
+                    .filter(
+                        MessageEvent.tenant_id == tenant_id,
+                        MessageEvent.conversation_id == cid,
+                        MessageEvent.direction != "outbound",
+                        _inbox_live_only_clause(),
+                        (MessageEvent.created_at > last_out_sq.c.last_out)
+                        | (last_out_sq.c.last_out.is_(None)),
+                        MessageEvent.created_at > lra,
+                    )
+                    .scalar()
+                ) or 0
+                adjusted.append((cid, int(live_cnt)))
+            unread_rows = adjusted
         for cid, cnt in unread_rows:
             phone = conv_id_to_phone.get(cid)
             if phone and phone in phone_info:
@@ -1027,7 +1076,11 @@ async def pause_conversation_ai(body: AIPauseIn, request: Request, db: Session =
     get_or_create_tenant(db, tenant_id)
     raw_phone = body.customer_phone or ""
     normalized_phone = normalize_phone(raw_phone) or raw_phone
-    reason = body.reason if body.reason in _VALID else "manual"
+    # Default to ``manual_pause`` (NOT a human takeover). Legacy callers
+    # passing ``manual`` are accepted but normalised forward.
+    reason = body.reason if body.reason in _VALID else "manual_pause"
+    if reason == "manual":
+        reason = "manual_pause"
 
     convos = _find_conversations_for_phone(db, tenant_id, normalized_phone)
     before = [
@@ -1067,7 +1120,14 @@ async def pause_conversation_ai(body: AIPauseIn, request: Request, db: Session =
 
 @router.post("/ai-resume")
 async def resume_conversation_ai(body: AIResumeIn, request: Request, db: Session = Depends(get_db)):
-    """Resume AI replies for one customer's conversation."""
+    """Resume AI replies after a *manual pause*.
+
+    This endpoint is **only** for the manual-pause UX path. It clears
+    ``ai_paused`` and nothing else — the human-takeover columns stay
+    intact. Calling resume on a conversation that's currently in a
+    human takeover is a no-op for the takeover state (the merchant
+    must use ``/handoff/return-to-ai`` to undo a takeover).
+    """
     from core.ai_pause_guard import resume_ai as _resume_ai  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
@@ -1078,7 +1138,8 @@ async def resume_conversation_ai(body: AIResumeIn, request: Request, db: Session
     convos = _find_conversations_for_phone(db, tenant_id, normalized_phone)
     before = [
         {"id": c.id, "ai_paused": bool(c.ai_paused), "reason": c.ai_paused_reason,
-         "human_handoff": bool(c.is_human_handoff), "paused_by_human": bool(c.paused_by_human)}
+         "needs_human": bool(getattr(c, "needs_human", False)),
+         "handoff_active": bool(getattr(c, "handoff_active", False))}
         for c in convos
     ]
     if not convos:
@@ -1086,28 +1147,9 @@ async def resume_conversation_ai(body: AIResumeIn, request: Request, db: Session
 
     now = datetime.now(timezone.utc)
     for c in convos:
-        # Clear legacy human-takeover flags AND new explicit columns so the
-        # resume is total — one toggle on the dashboard restores AI fully.
-        if (
-            c.is_human_handoff
-            or c.paused_by_human
-            or c.status == "human"
-            or getattr(c, "needs_human", False)
-            or getattr(c, "handoff_active", False)
-            or getattr(c, "taken_over_at", None) is not None
-        ):
-            c.is_human_handoff = False
-            c.paused_by_human = False
-            c.needs_human = False
-            c.handoff_active = False
-            c.taken_over_at = None
-            c.taken_over_by = None
-            c.status = "active"
-            db.add(c)
-        # Stamp a resume marker on the conversation so the bot-loop
-        # detector ignores messages older than this point — otherwise
-        # the next inbound would re-trip the same heuristic that made
-        # us pause in the first place.
+        # Stamp a resume marker so the loop guard ignores history older
+        # than this point — otherwise the next inbound could re-trip the
+        # heuristic that paused us.
         try:
             meta = dict(c.extra_metadata or {})
             meta["ai_resumed_at"] = now.isoformat()
@@ -1116,6 +1158,10 @@ async def resume_conversation_ai(body: AIResumeIn, request: Request, db: Session
             flag_modified(c, "extra_metadata")
         except Exception:
             pass
+        # Clear ONLY the AI pause state. Human takeover columns
+        # (needs_human, handoff_active, taken_over_at, taken_over_by,
+        # status='human', is_human_handoff, paused_by_human) stay
+        # exactly as they were — that's the new contract.
         _resume_ai(db, c, by="dashboard:resume", commit=False)
     db.commit()
 
@@ -1137,6 +1183,143 @@ async def resume_conversation_ai(body: AIResumeIn, request: Request, db: Session
         "aiPausedAt": state["ai_paused_at"],
         "aiPausedBy": state["ai_paused_by"],
         **state,
+    }
+
+
+@router.post("/handoff/return-to-ai")
+async def return_handoff_to_ai(body: AIResumeIn, request: Request, db: Session = Depends(get_db)):
+    """End a human takeover and hand the conversation back to the AI.
+
+    Distinct from ``/ai-resume`` because it has to clear the entire
+    human-takeover state set, not just the AI pause flag:
+    ``status``, ``is_human_handoff``, ``paused_by_human``,
+    ``needs_human``, ``handoff_active``, ``taken_over_at``,
+    ``taken_over_by`` — plus any active ``HandoffSession`` rows — and
+    finally ``ai_paused``. The dashboard surfaces this as the "إعادة
+    الذكاء" button shown only while the conversation is in a takeover
+    state.
+    """
+    from core.ai_pause_guard import resume_ai as _resume_ai  # noqa: PLC0415
+    from handoff.manager import resolve_handoff_session  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    raw_phone = body.customer_phone or ""
+    normalized_phone = normalize_phone(raw_phone) or raw_phone
+
+    convos = _find_conversations_for_phone(db, tenant_id, normalized_phone)
+    if not convos:
+        convos = [_get_or_create_conversation(db, tenant_id, normalized_phone)]
+
+    before = [
+        {"id": c.id,
+         "needs_human": bool(getattr(c, "needs_human", False)),
+         "handoff_active": bool(getattr(c, "handoff_active", False)),
+         "is_human_handoff": bool(c.is_human_handoff),
+         "ai_paused": bool(c.ai_paused),
+         "status": c.status}
+        for c in convos
+    ]
+
+    now = datetime.now(timezone.utc)
+    for c in convos:
+        c.is_human_handoff = False
+        c.paused_by_human = False
+        c.needs_human = False
+        c.handoff_active = False
+        c.taken_over_at = None
+        c.taken_over_by = None
+        c.status = "active"
+        try:
+            meta = dict(c.extra_metadata or {})
+            meta["ai_resumed_at"] = now.isoformat()
+            meta["handoff_returned_at"] = now.isoformat()
+            c.extra_metadata = meta
+            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+            flag_modified(c, "extra_metadata")
+        except Exception:
+            pass
+        db.add(c)
+        _resume_ai(db, c, by="dashboard:return_to_ai", commit=False)
+
+    # Resolve any active HandoffSession rows for this customer so the
+    # legacy handoff worker doesn't keep treating them as live.
+    try:
+        digits = _digits_only(normalized_phone)
+        suffix = digits[-9:] if len(digits) >= 9 else digits
+        for hs in db.query(HandoffSession).filter(
+            HandoffSession.tenant_id == tenant_id,
+            HandoffSession.status == "active",
+        ).all():
+            hs_digits = _digits_only(hs.customer_phone or "")
+            if hs_digits == digits or (suffix and hs_digits.endswith(suffix)):
+                resolve_handoff_session(db, hs.id, tenant_id, resolved_by="dashboard:return_to_ai")
+    except Exception as exc:
+        _log.debug("[handoff/return-to-ai] HandoffSession resolve failed: %s", exc)
+
+    db.commit()
+
+    after = [
+        {"id": c.id,
+         "needs_human": bool(getattr(c, "needs_human", False)),
+         "handoff_active": bool(getattr(c, "handoff_active", False)),
+         "ai_paused": bool(c.ai_paused), "status": c.status}
+        for c in convos
+    ]
+    _log.info(
+        "[HANDOFF_RETURN_API] tenant=%s phone_raw=%r normalized=%r rows=%d "
+        "before=%s after=%s",
+        tenant_id, raw_phone, normalized_phone, len(convos), before, after,
+    )
+    state = _aggregate_ai_state(convos)
+    return {
+        "ok": True,
+        "customerPhone": normalized_phone,
+        "aiPaused": state["ai_paused"],
+        "aiPausedReason": state["ai_paused_reason"],
+        "aiPausedAt": state["ai_paused_at"],
+        "aiPausedBy": state["ai_paused_by"],
+        "needsHuman": False,
+        "handoffActive": False,
+        "takenOverAt": None,
+        "takenOverBy": None,
+        **state,
+    }
+
+
+@router.post("/mark-read")
+async def mark_conversation_read(body: MarkReadIn, request: Request, db: Session = Depends(get_db)):
+    """Mark the conversation as read up to "now".
+
+    Stamps ``last_read_at`` on every Conversation row that matches the
+    customer phone, so the inbox unread badge zeroes immediately even
+    when the merchant only opened the conversation without sending a
+    reply. Subsequent inbound messages will bump unread again as they
+    arrive (created_at > last_read_at).
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    raw_phone = body.customer_phone or ""
+    normalized_phone = normalize_phone(raw_phone) or raw_phone
+
+    convos = _find_conversations_for_phone(db, tenant_id, normalized_phone)
+    if not convos:
+        return {"ok": True, "customerPhone": normalized_phone, "updated": 0}
+
+    now = datetime.now(timezone.utc)
+    for c in convos:
+        c.last_read_at = now
+        db.add(c)
+    db.commit()
+    _log.info(
+        "[MARK_READ_API] tenant=%s phone=%r normalized=%r rows=%d at=%s",
+        tenant_id, raw_phone, normalized_phone, len(convos), now.isoformat(),
+    )
+    return {
+        "ok": True,
+        "customerPhone": normalized_phone,
+        "updated": len(convos),
+        "lastReadAt": now.isoformat(),
     }
 
 

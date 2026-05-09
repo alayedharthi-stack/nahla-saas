@@ -226,6 +226,7 @@ export interface CouponDashboardSettings {
 
 export type AIPauseReason =
   | 'manual'
+  | 'manual_pause'
   | 'human_handoff'
   | 'bot_loop_detected'
   | 'rate_limit'
@@ -368,6 +369,28 @@ export const featureRealityApi = {
   },
   resumeConversationAI(body: { customer_phone: string }): Promise<AIPauseStateResponse> {
     return apiCall('/conversations/ai-resume', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+  returnHandoffToAI(body: { customer_phone: string }): Promise<AIPauseStateResponse & {
+    needsHuman: boolean
+    handoffActive: boolean
+    takenOverAt: string | null
+    takenOverBy: string | null
+  }> {
+    return apiCall('/conversations/handoff/return-to-ai', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+  markConversationRead(body: { customer_phone: string }): Promise<{
+    ok: boolean
+    customerPhone: string
+    updated: number
+    lastReadAt?: string
+  }> {
+    return apiCall('/conversations/mark-read', {
       method: 'POST',
       body: JSON.stringify(body),
     })
