@@ -2940,6 +2940,71 @@ async def _handle_merchant_message(
                 tenant_id, to, _orig_len, len(reply), _brain_active,
             )
 
+        # ── Loop guard (similarity / repetition based) ────────────────────
+        # Decides whether to:
+        #   continue → send `reply` as-is
+        #   recovery → swap `reply` for a one-shot recovery line
+        #   pause    → escalate: pause AI + send the canned handoff notice
+        # The guard NEVER pauses based on conversation length; it only
+        # reacts when the assistant is repeating itself or the customer
+        # side appears automated.
+        _loop_replaced_with_recovery = False
+        if reply and not _brain_handoff:
+            try:
+                from core.ai_pause_guard import (  # noqa: PLC0415
+                    evaluate_loop_pre_send as _eval_loop,
+                    note_recovery_sent as _note_recovery,
+                    pause_ai as _loop_pause_ai,
+                    REASON_BOT_LOOP as _R_LOOP,
+                )
+                _decision = _eval_loop(
+                    db, convo,
+                    tenant_id=tenant_id,
+                    candidate_reply=reply,
+                    inbound_text=text,
+                )
+                if _decision.action == "pause":
+                    _loop_pause_ai(db, convo, reason=_R_LOOP, by="system:loop_pause")
+                    # Send the same canned handoff notice the support
+                    # escalation branch uses; the 30-min cooldown there
+                    # prevents double-sends if multiple turns arrive.
+                    _handoff_text = (
+                        "أشوف إنه فيه شيء أحتاج فهمه أكثر — سأحوّل المحادثة "
+                        "لفريق المتجر الآن وسيرد عليك أحد الموظفين قريباً 🌷"
+                    )
+                    StateManager.save_message(
+                        db, to, _handoff_text, "outbound",
+                        conversation_id=convo.id, tenant_id=tenant_id,
+                    )
+                    try:
+                        await _send_whatsapp_message(
+                            phone_id=phone_id, to=to, text=_handoff_text,
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                    except Exception as _send_exc:
+                        logger.error(
+                            "[Merchant] loop-pause handoff send failed tenant=%s to=%s: %s",
+                            tenant_id, to, _send_exc,
+                        )
+                    logger.info(
+                        "[OUTBOUND] tenant=%s to=%s source=loop_guard_pause trigger=inbound "
+                        "intent=bot_loop_detected handoff_triggered=true dedup_blocked=true "
+                        "loop_score=%d similarity=%.2f reply_len=%d",
+                        tenant_id, to, _decision.score, _decision.similarity, len(_handoff_text),
+                    )
+                    return
+                if _decision.action == "recovery" and _decision.recovery_text:
+                    reply = _decision.recovery_text
+                    _loop_replaced_with_recovery = True
+                    _note_recovery(int(tenant_id), int(convo.id), recovery_text=reply)
+                    logger.info(
+                        "[OUTBOUND_PRE_SEND] tenant=%s to=%s replaced reply with recovery line "
+                        "loop_score=%d similarity=%.2f",
+                        tenant_id, to, _decision.score, _decision.similarity,
+                    )
+            except Exception as _loop_exc:
+                logger.debug("[loop_guard] evaluate failed (open): %s", _loop_exc)
+
         # Save outbound reply after generation.
         StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)
 
@@ -2979,19 +3044,24 @@ async def _handle_merchant_message(
         if _send_ok:
             logger.info("[TRACE][5/6] MERCHANT_AI_SENT | tenant=%s to=%s", tenant_id, to)
             logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
+            _outbound_source = (
+                "loop_guard_recovery" if _loop_replaced_with_recovery
+                else ("brain" if (_brain_active and not MERCHANT_BRAIN_ENABLED_FALLBACK) else "legacy")
+            )
             logger.info(
                 "[OUTBOUND] tenant=%s to=%s source=%s trigger=inbound "
-                "intent=merchant_reply handoff_triggered=%s dedup_blocked=false "
+                "intent=merchant_reply handoff_triggered=%s dedup_blocked=%s "
                 "buttons=%d reply_len=%d",
-                tenant_id, to,
-                "brain" if (_brain_active and not MERCHANT_BRAIN_ENABLED_FALLBACK) else "legacy",
+                tenant_id, to, _outbound_source,
                 str(bool(_brain_handoff)).lower(),
+                str(_loop_replaced_with_recovery).lower(),
                 len(_brain_buttons or []), len(reply or ""),
             )
-            # Increment per-contact rate counters; auto-pause if cap exceeded.
+            # Track this reply for similarity-based loop scoring on the
+            # next turn. Never auto-pauses on counts alone.
             try:
                 from core.ai_pause_guard import after_ai_reply as _after_ai_reply  # noqa: PLC0415
-                _after_ai_reply(db, convo, tenant_id=tenant_id)
+                _after_ai_reply(db, convo, tenant_id=tenant_id, reply_text=reply)
             except Exception as _rate_exc:
                 logger.debug("[ai_pause] post-reply tracker failed: %s", _rate_exc)
         else:
