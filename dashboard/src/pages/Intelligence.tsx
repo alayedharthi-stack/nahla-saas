@@ -485,7 +485,7 @@ function CollapsibleSection({ title, icon: Icon, children, defaultOpen = true }:
   )
 }
 
-function MerchantKnowledgePanel() {
+function MerchantKnowledgePanel({ onEditSettings }: { onEditSettings?: () => void }) {
   const [data, setData] = useState<MerchantKnowledge | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -1058,11 +1058,26 @@ function MerchantKnowledgePanel() {
 
       {/* ── Brain profile ── */}
       <div className="card p-5">
-        <div className="flex items-center gap-2 mb-4">
+        <div className="flex items-center gap-2 mb-2 flex-wrap">
           <Bot className="w-4 h-4 text-brand-500" />
           <h2 className="text-sm font-semibold text-slate-900">إعدادات شخصية الذكاء المُحمَّلة</h2>
           <span className="text-[10px] text-slate-400 ms-1">— هذا ما تراه نحلة في كل محادثة</span>
+          {onEditSettings && (
+            <button
+              type="button"
+              onClick={onEditSettings}
+              className="ms-auto btn-primary text-xs flex items-center gap-1.5 py-1.5 px-3"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              تعديل الإعدادات
+            </button>
+          )}
         </div>
+        <p className="text-[11px] text-slate-500 mb-4 leading-relaxed">
+          هذه نسخة قراءة من الإعدادات الحالية. لتعديل النبرة، الطول، استراتيجية الكوبون، أو تعليمات المالك،
+          اضغط <span className="font-semibold text-brand-600">«تعديل الإعدادات»</span> للانتقال إلى تبويب
+          «إعدادات المساعد» حيث textarea وحقول التحرير وزر الحفظ.
+        </p>
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
           {[
             { label: 'نبرة الرد', value: brain_profile.tone === 'friendly' ? 'ودية' : brain_profile.tone === 'professional' ? 'احترافية' : brain_profile.tone },
@@ -1364,7 +1379,11 @@ function BrainAnalyticsPanel() {
 export default function Intelligence() {
   useLanguage() // initialise RTL context
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant' | 'analytics'>('dashboard')
+  // Default to the editable AI settings tab — merchants kept landing on the
+  // dashboard / merchant-knowledge tabs and reporting "the AI page is read-only,
+  // there is no save button". The settings tab is where the textareas + save
+  // controls actually live, so it should be the entry point.
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant' | 'analytics'>('settings')
   const [data, setData] = useState<IntelligenceDashboard | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -1472,7 +1491,9 @@ export default function Intelligence() {
       {activeTab === 'settings' && <AISettingsPanel />}
 
       {/* ── Merchant Knowledge Tab ─────────────────────────────────────────── */}
-      {activeTab === 'merchant' && <MerchantKnowledgePanel />}
+      {activeTab === 'merchant' && (
+        <MerchantKnowledgePanel onEditSettings={() => setActiveTab('settings')} />
+      )}
 
       {/* ── Brain Analytics Tab ────────────────────────────────────────────── */}
       {activeTab === 'analytics' && <BrainAnalyticsPanel />}
