@@ -75,7 +75,7 @@ _SYSTEM = """أنت مُستخرِج معلومات دقيق. أجِب دائم�
 - additional_number: string — الرقم الإضافي
 - latitude: number — خط العرض
 - longitude: number — خط الطول
-- intent_hint: string — أفضل تخمين للنية: greeting|who_are_you|ask_product|ask_price|start_order|pay_now|ask_shipping|ask_store_info|ask_owner_contact|hesitation|talk_to_human|track_order|general
+- intent_hint: string — أفضل تخمين للنية: greeting|who_are_you|ask_product|ask_price|start_order|pay_now|ask_shipping|ask_store_info|ask_owner_contact|ask_payment_info|hesitation|talk_to_human|track_order|general
 
 ⚠️ قاعدة مهمة: أرجع فقط الحقول التي لها قيمة فعلية. لا تُضمِّن الحقول الفارغة أو الافتراضية (مثل "" أو {} أو null أو 1 للكمية إن لم تُذكر).
 استثناء: أرجع دائمًا intent_hint حتى لو كان "general".

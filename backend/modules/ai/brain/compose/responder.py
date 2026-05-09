@@ -85,10 +85,16 @@ class DefaultComposer:
         # The DecisionEngine already gates greetings on `state.greeted` and
         # the in-progress sales stage, but a stray ACTION_GREET produced by
         # learned-policy layers, partial state loss, or future decoration
-        # would still land here. We refuse to send the greeting template
-        # twice in the same conversation, period — and we refuse to send it
-        # at all once the customer is in deciding/ordering/checkout.
-        if action == ACTION_GREET and self._should_skip_greet(ctx):
+        # would still land here. We refuse to send the full greeting
+        # template twice in the same conversation, period.
+        #
+        # However — when the customer EXPLICITLY says salaam/hello after
+        # being greeted, downgrading to LLM is the wrong move (it makes
+        # the bot ignore the salutation). The DecisionEngine signals this
+        # case by passing `re_greet=True` in `decision.args` and we honour
+        # it here with a short re-greeting template instead.
+        re_greet_requested = bool(decision.args.get("re_greet"))
+        if action == ACTION_GREET and self._should_skip_greet(ctx) and not re_greet_requested:
             logger.info(
                 "[Composer] downgrading ACTION_GREET → LLM | "
                 "tenant=%s greeted=%s stage=%s",
@@ -107,9 +113,31 @@ class DefaultComposer:
         # ── Greet ──────────────────────────────────────────────────────────
         if action == ACTION_GREET:
             variant = self._variant_idx(ctx)
-            text = T.greeting(store_name=ctx.facts.store_name, variant=variant)
+            persona = getattr(ctx.facts, "assistant_name", "") or ""
+            if re_greet_requested:
+                text = T.re_greeting(
+                    store_name=ctx.facts.store_name,
+                    assistant_name=persona,
+                    variant=variant,
+                )
+                if self._is_duplicate(text, ctx):
+                    text = T.re_greeting(
+                        store_name=ctx.facts.store_name,
+                        assistant_name=persona,
+                        variant=(variant + 1) % 3,
+                    )
+                return text
+            text = T.greeting(
+                store_name=ctx.facts.store_name,
+                assistant_name=persona,
+                variant=variant,
+            )
             if self._is_duplicate(text, ctx):
-                text = T.greeting(store_name=ctx.facts.store_name, variant=(variant + 1) % 3)
+                text = T.greeting(
+                    store_name=ctx.facts.store_name,
+                    assistant_name=persona,
+                    variant=(variant + 1) % 3,
+                )
             return text
 
         # ── FAQ ────────────────────────────────────────────────────────────
@@ -118,7 +146,10 @@ class DefaultComposer:
             topic = data.get("topic", "")
             if topic == TOPIC_IDENTITY:
                 return self._with_follow_up(
-                    T.faq_identity(store_name=ctx.facts.store_name),
+                    T.faq_identity(
+                        store_name=ctx.facts.store_name,
+                        assistant_name=getattr(ctx.facts, "assistant_name", "") or "",
+                    ),
                     ctx,
                 )
             if topic == TOPIC_SHIPPING:

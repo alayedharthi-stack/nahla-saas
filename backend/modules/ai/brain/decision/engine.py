@@ -43,6 +43,7 @@ from .actions import (
 )
 from ..types import (
     INTENT_ASK_OWNER_CONTACT,
+    INTENT_ASK_PAYMENT_INFO,
     INTENT_GREETING,
     INTENT_ASK_PRODUCT,
     INTENT_ASK_PRICE,
@@ -259,7 +260,7 @@ class DefaultDecisionEngine:
         )
         if _candidates and not _in_data_collection and intent.name not in (
             INTENT_TALK_HUMAN, INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO,
-            INTENT_ASK_OWNER_CONTACT,
+            INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PAYMENT_INFO,
         ):
             _matched_product = _match_product_from_message(ctx.message, _candidates)
             if _matched_product:
@@ -909,6 +910,20 @@ class DefaultDecisionEngine:
                 reason="customer asked for store info / link / location",
             )
 
+        if intent.name == INTENT_ASK_PAYMENT_INFO:
+            # Payment-info questions (bank account / IBAN / barcode / QR)
+            # MUST go through the brain compose path so GPT can reach the
+            # AI Media Library and attach a matching item via [MEDIA:<id>].
+            # Routing this to ACTION_FAQ_REPLY would short-circuit into
+            # the static "هذه وسائل التواصل المتاحة" template and the
+            # bank-transfer barcode would never be sent — which is the
+            # exact bug the merchant reported.
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={"topic": "payment_info"},
+                reason="customer asked for bank/IBAN/barcode — let GPT attach matching media library item",
+            )
+
         if intent.name == INTENT_ASK_OWNER_CONTACT:
             return Decision(
                 action=ACTION_FAQ_REPLY,
@@ -917,14 +932,20 @@ class DefaultDecisionEngine:
             )
 
         # ── 5. Greeting (explicit greeting or first-turn generic help) ─────
-        # Two hard rules to prevent the "bot keeps re-greeting mid-order" bug:
+        # Three hard rules to prevent the "bot keeps re-greeting mid-order"
+        # bug while still acknowledging a returning customer politely:
         #   a) NEVER greet if the customer is in a committed sales stage
         #      (deciding/ordering/checkout). The continuation block above
         #      already routes those messages back into the order flow.
-        #   b) NEVER greet twice in the same conversation: once `greeted`
-        #      is true, only an explicit INTENT_GREETING re-triggers the
-        #      template, and even then we only do it when the funnel is
-        #      back at discovery (e.g. after an order completed).
+        #   b) NEVER send the FULL onboarding greeting twice in the same
+        #      conversation. Once `greeted` is true, the long welcome
+        #      template is locked.
+        #   c) DO acknowledge an EXPLICIT salaam/hello/marhaba even when
+        #      `greeted=True` — but with a short, warm re-greeting (no
+        #      bullet list, no re-onboarding). This is the case the user
+        #      reported: the bot received "السلام عليكم" after sending
+        #      automation messages and silently fell through to the LLM
+        #      fallback, which made it feel like the bot ignored them.
         _greet_locked = state.stage in (
             STAGE_DECIDING, STAGE_ORDERING, STAGE_CHECKOUT,
         )
@@ -938,6 +959,19 @@ class DefaultDecisionEngine:
                 return Decision(
                     action=ACTION_GREET,
                     reason="first-turn general help",
+                )
+            if intent.name == INTENT_GREETING and state.greeted:
+                # Composer reads `re_greet=True` and renders the short
+                # `re_greeting` template instead of the full onboarding
+                # message. Confidence kept slightly under the first-turn
+                # path so any higher-priority rule (e.g. a still-active
+                # checkout flow that somehow slipped past the lock above)
+                # would still win.
+                return Decision(
+                    action=ACTION_GREET,
+                    args={"re_greet": True},
+                    reason="explicit greeting after greeted=True — short re-greeting",
+                    confidence=0.85,
                 )
 
         # ── 6. Start order — product in focus ──────────────────────────────

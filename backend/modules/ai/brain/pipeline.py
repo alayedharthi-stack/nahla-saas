@@ -695,6 +695,7 @@ def _infer_customer_goal(intent: Intent, decision: Decision, previous_goal: str 
         "ask_shipping": "understand_shipping",
         "ask_store_info": "understand_store_info",
         "ask_owner_contact": "contact_store",
+        "ask_payment_info": "share_payment_info",
         "track_order": "track_order",
         "talk_to_human": "reach_human_support",
         "hesitation": "resolve_purchase_hesitation",

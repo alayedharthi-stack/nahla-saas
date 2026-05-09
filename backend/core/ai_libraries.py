@@ -131,43 +131,194 @@ def _is_currently_active(
 # ── Relevance scoring ────────────────────────────────────────────────────────
 
 
+# ── Arabic-aware normalisation ──────────────────────────────────────────────
+#
+# Arabic search is famously brittle without normalisation. The merchant
+# reported a real customer asking "ارسل حساب الراجحي" while the matching
+# media item carried tags like "تحويل / بنك / آيبان" — none of which
+# share a single character with "الراجحي" at the byte level. The
+# normalisation below collapses common variant forms so a tag of
+# "آيبان" still matches a query of "ايبان"; a query of "الراجحي" still
+# matches a tag/title containing "راجحي"; etc.
+_ARABIC_NORMALISE = str.maketrans({
+    "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا",  # alif variants
+    "ى": "ي", "ئ": "ي",                       # alif maqsura / hamza-on-ya
+    "ة": "ه",                                 # ta marbuta → ha
+    "ؤ": "و",
+    # Stripped diacritics (handled via regex below for ranges).
+})
+
+_ARABIC_DIACRITICS_RE = re.compile(r"[\u064B-\u0652\u0670\u0640]")  # tashkeel + tatweel
+# Definite article + common single-letter prefixes that should be stripped
+# token-by-token so "الراجحي" / "للراجحي" / "بالراجحي" all collapse to
+# "راجحي" for matching purposes.
+_AR_PREFIXES = ("ال", "لل", "بال", "كال", "فال", "وال", "ول", "فل", "بل", "كل", "ل", "ب", "ك", "ف", "و")
+
+
+def _normalise_arabic_token(tok: str) -> str:
+    s = tok.translate(_ARABIC_NORMALISE)
+    s = _ARABIC_DIACRITICS_RE.sub("", s)
+    return s
+
+
+def _strip_definite_prefix(tok: str) -> str:
+    """Remove a leading "ال" or related preposition glued onto the word."""
+    for pref in _AR_PREFIXES:
+        if tok.startswith(pref) and len(tok) > len(pref) + 1:
+            return tok[len(pref):]
+    return tok
+
+
 def _normalize_for_match(text: str) -> str:
-    """Lowercase + collapse whitespace for cheap substring scoring."""
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
+    """Arabic-aware normalisation for cheap substring/token scoring.
+
+    Steps: lowercase → strip tashkeel & tatweel → fold alif/ya/ta-marbuta
+    variants → collapse whitespace. Definite-article stripping happens
+    later (token-by-token) inside ``_tokenize_for_match`` so the raw
+    string still matches if the merchant tagged it with the article on.
+    """
+    if not text:
+        return ""
+    s = text.strip().lower()
+    s = _normalise_arabic_token(s)
+    return re.sub(r"\s+", " ", s)
+
+
+_NON_WORD_RE = re.compile(r"[^\w\u0600-\u06FF]+", re.UNICODE)
+
+
+def _tokenize_for_match(text: str) -> List[str]:
+    """Split into normalised tokens with Arabic prefixes removed.
+
+    Returns BOTH the prefix-free form and (when different) the original
+    normalised token so a tag like "بنك" matches a query containing
+    "البنك" and vice versa.
+    """
+    norm = _normalize_for_match(text)
+    if not norm:
+        return []
+    out: List[str] = []
+    for raw in _NON_WORD_RE.split(norm):
+        if not raw or len(raw) < 2:
+            continue
+        out.append(raw)
+        stripped = _strip_definite_prefix(raw)
+        if stripped != raw and len(stripped) >= 2:
+            out.append(stripped)
+    return out
+
+
+# ── Synonym groups ──────────────────────────────────────────────────────────
+#
+# Each entry below is a CLUSTER of words that should pull each other into
+# scoring matches. When ANY token in the customer's query matches a
+# member of a cluster, every other member of the same cluster is treated
+# as if it appeared in the query too. Crucially this is one-way (query
+# → match) so a media tag of "تحويل" lights up for a query of "راجحي",
+# not the other way around (which would over-fire).
+_SYNONYM_CLUSTERS: List[Tuple[str, ...]] = [
+    # Bank / transfer / IBAN family — the cluster the merchant flagged.
+    (
+        "راجحي", "الراجحي", "اهلي", "الاهلي", "rajhi", "alrajhi",
+        "بنك", "البنك", "بنكي", "البنكي", "bank",
+        "حساب", "الحساب", "account",
+        "تحويل", "التحويل", "تحويله", "transfer",
+        "ايبان", "الايبان", "iban",
+        "باركود", "الباركود", "barcode",
+        "qr", "كيوار", "كيوآر",
+        "دفع", "الدفع", "payment",
+        "ايداع", "الايداع", "deposit",
+    ),
+    # Shipping / tracking — for matching "اين شحنتي" to a media tag of "تتبع".
+    (
+        "شحن", "الشحن", "شحنه", "شحنة", "shipping",
+        "تتبع", "التتبع", "tracking",
+        "طلبيه", "طلبية", "طلب", "الطلب", "order",
+    ),
+]
+
+
+def _expand_with_synonyms(tokens: List[str]) -> set:
+    """Return the union of ``tokens`` with their synonym clusters, all
+    normalised (so cluster lookups work regardless of definite article
+    or alif variants)."""
+    norm_tokens = {t for t in tokens if t}
+    if not norm_tokens:
+        return set()
+
+    expanded = set(norm_tokens)
+    for cluster in _SYNONYM_CLUSTERS:
+        cluster_norm = {_strip_definite_prefix(_normalise_arabic_token(w)) for w in cluster}
+        # If any query token is in this cluster (or matches one of its
+        # members after definite-article stripping), pull the whole
+        # cluster into the expansion set.
+        hit = False
+        for tok in norm_tokens:
+            stripped = _strip_definite_prefix(tok)
+            if stripped in cluster_norm or tok in cluster_norm:
+                hit = True
+                break
+        if hit:
+            expanded |= cluster_norm
+    return expanded
 
 
 def _relevance_score(item: Dict[str, Any], query: str) -> float:
-    """Cheap, deterministic relevance score against the customer's last
-    message. Used as a tiebreaker when sorting the prompt slice.
+    """Arabic-aware relevance score against the customer's last message.
 
-    Returns 0.0 when nothing in the item overlaps with the query, up to
-    ~3.0 when title + tags + usage_context all hit. The absolute value
-    is unimportant — only the ordering matters."""
+    Uses three signals, in priority order:
+
+      * Tag overlap (1.5pt per tag hit) — strongest, because tags are
+        merchant-curated and represent intent ("تحويل", "بنك", …).
+      * Title overlap (1.0pt per token hit, capped at 2.5).
+      * Usage-context overlap (0.2pt per long-token hit).
+
+    Synonym expansion (see ``_SYNONYM_CLUSTERS``) means a query of
+    "ارسل حساب الراجحي" pulls in "بنك / تحويل / آيبان / باركود / QR"
+    so a media item tagged with any of those rises to the top.
+
+    Returns a score in roughly [0.0, 5.0]; absolute magnitude doesn't
+    matter — only the ordering does."""
     if not query:
         return 0.0
-    q = _normalize_for_match(query)
-    if not q:
+
+    q_tokens = _tokenize_for_match(query)
+    if not q_tokens:
         return 0.0
+    q_set = _expand_with_synonyms(q_tokens)
+    if not q_set:
+        return 0.0
+
     score = 0.0
-    title = _normalize_for_match(str(item.get("title") or ""))
-    if title and title in q:
-        score += 1.5
-    elif title:
-        # token overlap fallback
-        for tok in title.split():
-            if len(tok) >= 3 and tok in q:
-                score += 0.4
+
+    # Tag overlap — strongest signal; merchant explicitly labelled this.
     for tag in (item.get("tags") or []):
-        t = _normalize_for_match(str(tag))
-        if t and t in q:
-            score += 1.0
-    usage = _normalize_for_match(str(item.get("usage_context") or ""))
-    if usage:
-        for tok in usage.split():
-            if len(tok) >= 4 and tok in q:
-                score += 0.2
-                if score >= 3.0:
-                    return 3.0
+        for tok in _tokenize_for_match(str(tag)):
+            stripped = _strip_definite_prefix(tok)
+            if stripped in q_set or tok in q_set:
+                score += 1.5
+                break  # one hit per tag is enough
+
+    # Title overlap — capped so a multi-word title doesn't dominate.
+    title_score = 0.0
+    for tok in _tokenize_for_match(str(item.get("title") or "")):
+        if len(tok) < 3:
+            continue
+        stripped = _strip_definite_prefix(tok)
+        if stripped in q_set or tok in q_set:
+            title_score += 1.0
+    score += min(title_score, 2.5)
+
+    # Usage context — softest signal, mostly a tiebreaker.
+    for tok in _tokenize_for_match(str(item.get("usage_context") or "")):
+        if len(tok) < 4:
+            continue
+        stripped = _strip_definite_prefix(tok)
+        if stripped in q_set or tok in q_set:
+            score += 0.2
+            if score >= 5.0:
+                return 5.0
+
     return score
 
 

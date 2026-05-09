@@ -167,7 +167,10 @@ class DefaultFactsLoader:
             elif raw_payment_methods:
                 facts.payment_methods = [str(raw_payment_methods)]
 
-        # ── 5. Working hours (Phase 2) ─────────────────────────────────────
+        # ── 5. Working hours + assistant persona (Phase 2) ────────────────
+        # Both pulled from the same TenantSettings row so we make a single
+        # query. Failures are non-fatal — neither field is critical to a
+        # decision turn.
         try:
             settings = (
                 db.query(TenantSettings)
@@ -175,11 +178,18 @@ class DefaultFactsLoader:
                 .first()
             )
             if settings:
-                store_hours = (settings.ai_settings or {}).get("store_hours")
+                ai_settings = settings.ai_settings or {}
+                store_hours = ai_settings.get("store_hours")
                 if store_hours:
                     facts.within_working_hours = _check_working_hours(store_hours)
+                # Merchant-configured assistant name. Default lives in
+                # core.tenant.DEFAULT_AI ("نحلة"); we only override when
+                # the merchant explicitly set a non-empty value.
+                assistant_name = str(ai_settings.get("assistant_name") or "").strip()
+                if assistant_name:
+                    facts.assistant_name = assistant_name
         except Exception:
-            pass   # working hours are optional — never block a turn
+            pass   # working hours / persona are optional — never block a turn
 
         logger.debug(
             "[FactsLoader] tenant=%s products=%d (in_stock=%d) orderable=%s coupons=%s platform=%s",

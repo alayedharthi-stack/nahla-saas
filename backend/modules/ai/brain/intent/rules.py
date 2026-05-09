@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from ..types import (
+    INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_PRICE,
     INTENT_ASK_PRODUCT,
     INTENT_ASK_OWNER_CONTACT,
@@ -171,6 +172,40 @@ _register(RuleSet(
         r"(store link|store url|where is your store|about the store)",
     ],
     confidence=0.92,
+))
+
+# ── Payment info / bank transfer / IBAN / barcode (registered BEFORE
+#    owner_contact so a request like "ارسل حساب الراجحي" doesn't fall
+#    through to the static "هذه وسائل التواصل المتاحة" FAQ template).
+#
+# Confidence 0.95 ensures this beats both INTENT_ASK_OWNER_CONTACT (0.92)
+# and INTENT_ASK_PRODUCT (0.88) when the customer is asking for payment
+# details — even if the message also brushes against generic "ارسل" /
+# "أبغى" verbs that other rules look for. The decision engine then
+# routes this intent to the brain compose path so GPT can attach the
+# matching AI Media Library item (e.g. bank-transfer barcode) instead
+# of replying with the generic "contact owner" FAQ.
+_register(RuleSet(
+    intent=INTENT_ASK_PAYMENT_INFO,
+    patterns=[
+        # Bank account / transfer phrasings — Saudi & GCC dialects.
+        r"(حساب الراجحي|حساب راجحي|راجحي|الراجحي|الأهلي|أهلي|الرياض|الرياض بنك|"
+        r"حساب البنك|حساب بنك|حساب بنكي|رقم الحساب|رقم حساب|"
+        r"الآيبان|الايبان|آيبان|ايبان|iban|"
+        r"تحويل بنكي|تحويل بنكى|التحويل البنكي|بيانات التحويل|بيانات الدفع|"
+        r"الإيداع|إيداع|تحويلة|ترانزفر)",
+        # Payment barcode / QR phrasings.
+        r"(باركود التحويل|باركود الدفع|باركود البنك|باركود الراجحي|"
+        r"qr code|كود qr|كيو ?ار|كيوار)",
+        # Common explicit asks ("ارسل حساب / صور لي الباركود / أبغى الآيبان").
+        r"((ارسل|أرسل|ابعث|ابغى|ابغي|ودي|ابي|أبي|ابعتلي|ارسلي|"
+        r"\bsend me\b|\bgive me\b)\s*(لي\s+|له\s+|لها\s+)?"
+        r"(حساب|الحساب|الايبان|الآيبان|باركود|الباركود|بيانات\s+التحويل|بيانات\s+الدفع|"
+        r"تحويل|الراجحي|راجحي|بنك\s+\S*|الأهلي|أهلي))",
+        # English fallbacks — covers customers who use mixed messaging.
+        r"(bank (account|details|transfer)|payment (barcode|qr)|iban (number)?)",
+    ],
+    confidence=0.95,
 ))
 
 # ── Owner / support contact details ──────────────────────────────────────────

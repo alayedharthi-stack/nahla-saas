@@ -29,6 +29,13 @@ INTENT_PAY_NOW       = "pay_now"
 INTENT_ASK_SHIPPING  = "ask_shipping"
 INTENT_ASK_STORE_INFO = "ask_store_info"
 INTENT_ASK_OWNER_CONTACT = "ask_owner_contact"
+# Bank-transfer / IBAN / payment-barcode / QR style requests. Carved out
+# of the broader OWNER_CONTACT bucket so the brain can attach a matching
+# AI Media Library item (e.g. the bank-transfer barcode) instead of
+# falling back to the static "contact us" FAQ template — which used to
+# silently swallow these messages and leave the customer with a generic
+# "هذه وسائل التواصل المتاحة" reply.
+INTENT_ASK_PAYMENT_INFO = "ask_payment_info"
 INTENT_HESITATION       = "hesitation"
 INTENT_TALK_HUMAN       = "talk_to_human"
 INTENT_TRACK_ORDER      = "track_order"
@@ -368,6 +375,12 @@ class CommerceFacts:
     store_description: str = ""
     store_contact_phone: str = ""
     store_contact_email: str = ""
+    # Merchant-configured assistant persona (TenantSettings.ai_settings.
+    # assistant_name). Surfaced in greeting / identity templates so the
+    # bot can introduce itself by the merchant's chosen name (default
+    # "نحلة" — see core.tenant.DEFAULT_AI). Empty string means "use
+    # the generic 'مساعد {store_name}' phrasing".
+    assistant_name: str = ""
 
     # ── Phase 2 ───────────────────────────────────────────────────────────────
     # Number of products actually in stock (not just synced)
