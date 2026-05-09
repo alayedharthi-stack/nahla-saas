@@ -52,6 +52,16 @@ ALLOWED_VARIABLE_SLOTS: frozenset[str] = frozenset({
     "payment_url",     # unpaid_order_reminder
     "reorder_url",     # predictive_reorder_reminder
     "occasion_name",   # seasonal_offer (e.g. "اليوم الوطني")
+    # manual_coupon_campaign — Salla coupon API hasn't approved us yet, so the
+    # merchant types the coupon code + offer copy + URL by hand and we just
+    # ship it. None of these are auto-resolved by the engine; they ALL come
+    # from the merchant's form on the dashboard.
+    "merchant_name",
+    "offer_description",
+    "coupon_code",
+    "discount_text",
+    "expiry_text",
+    "store_or_product_url",
 })
 
 
@@ -687,6 +697,149 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
                         ),
                     },
                     {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                ],
+            },
+        },
+    },
+
+    # ── 12) Manual coupon campaign (interim — pre Salla coupon API) ────
+    #
+    # Manual fallback for merchants who want to push a discount over WhatsApp
+    # while we wait for Salla's coupon-creation API approval. The merchant
+    # creates the coupon inside Salla themselves, then types the code + the
+    # storefront URL into the dashboard. Nahla simply renders an APPROVED
+    # template + URL button; nothing is auto-generated, no code is validated
+    # against Salla, and the engine never picks this template up for any
+    # automation flow (`automation_type: "manual_only"` is unique and not
+    # subscribed by any emitter).
+    "manual_coupon_campaign": {
+        "automation_type": "manual_only",
+        "trigger_event":   "manual_only",
+        "category":        "MARKETING",
+        "languages": {
+            "ar": {
+                "template_name": "manual_coupon_campaign_ar",
+                # Body carries everything the merchant types — six numbered
+                # placeholders, NO auto-resolved slots. The URL button uses
+                # its own independent ``{{1}}`` (Meta-compliant button
+                # parameter), populated at send-time from the merchant's
+                # ``store_or_product_url`` via the standard URL-button suffix
+                # extractor (test_send_urls.extract_button_suffix).
+                "body_slots": [
+                    "customer_name",
+                    "merchant_name",
+                    "offer_description",
+                    "coupon_code",
+                    "discount_text",
+                    "expiry_text",
+                ],
+                "button_slots": ["store_or_product_url"],
+                "slots": [
+                    "customer_name",
+                    "merchant_name",
+                    "offer_description",
+                    "coupon_code",
+                    "discount_text",
+                    "expiry_text",
+                    "store_or_product_url",
+                ],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 👋\n\n"
+                            "عرض خاص من {{2}} 🍯\n\n"
+                            "{{3}}\n\n"
+                            "استخدم كود الخصم:\n"
+                            "{{4}}\n\n"
+                            "الخصم:\n"
+                            "{{5}}\n\n"
+                            "{{6}}\n\n"
+                            "اضغط الزر بالأسفل للطلب من المتجر."
+                        ),
+                        "example": {
+                            "body_text": [[
+                                "أحمد",
+                                "متجر نحلة",
+                                "عرض اليوم على المنتجات المختارة فقط",
+                                "NAHLA10",
+                                "خصم 10%",
+                                "العرض ساري حتى نهاية الأسبوع",
+                            ]],
+                        },
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{
+                            "type": "URL",
+                            "text": "اطلب الآن",
+                            # Meta requires a base URL with a {{1}} suffix —
+                            # the merchant submits a full URL on the dashboard
+                            # and the test-send pipeline strips the prefix
+                            # and forwards the path as the {{1}} parameter
+                            # (see ``test_send_urls.extract_button_suffix``).
+                            "url": "https://example.com/{{1}}",
+                            "example": ["https://example.com/products/special"],
+                        }],
+                    },
+                ],
+            },
+            "en": {
+                "template_name": "manual_coupon_campaign_en",
+                "body_slots": [
+                    "customer_name",
+                    "merchant_name",
+                    "offer_description",
+                    "coupon_code",
+                    "discount_text",
+                    "expiry_text",
+                ],
+                "button_slots": ["store_or_product_url"],
+                "slots": [
+                    "customer_name",
+                    "merchant_name",
+                    "offer_description",
+                    "coupon_code",
+                    "discount_text",
+                    "expiry_text",
+                    "store_or_product_url",
+                ],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 👋\n\n"
+                            "A special offer from {{2}} 🍯\n\n"
+                            "{{3}}\n\n"
+                            "Use this coupon code:\n"
+                            "{{4}}\n\n"
+                            "Discount:\n"
+                            "{{5}}\n\n"
+                            "{{6}}\n\n"
+                            "Tap the button below to shop now."
+                        ),
+                        "example": {
+                            "body_text": [[
+                                "Ahmad",
+                                "Nahla Store",
+                                "Today's special on selected items",
+                                "NAHLA10",
+                                "10% off",
+                                "Offer valid until the end of the week",
+                            ]],
+                        },
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                    {
+                        "type": "BUTTONS",
+                        "buttons": [{
+                            "type": "URL",
+                            "text": "Shop now",
+                            "url": "https://example.com/{{1}}",
+                            "example": ["https://example.com/products/special"],
+                        }],
+                    },
                 ],
             },
         },

@@ -65,6 +65,7 @@ import MerchantWidgets from './pages/MerchantWidgets'
 import Customers from './pages/Customers'
 import CustomersImport from './pages/CustomersImport'
 import WhatsAppManualSetup from './pages/WhatsAppManualSetup'
+import ManualCouponCampaign from './pages/ManualCouponCampaign'
 
 export default function App() {
   return (
@@ -127,7 +128,9 @@ export default function App() {
             <Route path="coupons"            element={<Coupons />} />
             <Route path="promotions"         element={<Promotions />} />
             <Route path="campaigns"          element={<Campaigns />} />
+            <Route path="campaigns/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="templates"          element={<Templates />} />
+            <Route path="templates/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="smart-automations"  element={<SmartAutomations />} />
             <Route path="automations"        element={<Navigate to="/smart-automations" replace />} />
             <Route path="intelligence"       element={<Intelligence />} />

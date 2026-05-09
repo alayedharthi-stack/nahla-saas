@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import {
   Plus, RefreshCw, CheckCircle, Clock, XCircle, AlertCircle,
   Eye, EyeOff, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
   Type, Link2, Phone, Copy as CopyIcon, Zap, Star,
   BookOpen, Download, Sparkles, Tag, Search, Bot, CheckCheck,
-  Pencil, Send,
+  Pencil, Send, Ticket, ChevronLeft as ArrowEnd,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -2074,6 +2075,24 @@ export default function Templates() {
           {t(tr => tr.templatesMgmt.metaPolicyText)}
         </p>
       </div>
+
+      {/* Manual coupon campaign quick entry — interim flow before Salla coupon API */}
+      <Link
+        to="/campaigns/manual-coupon"
+        className="card p-4 flex items-center gap-4 hover:border-amber-300 hover:bg-amber-50/40 transition-colors group"
+      >
+        <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-600 flex items-center justify-center shrink-0 group-hover:bg-amber-200">
+          <Ticket className="w-5 h-5" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-slate-900 mb-0.5">حملة كوبون يدوي</p>
+          <p className="text-xs text-slate-500 leading-relaxed">
+            أنشئ الكوبون داخل سلة بنفسك ثم ضع الكود + رابط المتجر هنا — وترسله نحلة عبر واتساب
+            بزر «اطلب الآن». حل مؤقت قبل اعتماد سلة لـ API الكوبونات.
+          </p>
+        </div>
+        <ArrowEnd className="w-4 h-4 text-slate-400 shrink-0 rotate-180" />
+      </Link>
 
       {/* Table */}
       <div className="card">
