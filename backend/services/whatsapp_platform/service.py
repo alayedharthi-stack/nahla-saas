@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from core.config import D360_API_BASE_URL, D360_PARTNER_API_KEY, D360_PARTNER_HUB_BASE, META_GRAPH_API_VERSION
 from .provider_utils import (
+    WHATSAPP_CONNECTION_TYPE_COEXISTENCE,
     WHATSAPP_PROVIDER_360DIALOG,
     wa_provider,
 )
@@ -17,6 +18,7 @@ logger = logging.getLogger("nahla.whatsapp.service")
 
 GRAPH = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
 D360_BASE = D360_API_BASE_URL.rstrip("/")
+_D360_PARTNER_HUB = D360_PARTNER_HUB_BASE.rstrip("/")
 
 
 def _provider_base_url(conn: Any) -> str:
@@ -444,9 +446,211 @@ async def dialog360_get_webhook_config(
     return data
 
 
-# ── 360dialog Partner API helpers ─────────────────────────────────────────────
+def _clip_body(body: Any, limit: int = 240) -> str:
+    try:
+        import json as _json  # noqa: PLC0415
+        txt = _json.dumps(body, ensure_ascii=False) if isinstance(body, dict) else str(body)
+    except Exception:
+        txt = str(body)
+    txt = txt.replace("\n", " ").strip()
+    return txt[:limit] + ("…" if len(txt) > limit else "")
 
-_D360_PARTNER_HUB = D360_PARTNER_HUB_BASE.rstrip("/")
+
+async def dialog360_live_verify_probes(
+    *,
+    tenant_id: int,
+    api_key: str,
+    phone_number_id: str,
+    waba_id: str,
+    channel_id: Optional[str],
+    connection_type: str,
+    partner_id: Optional[str],
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """
+    Multi-step live probe against 360dialog Channel API + Partner Hub.
+
+    GET ``/v1/configs`` is NOT universally reliable for Coexistence or hub-
+    provisioned channels (may legitimately return 404 ``{"error":"Not found"}``)
+    while messaging + webhook READ still work. Callers must combine these probe
+    results with webhook traffic / stored identifiers rather than trusting a
+    single endpoint.
+    """
+    coexistence = str(connection_type or "").strip().lower() == WHATSAPP_CONNECTION_TYPE_COEXISTENCE
+    steps: list[Dict[str, Any]] = []
+
+    logger.info(
+        "[D360 live-verify] tenant=%s base=%s coexistence=%s channel_id=%s "
+        "phone_number_id=%s waba_id=%s api_key=present partner_id_cfg=%s",
+        tenant_id,
+        D360_BASE,
+        coexistence,
+        channel_id or "-",
+        phone_number_id or "-",
+        waba_id or "-",
+        partner_id or "-",
+    )
+
+    auth_revoked = False
+
+    def _record_step(
+        *,
+        name: str,
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        uses_channel_key: bool,
+        status_code: Optional[int],
+        ok_http: bool,
+        body_preview: str,
+    ) -> None:
+        nonlocal auth_revoked
+        hdr_keys = ",".join(sorted(headers.keys()))
+        log_url = url.replace(api_key, "<redacted>") if api_key and api_key in url else url
+        if uses_channel_key and status_code in (401, 403):
+            auth_revoked = True
+        steps.append({
+            "step":             name,
+            "method":           method.upper(),
+            "url":              log_url,
+            "headers_present":  hdr_keys,
+            "uses_channel_key": uses_channel_key,
+            "status_code":      status_code,
+            "ok":               ok_http,
+            "body_preview":     body_preview,
+        })
+        logger.info(
+            "[D360 live-verify] tenant=%s step=%s %s %s status=%s ok=%s body_preview=%r",
+            tenant_id, name, method.upper(), log_url, status_code, ok_http, body_preview,
+        )
+
+    hdr_chan = {"D360-API-KEY": api_key}
+
+    async def _step_http(
+        *,
+        name: str,
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        params: Optional[Dict[str, str]] = None,
+        json_body: Optional[Dict[str, Any]] = None,
+        uses_channel_key: bool = False,
+    ) -> None:
+        log_url = url.replace(api_key, "<redacted>") if api_key and api_key in url else url
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                if method.upper() == "GET":
+                    resp = await client.get(url, headers=headers, params=params or {})
+                else:
+                    resp = await client.request(method.upper(), url, headers=headers, json=json_body)
+            ok_http = 200 <= resp.status_code < 300
+            try:
+                parsed = resp.json()
+            except Exception:
+                parsed = resp.text
+            preview = _clip_body(parsed if isinstance(parsed, dict) else {"body": parsed})
+            _record_step(
+                name=name, method=method, url=url, headers=headers,
+                uses_channel_key=uses_channel_key,
+                status_code=resp.status_code, ok_http=ok_http, body_preview=preview,
+            )
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"[:220]
+            logger.warning("[D360 live-verify] tenant=%s step=%s FAILED url=%s err=%s", tenant_id, name, log_url, err)
+            _record_step(
+                name=name, method=method, url=url, headers=headers,
+                uses_channel_key=uses_channel_key,
+                status_code=None, ok_http=False, body_preview=err,
+            )
+
+    await _step_http(
+        name="v1_configs",
+        method="GET",
+        url=f"{D360_BASE}/v1/configs",
+        headers=dict(hdr_chan),
+        uses_channel_key=True,
+    )
+
+    await _step_http(
+        name="webhook_read",
+        method="GET",
+        url=f"{D360_BASE}/v1/configs/webhook",
+        headers={**hdr_chan, "Content-Type": "application/json"},
+        uses_channel_key=True,
+    )
+
+    if phone_number_id:
+        await _step_http(
+            name="phone_object",
+            method="GET",
+            url=f"{D360_BASE}/{phone_number_id}",
+            headers=dict(hdr_chan),
+            params={"fields": "id,display_phone_number,verified_name,quality_rating,whatsapp_business_account"},
+            uses_channel_key=True,
+        )
+
+    if partner_id and channel_id and D360_PARTNER_API_KEY:
+        p_url = f"{_D360_PARTNER_HUB}/api/v2/partners/{partner_id}/channels/{channel_id}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(
+                    p_url,
+                    headers={"Authorization": f"Bearer {D360_PARTNER_API_KEY}"},
+                )
+            ok_http = 200 <= resp.status_code < 300
+            try:
+                pdata = resp.json()
+            except Exception:
+                pdata = resp.text
+            if isinstance(pdata, dict) and pdata.get("error"):
+                ok_http = False
+            preview = _clip_body(pdata if isinstance(pdata, dict) else {"body": pdata})
+            _record_step(
+                name="partner_channel",
+                method="GET",
+                url=p_url,
+                headers={"Authorization": "Bearer <redacted>"},
+                uses_channel_key=False,
+                status_code=resp.status_code,
+                ok_http=ok_http,
+                body_preview=preview,
+            )
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"[:220]
+            logger.warning("[D360 live-verify] tenant=%s step=partner_channel FAILED err=%s", tenant_id, err)
+            _record_step(
+                name="partner_channel",
+                method="GET",
+                url=p_url,
+                headers={"Authorization": "Bearer <redacted>"},
+                uses_channel_key=False,
+                status_code=None,
+                ok_http=False,
+                body_preview=err,
+            )
+
+    composite_alive = any(
+        s.get("ok")
+        for s in steps
+        if s["step"] in {"v1_configs", "webhook_read", "phone_object", "partner_channel"}
+    )
+
+    summary = " | ".join(
+        f"{s['step']}={s.get('status_code')}{'✓' if s.get('ok') else '✗'}"
+        for s in steps
+    )
+
+    return {
+        "coexistence_mode":     coexistence,
+        "d360_api_base":        D360_BASE,
+        "composite_alive":      composite_alive,
+        "channel_auth_revoked": auth_revoked,
+        "steps":                steps,
+        "summary":              summary,
+    }
+
+
+# ── 360dialog Partner API helpers ─────────────────────────────────────────────
 
 
 async def dialog360_generate_api_key(

@@ -1315,6 +1315,7 @@ export default function WhatsAppConnect() {
     db_status:       string | null
     provider:        string | null
     checks:          Array<{ name: string; ok: boolean; status_code?: number | null; detail?: string | null }>
+    provider_probe?: unknown
   } | null>(null)
   const [liveVerifying, setLiveVerifying] = useState(false)
 
@@ -1905,10 +1906,15 @@ export default function WhatsAppConnect() {
             <div>
               <p className={`font-bold text-lg ${palette.title}`}>
                 {!verifyKnown && (liveVerifying ? 'جارٍ التحقق من حالة الربط…' : 'واتساب مرتبط (لم يُتحقّق بعد)')}
-                {softWarning  && 'واتساب مرتبط — التحقق المتقدم غير مكتمل ⚠️'}
+                {softWarning  && 'واتساب مرتبط — تحذير بسيط ⚠️'}
                 {trulyOk && !softWarning && 'واتساب مرتبط ومُتحقّق ✅'}
                 {trulyBroken  && 'واتساب غير متصل فعليًا — يرجى إعادة الربط ❌'}
               </p>
+              {softWarning && liveVerify?.reason_message && (
+                <p className="text-xs text-amber-800 mt-2 leading-relaxed max-w-md mx-auto">
+                  {liveVerify.reason_message}
+                </p>
+              )}
               {connName && <p className="font-semibold text-slate-700 mt-1">{connName}</p>}
               {connPhone && <p className="text-sm font-mono text-slate-500 mt-0.5">{connPhone}</p>}
               {connAt && (

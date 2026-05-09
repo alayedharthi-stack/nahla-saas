@@ -25,7 +25,7 @@ import logging
 import secrets
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -75,6 +75,7 @@ from services.whatsapp_platform.service import (
     dialog360_configure_webhook,
     dialog360_generate_api_key,
     dialog360_get_channel_info,
+    dialog360_live_verify_probes,
     dialog360_resolve_channel_metadata,
 )
 
@@ -679,6 +680,8 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
     provider_reachable = False
     provider_status_code: Optional[int] = None
     provider_detail: Optional[str] = None
+    provider_probe: Optional[Dict[str, Any]] = None
+    channel_auth_revoked = False
 
     if has_token and (phone_id or waba_id):
         try:
@@ -689,22 +692,40 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
                 prefer_platform=False,
             )
             if provider == WHATSAPP_PROVIDER_360DIALOG:
-                # GET /v1/configs returns the channel/profile config.
-                # 401/403 → token revoked/disabled. 200 → channel alive.
-                from services.whatsapp_platform.service import (  # noqa: PLC0415
-                    _provider_url, _provider_headers,
+                meta_all = dict(conn.extra_metadata or {})
+                pd = dict(meta_all.get("provider_details") or {})
+                channel_id_resolved = pd.get("channel_id") or None
+                ctype = str(conn.connection_type or "").strip().lower()
+
+                provider_probe = await dialog360_live_verify_probes(
+                    tenant_id=tenant_id,
+                    api_key=ctx.token,
+                    phone_number_id=phone_id,
+                    waba_id=waba_id,
+                    channel_id=channel_id_resolved,
+                    connection_type=ctype,
+                    partner_id=D360_PARTNER_ID or None,
+                    timeout=10.0,
                 )
-                headers = dict(_provider_headers(conn, ctx))
-                headers.pop("Content-Type", None)
-                async with httpx.AsyncClient(timeout=10) as client:
-                    resp = await client.get(_provider_url(conn, "v1/configs"), headers=headers)
-                provider_status_code = resp.status_code
-                provider_reachable   = 200 <= resp.status_code < 300
-                if not provider_reachable:
-                    try:
-                        provider_detail = (resp.json().get("error") or {}).get("message") or resp.text[:200]
-                    except Exception:
-                        provider_detail = resp.text[:200]
+                channel_auth_revoked = bool(provider_probe.get("channel_auth_revoked"))
+                composite_alive = bool(provider_probe.get("composite_alive"))
+                cfg_step = next(
+                    (s for s in provider_probe.get("steps") or [] if s.get("step") == "v1_configs"),
+                    None,
+                )
+                provider_status_code = cfg_step.get("status_code") if cfg_step else None
+                provider_detail = str(provider_probe.get("summary") or "")
+                provider_reachable = composite_alive
+
+                # Coexistence / newer hub channels may legitimately 404 on
+                # GET /v1/configs while webhooks + messaging still work.
+                if not composite_alive and not channel_auth_revoked:
+                    if webhook_active or bool(waba_id):
+                        provider_reachable = True
+                        provider_detail = (
+                            f"{provider_detail} | fallback_ok=webhook_or_waba"
+                        )
+
             else:
                 # Meta Cloud API: GET /{phone_id}?fields=verified_name
                 from services.whatsapp_platform.service import (  # noqa: PLC0415
@@ -718,7 +739,7 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
                         params={"fields": "verified_name,quality_rating"},
                     )
                 provider_status_code = resp.status_code
-                provider_reachable   = 200 <= resp.status_code < 300
+                provider_reachable = 200 <= resp.status_code < 300
                 if not provider_reachable:
                     try:
                         provider_detail = (resp.json().get("error") or {}).get("message") or resp.text[:200]
@@ -727,22 +748,48 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
         except Exception as exc:
             provider_detail = f"network_error: {exc}"
             provider_reachable = False
+            if provider == WHATSAPP_PROVIDER_360DIALOG and (webhook_active or bool(waba_id)):
+                provider_reachable = True
+                provider_detail = f"{provider_detail} | probe_exception_fallback_ok"
 
     _add(
         "provider_reachable", provider_reachable,
         status_code=provider_status_code, provider=provider, detail=provider_detail,
     )
 
-    # If the provider rejected the credentials (4xx), upgrade the reason.
-    if reason_code is None and provider_status_code is not None and provider_status_code in (401, 403):
+    meta_auth_failed = (
+        provider == WHATSAPP_PROVIDER_META
+        and provider_status_code is not None
+        and provider_status_code in (401, 403)
+    )
+
+    if reason_code is None and (channel_auth_revoked or meta_auth_failed):
         reason_code = "token_revoked"
         reason_msg  = "مزوّد واتساب رفض المفتاح — قد يكون مُلغًى أو موقوفًا. يرجى إعادة الربط."
-    elif reason_code is None and not provider_reachable:
+    elif reason_code is None and provider == WHATSAPP_PROVIDER_360DIALOG and has_token and (phone_id or waba_id):
+        comp = bool(provider_probe and provider_probe.get("composite_alive"))
+        if provider_probe and not comp and not channel_auth_revoked:
+            if webhook_active or bool(waba_id):
+                soft_warning = True
+                reason_code = "provider_probe_inconclusive"
+                reason_msg  = (
+                    "الربط فعّال — استقبال الرسائل يعمل، لكن نقطة تحقق اختيارية في واجهة "
+                    "360dialog لم تُجب (أمر شائع مع التعايش). لا حاجة لإعادة الربط إذا وصلتك رسائل واختبار الذكاء ناجح."
+                )
+            else:
+                reason_code = "provider_unreachable"
+                reason_msg  = (
+                    f"تعذر التحقق من {provider} عبر أي مسار معروف، "
+                    "ولا يوجد دليل حديث على تدفق الويب هوك. يُنصح بإعادة الربط أو مراجعة المفتاح."
+                )
+    elif reason_code is None and provider == WHATSAPP_PROVIDER_META and not provider_reachable:
         reason_code = "provider_unreachable"
         reason_msg  = (
             f"تعذر الوصول إلى {provider} للتحقق من حالة الربط فعليًا. "
             "حاول لاحقًا أو أعد الربط."
         )
+
+    auth_failed_for_ui = channel_auth_revoked or meta_auth_failed
 
     # Soft path: when the only blocker is missing waba_id BUT webhooks are
     # arriving, we mark truly_connected=True so the merchant page does NOT
@@ -751,24 +798,31 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
     truly_connected = (
         conn.status == "connected"
         and bool(phone_id) and has_token
+        and not auth_failed_for_ui
         and (
-            (bool(waba_id) and provider_reachable)  # canonical
+            provider_reachable
             or (
                 soft_warning
-                and reason_code == "pending_advanced_verification"
+                and reason_code in (
+                    "pending_advanced_verification",
+                    "provider_probe_inconclusive",
+                )
             )
         )
     )
 
     logger.info(
         "[WA live-verify] tenant=%s provider=%s db_status=%s "
-        "waba=%s phone=%s token=%s webhook_active=%s probe=%s code=%s truly_connected=%s",
+        "waba=%s phone=%s token=%s webhook_active=%s probe_http=%s probe_summary=%s "
+        "code=%s truly_connected=%s",
         tenant_id, provider, db_status, bool(waba_id), bool(phone_id),
-        has_token, webhook_active, provider_status_code, reason_code, truly_connected,
+        has_token, webhook_active, provider_status_code,
+        (provider_probe or {}).get("summary") if provider_probe else "-",
+        reason_code, truly_connected,
     )
 
     if truly_connected and soft_warning:
-        default_msg = "الربط فعّال — التحقق المتقدم غير مكتمل."
+        default_msg = (reason_msg or "").strip() or "الربط فعّال — التحقق المتقدم غير مكتمل."
     elif truly_connected:
         default_msg = "الربط فعّال."
     else:
@@ -784,6 +838,7 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
         "provider":        provider,
         "db_status":       db_status,
         "verified_at":     now_iso,
+        "provider_probe":  provider_probe,
     }
 
 

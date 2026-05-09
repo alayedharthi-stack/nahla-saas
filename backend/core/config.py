@@ -185,7 +185,10 @@ META_WA_CONFIG_ID        = os.environ.get("META_WA_CONFIG_ID", "")
 # ── 360dialog / WhatsApp Coexistence ───────────────────────────────────────────
 # Internal / platform-managed provider configuration. Never expose these values
 # to merchants in the dashboard.
-BACKEND_URL = os.environ.get("BACKEND_URL", "https://api.nahlah.ai")
+BACKEND_URL = os.environ.get(
+    "BACKEND_URL",
+    "https://nahla-saas-production.up.railway.app",
+)
 D360_API_BASE_URL = os.environ.get("D360_API_BASE_URL", "https://waba-v2.360dialog.io")
 D360_PARTNER_HUB_BASE = os.environ.get("D360_PARTNER_HUB_BASE", "https://hub.360dialog.com")
 # Partner API key — used to generate channel API keys on behalf of merchants.
