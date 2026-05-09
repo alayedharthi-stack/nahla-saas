@@ -820,6 +820,25 @@ def build_merchant_context(
     _blocked_raw = store_settings.get("blocked_customers") or []
     _blocked_list: list = [str(p).strip() for p in _blocked_raw if p] if isinstance(_blocked_raw, list) else []
 
+    # ── Autopilot mode (read once, default False) ─────────────────────────
+    #
+    # The merchant-curated libraries (manual coupons + AI media) are part of
+    # *store intelligence*, not *automation*, so they MUST NOT be gated on
+    # this flag. We surface it here purely so the prompt builder can adjust
+    # priority guidance: when autopilot is ON, GPT prefers the automatic
+    # coupon engine and treats manual coupons as a fallback; when autopilot
+    # is OFF, manual coupons become the primary discount source the brain
+    # may cite. The libraries themselves are loaded unconditionally below.
+    try:
+        from core.automation_engine import _is_autopilot_enabled  # noqa: PLC0415
+        autopilot_enabled = bool(_is_autopilot_enabled(db, tenant_id))
+    except Exception as _ap_exc:  # pragma: no cover — defensive
+        logger.warning(
+            "[MerchantContext] autopilot flag read failed tenant=%s err=%s",
+            tenant_id, _ap_exc,
+        )
+        autopilot_enabled = False
+
     brain_profile = {
         "tone": ai_settings.get("reply_tone", "friendly"),
         "reply_length": ai_settings.get("reply_length", "medium"),
@@ -842,6 +861,11 @@ def build_merchant_context(
         "context_verbosity": context_verbosity,
         # Block list — customer phone numbers the merchant has flagged (Phase 12)
         "blocked_customers": _blocked_list,
+        # Autopilot master switch — surfaced to the prompt builder so the
+        # brain can prefer automatic coupons when ON and lean on the
+        # merchant-curated manual_coupons list when OFF. The libraries
+        # themselves are NEVER gated on this flag (see comment above).
+        "autopilot_enabled": autopilot_enabled,
     }
 
     # Pages — synced from Salla via StoreSyncService.sync_pages() which writes to
@@ -891,10 +915,16 @@ def build_merchant_context(
     )
 
     # Merchant-curated libraries (independent of Salla / automatic
-    # coupons) — surface the active rows so the brain can cite a coupon
-    # code verbatim and attach a media file to its reply via the
-    # ``[MEDIA:<id>]`` marker convention defined in
+    # coupons / autopilot) — surface the active rows so the brain can
+    # cite a coupon code verbatim and attach a media file to its reply
+    # via the ``[MEDIA:<id>]`` marker convention defined in
     # ``core.ai_libraries.extract_media_markers``.
+    #
+    # CONTRACT: this block runs unconditionally. The autopilot flag
+    # above only changes prompt *priority guidance*, never visibility.
+    # A merchant who sells manually over WhatsApp (autopilot=False, no
+    # Salla, no automatic coupon engine) MUST still be able to ship
+    # manual coupons and media library items through GPT.
     try:
         from core.ai_libraries import (  # noqa: PLC0415
             list_active_manual_coupons,

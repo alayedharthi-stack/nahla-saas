@@ -79,6 +79,33 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         "تشخيص نية العميل من نص الرسالة وحدها."
     )
 
+    # Autopilot-aware coupon priority guidance. Both modes still ALLOW
+    # manual coupons — the difference is which source GPT reaches for
+    # first when the customer asks for a discount.
+    autopilot_on = bool(
+        (state.merchant_context or {})
+        .get("brain_profile", {})
+        .get("autopilot_enabled", False)
+    )
+    if autopilot_on:
+        coupon_priority_rule = (
+            "- ❗ الكوبونات: المتجر يعمل بالطيار الآلي (autopilot ON)، "
+            "لذا الأولوية للكوبونات التلقائية المعتمدة في النظام. "
+            "إذا لم يقدّم BrainState كوبوناً تلقائياً مناسباً ولزم الأمر، "
+            "يمكنك استخدام كود من merchant_context.manual_coupons "
+            "(فقط من القائمة، بدون اختراع، وبما يطابق usage_context). "
+            "اختاري الأنسب بحسب usage_context أو الأقل priority.\n"
+        )
+    else:
+        coupon_priority_rule = (
+            "- ❗ الكوبونات اليدوية (الطيار الآلي مغلق): عند الحاجة "
+            "لإرسال كوبون أو خصم، استخدمي فقط الأكواد المذكورة في "
+            "merchant_context.manual_coupons — هذه هي المصدر الوحيد "
+            "للكوبونات في هذا الوضع. اختاري الأنسب بحسب usage_context "
+            "أو الأقل priority. لا تخترعي كوبونات ولا تعدّلي على الكود "
+            "ولا ترسلي كوبوناً غير موجود في القائمة.\n"
+        )
+
     parts.append(
         decision_block + "\n\n"
         "## قواعد تشغيل Brain لهذه الجولة\n"
@@ -91,10 +118,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         "- لا تعرضي خصماً أو كوبوناً إلا إذا أظهر BrainState أن الوقت "
         "مناسب أو طلب العميل خصماً بوضوح. (عند ذكر الخصم استخدمي 🎁 "
         "بحد أقصى مرة واحدة في الرسالة.)\n"
-        "- ❗ الكوبونات اليدوية: عند الحاجة لإرسال كوبون، استخدمي فقط "
-        "الأكواد المذكورة في merchant_context.manual_coupons. اختاري الأنسب "
-        "بحسب usage_context أو الأقل priority. لا تخترعي كوبونات ولا "
-        "تعدّلي على الكود ولا ترسلي كوبوناً غير موجود في القائمة.\n"
+        + coupon_priority_rule +
         "- 📎 مكتبة الوسائط: عند الحاجة لإرفاق صورة/فيديو/ملف من "
         "merchant_context.ai_media_library (مثل باركود التحويل البنكي، "
         "صورة منتج، PDF تعريفي) أضيفي في نهاية ردك السطر الخاص "

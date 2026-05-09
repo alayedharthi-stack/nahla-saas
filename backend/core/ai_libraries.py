@@ -28,9 +28,26 @@ These helpers are used in three places:
 Everything here is intentionally *read-only* and tenant-scoped; mutation
 goes through ``routers/intelligence_libraries.py``.
 
-Independence: these helpers DO NOT touch Salla, automatic coupons,
-product sync, or store-integration plumbing. A merchant who sells
-manually over WhatsApp gets the full feature.
+Independence (architectural contract — DO NOT regress):
+
+  These helpers are the read-side of *store intelligence*. They MUST
+  NEVER gate on or import from the automation/autopilot stack:
+
+    * No reads of ``TenantSettings.extra_metadata['autopilot']``.
+    * No imports of ``core.automation_engine`` (one-way arrow only —
+      ``store_knowledge`` may consume the autopilot flag for prompt
+      priority guidance, but ``ai_libraries`` itself stays clean).
+    * No checks against the automatic coupon engine or Salla sync.
+
+  The result: a merchant who sells manually over WhatsApp (no Salla,
+  no autopilot, no scheduler) still gets full benefit from manual
+  coupons and the AI media library. Autopilot ON only changes
+  *which* coupon source GPT prefers, never *which* sources are
+  visible. See :func:`core.store_knowledge.build_merchant_context`
+  for how the flag is surfaced to the prompt without affecting
+  library visibility.
+
+  Tests in ``tests/test_ai_assets_independence.py`` lock this contract.
 """
 from __future__ import annotations
 
