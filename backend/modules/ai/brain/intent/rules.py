@@ -139,13 +139,27 @@ _register(RuleSet(
 ))
 
 # ── Shipping / delivery ───────────────────────────────────────────────────────
+#
+# IMPORTANT: the previous rule used a bare ``شحن`` token, which fired
+# whenever the customer typed "الشحنة" / "شحنتي" / "وصلت الشحنة" — a
+# personal-shipment status question — and locked them into the generic
+# shipping-policy FAQ template instead of the order-tracking flow.
+#
+# We now require explicit shipping-POLICY context (rates, methods,
+# duration, free shipping, etc.) and let everything else fall through to
+# the LLM where the brain can look at the customer's order history.
 _register(RuleSet(
     intent=INTENT_ASK_SHIPPING,
     patterns=[
-        r"(شحن|توصيل|يوصل|متى يوصل|مدة التوصيل|كم يوم|يوصل لين|يوصل إلى)",
-        r"(shipping|delivery|when will|how long)",
+        # Cost / fee questions
+        r"(كم.{0,8}(الشحن|التوصيل)|رسوم.{0,5}(الشحن|التوصيل)|سعر.{0,5}(الشحن|التوصيل))",
+        # Method / area questions
+        r"(طرق.{0,5}(الشحن|التوصيل)|سياسة.{0,5}(الشحن|التوصيل)|شحن مجاني|توصيل مجاني|مناطق.{0,5}(الشحن|التوصيل))",
+        # Duration questions ("how many days", "when does it arrive")
+        r"(مدة.{0,5}(الشحن|التوصيل)|كم يوم|كم تأخذ|كم يستغرق|متى يوصل الطلب|متى توصل الطلبية)",
+        r"(shipping (cost|fee|price|policy|methods?|areas?)|how (long|many days)|free shipping|delivery (cost|fee|time))",
     ],
-    confidence=0.88,
+    confidence=0.85,
 ))
 
 # ── Store info / location / link ─────────────────────────────────────────────
@@ -181,13 +195,27 @@ _register(RuleSet(
 ))
 
 # ── Track order ───────────────────────────────────────────────────────────────
+#
+# Personal shipment questions ("هل وصلت الشحنة؟" / "وصلت طلبيتي؟") used
+# to be misclassified as INTENT_ASK_SHIPPING because of the bare "شحن"
+# token in the shipping rule. They belong here — the customer is asking
+# about THEIR shipment, not about shipping policy in general.
 _register(RuleSet(
     intent=INTENT_TRACK_ORDER,
     patterns=[
-        r"(وين طلبي|وين أمري|تتبع الطلب|متى يوصل طلبي|رقم الطلب|طلبي وين|شحنتي وين)",
-        r"(track|track my order|where is my order|order status)",
+        # "where is my X?" — high specificity, beats ASK_PRODUCT's broad "وين"
+        r"(وين|أين|فين)\s*(طلبي|طلبيتي|شحنتي|الشحنة|الطلبية|أمري)",
+        r"(طلبي|طلبيتي|شحنتي)\s*(وين|أين|فين)",
+        r"(تتبع الطلب|متى يوصل طلبي|رقم الطلب)",
+        r"(هل وصل|هل وصلت).{0,15}(الشحنة|الطلبية|الطلب|طلبي|طلبيتي|شحنتي|الشحنه)",
+        r"(وصلت|وصلتني).{0,8}(الشحنة|الطلبية|طلبيتي|شحنتي)",
+        r"(متى توصل طلبيتي|متى توصل شحنتي)",
+        r"(track|track my order|where is my order|order status|did my (order|shipment) arrive)",
     ],
-    confidence=0.88,
+    # Bumped above the default 0.88 so it wins ties against ASK_PRODUCT's
+    # broad "وين" pattern: "وين شحنتي" must classify as TRACK_ORDER, not
+    # ASK_PRODUCT, otherwise we lose the order-tracking flow.
+    confidence=0.92,
 ))
 
 # ── Talk to human ─────────────────────────────────────────────────────────────

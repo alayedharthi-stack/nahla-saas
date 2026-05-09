@@ -51,11 +51,47 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 # ── Greeting ─────────────────────────────────────────────────────────────────
+#
+# Two persona modes, both wired through the same `greeting()` entry point:
+#
+#   * Named persona (assistant_name set, e.g. "نحلة" — the default in
+#     core.tenant.DEFAULT_AI): the bot introduces itself by name —
+#     "أنا نحلة، مساعدة متجرك". Feels human, matches the merchant's
+#     branding choice, and is what the dashboard onboarding configures.
+#   * Generic (assistant_name empty): falls back to the original
+#     "مساعد {store_name}" phrasing. Kept so an explicit empty
+#     setting still produces a polite greeting.
 
-_GREETING_VARIANTS = [
+_GREETING_NAMED_VARIANTS = [
     # variant 0
-    lambda name: (
-        f"أهلاً! أنا مساعد {name} الذكي 🤖\n"
+    lambda persona, store: (
+        f"أهلاً! أنا {persona} 🤖 مساعدتك من *{store}*.\n"
+        "أقدر أساعدك في:\n"
+        "• البحث عن منتج معيّن أو معرفة الأسعار\n"
+        "• إنشاء طلب مباشرة من هنا\n"
+        "• متابعة الشحن والاستفسارات\n\n"
+        "وش تحتاج اليوم؟"
+    ),
+    # variant 1
+    lambda persona, store: (
+        f"مرحباً بك في *{store}*! 👋\n"
+        f"أنا {persona}، أقدر أساعدك في:\n"
+        "• اقتراح المنتج المناسب لك\n"
+        "• إنشاء طلبك مباشرة\n"
+        "• الإجابة عن الشحن والدفع\n\n"
+        "بماذا أخدمك؟"
+    ),
+    # variant 2
+    lambda persona, store: (
+        f"أهلاً وسهلاً! 🌟 معك *{persona}* من *{store}*.\n"
+        "قولي وش تحتاج — منتج، سعر، طلب، أو أي استفسار — وأنا هنا."
+    ),
+]
+
+_GREETING_GENERIC_VARIANTS = [
+    # variant 0
+    lambda store: (
+        f"أهلاً! أنا مساعد {store} الذكي 🤖\n"
         "هنا أساعدك في أي شي تحتاجه:\n"
         "• استفسارات عن المنتجات والأسعار\n"
         "• إنشاء طلب مباشرة من هنا\n"
@@ -63,8 +99,8 @@ _GREETING_VARIANTS = [
         "كيف أقدر أساعدك اليوم؟"
     ),
     # variant 1
-    lambda name: (
-        f"مرحباً بك في {name}! 👋\n"
+    lambda store: (
+        f"مرحباً بك في {store}! 👋\n"
         "أنا المساعد الذكي وأقدر أساعدك في:\n"
         "• البحث عن المنتج المناسب\n"
         "• إنشاء طلبك مباشرة\n"
@@ -72,16 +108,73 @@ _GREETING_VARIANTS = [
         "بماذا أخدمك؟"
     ),
     # variant 2
-    lambda name: (
-        f"أهلاً وسهلاً! 🌟 معك مساعد {name}.\n"
+    lambda store: (
+        f"أهلاً وسهلاً! 🌟 معك مساعد {store}.\n"
         "قولي وش تحتاج — منتج، سعر، طلب، أو أي استفسار — وأنا هنا."
     ),
 ]
 
 
-def greeting(store_name: str = "", variant: int = 0, **_: Any) -> str:
-    name = store_name or "متجرنا"
-    return _GREETING_VARIANTS[variant % 3](name)
+def greeting(
+    store_name: str = "",
+    assistant_name: str = "",
+    variant: int = 0,
+    **_: Any,
+) -> str:
+    store = store_name or "متجرنا"
+    persona = (assistant_name or "").strip()
+    v = variant % 3
+    if persona:
+        return _GREETING_NAMED_VARIANTS[v](persona, store)
+    return _GREETING_GENERIC_VARIANTS[v](store)
+
+
+_REGREET_VARIANTS = [
+    # variant 0
+    lambda persona, store: (
+        f"أهلاً مرة ثانية 👋 — معك {persona} من {store}.\n"
+        "وش أقدر أخدمك فيه الحين؟"
+    ),
+    # variant 1
+    lambda persona, store: (
+        f"مرحباً بك مجدّداً! 🌟\n"
+        f"أنا {persona} هنا — قول وش تحتاج وأكمل معك."
+    ),
+    # variant 2
+    lambda persona, store: (
+        f"حياك الله من جديد 💛\n"
+        f"أنا {persona}، أكمّل معك من وين توقّفنا — أو نبدأ شي جديد؟"
+    ),
+]
+
+_REGREET_GENERIC_VARIANTS = [
+    "أهلاً مرة ثانية 👋 وش أقدر أخدمك فيه الحين؟",
+    "مرحباً بك مجدّداً! 🌟 قول وش تحتاج وأكمل معك.",
+    "حياك الله من جديد — أكمّل معك. وش الخطوة الجاية؟",
+]
+
+
+def re_greeting(
+    store_name: str = "",
+    assistant_name: str = "",
+    variant: int = 0,
+    **_: Any,
+) -> str:
+    """Short, warm re-greeting for explicit "السلام عليكم" / "هلا" /
+    "مرحبا" arriving AFTER the customer has already been greeted (e.g.
+    they're returning to the conversation after an automation message).
+
+    Deliberately shorter than `greeting()` — we are not re-onboarding
+    them, just acknowledging the new salutation politely so they don't
+    feel ignored. Sending the full bullet-list greeting again is what
+    triggered the "البوت يكرّر التحية في كل رسالة" complaint.
+    """
+    store = store_name or "متجرنا"
+    persona = (assistant_name or "").strip()
+    v = variant % 3
+    if persona:
+        return _REGREET_VARIANTS[v](persona, store)
+    return _REGREET_GENERIC_VARIANTS[v]
 
 
 # ── Product search ────────────────────────────────────────────────────────────
@@ -476,10 +569,29 @@ def no_orders(**_: Any) -> str:
 
 # ── FAQ ───────────────────────────────────────────────────────────────────────
 
-def faq_identity(store_name: str = "", **_: Any) -> str:
-    name = store_name or "متجرنا"
+def faq_identity(
+    store_name: str = "",
+    assistant_name: str = "",
+    **_: Any,
+) -> str:
+    """Reply for "من أنت؟" / "أنت بوت؟" / "مين معي؟" intents.
+
+    Mirrors the persona logic of ``greeting()``: when the merchant
+    configured an ``assistant_name`` in tenant settings, the bot
+    introduces itself by that name and frames itself as "مساعدة
+    {store_name}". Otherwise falls back to the generic phrasing so an
+    explicit empty setting still produces a polite identity reply.
+    """
+    store = store_name or "متجرنا"
+    persona = (assistant_name or "").strip()
+    if persona:
+        return (
+            f"أنا *{persona}*، مساعدة {store} الذكية 🤖\n"
+            "أقدر أساعدك في المنتجات والأسعار والطلبات والشحن بشكل مباشر.\n"
+            "وش أقدر أخدمك فيه اليوم؟"
+        )
     return (
-        f"أنا مساعد {name} الذكي.\n"
+        f"أنا مساعد {store} الذكي.\n"
         "أساعدك في المنتجات والأسعار والطلبات والشحن بشكل مباشر.\n"
         "وش أقدر أخدمك فيه اليوم؟"
     )
@@ -575,16 +687,23 @@ def web_search_summary(summary: str = "", citations: List[str] | None = None, **
 
 # ── Handoff ───────────────────────────────────────────────────────────────────
 
+# IMPORTANT: never start a variant with phrases that sound like an
+# order confirmation ("وصل طلبك" / "تم استلام طلبك"). Customers read
+# them literally and assume their PURCHASE arrived, even when no
+# order, draft, checkout or payment link exists. Variant 1 used to
+# read "وصل طلبك! سأعيد توجيهك..." and was the single biggest source
+# of "I never bought anything, why am I being told my order arrived?"
+# complaints — keep this list neutral.
 _HANDOFF_VARIANTS = [
-    # variant 0
-    "بالتأكيد! سأحوّلك الآن لأحد أعضاء فريق المتجر.\n"
-    "سيتواصل معك في أقرب وقت ممكن. 🙏",
-    # variant 1
-    "وصل طلبك! سأُعيد توجيهك لفريق الدعم ليكمل معك. 🤝\n"
-    "سيتواصلون معك بأسرع وقت.",
-    # variant 2
-    "حسناً، سأوصّلك بفريق المتجر الآن.\n"
-    "انتظر — سيتواصلون معك قريباً. 🙏",
+    # variant 0 — neutral acknowledgement + next-step
+    "بالتأكيد، سأنبّه فريق المتجر للتواصل معك. 🙏\n"
+    "سيرد عليك أحد أعضاء الفريق في أقرب وقت ممكن.",
+    # variant 1 — explicit "I received your request to talk to a person"
+    "وصلتني رغبتك بالتحدث مع موظف. 🤝\n"
+    "سأبلّغ الفريق الآن وسيتواصل معك بأسرع وقت.",
+    # variant 2 — short, polite, no order-confirmation phrasing
+    "حسناً، سأطلب من الفريق التواصل معك مباشرة. 🙏\n"
+    "شكراً لصبرك — لن يتأخر الرد.",
 ]
 
 

@@ -17,9 +17,16 @@ RealPolicyGate rules (applied in order, first match modifies decision):
   3. Price-range gate     — steer back to search when product exceeds budget.
   4. Max-order-value gate — block orders above merchant's configured ceiling
                             (ai_settings.max_order_value, 0 = unlimited).
-  5. Auto-escalate        — transfer to human after N consecutive GENERAL turns
-                            (real general_streak counter, threshold from
-                            ai_settings.auto_escalate_after_n, default 3).
+  5. Auto-escalate        — opt-in only. Transfers to human ONLY when:
+                              (a) merchant has explicitly enabled it via
+                                  ai_settings.auto_escalate_enabled = True, AND
+                              (b) general_streak >= ai_settings.auto_escalate_after_n, AND
+                              (c) the customer's last message carries an explicit
+                                  frustration / unmet-need signal (e.g. "ما فهمت",
+                                  "كلموني", "تواصلوا معي", "موظف", "إنسان").
+                            Plain consecutive GENERAL turns (small talk, jokes,
+                            unusual product questions) NEVER trigger handoff —
+                            the brain handles them through the LLM. Default OFF.
 """
 from __future__ import annotations
 
@@ -249,6 +256,54 @@ class RealPolicyGate:
         return decision
 
     # ── Rule 5: auto-escalate on repeated confusion ───────────────────────────
+    #
+    # IMPORTANT: this used to fire on `general_streak >= 3` ALONE, which meant a
+    # customer who simply joked, made small talk, or asked unusual product
+    # questions ("متى انتاجه؟", a couple of laughing emojis, etc.) would silently
+    # be handed off to a human after three turns — and the customer would see
+    # "وصل طلبك! سأعيد توجيهك لفريق الدعم..." even though no order existed.
+    #
+    # The new contract is:
+    #
+    #   * OFF by default. The merchant must explicitly opt-in via
+    #     ``ai_settings.auto_escalate_enabled = True``.
+    #   * Even when enabled, a high general_streak isn't enough. The customer's
+    #     last message must carry a real escalation signal (frustration,
+    #     unmet-need, an explicit ask for a person).
+    #
+    # If neither condition holds we leave the decision alone and let the brain
+    # / LLM handle the conversation. Handoff stays available as an explicit
+    # path through INTENT_TALK_HUMAN (rules.py) — which is exactly how a real
+    # customer asks for a human.
+
+    # Lower-cased substrings that indicate the customer wants out of the AI
+    # conversation. Kept deliberately small + unambiguous: a casual mention of
+    # the words inside an unrelated sentence is rare in practice and the
+    # consequences of a false positive (silent handoff) are bad UX.
+    _ESCALATION_SIGNALS_AR = (
+        "موظف", "إنسان", "انسان", "بشري", "كلموني", "اتصلوا بي",
+        "تواصلوا معي", "محد رد", "ما حد رد", "ما فهمت", "مو فاهم",
+        "مش فاهم", "غير واضح", "خدمة العملاء", "اتكلم مع",
+    )
+    _ESCALATION_SIGNALS_EN = (
+        "human agent", "real person", "speak to someone", "talk to someone",
+        "customer service", "no one is answering", "i don't understand",
+    )
+
+    @classmethod
+    def _has_escalation_signal(cls, message: str) -> bool:
+        if not message:
+            return False
+        m = message.strip().lower()
+        if not m:
+            return False
+        for token in cls._ESCALATION_SIGNALS_AR:
+            if token in m:
+                return True
+        for token in cls._ESCALATION_SIGNALS_EN:
+            if token in m:
+                return True
+        return False
 
     def _auto_escalate(self, decision: Decision, ctx: BrainContext) -> Decision:
         from ..state.stages import STAGE_DISCOVERY, STAGE_EXPLORING
@@ -262,25 +317,43 @@ class RealPolicyGate:
         if ctx.intent.name != INTENT_GENERAL:
             return decision
 
-        # Merchant-configurable threshold (defaults to 3)
         bp = self._brain_profile(ctx)
-        escalate_n = int(bp.get("auto_escalate_after_n") or self._DEFAULT_ESCALATE_AFTER_N)
+        # Strict opt-in: missing/false flag means "never auto-escalate".
+        if not bool(bp.get("auto_escalate_enabled")):
+            return decision
+
+        escalate_n_raw = bp.get("auto_escalate_after_n")
+        try:
+            escalate_n = int(escalate_n_raw) if escalate_n_raw is not None else self._DEFAULT_ESCALATE_AFTER_N
+        except (TypeError, ValueError):
+            escalate_n = self._DEFAULT_ESCALATE_AFTER_N
         escalate_n = max(1, escalate_n)
 
-        # Use the real general_streak counter persisted in MerchantConversationState.
-        # This is incremented by DefaultStateStore.transition() every time the
-        # classifier resolves INTENT_GENERAL, and reset to 0 on any other intent.
         general_streak = getattr(ctx.state, "general_streak", 0) or 0
+        if general_streak < escalate_n:
+            return decision
 
-        if general_streak >= escalate_n:
+        # Even with the opt-in flag, require an explicit escalation signal in
+        # the customer's most recent message. A long banter session is NOT a
+        # reason to hand off — handoff has to be the customer's choice or the
+        # outcome of an obvious failure mode.
+        last_message = (getattr(ctx, "message", "") or "")
+        if not self._has_escalation_signal(last_message):
             logger.info(
-                "[PolicyGate] auto-escalate: general_streak=%d >= threshold=%d at stage=%s",
+                "[PolicyGate] auto-escalate SUPPRESSED | streak=%d threshold=%d "
+                "stage=%s reason=no_escalation_signal_in_message",
                 general_streak, escalate_n, ctx.state.stage,
             )
-            return Decision(
-                action=ACTION_HANDOFF,
-                args={"policy_reason": "repeated_confusion"},
-                reason=f"policy: {general_streak} consecutive GENERAL intents — escalate to human",
-                confidence=0.70,
-            )
-        return decision
+            return decision
+
+        logger.info(
+            "[PolicyGate] auto-escalate FIRED | streak=%d threshold=%d stage=%s "
+            "trigger=explicit_signal",
+            general_streak, escalate_n, ctx.state.stage,
+        )
+        return Decision(
+            action=ACTION_HANDOFF,
+            args={"policy_reason": "repeated_confusion_with_signal"},
+            reason=f"policy: {general_streak} GENERAL intents + explicit escalation signal",
+            confidence=0.70,
+        )

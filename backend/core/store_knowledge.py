@@ -833,6 +833,11 @@ def build_merchant_context(
         # Merchant-configurable policy knobs (Phase 11)
         "coupon_cap_hours": max(1, int(_cap_hours_raw)) if str(_cap_hours_raw).isdigit() or isinstance(_cap_hours_raw, (int, float)) else 24,
         "auto_escalate_after_n": max(1, int(_escalate_raw)) if str(_escalate_raw).isdigit() or isinstance(_escalate_raw, (int, float)) else 3,
+        # Strict opt-in: PolicyGate's auto-escalate fires only when this is
+        # explicitly True. Default False so a streak of GENERAL turns
+        # (small talk, jokes, unusual product questions) never silently
+        # promotes a conversation to handoff.
+        "auto_escalate_enabled": bool(ai_settings.get("auto_escalate_enabled", False)),
         "max_order_value": float(_max_order_raw) if _max_order_raw and float(_max_order_raw) > 0 else None,
         "context_verbosity": context_verbosity,
         # Block list — customer phone numbers the merchant has flagged (Phase 12)

@@ -641,14 +641,22 @@ async def ai_sales_process_message(
     if response_type == "payment_link" and settings.get("allow_payment_link_sending", True):
         payment_link = await store_payment_link(tenant_id, str(tenant_id), 0.0)
 
-    # 6. Rules first, orchestrator only as a guarded fallback.
-    should_use_orchestrator = (
-        intent == "general"
-        or confidence < threshold
-    )
-    orch_result = None
-    if should_use_orchestrator:
-        orch_result = await _call_orchestrator(tenant_id, cust_phone, message)
+    # 6. Brain-first contract.
+    #
+    # The legacy keyword pipeline used to win whenever rules detected an
+    # intent above the confidence threshold — which meant hardcoded canned
+    # responses ("بالنسبة للشحن:" / "وصل طلبك! سأعيد توجيهك...") were sent
+    # to the customer even when they were just chatting. The brain
+    # orchestrator is the proper conversational layer, so we now ALWAYS
+    # try it first and only fall back to the deterministic keyword
+    # response builder when the orchestrator returns nothing.
+    #
+    # The keyword path is preserved (not deleted) because it's still the
+    # deterministic safety net for: (a) total LLM/orchestrator failure,
+    # (b) automated tests that exercise specific code paths, and (c) the
+    # legacy `/ai-sales/process-message` HTTP contract used by the
+    # dashboard "test message" tool.
+    orch_result = await _call_orchestrator(tenant_id, cust_phone, message)
 
     if orch_result and orch_result.get("reply"):
         response_text = orch_result["reply"]
@@ -656,14 +664,28 @@ async def ai_sales_process_message(
             a.get("type") in ("propose_order", "create_draft_order") and a.get("executable", False)
             for a in (orch_result.get("actions") or [])
         )
-        handoff_triggered = False
+        # Handoff is the orchestrator's responsibility — only trip the
+        # flag when GPT+rules genuinely decided to escalate (we never
+        # promote a keyword guess to a handoff at this layer anymore).
+        handoff_triggered = bool(
+            (orch_result.get("decision") or {}).get("action") == "handoff"
+        )
         logger.info(
-            "[AISales] Orchestrator response used | tenant=%s model=%s fact_guard_modified=%s",
-            tenant_id,
+            "[AISales] orchestrator_used=true | tenant=%s intent=%s "
+            "rules_conf=%.2f model=%s fact_guard_modified=%s handoff=%s",
+            tenant_id, intent, confidence,
             orch_result.get("model_used", "?"),
             orch_result.get("fact_guard", {}).get("was_modified", False),
+            handoff_triggered,
         )
     else:
+        # Orchestrator could not produce a reply — fall back to the
+        # keyword pipeline so the customer never gets dead silence.
+        logger.info(
+            "[AISales] orchestrator_used=false | tenant=%s intent=%s rules_conf=%.2f "
+            "fallback=keyword reason=orchestrator_empty_or_failed",
+            tenant_id, intent, confidence,
+        )
         if confidence < threshold and intent not in ("general",):
             response_text = (
                 f"مرحباً {cust_name}! 😊 لم أفهم طلبك تماماً.\n"
