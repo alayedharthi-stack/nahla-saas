@@ -325,6 +325,33 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     ).all():
         active_handoffs[_norm(row.customer_phone)] = row.handoff_reason or "unknown"
 
+    # Tenant-level blocklist — pre-load once so the per-row classifier
+    # never re-queries the tenant on every conversation.
+    from core.ai_pause_guard import (  # noqa: PLC0415
+        _digits as _ai_digits,
+        list_blocked_numbers as _list_blocked,
+    )
+    _blocked_digits: set[str] = set()
+    try:
+        for raw in _list_blocked(db, tenant_id):
+            d = _ai_digits(raw)
+            if d:
+                _blocked_digits.add(d)
+    except Exception as exc:
+        _log.debug("[list_conversations] blocklist load failed tenant=%s: %s", tenant_id, exc)
+
+    def _is_phone_blocked(phone: str) -> bool:
+        d = _ai_digits(phone)
+        if not d:
+            return False
+        if d in _blocked_digits:
+            return True
+        suffix = d[-9:] if len(d) >= 9 else d
+        for entry in _blocked_digits:
+            if entry == d or entry.endswith(suffix):
+                return True
+        return False
+
     from datetime import timedelta  # noqa: PLC0415
     from models import WaConversationWindow  # noqa: PLC0415
     _window_cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -417,6 +444,14 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                     prev["takenOverAt"] = convo.taken_over_at.isoformat()
                 if getattr(convo, "taken_over_by", None) and not prev.get("takenOverBy"):
                     prev["takenOverBy"] = convo.taken_over_by
+            # If ANY sibling row matches the blocklist, the merged
+            # display row is blocked.
+            if _is_phone_blocked(phone) or (
+                bool(getattr(convo, "ai_paused", False))
+                and (getattr(convo, "ai_paused_reason", None) or "") == "internal_number"
+            ):
+                prev["isBlocked"] = True
+                prev["isAI"] = False
             prev_has_name = prev["customer"] and prev["customer"] != prev["phone"]
             if name and not prev_has_name:
                 phone_info.pop(existing_key)
@@ -429,6 +464,15 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
 
         ai_paused_now = bool(getattr(convo, "ai_paused", False))
         needs_human_now = _is_human_takeover(convo) or n in active_handoffs
+        # ``isBlocked`` is true when the phone matches the tenant's
+        # blocklist OR the conversation is paused with the
+        # ``internal_number`` reason (legacy rows that pre-date the
+        # blocklist persistence). It's mutually-exclusive with the
+        # human and "paused only" filters at the frontend level.
+        is_blocked_now = _is_phone_blocked(phone) or (
+            ai_paused_now
+            and (getattr(convo, "ai_paused_reason", None) or "") == "internal_number"
+        )
         display_name = name or phone
         phone_info[phone] = {
             "id": str(convo.id),
@@ -436,7 +480,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "phone": phone,
             "lastMsg": "",
             "time": "",
-            "isAI": status != "human" and not ai_paused_now and not needs_human_now,
+            "isAI": status != "human" and not ai_paused_now and not needs_human_now and not is_blocked_now,
             "status": status,
             "unread": 0,
             "lastMsgType": "",
@@ -457,6 +501,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 if getattr(convo, "taken_over_at", None) else None
             ),
             "takenOverBy": getattr(convo, "taken_over_by", None),
+            "isBlocked": is_blocked_now,
             "_conv_id": convo.id,
         }
         norm_to_key[n] = phone
@@ -624,6 +669,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 "aiPaused": False,
                 "aiPausedReason": None,
                 "aiPausedAt": None,
+                "isBlocked": _is_phone_blocked(phone),
                 "_conv_id": None,
             }
 

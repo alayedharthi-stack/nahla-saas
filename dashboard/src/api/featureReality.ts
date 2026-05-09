@@ -270,6 +270,10 @@ export interface DashboardConversation {
   handoffActive?: boolean
   takenOverAt?: string | null
   takenOverBy?: string | null
+  // Blocked-number signal — the phone is on the tenant's blocklist
+  // (or paused with reason='internal_number'). Mutually exclusive
+  // with the human and "paused only" filters at the UI level.
+  isBlocked?: boolean
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'

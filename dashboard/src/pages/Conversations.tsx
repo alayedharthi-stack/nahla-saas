@@ -29,6 +29,8 @@ const filterLabels: Record<string, string> = {
   active:       'نشطة',
   human:        'بشري',
   agent_req:    'طلب موظف',
+  paused:       'متوقف الذكاء',
+  blocked:      'محظور',
   unsubscribed: 'ألغى الاشتراك',
   closed:       'مغلقة',
 }
@@ -38,7 +40,7 @@ export default function Conversations() {
   const requestedPhone = searchParams.get('phone')?.trim() || null
 
   const [selected, setSelected]     = useState<Conversation | null>(null)
-  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'unsubscribed' | 'closed'>('all')
+  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'unsubscribed' | 'closed'>('all')
   const [reply, setReply]           = useState('')
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -330,25 +332,48 @@ export default function Conversations() {
         aiPausedReason: 'internal_number',
         aiPausedAt: new Date().toISOString(),
       })
+      _optimisticUpdate(selected.phone, { isBlocked: true })
       await loadList()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر حظر الرقم')
     }
   }
 
+  // ── Three mutually-exclusive operational filters ──────────────
+  // Priority order: blocked > human > paused. A blocked phone never
+  // appears under "human" or "paused"; a human takeover never
+  // appears under "paused". This matches the merchant's mental model
+  // ("each conversation is in exactly ONE operational state").
+
+  // "محظور": phone is on the tenant blocklist (server-resolved) or
+  // paused with the legacy ``internal_number`` reason.
+  const _isBlocked = (c: DashboardConversation) =>
+    !!c.isBlocked || c.aiPausedReason === 'internal_number'
+
   // "بشري": unified — the conversation is owned by a human right now.
   // ONLY driven by the explicit human-state columns (needs_human,
-  // handoff_active, status='human'). NOT influenced by ``aiPaused`` —
-  // a manual pause is a different UX path and must not appear here.
+  // handoff_active, status='human'). NOT influenced by ``aiPaused``.
+  // Excludes blocked rows so the filters stay disjoint.
   const _isHumanResponding = (c: DashboardConversation) => {
+    if (_isBlocked(c)) return false
     if (c.needsHuman) return true
     if (c.handoffActive) return true
     if (c.status === 'human') return true
     return false
   }
-  // "يطلب موظف": same surface as above EXCEPT we still treat it as
-  // pending until a human has actually replied. Used for the small
-  // "agent_req" tab (kept for backwards-compat of the existing pill).
+
+  // "متوقف الذكاء": AI is paused but it's NOT a human takeover and
+  // NOT a blocked number. Catches every soft-pause reason
+  // (manual_pause, bot_loop_detected, rate_limit, system pauses…).
+  const _isAIPausedOnly = (c: DashboardConversation) => {
+    if (!c.aiPaused) return false
+    if (_isBlocked(c)) return false
+    if (_isHumanResponding(c)) return false
+    return true
+  }
+
+  // "يطلب موظف": a takeover that hasn't received a manual reply yet.
+  // Kept for backwards-compat of the existing pill in the screenshot.
   const _isAwaitingAgent = (c: DashboardConversation) =>
     _isHumanResponding(c) && c.lastMsgType !== 'manual'
 
@@ -361,6 +386,8 @@ export default function Conversations() {
     else if (filter === 'active') matchFilter = c.windowOpen === true && !_isUnsubscribed(c)
     else if (filter === 'human') matchFilter = _isHumanResponding(c)
     else if (filter === 'agent_req') matchFilter = _isAwaitingAgent(c)
+    else if (filter === 'paused') matchFilter = _isAIPausedOnly(c)
+    else if (filter === 'blocked') matchFilter = _isBlocked(c)
     else if (filter === 'unsubscribed') matchFilter = _isUnsubscribed(c)
     else if (filter === 'closed') matchFilter = c.windowOpen === false
     const matchSearch = !searchQuery || c.customer.includes(searchQuery) || c.phone.includes(searchQuery)
@@ -420,27 +447,35 @@ export default function Conversations() {
 
         {/* Filter tabs */}
         <div className="flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
-          {(['all', 'active', 'human', 'agent_req', 'unsubscribed', 'closed'] as const).map((f) => {
+          {(['all', 'active', 'human', 'agent_req', 'paused', 'blocked', 'unsubscribed', 'closed'] as const).map((f) => {
             const count = f === 'all' ? 0
               : f === 'active' ? conversations.filter(c => c.windowOpen === true && !_isUnsubscribed(c)).length
               : f === 'human' ? conversations.filter(c => _isHumanResponding(c)).length
               : f === 'agent_req' ? conversations.filter(c => _isAwaitingAgent(c)).length
+              : f === 'paused' ? conversations.filter(c => _isAIPausedOnly(c)).length
+              : f === 'blocked' ? conversations.filter(c => _isBlocked(c)).length
               : f === 'unsubscribed' ? conversations.filter(c => _isUnsubscribed(c)).length
               : conversations.filter(c => c.windowOpen === false).length
 
             const activeClass =
               f === 'agent_req'    ? 'bg-red-500 text-white shadow-sm' :
+              f === 'paused'       ? 'bg-amber-500 text-white shadow-sm' :
+              f === 'blocked'      ? 'bg-rose-600 text-white shadow-sm' :
               f === 'unsubscribed' ? 'bg-slate-600 text-white shadow-sm' :
               'bg-brand-500 text-white shadow-sm'
 
             const inactiveClass =
               f === 'agent_req' && count > 0    ? 'text-red-600 bg-red-50 hover:bg-red-100' :
+              f === 'paused' && count > 0       ? 'text-amber-700 bg-amber-50 hover:bg-amber-100' :
+              f === 'blocked' && count > 0      ? 'text-rose-700 bg-rose-50 hover:bg-rose-100' :
               f === 'unsubscribed' && count > 0 ? 'text-slate-600 bg-slate-100 hover:bg-slate-200' :
               'text-slate-500 hover:bg-slate-100'
 
             const countClass =
               filter === f ? 'text-white/70' :
               f === 'agent_req' ? 'text-red-400' :
+              f === 'paused' ? 'text-amber-500' :
+              f === 'blocked' ? 'text-rose-500' :
               f === 'unsubscribed' ? 'text-slate-500' :
               'text-slate-400'
 
@@ -453,6 +488,8 @@ export default function Conversations() {
                 }`}
               >
                 {f === 'unsubscribed' && <BellOff className="inline w-3 h-3 me-1 opacity-70" />}
+                {f === 'paused' && <Pause className="inline w-3 h-3 me-1 opacity-70" />}
+                {f === 'blocked' && <Ban className="inline w-3 h-3 me-1 opacity-70" />}
                 {filterLabels[f]}
                 {f !== 'all' && count > 0 && (
                   <span className={`ms-1 ${countClass}`}>{count}</span>
