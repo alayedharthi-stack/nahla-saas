@@ -2,12 +2,49 @@
 // All dashboard API modules import apiCall from here so the auth token
 // is automatically attached to every request.
 
-import { getToken, getTenantId, logout } from '../auth'
+import { getToken, getTenantId, logout, getApiBase } from '../auth'
 
-// In production the frontend talks directly to the backend domain.
-// This avoids nginx acting as a proxy (which caused POST failures on Railway Edge).
-// CORS on the backend already allows https://api.nahlah.ai as origin.
-export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://api.nahlah.ai'
+const DEFAULT_FETCH_TIMEOUT_MS = 25_000
+
+/** Combines timeout + caller AbortSignal (either abort aborts the request). */
+function combinedAbortSignals(timeoutMs: number, userSignal?: AbortSignal | null): AbortSignal {
+  const timeoutSig =
+    typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(timeoutMs)
+      : (() => {
+          const c = new AbortController()
+          setTimeout(() => c.abort(), timeoutMs)
+          return c.signal
+        })()
+  if (!userSignal) return timeoutSig
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([timeoutSig, userSignal])
+  }
+  const merged = new AbortController()
+  const forward = () => {
+    try {
+      merged.abort()
+    } catch {
+      /* noop */
+    }
+  }
+  if (timeoutSig.aborted || userSignal.aborted) {
+    forward()
+    return merged.signal
+  }
+  timeoutSig.addEventListener('abort', forward, { once: true })
+  userSignal.addEventListener('abort', forward, { once: true })
+  return merged.signal
+}
+
+/**
+ * Coerces to string via toString/valueOf so legacy `${API_BASE}/path` keeps working
+ * while always resolving the current getApiBase() (matches auth + localStorage).
+ */
+export const API_BASE = {
+  toString: () => getApiBase(),
+  valueOf: () => getApiBase(),
+} as unknown as string
 
 // Error codes that mean the session is truly invalid and the user must re-login.
 // Do NOT logout on every 401 — some endpoints may return 401 for reasons unrelated
@@ -25,25 +62,34 @@ function classifyNetworkError(error: unknown): string {
   if (lowered.includes('failed to fetch') || lowered.includes('load failed') || lowered.includes('networkerror')) {
     return 'تعذر الوصول إلى الخادم. قد يكون السبب CORS أو انقطاع الشبكة أو خطأ مؤقت في API.'
   }
+  if (lowered.includes('abort') || (error instanceof DOMException && error.name === 'AbortError')) {
+    return `انتهت مهلة الطلب (${DEFAULT_FETCH_TIMEOUT_MS / 1000}s). تحقق من الخادم أو الشبكة.`
+  }
   return msg || 'حدث خطأ غير متوقع أثناء الاتصال بالخادم.'
 }
 
 export async function apiCall<T>(path: string, options?: RequestInit): Promise<T> {
   const token    = getToken()
   const tenantId = getTenantId()
+  const base     = getApiBase()
+  const url      = `${base}${path}`
+
+  const signal = combinedAbortSignals(DEFAULT_FETCH_TIMEOUT_MS, options?.signal)
 
   let res: Response
   try {
-    res = await fetch(`${API_BASE}${path}`, {
+    const { signal: _omit, headers: optHeaders, ...rest } = options ?? {}
+    res = await fetch(url, {
       cache: 'no-store',
       mode: 'cors',
+      signal,
       headers: {
         'Content-Type': 'application/json',
         ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(options?.headers ?? {}),
+        ...(optHeaders ?? {}),
       },
-      ...options,
+      ...rest,
     })
   } catch (error) {
     throw new Error(classifyNetworkError(error))
@@ -80,6 +126,8 @@ export async function apiCall<T>(path: string, options?: RequestInit): Promise<T
     const code = body?.code ?? body?.detail?.code ?? ''
 
     if (SESSION_EXPIRED_CODES.has(code)) {
+      // eslint-disable-next-line no-console
+      console.warn('[auth] session invalid / refresh — forcing logout', { code, url })
       logout()
       window.location.href = '/login'
       throw new Error('انتهت صلاحية الجلسة — يرجى تسجيل الدخول مجدداً')

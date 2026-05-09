@@ -1,6 +1,9 @@
+import { useEffect } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import {
+  getApiBase,
   getRole,
+  getTenantId,
   getToken,
   isAuthenticated,
   isImpersonating,
@@ -31,6 +34,16 @@ function isOwnerAllowedPath(pathname: string): boolean {
 
 export default function ProtectedRoute({ children }: { children: ReactNode }) {
   const location = useLocation()
+
+  useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.info('[auth] session bootstrap', {
+      pathname: location.pathname,
+      role:     getRole(),
+      tenantId: getTenantId(),
+      apiBase:  getApiBase(),
+    })
+  }, [location.pathname])
 
   // Both conditions must be true: the auth flag AND a non-empty JWT token.
   // A missing token means the session is from the pre-JWT era — force re-login.

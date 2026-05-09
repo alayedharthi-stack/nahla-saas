@@ -113,7 +113,7 @@ async def auth_ping(request: Request) -> Dict[str, Any]:
     }
 
 
-async def _auth_login_impl(
+def _auth_login_impl(
     *,
     raw_email: str,
     raw_password: str,
@@ -167,13 +167,11 @@ async def _auth_login_impl(
             bool(user and getattr(user, "password_hash", None)),
         )
         if user and getattr(user, "password_hash", None):
-            # bcrypt is CPU-bound (deliberately ~50–200 ms per call). Running
-            # it inline in this async handler blocks the event loop, which
-            # under any concurrent traffic delays /healthz, /auth/login, and
-            # webhook acks. asyncio.to_thread punts the work to the default
-            # thread executor so the loop stays free.
-            import asyncio as _asyncio  # noqa: PLC0415
-            if await _asyncio.to_thread(verify_password, raw_password, user.password_hash):
+            # bcrypt is CPU-bound (~50–200 ms). This handler is a normal ``def``
+            # route so Starlette runs it in a thread pool — sync DB + bcrypt do
+            # NOT block the asyncio event loop (unlike running them inside
+            # ``async def``, which would freeze ping/webhooks under DB stalls).
+            if verify_password(raw_password, user.password_hash):
                 role = user.role or "merchant"
                 logger.info("[AUTH LOGIN] password verified email=%s role=%s", email, role)
 
@@ -279,9 +277,9 @@ async def _auth_login_impl(
 #                    endpoint first when configured to do so.
 
 @router.post("/auth/login")
-async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     """JSON login (preflight-required). See _auth_login_impl docstring."""
-    return await _auth_login_impl(
+    return _auth_login_impl(
         raw_email=body.email,
         raw_password=body.password,
         request=request,
@@ -291,7 +289,7 @@ async def auth_login(body: LoginIn, request: Request, db: Session = Depends(get_
 
 
 @router.post("/auth/login-form")
-async def auth_login_form(
+def auth_login_form(
     request: Request,
     email:    str = Form(...),
     password: str = Form(...),
@@ -306,7 +304,7 @@ async def auth_login_form(
     OPTIONS preflight first. This is the path used by the dashboard
     when the JSON preflight is blocked upstream of the application.
     """
-    return await _auth_login_impl(
+    return _auth_login_impl(
         raw_email=email,
         raw_password=password,
         request=request,

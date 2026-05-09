@@ -6,7 +6,7 @@ import TrialBanner from '../ui/TrialBanner'
 import ImpersonationBanner from '../ui/ImpersonationBanner'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
-import { API_BASE } from '../../api/client'
+import { getApiBase } from '../../auth'
 import { X } from 'lucide-react'
 
 // ── Countdown hook ────────────────────────────────────────────────────────────
@@ -50,11 +50,19 @@ function SupportAccessWarningBanner() {
   const countdown = useCountdown(access?.enabled ? (access?.expires_at ?? null) : null)
 
   const load = useCallback(async () => {
+    let tid: ReturnType<typeof setTimeout> | undefined
     try {
       const token = localStorage.getItem('nahla_token') ?? ''
       if (!token) return
-      const res = await fetch(`${API_BASE}/merchant/support-access`, {
+      const base = getApiBase()
+      const url = `${base}/merchant/support-access`
+      const ctrl = new AbortController()
+      tid = setTimeout(() => ctrl.abort(), 25_000)
+      // eslint-disable-next-line no-console
+      console.info('[auth] tenant bootstrap (support-access)', { url })
+      const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: ctrl.signal,
       })
       if (res.ok) {
         const data = await res.json()
@@ -63,6 +71,9 @@ function SupportAccessWarningBanner() {
         if (!data.enabled) setDismissed(false)
       }
     } catch { /* ignore */ }
+    finally {
+      if (tid !== undefined) clearTimeout(tid)
+    }
   }, [])
 
   useEffect(() => {

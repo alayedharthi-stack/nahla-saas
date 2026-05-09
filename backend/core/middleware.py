@@ -38,6 +38,7 @@ ULTRA_LIGHT_PATHS = frozenset({
     "/alive",
     "/healthz",
     "/auth/ping",
+    "/auth/login",        # JSON login — same DB/hot path as login-form
     "/auth/login-form",   # form-encoded login (no preflight); must
                           # stay snappy when the JSON path is blocked
 })

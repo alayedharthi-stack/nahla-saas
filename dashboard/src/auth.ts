@@ -3,17 +3,37 @@
 // Resolution order (first wins):
 //   1. localStorage["nahla_api_base_override"] — runtime override set
 //      by the diagnostics panel on the login page. Lets the operator
-//      switch to the Railway-generated domain
-//      (https://nahla-saas-production.up.railway.app) without a
-//      frontend rebuild when the custom domain edge is broken.
-//   2. import.meta.env.VITE_API_BASE  — build-time env from Railway.
-//   3. https://api.nahlah.ai          — the production default.
+//      switch to the Railway-generated domain without a frontend rebuild
+//      when the custom domain edge is broken.
+//   2. Build-time env (first non-empty):
+//        VITE_API_BASE, VITE_API_BASE_URL, VITE_API_URL,
+//        NEXT_PUBLIC_API_URL, REACT_APP_API_URL
+//   3. Default host — temporarily the Railway service URL while
+//      api.nahlah.ai is unreliable; override via env for other environments.
 //
-// We log the resolved base URL at module load so that a wrong build
-// (relative path, wrong env var, stale localStorage override) is
-// obvious in the browser console before the user even attempts to
-// log in.
+// getApiBase() re-reads override + env on every call so api/client.ts and
+// auth stay aligned after localStorage changes (still reload after toggling
+// override so existing bundles pick up the new host consistently).
 const _OVERRIDE_KEY = 'nahla_api_base_override'
+
+/** Temporary production default when no env is set — Railway direct URL. */
+const _DEFAULT_API_BASE = 'https://nahla-saas-production.up.railway.app'
+
+function _trimEnv(key: string): string {
+  const v = import.meta.env[key] as string | undefined
+  return v ? String(v).trim() : ''
+}
+
+function _envApiBase(): string {
+  return (
+    _trimEnv('VITE_API_BASE') ||
+    _trimEnv('VITE_API_BASE_URL') ||
+    _trimEnv('VITE_API_URL') ||
+    _trimEnv('NEXT_PUBLIC_API_URL') ||
+    _trimEnv('REACT_APP_API_URL') ||
+    ''
+  ).replace(/\/+$/, '')
+}
 
 function _readApiBase(): string {
   if (typeof window !== 'undefined') {
@@ -22,14 +42,24 @@ function _readApiBase(): string {
       if (ovr && /^https?:\/\//.test(ovr)) return ovr.replace(/\/+$/, '')
     } catch { /* private mode etc. */ }
   }
-  const env = (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
-  return (env || 'https://api.nahlah.ai').replace(/\/+$/, '')
+  const env = _envApiBase()
+  return (env || _DEFAULT_API_BASE).replace(/\/+$/, '')
 }
 
-const API_BASE = _readApiBase()
 if (typeof window !== 'undefined') {
   // eslint-disable-next-line no-console
-  console.info('[auth] API_BASE =', API_BASE)
+  console.info('[auth] API_BASE (initial) =', _readApiBase())
+}
+
+/** True when localStorage override is active (operator diagnostics panel). */
+export function hasRuntimeApiBaseOverride(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    const ovr = window.localStorage.getItem(_OVERRIDE_KEY)
+    return !!(ovr && /^https?:\/\//.test(ovr))
+  } catch {
+    return false
+  }
 }
 
 /** Runtime API_BASE override — used by the login-page diagnostics panel. */
@@ -44,7 +74,7 @@ export function setApiBaseOverride(url: string | null): void {
 }
 
 export function getApiBase(): string {
-  return API_BASE
+  return _readApiBase()
 }
 
 /**
@@ -85,7 +115,7 @@ export async function clearServiceWorkersAndCaches(): Promise<{ swCount: number;
  */
 export async function pingAuth(): Promise<{ ok: boolean; status: number; body: unknown; durationMs: number; error?: string }> {
   const start = performance.now()
-  const url   = `${API_BASE}/auth/ping`
+  const url   = `${getApiBase()}/auth/ping`
   const controller = new AbortController()
   const timeoutId  = setTimeout(() => controller.abort(), 8_000)
   try {
@@ -194,7 +224,7 @@ async function _loginAttempt(
   timeoutMs: number,
 ): Promise<LoginResult> {
   const path = transport === 'form' ? '/auth/login-form' : '/auth/login'
-  const url = `${API_BASE}${path}`
+  const url = `${getApiBase()}${path}`
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
   const start = performance.now()
@@ -293,6 +323,8 @@ async function _loginAttempt(
  * (`unauthorized`, `http`, `parse`) are returned as-is.
  */
 export async function loginDetailed(email: string, password: string): Promise<LoginResult> {
+  // eslint-disable-next-line no-console
+  console.info('[auth] loginDetailed start', { apiBase: getApiBase() })
   // 1) Form transport (no preflight) — this is the path that should
   //    always succeed once the backend `/auth/login-form` endpoint is
   //    deployed.
@@ -466,11 +498,22 @@ export async function register(
   inviteToken: string = '',
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${API_BASE}/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, store_name: storeName, phone, invite_token: inviteToken }),
-    })
+    const ctrl = new AbortController()
+    const tid = setTimeout(() => ctrl.abort(), 25_000)
+    let res: Response
+    try {
+      res = await fetch(`${getApiBase()}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, store_name: storeName, phone, invite_token: inviteToken }),
+        signal: ctrl.signal,
+        cache: 'no-store',
+        mode: 'cors',
+        credentials: 'omit',
+      })
+    } finally {
+      clearTimeout(tid)
+    }
     const data = await res.json()
     if (!res.ok) return { ok: false, error: data.detail ?? 'فشل التسجيل' }
     _persistSession(data.access_token ?? '', {

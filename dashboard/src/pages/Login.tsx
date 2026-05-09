@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom'
 import { Eye, EyeOff, AlertCircle, Loader2, ArrowRight } from 'lucide-react'
 import {
   loginDetailed, getDefaultRoute, pingAuth,
-  getApiBase, setApiBaseOverride, clearServiceWorkersAndCaches,
+  getApiBase, hasRuntimeApiBaseOverride, setApiBaseOverride, clearServiceWorkersAndCaches,
 } from '../auth'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
@@ -35,7 +35,8 @@ export default function Login() {
   // Visible to the operator on the page itself (not just DevTools).
   // Refreshed on mount and after each user-triggered "Recheck".
   const [diagOpen, setDiagOpen] = useState(false)
-  const [apiBase,  setApiBase]  = useState<string>(getApiBase())
+  const apiBase = getApiBase()
+  const usingOverride = hasRuntimeApiBaseOverride()
   const [ping,     setPing]     = useState<PingState | null>(null)
   const [pinging,  setPinging]  = useState(false)
   const [swStatus, setSwStatus] = useState<string>('')
@@ -96,11 +97,10 @@ export default function Login() {
       : `Cleared ${r.swCount} SW + ${r.cacheCount} caches. Please reload.`)
   }
 
-  const usingOverride = apiBase !== 'https://api.nahlah.ai' &&
-                        apiBase !== (import.meta.env.VITE_API_BASE ?? '')
-
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
+    // eslint-disable-next-line no-console
+    console.info('[auth] login submit', { apiBase: getApiBase() })
     setError('')
     setLoading(true)
     try {
