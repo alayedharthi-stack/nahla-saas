@@ -31,6 +31,7 @@ from models import MessageEvent, WhatsAppConnection
 from core.config import (
     ANTHROPIC_API_KEY,
     CLAUDE_MODEL,
+    MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK,
     MERCHANT_BRAIN_ENABLED,
     MERCHANT_BRAIN_TENANT_IDS,
     ORCHESTRATOR_URL,
@@ -2202,8 +2203,27 @@ async def _handle_merchant_message(
     """
     For merchant tenants (tenant_id > 1): reply using the store's own AI context.
     Bypasses the platform sales engine (intent/stage/decision) entirely.
+
+    INVARIANT: this handler is only ever invoked from the WhatsApp webhook
+    in response to an actual inbound customer message. It must NEVER be
+    used to start a conversation. Background automations (campaigns,
+    cart recovery, COD confirmations, payment reminders) have their own
+    dedicated paths that emit pre-approved templates / canned copy and
+    never enter this conversational pipeline.
     """
-    logger.info("[Merchant] tenant=%s from=%s text_snippet=%s", tenant_id, to, text[:60])
+    if not (text or "").strip():
+        # Hard guard: refuse to spend tokens / send replies on empty
+        # inbound. Empty body usually means the upstream parser failed
+        # to extract text from a non-text message type.
+        logger.info(
+            "[Merchant] DROPPED empty inbound — no reply generated | tenant=%s to=%s",
+            tenant_id, to,
+        )
+        return
+    logger.info(
+        "[Merchant/INBOUND_TRIGGER] tenant=%s from=%s direction=inbound text_len=%d snippet=%r",
+        tenant_id, to, len(text or ""), (text or "")[:60],
+    )
 
     # ── COD reply interception ────────────────────────────────────────────────
     # Some WhatsApp clients render QUICK_REPLY taps as plain text rather
@@ -2467,6 +2487,51 @@ async def _handle_merchant_message(
                         logger.warning("[ORDER FLOW] lease reset failed: %s", _lease_exc)
                 # Fall through to Brain pipeline below — DO NOT return.
             else:
+                # Handoff notice cooldown — never re-send the same
+                # acknowledgement within HANDOFF_NOTICE_COOLDOWN_SEC even
+                # if the upstream pause flag was cleared by a different
+                # code path. This is belt-and-suspenders on top of the
+                # ai_pause_guard so a brief race can't replay the line.
+                _HANDOFF_COOLDOWN_SEC = 1800  # 30 min
+                _last_at = None
+                try:
+                    _meta = (convo.extra_metadata or {}) if convo is not None else {}
+                    _raw = _meta.get("last_handoff_notice_at") if isinstance(_meta, dict) else None
+                    if _raw:
+                        from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+                        _dt_parsed = _dt.fromisoformat(str(_raw))
+                        if _dt_parsed.tzinfo is None:
+                            _dt_parsed = _dt_parsed.replace(tzinfo=_tz.utc)
+                        _last_at = _dt_parsed
+                except Exception:
+                    _last_at = None
+                from datetime import datetime as _dt2, timezone as _tz2  # noqa: PLC0415
+                _now_utc = _dt2.now(_tz2.utc)
+                _within_cooldown = (
+                    _last_at is not None
+                    and (_now_utc - _last_at).total_seconds() < _HANDOFF_COOLDOWN_SEC
+                )
+                if _within_cooldown:
+                    logger.info(
+                        "[HANDOFF_DEDUP] skip handoff notice — within cooldown | "
+                        "tenant=%s to=%s last_at=%s seconds_since=%d",
+                        tenant_id, to, _last_at,
+                        int((_now_utc - _last_at).total_seconds()),
+                    )
+                    # Still ensure AI stays paused so subsequent inbound
+                    # turns don't loop back into this branch.
+                    try:
+                        from core.ai_pause_guard import pause_ai as _pause_ai, REASON_HUMAN_HANDOFF as _R_HOFF  # noqa: PLC0415
+                        _pause_ai(db, convo, reason=_R_HOFF, by="system:human_handoff")
+                    except Exception as _hoff_exc:
+                        logger.debug("[ai_pause] handoff pause failed: %s", _hoff_exc)
+                    logger.info(
+                        "[OUTBOUND] tenant=%s to=%s source=handoff_dedup trigger=inbound "
+                        "intent=human_handoff handoff_triggered=true dedup_blocked=true reply_len=0",
+                        tenant_id, to,
+                    )
+                    return
+
                 reply = (
                     "وصلت رسالتك. تم تحويل المحادثة لفريق المتجر، "
                     "وسيرد عليك أحد الموظفين في أقرب وقت."
@@ -2481,6 +2546,18 @@ async def _handle_merchant_message(
                 )
                 if _send_ok:
                     logger.info("[TRACE][5/6] HUMAN_HANDOFF_ACK_SENT | tenant=%s to=%s", tenant_id, to)
+                    # Stamp the cooldown marker so duplicate webhook
+                    # deliveries / racing turns don't replay the line.
+                    try:
+                        _new_meta = dict(convo.extra_metadata or {})
+                        _new_meta["last_handoff_notice_at"] = _now_utc.isoformat()
+                        convo.extra_metadata = _new_meta
+                        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                        flag_modified(convo, "extra_metadata")
+                        db.add(convo)
+                        db.flush()
+                    except Exception as _stamp_exc:
+                        logger.debug("[handoff] cooldown stamp failed: %s", _stamp_exc)
                 else:
                     logger.error("[TRACE][5/6] HUMAN_HANDOFF_ACK_SEND_FAILED | tenant=%s to=%s", tenant_id, to)
                 # Pause AI for this conversation so subsequent inbound
@@ -2490,6 +2567,12 @@ async def _handle_merchant_message(
                     _pause_ai(db, convo, reason=_R_HOFF, by="system:human_handoff")
                 except Exception as _hoff_exc:
                     logger.debug("[ai_pause] handoff pause failed: %s", _hoff_exc)
+                logger.info(
+                    "[OUTBOUND] tenant=%s to=%s source=support_escalation trigger=inbound "
+                    "intent=human_handoff handoff_triggered=true dedup_blocked=false "
+                    "reply_len=%d",
+                    tenant_id, to, len(reply),
+                )
                 return
 
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
@@ -2663,20 +2746,86 @@ async def _handle_merchant_message(
                                 "[Merchant/Brain] handoff session created for tenant=%s to=%s",
                                 tenant_id, to,
                             )
+                            # Pause AI so subsequent inbounds don't keep
+                            # producing brain handoff replies. Mirrors the
+                            # support-escalation branch's behaviour.
+                            try:
+                                from core.ai_pause_guard import (  # noqa: PLC0415
+                                    pause_ai as _pause_ai,
+                                    REASON_HUMAN_HANDOFF as _R_HOFF,
+                                )
+                                _pause_ai(db, convo, reason=_R_HOFF, by="brain:handoff")
+                            except Exception as _ph_exc:
+                                logger.debug("[ai_pause] brain handoff pause failed: %s", _ph_exc)
                     except Exception as ho_exc:
                         logger.error("[Merchant/Brain] failed to create handoff session: %s", ho_exc)
 
                 logger.info("[Merchant/Brain] replied tenant=%s to=%s buttons=%d handoff=%s",
                             tenant_id, to, len(_brain_buttons), _brain_handoff)
             except Exception as brain_exc:
-                logger.error("[Merchant/Brain] Brain pipeline failed: %s — falling back to legacy", brain_exc)
-                MERCHANT_BRAIN_ENABLED_FALLBACK = True
+                if MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK:
+                    logger.error(
+                        "[Merchant/Brain] Brain pipeline failed: %s — falling back to legacy "
+                        "(MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true)",
+                        brain_exc,
+                    )
+                    MERCHANT_BRAIN_ENABLED_FALLBACK = True
+                else:
+                    # Brain is the only sanctioned conversational path. We
+                    # send a single safe canned reply and stop instead of
+                    # routing the customer through the unprotected legacy
+                    # LLM (no intent/dedup/handoff guards).
+                    logger.error(
+                        "[Merchant/Brain] Brain pipeline failed: %s — sending canned safe reply, "
+                        "legacy fallback DISABLED (set MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true to re-enable)",
+                        brain_exc,
+                    )
+                    _safe_reply = (
+                        "وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت من فريق المتجر."
+                    )
+                    StateManager.save_message(
+                        db, to, _safe_reply, "outbound",
+                        conversation_id=convo.id, tenant_id=tenant_id,
+                    )
+                    try:
+                        await _send_whatsapp_message(
+                            phone_id=phone_id, to=to, text=_safe_reply,
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                    except Exception as _safe_exc:
+                        logger.error(
+                            "[Merchant/Brain] safe-reply send failed tenant=%s to=%s: %s",
+                            tenant_id, to, _safe_exc,
+                        )
+                    logger.info(
+                        "[OUTBOUND] tenant=%s to=%s source=brain_canned_safe trigger=inbound "
+                        "intent=brain_failed handoff_triggered=false dedup_blocked=false reply_len=%d",
+                        tenant_id, to, len(_safe_reply),
+                    )
+                    return
             else:
                 MERCHANT_BRAIN_ENABLED_FALLBACK = False
         else:
             MERCHANT_BRAIN_ENABLED_FALLBACK = True
 
         # ── Legacy path (original generate_ai_reply) ──────────────────────────
+        # Only entered when explicitly opted-in via
+        # MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true (debug only) OR when
+        # the Brain is disabled for this tenant. New tenants never see
+        # legacy behaviour because Brain is global-default-true.
+        if (not _brain_active or MERCHANT_BRAIN_ENABLED_FALLBACK) and not MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK and _brain_active:
+            # Defensive: brain_active path SHOULD have returned above on
+            # failure. If we land here with brain_active=true and
+            # legacy_fallback=true the explicit opt-in is missing — log
+            # loudly and bail with a safe canned reply.
+            logger.critical(
+                "[Merchant/LegacyGuard] would have entered legacy path but "
+                "MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=false — sending canned reply | "
+                "tenant=%s to=%s",
+                tenant_id, to,
+            )
+            return
+
         if not _brain_active or MERCHANT_BRAIN_ENABLED_FALLBACK:
             messages: list = []
             for turn in history[-15:]:
@@ -2830,6 +2979,15 @@ async def _handle_merchant_message(
         if _send_ok:
             logger.info("[TRACE][5/6] MERCHANT_AI_SENT | tenant=%s to=%s", tenant_id, to)
             logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
+            logger.info(
+                "[OUTBOUND] tenant=%s to=%s source=%s trigger=inbound "
+                "intent=merchant_reply handoff_triggered=%s dedup_blocked=false "
+                "buttons=%d reply_len=%d",
+                tenant_id, to,
+                "brain" if (_brain_active and not MERCHANT_BRAIN_ENABLED_FALLBACK) else "legacy",
+                str(bool(_brain_handoff)).lower(),
+                len(_brain_buttons or []), len(reply or ""),
+            )
             # Increment per-contact rate counters; auto-pause if cap exceeded.
             try:
                 from core.ai_pause_guard import after_ai_reply as _after_ai_reply  # noqa: PLC0415

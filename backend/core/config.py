@@ -344,7 +344,16 @@ LEARNED_POLICY_BIAS_ALLOW_RECOMMENDATION_STYLE = (
 
 # ── Merchant Brain (Phase 1 Commerce Decision Engine) ──────────────────────────
 # Global flag — activates Brain for ALL merchant tenants when true.
-MERCHANT_BRAIN_ENABLED = os.environ.get("MERCHANT_BRAIN_ENABLED", "false").lower() == "true"
+#
+# Default flipped to "true" because the Brain path is the only one with
+# proper intent classification, greeting/identity templates, dedup
+# guards, and stage-aware routing. The legacy LLM path has none of
+# these protections — leaving it as the default produced regressions:
+# bots that re-greeted on every turn, ignored "من أنت" / "السلام
+# عليكم", and repeated automation messages verbatim. An operator who
+# explicitly wants the legacy fallback can still set
+# MERCHANT_BRAIN_ENABLED=false at deploy time.
+MERCHANT_BRAIN_ENABLED = os.environ.get("MERCHANT_BRAIN_ENABLED", "true").lower() == "true"
 
 # Per-tenant opt-in — comma-separated tenant IDs (e.g. "1,5,12").
 # Allows enabling the Brain for specific stores without a global rollout.
@@ -354,6 +363,23 @@ MERCHANT_BRAIN_TENANT_IDS: set = {
     for x in os.environ.get("MERCHANT_BRAIN_TENANT_IDS", "").split(",")
     if x.strip().isdigit()
 }
+
+# ── Legacy conversational fallback ─────────────────────────────────────────
+# When the Brain pipeline raises (or is disabled), the merchant message
+# handler used to fall back to a free-form `generate_ai_reply()` call. The
+# legacy path has none of the Brain's intent / handoff / dedup
+# protections, so a single Brain hiccup could swap the entire
+# conversation into an unprotected LLM and produce repeat handoff
+# messages, mis-classified greetings, or runaway token spend.
+#
+# Default is now FALSE: if Brain fails we send a polite canned reply
+# and stop. Operators who explicitly need the legacy fallback while
+# diagnosing a Brain regression can flip
+# `MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true` for the duration of the
+# investigation. New tenants should never see legacy behaviour.
+MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK = (
+    os.environ.get("MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK", "false").lower() == "true"
+)
 
 # ── SPL National Address API (Saudi Address Resolution) ───────────────────────
 # Used by services/address_resolution.py to resolve national short address codes

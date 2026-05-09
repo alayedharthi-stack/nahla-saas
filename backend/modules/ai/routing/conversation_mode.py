@@ -220,6 +220,17 @@ _IDENTITY_PATTERNS: Tuple[re.Pattern, ...] = tuple(
         r"^\s*(من\s*أنت|من\s*انت|من\s*أنتِ|انت\s*مين|انتي\s*مين|مين\s*أنت|"
         r"وش\s*أنت|وش\s*انت|ايش\s*انت|ايش\s*أنت)\b",
         r"\b(عرفني\s+بنفسك|عرفني\s+عليك|who\s+are\s+you|what\s+are\s+you)\b",
+        # "Are you AI / a bot / a robot / human?" — covers the most
+        # frequent way customers test the assistant. Matches "هل أنت AI"
+        # / "هل أنتم AI" / "انت روبوت" / "أنت بوت" / "هل أنت برنامج" /
+        # "ai you" / "are u a bot" with diacritic-tolerant spacing.
+        r"(هل\s*)?(انتم|أنتم|انت|أنت|انتي|أنتي|انتو|أنتو)\s*"
+        r"(ا\s*ي|آي|ai|بوت|بوتات|روبوت|رو\s*بوت|"
+        r"برنامج|ذكاء\s*اصطناعي|ذكاء|chat\s*bot|chatbot)\b",
+        r"\b(are\s+(?:you|u|yall|ya'll)\s+(?:an?\s+)?(ai|bot|robot|chatbot|human|real|machine))\b",
+        r"\b(this\s+is\s+(?:an?\s+)?(ai|bot|chatbot))\b",
+        # Generic suspicion phrases — short Arabic forms.
+        r"^\s*(انت\s*انسان|أنت\s*إنسان|انت\s*حقيقي|أنت\s*حقيقي|انت\s*برنامج|أنت\s*برنامج)\b",
     )
 )
 
@@ -896,23 +907,42 @@ def _greeting_variants(assistant_name: str, store_name: str) -> List[str]:
 
 
 def _identity_variants(assistant_name: str, store_name: str) -> List[str]:
-    """Variants for «من أنت» — anchor on the bee 🐝 with a closing 👍."""
+    """Variants for «من أنت» / «هل أنت AI».
+
+    Policy: identify CONFIDENTLY as an AI assistant. Never pretend to be
+    human. The wording stays warm and store-specific so customers don't
+    feel they hit a generic chatbot wall.
+    """
     if assistant_name:
         return [
             (
-                f"أنا {assistant_name} 🐝 مساعدة {store_name} هنا.\n"
-                f"أقدر أجاوب على أسئلتك عن المنتجات والأسعار، "
-                f"وأساعدك تكمل الطلب بسهولة 👍"
+                f"نعم 😊\n"
+                f"أنا {assistant_name} 🐝 المساعدة الذكية في متجر {store_name}، "
+                f"موجودة على مدار الساعة أساعد فريق المتجر في الرد عليك "
+                f"وفي خدمة العملاء.\n"
+                f"وش أقدر أساعدك فيه؟"
             ),
             (
-                f"أنا {assistant_name} 🐝 موجودة لخدمتك في {store_name}.\n"
-                f"وش تحب نبدأ فيه؟"
+                f"أنا {assistant_name} 🐝 المساعدة الذكية لـ {store_name}، "
+                f"أرد عليك مباشرة وأساعدك في المنتجات والطلبات.\n"
+                f"كيف أقدر أخدمك اليوم؟ 👍"
+            ),
+            (
+                f"نعم 😊 أنا مساعدة ذكية اسمها {assistant_name} 🐝 "
+                f"تابعة لمتجر {store_name}.\n"
+                f"موجودة عشان أرد عليك بسرعة وأساعدك تكمل طلبك بسهولة."
             ),
         ]
     return [
         (
-            f"أنا المساعدة الذكية لـ {store_name} 🐝\n"
-            f"أقدر أساعدك في المنتجات والأسعار وإكمال الطلب 👍"
+            f"نعم 😊\n"
+            f"أنا المساعدة الذكية لمتجر {store_name} 🐝، "
+            f"موجودة على مدار الساعة أساعد الفريق في الرد السريع وخدمة العملاء.\n"
+            f"وش أقدر أساعدك فيه؟ 👍"
+        ),
+        (
+            f"أنا مساعدة ذكية تابعة لـ {store_name} 🐝\n"
+            f"أرد على استفساراتك عن المنتجات والأسعار وأساعدك تكمل الطلب 👍"
         ),
     ]
 
