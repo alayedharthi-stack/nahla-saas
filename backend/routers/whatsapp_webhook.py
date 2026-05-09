@@ -3241,21 +3241,51 @@ async def _handle_merchant_message(
             # Dispatch any media library attachments now that the text /
             # interactive reply has been delivered. We send them in order
             # so the customer sees the explanation first, then the file.
+            #
+            # Each attachment passes through the final-stage safety gate
+            # (`validate_media_for_send`) before we call the WhatsApp
+            # Cloud API: tenant scope, live `is_active` flag, supported
+            # media type, HTTPS / on-disk presence, size cap, safe
+            # filename. A failure here MUST log a warning and continue —
+            # we never crash the conversation over a single bad attachment.
+            try:
+                from core.ai_libraries import (  # noqa: PLC0415
+                    validate_media_for_send as _validate_media,
+                )
+            except Exception:  # noqa: BLE001
+                _validate_media = None  # type: ignore[assignment]
+
             for _att in _media_attachments:
+                if _validate_media is not None:
+                    _ok, _why, _normed = _validate_media(
+                        _att, expected_tenant_id=tenant_id, db=db,
+                    )
+                    if not _ok:
+                        logger.warning(
+                            "[AIMedia.validate] tenant=%s id=%s SKIPPED reason=%s",
+                            tenant_id, _att.get("id"), _why,
+                        )
+                        continue
+                    _att = _normed or _att
+
+                _media_type_norm = (_att.get("media_type") or "image").lower()
+                _filename = _att.get("filename")
+                if _filename is None and _media_type_norm in ("document", "pdf"):
+                    _filename = _att.get("title") or "document"
                 try:
                     _media_ok = await _send_media_message(
                         phone_id=phone_id,
                         to=to,
-                        media_type=_att.get("media_type") or "image",
+                        media_type=_media_type_norm,
                         media_url=_att.get("file_url") or "",
-                        filename=_att.get("title") if (_att.get("media_type") or "").lower() in ("document", "pdf") else None,
+                        filename=_filename,
                         _tenant_id=tenant_id,
                         _db=db,
                     )
                     logger.info(
                         "[AIMedia.send] tenant=%s to=%s id=%s type=%s ok=%s",
                         tenant_id, to, _att.get("id"),
-                        _att.get("media_type"), _media_ok,
+                        _media_type_norm, _media_ok,
                     )
                 except Exception as _media_send_exc:
                     logger.warning(

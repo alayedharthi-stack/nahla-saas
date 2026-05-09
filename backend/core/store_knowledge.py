@@ -900,8 +900,31 @@ def build_merchant_context(
             list_active_manual_coupons,
             list_active_ai_media,
         )
-        manual_coupons_active = list_active_manual_coupons(db, tenant_id)
-        ai_media_active = list_active_ai_media(db, tenant_id)
+        # Build a small relevance query from the customer's last turn
+        # so the cap (10 coupons / 15 media) tends to surface the most
+        # contextually relevant rows when the merchant has many.
+        _rel_query_parts: List[str] = []
+        if product_query:
+            _rel_query_parts.append(str(product_query))
+        if history:
+            for _msg in reversed(history):
+                if not isinstance(_msg, dict):
+                    continue
+                if (_msg.get("role") or _msg.get("direction") or "").lower() in (
+                    "user", "customer", "inbound",
+                ):
+                    _content = _msg.get("content") or _msg.get("text") or ""
+                    if _content:
+                        _rel_query_parts.append(str(_content))
+                        break
+        _relevance_query = " ".join(_rel_query_parts).strip() or None
+
+        manual_coupons_active = list_active_manual_coupons(
+            db, tenant_id, relevance_query=_relevance_query,
+        )
+        ai_media_active = list_active_ai_media(
+            db, tenant_id, relevance_query=_relevance_query,
+        )
     except Exception as _lib_exc:  # pragma: no cover — defensive
         logger.warning(
             "[MerchantContext] libraries fetch failed tenant=%s err=%s",

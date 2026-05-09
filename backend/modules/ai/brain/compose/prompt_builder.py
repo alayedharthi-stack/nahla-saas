@@ -50,6 +50,19 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     if overlay_text:
         parts.append(overlay_text)
 
+    # Surface manual coupons + AI media library as a readable Arabic block
+    # *before* the JSON dump. Even when the same data is present in
+    # ``merchant_context`` lower down, this block keeps the LLM's
+    # attention on title / tags / usage_context so it picks the right
+    # asset by meaning instead of guessing from a numeric id.
+    try:
+        from core.ai_libraries import format_libraries_for_prompt  # noqa: PLC0415
+        libraries_block = format_libraries_for_prompt(state.merchant_context or {})
+    except Exception:  # noqa: BLE001 — never let formatting crash the prompt
+        libraries_block = ""
+    if libraries_block:
+        parts.append(libraries_block)
+
     # Surface the four "must-have" fields the decision pipeline guarantees
     # — intent, stage, current product, response goal — so the LLM never
     # has to guess WHY it's being asked to compose this turn.
@@ -85,10 +98,16 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         "- 📎 مكتبة الوسائط: عند الحاجة لإرفاق صورة/فيديو/ملف من "
         "merchant_context.ai_media_library (مثل باركود التحويل البنكي، "
         "صورة منتج، PDF تعريفي) أضيفي في نهاية ردك السطر الخاص "
-        "[MEDIA:<id>] حيث <id> هو الرقم الموجود في القائمة. لا تلصقي "
-        "الرابط داخل النص — النظام يرسل الملف عبر واتساب تلقائياً. "
-        "لا ترفقي وسيطاً غير موجود في القائمة، ولا تستخدمي أكثر من "
-        "ملفين في الرسالة الواحدة.\n"
+        "[MEDIA:<id>] حيث <id> هو الرقم الموجود في قسم \"مكتبة وسائط "
+        "الذكاء\" أعلاه. اختاري الوسيط بناءً على title / tags / "
+        "usage_context وليس بناءً على رقم id فقط. لا تلصقي الرابط "
+        "داخل النص ولا تذكري file_url ولا storage_path ولا أي مسار "
+        "ملف — النظام يرسل الملف عبر واتساب تلقائياً. لا ترفقي وسيطاً "
+        "غير موجود في القائمة، ولا تستخدمي أكثر من ملفين في الرسالة "
+        "الواحدة.\n"
+        "- 🚫 ممنوع تماماً مشاركة روابط ملفات الوسائط الداخلية "
+        "(file_url, storage_path, /api/intelligence-libraries/...) "
+        "مع العميل تحت أي ظرف — هذه روابط داخلية للنظام فقط.\n"
         "- إذا كانت المعلومة ناقصة، اسألي سؤال متابعة واحداً فقط، قصيراً وواضحاً.\n"
         "- لا تخترعي حقائق غير موجودة في known_facts أو selected_product.\n"
         "- اجعلي ردك قصيراً ومناسباً لواتساب.\n\n"

@@ -71,11 +71,14 @@ def test_is_currently_active_no_window_means_always():
 
 def _stub_media_row(*, id_: int, tenant_id: int = 1, active: bool = True,
                     media_type: str = "image", file_url: str = "https://cdn/x.png",
-                    title: str = "x", mime: str | None = "image/png"):
+                    title: str = "x", mime: str | None = "image/png",
+                    storage_kind: str = "local", storage_path: str | None = None,
+                    file_size_bytes: int | None = None):
     return SimpleNamespace(
         id=id_, tenant_id=tenant_id, is_active=active,
         media_type=media_type, file_url=file_url, title=title,
-        mime_type=mime, storage_kind="local",
+        mime_type=mime, storage_kind=storage_kind,
+        storage_path=storage_path, file_size_bytes=file_size_bytes,
     )
 
 
