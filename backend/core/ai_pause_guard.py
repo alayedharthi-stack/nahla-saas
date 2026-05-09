@@ -377,14 +377,26 @@ def detect_bot_loop(
     tenant_id: int,
     convo_id: int,
     inbound_text: str | None,
+    *,
+    since: datetime | None = None,
 ) -> bool:
     """True if recent traffic looks like an automated assistant on the
-    customer side OR our own replies keep repeating the same canned line.
+    customer side OR our own replies keep repeating the same canned
+    line.
+
+    When ``since`` is given (e.g. the merchant's last manual resume
+    timestamp), only messages strictly newer than ``since`` are
+    considered — a manual resume must NOT immediately re-trip on the
+    history that triggered the original pause.
     """
     if _looks_automated(inbound_text):
         return True
 
     msgs = _recent_messages(db, tenant_id, convo_id, limit=8)
+    if since is not None:
+        cutoff = since
+        msgs = [m for m in msgs if m.created_at and _to_utc(m.created_at) > cutoff]
+
     automated_inbound = 0
     repeated_outbound: dict[str, int] = {}
     for m in msgs:
@@ -405,6 +417,26 @@ def detect_bot_loop(
         if n >= 3:
             return True
     return False
+
+
+def _to_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _convo_resumed_at(convo: Conversation | None) -> datetime | None:
+    if convo is None:
+        return None
+    meta = getattr(convo, "extra_metadata", None) or {}
+    raw = meta.get("ai_resumed_at") if isinstance(meta, dict) else None
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw))
+        return _to_utc(dt)
+    except Exception:
+        return None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -433,30 +465,56 @@ def should_skip_ai(
     # 1) Conversation already paused → respect it.
     if convo is not None and getattr(convo, "ai_paused", False):
         reason = getattr(convo, "ai_paused_reason", None) or REASON_MANUAL
+        logger.info(
+            "[AI_GUARD] skip reason=%s source=already_paused convo=%s tenant=%s phone=%s",
+            reason, convo.id, tenant_id, customer_phone,
+        )
         return True, reason
 
     # 2) Internal / merchant blocked numbers.
-    blocked, reason = is_internal_or_blocked(db, tenant_id, customer_phone)
+    blocked, b_reason = is_internal_or_blocked(db, tenant_id, customer_phone)
     if blocked:
-        # Persist the pause so subsequent messages don't even hit this branch.
         if convo is not None:
-            pause_ai(db, convo, reason=reason or REASON_INTERNAL_NUMBER, by="system:internal_number")
-        return True, reason or REASON_INTERNAL_NUMBER
+            pause_ai(db, convo, reason=b_reason or REASON_INTERNAL_NUMBER, by="system:internal_number")
+        logger.info(
+            "[AI_GUARD] skip reason=%s source=blocklist convo=%s tenant=%s phone=%s",
+            b_reason or REASON_INTERNAL_NUMBER,
+            getattr(convo, "id", None), tenant_id, customer_phone,
+        )
+        return True, b_reason or REASON_INTERNAL_NUMBER
+
+    # Honour the manual resume marker — heuristics below are only allowed
+    # to look at messages NEWER than the last dashboard resume, so the
+    # merchant can't ask us to resume only to be re-paused on the very
+    # next inbound by old loop history.
+    resumed_at = _convo_resumed_at(convo)
 
     # 3) Bot-loop detection (recent automated patterns).
     if convo is not None and convo.id is not None:
-        if detect_bot_loop(db, tenant_id, int(convo.id), inbound_text):
+        if detect_bot_loop(db, tenant_id, int(convo.id), inbound_text, since=resumed_at):
             pause_ai(db, convo, reason=REASON_BOT_LOOP, by="system:bot_loop_detected")
+            logger.info(
+                "[AI_GUARD] skip reason=%s source=bot_loop_detected convo=%s tenant=%s phone=%s",
+                REASON_BOT_LOOP, convo.id, tenant_id, customer_phone,
+            )
             return True, REASON_BOT_LOOP
 
     # 4) Rapid-burst guard: many inbound messages but no clear intent and
-    #    we've already replied a few times → likely a ping-pong.
+    #    we've already replied a few times → likely a ping-pong. The
+    #    in-memory windows are reset on resume_ai, so this guard already
+    #    starts from zero after a manual resume.
     if convo is not None and convo.id is not None:
         burst = _inbound_burst(int(tenant_id), int(convo.id))
         if burst > RAPID_BURST_INBOUND_LIMIT:
             ten_min_replies, _ = _reply_counts(int(tenant_id), int(convo.id))
             if ten_min_replies > RAPID_BURST_REPLY_LIMIT and not _has_recent_intent(int(tenant_id), int(convo.id)):
                 pause_ai(db, convo, reason=REASON_BOT_LOOP, by="system:rapid_burst_no_intent")
+                logger.info(
+                    "[AI_GUARD] skip reason=%s source=rapid_burst_no_intent convo=%s tenant=%s phone=%s "
+                    "burst_inbound=%d ten_min_replies=%d",
+                    REASON_BOT_LOOP, convo.id, tenant_id, customer_phone,
+                    burst, ten_min_replies,
+                )
                 return True, REASON_BOT_LOOP
 
     # 5) Hard rate-limit enforcement (10-min / day caps).
@@ -464,6 +522,11 @@ def should_skip_ai(
         ten_min, day = _reply_counts(int(tenant_id), int(convo.id))
         if ten_min >= MAX_AI_REPLIES_PER_CONTACT_10MIN or day >= MAX_AI_REPLIES_PER_CONTACT_DAY:
             pause_ai(db, convo, reason=REASON_RATE_LIMIT, by="system:rate_limit")
+            logger.info(
+                "[AI_GUARD] skip reason=%s source=rate_limit convo=%s tenant=%s phone=%s "
+                "ten_min=%d day=%d",
+                REASON_RATE_LIMIT, convo.id, tenant_id, customer_phone, ten_min, day,
+            )
             return True, REASON_RATE_LIMIT
 
     return False, None

@@ -231,6 +231,20 @@ export type AIPauseReason =
   | 'rate_limit'
   | 'internal_number'
 
+export interface AIPauseStateResponse {
+  ok: boolean
+  customerPhone?: string
+  aiPaused: boolean
+  aiPausedReason: AIPauseReason | null
+  aiPausedAt: string | null
+  aiPausedBy?: string | null
+  // Backwards-compatible snake_case mirrors (still emitted by backend).
+  ai_paused?: boolean
+  ai_paused_reason?: AIPauseReason | null
+  ai_paused_at?: string | null
+  ai_paused_by?: string | null
+}
+
 export interface DashboardConversation {
   id: string
   customer: string
@@ -339,25 +353,13 @@ export const featureRealityApi = {
       body: JSON.stringify(body),
     })
   },
-  pauseConversationAI(body: { customer_phone: string; reason?: AIPauseReason }): Promise<{
-    ok: boolean
-    ai_paused: boolean
-    ai_paused_reason: AIPauseReason | null
-    ai_paused_at: string | null
-    ai_paused_by: string | null
-  }> {
+  pauseConversationAI(body: { customer_phone: string; reason?: AIPauseReason }): Promise<AIPauseStateResponse> {
     return apiCall('/conversations/ai-pause', {
       method: 'POST',
       body: JSON.stringify(body),
     })
   },
-  resumeConversationAI(body: { customer_phone: string }): Promise<{
-    ok: boolean
-    ai_paused: boolean
-    ai_paused_reason: AIPauseReason | null
-    ai_paused_at: string | null
-    ai_paused_by: string | null
-  }> {
+  resumeConversationAI(body: { customer_phone: string }): Promise<AIPauseStateResponse> {
     return apiCall('/conversations/ai-resume', {
       method: 'POST',
       body: JSON.stringify(body),

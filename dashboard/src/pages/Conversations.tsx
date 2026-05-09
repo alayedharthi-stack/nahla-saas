@@ -7,7 +7,7 @@ import {
   Pause, Play, Ban,
 } from 'lucide-react'
 
-import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType } from '../api/featureReality'
+import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
 
 const EVENT_BADGE: Record<MessageEventType, { label: string; icon: React.ReactNode; cls: string }> = {
   ai:         { label: 'ذكاء اصطناعي', icon: <Bot className="w-3 h-3" />, cls: 'bg-brand-50 text-brand-600 border-brand-200' },
@@ -194,17 +194,42 @@ export default function Conversations() {
     }
   }
 
+  // Apply server-returned AI state to BOTH the conversations list and
+  // the currently selected conversation. We trust the API response (not
+  // optimistic guesses) so the button never flickers back on refetch.
+  const _applyAIState = (phone: string, state: {
+    aiPaused: boolean
+    aiPausedReason: AIPauseReason | null
+    aiPausedAt: string | null
+  }) => {
+    const patch: Partial<DashboardConversation> = {
+      aiPaused: state.aiPaused,
+      aiPausedReason: state.aiPausedReason,
+      aiPausedAt: state.aiPausedAt,
+      isAI: !state.aiPaused,
+    }
+    if (!state.aiPaused) {
+      // Resume also clears the legacy human-takeover indicators so the
+      // UI stays in sync with what the backend just reset.
+      patch.status = 'active'
+      patch.handoffReason = null
+    }
+    _optimisticUpdate(phone, patch)
+  }
+
   const handlePauseAI = async () => {
     if (!selected) return
+    console.log('[AI_PAUSE_UI] request pause phone=', selected.phone)
     try {
-      await featureRealityApi.pauseConversationAI({
+      const res = await featureRealityApi.pauseConversationAI({
         customer_phone: selected.phone,
         reason: 'manual',
       })
-      _optimisticUpdate(selected.phone, {
-        aiPaused: true,
-        aiPausedReason: 'manual',
-        isAI: false,
+      console.log('[AI_PAUSE_UI] response', res)
+      _applyAIState(selected.phone, {
+        aiPaused: !!res.aiPaused,
+        aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
+        aiPausedAt: res.aiPausedAt ?? null,
       })
       await loadList()
     } catch (e) {
@@ -214,19 +239,19 @@ export default function Conversations() {
 
   const handleResumeAI = async () => {
     if (!selected) return
+    console.log('[AI_PAUSE_UI] request resume phone=', selected.phone)
     try {
-      await featureRealityApi.resumeConversationAI({
+      const res = await featureRealityApi.resumeConversationAI({
         customer_phone: selected.phone,
       })
-      _optimisticUpdate(selected.phone, {
-        aiPaused: false,
-        aiPausedReason: null,
-        aiPausedAt: null,
-        isAI: true,
-        status: 'active',
-        handoffReason: null,
+      console.log('[AI_PAUSE_UI] response', res)
+      _applyAIState(selected.phone, {
+        aiPaused: !!res.aiPaused,
+        aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
+        aiPausedAt: res.aiPausedAt ?? null,
       })
       await loadList()
+      await loadMessages(selected.phone)
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر تشغيل الذكاء')
     }
@@ -239,15 +264,16 @@ export default function Conversations() {
       'ولن يتلقى الذكاء أي رسالة من هذا الرقم. متابعة؟',
     )
     if (!ok) return
+    console.log('[AI_PAUSE_UI] request blocklist add phone=', selected.phone)
     try {
       await featureRealityApi.addToBlocklist({
         phone: selected.phone,
         customer_phone: selected.phone,
       })
-      _optimisticUpdate(selected.phone, {
+      _applyAIState(selected.phone, {
         aiPaused: true,
         aiPausedReason: 'internal_number',
-        isAI: false,
+        aiPausedAt: new Date().toISOString(),
       })
       await loadList()
     } catch (e) {

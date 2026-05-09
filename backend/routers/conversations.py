@@ -149,6 +149,89 @@ def _resolve_customer_phone(convo: Conversation) -> str:
     return str(meta.get("customer_phone") or meta.get("phone") or "")
 
 
+def _digits_only(value: str | None) -> str:
+    """Phone helper — strip everything but digits."""
+    if not value:
+        return ""
+    return "".join(c for c in str(value) if c.isdigit())
+
+
+def _find_conversations_for_phone(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+) -> list[Conversation]:
+    """Return EVERY Conversation row in this tenant matching *customer_phone*.
+
+    The list view dedupes multiple legacy rows for the same customer
+    into one display entry, but pause/resume must update ALL of them
+    otherwise the dashboard shows stale state from a sibling row.
+
+    Match strategy (most specific first):
+    1. Customer.id ↔ Conversation.customer_id, when we can resolve the
+       phone to a Customer via normalized phone.
+    2. Conversation.extra_metadata->>'customer_phone' / 'phone' fallback
+       (digits-only suffix match) for orphaned rows that never got a
+       Customer link.
+    """
+    norm = normalize_phone(customer_phone) or customer_phone
+    digits = _digits_only(norm)
+    suffix = digits[-9:] if len(digits) >= 9 else digits
+
+    candidates: list[str] = []
+    for v in (customer_phone, norm, digits, f"+{digits}" if digits else ""):
+        v = (v or "").strip()
+        if v and v not in candidates:
+            candidates.append(v)
+
+    customer_ids: list[int] = []
+    if candidates:
+        from sqlalchemy import or_  # noqa: PLC0415
+        rows = (
+            db.query(Customer.id)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                or_(
+                    Customer.phone.in_(candidates),
+                    Customer.normalized_phone.in_(candidates),
+                ),
+            )
+            .all()
+        )
+        customer_ids = [r[0] for r in rows]
+
+    matches: dict[int, Conversation] = {}
+    if customer_ids:
+        for c in (
+            db.query(Conversation)
+            .filter(
+                Conversation.tenant_id == tenant_id,
+                Conversation.customer_id.in_(customer_ids),
+            )
+            .all()
+        ):
+            matches[c.id] = c
+
+    # Fallback: scan extra_metadata for orphaned conversation rows.
+    # Suffix match keeps the cost-vs-correctness trade-off reasonable for
+    # a per-tenant scan.
+    if suffix:
+        for c in (
+            db.query(Conversation)
+            .filter(Conversation.tenant_id == tenant_id)
+            .all()
+        ):
+            if c.id in matches:
+                continue
+            meta = c.extra_metadata or {}
+            phone_meta = str(meta.get("customer_phone") or meta.get("phone") or "")
+            d = _digits_only(phone_meta)
+            if d and (d == digits or d.endswith(suffix)):
+                matches[c.id] = c
+
+    return list(matches.values())
+
+
 def record_outbound_message(
     db: Session,
     tenant_id: int,
@@ -276,6 +359,19 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
         existing_key = norm_to_key.get(n)
         if existing_key and existing_key in phone_info:
             prev = phone_info[existing_key]
+            # Aggregate: if THIS row is paused, the merged display row
+            # should reflect that even when another sibling row isn't.
+            if bool(getattr(convo, "ai_paused", False)):
+                prev_at = prev.get("aiPausedAt") or ""
+                this_at = (
+                    convo.ai_paused_at.isoformat()
+                    if getattr(convo, "ai_paused_at", None) else ""
+                )
+                if not prev.get("aiPaused") or this_at > prev_at:
+                    prev["aiPaused"] = True
+                    prev["aiPausedReason"] = getattr(convo, "ai_paused_reason", None)
+                    prev["aiPausedAt"] = this_at or prev.get("aiPausedAt")
+                    prev["isAI"] = False
             prev_has_name = prev["customer"] and prev["customer"] != prev["phone"]
             if name and not prev_has_name:
                 phone_info.pop(existing_key)
@@ -286,6 +382,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
                 conv_id_to_phone[convo.id] = existing_key
                 continue
 
+        ai_paused_now = bool(getattr(convo, "ai_paused", False))
         display_name = name or phone
         phone_info[phone] = {
             "id": str(convo.id),
@@ -293,7 +390,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "phone": phone,
             "lastMsg": "",
             "time": "",
-            "isAI": status != "human" and not bool(getattr(convo, "ai_paused", False)),
+            "isAI": status != "human" and not ai_paused_now,
             "status": status,
             "unread": 0,
             "lastMsgType": "",
@@ -301,7 +398,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
             "handoffReason": _handoff_reason_for(phone),
             "isUnsubscribed": False,
             "pendingUnsubscribe": False,
-            "aiPaused": bool(getattr(convo, "ai_paused", False)),
+            "aiPaused": ai_paused_now,
             "aiPausedReason": getattr(convo, "ai_paused_reason", None),
             "aiPausedAt": (
                 convo.ai_paused_at.isoformat()
@@ -798,6 +895,31 @@ def _serialize_ai_state(convo: Conversation) -> Dict[str, Any]:
     }
 
 
+def _aggregate_ai_state(convos: list[Conversation]) -> Dict[str, Any]:
+    """Return ai_paused state aggregated across all matching rows.
+
+    A phone is considered paused if ANY of its conversation rows is
+    paused. The reason / timestamp / actor are taken from the most
+    recently paused row. This mirrors what the conversations list will
+    display once we deduplicate rows by phone.
+    """
+    if not convos:
+        return {
+            "ai_paused": False,
+            "ai_paused_reason": None,
+            "ai_paused_at": None,
+            "ai_paused_by": None,
+        }
+    paused_rows = [c for c in convos if bool(getattr(c, "ai_paused", False))]
+    if not paused_rows:
+        return _serialize_ai_state(convos[0])
+    paused_rows.sort(
+        key=lambda c: (c.ai_paused_at or datetime.min.replace(tzinfo=timezone.utc)),
+        reverse=True,
+    )
+    return _serialize_ai_state(paused_rows[0])
+
+
 @router.post("/ai-pause")
 async def pause_conversation_ai(body: AIPauseIn, request: Request, db: Session = Depends(get_db)):
     """Pause AI replies for one customer's conversation. Inbound messages
@@ -807,11 +929,44 @@ async def pause_conversation_ai(body: AIPauseIn, request: Request, db: Session =
 
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
-    customer_phone = normalize_phone(body.customer_phone) or body.customer_phone
-    convo = _get_or_create_conversation(db, tenant_id, customer_phone)
+    raw_phone = body.customer_phone or ""
+    normalized_phone = normalize_phone(raw_phone) or raw_phone
     reason = body.reason if body.reason in _VALID else "manual"
-    _pause_ai(db, convo, reason=reason, by=f"dashboard:{reason}")
-    return {"ok": True, **_serialize_ai_state(convo)}
+
+    convos = _find_conversations_for_phone(db, tenant_id, normalized_phone)
+    before = [
+        {"id": c.id, "ai_paused": bool(c.ai_paused), "reason": c.ai_paused_reason}
+        for c in convos
+    ]
+    if not convos:
+        # No row yet — create one so the merchant's button click is
+        # remembered the next time a webhook arrives.
+        convos = [_get_or_create_conversation(db, tenant_id, normalized_phone)]
+
+    for c in convos:
+        _pause_ai(db, c, reason=reason, by=f"dashboard:{reason}", commit=False)
+    db.commit()
+
+    after = [
+        {"id": c.id, "ai_paused": bool(c.ai_paused), "reason": c.ai_paused_reason}
+        for c in convos
+    ]
+    _log.info(
+        "[AI_PAUSE_API] tenant=%s phone_raw=%r normalized=%r reason=%s "
+        "found_conversations=%d before=%s after=%s",
+        tenant_id, raw_phone, normalized_phone, reason, len(convos), before, after,
+    )
+    state = _aggregate_ai_state(convos)
+    return {
+        "ok": True,
+        "customerPhone": normalized_phone,
+        "aiPaused": state["ai_paused"],
+        "aiPausedReason": state["ai_paused_reason"],
+        "aiPausedAt": state["ai_paused_at"],
+        "aiPausedBy": state["ai_paused_by"],
+        # Backwards-compatible snake_case for existing callers.
+        **state,
+    }
 
 
 @router.post("/ai-resume")
@@ -821,17 +976,61 @@ async def resume_conversation_ai(body: AIResumeIn, request: Request, db: Session
 
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
-    customer_phone = normalize_phone(body.customer_phone) or body.customer_phone
-    convo = _get_or_create_conversation(db, tenant_id, customer_phone)
-    # Resume also clears legacy paused_by_human / human_handoff so the
-    # merchant gets a single "AI back online" toggle instead of three.
-    if convo.is_human_handoff or convo.paused_by_human or convo.status == "human":
-        convo.is_human_handoff = False
-        convo.paused_by_human = False
-        convo.status = "active"
-        db.add(convo)
-    _resume_ai(db, convo, by="dashboard:resume")
-    return {"ok": True, **_serialize_ai_state(convo)}
+    raw_phone = body.customer_phone or ""
+    normalized_phone = normalize_phone(raw_phone) or raw_phone
+
+    convos = _find_conversations_for_phone(db, tenant_id, normalized_phone)
+    before = [
+        {"id": c.id, "ai_paused": bool(c.ai_paused), "reason": c.ai_paused_reason,
+         "human_handoff": bool(c.is_human_handoff), "paused_by_human": bool(c.paused_by_human)}
+        for c in convos
+    ]
+    if not convos:
+        convos = [_get_or_create_conversation(db, tenant_id, normalized_phone)]
+
+    now = datetime.now(timezone.utc)
+    for c in convos:
+        # Clear legacy human-takeover flags so the resume is total — one
+        # toggle on the dashboard restores AI fully.
+        if c.is_human_handoff or c.paused_by_human or c.status == "human":
+            c.is_human_handoff = False
+            c.paused_by_human = False
+            c.status = "active"
+            db.add(c)
+        # Stamp a resume marker on the conversation so the bot-loop
+        # detector ignores messages older than this point — otherwise
+        # the next inbound would re-trip the same heuristic that made
+        # us pause in the first place.
+        try:
+            meta = dict(c.extra_metadata or {})
+            meta["ai_resumed_at"] = now.isoformat()
+            c.extra_metadata = meta
+            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+            flag_modified(c, "extra_metadata")
+        except Exception:
+            pass
+        _resume_ai(db, c, by="dashboard:resume", commit=False)
+    db.commit()
+
+    after = [
+        {"id": c.id, "ai_paused": bool(c.ai_paused), "reason": c.ai_paused_reason}
+        for c in convos
+    ]
+    _log.info(
+        "[AI_RESUME_API] tenant=%s phone_raw=%r normalized=%r "
+        "found_conversations=%d before=%s after=%s",
+        tenant_id, raw_phone, normalized_phone, len(convos), before, after,
+    )
+    state = _aggregate_ai_state(convos)
+    return {
+        "ok": True,
+        "customerPhone": normalized_phone,
+        "aiPaused": state["ai_paused"],
+        "aiPausedReason": state["ai_paused_reason"],
+        "aiPausedAt": state["ai_paused_at"],
+        "aiPausedBy": state["ai_paused_by"],
+        **state,
+    }
 
 
 @router.get("/blocklist")
@@ -861,8 +1060,16 @@ async def add_to_blocklist(body: BlocklistIn, request: Request, db: Session = De
     target_norm = normalize_phone(target_phone) or target_phone
     if target_norm:
         try:
-            convo = _get_or_create_conversation(db, tenant_id, target_norm)
-            _pause_ai(db, convo, reason=_R_INT, by="dashboard:blocklist")
+            convos = _find_conversations_for_phone(db, tenant_id, target_norm)
+            if not convos:
+                convos = [_get_or_create_conversation(db, tenant_id, target_norm)]
+            for c in convos:
+                _pause_ai(db, c, reason=_R_INT, by="dashboard:blocklist", commit=False)
+            db.commit()
+            _log.info(
+                "[AI_PAUSE_API] blocklist_add tenant=%s phone=%r conversations=%d",
+                tenant_id, target_norm, len(convos),
+            )
         except Exception as exc:
             _log.debug("[ai_pause] blocklist add — convo pause failed: %s", exc)
     return {"ok": True, "numbers": numbers}
