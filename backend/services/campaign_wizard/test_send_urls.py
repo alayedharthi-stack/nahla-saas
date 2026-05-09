@@ -78,6 +78,8 @@ DEMO_FALLBACK_URL = "https://demo.nahlah.ai/preview/test"
 
 
 def _first_non_empty(merchant_vars: Dict[str, str], keys: Tuple[str, ...]) -> str:
+    if not isinstance(merchant_vars, dict):
+        return ""
     for k in keys:
         v = merchant_vars.get(k)
         if v and isinstance(v, str) and v.strip():

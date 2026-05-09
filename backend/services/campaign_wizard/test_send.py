@@ -62,7 +62,17 @@ MOCK_DEFAULTS: Dict[str, str] = {
 
 
 def _body_text(template: WhatsAppTemplate) -> str:
+    """Extract the BODY text from a template's components.
+
+    Defensive against non-dict components — older Salla / 360dialog
+    payloads occasionally serialised components as raw strings inside
+    ``WhatsAppTemplate.components``. We must skip those silently
+    instead of raising ``AttributeError: 'str' object has no
+    attribute 'get'`` mid test-send.
+    """
     for c in (template.components or []):
+        if not isinstance(c, dict):
+            continue
         if (c.get("type") or "").upper() == "BODY":
             return c.get("text", "") or ""
     return ""
@@ -89,18 +99,111 @@ def _dynamic_url_buttons(template: WhatsAppTemplate) -> List[Dict[str, Any]]:
     """Return a flat list of ``{index, url_template}`` for every URL
     button in the template that contains a ``{{1}}`` dynamic suffix.
     Static URL buttons (no placeholder) need no parameter and are
-    skipped — Meta accepts them as-is."""
+    skipped — Meta accepts them as-is.
+
+    Defensive against malformed component / button entries (occasional
+    string-instead-of-dict rows in legacy data) so a single bad row
+    can't crash the whole test-send with ``'str' object has no
+    attribute 'get'``.
+    """
     out: List[Dict[str, Any]] = []
     for c in (template.components or []):
+        if not isinstance(c, dict):
+            continue
         if str(c.get("type") or "").upper() != "BUTTONS":
             continue
-        for idx, btn in enumerate(c.get("buttons") or []):
+        buttons = c.get("buttons") or []
+        if not isinstance(buttons, list):
+            continue
+        for idx, btn in enumerate(buttons):
+            if not isinstance(btn, dict):
+                continue
             if str(btn.get("type") or "").upper() != "URL":
                 continue
             url_tpl = btn.get("url") or ""
             if "{{1}}" in url_tpl:
                 out.append({"index": idx, "url_template": url_tpl})
     return out
+
+
+def _coerce_merchant_vars(merchant_vars: Any) -> Dict[str, str]:
+    """Normalise the merchant-supplied variable map.
+
+    Defensive: the wizard's Step 4 emits a flat ``{name -> string}``
+    dict, but the legacy ``/campaigns/test-send`` route and a couple
+    of older callers used to pass:
+
+      * a JSON string of a dict
+      * a list of ``{key, value}`` pairs
+      * ``None``
+
+    Returning a clean ``Dict[str, str]`` here means the rest of the
+    pipeline (``_first_non_empty``, ``MOCK_DEFAULTS`` lookup) can stay
+    simple and never raise on a list/None/scalar value.
+    """
+    if not merchant_vars:
+        return {}
+    if isinstance(merchant_vars, dict):
+        out: Dict[str, str] = {}
+        for k, v in merchant_vars.items():
+            if v is None:
+                continue
+            if isinstance(v, (str, int, float)):
+                out[str(k)] = str(v)
+            # Lists / dicts inside variables are merchant input mistakes —
+            # skip them rather than letting them poison the body params.
+        return out
+    if isinstance(merchant_vars, list):
+        out = {}
+        for item in merchant_vars:
+            if isinstance(item, dict):
+                k = item.get("key") or item.get("name") or item.get("placeholder")
+                v = item.get("value") or item.get("text")
+                if k and v is not None:
+                    out[str(k)] = str(v)
+        return out
+    if isinstance(merchant_vars, str):
+        try:
+            import json as _json  # noqa: PLC0415
+            parsed = _json.loads(merchant_vars)
+            return _coerce_merchant_vars(parsed)
+        except Exception:
+            return {}
+    return {}
+
+
+def _coerce_recipient(recipient: Any) -> tuple[str, str]:
+    """Accept either a plain phone string or a ``{phone, name}`` dict.
+
+    The wizard's frontend only sends plain strings today, but the
+    legacy campaigns API has historically accepted both shapes — and
+    a couple of older mobile clients still post the dict form.
+    Returns ``(phone, name)`` with sensible defaults; raises
+    ``ValueError`` only when nothing usable was supplied.
+    """
+    if recipient is None:
+        raise ValueError("لم يُرفق رقم اختبار")
+    if isinstance(recipient, str):
+        phone = recipient.strip()
+        if not phone:
+            raise ValueError("رقم الاختبار فارغ")
+        return phone, "اختبار"
+    if isinstance(recipient, dict):
+        phone = (
+            recipient.get("phone")
+            or recipient.get("mobile")
+            or recipient.get("number")
+            or recipient.get("to_phone")
+            or recipient.get("to")
+            or ""
+        )
+        if not isinstance(phone, str) or not phone.strip():
+            raise ValueError("الرقم داخل بيانات الاختبار غير صالح")
+        name = recipient.get("name") or recipient.get("customer_name") or "اختبار"
+        return str(phone).strip(), str(name)
+    if isinstance(recipient, (int, float)):
+        return str(recipient), "اختبار"
+    raise ValueError(f"شكل بيانات الاختبار غير مدعوم: {type(recipient).__name__}")
 
 
 def build_test_payload(
@@ -119,7 +222,7 @@ def build_test_payload(
     ``Tenant.domain``."""
     body = _body_text(template)
     placeholders = _placeholders_in_order(body)
-    merchant_vars = merchant_vars or {}
+    merchant_vars = _coerce_merchant_vars(merchant_vars)
 
     body_params: List[Dict[str, str]] = []
     for ph in placeholders:
@@ -178,8 +281,8 @@ async def send_test_message(
     *,
     tenant_id: int,
     template_db_id: int,
-    to_phone: str,
-    merchant_vars: Optional[Dict[str, str]] = None,
+    to_phone: Any,
+    merchant_vars: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Top-level orchestration. Returns:
 
@@ -191,7 +294,29 @@ async def send_test_message(
           "error_code":     str|None,
           "error_message":  str|None,
         }
+
+    ``to_phone`` may be a plain string (``"0542980511"``) OR a dict
+    of the legacy shape ``{"phone": "0542980511", "name": "اختبار"}``.
+    Any other shape is rejected with a structured error rather than a
+    raw ``AttributeError``.
+
+    ``merchant_vars`` is similarly tolerant — see
+    :func:`_coerce_merchant_vars`. Together these two guards make
+    test-send a defensive citizen so a sloppy frontend payload never
+    bubbles up as ``'str' object has no attribute 'get'``.
     """
+    # Coerce the recipient ASAP so all downstream logging / observability
+    # uses the normalised phone string.
+    try:
+        raw_phone, recipient_name = _coerce_recipient(to_phone)
+        recipient_type = type(to_phone).__name__
+    except Exception as exc:
+        return {
+            "sent": False, "simulated": False, "wa_message_id": None,
+            "to": str(to_phone)[:64], "error_code": "invalid_recipient_shape",
+            "error_message": str(exc) or "بيانات الاختبار غير صالحة",
+        }
+
     # Inline imports keep the module load-time cheap and avoid pulling
     # the heavy whatsapp_platform graph during pytest collection of
     # tests that only exercise build_test_payload().
@@ -209,23 +334,31 @@ async def send_test_message(
     if not template:
         return {
             "sent": False, "simulated": False, "wa_message_id": None,
-            "to": to_phone, "error_code": "template_not_found",
+            "to": raw_phone, "error_code": "template_not_found",
             "error_message": "القالب غير موجود في حسابك.",
         }
     if (template.status or "").upper() != "APPROVED":
         return {
             "sent": False, "simulated": False, "wa_message_id": None,
-            "to": to_phone, "error_code": "template_not_approved",
+            "to": raw_phone, "error_code": "template_not_approved",
             "error_message": "لا يمكن إرسال رسالة اختبار من قالب غير معتمد من Meta.",
         }
 
-    to_e164 = normalize_phone(to_phone) or to_phone
+    to_e164 = normalize_phone(raw_phone) or raw_phone
     if not to_e164:
         return {
             "sent": False, "simulated": False, "wa_message_id": None,
-            "to": to_phone, "error_code": "invalid_recipient",
+            "to": raw_phone, "error_code": "invalid_recipient",
             "error_message": "رقم الجوال غير صالح — أدخل رقماً بصيغة دولية مثل +9665…",
         }
+
+    logger.info(
+        "[CAMPAIGN_TEST_SEND] tenant_id=%s template_id=%s recipient_type=%s "
+        "phone_raw=%r phone_normalized=%s vars_keys=%s recipient_name=%r",
+        tenant_id, template_db_id, recipient_type, raw_phone, to_e164,
+        sorted(list((_coerce_merchant_vars(merchant_vars) or {}).keys())),
+        recipient_name,
+    )
 
     wa_conn = (
         db.query(WhatsAppConnection)
@@ -257,12 +390,25 @@ async def send_test_message(
     except Exception as exc:  # observability only — never block test-send
         logger.debug("[test_send] failed to read tenant domain: %s", exc)
 
-    payload = build_test_payload(
-        template,
-        to_phone_e164=to_e164,
-        merchant_vars=merchant_vars,
-        store_domain_hint=store_domain_hint,
-    )
+    try:
+        payload = build_test_payload(
+            template,
+            to_phone_e164=to_e164,
+            merchant_vars=merchant_vars,
+            store_domain_hint=store_domain_hint,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[CAMPAIGN_TEST_SEND] build_test_payload failed tenant=%s tpl=%s: %s",
+            tenant_id, getattr(template, "name", None), exc, exc_info=True,
+        )
+        return {
+            "sent": False, "simulated": False, "wa_message_id": None,
+            "to": to_e164, "error_code": "payload_build_failed",
+            "error_message": (
+                "تعذر تجهيز رسالة الاختبار من القالب — تحقق من بيانات القالب أو أعد إنشاءه."
+            ),
+        }
 
     try:
         response, _ctx = await provider_send_message(
