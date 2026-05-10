@@ -1054,43 +1054,72 @@ async def on_startup() -> None:
                 from core.database import SessionLocal  # noqa: PLC0415
                 from models import BillingSubscription as _BS  # noqa: PLC0415
                 from services.billing_activation import (  # noqa: PLC0415
-                    reconcile_subscription_from_moyasar,
+                    _LAZY_RECONCILE_LAST,
+                    _is_revivable_cancelled,
+                    lazy_reconcile_tenant_pending_subs,
                 )
                 db: _Session = SessionLocal()
                 try:
-                    pending = (
+                    # Find every tenant that has at least one
+                    # reconcilable sub (pending OR revivable cancelled)
+                    # with a Moyasar invoice id. We iterate the
+                    # tenants — not the subs — and delegate to the
+                    # same lazy reconciler used by /billing/status
+                    # and /billing/entitlements, so all four entry
+                    # points (boot sweep, status, entitlements,
+                    # debug) share one definition of "what needs
+                    # reconciling". Keeps tenant 33's class of bug
+                    # from re-emerging through the back door.
+                    candidates = (
                         db.query(_BS)
-                        .filter(_BS.status == "pending_payment")
+                        .filter(_BS.status.in_(["pending_payment", "cancelled"]))
                         .all()
                     )
-                    pending = [
-                        s for s in pending
-                        if (s.extra_metadata or {}).get("moyasar_invoice_id")
-                    ]
+                    tenant_ids: list[int] = []
+                    seen: set[int] = set()
+                    for s in candidates:
+                        meta = s.extra_metadata or {}
+                        if not meta.get("moyasar_invoice_id"):
+                            continue
+                        if s.status == "cancelled" and not _is_revivable_cancelled(s):
+                            continue
+                        if s.tenant_id in seen:
+                            continue
+                        seen.add(s.tenant_id)
+                        tenant_ids.append(s.tenant_id)
+
                     logger.info(
-                        "[BOOT/billing-sweep] found %d pending Moyasar sub(s) — reconciling",
-                        len(pending),
+                        "[BOOT/billing-sweep] %d tenant(s) with reconcilable Moyasar sub(s)",
+                        len(tenant_ids),
                     )
-                    activated = 0
-                    for sub in pending:
+
+                    # The boot sweep should always run regardless of
+                    # in-process cooldown — this is a one-shot per
+                    # boot, after sleeping 30s, so it's not a
+                    # rate-limit concern.
+                    _LAZY_RECONCILE_LAST.clear()
+
+                    activated_total = 0
+                    for tid in tenant_ids:
                         try:
-                            ok, reason = await reconcile_subscription_from_moyasar(
-                                db, sub, source="boot_sweep",
+                            activated_any, results = await lazy_reconcile_tenant_pending_subs(
+                                db, tid, source="boot_sweep",
                             )
-                            if ok:
-                                activated += 1
+                            n = sum(1 for r in results if r.get("activated"))
+                            activated_total += n
+                            if activated_any:
                                 logger.info(
-                                    "[BOOT/billing-sweep] activated sub_id=%s tenant=%s reason=%s",
-                                    sub.id, sub.tenant_id, reason,
+                                    "[BOOT/billing-sweep] tenant=%s activated_subs=%d",
+                                    tid, n,
                                 )
                         except Exception as exc:
                             logger.warning(
-                                "[BOOT/billing-sweep] sub_id=%s failed: %r",
-                                sub.id, exc,
+                                "[BOOT/billing-sweep] tenant=%s failed: %r",
+                                tid, exc,
                             )
                     logger.info(
-                        "[BOOT/billing-sweep] complete activated=%d/%d",
-                        activated, len(pending),
+                        "[BOOT/billing-sweep] complete tenants=%d activated_subs=%d",
+                        len(tenant_ids), activated_total,
                     )
                 finally:
                     db.close()

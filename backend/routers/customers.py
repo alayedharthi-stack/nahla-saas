@@ -375,10 +375,44 @@ async def list_customers(
         # need to be visible (so the merchant can fix the phone number).
         if get_nahla_segment(seg_key) is None:
             raise HTTPException(status_code=422, detail=f"شريحة غير معروفة: {seg_key}")
-        q = build_segment_query(seg_key, db, tenant_id, require_reachable=False)
-        if q is None:
+        auto_q = build_segment_query(seg_key, db, tenant_id, require_reachable=False)
+        if auto_q is None:
             # Defensive — get_nahla_segment said yes but builder said no
             raise HTTPException(status_code=422, detail=f"شريحة غير معروفة: {seg_key}")
+
+        # ── Union with manual tag matches ────────────────────────────
+        # The auto chip strip and the drawer manual-tag UI share the
+        # SAME Arabic labels (e.g. "عملاء واعدون"). Merchants don't
+        # distinguish between "auto-classified promising" and
+        # "manually tagged promising" — they expect both to show
+        # under one filter. Without this union, a customer the
+        # merchant deliberately tagged "عملاء واعدون" would NOT show
+        # when clicking the same chip — which is the production bug
+        # reported for tenant 33 (هيثم الحارثي tagged but not in
+        # results). The dedicated manual_segment=<key> dropdown
+        # below keeps the only-manual semantics for merchants who
+        # want to inspect their manual tagging specifically.
+        auto_ids = {row[0] for row in auto_q.with_entities(Customer.id).all()}
+        manual_ids = set(customer_ids_with_manual_segment(db, tenant_id, seg_key))
+        union_ids = auto_ids | manual_ids
+        if not union_ids:
+            return {"customers": [], "total": 0, "page": page,
+                    "per_page": per_page, "pages": 1}
+        q = (
+            db.query(Customer)
+            .filter(Customer.tenant_id == tenant_id, Customer.id.in_(union_ids))
+        )
+
+        # Diagnostic log so production tickets are debuggable in one
+        # grep instead of a database session.
+        try:
+            import logging  # noqa: PLC0415
+            logging.getLogger("nahla.customers.segment_filter").info(
+                "segment filter | tenant=%s key=%r auto=%d manual=%d union=%d",
+                tenant_id, seg_key, len(auto_ids), len(manual_ids), len(union_ids),
+            )
+        except Exception:
+            pass
     else:
         q = db.query(Customer).filter(Customer.tenant_id == tenant_id)
 

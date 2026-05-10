@@ -574,7 +574,108 @@ async def _do_checkout(
 
     gateway_client, gateway_name, gateway_cfg = get_billing_gateway(db, tenant_id)
 
+    # ── Self-heal: maybe the merchant already paid an older sub ───────
+    # If the merchant double-clicked Subscribe an hour ago, paid that
+    # invoice, and is now clicking again expecting "Pay" but actually
+    # already paid — we must NOT create a new sub. Reconcile first
+    # so any paid-but-stuck invoice gets activated, and only then
+    # decide whether checkout needs a new row.
+    try:
+        from services.billing_activation import lazy_reconcile_tenant_pending_subs  # noqa: PLC0415
+        await lazy_reconcile_tenant_pending_subs(
+            db, int(tenant_id), source="checkout_self_heal",
+        )
+    except Exception as _exc:
+        logger.warning("[Billing] checkout self-heal reconcile failed: %s", _exc)
+
+    # If reconcile activated something, the tenant now has an active
+    # sub — return it instead of creating a new one. This is the
+    # "already paid, please don't bill me again" case.
+    existing_active = (
+        db.query(BillingSubscription)
+        .filter(
+            BillingSubscription.tenant_id == tenant_id,
+            BillingSubscription.status == "active",
+        )
+        .order_by(BillingSubscription.id.desc())
+        .first()
+    )
+    if existing_active and existing_active.plan_id == plan.id:
+        logger.info(
+            "[Billing] checkout idempotent: tenant=%s already active on plan=%s sub=%s",
+            tenant_id, plan.slug, existing_active.id,
+        )
+        return {
+            "subscription_id": existing_active.id,
+            "checkout_url":    None,
+            "gateway":         gateway_name or "active",
+            "amount_sar":      price_sar,
+            "plan_slug":       plan.slug,
+            "demo_mode":       False,
+            "already_active":  True,
+        }
+
     if gateway_client is not None:
+        # ── Idempotent reuse of existing pending sub for SAME plan ────
+        # If the merchant already has a pending_payment subscription
+        # for this plan with a Moyasar invoice attached, fetch the
+        # invoice's checkout URL from Moyasar and return it instead
+        # of creating a new sub. This is the canonical fix for the
+        # tenant-33 class of bug — N clicks on Subscribe must not
+        # produce N orphan subs.
+        existing_pending = (
+            db.query(BillingSubscription)
+            .filter(
+                BillingSubscription.tenant_id == tenant_id,
+                BillingSubscription.status == "pending_payment",
+                BillingSubscription.plan_id == plan.id,
+            )
+            .order_by(BillingSubscription.id.desc())
+            .first()
+        )
+        existing_invoice_id = (
+            (existing_pending.extra_metadata or {}).get("moyasar_invoice_id")
+            if existing_pending else None
+        )
+        existing_price = (
+            int((existing_pending.extra_metadata or {}).get("price_charged_sar") or 0)
+            if existing_pending else 0
+        )
+
+        if existing_pending and existing_invoice_id and existing_price == price_sar:
+            try:
+                inv_data = await gateway_client.get_invoice(existing_invoice_id)
+                inv_status = (inv_data.get("status") or "").lower() if isinstance(inv_data, dict) else ""
+                inv_url = (
+                    (inv_data or {}).get("url")
+                    or (inv_data or {}).get("source", {}).get("transaction_url")
+                )
+                # Reuse only if the invoice is still pay-able. Paid
+                # invoices were just activated by the reconcile above,
+                # so we shouldn't reach here for those. Expired/failed
+                # → fall through and create a fresh one.
+                if inv_status in ("initiated", "pending") and inv_url:
+                    logger.info(
+                        "[Billing] checkout idempotent: reusing pending sub=%s "
+                        "invoice=%s tenant=%s plan=%s",
+                        existing_pending.id, existing_invoice_id, tenant_id, plan.slug,
+                    )
+                    return {
+                        "subscription_id": existing_pending.id,
+                        "checkout_url":    inv_url,
+                        "gateway":         gateway_name,
+                        "amount_sar":      price_sar,
+                        "plan_slug":       plan.slug,
+                        "demo_mode":       False,
+                        "reused":          True,
+                    }
+            except Exception as _exc:
+                logger.warning(
+                    "[Billing] could not reuse existing invoice (will create new): %s",
+                    _exc,
+                )
+                # Fall through to fresh-create path.
+
         db.query(BillingSubscription).filter(
             BillingSubscription.tenant_id == tenant_id,
             BillingSubscription.status == "pending_payment",

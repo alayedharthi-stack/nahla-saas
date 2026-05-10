@@ -487,6 +487,66 @@ class TestCustomerListManualFilter:
         assert customer_ids_with_manual_segment(db, t.id, "nope_not_real") == []
 
 
+# ── 7. Auto-chip union with manual tags — UX bug regression ──────────────
+#
+# Production scenario: merchant tags هيثم as "عملاء واعدون" via the
+# drawer (manual). The chip strip "عملاء واعدون" uses RFM logic — and
+# Haitham's RFM doesn't qualify, so he doesn't appear under the chip.
+# But the chip and the drawer share the SAME label, so the merchant
+# can't tell why their manual tag was ignored.
+#
+# Fix: when filtering by `segment=<key>` (auto chip), include manual
+# matches for the same key. This test pins the contract that
+# `auto_ids ∪ manual_ids` is the contract.
+
+
+class TestAutoChipUnionWithManualTags:
+    def test_manually_tagged_customer_appears_under_auto_chip(self):
+        # End-to-end via the route handler isn't worth booting FastAPI
+        # for; we exercise the same union logic directly.
+        from services.manual_segments import customer_ids_with_manual_segment
+        from services.nahla_segments import build_segment_query
+
+        db, _ = _make_db()
+        t = _seed_tenant(db, "T-union")
+
+        # Customer A: manually tagged but RFM doesn't qualify.
+        a = _seed_customer(db, t.id, "+966500000001")
+        add_manual_segment(db, tenant_id=t.id, customer_id=a.id, segment_key="promising")
+
+        # Customer B: untagged and RFM doesn't qualify either.
+        _seed_customer(db, t.id, "+966500000002")
+
+        # Auto-segment query (RFM-based) — both A and B fail it.
+        auto_q = build_segment_query("promising", db, t.id, require_reachable=False)
+        auto_ids = {row[0] for row in auto_q.with_entities(Customer.id).all()}
+        manual_ids = set(customer_ids_with_manual_segment(db, t.id, "promising"))
+
+        # The auto query returns nobody (no profile rows seeded).
+        assert a.id not in auto_ids
+        # The manual query returns A.
+        assert manual_ids == {a.id}
+
+        # Union: A appears, which is what the merchant expects.
+        assert (auto_ids | manual_ids) == {a.id}
+
+    def test_chip_filter_is_still_tenant_isolated_after_union(self):
+        # The union must NOT leak manual tags from another tenant.
+        from services.manual_segments import customer_ids_with_manual_segment
+
+        db, _ = _make_db()
+        a = _seed_tenant(db, "A")
+        b = _seed_tenant(db, "B")
+        ca = _seed_customer(db, a.id, "+966500000001")
+        cb = _seed_customer(db, b.id, "+966500000002")
+        add_manual_segment(db, tenant_id=a.id, customer_id=ca.id, segment_key="vip")
+        add_manual_segment(db, tenant_id=b.id, customer_id=cb.id, segment_key="vip")
+
+        # Tenant A's manual set must not include B's customer.
+        assert customer_ids_with_manual_segment(db, a.id, "vip") == [ca.id]
+        assert customer_ids_with_manual_segment(db, b.id, "vip") == [cb.id]
+
+
 # ── 6. Lazy billing reconcile — guard against re-introducing the bug ─────
 #
 # Tenant 33 sat at "pending_payment" because no caller ever invoked
