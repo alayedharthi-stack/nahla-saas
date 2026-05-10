@@ -825,6 +825,172 @@ def _frequency_cap_evidence_for_phones(
     return out
 
 
+_MAX_RAW_META_SAMPLES = 5
+
+
+def _mask_phone_for_log(phone: Optional[str]) -> str:
+    """Display the last 4 digits only — matches /debug masking."""
+    if not phone:
+        return ""
+    s = str(phone)
+    return ("•" * max(0, len(s) - 4)) + s[-4:] if len(s) > 4 else s
+
+
+def _mask_payload(payload: Any) -> Any:
+    """Deep-copy ``payload`` masking obvious PII (``to`` phone). We
+    keep template / components / parameters verbatim because that's
+    exactly what support needs to debug ``unknown`` Meta errors —
+    e.g. ``template.name`` mismatch, ``language.code`` mismatch, or
+    parameter-count mismatch.
+
+    We never mutate the original dict so the live Meta call is
+    unaffected by what the debug endpoint stores.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    masked: Dict[str, Any] = {}
+    for k, v in payload.items():
+        if k == "to" and v:
+            masked[k] = _mask_phone_for_log(str(v))
+        elif isinstance(v, dict):
+            masked[k] = _mask_payload(v)
+        elif isinstance(v, list):
+            masked[k] = [_mask_payload(x) for x in v]
+        else:
+            masked[k] = v
+    return masked
+
+
+def _summarise_send_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the compact ``campaign_send_attempt`` log dict.
+
+    Mirrors the shape the user explicitly asked for so the production
+    log line is grep-able as JSON::
+
+        {template_name, language, recipient, component_count,
+         body_params, button_params, media}
+    """
+    tpl = (payload or {}).get("template") or {}
+    components = tpl.get("components") or []
+    body_params = 0
+    button_params = 0
+    media = False
+    for comp in components:
+        ctype = (comp.get("type") or "").lower()
+        params = comp.get("parameters") or []
+        if ctype == "body":
+            body_params += len(params)
+        elif ctype == "button":
+            button_params += len(params)
+        elif ctype == "header":
+            for p in params:
+                if isinstance(p, dict) and (p.get("type") or "").lower() in (
+                    "image", "video", "document",
+                ):
+                    media = True
+    return {
+        "template_name":   tpl.get("name"),
+        "language":        ((tpl.get("language") or {}).get("code")
+                            if isinstance(tpl.get("language"), dict) else tpl.get("language")),
+        "recipient":       _mask_phone_for_log(payload.get("to")),
+        "component_count": len(components),
+        "body_params":     body_params,
+        "button_params":   button_params,
+        "media":           media,
+    }
+
+
+def _log_send_attempt(
+    *,
+    campaign_id: int,
+    template: WhatsAppTemplate,
+    recipient_phone: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Emit the canonical pre-send attempt line. The dict shape is
+    stable so support can search ``campaign_send_attempt`` in Railway
+    logs and instantly correlate every ``unknown`` Meta failure with
+    the template variables that were shipped."""
+    try:
+        summary = _summarise_send_payload(payload)
+    except Exception:
+        summary = {
+            "template_name": getattr(template, "name", None),
+            "recipient":     _mask_phone_for_log(recipient_phone),
+        }
+    logger.info(
+        "[campaign_dispatcher] campaign_send_attempt campaign=%d %s",
+        campaign_id, summary,
+    )
+
+
+def _record_raw_meta_sample(
+    *,
+    campaign: "Campaign",
+    recipient_phone: str,
+    meta_code: Any,
+    meta_subcode: Any,
+    meta_type: Any,
+    meta_message: Any,
+    request_payload: Dict[str, Any],
+    response_payload: Dict[str, Any],
+    classified_key: str,
+) -> None:
+    """Append a bounded sample of the full Meta request/response onto
+    ``campaign.template_variables._raw_meta_error_samples`` so the
+    debug endpoint can show it verbatim. Capped at
+    ``_MAX_RAW_META_SAMPLES`` to keep the JSONB row size sane.
+
+    Order: prefer ``unknown`` keys at the front (they're the ones
+    support needs to fingerprint). The classifier improves over time
+    by adding the codes that show up here to ``meta_errors._CODE_MAP``.
+    """
+    try:
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+        tv = dict(campaign.template_variables or {})
+        raw_str = tv.get("_raw_meta_error_samples") or ""
+        samples: List[Dict[str, Any]] = []
+        if isinstance(raw_str, str) and raw_str.strip():
+            try:
+                samples = _json.loads(raw_str) or []
+            except Exception:
+                samples = []
+        elif isinstance(raw_str, list):
+            samples = list(raw_str)
+
+        sample = {
+            "ts":                  datetime.now(timezone.utc).isoformat(),
+            "recipient":           _mask_phone_for_log(recipient_phone),
+            "meta_error_code":     str(meta_code) if meta_code is not None else None,
+            "meta_error_subcode":  str(meta_subcode) if meta_subcode is not None else None,
+            "meta_error_type":     str(meta_type) if meta_type is not None else None,
+            "meta_error_message":  str(meta_message or "")[:1000],
+            "request_payload":     _mask_payload(request_payload),
+            "response_payload":    _mask_payload(response_payload),
+            "classified_key":      classified_key,
+        }
+        # Unknown samples win priority — drop the oldest known sample
+        # first when we exceed the cap.
+        samples.append(sample)
+        if len(samples) > _MAX_RAW_META_SAMPLES:
+            unknowns = [s for s in samples if s.get("classified_key") == "unknown"]
+            knowns = [s for s in samples if s.get("classified_key") != "unknown"]
+            kept = unknowns[-_MAX_RAW_META_SAMPLES:]
+            slots_left = max(0, _MAX_RAW_META_SAMPLES - len(kept))
+            kept = knowns[-slots_left:] + kept if slots_left > 0 else kept
+            samples = kept
+
+        tv["_raw_meta_error_samples"] = _json.dumps(samples, ensure_ascii=False)
+        campaign.template_variables = tv
+        flag_modified(campaign, "template_variables")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[campaign_dispatcher] failed to persist raw Meta sample: %s",
+            exc,
+        )
+
+
 def _count_log_statuses(db: Session, campaign_id: int) -> Dict[str, int]:
     """Return ``{status: count}`` for every status seen on this
     campaign. Backbone of the report endpoint."""
@@ -914,6 +1080,19 @@ async def _dispatch_queued_rows(
                     coupon_code=coupon_code,
                 )
 
+                # ── PRE-SEND ATTEMPT LOG ──────────────────────────
+                # Emit a single structured line per recipient BEFORE
+                # we hit Meta. This is the line support greps for
+                # "campaign_send_attempt" when an entire campaign
+                # fails with `unknown` — it shows exactly which
+                # template / language / parameter shape we shipped.
+                _log_send_attempt(
+                    campaign_id=campaign.id,
+                    template=template,
+                    recipient_phone=phone,
+                    payload=payload,
+                )
+
                 response, _ctx = await provider_send_message(
                     db,
                     wa_conn,
@@ -946,7 +1125,9 @@ async def _dispatch_queued_rows(
                         meta_code = None
                         meta_subcode = None
                         meta_type = None
-                    from services.meta_errors import classify_meta_error  # noqa: PLC0415
+                    from services.meta_errors import (  # noqa: PLC0415
+                        classify_meta_error, format_technical,
+                    )
                     classified = classify_meta_error(
                         code=meta_code, subcode=meta_subcode,
                         error_type=meta_type, message=meta_msg,
@@ -959,13 +1140,32 @@ async def _dispatch_queued_rows(
                     row.error_code = classified.key[:64]
                     # ``error_message`` keeps the raw Meta string +
                     # numeric code so support can paste it into a
-                    # ticket without losing fidelity.
-                    technical = (
-                        f"[code={meta_code} subcode={meta_subcode} "
-                        f"type={meta_type}] {meta_msg}"
+                    # ticket without losing fidelity. The canonical
+                    # ``[code=X subcode=Y type=Z] msg`` shape is what
+                    # ``parse_technical`` consumes to surface the raw
+                    # fields separately in the UI.
+                    technical = format_technical(
+                        code=meta_code, subcode=meta_subcode,
+                        error_type=meta_type, message=meta_msg,
                     )
                     row.error_message = technical[:500]
                     row.updated_at = datetime.now(timezone.utc)
+                    # Persist a bounded list of raw fingerprints on the
+                    # campaign so the debug endpoint can render the
+                    # full Meta payload for every UNKNOWN error — this
+                    # is the fingerprint-collection bucket support uses
+                    # to grow the canonical classifier.
+                    _record_raw_meta_sample(
+                        campaign=campaign,
+                        recipient_phone=phone,
+                        meta_code=meta_code,
+                        meta_subcode=meta_subcode,
+                        meta_type=meta_type,
+                        meta_message=meta_msg,
+                        request_payload=payload,
+                        response_payload=resp,
+                        classified_key=classified.key,
+                    )
                     failed += 1
                     if len(errors) < 10:
                         # Friendly Arabic line for the campaign report
@@ -975,11 +1175,18 @@ async def _dispatch_queued_rows(
                             f"{phone}: {classified.label_ar} "
                             f"[{classified.key}]"
                         )
-                    logger.warning(
+                    # WARNING for known errors, ERROR for unknown so
+                    # operators can grep production for new codes the
+                    # classifier doesn't recognise yet.
+                    log_method = (
+                        logger.error if classified.key == "unknown"
+                        else logger.warning
+                    )
+                    log_method(
                         "[campaign_dispatcher] campaign=%d Meta error "
-                        "key=%s code=%s subcode=%s phone=%s msg=%s",
+                        "key=%s code=%s subcode=%s type=%s phone=%s msg=%s",
                         campaign.id, classified.key, meta_code,
-                        meta_subcode, phone, meta_msg,
+                        meta_subcode, meta_type, phone, meta_msg,
                     )
                 else:
                     messages = resp.get("messages") if isinstance(resp, dict) else None

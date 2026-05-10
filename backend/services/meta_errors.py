@@ -210,22 +210,48 @@ ERRORS: Dict[str, ClassifiedError] = {
 #      English keyword fragments Meta is known to emit).
 
 # Code → canonical key. ``None`` keys mean "subcode-only resolution".
+#
+# Production fingerprints — every code is observed in the wild and
+# documented at developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes.
+# When you spot a NEW code in Railway logs (search the warning
+# "[campaign_dispatcher] campaign=%d Meta error key=unknown"), add it
+# here with the most-applicable canonical key.
 _CODE_MAP: Dict[int, str] = {
+    # ── OAuth / auth errors ──
+    0:      "auth_error",
+    3:      "auth_error",             # API method permission
+    10:     "auth_error",
+    190:    "auth_error",
+    200:    "auth_error",
+    # ── Generic + rate limit ──
+    1:      "service_unavailable",
+    2:      "service_unavailable",
+    4:      "rate_limit",
+    17:     "rate_limit",
+    32:     "rate_limit",
     100:    "invalid_phone",          # Param to is not a valid phone number
     130429: "rate_limit",
+    # ── 131xxx — message delivery ──
     131000: "service_unavailable",
     131005: "auth_error",
+    131008: "template_param_mismatch", # required param missing
     131009: "invalid_phone",
     131016: "service_unavailable",
     131021: "invalid_phone",          # recipient cannot be sender
     131026: "not_on_whatsapp",        # message undeliverable
     131031: "account_locked",
+    131042: "service_unavailable",    # business eligibility issue
+    131045: "template_param_mismatch",
     131047: "out_of_24h_window",
     131048: "spam_rate_limit",
     131049: "marketing_blocked",
     131051: "media_error",
     131052: "media_error",
     131053: "media_error",
+    131056: "rate_limit",              # pair rate limit hit
+    131057: "service_unavailable",
+    131058: "media_error",             # message too long
+    # ── 132xxx — template / policy ──
     132000: "template_param_mismatch",
     132001: "template_not_found",
     132005: "template_param_mismatch",
@@ -234,10 +260,22 @@ _CODE_MAP: Dict[int, str] = {
     132015: "template_paused",
     132016: "template_disabled",
     132068: "policy_violation",
+    132069: "policy_violation",
+    # ── 133xxx — phone / WABA registration ──
     133000: "invalid_phone",
     133004: "service_unavailable",
+    133005: "service_unavailable",
+    133006: "service_unavailable",
+    133008: "service_unavailable",
+    133009: "service_unavailable",
     133010: "invalid_phone",
     133012: "invalid_phone",
+    133015: "service_unavailable",
+    # ── 135xxx — graph + WABA quality ──
+    135000: "service_unavailable",
+    136025: "policy_violation",
+    # ── 368 — temporarily blocked ──
+    368:    "policy_violation",
 }
 
 
@@ -308,6 +346,66 @@ def classify_meta_error(
     return ERRORS["unknown"]
 
 
+def format_technical(
+    *,
+    code: Any = None,
+    subcode: Any = None,
+    error_type: Any = None,
+    message: Any = None,
+) -> str:
+    """Canonical one-line technical string we store in
+    ``CampaignSendLog.error_message`` and surface verbatim in the UI
+    when the classifier falls back to ``unknown``. Stable format so
+    support can grep production logs deterministically."""
+    msg = str(message or "Unknown Meta error").strip()
+    code_part = f"code={code}" if code is not None and str(code).strip() else "code=?"
+    sub_part = (
+        f" subcode={subcode}"
+        if subcode is not None and str(subcode).strip()
+        else ""
+    )
+    type_part = (
+        f" type={error_type}"
+        if error_type is not None and str(error_type).strip()
+        else ""
+    )
+    return f"[{code_part}{sub_part}{type_part}] {msg}"
+
+
+def parse_technical(text: Optional[str]) -> Dict[str, Optional[str]]:
+    """Inverse of ``format_technical``. Given a stored
+    ``CampaignSendLog.error_message`` string (or any other string of
+    the same shape), return the parsed component fields. Never raises
+    — returns whatever it can recover, falling back to ``None`` for
+    missing fields so the UI can still render a partial breakdown."""
+    out: Dict[str, Optional[str]] = {
+        "meta_error_code":    None,
+        "meta_error_subcode": None,
+        "meta_error_type":    None,
+        "meta_error_message": None,
+    }
+    if not text:
+        return out
+    s = str(text)
+    head_match = re.match(r"^\s*\[([^\]]*)\]\s*(.*)$", s, re.S)
+    if not head_match:
+        out["meta_error_message"] = s.strip() or None
+        return out
+    head, body = head_match.group(1), head_match.group(2)
+    out["meta_error_message"] = body.strip() or None
+    for tok in re.findall(r"(code|subcode|type)\s*=\s*([^\s\]]+)", head, re.I):
+        key, val = tok[0].lower(), tok[1]
+        if val.lower() in ("none", "null", "?"):
+            continue
+        if key == "code":
+            out["meta_error_code"] = val
+        elif key == "subcode":
+            out["meta_error_subcode"] = val
+        elif key == "type":
+            out["meta_error_type"] = val
+    return out
+
+
 def severity_of(key: str) -> str:
     """Quick lookup — used by the lifecycle classifier to decide if a
     failure is "minor" enough that the campaign shouldn't be marked
@@ -335,6 +433,8 @@ __all__ = [
     "ClassifiedError",
     "ERRORS",
     "classify_meta_error",
+    "format_technical",
+    "parse_technical",
     "severity_of",
     "label_for",
     "to_dict",

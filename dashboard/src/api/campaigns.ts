@@ -134,6 +134,13 @@ export interface CampaignDebugSnapshot {
     advice_ar: string | null
     /** Raw technical message kept verbatim so support can copy it. */
     error_technical: string
+    /** Parsed-out Meta error fields. Present even when ``error_code``
+     *  is "unknown" so the UI can always show the merchant the raw
+     *  Meta payload instead of a generic "خطأ غير معروف". */
+    meta_error_code: string | null
+    meta_error_subcode: string | null
+    meta_error_type: string | null
+    meta_error_message: string | null
     attempt_count: number
     updated_at: string | null
   }>
@@ -222,6 +229,20 @@ export interface CampaignDebugSnapshot {
     last_successful_sent_at: string | null
     last_successful_campaign_id: number | null
   }
+  /** Raw Meta API request/response fingerprints captured when the
+   *  classifier falls back to "unknown". Used by support to add new
+   *  Meta error codes to the canonical classifier. */
+  raw_meta_error_samples: Array<{
+    ts: string
+    recipient: string
+    meta_error_code: string | null
+    meta_error_subcode: string | null
+    meta_error_type: string | null
+    meta_error_message: string | null
+    request_payload: Record<string, unknown>
+    response_payload: Record<string, unknown>
+    classified_key: string
+  }>
   sample_sent: Array<{
     phone: string
     provider_message_id: string | null

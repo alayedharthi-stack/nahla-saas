@@ -1656,6 +1656,186 @@ function FieldFlag({
   )
 }
 
+// ── Unknown-Meta error fingerprint panels ────────────────────────────────────
+//
+// Shown only when at least one failed recipient was classified as
+// ``unknown`` (the classifier hasn't fingerprinted the Meta code yet).
+// Renders the parsed code/subcode/type/message prominently — no more
+// "خطأ غير معروف" with nothing underneath — and copy-to-clipboard the
+// full technical line so support can add the code to
+// ``backend/services/meta_errors._CODE_MAP``.
+
+function UnknownMetaErrorsPanel({
+  rows,
+}: {
+  rows: NonNullable<CampaignDebugSnapshot['sample_failed']>
+}) {
+  return (
+    <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50/60 p-3">
+      <p className="text-[11px] font-semibold text-amber-800 mb-2 flex items-center gap-1">
+        <AlertCircle className="w-3.5 h-3.5" />
+        Meta أعادت خطأ غير مصنّف بعد ({rows.length})
+      </p>
+      <p className="text-[10px] text-amber-700 leading-relaxed mb-2">
+        نحن في طور جمع بصمات أخطاء Meta الحقيقية لتحسين المُصنِّف. انسخ
+        السطر التقني التالي وأرسله للدعم لإضافته إلى قائمة الأخطاء
+        المعروفة.
+      </p>
+      <div className="space-y-2">
+        {rows.map((r, i) => (
+          <div
+            key={i}
+            className="border border-amber-200 rounded-md p-2 bg-white"
+          >
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="text-[10px] text-slate-500 font-mono" dir="ltr">
+                {r.phone}
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  navigator.clipboard
+                    .writeText(r.error_technical || '')
+                    .catch(() => {})
+                }
+                className="text-[10px] text-amber-700 hover:text-amber-900 flex items-center gap-1"
+                title="نسخ السطر التقني الكامل"
+              >
+                <Copy className="w-3 h-3" /> نسخ
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-1 text-[10px] mb-1.5">
+              <MetaField label="code"    value={r.meta_error_code} />
+              <MetaField label="subcode" value={r.meta_error_subcode} />
+              <MetaField label="type"    value={r.meta_error_type} />
+            </div>
+            <p
+              className="text-[10.5px] text-slate-700 leading-relaxed border-t border-amber-100 pt-1.5"
+              dir="ltr"
+            >
+              {r.meta_error_message || r.error_technical || '—'}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function MetaField({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-slate-500 font-mono">{label}:</span>
+      <span
+        className={`font-mono px-1 rounded ${
+          value
+            ? 'bg-slate-100 text-slate-800'
+            : 'bg-slate-50 text-slate-400'
+        }`}
+        dir="ltr"
+      >
+        {value || '—'}
+      </span>
+    </div>
+  )
+}
+
+/** Expandable raw Meta request / response payloads. Lets support
+ *  drill into the EXACT bytes Meta saw — template name, language
+ *  code, component count, parameter list — to debug ``unknown``
+ *  errors caused by template-name mismatch, language-code mismatch,
+ *  parameter-count mismatch, or sandbox/test-number restrictions.
+ */
+function RawMetaSamplesPanel({
+  samples,
+}: {
+  samples: NonNullable<CampaignDebugSnapshot['raw_meta_error_samples']>
+}) {
+  const [openIdx, setOpenIdx] = useState<number | null>(null)
+  return (
+    <div className="mt-3 rounded-lg border border-slate-300 bg-slate-50/70 p-3">
+      <p className="text-[11px] font-semibold text-slate-700 mb-2 flex items-center gap-1">
+        🔬 العيّنات الخام من Meta ({samples.length})
+      </p>
+      <p className="text-[10px] text-slate-600 leading-relaxed mb-2">
+        كل عينة تحوي الطلب والاستجابة الكاملين — مفيد للتأكد من
+        ``template.name`` و``language.code`` وعدد المتغيّرات قبل
+        تقديم تذكرة للدعم.
+      </p>
+      <div className="space-y-2">
+        {samples.map((s, i) => {
+          const open = openIdx === i
+          return (
+            <div
+              key={i}
+              className="border border-slate-200 rounded-md bg-white"
+            >
+              <button
+                type="button"
+                onClick={() => setOpenIdx(open ? null : i)}
+                className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-[10.5px] hover:bg-slate-50"
+              >
+                <span className="text-slate-700 font-mono" dir="ltr">
+                  {s.ts.slice(0, 19).replace('T', ' ')} • {s.recipient}
+                </span>
+                <span className="flex items-center gap-2">
+                  <span
+                    className={`font-mono px-1.5 py-0.5 rounded border ${
+                      s.classified_key === 'unknown'
+                        ? 'bg-amber-100 text-amber-700 border-amber-200'
+                        : 'bg-slate-100 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    {s.classified_key}
+                  </span>
+                  <span className="text-slate-400">{open ? '▲' : '▼'}</span>
+                </span>
+              </button>
+              {open && (
+                <div className="border-t border-slate-200 p-2 space-y-2">
+                  <div className="grid grid-cols-3 gap-1 text-[10px]">
+                    <MetaField label="code"    value={s.meta_error_code} />
+                    <MetaField label="subcode" value={s.meta_error_subcode} />
+                    <MetaField label="type"    value={s.meta_error_type} />
+                  </div>
+                  <p
+                    className="text-[10.5px] text-slate-700 leading-relaxed"
+                    dir="ltr"
+                  >
+                    {s.meta_error_message || '—'}
+                  </p>
+                  <div>
+                    <p className="text-[10px] font-semibold text-slate-600 mb-1">
+                      Request payload (masked):
+                    </p>
+                    <pre
+                      className="text-[9.5px] bg-slate-900 text-emerald-200 rounded p-2 overflow-x-auto max-h-44 leading-relaxed"
+                      dir="ltr"
+                    >
+                      {JSON.stringify(s.request_payload, null, 2)}
+                    </pre>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold text-slate-600 mb-1">
+                      Response payload:
+                    </p>
+                    <pre
+                      className="text-[9.5px] bg-slate-900 text-rose-200 rounded p-2 overflow-x-auto max-h-44 leading-relaxed"
+                      dir="ltr"
+                    >
+                      {JSON.stringify(s.response_payload, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ── Campaign list row ─────────────────────────────────────────────────────────
 
 /** Append frequency-cap audit lines to the diagnostic ``pre`` block —
@@ -1714,6 +1894,15 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   // the section until the first /debug call returns.
   const [excludedSample, setExcludedSample] =
     useState<CampaignDebugSnapshot['sample_excluded_before_send'] | null>(null)
+  /** Failed-sample drill-down (parsed Meta fields, shown prominently
+   *  when ``error_code == "unknown"`` — fingerprint collection). */
+  const [failedSample, setFailedSample] =
+    useState<CampaignDebugSnapshot['sample_failed'] | null>(null)
+  /** Raw Meta request/response payloads captured on failure — only
+   *  populated when at least one failure was "unknown". Used by
+   *  support to add new Meta codes to the canonical classifier. */
+  const [rawMetaSamples, setRawMetaSamples] =
+    useState<CampaignDebugSnapshot['raw_meta_error_samples'] | null>(null)
   /** QA escape hatch — POST dispatch-now with ``bypass_frequency_cap``. */
   const [ignoreFreqCapForDispatch, setIgnoreFreqCapForDispatch] = useState(false)
 
@@ -1730,9 +1919,13 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     setDiagnosing(true)
     setDiagnostic(null)
     setExcludedSample(null)
+    setFailedSample(null)
+    setRawMetaSamples(null)
     try {
       const snap = await campaignsApi.debug(campaign.id)
       setExcludedSample(snap.sample_excluded_before_send || [])
+      setFailedSample(snap.sample_failed || [])
+      setRawMetaSamples(snap.raw_meta_error_samples || [])
       const r = snap.recipients
       const total = r.total || campaign.audience_count || 0
       const skipped = r.skipped_duplicate + r.skipped_invalid +
@@ -1848,6 +2041,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         try {
           const snap = await campaignsApi.debug(campaign.id)
           setExcludedSample(snap.sample_excluded_before_send || [])
+          setFailedSample(snap.sample_failed || [])
+          setRawMetaSamples(snap.raw_meta_error_samples || [])
           const r = snap.recipients
           const total = r.total || campaign.audience_count || 0
           const lifecycleLabel =
@@ -2071,6 +2266,12 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
             </pre>
             {excludedSample && excludedSample.length > 0 && (
               <ExcludedCustomersDrillDown rows={excludedSample} />
+            )}
+            {failedSample && failedSample.some(r => r.error_code === 'unknown') && (
+              <UnknownMetaErrorsPanel rows={failedSample.filter(r => r.error_code === 'unknown')} />
+            )}
+            {rawMetaSamples && rawMetaSamples.length > 0 && (
+              <RawMetaSamplesPanel samples={rawMetaSamples} />
             )}
           </td>
         </tr>

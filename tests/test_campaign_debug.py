@@ -526,6 +526,178 @@ class TestMetaErrorClassifier:
         assert c.advice_ar
 
 
+class TestMetaTechnicalSerialisation:
+    """The ``[code=X subcode=Y type=Z] msg`` shape is the contract
+    between the dispatcher (writer) and the debug endpoint (reader).
+    Round-tripping it MUST preserve every Meta field so the UI can
+    show ``unknown`` errors with the raw payload underneath."""
+
+    def test_format_then_parse_round_trips(self):
+        from services.meta_errors import format_technical, parse_technical
+        s = format_technical(
+            code=132000, subcode=2494073, error_type="OAuthException",
+            message="Template parameter mismatch",
+        )
+        assert s == (
+            "[code=132000 subcode=2494073 type=OAuthException] "
+            "Template parameter mismatch"
+        )
+        parsed = parse_technical(s)
+        assert parsed["meta_error_code"] == "132000"
+        assert parsed["meta_error_subcode"] == "2494073"
+        assert parsed["meta_error_type"] == "OAuthException"
+        assert parsed["meta_error_message"] == "Template parameter mismatch"
+
+    def test_parse_handles_missing_fields(self):
+        from services.meta_errors import parse_technical
+        parsed = parse_technical("[code=131026] Message undeliverable")
+        assert parsed["meta_error_code"] == "131026"
+        assert parsed["meta_error_subcode"] is None
+        assert parsed["meta_error_type"] is None
+        assert parsed["meta_error_message"] == "Message undeliverable"
+
+    def test_parse_handles_legacy_string_without_brackets(self):
+        from services.meta_errors import parse_technical
+        parsed = parse_technical("Meta accepted but no wamid returned")
+        assert parsed["meta_error_code"] is None
+        assert parsed["meta_error_message"] == (
+            "Meta accepted but no wamid returned"
+        )
+
+    def test_parse_skips_none_placeholders(self):
+        from services.meta_errors import parse_technical
+        parsed = parse_technical("[code=None subcode=None type=None] boom")
+        assert parsed["meta_error_code"] is None
+        assert parsed["meta_error_subcode"] is None
+        assert parsed["meta_error_type"] is None
+        assert parsed["meta_error_message"] == "boom"
+
+
+class TestRawMetaSamplesPersistence:
+    """Capture-bucket invariants. Support relies on these to grow the
+    classifier from production fingerprints."""
+
+    def _campaign(self):
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="active", audience_count=4)
+        return db, t, c
+
+    def test_record_appends_sample_into_template_variables(self):
+        from services.campaign_dispatcher import _record_raw_meta_sample
+        db, t, c = self._campaign()
+        _record_raw_meta_sample(
+            campaign=c,
+            recipient_phone="+966500000001",
+            meta_code=132000, meta_subcode=2494073,
+            meta_type="OAuthException",
+            meta_message="Template parameter mismatch",
+            request_payload={
+                "to": "+966500000001",
+                "template": {
+                    "name": "nahla_special_offer_c874",
+                    "language": {"code": "ar"},
+                    "components": [{"type": "body", "parameters": [{"type": "text", "text": "n"}]}],
+                },
+            },
+            response_payload={"error": {"code": 132000, "message": "boom"}},
+            classified_key="unknown",
+        )
+        db.commit()
+        db.refresh(c)
+        import json as _json
+        raw = (c.template_variables or {}).get("_raw_meta_error_samples")
+        samples = _json.loads(raw)
+        assert len(samples) == 1
+        s = samples[0]
+        # Phone is masked — never leak raw PII into stored JSON.
+        assert "966500000001" not in s["recipient"]
+        assert s["recipient"].endswith("0001")
+        # Template name + language survive verbatim so support can
+        # check ``template.name`` mismatch / language-code mismatch.
+        assert s["request_payload"]["template"]["name"] == "nahla_special_offer_c874"
+        assert s["request_payload"]["template"]["language"]["code"] == "ar"
+        assert s["classified_key"] == "unknown"
+
+    def test_sample_bucket_is_bounded_and_prefers_unknown(self):
+        from services.campaign_dispatcher import (
+            _record_raw_meta_sample, _MAX_RAW_META_SAMPLES,
+        )
+        db, t, c = self._campaign()
+        for i in range(_MAX_RAW_META_SAMPLES + 4):
+            classified = "unknown" if i % 2 == 0 else "rate_limit"
+            _record_raw_meta_sample(
+                campaign=c,
+                recipient_phone=f"+96650000{i:04d}",
+                meta_code=131026 + i,
+                meta_subcode=None, meta_type=None,
+                meta_message=f"err {i}",
+                request_payload={"to": f"+96650000{i:04d}"},
+                response_payload={"error": {"code": 131026 + i}},
+                classified_key=classified,
+            )
+        db.commit()
+        db.refresh(c)
+        import json as _json
+        samples = _json.loads(
+            (c.template_variables or {})["_raw_meta_error_samples"]
+        )
+        assert len(samples) <= _MAX_RAW_META_SAMPLES
+        # At least one ``unknown`` survived even though more known
+        # samples followed — the bucket prefers unknowns.
+        keys = [s["classified_key"] for s in samples]
+        assert "unknown" in keys
+
+    def test_debug_endpoint_exposes_raw_samples(self):
+        from services.campaign_dispatcher import _record_raw_meta_sample
+        db, t, c = self._campaign()
+        _record_raw_meta_sample(
+            campaign=c,
+            recipient_phone="+966500000099",
+            meta_code=999999, meta_subcode=None, meta_type=None,
+            meta_message="fingerprint me",
+            request_payload={"to": "+966500000099", "template": {"name": "T", "language": {"code": "ar"}}},
+            response_payload={"error": {"code": 999999, "message": "fingerprint me"}},
+            classified_key="unknown",
+        )
+        db.commit()
+
+        result = _call_debug(db, t.id, c.id)
+        samples = result["raw_meta_error_samples"]
+        assert len(samples) == 1
+        assert samples[0]["meta_error_code"] == "999999"
+        assert samples[0]["meta_error_message"] == "fingerprint me"
+        # Request payload made it through verbatim.
+        assert samples[0]["request_payload"]["template"]["name"] == "T"
+        # Recipient is masked.
+        assert "966500000099" not in samples[0]["recipient"]
+
+    def test_sample_failed_includes_parsed_meta_fields(self):
+        from services.meta_errors import format_technical
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="active", audience_count=2)
+        technical = format_technical(
+            code=132000, subcode=2494073,
+            error_type="OAuthException",
+            message="Template parameter mismatch",
+        )
+        db.add(CampaignSendLog(
+            tenant_id=t.id, campaign_id=c.id,
+            customer_phone_e164="+966500000111", status="failed",
+            error_code="unknown", error_message=technical,
+        ))
+        db.commit()
+
+        result = _call_debug(db, t.id, c.id)
+        sf = result["sample_failed"]
+        assert len(sf) == 1
+        # Parsed Meta fields surface separately so the UI can render
+        # them when the canonical key is ``unknown``.
+        assert sf[0]["meta_error_code"] == "132000"
+        assert sf[0]["meta_error_subcode"] == "2494073"
+        assert sf[0]["meta_error_type"] == "OAuthException"
+        assert sf[0]["meta_error_message"] == "Template parameter mismatch"
+
+
 # ── 6. Lifecycle: partial_minor + no_whatsapp_recipients ────────────
 
 

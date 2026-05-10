@@ -812,7 +812,7 @@ async def debug_campaign(
 
     def _sample_failed():
         from services.meta_errors import (  # noqa: PLC0415
-            ERRORS as META_ERRORS, classify_meta_error,
+            ERRORS as META_ERRORS, classify_meta_error, parse_technical,
         )
         rows = (
             db.query(CampaignSendLog)
@@ -839,6 +839,11 @@ async def debug_campaign(
                     code=r.error_code, message=r.error_message,
                 )
             )
+            # Parse the canonical "[code=X subcode=Y type=Z] msg"
+            # string back into separate fields so the UI can render
+            # raw Meta details prominently when key=="unknown" — no
+            # more "خطأ غير معروف" with nothing underneath it.
+            parsed = parse_technical(r.error_message)
             out.append({
                 "phone":          _mask(r.customer_phone_e164),
                 "error_code":     classified.key,
@@ -848,12 +853,45 @@ async def debug_campaign(
                 "advice_ar":      classified.advice_ar,
                 # Raw technical message kept verbatim — surfaces in
                 # the "نسخ الخطأ التقني" button.
-                "error_technical": (r.error_message or "")[:300],
+                "error_technical":     (r.error_message or "")[:300],
+                # Parsed Meta fields — surface separately so the UI
+                # can always show meta_error_code / subcode / type /
+                # message even for ``unknown`` keys (fingerprint
+                # collection for the classifier).
+                "meta_error_code":     parsed["meta_error_code"],
+                "meta_error_subcode":  parsed["meta_error_subcode"],
+                "meta_error_type":     parsed["meta_error_type"],
+                "meta_error_message":  parsed["meta_error_message"],
                 "attempt_count":   r.attempt_count,
                 "updated_at": r.updated_at.isoformat() if r.updated_at else None,
             })
         return out
     sample_failed = _safe("sample_failed", _sample_failed) or []
+
+    # ── Raw Meta error fingerprint bucket ───────────────────────────
+    # When ``classified.key == "unknown"`` the dispatcher persists the
+    # full request + response payload onto the campaign so support can
+    # see EXACTLY what Meta replied. Surfaces under
+    # ``raw_meta_error_samples`` (list, oldest → newest).
+    def _raw_meta_samples():
+        import json as _json  # noqa: PLC0415
+        raw = (campaign.template_variables or {}).get(
+            "_raw_meta_error_samples"
+        )
+        if not raw:
+            return []
+        if isinstance(raw, list):
+            return raw[-5:]
+        if isinstance(raw, str) and raw.strip():
+            try:
+                data = _json.loads(raw)
+            except Exception:
+                return []
+            return data[-5:] if isinstance(data, list) else []
+        return []
+    raw_meta_error_samples = _safe(
+        "raw_meta_samples", _raw_meta_samples,
+    ) or []
 
     def _sample_sent():
         rows = (
@@ -1374,6 +1412,22 @@ async def debug_campaign(
             + tail
             + " إذا كنت تختبر، فعّل «تجاهل حد التكرار لهذه الحملة» عند الإرسال."
         )
+    # Hint: every failure is an UNKNOWN Meta error → support needs
+    # to look at the raw payload bucket to fingerprint a new code.
+    unknown_failures = sum(
+        1 for fs in (failure_summary or [])
+        if (fs.get("error_code") or "") == "unknown"
+    )
+    total_failures = sum(int(fs.get("count") or 0) for fs in (failure_summary or []))
+    if unknown_failures > 0 and unknown_failures == len(failure_summary or []) and total_failures > 0:
+        hints.append(
+            "كل حالات الفشل صنّفها النظام كـ «خطأ غير مصنّف بعد من Meta». "
+            "افحص قسم «العيّنات الخام من Meta» في الأسفل — يحوي ردّ Meta "
+            "الكامل لكل محاولة (request + response + code + subcode + "
+            "type + message). أرسل لقطة منها للدعم لإضافة الكود إلى "
+            "المُصنِّف."
+        )
+
     if not (template_info or {}).get("approved"):
         hints.append(
             "القالب ليس بحالة APPROVED — لن يُرسل واتساب أي رسالة قبل "
@@ -1442,6 +1496,12 @@ async def debug_campaign(
         # campaign. ``source_rows`` traces every capped phone to the
         # last successful campaign that "burned" the cap.
         "frequency_cap":             frequency_cap_audit,
+        # NEW: raw Meta request/response fingerprints captured on
+        # failure (especially when the classifier returned
+        # ``unknown``). The UI renders these in an expandable panel
+        # so support can fingerprint new error codes Meta started
+        # emitting and add them to ``meta_errors._CODE_MAP``.
+        "raw_meta_error_samples":    raw_meta_error_samples,
         "template":         template_info,
         "wa_connection":    wa_conn_info,
         "scheduler":        scheduler_info,
