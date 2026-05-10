@@ -85,10 +85,17 @@ SUPPORTED_FEATURE_RULES: Dict[str, Dict[str, Any]] = {
 # auto-derived from the atoms via `services.crm_atoms` so we never
 # duplicate the cohort definitions here. See `_enrich_library_meta`.
 DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
+    # ── MANUAL templates ────────────────────────────────────────────────
+    # The merchant types every dynamic value (coupon, URL, discount).
+    # Nahla never auto-binds a service or generates a coupon for these.
+    # The display label must literally contain "يدوي" so the merchant
+    # cannot confuse them with the auto siblings below.
     "welcome_intro": {
         "library_key": "welcome",
         "label": "رسالة ترحيب",
         "objective": "welcome",
+        "mode": "auto",
+        "library_label_ar": "رسالة ترحيب — تلقائي",
         "customer_statuses": ["lead", "new"],
         "rfm_segments": ["lead", "new_customers", "promising"],
     },
@@ -96,6 +103,8 @@ DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
         "library_key": "abandoned_cart",
         "label": "استرداد سلة متروكة",
         "objective": "abandoned_cart",
+        "mode": "auto",
+        "library_label_ar": "سلة متروكة — تلقائي",
         "customer_statuses": ["new", "active"],
         "rfm_segments": ["regulars", "potential_loyalists", "promising"],
         # `abandoned_cart` cohort is signal-driven (orders.is_abandoned)
@@ -106,6 +115,11 @@ DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
         "library_key": "reactivation",
         "label": "استرجاع العملاء",
         "objective": "reactivation",
+        # MANUAL: merchant types the discount % and coupon code by hand.
+        # We do NOT change the Meta-approved body — only mark its mode
+        # so the wizard treats it as a manual template.
+        "mode": "manual",
+        "library_label_ar": "استرجاع عملاء — يدوي",
         "customer_statuses": ["at_risk", "inactive"],
         "rfm_segments": ["at_risk", "hibernating", "lost_customers", "cant_lose_them"],
     },
@@ -113,6 +127,8 @@ DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
         "library_key": "vip_offers",
         "label": "عروض VIP",
         "objective": "vip_offer",
+        "mode": "manual",
+        "library_label_ar": "عرض VIP — يدوي",
         "customer_statuses": ["vip"],
         "rfm_segments": ["champions", "loyal_customers", "cant_lose_them"],
     },
@@ -120,6 +136,8 @@ DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
         "library_key": "product_recommendations",
         "label": "توصيات منتجات",
         "objective": "product_recommendations",
+        "mode": "auto",
+        "library_label_ar": "توصيات منتجات — تلقائي",
         "customer_statuses": ["active", "vip"],
         "rfm_segments": ["champions", "loyal_customers", "potential_loyalists", "regulars"],
     },
@@ -127,6 +145,8 @@ DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
         "library_key": "order_notifications",
         "label": "إشعارات الطلبات",
         "objective": "order_notifications",
+        "mode": "auto",
+        "library_label_ar": "تأكيد الطلب — تلقائي",
         "customer_statuses": ["new", "active", "vip"],
         "rfm_segments": ["new_customers", "regulars", "champions", "loyal_customers"],
     },
@@ -134,26 +154,114 @@ DEFAULT_TEMPLATE_LIBRARY: Dict[str, Dict[str, Any]] = {
         "library_key": "product_recommendations",
         "label": "تذكير إعادة الطلب",
         "objective": "predictive_reorder",
+        "mode": "auto",
+        "library_label_ar": "تذكير إعادة الطلب — تلقائي",
         "customer_statuses": ["active", "vip"],
         "rfm_segments": ["loyal_customers", "potential_loyalists", "regulars"],
+    },
+    # The classic special-offer template stays exactly as Meta approved
+    # it — body, header, var_map, all untouched. Only its mode flag is
+    # added so the wizard knows it's manual.
+    "special_offer": {
+        "library_key": "promotion",
+        "label": "عرض خاص",
+        "objective": "promotion",
+        "mode": "manual",
+        "library_label_ar": "عرض خاص — يدوي",
+        "customer_statuses": ["active", "vip", "new"],
+        "rfm_segments": ["champions", "loyal_customers", "potential_loyalists", "regulars", "promising"],
+    },
+    "new_arrivals": {
+        "library_key": "promotion",
+        "label": "وصل جديد",
+        "objective": "promotion",
+        "mode": "auto",
+        "library_label_ar": "وصل جديد — تلقائي",
+        "customer_statuses": ["active", "vip", "new"],
+        "rfm_segments": ["champions", "loyal_customers", "potential_loyalists", "regulars", "promising"],
+    },
+    "cod_order_confirmation_ar": {
+        "library_key": "order_notifications",
+        "label": "تأكيد الدفع عند الاستلام",
+        "objective": "order_notifications",
+        "mode": "auto",
+        "library_label_ar": "تأكيد COD — تلقائي",
+        "customer_statuses": ["new", "active", "vip"],
+        "rfm_segments": ["new_customers", "regulars", "champions", "loyal_customers"],
+    },
+
+    # ── AUTO siblings of the manual coupon templates ──────────────────
+    # NEW templates — ship as DRAFT so each merchant submits them to
+    # Meta independently. The body uses customer_name + an auto-bound
+    # coupon code so the campaign engine can fill {{2}} from the coupon
+    # generator at send-time. The merchant never types a coupon code
+    # for these.
+    "special_offer_auto": {
+        "library_key": "promotion",
+        "label": "عرض خاص (تلقائي)",
+        "objective": "promotion",
+        "mode": "auto",
+        "library_label_ar": "عرض خاص — تلقائي",
+        "auto_coupon_capable": True,
+        "customer_statuses": ["active", "vip", "new"],
+        "rfm_segments": ["champions", "loyal_customers", "potential_loyalists", "regulars", "promising"],
+    },
+    "vip_exclusive_auto": {
+        "library_key": "vip_offers",
+        "label": "عرض VIP (تلقائي)",
+        "objective": "vip_offer",
+        "mode": "auto",
+        "library_label_ar": "عرض VIP — تلقائي",
+        "auto_coupon_capable": True,
+        "customer_statuses": ["vip"],
+        "rfm_segments": ["champions", "loyal_customers", "cant_lose_them"],
+    },
+    "win_back_auto": {
+        "library_key": "reactivation",
+        "label": "استرجاع عملاء (تلقائي)",
+        "objective": "reactivation",
+        "mode": "auto",
+        "library_label_ar": "استرجاع عملاء — تلقائي",
+        "auto_coupon_capable": True,
+        "customer_statuses": ["at_risk", "inactive"],
+        "rfm_segments": ["at_risk", "hibernating", "lost_customers", "cant_lose_them"],
     },
 }
 
 
 def _enrich_library_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach a derived ``cohort_keys`` list (the official Nahla
-    marketing cohorts this template is designed for) to a library
-    entry, computed from its declared CRM atoms.
+    """Attach derived metadata (``cohort_keys``, default ``mode``,
+    default ``library_label_ar``) to a library entry.
 
     Returns a *new* dict — never mutates ``DEFAULT_TEMPLATE_LIBRARY``
     so the source-of-truth declarations stay clean. If ``meta`` is
     falsy (template not in the library) returns ``meta`` unchanged.
+
+    The ``mode`` field disambiguates **manual** vs **auto** templates:
+
+      * ``manual`` — merchant types every dynamic value (coupon, URL,
+        discount %). The wizard MUST refuse to auto-bind a coupon or
+        attach a service to these.
+      * ``auto`` — Nahla resolves customer_name / cart_url / coupon
+        from system data; merchant only confirms the send.
+
+    A library entry without an explicit ``mode`` defaults to ``auto``
+    because the historical library was auto-only — the manual flavour
+    was introduced when the broadcast/custom goals were unbundled.
     """
     if not meta:
         return meta
     from services.crm_atoms import derive_cohort_keys_for_template  # noqa: PLC0415
     enriched = dict(meta)
     enriched["cohort_keys"] = list(derive_cohort_keys_for_template(meta))
+    # Backfill the manual/auto contract for any older entry that
+    # forgot to declare it. We default to "auto" so unknown templates
+    # don't accidentally bypass auto-resolve / auto-coupon.
+    enriched.setdefault("mode", "auto")
+    label = enriched.get("label") or ""
+    if label and not enriched.get("library_label_ar"):
+        suffix = " — يدوي" if enriched["mode"] == "manual" else " — تلقائي"
+        enriched["library_label_ar"] = f"{label}{suffix}"
     return enriched
 
 
@@ -287,6 +395,54 @@ SEED_TEMPLATES: List[Dict[str, Any]] = [
             {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
         ],
     },
+
+    # ── AUTO siblings of the manual coupon templates ──────────────────
+    # Ship as DRAFT so each merchant submits them to Meta on demand.
+    # These bodies are designed so the engine can fill all slots from
+    # system data:
+    #   {{1}} = customer_name        (auto from customer record)
+    #   {{2}} = coupon_code          (auto from coupon generator)
+    # The merchant types nothing inside the wizard — they only confirm
+    # the send.
+    {
+        "name": "special_offer_auto",
+        "language": "ar",
+        "category": "MARKETING",
+        "status": "DRAFT",
+        "components": [
+            {"type": "HEADER", "format": "TEXT", "text": "عرض خاص لك 🎁"},
+            {"type": "BODY",
+             "text": "أهلاً {{1}}،\nخصّصنا لك عرضاً خاصاً اليوم.\nاستخدم الكود: *{{2}}*\nالعرض ينتهي قريباً — لا تفوّته!",
+             "example": {"body_text": [["أحمد", "SAVE20"]]}},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+        ],
+    },
+    {
+        "name": "vip_exclusive_auto",
+        "language": "ar",
+        "category": "MARKETING",
+        "status": "DRAFT",
+        "components": [
+            {"type": "HEADER", "format": "TEXT", "text": "👑 عرض VIP حصري"},
+            {"type": "BODY",
+             "text": "{{1}}، أنت من عملائنا المميزين!\nخصصنا لك كوبوناً حصرياً: *{{2}}*\nاستفد منه قبل انتهاء صلاحيته.",
+             "example": {"body_text": [["أحمد", "VIP30"]]}},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+        ],
+    },
+    {
+        "name": "win_back_auto",
+        "language": "ar",
+        "category": "MARKETING",
+        "status": "DRAFT",
+        "components": [
+            {"type": "HEADER", "format": "TEXT", "text": "اشتقنا إليك! 💙"},
+            {"type": "BODY",
+             "text": "مرحباً {{1}}،\nلم نرك منذ فترة ونحن نفتقدك!\nعُد إلينا الآن واستخدم الكود: *{{2}}*",
+             "example": {"body_text": [["أحمد", "BACK15"]]}},
+            {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+        ],
+    },
 ]
 
 TEMPLATE_VAR_MAP: Dict[str, Dict[str, str]] = {
@@ -338,6 +494,23 @@ TEMPLATE_VAR_MAP: Dict[str, Dict[str, str]] = {
     "order_confirmed": {
         "{{1}}": "customer_name",
         "{{2}}": "order_id",
+    },
+    # ── AUTO sibling var maps ─────────────────────────────────────────
+    # The auto bodies use only two slots each: customer_name (from the
+    # customer record) and coupon_code (from the coupon generator at
+    # send-time). No discount_pct slot — the merchant doesn't pick a
+    # percentage; the auto-coupon rule decides it from the segment.
+    "special_offer_auto": {
+        "{{1}}": "customer_name",
+        "{{2}}": "coupon_code",
+    },
+    "vip_exclusive_auto": {
+        "{{1}}": "customer_name",
+        "{{2}}": "vip_coupon",
+    },
+    "win_back_auto": {
+        "{{1}}": "customer_name",
+        "{{2}}": "coupon_code",
     },
 }
 

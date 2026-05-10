@@ -83,12 +83,38 @@ def _placeholder_count(text: str) -> int:
     return len(set(re.findall(r"\{\{(\d+)\}\}", text or "")))
 
 
+def _resolve_library_meta(template: WhatsAppTemplate) -> Dict[str, Any]:
+    """Return the enriched library metadata for *template* or ``{}``.
+
+    Centralised because both ``_score_one`` (for cohort boost) and the
+    public ``recommend_templates`` (for ``mode`` / ``library_label_ar``
+    surfacing) need the same lookup. Imported lazily to avoid a
+    circular import on ``routers.templates``.
+    """
+    try:
+        from routers.templates import (  # noqa: PLC0415
+            DEFAULT_TEMPLATE_LIBRARY,
+            _enrich_library_meta,
+        )
+    except Exception:  # noqa: silent-ok — recommender stays useful even if templates router unavailable
+        return {}
+    return _enrich_library_meta(
+        DEFAULT_TEMPLATE_LIBRARY.get(template.name, {})
+    ) or {}
+
+
 def _score_one(
     template: WhatsAppTemplate, goal: Optional[CampaignGoal],
     segment: Optional[CustomerSegment], lang: str,
+    *,
+    library_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, List[str], str]:
     """Return (score, badges, reason_ar) for one template. Pure function —
-    does not touch the DB."""
+    does not touch the DB.
+
+    ``library_meta`` may be passed in by the caller when the lookup has
+    already been performed (avoids re-importing on every template).
+    """
     badges: List[str] = []
     score = 50  # baseline for an APPROVED template that passed hard filters
 
@@ -158,20 +184,13 @@ def _score_one(
     #     boosts to surface obvious matches like "vip exclusive" /
     #     "welcome".
     if segment is not None:
-        # (a) cohort-level
-        try:
-            from routers.templates import (  # noqa: PLC0415
-                DEFAULT_TEMPLATE_LIBRARY,
-                _enrich_library_meta,
-            )
-            lib_meta = _enrich_library_meta(
-                DEFAULT_TEMPLATE_LIBRARY.get(template.name, {})
-            )
-            cohort_keys = (lib_meta or {}).get("cohort_keys") or []
-            if segment.key in cohort_keys:
-                score += 20
-        except Exception:  # noqa: silent-ok — recommender stays useful even if library import fails
-            pass
+        # (a) cohort-level — prefer the caller-supplied lookup when
+        # available so ``recommend_templates`` doesn't pay for a
+        # duplicate import per template.
+        lib_meta = library_meta if library_meta is not None else _resolve_library_meta(template)
+        cohort_keys = (lib_meta or {}).get("cohort_keys") or []
+        if segment.key in cohort_keys:
+            score += 20
 
         # (b) keyword fallback for non-library templates
         if segment.key == "abandoned_cart" and ("cart" in name_lower or "abandon" in objective):
@@ -249,7 +268,21 @@ def recommend_templates(
 
     scored: List[Dict[str, Any]] = []
     for tpl in candidates:
-        score, badges, reason = _score_one(tpl, goal, segment, language)
+        lib_meta = _resolve_library_meta(tpl)
+        score, badges, reason = _score_one(
+            tpl, goal, segment, language, library_meta=lib_meta,
+        )
+        # Mode / library label come from the canonical library metadata
+        # so the manual vs auto distinction is identical everywhere
+        # (templates page, wizard, autopilot recommender).
+        mode = (lib_meta or {}).get("mode") or "auto"
+        library_label_ar = (lib_meta or {}).get("library_label_ar")
+        # The mode badge is rendered inline with the rest of the
+        # badges so even merchants who never look at the dedicated
+        # Manual/Auto pill can still see it on the card.
+        mode_badge = "🟠 يدوي" if mode == "manual" else "⚡ تلقائي"
+        if mode_badge not in badges:
+            badges.append(mode_badge)
         scored.append({
             "id":              tpl.id,
             "name":            tpl.name,
@@ -263,6 +296,12 @@ def recommend_templates(
             "is_best":         False,  # filled below for the top scorer
             "badges":          badges,
             "reason_ar":       reason,
+            # Manual vs auto contract — drives Step-3 grouping +
+            # Step-4 variable inputs + Step-7 coupon section in the
+            # frontend wizard.
+            "mode":              mode,
+            "library_label_ar":  library_label_ar,
+            "auto_coupon_capable": bool((lib_meta or {}).get("auto_coupon_capable")),
         })
 
     scored.sort(key=lambda r: (-r["score"], r["name"] or ""))

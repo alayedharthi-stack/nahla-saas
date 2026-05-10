@@ -318,6 +318,14 @@ function RecommendedTemplateCard({
   const header = getTemplateHeader(tpl)
   const body   = getTemplateBody(tpl)
   const vars   = extractVariables(body)
+  const manual = isManualTemplate(tpl)
+  // Prefer the merchant-set display name, then the library's labelled
+  // suggestion (always contains "يدوي" / "تلقائي"), and only fall
+  // back to the raw template name as a last resort.
+  const displayName =
+    tpl.display_name_ar ||
+    tpl.library_label_ar ||
+    tpl.name.replace(/_/g, ' ')
 
   return (
     <button
@@ -337,15 +345,36 @@ function RecommendedTemplateCard({
       )}
       <div className="flex items-center justify-between mb-2 gap-2">
         <p className="text-xs font-semibold text-slate-800 truncate">
-          {tpl.display_name_ar || tpl.name.replace(/_/g, ' ')}
+          {displayName}
         </p>
-        <Badge label={tpl.category === 'MARKETING' ? 'تسويق' : tpl.category === 'UTILITY' ? 'خدمة' : 'مصادقة'}
-               variant={tpl.category === 'MARKETING' ? 'amber' : 'blue'} />
+        <div className="flex items-center gap-1 shrink-0">
+          {/* Mode pill — the single most important signal on the
+              card. Orange = merchant types every value; green = Nahla
+              fills values from system data. */}
+          <span
+            className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+              manual
+                ? 'bg-orange-50 text-orange-700 border-orange-200'
+                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+            }`}
+            title={manual
+              ? 'قالب يدوي — أنت تكتب الكوبون والرابط بنفسك.'
+              : 'قالب تلقائي — نحلة تُعبّئ القيم تلقائياً حسب الإعدادات.'}
+          >
+            {manual ? '✋ يدوي' : '⚡ تلقائي'}
+          </span>
+          <Badge label={tpl.category === 'MARKETING' ? 'تسويق' : tpl.category === 'UTILITY' ? 'خدمة' : 'مصادقة'}
+                 variant={tpl.category === 'MARKETING' ? 'amber' : 'blue'} />
+        </div>
       </div>
       {header && <p className="text-xs font-medium text-slate-700 mb-1">{header}</p>}
       <p className="text-xs text-slate-500 line-clamp-2 mb-2" dir="rtl">{body}</p>
       <div className="flex flex-wrap gap-1 mb-2">
-        {tpl.badges.map(b => <TemplateBadge key={b} label={b} />)}
+        {tpl.badges
+          // Drop the inline mode emoji-badge — the dedicated pill above
+          // is louder; keeping both clutters the card.
+          .filter(b => b !== '✋ يدوي' && b !== '🟠 يدوي' && b !== '⚡ تلقائي')
+          .map(b => <TemplateBadge key={b} label={b} />)}
       </div>
       {vars.length > 0 && (
         <div className="flex flex-wrap gap-1">
@@ -406,20 +435,67 @@ function Step3Template({
       </div>
     )
   }
+  // Split templates into auto / manual groups so the merchant never
+  // confuses an auto template (Nahla fills values) with a manual one
+  // (the merchant types values). Both groups stay sorted by the
+  // recommender's score so "الأفضل لهذه الحملة" still surfaces inside
+  // its own group.
+  const autoTpls   = recommendation.templates.filter(t => !isManualTemplate(t))
+  const manualTpls = recommendation.templates.filter(t =>  isManualTemplate(t))
+  const renderGroup = (tpls: RecommendedTemplate[]) => (
+    <div className="grid sm:grid-cols-2 gap-3">
+      {tpls.map(tpl => (
+        <RecommendedTemplateCard
+          key={tpl.id}
+          tpl={tpl}
+          selected={String(wiz.template?.id) === String(tpl.id)}
+          onClick={() => setWiz(w => ({ ...w, template: tpl, variables: {} }))}
+        />
+      ))}
+    </div>
+  )
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <p className="text-xs text-slate-500">
         نحلة فلترت {recommendation.total} قالباً مناسباً ورتّبتها حسب الأنسب لحملتك.
       </p>
-      <div className="grid sm:grid-cols-2 gap-3 max-h-[26rem] overflow-y-auto pe-1">
-        {recommendation.templates.map(tpl => (
-          <RecommendedTemplateCard
-            key={tpl.id}
-            tpl={tpl}
-            selected={String(wiz.template?.id) === String(tpl.id)}
-            onClick={() => setWiz(w => ({ ...w, template: tpl, variables: {} }))}
-          />
-        ))}
+
+      {/* Quick legend so the merchant understands the badge before
+          they even click a card. Stays visible above both groups. */}
+      <div className="flex flex-wrap gap-3 text-[11px] bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block px-2 py-0.5 rounded-full bg-orange-50 text-orange-700 border border-orange-200 font-bold text-[10px]">
+            ✋ يدوي
+          </span>
+          <span className="text-slate-600">أنت تكتب الكوبون والرابط بنفسك</span>
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold text-[10px]">
+            ⚡ تلقائي
+          </span>
+          <span className="text-slate-600">نحلة تُعبّئ القيم تلقائياً حسب الإعدادات</span>
+        </span>
+      </div>
+
+      <div className="max-h-[26rem] overflow-y-auto pe-1 space-y-5">
+        {autoTpls.length > 0 && (
+          <section className="space-y-2">
+            <h3 className="text-[11px] font-bold text-emerald-700 inline-flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5" />
+              قوالب تلقائية ({autoTpls.length})
+            </h3>
+            {renderGroup(autoTpls)}
+          </section>
+        )}
+        {manualTpls.length > 0 && (
+          <section className="space-y-2">
+            <h3 className="text-[11px] font-bold text-orange-700 inline-flex items-center gap-1.5">
+              <FileText className="w-3.5 h-3.5" />
+              قوالب يدوية ({manualTpls.length})
+            </h3>
+            {renderGroup(manualTpls)}
+          </section>
+        )}
       </div>
     </div>
   )
@@ -471,11 +547,36 @@ function isManualGoal(goalKey: string | null): boolean {
   return !!goalKey && MANUAL_GOAL_KEYS.has(goalKey)
 }
 
+/** True when the chosen template itself is a manual library template.
+ *  This is independent of the goal — a merchant can pick a manual
+ *  template under any goal and the wizard must treat it as fully
+ *  manual (no auto-coupon, no service binding, every variable typed
+ *  by the merchant). The library labels these explicitly with
+ *  ``mode === 'manual'`` and a display label containing "يدوي". */
+function isManualTemplate(tpl: { mode?: 'manual' | 'auto' } | null | undefined): boolean {
+  return !!tpl && tpl.mode === 'manual'
+}
+
+/** Convenience: true if either the goal OR the chosen template forces
+ *  manual mode. This is the single predicate every step should
+ *  consult — never check ``isManualGoal`` alone. */
+function isManualMode(
+  goalKey: string | null,
+  tpl: { mode?: 'manual' | 'auto' } | null | undefined,
+): boolean {
+  return isManualGoal(goalKey) || isManualTemplate(tpl)
+}
+
 /** Returns true when ALL template body variables are auto-resolved.
- *  Manual goals always force this to false — the merchant must type
- *  every variable themselves so the campaign carries no service binding. */
-function allVarsAutoResolved(vars: string[], goalKey: string | null = null): boolean {
-  if (isManualGoal(goalKey)) return false
+ *  Manual goals/templates always force this to false — the merchant
+ *  must type every variable themselves so the campaign carries no
+ *  service binding. */
+function allVarsAutoResolved(
+  vars: string[],
+  goalKey: string | null = null,
+  tpl: { mode?: 'manual' | 'auto' } | null | undefined = null,
+): boolean {
+  if (isManualMode(goalKey, tpl)) return false
   return vars.length > 0 && vars.every(v => v in AUTO_RESOLVE_VARS)
 }
 
@@ -483,11 +584,12 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
   const body = getTemplateBody(wiz.template!)
   const vars = extractVariables(body)
 
-  // Manual campaigns (broadcast / custom) treat every {{N}} as merchant
-  // input. We deliberately bypass the auto-resolve map so a manual
-  // marketing message never silently inherits a coupon code, cart URL,
-  // or any other service-bound value the merchant didn't ask for.
-  const manualMode = isManualGoal(wiz.goalKey)
+  // Manual mode is forced by EITHER a manual goal (broadcast / custom)
+  // OR a manual template (library entries flagged ``mode === 'manual'``).
+  // In manual mode we bypass the auto-resolve map so the merchant types
+  // every dynamic value themselves — no coupon code, cart URL, or
+  // service-bound value is silently inherited.
+  const manualMode = isManualMode(wiz.goalKey, wiz.template)
   const autoVars   = manualMode ? [] : vars.filter(v => v in AUTO_RESOLVE_VARS)
   const manualVars = manualMode ? vars : vars.filter(v => !(v in AUTO_RESOLVE_VARS))
 
@@ -772,7 +874,7 @@ function Step7Review({
             لا تحتاج لكتابة أي شيء.
           </p>
         </div>
-      ) : isManualGoal(wiz.goalKey) ? (
+      ) : isManualMode(wiz.goalKey, wiz.template) ? (
         <div className="space-y-2">
           <label className="label mb-0">كود خصم يدوي (اختياري)</label>
           <input
@@ -786,8 +888,9 @@ function Step7Review({
             }))}
           />
           <p className="text-[11px] text-slate-500 leading-relaxed">
-            هذه الحملة مستقلة. لن يقوم نظام الكوبونات بتوليد كوبون لكل عميل — سيظهر الكود كما كتبتَه (أو يبقى الحقل فارغاً)
-            إذا لم تدخل أي قيمة.
+            {isManualTemplate(wiz.template)
+              ? 'القالب الذي اخترته يدوي بطبيعته — التاجر يكتب الكوبون والرابط بنفسه ولا يولّد نظام الكوبونات قيماً تلقائية.'
+              : 'هذه الحملة مستقلة. لن يقوم نظام الكوبونات بتوليد كوبون لكل عميل — سيظهر الكود كما كتبتَه (أو يبقى الحقل فارغاً) إذا لم تدخل أي قيمة.'}
           </p>
         </div>
       ) : (
@@ -923,7 +1026,7 @@ function Step8Launch({
         </span></div>
         {wiz.goalKey === 'reminder' ? (
           <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-emerald-600">تلقائي لكل عميل</span></div>
-        ) : isManualGoal(wiz.goalKey) ? (
+        ) : isManualMode(wiz.goalKey, wiz.template) ? (
           wiz.couponCode.trim() ? (
             <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-slate-800 font-mono">{wiz.couponCode.trim()}</span></div>
           ) : (
@@ -1031,15 +1134,15 @@ function CampaignWizard({
 
   // Auto-skip step 4 when all template body vars are auto-resolved from
   // CRM data (e.g. {{1}} = customer_name). The merchant shouldn't waste
-  // time on a step that says "everything is automatic". Manual goals
-  // (broadcast / custom) deliberately disable this skip so every
-  // variable goes through the explicit input UI.
+  // time on a step that says "everything is automatic". Manual mode
+  // (manual goal OR manual template) deliberately disables this skip
+  // so every variable goes through the explicit input UI.
   const shouldSkipStep4 = useCallback((): boolean => {
     if (!wiz.template) return false
-    if (isManualGoal(wiz.goalKey)) return false
+    if (isManualMode(wiz.goalKey, wiz.template)) return false
     const body = getTemplateBody(wiz.template)
     const vars = extractVariables(body)
-    return allVarsAutoResolved(vars, wiz.goalKey)
+    return allVarsAutoResolved(vars, wiz.goalKey, wiz.template)
   }, [wiz.template, wiz.goalKey])
 
   const next = () => setWiz(w => {
@@ -1091,14 +1194,15 @@ function CampaignWizard({
     setSaving(true)
     setError('')
     try {
-      // Manual campaigns (broadcast / custom) MUST NOT carry an
-      // auto_coupon flag, a service binding, or the magic "auto"
+      // Manual mode (manual goal OR manual template) MUST NOT carry
+      // an auto_coupon flag, a service binding, or the magic "auto"
       // coupon_code — those would re-attach the campaign to the
       // coupon-generator + service-templates pipeline, which is
-      // exactly what the merchant opted out of by picking a manual
-      // goal. We send an empty coupon string when the merchant left
-      // the manual code blank so the backend column stays NULL.
-      const manualMode = isManualGoal(wiz.goalKey)
+      // exactly what the merchant opted out of when picking a manual
+      // template / manual goal. We send an empty coupon string when
+      // the merchant left the manual code blank so the backend column
+      // stays NULL.
+      const manualMode = isManualMode(wiz.goalKey, wiz.template)
       const wantsAutoCoupon = !manualMode && (wiz.goalKey === 'reminder' || wiz.autoCoupon)
       const payload: CreateCampaignPayload = {
         name: wiz.campaignName,

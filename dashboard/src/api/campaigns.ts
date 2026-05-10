@@ -119,6 +119,19 @@ export interface RecommendedTemplate extends WaTemplate {
   is_best: boolean
   badges: string[]
   reason_ar: string
+  /** Whether this template is a fully-manual template (merchant types
+   *  every dynamic value) or an auto template (Nahla resolves
+   *  customer name / coupon / cart URL from system data). Drives the
+   *  grouping + badge in Step 3, and forces manual-mode behaviour in
+   *  Steps 4 / 7 regardless of the chosen goal. */
+  mode?: 'manual' | 'auto'
+  /** Library-suggested display label, e.g. "عرض خاص — يدوي". The
+   *  wizard prefers ``display_name_ar`` (merchant override) and falls
+   *  back to this. */
+  library_label_ar?: string | null
+  /** True when the auto template can bind to Nahla's coupon
+   *  generator. Only valid for ``mode === 'auto'`` templates. */
+  auto_coupon_capable?: boolean
 }
 
 export interface NextBestTemplate {
