@@ -134,6 +134,11 @@ const LIFECYCLE_META: Record<string, { label: string; variant: 'green' | 'amber'
   // Not the campaign's fault; surface it with a calm slate badge so
   // the merchant doesn't think the platform broke.
   no_whatsapp_recipients:  { label: 'لا يوجد عملاء على واتساب', variant: 'slate' },
+  // ``excluded_before_send`` = audience matched > 0 customers but every
+  // one was filtered out before we even wrote a send-log row (no phone,
+  // opted-out, etc.). Different from ``completed_empty`` (zero
+  // audience) — the merchant needs the explicit breakdown.
+  excluded_before_send:    { label: 'استبعد كل العملاء قبل الإرسال', variant: 'amber' },
   completed_empty:         { label: 'اكتملت بلا مستلمين',       variant: 'slate' },
   failed:                  { label: 'فشل الإرسال',              variant: 'red'   },
   failed_all:              { label: 'فشل الإرسال للجميع',       variant: 'red'   },
@@ -1575,6 +1580,35 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         `📞 الواتساب: ${wa}`,
         `🕐 المُجدول: ${snap.scheduler.campaign_dispatcher_enabled ? 'مفعّل' : 'معطّل'}`,
       ]
+
+      // Audience funnel — render the complete pipeline so the
+      // merchant can see exactly where customers were dropped. We
+      // ALWAYS show this when the campaign has either an audience
+      // > 0 or has materialised any rows; otherwise it's noise.
+      const f = snap.audience_funnel
+      if (f && (f.raw_audience > 0 || f.materialized_rows > 0)) {
+        lines.push('📊 مسار الجمهور:')
+        lines.push(`  • العدد الأولي: ${f.raw_audience}`)
+        lines.push(`  • قابل للوصول: ${f.after_reachable_filter}`)
+        lines.push(`  • صفوف فعليّة: ${f.materialized_rows}`)
+        if (f.queued_for_send > 0) {
+          lines.push(`  • في الطابور: ${f.queued_for_send}`)
+        }
+        if (f.frequency_cap_skipped > 0) {
+          lines.push(`  • تخطّى التكرار: ${f.frequency_cap_skipped}`)
+        }
+      }
+
+      // Pre-send exclusion breakdown — surfaces "🚫 تم استبعاد 4
+      // عملاء: 2 لا يملكون واتساب، 2 أرقام غير صالحة" instead of
+      // the generic "حملة بلا مستلمين".
+      if ((snap.excluded_reasons_summary || []).length > 0) {
+        lines.push(`🚫 تم استبعاد ${snap.excluded_before_send_count} عميل قبل الإرسال:`)
+        for (const ex of snap.excluded_reasons_summary) {
+          lines.push(`  • ${ex.label_ar} (${ex.count})`)
+        }
+      }
+
       // Failure summary — group by canonical Meta key so the merchant
       // doesn't see 4 raw rows; just "3 عملاء لا يملكون واتساب".
       if ((snap.failure_summary || []).length > 0) {
@@ -1652,6 +1686,14 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               lines.push(`  ${sev} ${fs.error_label_ar} (${fs.count})`)
             }
           }
+          // Surface the funnel during polling too — the merchant
+          // can see "raw=4, after_reachable=0" the moment we know.
+          if ((snap.excluded_reasons_summary || []).length > 0) {
+            lines.push(`🚫 مستبعدون: ${snap.excluded_before_send_count}`)
+            for (const ex of snap.excluded_reasons_summary) {
+              lines.push(`  • ${ex.label_ar} (${ex.count})`)
+            }
+          }
           lines.push(`🚦 الحالة: ${lifecycleLabel}`)
           lastSnapshot = lines.join('\n')
           setDiagnostic(lastSnapshot)
@@ -1662,7 +1704,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           const terminal = new Set([
             'sent', 'partial', 'partial_minor',
             'no_whatsapp_recipients', 'failed_all', 'failed',
-            'completed_empty',
+            'completed_empty', 'excluded_before_send',
           ])
           if (terminal.has(snap.campaign.lifecycle)) break
         } catch {
@@ -1807,7 +1849,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               <AlertCircle className="w-3.5 h-3.5" />
               {diagnosing ? 'جاري…' : 'تشخيص'}
             </button>
-            {(isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty') && (
+            {(isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty' || lifecycleKey === 'excluded_before_send') && (
               <button
                 onClick={handleDispatchNow}
                 disabled={dispatching}

@@ -719,6 +719,15 @@ def _classify_campaign_lifecycle(
             return "partial_minor" if all_failures_minor else "partial"
         if failed > 0 and sent == 0:
             return "no_whatsapp_recipients" if all_failures_minor else "failed_all"
+        # sent==0, failed==0 — distinguish two very different cases:
+        #   (a) Genuinely empty audience (segment matched 0 customers)     → completed_empty
+        #   (b) Audience > 0 but EVERY customer was filtered out before
+        #       any campaign_send_logs row was even written (e.g. all
+        #       have no normalized_phone, all are unsubscribed, all are
+        #       in an excluded segment). The merchant needs to see this
+        #       distinctly because the fix is data-side, not code-side.
+        if (campaign.audience_count or 0) > 0 and total == 0:
+            return "excluded_before_send"
         return "completed_empty"
     if status == "failed":
         return "failed"
@@ -961,6 +970,123 @@ async def debug_campaign(
     from sqlalchemy import func  # noqa: PLC0415, E402
     failure_summary = _safe("failure_summary", _failure_summary) or []
 
+    # ── Audience funnel ─────────────────────────────────────────────
+    # Persisted by the dispatcher in template_variables['_audience_funnel']
+    # as a JSON-encoded string. We always render a structured object —
+    # if the campaign hasn't dispatched yet (or was sent before this
+    # feature shipped) we synthesise a best-effort funnel from the
+    # current send-log counters so the UI never has missing fields.
+    def _audience_funnel():
+        import json as _json  # noqa: PLC0415
+        raw = (campaign.template_variables or {}).get("_audience_funnel")
+        funnel: Dict[str, Any] = {}
+        if isinstance(raw, str) and raw.strip():
+            try:
+                funnel = _json.loads(raw) or {}
+            except Exception:
+                funnel = {}
+        elif isinstance(raw, dict):
+            funnel = raw
+        # Normalised shape — every key always present so the UI can
+        # render the funnel without optional-chaining everywhere.
+        total_logs = sum(counts.values())
+        return {
+            "raw_audience":           int(funnel.get("raw_audience") or 0),
+            "after_reachable_filter": int(
+                funnel.get("after_reachable_filter")
+                # Fallback: assume the materialized rows is the best
+                # proxy for "after reachable" on legacy campaigns.
+                or total_logs
+            ),
+            "materialized_rows":      int(
+                funnel.get("materialized_rows") or total_logs
+            ),
+            "queued_for_send":        int(
+                funnel.get("queued_for_send") or counts.get("queued", 0)
+            ),
+            "skipped_at_snapshot":    int(funnel.get("skipped_at_snapshot") or (
+                counts.get("skipped_unreachable", 0)
+                + counts.get("skipped_unsubscribed", 0)
+                + counts.get("skipped_invalid", 0)
+                + counts.get("skipped_manual_exclusion", 0)
+            )),
+            "frequency_cap_skipped":  int(
+                funnel.get("frequency_cap_skipped")
+                or counts.get("skipped_duplicate", 0)
+            ),
+            "audience_count_campaign": int(campaign.audience_count or 0),
+        }
+    audience_funnel = _safe("audience_funnel", _audience_funnel) or {}
+
+    # ── Pre-send exclusion summary ──────────────────────────────────
+    # Two layers of exclusions feed this:
+    #   (1) skipped_* rows in campaign_send_logs (we know the exact
+    #       skip_reason for each).
+    #   (2) Customers that never made it to a row at all because the
+    #       reachability filter dropped them upstream — we can only
+    #       infer this from (raw_audience - after_reachable_filter).
+    def _excluded_summary():
+        rows = (
+            db.query(
+                CampaignSendLog.status,
+                CampaignSendLog.skip_reason,
+                func.count(CampaignSendLog.id),
+            )
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.status.like("skipped_%"),
+            )
+            .group_by(CampaignSendLog.status, CampaignSendLog.skip_reason)
+            .all()
+        )
+        ar_label = {
+            "no_phone":                 "بدون رقم جوال",
+            "invalid_phone":            "رقم جوال غير صالح",
+            "unsubscribed":             "ألغى الاشتراك",
+            "pending_unsubscribe":      "في طور إلغاء الاشتراك",
+            "marketing_opt_out_manual": "إلغاء التسويق يدوياً",
+            "excluded_by_manual_segment": "مستبعد بواسطة فلتر يدوي",
+            "frequency_cap_marketing":  "تجاوز الحد الأقصى للرسائل التسويقية",
+        }
+        ar_status = {
+            "skipped_unreachable":      "غير قابل للوصول",
+            "skipped_unsubscribed":     "ألغى الاشتراك",
+            "skipped_invalid":          "بيانات غير صالحة",
+            "skipped_manual_exclusion": "مستبعد يدوياً",
+            "skipped_duplicate":        "تكرار / تجاوز الحد الأقصى",
+        }
+        out: List[Dict[str, Any]] = []
+        for status_v, reason, n in rows:
+            key = (reason or status_v or "unknown")
+            out.append({
+                "status":      status_v,
+                "skip_reason": reason,
+                "label_ar":    ar_label.get(reason or "")
+                                or ar_status.get(status_v or "")
+                                or str(key),
+                "count":       int(n),
+            })
+
+        # Inferred upstream drop: customers who matched the segment
+        # but never got a log row because the reachability filter
+        # already excluded them (no phone, opted-out, etc.).
+        inferred = max(
+            int(audience_funnel.get("raw_audience") or 0)
+            - int(audience_funnel.get("after_reachable_filter") or 0),
+            0,
+        )
+        if inferred > 0:
+            out.append({
+                "status":      "filtered_pre_snapshot",
+                "skip_reason": "unreachable_or_opted_out",
+                "label_ar":    "مستبعد قبل الإرسال (بدون واتساب أو إلغى الاشتراك)",
+                "count":       inferred,
+            })
+        out.sort(key=lambda x: -x["count"])
+        return out
+    excluded_reasons_summary = _safe("excluded_reasons", _excluded_summary) or []
+    excluded_before_send_count = sum(int(r["count"]) for r in excluded_reasons_summary)
+
     # If lifecycle is pending_dispatch but status=active and audience is
     # > 0, that almost always means the asyncio.create_task background
     # job died before _snapshot_recipients ran. Surface a direct hint.
@@ -973,6 +1099,29 @@ async def debug_campaign(
             "من القالب أو اتصال واتساب. استخدم POST "
             f"/campaigns/{campaign_id}/dispatch-now لإعادة المحاولة."
         )
+    if lifecycle == "excluded_before_send":
+        # Build an explicit, merchant-facing breakdown using the
+        # exclusion summary computed above. We show counts in Arabic
+        # so the merchant immediately understands "why is no one
+        # receiving my campaign?".
+        if excluded_reasons_summary:
+            parts = [
+                f"{r['count']} {r['label_ar']}"
+                for r in excluded_reasons_summary
+            ]
+            hints.append(
+                "الجمهور الأولي كان "
+                f"{audience_funnel.get('raw_audience', 0)} عميل، "
+                "لكن لا أحد منهم يستوفي شروط الإرسال: "
+                + "، ".join(parts)
+                + ". تأكد من إضافة أرقام واتساب صحيحة أو راجع "
+                  "إعدادات إلغاء الاشتراك."
+            )
+        else:
+            hints.append(
+                "لم تُكتب أي صفوف في سجل الإرسال. تحقق من اتصال واتساب "
+                "ومن أن العملاء يملكون أرقاماً مطبَّعة (normalized_phone)."
+            )
     if not (template_info or {}).get("approved"):
         hints.append(
             "القالب ليس بحالة APPROVED — لن يُرسل واتساب أي رسالة قبل "
@@ -1021,6 +1170,16 @@ async def debug_campaign(
         # NEW: aggregated failure breakdown by canonical Meta-error key.
         # Powers the "3 عملاء لا يملكون واتساب" summary in the UI.
         "failure_summary":  failure_summary,
+        # NEW: complete audience funnel (raw → reachable → snapshot →
+        # queued). Lets the merchant see exactly where customers were
+        # dropped before any send happened.
+        "audience_funnel":           audience_funnel,
+        # NEW: aggregated upstream-exclusion summary in Arabic. Used
+        # by the UI to render "🚫 تم استبعاد 4 عملاء: 2 لا يملكون
+        # واتساب، 2 أرقام غير صالحة" instead of the generic
+        # "حملة بلا مستلمين".
+        "excluded_reasons_summary":  excluded_reasons_summary,
+        "excluded_before_send_count": excluded_before_send_count,
         "template":         template_info,
         "wa_connection":    wa_conn_info,
         "scheduler":        scheduler_info,

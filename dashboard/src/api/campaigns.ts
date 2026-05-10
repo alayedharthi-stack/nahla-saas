@@ -44,6 +44,10 @@ export type CampaignLifecycle =
   /** Sent==0 with failures, but every failure was minor — the campaign
    *  itself didn't fail, the recipient list was just unreachable. */
   | 'no_whatsapp_recipients'
+  /** Audience matched > 0 customers but every one of them was filtered
+   *  out (no phone, opted-out, manual-exclude) BEFORE any send-log row
+   *  was written. Distinct from completed_empty (zero audience). */
+  | 'excluded_before_send'
   | 'completed_empty'
   | 'unknown'
 
@@ -142,6 +146,27 @@ export interface CampaignDebugSnapshot {
     advice_ar: string | null
     count: number
   }>
+  /** Audience funnel — every stage between segment match and the
+   *  Meta send call. Used to render the "🚫 تم استبعاد X عميل" panel
+   *  when no rows materialised. */
+  audience_funnel: {
+    raw_audience: number
+    after_reachable_filter: number
+    materialized_rows: number
+    queued_for_send: number
+    skipped_at_snapshot: number
+    frequency_cap_skipped: number
+    audience_count_campaign: number
+  }
+  /** Per-reason exclusion breakdown in Arabic. Powers the granular
+   *  "بدون رقم جوال — 2 عملاء" list in the diagnostic panel. */
+  excluded_reasons_summary: Array<{
+    status: string
+    skip_reason: string | null
+    label_ar: string
+    count: number
+  }>
+  excluded_before_send_count: number
   sample_sent: Array<{
     phone: string
     provider_message_id: string | null

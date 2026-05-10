@@ -161,11 +161,23 @@ class TestLifecycleClassifier:
             camp, {"sent": 2, "failed": 1},
         ) == "partial"
 
-    def test_completed_with_no_recipients_is_completed_empty(self):
-        camp = Campaign(status="completed", sent_count=0)
+    def test_completed_with_no_audience_is_completed_empty(self):
+        # Genuinely empty audience (segment matched 0 customers).
+        camp = Campaign(status="completed", sent_count=0, audience_count=0)
         assert campaigns_router._classify_campaign_lifecycle(
             camp, {},
         ) == "completed_empty"
+
+    def test_completed_with_audience_but_zero_logs_is_excluded_before_send(self):
+        # The exact bug the merchant hit: audience_count=4 but 0 rows
+        # in campaign_send_logs (every customer was filtered upstream).
+        # Must NOT collapse to ``completed_empty`` — the merchant needs
+        # the explicit "all your customers were excluded" verdict so
+        # they fix data, not retry.
+        camp = Campaign(status="completed", sent_count=0, audience_count=4)
+        assert campaigns_router._classify_campaign_lifecycle(
+            camp, {},
+        ) == "excluded_before_send"
 
     def test_scheduled_is_waiting_scheduler(self):
         assert self._verb("scheduled") == "waiting_scheduler"
@@ -190,6 +202,9 @@ class TestDebugEndpoint:
         assert set(result.keys()) >= {
             "campaign", "recipients", "sample_failed", "sample_sent",
             "template", "wa_connection", "scheduler", "hints", "errors",
+            # New funnel + exclusion fields (see TestAudienceFunnel below).
+            "audience_funnel", "excluded_reasons_summary",
+            "excluded_before_send_count",
         }
         assert result["campaign"]["id"] == c.id
         assert result["campaign"]["lifecycle"] == "pending_dispatch"
@@ -541,3 +556,129 @@ class TestFailureSummary:
         assert fs[1]["error_code"] == "rate_limit"
         assert fs[1]["count"] == 1
         assert fs[1]["severity"] == "blocking"
+
+
+# ── 8. Audience funnel + pre-send exclusion summary ─────────────────
+
+
+class TestAudienceFunnel:
+    """The exact bug pattern this surface fixes:
+
+        UI: total=4, pending=0, sent=0, failed=0, skipped=0
+            lifecycle = "completed_empty"
+
+    That message is misleading — the audience matched 4 customers, but
+    every one was filtered out before any send-log row was even written
+    (no phone, all opt-out, etc.). The merchant has no way to fix it
+    without knowing where the drop happened, which is what the funnel
+    + ``excluded_reasons_summary`` provide.
+    """
+
+    def test_funnel_falls_back_when_dispatcher_did_not_persist(self):
+        # Legacy campaign — never had _audience_funnel persisted.
+        # The debug endpoint must still return a structured funnel so
+        # the UI can render without optional-chaining everywhere.
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="completed", audience_count=4)
+        result = _call_debug(db, t.id, c.id)
+        f = result["audience_funnel"]
+        # Every key is present and numeric (no missing fields).
+        for k in (
+            "raw_audience", "after_reachable_filter",
+            "materialized_rows", "queued_for_send",
+            "skipped_at_snapshot", "frequency_cap_skipped",
+            "audience_count_campaign",
+        ):
+            assert k in f and isinstance(f[k], int)
+        # Campaign-level audience_count is always passed through.
+        assert f["audience_count_campaign"] == 4
+
+    def test_funnel_round_trips_persisted_payload(self):
+        # The dispatcher writes _audience_funnel as a JSON string in
+        # template_variables (the column is Dict[str, str]). The debug
+        # endpoint must decode + surface it untouched so the UI sees
+        # exactly what the dispatcher computed.
+        import json as _json
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="completed", audience_count=4)
+        c.template_variables = {
+            "_audience_funnel": _json.dumps({
+                "raw_audience": 4,
+                "after_reachable_filter": 0,
+                "materialized_rows": 0,
+                "queued_for_send": 0,
+                "skipped_at_snapshot": 0,
+                "frequency_cap_skipped": 0,
+            }, ensure_ascii=False),
+        }
+        db.commit()
+        result = _call_debug(db, t.id, c.id)
+        f = result["audience_funnel"]
+        assert f["raw_audience"] == 4
+        assert f["after_reachable_filter"] == 0
+        assert f["materialized_rows"] == 0
+
+    def test_pre_snapshot_drop_inferred_from_funnel_delta(self):
+        # raw_audience=4, after_reachable=0 → 4 customers were
+        # silently dropped upstream (no phone, opt-out, etc.). The
+        # exclusion summary must include an inferred row in Arabic so
+        # the merchant sees "🚫 4 مستبعد قبل الإرسال" rather than the
+        # empty "completed_empty".
+        import json as _json
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="completed", audience_count=4)
+        c.template_variables = {
+            "_audience_funnel": _json.dumps({
+                "raw_audience": 4,
+                "after_reachable_filter": 0,
+                "materialized_rows": 0,
+                "queued_for_send": 0,
+                "skipped_at_snapshot": 0,
+                "frequency_cap_skipped": 0,
+            }),
+        }
+        db.commit()
+        result = _call_debug(db, t.id, c.id)
+        ex = result["excluded_reasons_summary"]
+        assert any(r["count"] == 4 and r["status"] == "filtered_pre_snapshot" for r in ex)
+        assert result["excluded_before_send_count"] >= 4
+        # Lifecycle now distinguishes "audience matched but everyone
+        # was excluded" from "audience was zero".
+        assert result["campaign"]["lifecycle"] == "excluded_before_send"
+        # Hint surfaces the breakdown explicitly.
+        joined_hints = " | ".join(result["hints"])
+        assert "الجمهور الأولي" in joined_hints
+
+    def test_skipped_log_rows_appear_in_exclusion_summary(self):
+        # When the snapshot DOES write rows but they're all
+        # ``skipped_*``, the exclusion summary must group them by
+        # skip_reason (not by raw status) so "بدون رقم جوال" and
+        # "ألغى الاشتراك" are visible separately.
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="completed", audience_count=4)
+        for i, (status_v, reason) in enumerate([
+            ("skipped_unreachable", "no_phone"),
+            ("skipped_unreachable", "no_phone"),
+            ("skipped_unsubscribed", "unsubscribed"),
+            ("skipped_invalid", "invalid_phone"),
+        ]):
+            db.add(CampaignSendLog(
+                tenant_id=t.id, campaign_id=c.id,
+                customer_phone_e164=f"__skipped__:{i}",
+                status=status_v, skip_reason=reason,
+            ))
+        db.commit()
+
+        result = _call_debug(db, t.id, c.id)
+        ex = result["excluded_reasons_summary"]
+        # Three distinct reasons, with the no-phone bucket aggregated.
+        by_reason = {(r["skip_reason"]): r["count"] for r in ex}
+        assert by_reason.get("no_phone") == 2
+        assert by_reason.get("unsubscribed") == 1
+        assert by_reason.get("invalid_phone") == 1
+        # Every entry is Arabic-labelled so the UI doesn't need its
+        # own translation table.
+        assert all(r["label_ar"] for r in ex)
+        # All four are in the totaliser.
+        assert result["excluded_before_send_count"] == 4
+

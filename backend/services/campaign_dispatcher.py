@@ -268,10 +268,39 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         db.commit()
         return _empty_result(error=errs_text)
 
+    # ── Audience funnel — phase 1: raw count (pre-reachability) ────
+    # We capture the unfiltered audience count BEFORE reachability
+    # filtering so the merchant can see "you targeted 4 customers but
+    # 3 had no WhatsApp number". Persisted to template_variables so
+    # the debug endpoint can render the funnel without rerunning
+    # heavy queries.
+    raw_audience_count = 0
+    try:
+        from services.nahla_segments import (  # noqa: PLC0415
+            build_unified_segment_query,
+        )
+        raw_q = build_unified_segment_query(
+            campaign.audience_type, db, tenant_id, require_reachable=False,
+        )
+        if raw_q is not None:
+            raw_audience_count = (
+                raw_q.with_entities(func.count(func.distinct(Customer.id)))
+                     .scalar()
+                or 0
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d raw audience probe failed: %s",
+            campaign_id, exc,
+        )
+
     customers = _resolve_audience(db, tenant_id, campaign.audience_type)
+    after_reachable_count = len(customers)
     logger.info(
-        "[campaign_dispatcher] campaign=%d: resolved %d customers from segment=%s",
-        campaign_id, len(customers), campaign.audience_type,
+        "[campaign_dispatcher] campaign=%d funnel: raw=%d "
+        "after_reachable=%d (segment=%s)",
+        campaign_id, raw_audience_count, after_reachable_count,
+        campaign.audience_type,
     )
 
     # Read manual exclusion list (set by the wizard step 2 "استبعد X").
@@ -309,6 +338,47 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
     if not campaign.launched_at:
         campaign.launched_at = datetime.now(timezone.utc)
     campaign.audience_count = len(customers)
+
+    # ── Audience funnel — phase 2: persist breakdown ────────────────
+    # Now that snapshot + frequency cap have run we know exactly how
+    # many recipients made it through. Persist the full funnel so
+    # /campaigns/{id}/debug can render it without recomputation.
+    try:
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        counts_after_snapshot = _count_log_statuses(db, campaign_id)
+        skipped_at_snapshot = (
+            counts_after_snapshot.get(LOG_SKIPPED_UNREACHABLE, 0)
+            + counts_after_snapshot.get(LOG_SKIPPED_UNSUBSCRIBED, 0)
+            + counts_after_snapshot.get(LOG_SKIPPED_INVALID, 0)
+            + counts_after_snapshot.get(LOG_SKIPPED_MANUAL_EXCLUSION, 0)
+        )
+        funnel = {
+            # 1. Customers in the unified segment query (auto ∪ overrides)
+            "raw_audience":           int(raw_audience_count),
+            # 2. After reachability filter (has phone, not opted-out)
+            "after_reachable_filter": int(after_reachable_count),
+            # 3. Rows actually written to campaign_send_logs
+            "materialized_rows":      int(sum(counts_after_snapshot.values())),
+            # 4. Of those, how many are queued for actual send
+            "queued_for_send":        int(counts_after_snapshot.get(LOG_QUEUED, 0)),
+            # 5. How many were already skipped at snapshot time
+            "skipped_at_snapshot":    int(skipped_at_snapshot),
+            # 6. Frequency-cap dedupes (sent within last N days to same phone)
+            "frequency_cap_skipped":  int(cap_skipped),
+        }
+        tpl_vars_now = dict(campaign.template_variables or {})
+        # Persist as JSON-encoded string because the column is
+        # ``Dict[str, str]`` (the same shape constraint we hit for
+        # ``_exclude_segments``).
+        import json as _json  # noqa: PLC0415
+        tpl_vars_now["_audience_funnel"] = _json.dumps(funnel, ensure_ascii=False)
+        campaign.template_variables = tpl_vars_now
+        flag_modified(campaign, "template_variables")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d funnel persist failed: %s",
+            campaign_id, exc,
+        )
     db.commit()
 
     counts_pre = _count_log_statuses(db, campaign_id)
