@@ -73,6 +73,16 @@ DEFAULT_AI: Dict[str, Any] = {
     ),
     "allowed_discount_levels":  "10",
     "recommendations_enabled":  True,
+    # ── Knowledge Base (free-form merchant-supplied store knowledge) ──────
+    # Plain text dump that the merchant fills in via "نحلة الذكية → قاعدة
+    # المعرفة" page. Architecturally it is an *additional* layer on top of
+    # owner_instructions: owner_instructions controls how the assistant
+    # *behaves*, while manual_knowledge_base feeds the assistant *facts*
+    # about the store (products, FAQ, shipping notes, warranty, payment, …).
+    # The runtime overlay tags it as a non-authoritative source and
+    # explicitly defers to Salla data for prices / inventory / variants
+    # whenever Salla is connected — see modules/ai/prompts/tenant_overlay.py.
+    "manual_knowledge_base":     "",
     # ── Merchant-configurable policy rules (Phase 11) ─────────────────────
     # coupon_cap_hours: block a second coupon to same customer within N hours
     "coupon_cap_hours":          24,

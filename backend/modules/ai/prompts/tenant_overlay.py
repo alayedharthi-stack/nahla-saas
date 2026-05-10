@@ -127,6 +127,32 @@ def build_tenant_prompt_overlay(settings: Optional[Dict[str, Any]]) -> str:
     if escalation_rules:
         sections.append(f"قواعد التحويل والتصعيد:\n{escalation_rules}")
 
+    # ── 8. Manual Knowledge Base ──────────────────────────────────────────
+    # Free-form facts the merchant supplied on the "قاعدة المعرفة" page.
+    # CRITICAL DESIGN RULE — do NOT collapse this into owner_instructions:
+    #   * owner_instructions  = how the assistant *behaves*
+    #   * manual_knowledge_base = facts the assistant can *cite*
+    # The block is tagged as a non-authoritative source for prices/inventory
+    # so that Salla-synced data (loaded via core.store_knowledge.build_
+    # merchant_context) always wins on those fields, even if the merchant
+    # accidentally pasted stale prices in here.
+    knowledge_base = str(settings.get("manual_knowledge_base") or "").strip()
+    if knowledge_base:
+        sections.append(
+            "قاعدة المعرفة (معلومات المتجر التي أضافها التاجر):\n"
+            f"{knowledge_base}\n\n"
+            "ملاحظات لاستخدام قاعدة المعرفة:\n"
+            "- استخدم هذه المعلومات للإجابة على أسئلة العملاء عن المنتجات "
+            "والشحن والضمان والأسئلة الشائعة وأي تفاصيل أضافها التاجر هنا.\n"
+            "- إذا كان المتجر مربوطاً بسلة فإن السعر، التوفر، المخزون، "
+            "المتغيرات، ورابط المنتج المباشر تأتي من بيانات سلة في "
+            "merchant_context وهي المصدر الرسمي — لا تستخدم أي رقم سعر أو "
+            "حالة توفر من هذه القاعدة لمخالفة بيانات سلة.\n"
+            "- إذا تعارض السعر هنا مع سعر سلة، اعتمد سعر سلة دائماً ولا "
+            "تذكر السعر اليدوي.\n"
+            "- لا تختلق معلومات ليست في القاعدة أو في merchant_context."
+        )
+
     if not sections:
         return ""
 

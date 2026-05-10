@@ -24,6 +24,14 @@ export interface AISettings {
   escalation_rules: string
   allowed_discount_levels: string
   recommendations_enabled: boolean
+  /**
+   * Free-form merchant-supplied store knowledge.  Edited on the dedicated
+   * "قاعدة المعرفة" page (KnowledgeBase.tsx), kept separate from
+   * `owner_instructions` because behaviour ≠ facts.  Empty string by
+   * default.  See `backend/modules/ai/prompts/tenant_overlay.py` for the
+   * Salla-precedence rules baked into the prompt overlay.
+   */
+  manual_knowledge_base: string
   // ── Merchant-configurable policy rules (Phase 11) ────────────────────
   coupon_cap_hours: number
   auto_escalate_after_n: number

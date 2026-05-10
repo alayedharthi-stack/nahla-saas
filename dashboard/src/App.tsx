@@ -18,6 +18,7 @@ import Campaigns from './pages/Campaigns'
 import Templates from './pages/Templates'
 import SmartAutomations from './pages/SmartAutomations'
 import Intelligence from './pages/Intelligence'
+import KnowledgeBase from './pages/KnowledgeBase'
 import Integrations from './pages/Integrations'
 import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
@@ -134,6 +135,7 @@ export default function App() {
             <Route path="smart-automations"  element={<SmartAutomations />} />
             <Route path="automations"        element={<Navigate to="/smart-automations" replace />} />
             <Route path="intelligence"       element={<Intelligence />} />
+            <Route path="knowledge-base"     element={<KnowledgeBase />} />
             <Route path="integrations"       element={<Integrations />} />
             <Route path="analytics"          element={<Analytics />} />
             <Route path="settings"           element={<Settings />} />

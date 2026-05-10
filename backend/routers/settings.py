@@ -60,6 +60,11 @@ class AISettingsIn(BaseModel):
     escalation_rules: str = ""
     allowed_discount_levels: str = "10"
     recommendations_enabled: bool = True
+    # ── Knowledge Base ────────────────────────────────────────────────────
+    # Free-form text the merchant maintains on the dedicated "قاعدة المعرفة"
+    # page (separate from owner_instructions which controls *behaviour*).
+    # Stored verbatim and injected into the prompt overlay at runtime.
+    manual_knowledge_base: str = ""
 
 
 class StoreSettingsIn(BaseModel):

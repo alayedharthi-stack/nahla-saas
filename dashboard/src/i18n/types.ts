@@ -31,6 +31,7 @@ export interface Translations {
       templates:        string
       automations:      string
       intelligence:     string
+      knowledgeBase:    string
       analyticsAI:      string
       salesAgent:       string
       handoffQueue:     string
@@ -93,6 +94,7 @@ export interface Translations {
     automations:      { title: string; subtitle: string }
     smartAutomations: { title: string; subtitle: string }
     intelligence:     { title: string; subtitle: string }
+    knowledgeBase:    { title: string; subtitle: string }
     analytics:        { title: string; subtitle: string }
     integrations:     { title: string; subtitle: string }
     settings:         { title: string; subtitle: string }
