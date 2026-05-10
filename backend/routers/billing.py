@@ -897,6 +897,108 @@ async def hyperpay_create_payment_link(
     }
 
 
+# ── GET /billing/debug/current — fast diagnostics ────────────────────────────
+
+@router.get("/billing/debug/current")
+async def billing_debug_current(request: Request, db: Session = Depends(get_db)):
+    """One-stop diagnostic dump for "why doesn't my plan show?" tickets.
+
+    Returns the same row of truth as the merchant dashboard sees — but
+    with all the upstream data points laid out side-by-side so you can
+    immediately tell where the divergence is. Common patterns this catches:
+
+      * ``active_subscription_id`` is set but ``latest_subscription_id``
+        is *different* and ``pending_payment`` → the merchant clicked
+        Subscribe twice; the cancel-stale-siblings rule or the
+        active-first lookup will resolve it. (Both shipped in
+        commit d5a110be.)
+      * ``billing_status_endpoint.has_subscription`` is true but
+        ``entitlements.plan == "none"`` → the plan_id→slug join was
+        broken. Fixed by the BillingPlan lookup in get_entitlements.
+      * ``billing_subs_count > 1`` and multiple ``active`` rows → data
+        integrity bug; never expected.
+
+    No secrets are leaked — only IDs, statuses, and slugs.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    from core.billing import compute_trial_info, get_tenant_subscription  # noqa: PLC0415
+    from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+
+    tenant = get_or_create_tenant(db, tenant_id)
+    all_subs = (
+        db.query(BillingSubscription)
+        .filter(BillingSubscription.tenant_id == tenant_id)
+        .order_by(BillingSubscription.id.desc())
+        .all()
+    )
+    active_sub = get_tenant_subscription(db, tenant_id)
+    latest_sub = all_subs[0] if all_subs else None
+
+    def _sub_view(sub):
+        if not sub:
+            return None
+        plan = (
+            db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+            if sub.plan_id else None
+        )
+        meta = sub.extra_metadata or {}
+        return {
+            "id":                   sub.id,
+            "status":               sub.status,
+            "plan_id":              sub.plan_id,
+            "plan_slug":            plan.slug if plan else None,
+            "plan_name_ar":         (plan.extra_metadata or {}).get("name_ar") if plan else None,
+            "started_at":           sub.started_at.isoformat() if sub.started_at else None,
+            "ends_at":              sub.ends_at.isoformat() if sub.ends_at else None,
+            "moyasar_invoice_id":   meta.get("moyasar_invoice_id"),
+            "moyasar_payment_id":   meta.get("moyasar_payment_id"),
+            "activation_source":    meta.get("activation_source"),
+            "paid_at":              meta.get("paid_at"),
+            "price_charged_sar":    meta.get("price_charged_sar"),
+        }
+
+    ent = get_entitlements(db, tenant_id)
+    trial = compute_trial_info(tenant)
+
+    # Echo what GET /billing/status would return — not by re-issuing the
+    # request, just by computing the same booleans here so any drift
+    # between the two views is immediately visible.
+    bstatus = {
+        "has_subscription": active_sub is not None,
+        "status_field":     active_sub.status if active_sub else ("trial" if trial["is_trial"] else "none"),
+        "is_trial":         active_sub is None and trial["is_trial"],
+        "trial_expired":    active_sub is None and trial["trial_expired"],
+    }
+
+    return {
+        "tenant_id": tenant_id,
+        "tenant": {
+            "name":                tenant.name,
+            "subscription_status": tenant.subscription_status,
+            "trial_started_at":    tenant.trial_started_at.isoformat() if tenant.trial_started_at else None,
+            "trial_ends_at":       tenant.trial_ends_at.isoformat() if tenant.trial_ends_at else None,
+        },
+        "billing_subs_count":           len(all_subs),
+        "billing_subs_by_status": {
+            s: sum(1 for x in all_subs if x.status == s)
+            for s in {x.status for x in all_subs}
+        },
+        "active_subscription":          _sub_view(active_sub),
+        "latest_subscription":          _sub_view(latest_sub),
+        "entitlements": {
+            "plan":           ent.plan,
+            "plan_name_ar":   ent.plan_name_ar,
+            "billing_status": ent.billing_status,
+            "is_active":      ent.is_active,
+            "is_blocked":     ent.is_blocked,
+        },
+        "billing_status_endpoint": bstatus,
+        "trial_info":              trial,
+    }
+
+
 # ── GET /billing/entitlements ──────────────────────────────────────────────────
 
 @router.get("/billing/entitlements")

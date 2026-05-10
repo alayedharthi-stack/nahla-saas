@@ -330,7 +330,24 @@ export function useEntitlements(): UseEntitlementsResult {
 
   useEffect(() => {
     fetchEntitlements()
-    return () => { abortRef.current?.abort() }
+
+    // Refetch on tab focus. The in-memory cache has a 2-minute TTL,
+    // which is fine for most of the app but creates a confusing UX
+    // immediately after a successful Moyasar checkout: the merchant
+    // returns from the gateway tab, the sub is now active server-side,
+    // but this hook keeps reading the cached "none" snapshot until the
+    // TTL expires. The focus listener short-circuits that — when we
+    // detect the user came back, we drop the cache and refetch live.
+    const onFocus = () => {
+      _cache = null
+      fetchEntitlements()
+    }
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      abortRef.current?.abort()
+    }
   }, [fetchEntitlements])
 
   const hasFeature = useCallback(

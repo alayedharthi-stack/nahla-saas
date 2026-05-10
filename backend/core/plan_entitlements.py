@@ -486,15 +486,33 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
     if plan_slug == "none":
         try:
             from core.billing import get_tenant_subscription  # noqa: PLC0415
+            from models import BillingPlan  # noqa: PLC0415
             sub = get_tenant_subscription(db, tenant_id)
             if sub and sub.status in ("active", "trialing", "trial"):
-                raw_slug       = getattr(sub, "plan_id", "") or ""
+                # ``sub.plan_id`` is the FK integer to billing_plans.id, NOT a
+                # slug. The previous version passed the integer straight into
+                # ``_resolve_plan_slug`` which returned the integer back, then
+                # the integer fell through ``slug not in PLAN_DEFINITIONS`` and
+                # collapsed to "none" — so every paid Moyasar subscription
+                # was rendered as "no plan / trial" on the merchant
+                # dashboard, even though admin tenants table (which JOINs
+                # via plan_id) showed Growth + active correctly. The two
+                # views were reading the same row but parsing different
+                # columns. Fix: actually load the BillingPlan row and read
+                # its ``slug`` column.
+                plan_row = (
+                    db.query(BillingPlan)
+                    .filter(BillingPlan.id == sub.plan_id)
+                    .first()
+                    if sub.plan_id else None
+                )
+                raw_slug       = (plan_row.slug if plan_row else "") or ""
                 plan_slug      = _resolve_plan_slug(raw_slug) or "starter"
                 billing_status = "trial" if sub.status in ("trialing", "trial") else "active"
-            elif sub and sub.status in ("past_due", "failed", "unpaid"):
+            elif sub and sub.status in ("past_due", "failed", "unpaid", "payment_failed"):
                 plan_slug      = "failed"
                 billing_status = "failed"
-            elif sub and sub.status == "canceled":
+            elif sub and sub.status in ("canceled", "cancelled"):
                 plan_slug      = "none"
                 billing_status = "cancelled"
         except Exception as exc:

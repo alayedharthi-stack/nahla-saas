@@ -535,6 +535,79 @@ class TestEndToEndActivationVisible:
         assert retry.status == "cancelled"
 
 
+# ── Entitlements: plan_id → slug resolution ─────────────────────────────
+
+
+class TestEntitlementsResolvesPlanSlug:
+    """Regression test for the second half of the 'merchant dashboard
+    doesn't show plan' bug.
+
+    Before the fix, ``get_entitlements`` did:
+
+        raw_slug  = getattr(sub, "plan_id", "") or ""
+        plan_slug = _resolve_plan_slug(raw_slug) or "starter"
+
+    But ``sub.plan_id`` is the FK *integer* to ``billing_plans.id`` —
+    not a slug. So ``_resolve_plan_slug(11)`` returned ``11``, then
+    ``11 not in PLAN_DEFINITIONS`` collapsed it to ``"none"``. Result:
+    every active Moyasar sub showed ``plan="none"`` on the merchant
+    dashboard while the admin tenants table (which JOINs via plan_id
+    → BillingPlan.slug) showed Growth + active correctly.
+
+    These tests pin the contract that the entitlements resolver must
+    do the same join.
+    """
+
+    def test_active_sub_resolves_to_growth_plan(self, db, tenant, plan, pending_sub):
+        # Activate the sub via the production helper.
+        activate_subscription_from_moyasar_invoice(
+            db, pending_sub, invoice_data=_paid_invoice(),
+        )
+        db.expire_all()
+
+        from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+        ent = get_entitlements(db, tenant.id)
+        assert ent.plan_slug == "growth"
+        assert ent.billing_status == "active"
+        assert ent.is_active is True
+        assert ent.is_blocked is False
+        # And the to_dict() shape — what the frontend actually sees —
+        # must use the key ``plan`` (not ``plan_slug``):
+        as_dict = ent.to_dict()
+        assert as_dict["plan"] == "growth"
+        assert as_dict["billing_status"] == "active"
+        assert as_dict["is_active"] is True
+
+    def test_no_sub_resolves_to_none(self, db, tenant):
+        from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+        ent = get_entitlements(db, tenant.id)
+        assert ent.plan_slug == "none"
+        assert ent.is_active is False
+
+    def test_pending_sub_does_not_grant_features(self, db, tenant, plan, pending_sub):
+        # While pending_payment, plan must NOT be granted — only after
+        # activation. This guards against a future regression where
+        # someone "helpfully" widens the active-status filter and
+        # accidentally lets unpaid trials access paid features.
+        from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+        ent = get_entitlements(db, tenant.id)
+        assert ent.plan_slug == "none"
+        assert ent.is_active is False
+
+    def test_cancelled_sub_resolves_to_none(self, db, tenant, plan):
+        cancelled = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="cancelled",
+            started_at=datetime.now(timezone.utc),
+            auto_renew=False, extra_metadata={},
+        )
+        db.add(cancelled); db.commit()
+
+        # No active sub anywhere — entitlements should be "none".
+        from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+        ent = get_entitlements(db, tenant.id)
+        assert ent.plan_slug == "none"
+
+
 # ── reconcile_subscription_from_moyasar (the polling-page path) ─────────
 
 

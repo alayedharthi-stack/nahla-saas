@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { CheckCircle, XCircle, Loader2, ArrowRight, RefreshCw, Clock } from 'lucide-react'
 import { billingApi, type PaymentResult } from '../api/billing'
+import { invalidateEntitlementsCache } from '../hooks/useEntitlements'
 
 const MAX_POLLS  = 12
 const POLL_DELAY = 2500   // ms
@@ -42,6 +43,11 @@ export default function BillingResult() {
 
       if (res.activated) {
         setPolling(false)
+        // Activation just happened — bust any cached billing state so
+        // the next page (overview / billing / Salla embedded pricing)
+        // doesn't render stale "no plan / trial expired" copy from the
+        // 2-minute useEntitlements cache. See hooks/useEntitlements.ts.
+        try { invalidateEntitlementsCache() } catch { /* noop */ }
       } else if (res.status === 'payment_failed') {
         setPolling(false)
       } else {

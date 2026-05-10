@@ -33,6 +33,14 @@ export default function TrialBanner() {
 
   useEffect(() => {
     fetchStatus()
+    // Refetch when the tab regains focus — covers the "merchant paid in
+    // another tab" case (Moyasar redirect), where the activation flips
+    // server-side but this banner is still rendering its last-known
+    // state. Also catches the case where reconcile activated a sub
+    // moments ago but the cached status still says trial.
+    const onFocus = () => fetchStatus()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
   }, [fetchStatus])
 
   if (dismissed) return null
