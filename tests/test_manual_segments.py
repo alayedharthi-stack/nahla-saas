@@ -404,3 +404,147 @@ class TestResolveAudience:
         add_manual_segment(db, tenant_id=b.id, customer_id=cb.id, segment_key="vip")
         assert _resolve_audience(db, a.id, "manual:vip") == []
         assert [c.id for c in _resolve_audience(db, b.id, "manual:vip")] == [cb.id]
+
+
+# ── 5. Customer-list filter — the production-bug regression ──────────────
+#
+# Production scenario reported by tenant 33: merchant adds the
+# "promising" (عملاء واعدون) tag to a customer via the drawer, then
+# selects the same segment in the filter dropdown — and the customer
+# list returns zero rows. This test pins the contract that the two
+# code paths must agree.
+
+
+class TestCustomerListManualFilter:
+    """Walks the same data path the dashboard hits:
+       1. POST /customers/{id}/segments         (drawer "add tag")
+       2. GET  /customers?manual_segment=<key>  (filter dropdown)
+
+    Bypasses HTTP for speed but uses the *same* service helpers the
+    routers do, so any divergence between add-write and filter-read
+    is caught.
+    """
+
+    def test_promising_tag_is_findable_via_filter_immediately(self):
+        # The exact production case: tag a customer with `promising`
+        # and verify `customer_ids_with_manual_segment(... "promising")`
+        # returns that customer's id with no other steps. The filter
+        # endpoint reads from this helper, so green here ⇒ green
+        # filter.
+        db, _ = _make_db()
+        t = _seed_tenant(db, "T-prod")
+        haitham = _seed_customer(db, t.id, "+966542688511")  # "هيثم الحارثي"
+        ali     = _seed_customer(db, t.id, "+966500000099")
+
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=haitham.id, segment_key="promising",
+        )
+
+        ids = customer_ids_with_manual_segment(db, t.id, "promising")
+        assert ids == [haitham.id], (
+            "Customer tagged 'promising' via drawer should appear in "
+            "the customers-list manual_segment filter for the same key."
+        )
+        # Negative — the untagged customer is NOT in the result.
+        assert ali.id not in ids
+
+    def test_filter_key_is_normalised_like_drawer(self):
+        # Drawer normalises the key via assert_known_segment (lowercase
+        # + strip). Filter must do the same so "Promising" / " promising "
+        # / "promising" all hit the same row set.
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id, segment_key="VIP",  # caps
+        )
+        # All three spellings must resolve to the same canonical key.
+        assert customer_ids_with_manual_segment(db, t.id, "vip")   == [c.id]
+        assert customer_ids_with_manual_segment(db, t.id, "VIP")   == [c.id]
+        assert customer_ids_with_manual_segment(db, t.id, " vip ") == [c.id]
+
+    def test_filter_does_not_leak_across_tenants(self):
+        db, _ = _make_db()
+        a = _seed_tenant(db, "A")
+        b = _seed_tenant(db, "B")
+        ca = _seed_customer(db, a.id, "+966500000001")
+        cb = _seed_customer(db, b.id, "+966500000002")
+        add_manual_segment(db, tenant_id=a.id, customer_id=ca.id, segment_key="promising")
+        add_manual_segment(db, tenant_id=b.id, customer_id=cb.id, segment_key="promising")
+        # Tenant A's filter must only see ca.
+        assert customer_ids_with_manual_segment(db, a.id, "promising") == [ca.id]
+        assert customer_ids_with_manual_segment(db, b.id, "promising") == [cb.id]
+
+    def test_unknown_key_passes_validation_layer_in_filter(self):
+        # The router rejects unknown keys *before* hitting the helper,
+        # but the helper itself must return [] for any key it can't
+        # find, never raise. This keeps the helper safe to reuse from
+        # campaign dispatch where unknown keys (e.g. legacy data) are
+        # treated as "no match" not a hard 500.
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        _seed_customer(db, t.id, "+966500000001")
+        assert customer_ids_with_manual_segment(db, t.id, "nope_not_real") == []
+
+
+# ── 6. Lazy billing reconcile — guard against re-introducing the bug ─────
+#
+# Tenant 33 sat at "pending_payment" because no caller ever invoked
+# the activation helper after Moyasar's redirect. The fix wires the
+# helper into /billing/status and /billing/entitlements with an
+# in-memory cooldown. This test pins the cooldown contract so a
+# careless future refactor doesn't accidentally call Moyasar once per
+# page mount.
+
+
+class TestLazyReconcileCooldown:
+    def test_cooldown_blocks_repeat_attempt_for_pending_sub(self):
+        # Importing here so the test file doesn't fail collection on
+        # environments where billing isn't installed.
+        from services.billing_activation import (
+            _LAZY_RECONCILE_LAST,
+            _should_attempt_lazy_reconcile,
+        )
+        from models import BillingSubscription
+
+        _LAZY_RECONCILE_LAST.clear()
+        sub = BillingSubscription(
+            id=999, tenant_id=33, plan_id=2, status="pending_payment",
+            extra_metadata={"moyasar_invoice_id": "inv_xyz"},
+        )
+        # First call passes — first time we've seen this sub.
+        assert _should_attempt_lazy_reconcile(sub) is True
+        # Immediate retry must be blocked.
+        assert _should_attempt_lazy_reconcile(sub) is False
+
+    def test_active_sub_never_triggers_reconcile(self):
+        from services.billing_activation import (
+            _LAZY_RECONCILE_LAST,
+            _should_attempt_lazy_reconcile,
+        )
+        from models import BillingSubscription
+
+        _LAZY_RECONCILE_LAST.clear()
+        sub = BillingSubscription(
+            id=1000, tenant_id=33, plan_id=2, status="active",
+            extra_metadata={"moyasar_invoice_id": "inv_xyz"},
+        )
+        # Already active → no Moyasar call ever needed.
+        assert _should_attempt_lazy_reconcile(sub) is False
+
+    def test_pending_without_moyasar_invoice_id_is_skipped(self):
+        # A pending sub with no Moyasar invoice (e.g. a manually-created
+        # row from the admin panel) has nothing to reconcile against,
+        # so we must NOT call Moyasar at all.
+        from services.billing_activation import (
+            _LAZY_RECONCILE_LAST,
+            _should_attempt_lazy_reconcile,
+        )
+        from models import BillingSubscription
+
+        _LAZY_RECONCILE_LAST.clear()
+        sub = BillingSubscription(
+            id=1001, tenant_id=33, plan_id=2, status="pending_payment",
+            extra_metadata={},  # no moyasar_invoice_id
+        )
+        assert _should_attempt_lazy_reconcile(sub) is False

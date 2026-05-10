@@ -288,13 +288,33 @@ async def list_billing_plans(db: Session = Depends(get_db)):
 
 @router.get("/billing/status")
 async def get_billing_status(request: Request, db: Session = Depends(get_db)):
-    """Return the current subscription status for the tenant."""
+    """Return the current subscription status for the tenant.
+
+    Also performs a **lazy self-heal reconcile**: if this tenant has a
+    ``pending_payment`` Moyasar sub, we ask Moyasar's invoice API
+    whether it's actually paid and activate it on the spot. This is
+    what closes the gap left by Moyasar's invoice ``callback_url``
+    being a browser-redirect (not a webhook) — without it, a merchant
+    who paid in another tab and came back to the dashboard would stay
+    on trial forever even though the funds were captured. Tenant 33
+    was the production case.
+    """
     tenant_id = resolve_tenant_id(request)
     logger.info("billing/status called for tenant_id=%s", tenant_id)
     try:
         ensure_billing_plans(db)
     except Exception as exc:
         logger.error("ensure_billing_plans failed in status: %s", exc, exc_info=True)
+
+    # ── Self-heal: reconcile any pending Moyasar invoice for this tenant ─
+    try:
+        from services.billing_activation import lazy_reconcile_tenant_pending_subs  # noqa: PLC0415
+        await lazy_reconcile_tenant_pending_subs(
+            db, int(tenant_id), source="billing_status",
+        )
+    except Exception as exc:
+        # Reconcile failures must NEVER break the status endpoint.
+        logger.warning("[Billing] lazy reconcile failed for tenant=%s: %s", tenant_id, exc)
 
     sub = get_tenant_subscription(db, tenant_id)
 
@@ -900,7 +920,11 @@ async def hyperpay_create_payment_link(
 # ── GET /billing/debug/current — fast diagnostics ────────────────────────────
 
 @router.get("/billing/debug/current")
-async def billing_debug_current(request: Request, db: Session = Depends(get_db)):
+async def billing_debug_current(
+    request: Request,
+    db: Session = Depends(get_db),
+    force_reconcile: bool = False,
+):
     """One-stop diagnostic dump for "why doesn't my plan show?" tickets.
 
     Returns the same row of truth as the merchant dashboard sees — but
@@ -925,6 +949,25 @@ async def billing_debug_current(request: Request, db: Session = Depends(get_db))
 
     from core.billing import compute_trial_info, get_tenant_subscription  # noqa: PLC0415
     from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+
+    # Optional: actively poke Moyasar for any pending invoice. This is
+    # the same self-heal logic that runs lazily in /billing/status,
+    # but the debug endpoint accepts ``?force_reconcile=1`` to bypass
+    # the in-memory cooldown — useful when ops is debugging a stuck
+    # tenant and wants the truthiest possible snapshot in one shot.
+    reconcile_actions: list[dict] = []
+    if force_reconcile:
+        try:
+            from services.billing_activation import (  # noqa: PLC0415
+                _LAZY_RECONCILE_LAST,
+                lazy_reconcile_tenant_pending_subs,
+            )
+            _LAZY_RECONCILE_LAST.clear()
+            _, reconcile_actions = await lazy_reconcile_tenant_pending_subs(
+                db, int(tenant_id), source="debug_force_reconcile",
+            )
+        except Exception as exc:
+            reconcile_actions = [{"error": str(exc)}]
 
     tenant = get_or_create_tenant(db, tenant_id)
     all_subs = (
@@ -972,6 +1015,18 @@ async def billing_debug_current(request: Request, db: Session = Depends(get_db))
         "trial_expired":    active_sub is None and trial["trial_expired"],
     }
 
+    # ── WA usage view ────────────────────────────────────────────────
+    # This is what the Overview page actually reads to render the
+    # "97/100 محادثة" warning. If this view says limit=100 while
+    # entitlements says plan=growth, that's the smoking gun for the
+    # ``_get_or_create_usage`` re-sync miss.
+    wa_usage_view: dict | None = None
+    try:
+        from core.wa_usage import get_usage_this_month  # noqa: PLC0415
+        wa_usage_view = get_usage_this_month(db, int(tenant_id))
+    except Exception as exc:
+        wa_usage_view = {"error": str(exc)}
+
     return {
         "tenant_id": tenant_id,
         "tenant": {
@@ -996,6 +1051,9 @@ async def billing_debug_current(request: Request, db: Session = Depends(get_db))
         },
         "billing_status_endpoint": bstatus,
         "trial_info":              trial,
+        # What Overview *actually* shows in the conversations card.
+        "wa_usage_overview_source": wa_usage_view,
+        "reconcile_actions":        reconcile_actions,
     }
 
 
@@ -1013,6 +1071,21 @@ async def get_billing_entitlements(request: Request, db: Session = Depends(get_d
     """
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+
+    # ── Self-heal: same lazy reconcile as /billing/status. Both
+    # endpoints are mounted on basically every dashboard page, so
+    # whichever fires first will catch a pending Moyasar invoice and
+    # flip it to active before this function reads entitlements.
+    try:
+        from services.billing_activation import lazy_reconcile_tenant_pending_subs  # noqa: PLC0415
+        await lazy_reconcile_tenant_pending_subs(
+            db, int(tenant_id), source="billing_entitlements",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Billing] lazy reconcile failed for tenant=%s in entitlements: %s",
+            tenant_id, exc,
+        )
 
     from core.plan_entitlements import get_entitlements  # noqa: PLC0415
     ent = get_entitlements(db, tenant_id)

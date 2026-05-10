@@ -1030,6 +1030,77 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("[Startup] webhook subscription skipped: %s", exc)
 
+    # ── Phase 2.5: Moyasar pending-subs reconciliation sweep ─────────────────
+    # Why: Moyasar invoice ``callback_url`` is a *browser* redirect, not a
+    # server webhook. If a merchant pays in another tab/device and never
+    # comes back to /billing/payment-result, our DB stays
+    # ``pending_payment`` while the funds were captured. The
+    # ``/billing/status`` endpoint already self-heals on every dashboard
+    # request, but a tenant that never opens the dashboard between
+    # paying-and-now would still be stuck.
+    #
+    # This sweep runs once per process boot, ~30s after lifespan ends so
+    # we don't slow startup, and asks Moyasar's invoice API about every
+    # ``pending_payment`` Moyasar sub in the DB. Activation is idempotent
+    # (already-paid → activate; still pending → no-op).
+    try:
+        async def _reconcile_pending_moyasar_sweep():
+            try:
+                await asyncio.sleep(30.0)
+            except asyncio.CancelledError:
+                return
+            try:
+                from sqlalchemy.orm import Session as _Session  # noqa: PLC0415
+                from core.database import SessionLocal  # noqa: PLC0415
+                from models import BillingSubscription as _BS  # noqa: PLC0415
+                from services.billing_activation import (  # noqa: PLC0415
+                    reconcile_subscription_from_moyasar,
+                )
+                db: _Session = SessionLocal()
+                try:
+                    pending = (
+                        db.query(_BS)
+                        .filter(_BS.status == "pending_payment")
+                        .all()
+                    )
+                    pending = [
+                        s for s in pending
+                        if (s.extra_metadata or {}).get("moyasar_invoice_id")
+                    ]
+                    logger.info(
+                        "[BOOT/billing-sweep] found %d pending Moyasar sub(s) — reconciling",
+                        len(pending),
+                    )
+                    activated = 0
+                    for sub in pending:
+                        try:
+                            ok, reason = await reconcile_subscription_from_moyasar(
+                                db, sub, source="boot_sweep",
+                            )
+                            if ok:
+                                activated += 1
+                                logger.info(
+                                    "[BOOT/billing-sweep] activated sub_id=%s tenant=%s reason=%s",
+                                    sub.id, sub.tenant_id, reason,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "[BOOT/billing-sweep] sub_id=%s failed: %r",
+                                sub.id, exc,
+                            )
+                    logger.info(
+                        "[BOOT/billing-sweep] complete activated=%d/%d",
+                        activated, len(pending),
+                    )
+                finally:
+                    db.close()
+            except Exception as exc:
+                logger.warning("[BOOT/billing-sweep] aborted: %r", exc)
+
+        asyncio.create_task(_reconcile_pending_moyasar_sweep())
+    except Exception as exc:
+        logger.warning("[BOOT/billing-sweep] dispatch skipped: %s", exc)
+
     logger.info("[BOOT/lifespan] phase=3_heartbeat t+%.3fs", _bt.monotonic() - _t_lifespan)
     # ── Runtime heartbeat (always on) ───────────────────────────────────────
     # Emits a structured INFO line every 10s with event-loop lag, in-flight

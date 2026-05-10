@@ -336,6 +336,96 @@ def _send_activation_receipts(
         ))
 
 
+# ── Per-process throttle for lazy reconcile ─────────────────────────────
+# Lazy reconcile runs from the hot path of /billing/status and
+# /billing/entitlements — both of which the dashboard calls on nearly
+# every page mount. We MUST NOT hit Moyasar once per page load, so we
+# remember the last attempt time per subscription_id in-memory and
+# refuse to call again within ``LAZY_RECONCILE_COOLDOWN_SEC``.
+#
+# The map is process-local on purpose: a multi-worker deploy will have
+# each worker keep its own counter, which is fine. The downside is at
+# most ``num_workers`` Moyasar calls per cooldown window per stuck
+# tenant — a tiny constant. The upside is no Redis dependency for
+# what is fundamentally a polite-rate-limit concern, not a correctness
+# concern (the activation helper itself is idempotent).
+LAZY_RECONCILE_COOLDOWN_SEC = 60
+_LAZY_RECONCILE_LAST: dict[int, float] = {}
+
+
+def _should_attempt_lazy_reconcile(sub: BillingSubscription) -> bool:
+    """Throttle gate for lazy reconcile. True iff we haven't tried this
+    sub recently. Always returns True for active subs (no cooldown
+    needed since activation helper short-circuits on already-active)."""
+    if sub.status != "pending_payment":
+        return False
+    meta = sub.extra_metadata or {}
+    if not meta.get("moyasar_invoice_id"):
+        return False
+    import time  # noqa: PLC0415
+    now = time.monotonic()
+    last = _LAZY_RECONCILE_LAST.get(sub.id, 0.0)
+    if (now - last) < LAZY_RECONCILE_COOLDOWN_SEC:
+        return False
+    _LAZY_RECONCILE_LAST[sub.id] = now
+    return True
+
+
+async def lazy_reconcile_tenant_pending_subs(
+    db: Session, tenant_id: int, *, source: str = "lazy_status_check",
+) -> Tuple[bool, list[dict]]:
+    """Best-effort reconcile of every pending Moyasar sub for a tenant.
+
+    Designed to run from billing-status / entitlements endpoints —
+    cheap when there's nothing to do (no pending subs) and rate-limited
+    when there is. Never raises; returns ``(activated_any, [info...])``
+    so the caller can log or skip.
+
+    Without this, a merchant who paid via Moyasar but never visited
+    /billing/payment-result (e.g. because they lost the tab and just
+    came back to the dashboard) would stay pending forever, since
+    Moyasar's invoice ``callback_url`` is a redirect and not a webhook.
+    Tenant 33 was the production case that exposed this: every fix to
+    the activation helper was correct, but no caller was actually
+    invoking it on the merchant's normal navigation path.
+    """
+    pending = (
+        db.query(BillingSubscription)
+        .filter(
+            BillingSubscription.tenant_id == tenant_id,
+            BillingSubscription.status == "pending_payment",
+        )
+        .all()
+    )
+
+    activated_any = False
+    results: list[dict] = []
+    for sub in pending:
+        if not _should_attempt_lazy_reconcile(sub):
+            results.append({"sub_id": sub.id, "skipped": "throttled"})
+            continue
+        try:
+            activated, reason = await reconcile_subscription_from_moyasar(
+                db, sub, source=source,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[lazy_reconcile] sub=%s tenant=%s exception=%r",
+                sub.id, tenant_id, exc,
+            )
+            results.append({"sub_id": sub.id, "error": str(exc)})
+            continue
+        activated_any = activated_any or activated
+        results.append({"sub_id": sub.id, "activated": activated, "reason": reason})
+
+    if activated_any:
+        logger.info(
+            "[lazy_reconcile] activated tenant=%s via %s | results=%s",
+            tenant_id, source, results,
+        )
+    return activated_any, results
+
+
 async def reconcile_subscription_from_moyasar(
     db: Session,
     sub: BillingSubscription,

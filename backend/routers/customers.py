@@ -400,6 +400,29 @@ async def list_customers(
         if get_nahla_segment(msf) is None:
             raise HTTPException(status_code=422, detail=f"تصنيف يدوي غير معروف: {msf}")
         ids = customer_ids_with_manual_segment(db, tenant_id, msf)
+        # Diagnostic log so we can see in production exactly what key
+        # the filter looked up vs what's actually in the table for the
+        # tenant. If a merchant complains "I tagged this customer
+        # but the filter shows nobody", the log line below tells us
+        # whether it's a key mismatch (count=0 here, customer tagged
+        # under different key) or genuinely empty.
+        try:
+            import logging  # noqa: PLC0415
+            _seglog = logging.getLogger("nahla.customers.manual_segment")
+            distinct_keys = (
+                db.query(CustomerSegmentManual.segment_key)
+                .filter(CustomerSegmentManual.tenant_id == tenant_id)
+                .distinct()
+                .all()
+            )
+            _seglog.info(
+                "manual_segment filter | tenant=%s requested_key=%r matched_ids=%d "
+                "distinct_keys_in_db=%s",
+                tenant_id, msf, len(ids),
+                sorted({k[0] for k in distinct_keys}),
+            )
+        except Exception:
+            pass
         if not ids:
             # Empty universe — short-circuit to no results without
             # building a giant `IN ()` clause.
@@ -502,6 +525,81 @@ async def customers_segments(request: Request, db: Session = Depends(get_db)):
         "segments": list_segments_with_counts(
             db, tenant_id, require_reachable=False,
         ),
+    }
+
+
+@router.get("/debug/manual-segments")
+async def debug_manual_segments(
+    request: Request,
+    customer_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Diagnostic dump for "I tagged this customer but the filter
+    can't find them" tickets.
+
+    Returns:
+      * ``known_segment_keys``  — the canonical Nahla registry the
+        filter validates against. The drawer uses the same registry,
+        so any key in the DB that is *not* in this list means the
+        tag was created before validation existed and is now invisible
+        to the filter.
+      * ``stored_keys_for_tenant`` — every distinct segment_key
+        actually present in ``customer_segments_manual`` for this
+        tenant, with its row count. A key here that is missing from
+        ``known_segment_keys`` is the smoking gun.
+      * ``customer_tags`` (if ``customer_id`` provided) — the exact
+        rows for that customer, so you can compare the stored
+        segment_key character-for-character against what the filter
+        sends.
+    """
+    from sqlalchemy import func  # noqa: PLC0415
+    from services.nahla_segments import all_segment_keys  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    distinct_rows = (
+        db.query(
+            CustomerSegmentManual.segment_key,
+            func.count(CustomerSegmentManual.id),
+        )
+        .filter(CustomerSegmentManual.tenant_id == tenant_id)
+        .group_by(CustomerSegmentManual.segment_key)
+        .all()
+    )
+    stored = [{"segment_key": k, "count": int(n)} for (k, n) in distinct_rows]
+    known = sorted(all_segment_keys())
+    unknown = sorted({s["segment_key"] for s in stored} - set(known))
+
+    customer_tags = None
+    if customer_id is not None:
+        rows = (
+            db.query(CustomerSegmentManual)
+            .filter(
+                CustomerSegmentManual.tenant_id == tenant_id,
+                CustomerSegmentManual.customer_id == customer_id,
+            )
+            .all()
+        )
+        customer_tags = [
+            {
+                "id":           r.id,
+                "segment_key":  r.segment_key,
+                "key_repr":     repr(r.segment_key),  # exposes hidden whitespace
+                "key_len":      len(r.segment_key or ""),
+                "is_in_known":  (r.segment_key in known),
+                "created_at":   r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+
+    return {
+        "tenant_id":             tenant_id,
+        "known_segment_keys":    known,
+        "stored_keys_for_tenant": stored,
+        "stored_keys_unknown":   unknown,
+        "customer_id":           customer_id,
+        "customer_tags":         customer_tags,
     }
 
 
