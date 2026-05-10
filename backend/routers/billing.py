@@ -786,7 +786,23 @@ async def billing_payment_result(
     sub_id: Optional[int] = None,
     status: Optional[str] = None,
 ):
-    """Return subscription status for the payment-result page after Moyasar redirect."""
+    """Return subscription status for the payment-result page after a Moyasar
+    redirect. **This endpoint is the primary safety net for activation.**
+
+    Why: Moyasar invoices use ``callback_url`` as a *browser redirect URL*
+    after the customer pays — not a server-to-server webhook. A
+    server-to-server webhook only arrives if the merchant has registered
+    one in the Moyasar dashboard AND we're handling the right event
+    shape. So relying on the webhook alone left every successful payment
+    stuck in ``pending_payment`` and the merchant looking at a polling
+    spinner forever (see services/billing_activation.py for full context).
+
+    Fix: when the polling page hits this endpoint, if the subscription
+    is still pending and we know the Moyasar invoice id, we reconcile
+    *live* against ``GET /v1/invoices/{id}``. If Moyasar reports the
+    invoice as paid, we activate immediately — and the very next poll
+    from the frontend gets ``activated=true``. Idempotent end-to-end.
+    """
     if not sub_id:
         return {"activated": False, "status": "unknown"}
 
@@ -797,6 +813,28 @@ async def billing_payment_result(
 
     if sub.tenant_id != int(tenant_id):
         raise HTTPException(status_code=403, detail="Access denied")
+
+    # ── Live reconcile when sub is still pending ──────────────────────
+    if sub.status not in ("active", "cancelled", "payment_failed"):
+        try:
+            from services.billing_activation import reconcile_subscription_from_moyasar  # noqa: PLC0415
+            activated, reason = await reconcile_subscription_from_moyasar(
+                db, sub, source="result_page_poll",
+            )
+            logger.info(
+                "[Billing] payment-result reconcile tenant=%s sub=%s activated=%s reason=%s",
+                tenant_id, sub.id, activated, reason,
+            )
+            if activated:
+                # Re-fetch to get committed state.
+                db.refresh(sub)
+        except Exception as exc:
+            # Reconcile failures must never break the polling page —
+            # the merchant should still see the current DB state.
+            logger.warning(
+                "[Billing] payment-result reconcile failed tenant=%s sub=%s: %s",
+                tenant_id, sub.id, exc, exc_info=True,
+            )
 
     plan      = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
     plan_meta = plan.extra_metadata or {} if plan else {}

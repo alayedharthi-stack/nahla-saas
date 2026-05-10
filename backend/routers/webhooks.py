@@ -987,8 +987,32 @@ async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
 async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db)):
     """
     Moyasar payment webhook handler for subscription payments.
-    Activates the BillingSubscription and records a BillingPayment on success.
-    Hardened: idempotency, signature verification, full status handling, race protection.
+
+    Accepts BOTH event shapes Moyasar can deliver:
+
+      * **Payment-level** (flat) — what the dashboard "payment_paid" event
+        produces::
+
+            {"id": "<payment>", "status": "paid", "metadata": {...}, ...}
+
+      * **Invoice-level** (envelope) — what "invoice_paid" produces::
+
+            {"id": "<event>", "type": "invoice.paid",
+             "data": {"id": "<invoice>", "status": "paid",
+                      "metadata": {...}, "payments": [...]}}
+
+    Old code only understood the flat shape, so any merchant who
+    happened to subscribe to invoice events in the dashboard saw the
+    handler silently ignore every paid invoice with a misleading log
+    line ``"Unhandled status '' …"``. The normaliser below collapses
+    both shapes into a single ``payload`` dict before activation.
+
+    Note: even with this handler in perfect shape, a Moyasar invoice's
+    ``callback_url`` field is the **browser redirect URL** — not a
+    webhook. To get server-to-server webhooks at all, the merchant must
+    register one in the Moyasar dashboard. This endpoint exists for
+    when they do; the primary activation path is the live reconcile
+    inside ``GET /billing/payment-result``.
     """
     body_bytes = await request.body()
     signature  = request.headers.get("x-moyasar-signature", "")
@@ -998,17 +1022,33 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    payment_id      = event.get("id", "")
-    status          = event.get("status", "")
-    amount_h        = int(event.get("amount", 0))
+    # ── Normalise the two shapes into a single payload ────────────────
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from services.billing_activation import (  # noqa: PLC0415
+        activate_subscription_from_moyasar_invoice,
+        extract_payment_id_from_invoice,
+        normalize_moyasar_event,
+    )
+
+    payload, event_shape = normalize_moyasar_event(event)
+    status          = (payload.get("status") or "").lower()
+    amount_h        = int(payload.get("amount") or 0)
     amount_sar      = amount_h // 100
-    payment_meta    = event.get("metadata") or {}
+    payment_meta    = payload.get("metadata") or {}
     subscription_id = payment_meta.get("subscription_id")
     tenant_id_raw   = payment_meta.get("tenant_id")
 
+    # For invoice-shape events, the *payment* id lives inside payments[];
+    # for payment-shape events, the top-level id IS the payment id.
+    if event_shape == "invoice":
+        payment_id = extract_payment_id_from_invoice(payload)
+    else:
+        payment_id = str(payload.get("id") or "")
+
     logger.info(
-        "[Billing Webhook] event id=%s status=%s sub=%s tenant=%s",
-        payment_id, status, subscription_id, tenant_id_raw,
+        "[Billing Webhook] shape=%s payment_id=%s invoice_id=%s status=%s sub=%s tenant=%s",
+        event_shape, payment_id, payload.get("id") if event_shape == "invoice" else "—",
+        status, subscription_id, tenant_id_raw,
     )
 
     if not subscription_id:
@@ -1038,121 +1078,37 @@ async def billing_webhook_moyasar(request: Request, db: Session = Depends(get_db
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     if status == "paid":
-        if payment_id:
-            existing = db.query(BillingPayment).filter(
-                BillingPayment.transaction_reference == payment_id,
-                BillingPayment.gateway == "moyasar",
-            ).first()
-            if existing:
-                logger.info(
-                    "[Billing Webhook] Duplicate delivery payment_id=%s — idempotent, ignoring",
-                    payment_id,
-                )
-                return {"received": True, "idempotent": True}
+        # Build a synthetic invoice payload that the shared activation
+        # helper understands. For invoice-shape events the payload IS
+        # already an invoice; for payment-shape events we fabricate
+        # a minimal one that exposes the same keys.
+        if event_shape == "invoice":
+            invoice_data = payload
+        else:
+            invoice_data = {
+                "id":       payload.get("invoice_id") or payment_id,
+                "status":   "paid",
+                "amount":   amount_h,
+                "metadata": payment_meta,
+                "payments": [{"id": payment_id, "status": "paid"}],
+            }
 
-        if sub.status == "active":
-            logger.info(
-                "[Billing Webhook] Sub %s already active — duplicate webhook ignored", subscription_id,
-            )
+        activated, reason = activate_subscription_from_moyasar_invoice(
+            db, sub,
+            invoice_data=invoice_data,
+            payment_id=payment_id,
+            source=f"webhook_{event_shape}",
+        )
+        if activated:
+            return {"received": True, "activated": True}
+        if reason == "already_active":
             return {"received": True, "already_active": True}
-
-        if sub.status not in _BILLING_ACTIVATABLE:
-            logger.warning(
-                "[Billing Webhook] Sub %s in unexpected status %r — skipping activation",
-                subscription_id, sub.status,
-            )
-            return {"received": True, "skipped": True}
-
-        sub.status = "active"
-        m = dict(sub.extra_metadata or {})
-        m["moyasar_payment_id"] = payment_id
-        m["paid_at"] = datetime.now(timezone.utc).isoformat()
-        sub.extra_metadata = m
-
-        # amount_sar was computed at top of handler as `amount_h // 100`;
-        # prefer sub.extra_metadata["price_charged_sar"] when the webhook
-        # amount differs (e.g. refunds, launch discount).
-        final_amount_sar = amount_sar or int(m.get("price_charged_sar", 0))
-
-        billing_payment = BillingPayment(
-            tenant_id=sub.tenant_id,
-            subscription_id=sub.id,
-            amount_sar=final_amount_sar,
-            currency="SAR",
-            gateway="moyasar",
-            transaction_reference=payment_id,
-            status="paid",
-            paid_at=datetime.now(timezone.utc),
-            extra_metadata={"moyasar_event": event},
-        )
-        db.add(billing_payment)
-        db.flush()
-
-        logger.info(
-            "[NAHLA PAYMENT ACTIVATED] tenant=%s sub=%s payment_id=%s amount=%s SAR billing_payment_id=%s",
-            sub.tenant_id, subscription_id, payment_id, final_amount_sar, billing_payment.id,
-        )
-
-        # ── Notifications: receipt email + WA ─────────────────────────────
-        try:
-            import asyncio  # noqa: PLC0415
-            from core.notifications import send_email, email_invoice  # noqa: PLC0415
-            from core.wa_notify import notify_payment_invoice  # noqa: PLC0415
-            from services.billing_formatter import (  # noqa: PLC0415
-                resolve_billing_context,
-                build_nahla_payment_receipt_message,
-                build_nahla_email_invoice_html,
-            )
-
-            paid_now = datetime.now(timezone.utc)
-            ctx = resolve_billing_context(
-                db,
-                tenant_id=sub.tenant_id,
-                sub=sub,
-                plan_obj=None,      # resolved inside
-                payment_id=payment_id,
-                payment_amount_sar=final_amount_sar,
-                paid_at=paid_now,
-            )
-
-            email_addr = ctx["merchant_email"]
-            phone      = ctx["merchant_phone"]
-
-            if email_addr:
-                asyncio.ensure_future(send_email(
-                    to=email_addr,
-                    subject=f"🧾 فاتورة اشتراك نحلة AI — {ctx['plan_name']} #{ctx['invoice_id']}",
-                    html=build_nahla_email_invoice_html(ctx),
-                ))
-
-            if phone:
-                wa_ok = await notify_payment_invoice(
-                    phone,
-                    ctx["store_name"],
-                    ctx["plan_name"],
-                    ctx["amount_sar"],
-                    ctx["invoice_id"],
-                    paid_now,
-                    merchant_name=ctx["merchant_name"],
-                    billing_period=ctx["billing_period"],
-                    tenant_id=ctx["tenant_id"],
-                    ends_at=ctx["ends_at"],
-                )
-                if wa_ok:
-                    logger.info(
-                        "[NAHLA PAYMENT RECEIPT SENT] tenant=%s payment_id=%s phone=%s",
-                        sub.tenant_id, payment_id, phone[:6] + "****",
-                    )
-                else:
-                    logger.warning(
-                        "[NAHLA PAYMENT RECEIPT SEND FAILED] tenant=%s payment_id=%s phone=%s",
-                        sub.tenant_id, payment_id, phone[:6] + "****",
-                    )
-        except Exception as notify_exc:
-            logger.warning(
-                "[NAHLA PAYMENT RECEIPT SEND FAILED] tenant=%s payment_id=%s error=%s",
-                sub.tenant_id, payment_id, notify_exc,
-            )
+        if reason == "duplicate_payment":
+            return {"received": True, "idempotent": True}
+        if reason == "unexpected_status":
+            return {"received": True, "skipped": True, "reason": reason}
+        # fall-through for invoice_not_paid / unknown — let it commit.
+        return {"received": True, "noop": True, "reason": reason}
 
     elif status in _MOYASAR_FAIL_STATUSES:
         if sub.status == "active":

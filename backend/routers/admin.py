@@ -1350,6 +1350,86 @@ async def admin_billing_payments(
     }
 
 
+@router.post("/admin/billing/reconcile/{subscription_id}")
+async def admin_billing_reconcile(
+    subscription_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Manual recovery — re-reconcile a stuck Moyasar subscription.
+
+    Use this when a merchant paid via Moyasar but the subscription stayed
+    in ``pending_payment`` (most common cause: the dashboard never had a
+    webhook registered, so only the browser redirect happened and the
+    polling loop on ``BillingResult.tsx`` timed out before live reconcile
+    was added).
+
+    Behaviour:
+      * Looks up the subscription by id.
+      * Calls ``services.billing_activation.reconcile_subscription_from_moyasar``,
+        which fetches the live invoice from Moyasar's API and activates
+        the sub idempotently if the invoice is paid.
+      * Returns a structured result so ops can see exactly what happened.
+
+    This endpoint is admin-only and idempotent — calling it twice on an
+    already-activated sub is a safe no-op that returns
+    ``{activated: false, reason: "already_active"}``.
+    """
+    sub = (
+        db.query(BillingSubscription)
+        .filter(BillingSubscription.id == subscription_id)
+        .first()
+    )
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    from services.billing_activation import reconcile_subscription_from_moyasar  # noqa: PLC0415
+
+    activated, reason = await reconcile_subscription_from_moyasar(
+        db, sub, source="admin_reconcile",
+    )
+    db.refresh(sub)
+
+    plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first() if sub.plan_id else None
+    payment = (
+        db.query(BillingPayment)
+        .filter(BillingPayment.subscription_id == sub.id)
+        .order_by(BillingPayment.id.desc())
+        .first()
+    )
+
+    audit(
+        "admin_billing_reconcile",
+        admin_id=_admin.get("user_id"),
+        subscription_id=sub.id,
+        tenant_id=sub.tenant_id,
+        activated=activated,
+        reason=reason,
+    )
+
+    return {
+        "activated":      activated,
+        "reason":         reason,
+        "subscription": {
+            "id":         sub.id,
+            "tenant_id":  sub.tenant_id,
+            "status":     sub.status,
+            "plan_slug":  plan.slug if plan else None,
+            "plan_name":  plan.name if plan else None,
+            "started_at": sub.started_at.isoformat() if sub.started_at else None,
+            "ends_at":    sub.ends_at.isoformat() if sub.ends_at else None,
+            "metadata":   sub.extra_metadata or {},
+        },
+        "payment": {
+            "id":                    payment.id if payment else None,
+            "amount_sar":            _payment_amount_value(payment) if payment else None,
+            "transaction_reference": payment.transaction_reference if payment else None,
+            "status":                payment.status if payment else None,
+            "paid_at":               payment.paid_at.isoformat() if payment and payment.paid_at else None,
+        },
+    }
+
+
 @router.get("/admin/revenue/summary")
 async def admin_revenue_summary(
     db: Session = Depends(get_db),
