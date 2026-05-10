@@ -61,9 +61,30 @@ export interface CustomerRecord {
   is_campaign_test_recipient: boolean
   /** Manual Nahla segment tags pinned by the merchant (e.g. ['vip',
    *  'unsubscribed']). Always a subset of the official Nahla
-   *  registry — backend rejects unknown keys with 422. */
+   *  registry — backend rejects unknown keys with 422.
+   *  Note: this list reflects ONLY ``include`` rows. Excludes are
+   *  surfaced via ``segment_sources`` instead. */
   manual_segments: string[]
   manual_segments_labels: string[]
+  /** Per-segment source breakdown.
+   *
+   *  Shape: ``{ <segment_key>: { automatic, manual_include, manual_exclude } }``
+   *
+   *  Only segments where at least one of the three booleans is true
+   *  appear here. Used by the drawer to render labels like:
+   *    "VIP يدوي + تلقائي"  — automatic && manual_include
+   *    "VIP يدوي"            — !automatic && manual_include
+   *    "VIP تلقائي"          — automatic && !manual_include
+   *    "مستبعد يدويًا من VIP" — manual_exclude
+   *
+   *  Filter formula (cemented backend-side too):
+   *    member ⇔ (automatic ∨ manual_include) ∧ ¬ manual_exclude
+   */
+  segment_sources?: Record<string, {
+    automatic: boolean
+    manual_include: boolean
+    manual_exclude: boolean
+  }>
 }
 
 export interface CustomersListResponse {
@@ -131,11 +152,19 @@ export interface CustomersListFilters {
 export interface CustomerSegmentMutationResponse {
   customer_id: number
   segment_key?: string
+  /** "include" or "exclude" — only present on add (POST). */
+  mode?: 'include' | 'exclude'
   label_ar?: string
   source?: string
   created_at?: string | null
-  removed?: boolean
+  /** "deleted" | "excluded" | "noop" — only present on smart-remove (DELETE). */
+  action?: 'deleted' | 'excluded' | 'noop'
+  /** True when the auto classifier currently considers this customer
+   *  to belong to the segment (used by the smart-remove decision). */
+  auto_match?: boolean
   manual_segments: string[]
+  /** Full {segment_key: mode} map after the mutation. */
+  manual_sources?: Record<string, 'include' | 'exclude'>
 }
 
 export interface CustomerMarketingPreferences {

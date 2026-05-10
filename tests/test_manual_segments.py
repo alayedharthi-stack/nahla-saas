@@ -547,6 +547,187 @@ class TestAutoChipUnionWithManualTags:
         assert customer_ids_with_manual_segment(db, b.id, "vip") == [cb.id]
 
 
+# ── 8. Include / Exclude mode (migration 0053) ────────────────────────────
+#
+# The unified-segment-membership formula is:
+#     member ⇔ (auto_match ∨ manual_include) ∧ ¬ manual_exclude
+# These tests pin all four corners.
+
+
+class TestIncludeExcludeMode:
+    def test_default_mode_is_include(self):
+        from services.manual_segments import MODE_INCLUDE
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        row = add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id, segment_key="vip",
+        )
+        assert row.mode == MODE_INCLUDE
+
+    def test_explicit_exclude_creates_exclude_row(self):
+        from services.manual_segments import (
+            MODE_EXCLUDE, customer_ids_with_manual_segment,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        row = add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="vip", mode=MODE_EXCLUDE,
+        )
+        assert row.mode == MODE_EXCLUDE
+        # Default-mode (include) lookup misses it.
+        assert customer_ids_with_manual_segment(db, t.id, "vip") == []
+        # Exclude-mode lookup finds it.
+        assert customer_ids_with_manual_segment(
+            db, t.id, "vip", mode=MODE_EXCLUDE,
+        ) == [c.id]
+
+    def test_re_tag_with_different_mode_flips_in_place(self):
+        from services.manual_segments import (
+            MODE_EXCLUDE, MODE_INCLUDE,
+            customer_ids_with_manual_segment,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="vip", mode=MODE_INCLUDE,
+        )
+        # Now flip to exclude — same row, mode field changes.
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="vip", mode=MODE_EXCLUDE,
+        )
+        assert customer_ids_with_manual_segment(db, t.id, "vip") == []
+        assert customer_ids_with_manual_segment(
+            db, t.id, "vip", mode=MODE_EXCLUDE,
+        ) == [c.id]
+        # Still exactly one row — no duplicates from the re-insert.
+        assert (
+            db.query(CustomerSegmentManual)
+            .filter_by(tenant_id=t.id, customer_id=c.id, segment_key="vip")
+            .count() == 1
+        )
+
+    def test_smart_remove_when_only_manual_deletes_row(self):
+        from services.manual_segments import (
+            list_manual_segments_for_customer, smart_remove_manual_segment,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        add_manual_segment(db, tenant_id=t.id, customer_id=c.id, segment_key="vip")
+        assert list_manual_segments_for_customer(db, t.id, c.id) == ["vip"]
+
+        action = smart_remove_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="vip", auto_match=False,
+        )
+        assert action == "deleted"
+        assert list_manual_segments_for_customer(db, t.id, c.id) == []
+
+    def test_smart_remove_when_auto_match_creates_exclude(self):
+        from services.manual_segments import (
+            MODE_EXCLUDE, customer_ids_with_manual_segment,
+            list_manual_segments_for_customer, smart_remove_manual_segment,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        # No manual row to start; auto classifier matches.
+        action = smart_remove_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="vip", auto_match=True,
+        )
+        assert action == "excluded"
+        # No include row.
+        assert list_manual_segments_for_customer(db, t.id, c.id) == []
+        # But exclude row exists.
+        assert customer_ids_with_manual_segment(
+            db, t.id, "vip", mode=MODE_EXCLUDE,
+        ) == [c.id]
+
+    def test_smart_remove_flips_existing_include_to_exclude_on_auto_match(self):
+        from services.manual_segments import (
+            MODE_EXCLUDE, customer_ids_with_manual_segment,
+            list_manual_segments_for_customer, smart_remove_manual_segment,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        # Existing include row — and auto classifier ALSO matches.
+        add_manual_segment(db, tenant_id=t.id, customer_id=c.id, segment_key="vip")
+
+        action = smart_remove_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="vip", auto_match=True,
+        )
+        assert action == "excluded"
+        # Include is now exclude.
+        assert list_manual_segments_for_customer(db, t.id, c.id) == []
+        assert customer_ids_with_manual_segment(
+            db, t.id, "vip", mode=MODE_EXCLUDE,
+        ) == [c.id]
+
+    def test_smart_remove_when_nothing_present_is_noop(self):
+        from services.manual_segments import smart_remove_manual_segment
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        action = smart_remove_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="vip", auto_match=False,
+        )
+        assert action == "noop"
+
+    def test_list_manual_sources_returns_mode_per_segment(self):
+        from services.manual_segments import (
+            MODE_EXCLUDE, list_manual_sources_for_customer,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        add_manual_segment(db, tenant_id=t.id, customer_id=c.id, segment_key="vip")
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="dormant", mode=MODE_EXCLUDE,
+        )
+        sources = list_manual_sources_for_customer(db, t.id, c.id)
+        assert sources == {"vip": "include", "dormant": "exclude"}
+
+    def test_unknown_mode_raises(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        with pytest.raises(ValueError):
+            add_manual_segment(
+                db, tenant_id=t.id, customer_id=c.id,
+                segment_key="vip", mode="bogus",
+            )
+
+    def test_list_manual_segments_bulk_excludes_exclude_rows(self):
+        # Bulk helper feeds the customer-list "manual_segments" field
+        # which is the *positive* tag list. Exclude rows must NOT
+        # leak into it — otherwise the drawer would show "VIP يدوي"
+        # for a customer the merchant deliberately removed from VIP.
+        from services.manual_segments import (
+            MODE_EXCLUDE, list_manual_segments_bulk,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="vip", mode=MODE_EXCLUDE,
+        )
+        bulk = list_manual_segments_bulk(db, t.id, [c.id])
+        assert bulk == {} or bulk.get(c.id, []) == []
+
+
 # ── 6. Lazy billing reconcile — guard against re-introducing the bug ─────
 #
 # Tenant 33 sat at "pending_payment" because no caller ever invoked

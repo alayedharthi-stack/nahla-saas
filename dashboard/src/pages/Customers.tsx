@@ -1044,41 +1044,96 @@ function ManualSegmentsSection({
       <div className="flex items-center justify-between">
         <h5 className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
           <Tag className="w-3.5 h-3.5 text-slate-400" />
-          التصنيفات اليدوية
+          شرائح هذا العميل
         </h5>
         <span className="text-[10px] text-slate-400">
-          من قائمة نحلة الرسمية فقط
+          ذكي + يدوي
         </span>
       </div>
 
-      {/* Active manual tags */}
+      {/* Unified per-segment chips. Each chip carries a source label
+          ("VIP يدوي + تلقائي" / "VIP يدوي" / "VIP تلقائي" /
+          "مستبعد يدويًا من VIP") and visually distinguishes excludes
+          from positive memberships so the merchant can tell at a
+          glance why this customer is (or isn't) in each segment. */}
       <div className="flex flex-wrap gap-1.5">
-        {manualKeys.length === 0 ? (
-          <p className="text-[11px] text-slate-400 italic">
-            لا توجد تصنيفات يدوية — التصنيف الذكي وحده يحدد سلوك العميل.
-          </p>
-        ) : (
-          manualKeys.map(k => {
+        {(() => {
+          // Build a unified row set from segment_sources (server) so
+          // we render one pill per segment with the right source.
+          const sources = customer.segment_sources || {}
+          const keys = Object.keys(sources)
+          if (keys.length === 0) {
+            return (
+              <p className="text-[11px] text-slate-400 italic">
+                لم يُصنَّف هذا العميل بعد في أي شريحة — أضف تصنيفاً يدوياً أدناه.
+              </p>
+            )
+          }
+          return keys.map(k => {
+            const src = sources[k]
             const label = segments.find(s => s.key === k)?.label_ar || k
+            const isExcluded = src.manual_exclude
+            const sourceLabel = isExcluded
+              ? `مستبعد يدويًا من ${label}`
+              : src.manual_include && src.automatic
+                ? `${label} — يدوي + تلقائي`
+                : src.manual_include
+                  ? `${label} — يدوي`
+                  : `${label} — تلقائي`
+            const cls = isExcluded
+              ? 'text-slate-500 bg-slate-100 border-slate-200'
+              : src.manual_include && src.automatic
+                ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
+                : src.manual_include
+                  ? 'text-amber-700 bg-amber-50 border-amber-200'
+                  : 'text-blue-700 bg-blue-50 border-blue-200'
             return (
               <span
                 key={k}
-                className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-full"
+                className={`inline-flex items-center gap-1 text-[11px] font-semibold border px-2 py-1 rounded-full ${cls}`}
+                title={
+                  isExcluded
+                    ? 'استبعدتَ هذا العميل من هذه الشريحة يدوياً.'
+                    : src.manual_include && src.automatic
+                      ? 'صنّفه التاجر يدوياً والذكاء التلقائي يطابقه أيضاً.'
+                      : src.manual_include
+                        ? 'صنّفه التاجر يدوياً.'
+                        : 'تصنيف ذكي تلقائي بناءً على السلوك.'
+                }
               >
-                {label}
-                <button
-                  type="button"
-                  disabled={busy === k}
-                  onClick={() => handleRemove(k)}
-                  className="text-amber-500 hover:text-amber-700 disabled:opacity-50"
-                  title="إزالة التصنيف"
-                >
-                  <X className="w-3 h-3" />
-                </button>
+                {sourceLabel}
+                {/* Remove button only on manual-include or auto rows.
+                    Exclude rows show a "restore" button instead. */}
+                {!isExcluded && (
+                  <button
+                    type="button"
+                    disabled={busy === k}
+                    onClick={() => handleRemove(k)}
+                    className="text-current opacity-60 hover:opacity-100 disabled:opacity-30"
+                    title={
+                      src.automatic && !src.manual_include
+                        ? 'استبعِد هذا العميل من الشريحة'
+                        : 'إزالة التصنيف اليدوي'
+                    }
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+                {isExcluded && (
+                  <button
+                    type="button"
+                    disabled={busy === k}
+                    onClick={() => handleAdd(k)}
+                    className="text-current opacity-60 hover:opacity-100 disabled:opacity-30"
+                    title="إعادة إلى التصنيف"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+                )}
               </span>
             )
           })
-        )}
+        })()}
       </div>
 
       {/* Add new tag — dropdown, never a free-form text field */}

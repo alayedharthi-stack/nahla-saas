@@ -212,6 +212,7 @@ def _serialize_customer(
     profile: Optional[CustomerProfile],
     *,
     manual_segments: Optional[List[str]] = None,
+    segment_sources: Optional[Dict[str, Dict[str, bool]]] = None,
 ) -> Dict[str, Any]:
     meta = cust.extra_metadata or {}
     source, source_label = _resolve_customer_source(cust)
@@ -248,6 +249,14 @@ def _serialize_customer(
         "is_campaign_test_recipient": is_campaign_test_recipient,
         "manual_segments":            manual_keys,
         "manual_segments_labels":     [_segment_label_for_key(k) for k in manual_keys],
+        # ── Per-segment source breakdown ──────────────────────────────
+        # Shape: { "<segment_key>": { "automatic": bool,
+        #                              "manual_include": bool,
+        #                              "manual_exclude": bool } }
+        # The drawer uses this to render labels like "VIP يدوي + تلقائي"
+        # or "مستبعد يدويًا من VIP". Only segments with at least one
+        # truthy field appear (no need to ship 30 empty objects).
+        "segment_sources": segment_sources or {},
     }
     if profile:
         result.update({
@@ -380,27 +389,37 @@ async def list_customers(
             # Defensive — get_nahla_segment said yes but builder said no
             raise HTTPException(status_code=422, detail=f"شريحة غير معروفة: {seg_key}")
 
-        # ── Union with manual tag matches ────────────────────────────
-        # The auto chip strip and the drawer manual-tag UI share the
-        # SAME Arabic labels (e.g. "عملاء واعدون"). Merchants don't
-        # distinguish between "auto-classified promising" and
-        # "manually tagged promising" — they expect both to show
-        # under one filter. Without this union, a customer the
-        # merchant deliberately tagged "عملاء واعدون" would NOT show
-        # when clicking the same chip — which is the production bug
-        # reported for tenant 33 (هيثم الحارثي tagged but not in
-        # results). The dedicated manual_segment=<key> dropdown
-        # below keeps the only-manual semantics for merchants who
-        # want to inspect their manual tagging specifically.
+        # ── Unified segment membership formula ──────────────────────
+        # The product invariant (cemented in migration 0053):
+        #
+        #   member ⇔ (auto_match ∨ manual_include) ∧ ¬ manual_exclude
+        #
+        # Why all three pieces matter:
+        #   * auto_match: the RFM classifier's verdict.
+        #   * manual_include: merchant explicitly pinned the customer
+        #     to this segment in the drawer (overrides a "no" from
+        #     the classifier).
+        #   * manual_exclude: merchant explicitly removed the customer
+        #     from this segment (overrides a "yes" from the
+        #     classifier — without this we couldn't honour
+        #     "remove from VIP" while leaving the auto match alone).
+        from services.manual_segments import (  # noqa: PLC0415
+            MODE_EXCLUDE, MODE_INCLUDE,
+        )
         auto_ids = {row[0] for row in auto_q.with_entities(Customer.id).all()}
-        manual_ids = set(customer_ids_with_manual_segment(db, tenant_id, seg_key))
-        union_ids = auto_ids | manual_ids
-        if not union_ids:
+        include_ids = set(customer_ids_with_manual_segment(
+            db, tenant_id, seg_key, mode=MODE_INCLUDE,
+        ))
+        exclude_ids = set(customer_ids_with_manual_segment(
+            db, tenant_id, seg_key, mode=MODE_EXCLUDE,
+        ))
+        member_ids = (auto_ids | include_ids) - exclude_ids
+        if not member_ids:
             return {"customers": [], "total": 0, "page": page,
                     "per_page": per_page, "pages": 1}
         q = (
             db.query(Customer)
-            .filter(Customer.tenant_id == tenant_id, Customer.id.in_(union_ids))
+            .filter(Customer.tenant_id == tenant_id, Customer.id.in_(member_ids))
         )
 
         # Diagnostic log so production tickets are debuggable in one
@@ -408,8 +427,9 @@ async def list_customers(
         try:
             import logging  # noqa: PLC0415
             logging.getLogger("nahla.customers.segment_filter").info(
-                "segment filter | tenant=%s key=%r auto=%d manual=%d union=%d",
-                tenant_id, seg_key, len(auto_ids), len(manual_ids), len(union_ids),
+                "segment filter | tenant=%s key=%r auto=%d include=%d exclude=%d member=%d",
+                tenant_id, seg_key, len(auto_ids), len(include_ids),
+                len(exclude_ids), len(member_ids),
             )
         except Exception:
             pass
@@ -510,6 +530,7 @@ async def list_customers(
     customer_ids = [c.id for c in rows]
     profiles = {}
     manual_segments_by_id: Dict[int, List[str]] = {}
+    sources_by_id: Dict[int, Dict[str, Dict[str, bool]]] = {}
     if customer_ids:
         prof_rows = (
             db.query(CustomerProfile)
@@ -522,11 +543,58 @@ async def list_customers(
         profiles = {p.customer_id: p for p in prof_rows}
         manual_segments_by_id = list_manual_segments_bulk(db, tenant_id, customer_ids)
 
+        # ── Build segment_sources per customer ────────────────────────
+        # We compute the per-segment {automatic, manual_include,
+        # manual_exclude} breakdown for each customer in this page.
+        # This is a bounded operation — `len(customer_ids) <= per_page`
+        # (max 200 by route schema) and the number of Nahla segments
+        # is small (~20). Total work is O(page_size * segments_count)
+        # which is negligible compared to the query above.
+        from services.manual_segments import list_manual_sources_bulk  # noqa: PLC0415
+        from services.nahla_segments import (  # noqa: PLC0415
+            all_segment_keys,
+            build_segment_query,
+        )
+        manual_sources = list_manual_sources_bulk(db, tenant_id, customer_ids)
+        # For each segment in the registry, fetch the auto-match set
+        # for this tenant once; intersect with the page's customer ids.
+        # We only iterate segments that have at least one manual row
+        # OR are referenced — defensively we just check ALL keys, the
+        # cost is tiny.
+        for seg_key_iter in all_segment_keys():
+            try:
+                auto_q = build_segment_query(
+                    seg_key_iter, db, tenant_id, require_reachable=False,
+                )
+                if auto_q is None:
+                    continue
+                auto_set = {
+                    r[0] for r in
+                    auto_q.with_entities(Customer.id)
+                    .filter(Customer.id.in_(customer_ids))
+                    .all()
+                }
+            except Exception:
+                auto_set = set()
+            for cid in customer_ids:
+                manual_mode = manual_sources.get(cid, {}).get(seg_key_iter)
+                auto = cid in auto_set
+                inc = manual_mode == "include"
+                exc = manual_mode == "exclude"
+                if not (auto or inc or exc):
+                    continue
+                sources_by_id.setdefault(cid, {})[seg_key_iter] = {
+                    "automatic":      auto,
+                    "manual_include": inc,
+                    "manual_exclude": exc,
+                }
+
     return {
         "customers": [
             _serialize_customer(
                 c, profiles.get(c.id),
                 manual_segments=manual_segments_by_id.get(c.id, []),
+                segment_sources=sources_by_id.get(c.id, {}),
             )
             for c in rows
         ],
@@ -830,6 +898,10 @@ async def bulk_delete_customers(
 
 class CustomerSegmentAddIn(BaseModel):
     segment_key: str
+    # Optional mode — backwards compatible (defaults to ``include``).
+    # ``exclude`` lets the merchant explicitly hide a customer from
+    # a segment even when the auto classifier says they belong.
+    mode: Optional[str] = None
 
 
 class MarketingPrefsPatchIn(BaseModel):
@@ -838,6 +910,24 @@ class MarketingPrefsPatchIn(BaseModel):
     ``False`` because that would silently re-subscribe customers."""
     marketing_opt_out_manual: Optional[bool] = None
     is_campaign_test_recipient: Optional[bool] = None
+
+
+def _customer_matches_auto_segment(
+    db: Session, tenant_id: int, customer_id: int, segment_key: str,
+) -> bool:
+    """Return True iff the auto RFM classifier currently considers
+    this customer to belong to ``segment_key``. Used by smart-remove
+    to decide whether a delete must be converted to an exclude row."""
+    from services.nahla_segments import build_segment_query  # noqa: PLC0415
+    auto_q = build_segment_query(segment_key, db, tenant_id, require_reachable=False)
+    if auto_q is None:
+        return False
+    return (
+        auto_q.with_entities(Customer.id)
+        .filter(Customer.id == customer_id)
+        .first()
+        is not None
+    )
 
 
 @router.post("/{customer_id}/segments")
@@ -849,16 +939,31 @@ async def add_customer_segment(
 ):
     """Pin a customer to one of Nahla's official manual segments.
 
-    Idempotent: re-tagging an existing pair returns 200 with the same
-    payload, never a 409. Unknown segment keys return 422 with the
-    list of accepted keys (frontend uses this to render an error
-    message that's actually useful).
+    Optional ``mode`` field:
+      * ``"include"`` (default) — pin into the segment.
+      * ``"exclude"`` — explicitly hide the customer from this
+        segment even when the auto RFM classifier says they match.
+        Used by the drawer's "remove from segment" UI when the
+        auto match is what put them there.
+
+    Idempotent: re-tagging the same pair updates the existing row's
+    mode in-place. Unknown segment keys return 422 with the list of
+    accepted keys.
     """
+    from services.manual_segments import (  # noqa: PLC0415
+        ALLOWED_MODES, MODE_INCLUDE, list_manual_sources_for_customer,
+    )
     tenant_id = resolve_tenant_id(request)
+    requested_mode = (body.mode or MODE_INCLUDE).strip().lower()
+    if requested_mode not in ALLOWED_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"وضع غير صالح: {body.mode!r}. المسموح: {sorted(ALLOWED_MODES)}",
+        )
     try:
         row = add_manual_segment(
             db, tenant_id=tenant_id, customer_id=customer_id,
-            segment_key=body.segment_key,
+            segment_key=body.segment_key, mode=requested_mode,
         )
     except UnknownSegmentError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -866,12 +971,14 @@ async def add_customer_segment(
         raise HTTPException(status_code=404, detail="العميل غير موجود")
 
     return {
-        "customer_id": customer_id,
-        "segment_key": row.segment_key,
-        "label_ar":    _segment_label_for_key(row.segment_key),
-        "source":      row.source,
-        "created_at":  _iso(row.created_at),
-        "manual_segments": list_manual_segments_for_customer(db, tenant_id, customer_id),
+        "customer_id":      customer_id,
+        "segment_key":      row.segment_key,
+        "mode":             row.mode,
+        "label_ar":         _segment_label_for_key(row.segment_key),
+        "source":           row.source,
+        "created_at":       _iso(row.created_at),
+        "manual_segments":  list_manual_segments_for_customer(db, tenant_id, customer_id),
+        "manual_sources":   list_manual_sources_for_customer(db, tenant_id, customer_id),
     }
 
 
@@ -882,9 +989,24 @@ async def remove_customer_segment(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Remove a manual segment pin. Returns 200 even when the pin
-    didn't exist — the goal is for merchants to be able to retry on
-    flaky networks without seeing a 404 on success."""
+    """Smart-remove a customer from a segment.
+
+    Behaviour:
+      * If the auto RFM classifier considers the customer a match,
+        we INSERT/UPDATE a manual ``exclude`` row (the auto match
+        itself is never mutated — it'll re-compute on the next RFM
+        cycle, but the exclude row keeps the customer hidden until
+        the merchant re-includes them).
+      * Otherwise (the customer is in the segment only because of
+        an existing manual ``include`` row), we just delete that row.
+      * If neither row exists, returns ``"noop"``.
+
+    Returns 200 in all cases — merchant retries on flaky networks
+    must converge to "removed" without flashing a 404.
+    """
+    from services.manual_segments import (  # noqa: PLC0415
+        list_manual_sources_for_customer, smart_remove_manual_segment,
+    )
     tenant_id = resolve_tenant_id(request)
     cust = db.query(Customer).filter(
         Customer.id == customer_id, Customer.tenant_id == tenant_id,
@@ -892,13 +1014,24 @@ async def remove_customer_segment(
     if not cust:
         raise HTTPException(status_code=404, detail="العميل غير موجود")
 
-    removed = remove_manual_segment(
-        db, tenant_id=tenant_id, customer_id=customer_id, segment_key=segment_key,
-    )
+    try:
+        normalised_key = segment_key.strip().lower()
+        auto_match = _customer_matches_auto_segment(
+            db, tenant_id, customer_id, normalised_key,
+        )
+        action = smart_remove_manual_segment(
+            db, tenant_id=tenant_id, customer_id=customer_id,
+            segment_key=normalised_key, auto_match=auto_match,
+        )
+    except UnknownSegmentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
     return {
-        "customer_id": customer_id,
-        "removed":     removed,
+        "customer_id":     customer_id,
+        "action":          action,  # "deleted" | "excluded" | "noop"
+        "auto_match":      auto_match,
         "manual_segments": list_manual_segments_for_customer(db, tenant_id, customer_id),
+        "manual_sources":  list_manual_sources_for_customer(db, tenant_id, customer_id),
     }
 
 

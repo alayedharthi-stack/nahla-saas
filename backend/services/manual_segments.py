@@ -74,25 +74,40 @@ def assert_known_segment(segment_key: str) -> str:
 # ── Manual segment CRUD ─────────────────────────────────────────────────
 
 
+# ── Mode constants ───────────────────────────────────────────────────────
+# Single source of truth for the two values stored in
+# CustomerSegmentManual.mode. See migration 0053.
+MODE_INCLUDE = "include"
+MODE_EXCLUDE = "exclude"
+ALLOWED_MODES = frozenset({MODE_INCLUDE, MODE_EXCLUDE})
+
+
 def add_manual_segment(
     db: Session,
     *,
     tenant_id: int,
     customer_id: int,
     segment_key: str,
+    mode: str = MODE_INCLUDE,
     created_by: Optional[int] = None,
     commit: bool = True,
 ) -> CustomerSegmentManual:
-    """Idempotently pin ``customer`` to ``segment_key``.
+    """Pin ``customer`` to ``segment_key`` in the requested ``mode``.
 
-    Re-tagging an existing pair is a no-op — we return the existing
-    row instead of raising. This is what lets the front-end safely
-    retry on a flaky connection.
+    Idempotent — re-tagging the same pair updates the existing row's
+    mode (so a merchant can flip include⇄exclude without us having
+    to delete + recreate). The unique index keeps us at one row per
+    (tenant, customer, segment) tuple.
 
     Validates:
       * ``segment_key`` exists in the official Nahla registry.
+      * ``mode`` is one of {include, exclude}.
       * The customer belongs to ``tenant_id`` (cross-tenant guard).
     """
+    if mode not in ALLOWED_MODES:
+        raise ValueError(
+            f"Unknown mode {mode!r}. Allowed: {sorted(ALLOWED_MODES)}",
+        )
     key = assert_known_segment(segment_key)
 
     cust = (
@@ -116,12 +131,22 @@ def add_manual_segment(
         .first()
     )
     if existing is not None:
+        # Idempotent + mode-flip path. If the merchant re-clicks the
+        # same tag with the same mode it's a no-op; if they click the
+        # opposite mode (e.g. they previously hid a customer from VIP
+        # and now want to put them back), we update in place.
+        if existing.mode != mode:
+            existing.mode = mode
+            if commit:
+                db.commit()
+                db.refresh(existing)
         return existing
 
     row = CustomerSegmentManual(
         tenant_id=tenant_id,
         customer_id=customer_id,
         segment_key=key,
+        mode=mode,
         source="manual",
         created_by=created_by,
     )
@@ -160,7 +185,14 @@ def remove_manual_segment(
 ) -> bool:
     """Drop the (tenant, customer, segment) row. Returns ``True`` when
     something was removed, ``False`` when the pin was not present
-    (still a 200 OK at the API layer — caller decides)."""
+    (still a 200 OK at the API layer — caller decides).
+
+    Note — this is the *unconditional* delete. The router uses
+    ``smart_remove_manual_segment`` for the merchant-facing UX which
+    automatically converts an include into an exclude when the auto
+    classifier still matches (so the customer doesn't pop back into
+    the segment one second after the merchant removed them).
+    """
     key = (segment_key or "").strip().lower()
     if not key:
         return False
@@ -181,27 +213,51 @@ def remove_manual_segment(
 def list_manual_segments_for_customer(
     db: Session, tenant_id: int, customer_id: int,
 ) -> List[str]:
-    """Return the canonical segment keys this customer is manually
-    pinned to (sorted). Used by the drawer + by the campaign snapshot
-    when applying include/exclude rules."""
+    """Return the *included* segment keys this customer is manually
+    pinned to (sorted). Used by the legacy callers that only care
+    about positive tags. ``list_manual_sources_for_customer`` returns
+    the include + exclude breakdown for the new sources UI."""
     rows = (
         db.query(CustomerSegmentManual.segment_key)
         .filter(
             CustomerSegmentManual.tenant_id == tenant_id,
             CustomerSegmentManual.customer_id == customer_id,
+            CustomerSegmentManual.mode == MODE_INCLUDE,
         )
         .all()
     )
     return sorted({r[0] for r in rows})
 
 
+def list_manual_sources_for_customer(
+    db: Session, tenant_id: int, customer_id: int,
+) -> Dict[str, str]:
+    """Return ``{segment_key: mode}`` for this customer.
+
+    Used by the drawer to render the per-segment source label
+    ("VIP يدوي + تلقائي" vs "مستبعد يدويًا من VIP" vs "VIP تلقائي").
+    """
+    rows = (
+        db.query(CustomerSegmentManual.segment_key, CustomerSegmentManual.mode)
+        .filter(
+            CustomerSegmentManual.tenant_id == tenant_id,
+            CustomerSegmentManual.customer_id == customer_id,
+        )
+        .all()
+    )
+    return {k: m for (k, m) in rows}
+
+
 def list_manual_segments_bulk(
     db: Session, tenant_id: int, customer_ids: List[int],
 ) -> Dict[int, List[str]]:
-    """Bulk version — returns ``{customer_id: [segment_key, ...]}``.
+    """Bulk version of ``list_manual_segments_for_customer`` —
+    returns ``{customer_id: [included_segment_key, ...]}``.
 
-    Used by the customers list endpoint so we don't fan out an N+1
-    query per row when rendering a 200-row table.
+    Excludes are deliberately filtered out so callers that only
+    want the positive-tag list don't have to re-filter. For the
+    full include + exclude breakdown use
+    ``list_manual_sources_bulk``.
     """
     if not customer_ids:
         return {}
@@ -210,6 +266,7 @@ def list_manual_segments_bulk(
         .filter(
             CustomerSegmentManual.tenant_id == tenant_id,
             CustomerSegmentManual.customer_id.in_(customer_ids),
+            CustomerSegmentManual.mode == MODE_INCLUDE,
         )
         .all()
     )
@@ -219,13 +276,48 @@ def list_manual_segments_bulk(
     return {cid: sorted(keys) for cid, keys in out.items()}
 
 
+def list_manual_sources_bulk(
+    db: Session, tenant_id: int, customer_ids: List[int],
+) -> Dict[int, Dict[str, str]]:
+    """Bulk include + exclude breakdown — ``{customer_id: {key: mode}}``.
+
+    Powers the ``segment_sources`` field in the customers list
+    response so the drawer can render labels without an N+1 fetch.
+    """
+    if not customer_ids:
+        return {}
+    rows = (
+        db.query(
+            CustomerSegmentManual.customer_id,
+            CustomerSegmentManual.segment_key,
+            CustomerSegmentManual.mode,
+        )
+        .filter(
+            CustomerSegmentManual.tenant_id == tenant_id,
+            CustomerSegmentManual.customer_id.in_(customer_ids),
+        )
+        .all()
+    )
+    out: Dict[int, Dict[str, str]] = {}
+    for cid, key, mode in rows:
+        out.setdefault(cid, {})[key] = mode
+    return out
+
+
 def customer_ids_with_manual_segment(
     db: Session, tenant_id: int, segment_key: str,
+    *, mode: str = MODE_INCLUDE,
 ) -> List[int]:
-    """All customer IDs in this tenant that carry the given manual
-    segment. Returned as a Python list (not a Query) so callers can
-    feed it to ``Customer.id.in_(...)`` without leaking the SQLAlchemy
-    object across module boundaries."""
+    """Customer IDs in this tenant tagged ``segment_key`` in ``mode``.
+
+    Default ``mode='include'`` keeps the legacy behaviour. Pass
+    ``mode='exclude'`` to get the negative set (for the
+    ``(auto ∪ include) − exclude`` filter formula).
+    """
+    if mode not in ALLOWED_MODES:
+        raise ValueError(
+            f"Unknown mode {mode!r}. Allowed: {sorted(ALLOWED_MODES)}",
+        )
     key = (segment_key or "").strip().lower()
     if not key:
         return []
@@ -234,10 +326,80 @@ def customer_ids_with_manual_segment(
         .filter(
             CustomerSegmentManual.tenant_id == tenant_id,
             CustomerSegmentManual.segment_key == key,
+            CustomerSegmentManual.mode == mode,
         )
         .all()
     )
     return [r[0] for r in rows]
+
+
+def smart_remove_manual_segment(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    segment_key: str,
+    auto_match: bool,
+    commit: bool = True,
+) -> str:
+    """Merchant-facing "remove this customer from segment X" action.
+
+    The merchant sees one button — "أزل هذا التصنيف" — and expects
+    the customer to disappear from the segment immediately AND stay
+    out. There are two distinct DB outcomes depending on whether
+    the auto classifier matched:
+
+      * Auto classifier matched (``auto_match=True``):
+        We can't delete the auto match (it's derived from RFM and
+        will re-compute next cycle). Instead we INSERT/UPDATE a
+        manual ``exclude`` row, which the filter formula subtracts.
+        Returns ``"excluded"``.
+
+      * Auto classifier did NOT match (``auto_match=False``):
+        The customer was in the segment only because of the manual
+        include row. Plain delete; nothing else needed.
+        Returns ``"deleted"``.
+
+    If neither row exists, returns ``"noop"``.
+
+    The router is the only sensible caller — it knows ``auto_match``
+    by querying ``services.nahla_segments.build_segment_query`` (or
+    its bulk equivalent) for the customer.
+    """
+    key = assert_known_segment(segment_key)
+
+    existing = (
+        db.query(CustomerSegmentManual)
+        .filter(
+            CustomerSegmentManual.tenant_id == tenant_id,
+            CustomerSegmentManual.customer_id == customer_id,
+            CustomerSegmentManual.segment_key == key,
+        )
+        .first()
+    )
+
+    if auto_match:
+        # Need an exclude row regardless of whether an include row
+        # exists. If existing.mode is already exclude → no-op.
+        if existing is None:
+            new_row = CustomerSegmentManual(
+                tenant_id=tenant_id, customer_id=customer_id,
+                segment_key=key, mode=MODE_EXCLUDE, source="manual",
+            )
+            db.add(new_row)
+        else:
+            existing.mode = MODE_EXCLUDE
+        if commit:
+            db.commit()
+        return "excluded"
+
+    # auto_match=False — only the manual include row matters.
+    if existing is None:
+        return "noop"
+    db.delete(existing)
+    if commit:
+        db.commit()
+    return "deleted"
 
 
 # ── Marketing preference flags (stored on Customer.extra_metadata) ──────

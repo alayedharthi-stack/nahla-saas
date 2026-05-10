@@ -1146,6 +1146,12 @@ class CustomerSegmentManual(Base):
     customer_id = Column(Integer, ForeignKey('customers.id', ondelete='CASCADE'), nullable=False)
     segment_key = Column(String(64), nullable=False)
     source = Column(String(16), nullable=False, default='manual')
+    # ``include`` (default) pins the customer to the segment.
+    # ``exclude`` hides them from segment-membership queries even
+    # when the auto classifier matched. Filter formula is
+    #   member ⇔ (auto_match ∨ manual_include) ∧ ¬ manual_exclude
+    # See migration 0053.
+    mode = Column(String(16), nullable=False, default='include')
     created_by = Column(Integer, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -1158,6 +1164,10 @@ class CustomerSegmentManual(Base):
         Index(
             'ix_customer_segments_manual_tenant_segment',
             'tenant_id', 'segment_key',
+        ),
+        Index(
+            'ix_customer_segments_manual_tenant_segment_mode',
+            'tenant_id', 'segment_key', 'mode',
         ),
         Index(
             'ix_customer_segments_manual_customer',
