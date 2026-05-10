@@ -126,7 +126,28 @@ def _naive(dt: datetime) -> datetime:
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
+# Sentinel returned for unlimited plans (Scale). We use a finite integer
+# rather than ``math.inf`` so it can be stored in the ``conversations_limit``
+# integer column without overflow and so existing ``limit > 0`` and
+# ``total / limit`` math stays valid. ``get_usage_this_month`` translates
+# this back to ``unlimited=True`` for the API surface.
+UNLIMITED_LIMIT_SENTINEL = 999_999_999
+
+
 def _get_plan_limit(db: Session, tenant_id: int) -> int:
+    """Return the merchant's monthly conversation cap.
+
+    Reads from the *current* active subscription each call — this is the
+    function that ``_get_or_create_usage`` re-syncs against, so a paid
+    upgrade takes effect on the very next inbound message.
+
+    Resolution:
+      * No active sub → ``TRIAL_LIMIT`` (100).
+      * Plan ``conversations_per_month == -1`` (Scale)
+        → ``UNLIMITED_LIMIT_SENTINEL`` so percent-used calculations
+        always fall to ~0% and enforcement gates never trip.
+      * Otherwise → the integer from ``BillingPlan.limits``.
+    """
     from models import BillingSubscription, BillingPlan  # noqa: PLC0415
 
     sub = (
@@ -145,8 +166,13 @@ def _get_plan_limit(db: Session, tenant_id: int) -> int:
     if plan is None:
         return TRIAL_LIMIT
 
-    val = (plan.limits or {}).get("conversations_per_month", TRIAL_LIMIT)
-    return int(val) if val and val != -1 else TRIAL_LIMIT
+    val = (plan.limits or {}).get("conversations_per_month")
+    if val is None:
+        return TRIAL_LIMIT
+    if int(val) == -1:
+        # Unlimited — Scale plan or admin-granted bypass.
+        return UNLIMITED_LIMIT_SENTINEL
+    return int(val)
 
 
 def _get_or_create_usage(
@@ -155,6 +181,32 @@ def _get_or_create_usage(
     year: int,
     month: int,
 ) -> "WhatsAppUsage":  # noqa: F821
+    """Return the WhatsAppUsage row for (tenant, year, month), creating
+    it on first access and **re-syncing its plan limit on every read**.
+
+    Re-sync rationale:
+        ``conversations_limit`` is denormalised onto the row so the
+        enforcement path can read a single column without joining
+        BillingPlan on the hot path. The original implementation only
+        wrote that column at row-creation time. Result: a tenant whose
+        row was created during the trial (limit=100) and who later
+        activated Growth would still be enforced against 100 — and the
+        Overview / Billing UIs would render ``96/100, ‫اقتربت من الحد‬``
+        even though the active plan is Growth (15,000). Tenant 33 hit
+        exactly this. Fixing only ``get_entitlements`` was not enough
+        because ``get_usage_this_month`` reads from this stored column,
+        not from entitlements.
+
+    Re-sync rules:
+      * If the current plan limit differs from the stored value, update
+        the row and reset the alert flags (the merchant just got a
+        bigger plan; old "you hit 80%" alerts are no longer relevant).
+      * If the merchant DOWNGRADED (active plan limit is *lower* than
+        stored), we still update — but we keep the alert flags so they
+        don't get spammed with "you're over limit" duplicates.
+      * Tenants on no plan / cancelled fall back to ``TRIAL_LIMIT``;
+        that's the same as the original behaviour, just made explicit.
+    """
     from models import WhatsAppUsage  # noqa: PLC0415
 
     row = (
@@ -189,6 +241,32 @@ def _get_or_create_usage(
             db.rollback()
             logger.warning("[WaUsage] flush failed (table may be missing columns): %s", exc)
             raise
+        return row
+
+    # ── Re-sync against current plan ───────────────────────────────────
+    current_limit = _get_plan_limit(db, tenant_id)
+    if int(row.conversations_limit or 0) != int(current_limit):
+        previous = int(row.conversations_limit or 0)
+        row.conversations_limit = current_limit
+        # Plan went UP → user just upgraded; clear alert flags so the
+        # 70%/90% warnings can re-fire against the new ceiling. Plan
+        # going DOWN keeps the flags (merchant already saw the warning).
+        if current_limit > previous:
+            row.alert_80_sent  = False
+            row.alert_100_sent = False
+        try:
+            db.flush()
+            logger.info(
+                "[WaUsage] Re-synced limit | tenant=%s %04d-%02d "
+                "old=%s new=%s used=%s reset_alerts=%s",
+                tenant_id, year, month, previous, current_limit,
+                int(row.service_conversations_used or 0)
+                + int(row.marketing_conversations_used or 0),
+                current_limit > previous,
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.warning("[WaUsage] limit re-sync flush failed: %s", exc)
     return row
 
 
@@ -468,7 +546,14 @@ def get_usage_this_month(db: Session, tenant_id: int) -> dict:
     mkt   = usage.marketing_conversations_used
     total = svc + mkt
     limit = usage.conversations_limit
-    pct   = round((total / limit) * 100, 1) if limit > 0 else 0.0
+    # Treat the unlimited sentinel as "no cap" for percent / exceeded /
+    # near_limit calculations, so the Overview UI never lights up the
+    # amber/red bar for Scale plans.
+    is_unlimited = limit >= UNLIMITED_LIMIT_SENTINEL
+    pct   = (
+        0.0 if is_unlimited
+        else (round((total / limit) * 100, 1) if limit > 0 else 0.0)
+    )
 
     meta_tier = _get_meta_tier(db, tenant_id)
 
@@ -476,15 +561,15 @@ def get_usage_this_month(db: Session, tenant_id: int) -> dict:
         "service_conversations_used":   svc,
         "marketing_conversations_used": mkt,
         "conversations_used":           total,
-        "conversations_limit":          limit,
+        "conversations_limit":          (-1 if is_unlimited else limit),
         "usage_pct":                    pct,
-        "exceeded":                     (limit > 0 and total >= limit),
-        "near_limit":                   (limit > 0 and pct >= 70 and total < limit),
-        "warning_70":                   (limit > 0 and 70 <= pct < 90),
-        "warning_90":                   (limit > 0 and pct >= 90 and total < limit),
-        "marketing_blocked":            (limit > 0 and total >= limit),
-        "emergency_stop":               (limit > 0 and total >= int(limit * SERVICE_EMERGENCY_STOP)),
-        "unlimited":                    False,
+        "exceeded":                     (not is_unlimited and limit > 0 and total >= limit),
+        "near_limit":                   (not is_unlimited and limit > 0 and pct >= 70 and total < limit),
+        "warning_70":                   (not is_unlimited and limit > 0 and 70 <= pct < 90),
+        "warning_90":                   (not is_unlimited and limit > 0 and pct >= 90 and total < limit),
+        "marketing_blocked":            (not is_unlimited and limit > 0 and total >= limit),
+        "emergency_stop":               (not is_unlimited and limit > 0 and total >= int(limit * SERVICE_EMERGENCY_STOP)),
+        "unlimited":                    is_unlimited,
         "month":                        now.month,
         "year":                         now.year,
         "reset_date":                   f"01/{now.month + 1 if now.month < 12 else 1}/{now.year if now.month < 12 else now.year + 1}",
