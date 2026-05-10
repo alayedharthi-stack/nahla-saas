@@ -167,6 +167,36 @@ export interface CampaignDebugSnapshot {
     count: number
   }>
   excluded_before_send_count: number
+  /** Per-customer drill-down for the first 10 excluded recipients.
+   *  Lets support spot patterns like "all 4 are missing
+   *  normalized_phone" without paging through the customer list.
+   *  ``has_whatsapp`` is intentionally tri-state (true / false /
+   *  null) — null means unknown and would have been delivered to
+   *  Meta; only explicit false blocks the send. */
+  sample_excluded_before_send: Array<{
+    customer_id: number
+    name: string
+    phone_masked: string
+    reason_key:
+      | 'no_phone'
+      | 'phone_not_normalized'
+      | 'unsubscribed'
+      | 'pending_unsubscribe'
+      | 'marketing_opt_out'
+      | 'no_whatsapp_confirmed'
+      | 'unknown'
+    reason_label_ar: string
+    fields: {
+      has_phone: boolean
+      phone_normalized_valid: boolean
+      whatsapp_opted_out: boolean
+      /** TRI-STATE: true / false / null (unknown). */
+      has_whatsapp: boolean | null
+      is_unsubscribed: boolean
+      pending_unsubscribe: boolean
+      marketing_opt_out: boolean
+    }
+  }>
   sample_sent: Array<{
     phone: string
     provider_message_id: string | null

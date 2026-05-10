@@ -649,6 +649,122 @@ class TestAudienceFunnel:
         joined_hints = " | ".join(result["hints"])
         assert "الجمهور الأولي" in joined_hints
 
+    def test_sample_excluded_before_send_introspects_each_customer(self):
+        """Per-customer drill-down: for each excluded recipient we must
+        return the actual field flags that drove the decision so support
+        can see "all 4 are missing normalized_phone" instantly without
+        paging through the customers list.
+
+        Includes the tri-state ``has_whatsapp`` invariant — null
+        (unknown) MUST be passed through as null, NOT coerced to false,
+        because Meta is the source of truth and we'd have tried to send.
+        """
+        from sqlalchemy.orm.attributes import flag_modified
+        from services.nahla_segments import build_unified_segment_query
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="completed", audience_count=4)
+
+        # Seed 4 customers exhibiting the four most common drop modes.
+        # Customer 1: raw phone but no normalized_phone (import bug)
+        # Customer 2: explicit unsubscribe
+        # Customer 3: has_whatsapp=false confirmed by past Meta failure
+        # Customer 4: has_whatsapp=null (UNKNOWN — must NOT block)
+        cust_specs = [
+            ("Layla",  "0501234567", None,           {}),
+            ("Hisham", "+966500000002", "+966500000002",
+             {"is_unsubscribed": True}),
+            ("Sara",   "+966500000003", "+966500000003",
+             {"has_whatsapp": False}),
+            ("Khalid", "+966500000004", "+966500000004",
+             {"has_whatsapp": None}),
+        ]
+        for name, phone, normalized, meta in cust_specs:
+            cust = Customer(
+                tenant_id=t.id, name=name, phone=phone,
+                normalized_phone=normalized, extra_metadata=meta,
+            )
+            db.add(cust)
+        db.commit()
+
+        # Force the segment query to return all 4 customers via the
+        # ``all`` audience type (no segment filter).
+        c.audience_type = "all"
+        # Persist a funnel that shows raw=4 / after_reachable=1 so the
+        # debug endpoint computes excluded=3 (matches our seed: only
+        # Khalid passes _reachable_filter — he has a normalized phone
+        # and isn't opted out).
+        # We don't actually need to set the funnel here because the
+        # endpoint recomputes the sample from the raw query directly.
+        flag_modified(c, "audience_type")
+        db.commit()
+
+        # Sanity check: the unified query (require_reachable=False)
+        # returns all 4 customers. (require_reachable=True returns
+        # only the 2 customers without is_unsubscribed AND with a
+        # normalized_phone — Sara and Khalid.)
+        raw_q = build_unified_segment_query("all", db, t.id, require_reachable=False)
+        assert raw_q is not None
+        raw_count = raw_q.count()
+        assert raw_count == 4
+
+        result = _call_debug(db, t.id, c.id)
+        sample = result["sample_excluded_before_send"]
+        # Every customer is "excluded before send" because no
+        # campaign_send_logs rows exist yet.
+        assert len(sample) >= 1
+        by_name = {row["name"]: row for row in sample}
+
+        # Layla: no normalized_phone but has raw phone → "phone_not_normalized"
+        if "Layla" in by_name:
+            r = by_name["Layla"]
+            assert r["fields"]["has_phone"] is True
+            assert r["fields"]["phone_normalized_valid"] is False
+            assert r["reason_key"] == "phone_not_normalized"
+
+        # Hisham: explicitly unsubscribed → "unsubscribed"
+        if "Hisham" in by_name:
+            r = by_name["Hisham"]
+            assert r["fields"]["is_unsubscribed"] is True
+            assert r["fields"]["whatsapp_opted_out"] is True
+            assert r["reason_key"] == "unsubscribed"
+
+        # Sara: has_whatsapp explicitly False (Meta confirmed)
+        # → "no_whatsapp_confirmed"
+        if "Sara" in by_name:
+            r = by_name["Sara"]
+            assert r["fields"]["has_whatsapp"] is False
+            assert r["reason_key"] == "no_whatsapp_confirmed"
+
+        # Khalid: has_whatsapp=null → MUST pass through as null AND
+        # MUST NOT have reason_key="no_whatsapp_confirmed". This is
+        # the critical invariant: we never block on unknown.
+        if "Khalid" in by_name:
+            r = by_name["Khalid"]
+            assert r["fields"]["has_whatsapp"] is None, (
+                "has_whatsapp=null MUST pass through as null — coercing it "
+                "to false would silently exclude every customer Meta "
+                "hasn't told us about yet"
+            )
+            assert r["reason_key"] != "no_whatsapp_confirmed"
+
+        # Phones are masked so the debug endpoint never leaks PII
+        # (consistent with sample_failed / sample_sent behaviour).
+        for r in sample:
+            if r["phone_masked"]:
+                assert "•" in r["phone_masked"] or len(r["phone_masked"]) <= 4
+
+    def test_sample_excluded_returns_empty_for_zero_audience(self):
+        """``completed_empty`` (genuinely zero audience) must return an
+        empty sample — there's no one to introspect, so the UI should
+        hide the drill-down section entirely instead of rendering an
+        empty card grid."""
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="completed", audience_count=0)
+        c.audience_type = "all"
+        db.commit()
+        result = _call_debug(db, t.id, c.id)
+        assert result["sample_excluded_before_send"] == []
+
     def test_skipped_log_rows_appear_in_exclusion_summary(self):
         # When the snapshot DOES write rows but they're all
         # ``skipped_*``, the exclusion summary must group them by

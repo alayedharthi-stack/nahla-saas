@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from models import Campaign, CampaignSendLog, WhatsAppTemplate  # noqa: E402
+from models import Campaign, CampaignSendLog, Customer, WhatsAppTemplate  # noqa: E402
 
 from core.config import MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS
 from core.database import get_db
@@ -1087,6 +1087,154 @@ async def debug_campaign(
     excluded_reasons_summary = _safe("excluded_reasons", _excluded_summary) or []
     excluded_before_send_count = sum(int(r["count"]) for r in excluded_reasons_summary)
 
+    # ── Per-customer exclusion sample ───────────────────────────────
+    # The aggregate counts are useful but a merchant looking at an
+    # ``excluded_before_send`` campaign needs to know **which** of
+    # their 4 customers was dropped and **why**. We surface up to 10
+    # excluded customers with the actual field values that drove the
+    # decision so support can spot patterns instantly:
+    #   "all 4 have raw `phone` but no `normalized_phone`" → import
+    #     pipeline didn't normalise.
+    #   "all 4 have `is_unsubscribed=true`" → bulk opt-out / data
+    #     migration bug.
+    #   "all 4 have `extra_metadata.has_whatsapp=false`" → confirmed
+    #     by past Meta failures, not a Nahla filter problem.
+    #
+    # IMPORTANT design choice (per merchant feedback):
+    #   `has_whatsapp` is treated as **tri-state** (true / false /
+    #   unknown). Only an explicit ``false`` (set after a Meta send
+    #   failure) is shown as a blocker. ``null`` / ``unknown`` are
+    #   reported as ``unknown`` so the merchant doesn't blame Nahla
+    #   for excluding people we'd actually have tried to reach.
+    def _sample_excluded():
+        from services.nahla_segments import (  # noqa: PLC0415
+            build_unified_segment_query,
+        )
+        raw_q = build_unified_segment_query(
+            campaign.audience_type, db, tenant_id, require_reachable=False,
+        )
+        if raw_q is None:
+            return []
+
+        # Cap the raw scan to 200 IDs so the debug call stays cheap
+        # even on huge segments. The first 200 are a representative
+        # sample for any merchant who's "missing recipients".
+        raw_ids = [
+            cid for (cid,) in raw_q.with_entities(Customer.id).limit(200).all()
+        ]
+        if not raw_ids:
+            return []
+
+        # IDs that DID make it into campaign_send_logs — we only care
+        # about the ones that were dropped before snapshotting.
+        materialized_ids = {
+            cid for (cid,) in (
+                db.query(CampaignSendLog.customer_id)
+                  .filter(
+                      CampaignSendLog.campaign_id == campaign_id,
+                      CampaignSendLog.customer_id.isnot(None),
+                  )
+                  .distinct()
+                  .all()
+            )
+        }
+        excluded_ids = [cid for cid in raw_ids if cid not in materialized_ids]
+        if not excluded_ids:
+            return []
+
+        # Pull the 10 oldest-id rows (deterministic for diffing) and
+        # introspect each customer's actual field values.
+        sample_rows = (
+            db.query(Customer)
+              .filter(
+                  Customer.tenant_id == tenant_id,
+                  Customer.id.in_(excluded_ids[:10]),
+              )
+              .all()
+        )
+
+        ar_label = {
+            "no_phone":              "بدون رقم جوال",
+            "phone_not_normalized":  "الرقم غير مُطبَّع (E.164)",
+            "unsubscribed":          "ألغى الاشتراك",
+            "pending_unsubscribe":   "في طور إلغاء الاشتراك",
+            "marketing_opt_out":     "إلغاء التسويق يدوياً",
+            "no_whatsapp_confirmed": "تأكّد من Meta أن الرقم بلا واتساب",
+            "unknown":               "سبب غير محدّد (راجع البيانات)",
+        }
+
+        out: List[Dict[str, Any]] = []
+        for cust in sample_rows:
+            meta = getattr(cust, "extra_metadata", None) or {}
+
+            # Tri-state has_whatsapp: True / False / None (unknown).
+            # ``None`` is the most common value — Meta hasn't told us
+            # yet — and MUST be treated as "try to send" not "skip".
+            raw_has_wa = meta.get("has_whatsapp")
+            if isinstance(raw_has_wa, bool):
+                has_whatsapp_state: Any = raw_has_wa
+            elif raw_has_wa is None:
+                has_whatsapp_state = None  # truly unknown
+            else:
+                # Strings like "true"/"false" — coerce defensively.
+                v = str(raw_has_wa).strip().lower()
+                if v in ("true", "1", "yes"):
+                    has_whatsapp_state = True
+                elif v in ("false", "0", "no"):
+                    has_whatsapp_state = False
+                else:
+                    has_whatsapp_state = None
+
+            has_phone = bool((cust.phone or "").strip())
+            phone_normalized_valid = bool((cust.normalized_phone or "").strip())
+            is_unsubscribed = bool(meta.get("is_unsubscribed"))
+            pending_unsubscribe = bool(meta.get("pending_unsubscribe"))
+            marketing_opt_out = bool(meta.get("marketing_opt_out_manual"))
+
+            # Decide the dominant reason. Order matters: a customer
+            # without normalized_phone could ALSO be unsubscribed — we
+            # report the upstream-most blocker so the merchant fixes
+            # the right thing first.
+            if not phone_normalized_valid and not has_phone:
+                reason_key = "no_phone"
+            elif not phone_normalized_valid and has_phone:
+                reason_key = "phone_not_normalized"
+            elif is_unsubscribed:
+                reason_key = "unsubscribed"
+            elif pending_unsubscribe:
+                reason_key = "pending_unsubscribe"
+            elif marketing_opt_out:
+                reason_key = "marketing_opt_out"
+            elif has_whatsapp_state is False:
+                # ONLY explicit false (set by past Meta failure) blocks.
+                # Tri-state ``None`` falls through to "unknown" — Meta
+                # is the source of truth, not us.
+                reason_key = "no_whatsapp_confirmed"
+            else:
+                reason_key = "unknown"
+
+            out.append({
+                "customer_id":     int(cust.id),
+                "name":            cust.name or "—",
+                "phone_masked":    _mask(cust.normalized_phone or cust.phone),
+                "reason_key":      reason_key,
+                "reason_label_ar": ar_label.get(reason_key, ar_label["unknown"]),
+                "fields": {
+                    "has_phone":              has_phone,
+                    "phone_normalized_valid": phone_normalized_valid,
+                    "whatsapp_opted_out":     is_unsubscribed or pending_unsubscribe,
+                    # Tri-state: True / False / None (unknown).
+                    # The UI shows null as "غير معروف" so the merchant
+                    # understands we don't pre-block on this.
+                    "has_whatsapp":           has_whatsapp_state,
+                    "is_unsubscribed":        is_unsubscribed,
+                    "pending_unsubscribe":    pending_unsubscribe,
+                    "marketing_opt_out":      marketing_opt_out,
+                },
+            })
+        return out
+    sample_excluded_before_send = _safe("sample_excluded", _sample_excluded) or []
+
     # If lifecycle is pending_dispatch but status=active and audience is
     # > 0, that almost always means the asyncio.create_task background
     # job died before _snapshot_recipients ran. Surface a direct hint.
@@ -1180,6 +1328,11 @@ async def debug_campaign(
         # "حملة بلا مستلمين".
         "excluded_reasons_summary":  excluded_reasons_summary,
         "excluded_before_send_count": excluded_before_send_count,
+        # NEW: per-customer drill-down (up to 10) so support can see
+        # exactly WHICH 4 customers were dropped and which field flag
+        # caused it. Treats ``has_whatsapp=null`` as unknown (would
+        # have been sent to Meta), NOT as a blocker.
+        "sample_excluded_before_send": sample_excluded_before_send,
         "template":         template_info,
         "wa_connection":    wa_conn_info,
         "scheduler":        scheduler_info,

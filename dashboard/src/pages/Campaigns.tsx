@@ -15,7 +15,7 @@ import { useLanguage } from '../i18n/context'
 import {
   campaignsApi, CampaignRecord, CreateCampaignPayload,
   CampaignGoal, CustomerSegmentMeta, RecommendedTemplate, TemplateRecommendation,
-  CampaignProtectionInfo,
+  CampaignProtectionInfo, CampaignDebugSnapshot,
   extractVariables, renderTemplate, getTemplateBody, getTemplateHeader, getTemplateFooter,
 } from '../api/campaigns'
 
@@ -1524,6 +1524,138 @@ function DebugTemplateLink({ templateId }: { templateId: string }) {
   )
 }
 
+// ── Per-customer exclusion drill-down ────────────────────────────────────────
+//
+// Shown below the diagnostic <pre> when a campaign is in
+// ``excluded_before_send`` (or any other state where rows were dropped).
+// Renders the first 10 excluded recipients as compact cards with
+// coloured field flags so support can spot the pattern at a glance:
+//
+//   • "all 4 have phone but no normalized_phone"  → import didn't normalise
+//   • "all 4 have is_unsubscribed=true"           → bulk opt-out / data bug
+//   • "all 4 have has_whatsapp=null"              → NOT a blocker (we'd
+//                                                    have tried to send)
+//
+// Tri-state ``has_whatsapp`` is the key UX detail — null renders
+// neutral grey ("غير معروف") so the merchant doesn't blame Nahla for
+// excluding people we'd actually have tried to reach via Meta.
+
+function ExcludedCustomersDrillDown({
+  rows,
+}: {
+  rows: NonNullable<CampaignDebugSnapshot['sample_excluded_before_send']>
+}) {
+  // Map reason_key → small badge colour. ``unknown`` is amber (data
+  // smell — we should know why) rather than red.
+  const reasonVariant: Record<string, string> = {
+    no_phone:              'bg-rose-100 text-rose-700 border-rose-200',
+    phone_not_normalized:  'bg-amber-100 text-amber-700 border-amber-200',
+    unsubscribed:          'bg-slate-200 text-slate-700 border-slate-300',
+    pending_unsubscribe:   'bg-slate-100 text-slate-600 border-slate-200',
+    marketing_opt_out:     'bg-violet-100 text-violet-700 border-violet-200',
+    no_whatsapp_confirmed: 'bg-orange-100 text-orange-700 border-orange-200',
+    unknown:               'bg-amber-100 text-amber-700 border-amber-200',
+  }
+  return (
+    <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+      <p className="text-[11px] font-semibold text-slate-700 mb-2">
+        تفاصيل المستبعدين (أول {rows.length}):
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {rows.map(row => (
+          <div
+            key={row.customer_id}
+            className="border border-slate-200 rounded-md p-2 bg-slate-50/40"
+          >
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <p className="text-[11px] font-semibold text-slate-800 truncate">
+                {row.name} <span className="text-slate-400 font-normal">#{row.customer_id}</span>
+              </p>
+              <span
+                className={`text-[9.5px] font-semibold px-1.5 py-0.5 rounded border ${
+                  reasonVariant[row.reason_key] || reasonVariant.unknown
+                }`}
+              >
+                {row.reason_label_ar}
+              </span>
+            </div>
+            <p className="text-[10px] text-slate-500 font-mono mb-1.5" dir="ltr">
+              {row.phone_masked || '— بدون رقم —'}
+            </p>
+            <div className="flex flex-wrap gap-1">
+              <FieldFlag label="رقم" value={row.fields.has_phone} />
+              <FieldFlag label="مُطبَّع" value={row.fields.phone_normalized_valid} />
+              <FieldFlag
+                label="ألغى الاشتراك"
+                value={row.fields.is_unsubscribed}
+                invert
+              />
+              <FieldFlag
+                label="قيد الإلغاء"
+                value={row.fields.pending_unsubscribe}
+                invert
+              />
+              <FieldFlag
+                label="إلغاء تسويق"
+                value={row.fields.marketing_opt_out}
+                invert
+              />
+              {/* Tri-state has_whatsapp — null renders neutral grey
+                  (we haven't been told yet, so we'd have TRIED to send
+                  via Meta and let it tell us). Only explicit false
+                  blocks the send. */}
+              <FieldFlag
+                label="واتساب"
+                value={row.fields.has_whatsapp}
+                triState
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[10px] text-slate-500 mt-2 leading-relaxed">
+        ملاحظة: <strong>واتساب=غير معروف</strong> ليست سبب استبعاد —
+        نُرسل عبر Meta وهو من يؤكّد. فقط <strong>واتساب=لا</strong>
+        المؤكَّد من فشل سابق هو الحاجز.
+      </p>
+    </div>
+  )
+}
+
+function FieldFlag({
+  label, value, invert, triState,
+}: {
+  label: string
+  value: boolean | null
+  /** When true, ``value=true`` is the BAD state (red). Otherwise
+   *  ``value=true`` is the GOOD state (green). */
+  invert?: boolean
+  /** Three-valued: null renders neutral grey ("غير معروف"). */
+  triState?: boolean
+}) {
+  let color: string
+  let text: string
+  if (triState && value === null) {
+    color = 'bg-slate-100 text-slate-500 border-slate-200'
+    text = 'غير معروف'
+  } else if (value === true) {
+    color = invert
+      ? 'bg-rose-100 text-rose-700 border-rose-200'
+      : 'bg-emerald-100 text-emerald-700 border-emerald-200'
+    text = 'نعم'
+  } else {
+    color = invert
+      ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+      : 'bg-rose-100 text-rose-700 border-rose-200'
+    text = 'لا'
+  }
+  return (
+    <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${color}`}>
+      {label}: {text}
+    </span>
+  )
+}
+
 // ── Campaign list row ─────────────────────────────────────────────────────────
 
 function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
@@ -1546,6 +1678,13 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   const [diagnosing, setDiagnosing] = useState(false)
   const [dispatching, setDispatching] = useState(false)
   const [diagnostic, setDiagnostic] = useState<string | null>(null)
+  // Structured per-customer drill-down. Rendered as cards below the
+  // free-text diagnostic so support can scan field flags at a glance
+  // ("has_phone=true, normalized=false" → import didn't normalise).
+  // ``null`` instead of ``[]`` means "haven't fetched yet" — we hide
+  // the section until the first /debug call returns.
+  const [excludedSample, setExcludedSample] =
+    useState<CampaignDebugSnapshot['sample_excluded_before_send'] | null>(null)
 
   // Treat both ``failed`` and ``failed_all`` as red. Note we
   // explicitly do NOT include ``partial_minor`` or
@@ -1559,8 +1698,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   const handleDiagnose = async () => {
     setDiagnosing(true)
     setDiagnostic(null)
+    setExcludedSample(null)
     try {
       const snap = await campaignsApi.debug(campaign.id)
+      setExcludedSample(snap.sample_excluded_before_send || [])
       const r = snap.recipients
       const total = r.total || campaign.audience_count || 0
       const skipped = r.skipped_duplicate + r.skipped_invalid +
@@ -1668,6 +1809,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         await new Promise(r => setTimeout(r, 4_000))
         try {
           const snap = await campaignsApi.debug(campaign.id)
+          setExcludedSample(snap.sample_excluded_before_send || [])
           const r = snap.recipients
           const total = r.total || campaign.audience_count || 0
           const lifecycleLabel =
@@ -1876,6 +2018,9 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
             <pre className="text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono bg-white border border-slate-200 rounded-lg p-3 leading-relaxed">
               {diagnostic}
             </pre>
+            {excludedSample && excludedSample.length > 0 && (
+              <ExcludedCustomersDrillDown rows={excludedSample} />
+            )}
           </td>
         </tr>
       )}
