@@ -5,6 +5,7 @@ Billing plan seed data and helper functions shared by billing routers.
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,8 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from models import BillingPlan, BillingSubscription, Tenant  # noqa: E402
+
+logger = logging.getLogger("nahla.billing")
 
 # ── Billing constants ──────────────────────────────────────────────────────────
 INTEGRATION_FEE_SAR = 59
@@ -29,17 +32,22 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
         "price_sar": 899,
         "launch_price_sar": 449,
         "billing_cycle": "monthly",
+        # Feature copy is the *single source of truth* — DO NOT duplicate
+        # in the frontend. Frontend reads via GET /billing/plans.
+        # Killer feature MUST stay first; UI gives index 0 a special pill.
         "features": [
-            "واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا",
-            "حتى 5,000 محادثة/شهر",
-            "3 أتمتات فعّالة",
-            "حملات واتساب",
-            "تحليلات أساسية",
-            "دعم أساسي",
+            "📱 واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا",
+            "✈️ الطيار الآلي للمبيعات والردود الذكية",
+            "📣 حملات واتساب غير محدودة",
+            "🛒 استرجاع السلات المتروكة (3 مراحل) + كوبونات تلقائية",
+            "📦 إشعارات الطلبات التلقائية (تأكيد - شحن - تسليم)",
+            "🔄 مزامنة منتجات سلة تلقائيًا",
+            "🏷️ إنشاء كوبونات خصم تلقائية",
+            "💬 حتى 5,000 محادثة شهريًا",
         ],
         "limits": {
             "conversations_per_month": 5000,
-            "automations": 3,
+            "automations": -1,
             "campaigns_per_month": -1,
         },
     },
@@ -52,13 +60,22 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
         "launch_price_sar": 849,
         "billing_cycle": "monthly",
         "features": [
-            "واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا",
-            "حتى 15,000 محادثة/شهر",
-            "أتمتات غير محدودة",
-            "حملات متقدمة",
-            "تحليلات متقدمة",
-            "مزامنة المنتجات والكتالوج",
-            "أولوية الدعم",
+            "📱 واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا",
+            "✈️ الطيار الآلي للمبيعات والردود الذكية",
+            "📣 حملات واتساب تسويقية متقدمة",
+            "🛒 استرجاع السلات المتروكة (3 مراحل) + كوبونات ذكية تلقائية",
+            "💳 تأكيد طلبات الدفع عند الاستلام (COD) تلقائيًا",
+            "🏷️ كوبونات خصم تلقائية بأربعة مستويات",
+            "🔗 إرسال روابط الدفع المباشرة للعملاء",
+            "📦 إشعارات الطلبات التلقائية (تأكيد - شحن - تسليم)",
+            "🧠 لوحة تحليلات ومبيعات بالذكاء الاصطناعي",
+            "🔄 مزامنة منتجات سلة تلقائيًا",
+            "🛍️ مزامنة المنتجات مع كتالوج Meta (قريبًا)",
+            "🔍 مزامنة المنتجات مع Google Merchant (قريبًا)",
+            "📺 مزامنة المنتجات مع قناة YouTube (قريبًا)",
+            "🎵 مزامنة المنتجات مع TikTok Shop (قريبًا)",
+            "📊 لوحة تحكم متقدمة للإحصائيات والتحليلات",
+            "💬 حتى 15,000 محادثة شهريًا",
         ],
         "limits": {
             "conversations_per_month": 15000,
@@ -75,13 +92,26 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
         "launch_price_sar": 1499,
         "billing_cycle": "monthly",
         "features": [
-            "واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا",
-            "محادثات غير محدودة",
-            "حملات غير محدودة",
-            "تحليلات وتقارير مخصصة",
-            "API كامل",
-            "فرق عمل وصلاحيات",
-            "دعم مخصص 24/7",
+            "📱 واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا",
+            "✈️ الطيار الآلي الكامل للمبيعات والردود وخدمة العملاء",
+            "♾️ محادثات غير محدودة",
+            "📣 حملات واتساب غير محدودة",
+            "🛒 استرجاع السلات المتروكة (3 مراحل) + كوبونات ذكية تلقائية",
+            "🏷️ كوبونات خصم تلقائية بأربعة مستويات",
+            "💳 تأكيد طلبات الدفع عند الاستلام (COD) تلقائيًا",
+            "🔗 إرسال روابط الدفع المباشرة للعملاء",
+            "📦 إشعارات الطلبات التلقائية (تأكيد - شحن - تسليم)",
+            "🧠 لوحة تحليلات ومبيعات متقدمة بالذكاء الاصطناعي",
+            "🔄 مزامنة المنتجات تلقائيًا مع سلة",
+            "🛍️ مزامنة المنتجات مع كتالوج Meta (قريبًا)",
+            "🔍 مزامنة المنتجات مع Google Merchant (قريبًا)",
+            "📺 مزامنة المنتجات مع قناة YouTube (قريبًا)",
+            "🎵 مزامنة المنتجات مع TikTok Shop (قريبًا)",
+            "👥 فرق عمل متعددة وصلاحيات متقدمة",
+            "🔌 API كامل وربط مخصص",
+            "📈 تقارير وتحليلات مخصصة للأعمال الكبيرة",
+            "⚡ أولوية قصوى في سرعة الذكاء والمعالجة",
+            "🛡️ مدير نجاح مخصص ودعم VIP على مدار الساعة",
         ],
         "limits": {
             "conversations_per_month": -1,
@@ -95,13 +125,33 @@ BILLING_PLANS_SEED: List[Dict[str, Any]] = [
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 def ensure_billing_plans(db: Session) -> None:
-    """Seed system billing plans on first use (idempotent).
+    """Seed system billing plans and keep PRODUCT-CONFIG fields canonical.
 
-    Also migrates existing plans' Arabic display name (extra_metadata.name_ar)
-    to match the current seed — without touching ANY price field.  This lets us
-    rename "المبتدئ" → "الأساسية" on live deployments without a manual SQL
-    migration or data loss.
+    Behaviour split (deliberate — see commit history for context):
+
+    1.  **Inserted on first boot** — full row from BILLING_PLANS_SEED.
+
+    2.  **Re-synced on every call** — the *product description* of a plan
+        (``features`` list, ``limits`` map, ``description`` text, English
+        ``name``, and ``extra_metadata.name_ar``).  These fields describe
+        what the plan IS, so they must always reflect the latest seed.
+        Previously this function refused to update them, which meant any
+        edit to BILLING_PLANS_SEED was effectively dead code on existing
+        deployments — the DB kept serving the original first-boot snapshot
+        forever.  That's why the v1 pricing-update commit (34310c7d)
+        appeared to do nothing in the UI.
+
+    3.  **Preserved untouched** — pricing fields (``price_sar``,
+        ``extra_metadata.launch_price_sar``).  Some merchants may have
+        custom pricing applied, and we never want a deploy to silently
+        change the price they see on the next page-load.  Pricing must
+        change through an explicit migration / admin action, not a code
+        push.
     """
+    # Order matters — keep this list aligned with the actual JSONB shape
+    # so the equality check below catches stale rows.
+    PRODUCT_FIELDS_TO_SYNC = ("features", "limits", "description", "name")
+
     changed = False
     for seed in BILLING_PLANS_SEED:
         existing = db.query(BillingPlan).filter(BillingPlan.slug == seed["slug"]).first()
@@ -123,20 +173,33 @@ def ensure_billing_plans(db: Session) -> None:
             )
             db.add(plan)
             changed = True
-        else:
-            # ── Migrate name_ar only — preserve all price fields untouched.
-            meta = dict(existing.extra_metadata or {})
-            current_name_ar = meta.get("name_ar")
-            if current_name_ar != seed["name_ar"]:
-                meta["name_ar"] = seed["name_ar"]
-                # Preserve launch_price_sar if it already exists (do NOT overwrite).
-                # Only fill it in when missing, so we never change displayed prices.
-                if "launch_price_sar" not in meta:
-                    meta["launch_price_sar"] = seed["launch_price_sar"]
-                existing.extra_metadata = meta
+            continue
+
+        # ── Re-sync product-config fields ──────────────────────────────
+        for field in PRODUCT_FIELDS_TO_SYNC:
+            if getattr(existing, field) != seed[field]:
+                setattr(existing, field, seed[field])
                 changed = True
+
+        # ── Re-sync name_ar; preserve launch_price_sar only when missing
+        meta = dict(existing.extra_metadata or {})
+        if meta.get("name_ar") != seed["name_ar"]:
+            meta["name_ar"] = seed["name_ar"]
+            changed = True
+        if "launch_price_sar" not in meta:
+            # Only fill in when missing — never overwrite a price merchants
+            # may have seen on a previous billing page-load.
+            meta["launch_price_sar"] = seed["launch_price_sar"]
+            changed = True
+        if meta != (existing.extra_metadata or {}):
+            existing.extra_metadata = meta
+
     if changed:
         db.commit()
+        logger.info(
+            "[billing] ensure_billing_plans: re-synced %d plan(s) from seed",
+            len(BILLING_PLANS_SEED),
+        )
 
 
 def get_tenant_subscription(db: Session, tenant_id: int) -> Optional[BillingSubscription]:
