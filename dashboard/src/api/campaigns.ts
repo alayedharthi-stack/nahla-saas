@@ -22,11 +22,32 @@ export interface WaTemplate {
   } | null
 }
 
+/**
+ * Merchant-facing lifecycle verb, derived from ``status`` plus the
+ * per-recipient counters that the dispatcher writes back to the
+ * campaign row. The UI should prefer this over ``status`` for the
+ * badge label — "active" on its own is ambiguous (queued vs sending
+ * vs no-recipients-yet), but lifecycle disambiguates.
+ */
+export type CampaignLifecycle =
+  | 'draft'
+  | 'waiting_scheduler'
+  | 'pending_dispatch'
+  | 'sending'
+  | 'sent'
+  | 'partial'
+  | 'failed'
+  | 'failed_all'
+  | 'completed_empty'
+  | 'unknown'
+
 export interface CampaignRecord {
   id: number
   name: string
   campaign_type: string
   status: 'draft' | 'scheduled' | 'active' | 'completed' | 'paused' | 'failed'
+  /** Granular merchant-facing status. Always present from /campaigns. */
+  lifecycle?: CampaignLifecycle
   template_id: string
   template_name: string
   template_language: string
@@ -44,12 +65,80 @@ export interface CampaignRecord {
   failed_count: number
   skipped_count: number
   dispatch_errors: string[]
+  /** First entry from dispatch_errors, surfaced under the status pill. */
+  last_error?: string | null
   delivered_count: number
   read_count: number
   clicked_count: number
   converted_count: number
   created_at: string | null
   launched_at: string | null
+}
+
+export interface CampaignDebugSnapshot {
+  campaign: {
+    id: number
+    name: string
+    status: string
+    lifecycle: CampaignLifecycle
+    campaign_type: string
+    audience_type: string
+    audience_count: number
+    schedule_type: string
+    schedule_time: string | null
+    delay_minutes: number | null
+    template_name: string
+    template_language: string
+    launched_at: string | null
+    created_at: string | null
+    dispatch_errors: string[]
+  }
+  recipients: {
+    total: number
+    queued: number
+    sending: number
+    sent: number
+    failed: number
+    skipped_duplicate: number
+    skipped_invalid: number
+    skipped_unsubscribed: number
+    skipped_unreachable: number
+    skipped_manual_exclusion: number
+  }
+  sample_failed: Array<{
+    phone: string
+    error_code: string | null
+    error_message: string
+    attempt_count: number
+    updated_at: string | null
+  }>
+  sample_sent: Array<{
+    phone: string
+    provider_message_id: string | null
+    sent_at: string | null
+  }>
+  template: {
+    id: number
+    name: string
+    language: string
+    category: string
+    status: string
+    approved: boolean
+  } | null
+  wa_connection: {
+    phone_number_id: string | null
+    status: string | null
+    provider: string | null
+    last_error: string | null
+  } | null
+  scheduler: {
+    campaign_dispatcher_enabled: boolean
+    kill_switch_set: boolean
+    poll_seconds: number
+    note: string
+  }
+  hints: string[]
+  errors: string[]
 }
 
 export interface CreateCampaignPayload {
@@ -224,6 +313,33 @@ export const campaignsApi = {
 
   debugTemplate: (templateId: string) =>
     apiCall<Record<string, unknown>>(`/campaigns/debug-template/${templateId}`),
+
+  /** Full diagnostic snapshot for a single campaign.
+   *
+   *  Returns recipient counts, sample failed/sent rows, template
+   *  approval state, WhatsApp connection state, scheduler health
+   *  and merchant-facing ``hints`` (e.g. "ASYNCIO task died" or
+   *  "NAHLA_DISABLE_SCHEDULERS=1 is set"). The endpoint never raises
+   *  500 — any internal failure is captured in ``errors``. */
+  debug: (id: number) =>
+    apiCall<CampaignDebugSnapshot>(`/campaigns/${id}/debug`),
+
+  /** Force the dispatcher to run synchronously for a campaign that's
+   *  stuck in ``pending_dispatch`` or ``failed``. Idempotent — rows
+   *  already in ``status='sent'`` are NOT re-sent. */
+  dispatchNow: (id: number) =>
+    apiCall<{
+      campaign_id: number
+      ok?: boolean
+      skipped?: boolean
+      reason?: string
+      message?: string
+      status?: string
+      sent?: number
+      failed?: number
+      queued?: number
+      errors?: string[]
+    }>(`/campaigns/${id}/dispatch-now`, { method: 'POST' }),
 
   deleteCampaign: (id: number) =>
     apiCall<{ deleted: boolean; id: number }>(`/campaigns/${id}`, { method: 'DELETE' }),

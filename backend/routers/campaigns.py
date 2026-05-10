@@ -90,12 +90,54 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
     skipped_count = int(tpl_vars.get("_skipped_count", "0") or "0")
     raw_errors = tpl_vars.get("_dispatch_errors", "") or ""
     dispatch_errors = [e for e in raw_errors.split("|") if e] if raw_errors else []
+    # ``last_error`` is what the UI puts under the status pill so the
+    # merchant can tell ``failed`` from ``failed because the template
+    # was unapproved`` at a glance.
+    last_error = dispatch_errors[0] if dispatch_errors else None
+
+    # Synthetic ``lifecycle`` field: a merchant-friendly verb derived
+    # from ``status`` + the per-recipient counters we already persisted
+    # to ``template_variables``. Display logic in the UI keys off this
+    # instead of the raw status column so "نشطة" never lies — a
+    # campaign that died before snapshotting recipients shows up as
+    # ``pending_dispatch`` ("ينتظر بدء الإرسال") even though the
+    # underlying status is still ``active``.
+    sent = c.sent_count or 0
+    total_seen = sent + failed_count + skipped_count
+    raw_status = (c.status or "").lower()
+    if raw_status == "completed":
+        if sent > 0 and failed_count == 0:
+            lifecycle = "sent"
+        elif sent > 0 and failed_count > 0:
+            lifecycle = "partial"
+        elif failed_count > 0:
+            lifecycle = "failed_all"
+        else:
+            lifecycle = "completed_empty"
+    elif raw_status == "failed":
+        lifecycle = "failed"
+    elif raw_status == "scheduled":
+        lifecycle = "waiting_scheduler"
+    elif raw_status == "active":
+        if total_seen == 0:
+            lifecycle = "pending_dispatch"
+        elif sent == 0 and failed_count == 0:
+            lifecycle = "pending_dispatch"
+        else:
+            lifecycle = "sending"
+    elif raw_status == "draft":
+        lifecycle = "draft"
+    else:
+        lifecycle = raw_status or "unknown"
 
     return {
         "id": c.id,
         "name": c.name,
         "campaign_type": c.campaign_type,
         "status": c.status,
+        # New: merchant-facing verb (see _classify_campaign_lifecycle).
+        # The UI should prefer this over ``status`` for the badge label.
+        "lifecycle": lifecycle,
         "template_id": c.template_id,
         "template_name": c.template_name,
         "template_language": c.template_language,
@@ -115,6 +157,7 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
         "failed_count": failed_count,
         "skipped_count": skipped_count,
         "dispatch_errors": dispatch_errors,
+        "last_error": last_error,
         "delivered_count": c.delivered_count,
         "read_count": c.read_count,
         "clicked_count": c.clicked_count,
@@ -575,6 +618,374 @@ async def get_campaign_report(
         "stopped_by_limit":      counts.get("skipped_duplicate", 0),
         "last_error_code":       last_error_row.error_code if last_error_row else None,
         "last_error_message":    last_error_row.error_message if last_error_row else None,
+    }
+
+
+# ── Campaign diagnostics ─────────────────────────────────────────────────────
+#
+# These two endpoints exist so a merchant (or support) can answer the
+# question "I launched the campaign, audience=N, but nobody received
+# anything — what happened?" without SSH access to Railway.
+#
+#   * GET  /campaigns/{id}/debug          → full state snapshot
+#   * POST /campaigns/{id}/dispatch-now   → kick the dispatcher in-process
+#
+# The debug endpoint NEVER raises 500 — every internal failure is caught
+# and surfaced as a string in the response so the diagnostic round-trip
+# itself never becomes the bug being investigated. Same defensive
+# posture we used for /billing/debug/current.
+
+
+def _classify_campaign_lifecycle(campaign: Campaign, counts: Dict[str, int]) -> str:
+    """Map the raw ``status`` column + send-log counters onto a
+    merchant-friendly verb so the UI never has to show just "نشطة" for
+    an inert campaign.
+
+    Order matters: a campaign whose dispatch task crashed BEFORE
+    snapshotting any recipient will be ``active`` with zero counts, and
+    we want the merchant to see that explicitly as "ينتظر بدء الإرسال"
+    instead of the falsely reassuring "نشطة".
+    """
+    status = (campaign.status or "").lower()
+    sent = counts.get("sent", 0)
+    failed = counts.get("failed", 0)
+    queued = counts.get("queued", 0)
+    total = sum(counts.values())
+
+    if status in ("completed",):
+        if sent > 0 and failed == 0:
+            return "sent"               # تم الإرسال
+        if sent > 0 and failed > 0:
+            return "partial"            # أُرسل جزئياً
+        if failed > 0 and sent == 0:
+            return "failed_all"         # فشل الإرسال للجميع
+        return "completed_empty"        # اكتملت بدون مستلمين فعليين
+    if status == "failed":
+        return "failed"                 # فشل الإرسال
+    if status == "scheduled":
+        return "waiting_scheduler"      # بانتظار المُجدول
+    if status == "active":
+        if total == 0:
+            return "pending_dispatch"   # ينتظر بدء الإرسال
+        if queued > 0:
+            return "sending"            # جاري الإرسال
+        if sent == 0 and failed == 0:
+            return "pending_dispatch"
+        return "sending"
+    if status == "draft":
+        return "draft"
+    return status or "unknown"
+
+
+@router.get("/campaigns/{campaign_id}/debug")
+async def debug_campaign(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Single-call snapshot of a campaign's send-state.
+
+    Returned shape (every field is a primitive — safe to JSON-encode
+    no matter what blew up internally)::
+
+        {
+          "campaign": { id, name, status, lifecycle, audience_type,
+                        audience_count, template_*, schedule_*,
+                        launched_at, created_at, dispatch_errors[] },
+          "recipients": { total, queued, sending, sent, failed,
+                          skipped_duplicate, skipped_unsubscribed,
+                          skipped_invalid, skipped_unreachable,
+                          skipped_manual_exclusion },
+          "sample_failed":   [ {phone(masked), error_code, error_message} ],
+          "sample_sent":     [ {phone(masked), provider_message_id, sent_at} ],
+          "template":   { id, name, language, category, status, approved },
+          "wa_connection": { phone_number_id, status, provider, last_error },
+          "scheduler": { campaign_dispatcher_enabled, kill_switch_set,
+                         poll_seconds },
+          "errors": [ "<diagnostic_section_name>: <error>", … ]
+        }
+
+    The ``errors`` array is for *meta* errors (a section that failed to
+    compute) — the per-recipient errors live under ``sample_failed``.
+    """
+    tenant_id = resolve_tenant_id(request)
+    errors: List[str] = []
+
+    def _safe(name: str, fn):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {type(exc).__name__}: {exc!s:.200}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return None
+
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id, Campaign.tenant_id == tenant_id,
+    ).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    # ── Recipient counts ────────────────────────────────────────────
+    def _counts():
+        from services.campaign_dispatcher import _count_log_statuses  # noqa: PLC0415
+        return _count_log_statuses(db, campaign_id)
+    counts: Dict[str, int] = _safe("recipient_counts", _counts) or {}
+
+    # ── Sample failed / sent rows ───────────────────────────────────
+    def _mask(phone: Optional[str]) -> str:
+        if not phone:
+            return ""
+        s = str(phone)
+        return ("•" * max(0, len(s) - 4)) + s[-4:] if len(s) > 4 else s
+
+    def _sample_failed():
+        rows = (
+            db.query(CampaignSendLog)
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.status == "failed",
+            )
+            .order_by(CampaignSendLog.updated_at.desc())
+            .limit(5)
+            .all()
+        )
+        return [
+            {
+                "phone":              _mask(r.customer_phone_e164),
+                "error_code":         r.error_code,
+                "error_message":      (r.error_message or "")[:300],
+                "attempt_count":      r.attempt_count,
+                "updated_at":         r.updated_at.isoformat() if r.updated_at else None,
+            }
+            for r in rows
+        ]
+    sample_failed = _safe("sample_failed", _sample_failed) or []
+
+    def _sample_sent():
+        rows = (
+            db.query(CampaignSendLog)
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.status == "sent",
+            )
+            .order_by(CampaignSendLog.sent_at.desc())
+            .limit(5)
+            .all()
+        )
+        return [
+            {
+                "phone":              _mask(r.customer_phone_e164),
+                "provider_message_id": r.provider_message_id,
+                "sent_at":            r.sent_at.isoformat() if r.sent_at else None,
+            }
+            for r in rows
+        ]
+    sample_sent = _safe("sample_sent", _sample_sent) or []
+
+    # ── Template (approved/language/etc.) ──────────────────────────
+    def _template():
+        tpl = db.query(WhatsAppTemplate).filter(
+            WhatsAppTemplate.id == int(campaign.template_id or 0),
+            WhatsAppTemplate.tenant_id == tenant_id,
+        ).first() if campaign.template_id else None
+        if not tpl:
+            return None
+        return {
+            "id":         tpl.id,
+            "name":       tpl.name,
+            "language":   tpl.language,
+            "category":   tpl.category,
+            "status":     tpl.status,
+            "approved":   (tpl.status or "").upper() == "APPROVED",
+        }
+    template_info = _safe("template", _template)
+
+    # ── WhatsApp connection ────────────────────────────────────────
+    def _wa_conn():
+        from services.campaign_dispatcher import _get_wa_connection  # noqa: PLC0415
+        conn = _get_wa_connection(db, tenant_id)
+        if not conn:
+            return None
+        return {
+            "phone_number_id": getattr(conn, "phone_number_id", None),
+            "status":          getattr(conn, "status", None),
+            "provider":        getattr(conn, "provider", None) or getattr(conn, "provider_name", None),
+            "last_error":      getattr(conn, "last_error", None),
+        }
+    wa_conn_info = _safe("wa_connection", _wa_conn)
+
+    # ── Scheduler health ───────────────────────────────────────────
+    def _scheduler():
+        kill_switch = (
+            os.environ.get("NAHLA_DISABLE_SCHEDULERS", "").strip().lower()
+            in ("1", "true", "yes")
+        )
+        return {
+            "campaign_dispatcher_enabled": not kill_switch,
+            "kill_switch_set":             kill_switch,
+            "poll_seconds":                30,
+            "note": (
+                "إذا كان kill_switch_set=true فإن الحملات المجدولة لن "
+                "تنطلق تلقائياً (NAHLA_DISABLE_SCHEDULERS مفعّلة). "
+                "الحملات الفورية تستخدم asyncio.create_task ولا تتأثر "
+                "بهذه المفتاح. استخدم dispatch-now للإرسال يدوياً."
+            ),
+        }
+    scheduler_info = _safe("scheduler", _scheduler) or {}
+
+    tpl_vars = campaign.template_variables or {}
+    dispatch_errors_raw = tpl_vars.get("_dispatch_errors", "") or ""
+    dispatch_errors = [e for e in dispatch_errors_raw.split("|") if e]
+
+    lifecycle = _classify_campaign_lifecycle(campaign, counts)
+
+    # If lifecycle is pending_dispatch but status=active and audience is
+    # > 0, that almost always means the asyncio.create_task background
+    # job died before _snapshot_recipients ran. Surface a direct hint.
+    hints: List[str] = []
+    if lifecycle == "pending_dispatch" and (campaign.audience_count or 0) > 0:
+        hints.append(
+            "تم إنشاء الحملة بدون أي مستلم في سجل الإرسال. الأسباب "
+            "المحتملة: (1) خلل في مَهمّة asyncio الخلفية (راجع سجلات "
+            "Railway للبحث عن 'dispatching campaign'). (2) فشل التحقق "
+            "من القالب أو اتصال واتساب. استخدم POST "
+            f"/campaigns/{campaign_id}/dispatch-now لإعادة المحاولة."
+        )
+    if not (template_info or {}).get("approved"):
+        hints.append(
+            "القالب ليس بحالة APPROVED — لن يُرسل واتساب أي رسالة قبل "
+            "اعتماد القالب من Meta."
+        )
+    if not wa_conn_info:
+        hints.append("لا يوجد اتصال واتساب نشط لهذا المتجر.")
+    if scheduler_info.get("kill_switch_set") and (campaign.schedule_type or "") != "immediate":
+        hints.append(
+            "NAHLA_DISABLE_SCHEDULERS=1 مفعّلة على Railway — الحملات "
+            "المجدولة معطّلة. احذف هذا المتغيّر أو اضبطه على 0 ثم redeploy."
+        )
+
+    return {
+        "campaign": {
+            "id":                campaign.id,
+            "name":              campaign.name,
+            "status":            campaign.status,
+            "lifecycle":         lifecycle,
+            "campaign_type":     campaign.campaign_type,
+            "audience_type":     campaign.audience_type,
+            "audience_count":    campaign.audience_count or 0,
+            "schedule_type":     campaign.schedule_type,
+            "schedule_time":     campaign.schedule_time.isoformat() if campaign.schedule_time else None,
+            "delay_minutes":     campaign.delay_minutes,
+            "template_name":     campaign.template_name,
+            "template_language": campaign.template_language,
+            "launched_at":       campaign.launched_at.isoformat() if campaign.launched_at else None,
+            "created_at":        campaign.created_at.isoformat() if campaign.created_at else None,
+            "dispatch_errors":   dispatch_errors,
+        },
+        "recipients": {
+            "total":                     sum(counts.values()),
+            "queued":                    counts.get("queued", 0),
+            "sending":                   counts.get("sending", 0),
+            "sent":                      counts.get("sent", 0),
+            "failed":                    counts.get("failed", 0),
+            "skipped_duplicate":         counts.get("skipped_duplicate", 0),
+            "skipped_invalid":           counts.get("skipped_invalid", 0),
+            "skipped_unsubscribed":      counts.get("skipped_unsubscribed", 0),
+            "skipped_unreachable":       counts.get("skipped_unreachable", 0),
+            "skipped_manual_exclusion":  counts.get("skipped_manual_exclusion", 0),
+        },
+        "sample_failed":    sample_failed,
+        "sample_sent":      sample_sent,
+        "template":         template_info,
+        "wa_connection":    wa_conn_info,
+        "scheduler":        scheduler_info,
+        "hints":            hints,
+        "errors":           errors,
+    }
+
+
+@router.post("/campaigns/{campaign_id}/dispatch-now")
+async def dispatch_campaign_now(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Synchronously run the campaign dispatcher for one campaign.
+
+    Use cases:
+      * The merchant launched a campaign and the asyncio background
+        task died silently → click "إرسال يدوي الآن" to retry.
+      * Support wants to confirm that the entire pipeline (template,
+        connection, audience, send) works end-to-end without waiting
+        for the 30s scheduler tick.
+
+    Strict tenant scoping: the campaign must belong to the requesting
+    tenant. Returns the full :func:`dispatch_campaign` result dict so
+    the merchant can see ``sent`` / ``failed`` / ``errors`` directly
+    in the response (no second round-trip required).
+
+    Idempotency note — ``dispatch_campaign`` is itself idempotent:
+    rows already in ``status='sent'`` are NEVER re-sent on retry, so
+    calling this endpoint twice in a row will not double-send.
+    """
+    tenant_id = resolve_tenant_id(request)
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id, Campaign.tenant_id == tenant_id,
+    ).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    if (campaign.status or "").lower() == "completed" and (campaign.sent_count or 0) > 0:
+        # Avoid wasting a Meta API call on a campaign that already
+        # finished cleanly. The frequency cap would block re-sends
+        # anyway, but bailing here surfaces it as a clear message
+        # rather than "skipped_duplicate=N".
+        return {
+            "campaign_id": campaign_id,
+            "skipped":     True,
+            "reason":      "completed",
+            "message":     (
+                "الحملة مكتملة مسبقاً — لا حاجة لإعادة الإرسال. أنشئ "
+                "حملة جديدة إذا كنت تريد إرسالاً جديداً لنفس الجمهور."
+            ),
+        }
+
+    logger.info(
+        "[campaigns.dispatch-now] tenant=%d campaign=%d status=%s audience_count=%s",
+        tenant_id, campaign_id, campaign.status, campaign.audience_count,
+    )
+    from services.campaign_dispatcher import dispatch_campaign  # noqa: PLC0415
+    try:
+        result = await dispatch_campaign(db, campaign_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[campaigns.dispatch-now] tenant=%d campaign=%d crashed",
+            tenant_id, campaign_id,
+        )
+        try:
+            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+            campaign.status = "failed"
+            tpl_vars = dict(campaign.template_variables or {})
+            tpl_vars["_dispatch_errors"] = f"manual dispatch crashed: {str(exc)[:200]}"
+            campaign.template_variables = tpl_vars
+            flag_modified(campaign, "template_variables")
+            db.commit()
+        except Exception:
+            db.rollback()
+        return {
+            "campaign_id": campaign_id,
+            "ok":          False,
+            "error":       f"{type(exc).__name__}: {exc!s:.200}",
+            "message":     "فشل تشغيل الإرسال يدوياً — راجع /campaigns/{id}/debug",
+        }
+
+    return {
+        "campaign_id": campaign_id,
+        "ok":          True,
+        **result,
     }
 
 

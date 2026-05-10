@@ -108,6 +108,30 @@ const STATUS_META: Record<string, { label: string; variant: 'green' | 'amber' | 
   failed:    { label: 'فشلت',    variant: 'red'   },
 }
 
+/**
+ * Granular lifecycle labels surfaced on top of the raw ``status``
+ * column. The backend computes the lifecycle verb from status +
+ * recipient counters (see ``_classify_campaign_lifecycle``), so the
+ * UI just renders.
+ *
+ * IMPORTANT: a campaign whose async dispatch task died silently shows
+ * up as ``status='active'`` but ``lifecycle='pending_dispatch'`` — we
+ * render the lifecycle label so the merchant doesn't trust a "نشطة"
+ * pill on an inert campaign.
+ */
+const LIFECYCLE_META: Record<string, { label: string; variant: 'green' | 'amber' | 'blue' | 'slate' | 'red' }> = {
+  draft:             { label: 'مسودة',           variant: 'slate' },
+  waiting_scheduler: { label: 'بانتظار المُجدول', variant: 'amber' },
+  pending_dispatch:  { label: 'ينتظر بدء الإرسال', variant: 'amber' },
+  sending:           { label: 'جاري الإرسال',    variant: 'green' },
+  sent:              { label: 'تم الإرسال',      variant: 'blue'  },
+  partial:           { label: 'أُرسل جزئياً',     variant: 'amber' },
+  completed_empty:   { label: 'اكتملت بلا مستلمين', variant: 'slate' },
+  failed:            { label: 'فشل الإرسال',      variant: 'red'   },
+  failed_all:        { label: 'فشل الإرسال للجميع', variant: 'red'   },
+  unknown:           { label: 'غير معروفة',      variant: 'slate' },
+}
+
 // Map the new goal keys back to the legacy `campaign_type` enum the
 // existing `Campaign` model + table column uses, so the list/table and
 // any historical analytics keep working without a DB migration.
@@ -1496,15 +1520,74 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   onCheck: (id: number, v: boolean) => void
   onDelete: (id: number) => void
 }) {
-  const sm = STATUS_META[campaign.status] ?? STATUS_META['draft']
+  // Prefer the granular lifecycle label (e.g. "ينتظر بدء الإرسال")
+  // over the raw status pill ("نشطة"). Fall back to STATUS_META if
+  // the backend didn't ship a lifecycle key (older clients hitting a
+  // freshly redeployed backend).
+  const lifecycleKey = campaign.lifecycle || campaign.status || 'draft'
+  const sm = LIFECYCLE_META[lifecycleKey] ?? STATUS_META[campaign.status] ?? STATUS_META['draft']
   const tm = TYPE_META[campaign.campaign_type] ?? TYPE_META['broadcast']
   const openRate = campaign.sent_count > 0 ? Math.round((campaign.read_count / campaign.sent_count) * 100) : 0
   const convRate = campaign.sent_count > 0 ? Math.round((campaign.converted_count / campaign.sent_count) * 100) : 0
   const [showErrors, setShowErrors] = useState(false)
+  const [diagnosing, setDiagnosing] = useState(false)
+  const [dispatching, setDispatching] = useState(false)
+  const [diagnostic, setDiagnostic] = useState<string | null>(null)
 
-  const isFailed = campaign.status === 'failed'
+  const isFailed = campaign.status === 'failed' || lifecycleKey === 'failed_all' || lifecycleKey === 'failed'
+  const isStuck = lifecycleKey === 'pending_dispatch'
   const hasErrors = (campaign.dispatch_errors?.length ?? 0) > 0
   const failedCount = campaign.failed_count ?? 0
+
+  const handleDiagnose = async () => {
+    setDiagnosing(true)
+    setDiagnostic(null)
+    try {
+      const snap = await campaignsApi.debug(campaign.id)
+      const r = snap.recipients
+      const hints = (snap.hints || []).join(' • ')
+      const wa = snap.wa_connection
+        ? `${snap.wa_connection.status} / ${snap.wa_connection.phone_number_id ?? '—'}`
+        : 'لا اتصال'
+      const tpl = snap.template
+        ? `${snap.template.name} (${snap.template.status})`
+        : 'القالب غير موجود'
+      const lines = [
+        `📊 المستلمون: total=${r.total} pending=${r.queued} sent=${r.sent} failed=${r.failed} skipped=${r.skipped_duplicate + r.skipped_invalid + r.skipped_unsubscribed + r.skipped_unreachable + r.skipped_manual_exclusion}`,
+        `📨 القالب: ${tpl}`,
+        `📞 الواتساب: ${wa}`,
+        `🕐 المُجدول: ${snap.scheduler.campaign_dispatcher_enabled ? 'مفعّل' : 'معطّل (NAHLA_DISABLE_SCHEDULERS=1)'}`,
+        hints && `💡 ${hints}`,
+      ].filter(Boolean) as string[]
+      setDiagnostic(lines.join('\n'))
+    } catch (err: any) {
+      setDiagnostic(`تعذر تشغيل التشخيص: ${err?.message || err}`)
+    } finally {
+      setDiagnosing(false)
+    }
+  }
+
+  const handleDispatchNow = async () => {
+    if (!confirm(`سيتم تشغيل الإرسال يدوياً للحملة "${campaign.name}" الآن. لن يُعاد إرسال أي مستلم تم إرساله مسبقاً.`)) return
+    setDispatching(true)
+    setDiagnostic(null)
+    try {
+      const res = await campaignsApi.dispatchNow(campaign.id)
+      if (res.skipped) {
+        setDiagnostic(res.message || 'تم تجاوز الإرسال.')
+      } else if (res.ok === false) {
+        setDiagnostic(`❌ فشل الإرسال اليدوي: ${(res as any).error || res.message || 'unknown'}`)
+      } else {
+        setDiagnostic(`✅ تم تشغيل الإرسال: sent=${res.sent ?? 0} failed=${res.failed ?? 0}`)
+        // Refresh the list by bubbling a no-op status change.
+        onStatusChange(campaign.id, campaign.status)
+      }
+    } catch (err: any) {
+      setDiagnostic(`❌ فشل الإرسال اليدوي: ${err?.message || err}`)
+    } finally {
+      setDispatching(false)
+    }
+  }
 
   return (
     <>
@@ -1523,6 +1606,17 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         </td>
         <td className="px-5 py-3.5">
           <Badge label={sm.label} variant={sm.variant} dot />
+          {/* last_error gets the same surface as failed_count: a small
+              one-line hint under the status badge so the merchant
+              doesn't have to open the drawer to know "what broke?". */}
+          {campaign.last_error && (
+            <p
+              className="text-[10px] text-red-500 mt-1 max-w-[180px] truncate"
+              title={campaign.last_error}
+            >
+              {campaign.last_error}
+            </p>
+          )}
           {isFailed && hasErrors && (
             <button
               onClick={() => setShowErrors(v => !v)}
@@ -1587,6 +1681,30 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 <Send className="w-3.5 h-3.5" /> إطلاق
               </button>
             )}
+            {/* Diagnose + manual dispatch — visible whenever a campaign
+                is in a state where the merchant might want to know
+                what's happening (stuck pending, partial, failed) and
+                also for completed campaigns so support can re-check. */}
+            <button
+              onClick={handleDiagnose}
+              disabled={diagnosing}
+              className="text-xs text-slate-500 hover:text-slate-800 transition-colors flex items-center gap-1 disabled:opacity-50"
+              title="تشخيص حالة الإرسال"
+            >
+              <AlertCircle className="w-3.5 h-3.5" />
+              {diagnosing ? 'جاري…' : 'تشخيص'}
+            </button>
+            {(isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty') && (
+              <button
+                onClick={handleDispatchNow}
+                disabled={dispatching}
+                className="text-xs text-amber-600 hover:text-amber-800 transition-colors flex items-center gap-1 disabled:opacity-50"
+                title="تشغيل الإرسال يدوياً الآن"
+              >
+                <Send className="w-3.5 h-3.5" />
+                {dispatching ? 'جاري…' : 'إرسال الآن'}
+              </button>
+            )}
             <button
               onClick={() => onDelete(campaign.id)}
               className="text-xs text-slate-300 hover:text-red-500 transition-colors p-1 rounded"
@@ -1597,6 +1715,15 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           </div>
         </td>
       </tr>
+      {diagnostic && (
+        <tr className="bg-slate-50/70">
+          <td colSpan={TABLE_HEADERS.length} className="px-6 py-3">
+            <pre className="text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono bg-white border border-slate-200 rounded-lg p-3 leading-relaxed">
+              {diagnostic}
+            </pre>
+          </td>
+        </tr>
+      )}
       {showErrors && hasErrors && (
         <tr className="bg-red-50/60">
           <td colSpan={TABLE_HEADERS.length} className="px-6 py-3">
