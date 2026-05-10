@@ -1120,6 +1120,52 @@ class CampaignSendLog(Base):
     )
 
 
+class CustomerSegmentManual(Base):
+    """Merchant-curated link between a Customer and a *Nahla official*
+    marketing cohort (vip, new, unsubscribed, …).
+
+    Crucially, ``segment_key`` is NOT a free-form tag — the API layer
+    validates every insert against ``services.nahla_segments.SEGMENTS``
+    so merchants can only pin customers to cohorts that exist in the
+    canonical registry. Anything else (including a typo) returns 422.
+
+    The table coexists with the auto-classifier output stored on
+    ``CustomerProfile`` (``customer_status`` / ``rfm_segment``). A
+    customer can simultaneously be auto-classified as ``new`` AND
+    manually tagged as ``vip`` — the campaign snapshot honours both
+    sources via UNION semantics so a "VIP" campaign reaches both groups.
+
+    The unique index on ``(tenant_id, customer_id, segment_key)`` makes
+    a re-tag a no-op, which lets the API endpoint be safely retried
+    on flaky networks.
+    """
+    __tablename__ = 'customer_segments_manual'
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id', ondelete='CASCADE'), nullable=False)
+    segment_key = Column(String(64), nullable=False)
+    source = Column(String(16), nullable=False, default='manual')
+    created_by = Column(Integer, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index(
+            'uq_customer_segments_manual_tenant_customer_segment',
+            'tenant_id', 'customer_id', 'segment_key',
+            unique=True,
+        ),
+        Index(
+            'ix_customer_segments_manual_tenant_segment',
+            'tenant_id', 'segment_key',
+        ),
+        Index(
+            'ix_customer_segments_manual_customer',
+            'customer_id',
+        ),
+    )
+
+
 class NotificationLog(Base):
     """
     سجل بسيط لكل إشعار يُرسَل أو يُتجاهَل.

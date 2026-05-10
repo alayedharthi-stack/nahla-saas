@@ -5,7 +5,7 @@ import {
   Smartphone, AlertCircle, RefreshCw, X, MessageSquare, FileText,
   HandHeart, Repeat, Bell, Settings2, Sparkles, Moon, UserPlus, UserX,
   Calendar, ShoppingBag, TrendingUp, Star, Trash2, CheckSquare, Square,
-  Shield,
+  Shield, Beaker, ShieldOff,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -43,6 +43,10 @@ interface WizardState {
   couponCode: string
   autoCoupon: boolean
   discountPercent: number
+  /** Manual segment keys to *exclude* from this campaign. Snapshot
+   *  marks these recipients as ``skipped_manual_exclusion`` so the
+   *  report shows exactly who was filtered out and why. */
+  excludeSegments: string[]
 }
 
 const INITIAL_WIZARD: WizardState = {
@@ -63,6 +67,7 @@ const INITIAL_WIZARD: WizardState = {
   couponCode: '',
   autoCoupon: true,
   discountPercent: 10,
+  excludeSegments: [],
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -248,6 +253,35 @@ function Step2Segment({
         </div>
       )}
       <div className="grid sm:grid-cols-2 gap-2 max-h-[26rem] overflow-y-auto pe-1">
+        {/* Quick action: target the merchant's internal "test list" —
+            customers flipped via the drawer toggle. NOT a Nahla
+            segment by design, so it's surfaced as a separate card. */}
+        <button
+          onClick={() => setWiz(w => ({ ...w, segmentKey: 'test_recipients', template: null, variables: {} }))}
+          title="أرسل لعدد محدود من العملاء الذين فعّلت لهم زر «إضافة إلى قائمة اختبار الحملات» داخل بطاقة العميل."
+          className={`flex items-start gap-3 border rounded-xl p-3 text-start transition-all ${
+            wiz.segmentKey === 'test_recipients'
+              ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-200'
+              : 'border-emerald-200 bg-emerald-50/40 hover:border-emerald-300'
+          }`}
+        >
+          <span className="p-2 rounded-lg shrink-0 bg-emerald-100 text-emerald-700">
+            <Beaker className="w-4 h-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <p className="text-sm font-semibold text-emerald-900 truncate">قائمة اختبار الحملات</p>
+              <span className="text-[9px] bg-white text-emerald-700 px-1.5 py-0.5 rounded-full font-medium border border-emerald-200 shrink-0">
+                داخلي
+              </span>
+            </div>
+            <p className="text-[11px] text-emerald-700/80 leading-snug line-clamp-2">
+              أرسل تجريبياً لمجموعة صغيرة قبل الإطلاق على القاعدة كاملة.
+            </p>
+          </div>
+        </button>
+
+        {/* Auto Nahla segments */}
         {ordered.map(s => {
           const selected = wiz.segmentKey === s.key
           const isNatural = wiz.goalKey ? s.natural_goals.includes(wiz.goalKey) : false
@@ -286,6 +320,82 @@ function Step2Segment({
             </button>
           )
         })}
+
+        {/* Manual segments — same registry, but targets customers
+            with a *manually* set tag rather than the auto classifier.
+            Distinct in the audience type as ``manual:<key>`` so the
+            dispatcher knows to query `customer_segments_manual`. */}
+        {ordered.filter(s => s.key !== 'all').map(s => {
+          const audKey = `manual:${s.key}`
+          const selected = wiz.segmentKey === audKey
+          return (
+            <button
+              key={audKey}
+              onClick={() => setWiz(w => ({ ...w, segmentKey: audKey, template: null, variables: {} }))}
+              title={`فقط العملاء الذين قمت بتصنيفهم يدوياً كـ «${s.label_ar}»`}
+              className={`flex items-start gap-3 border rounded-xl p-3 text-start transition-all ${
+                selected
+                  ? 'border-amber-500 bg-amber-50 ring-2 ring-amber-200'
+                  : 'border-amber-100 bg-amber-50/30 hover:border-amber-200'
+              }`}
+            >
+              <span className={`p-2 rounded-lg shrink-0 ${
+                selected ? 'bg-amber-100 text-amber-700' : 'bg-amber-50 text-amber-600'
+              }`}>
+                <Tag className="w-4 h-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <p className="text-sm font-semibold text-amber-900 truncate">{s.label_ar}</p>
+                  <span className="text-[9px] bg-white text-amber-700 px-1.5 py-0.5 rounded-full font-medium border border-amber-200 shrink-0">
+                    تصنيف يدوي
+                  </span>
+                </div>
+                <p className="text-[11px] text-amber-700/80 leading-snug line-clamp-2">
+                  أرسل فقط للعملاء الذين قمت بتصنيفهم يدوياً.
+                </p>
+              </div>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Exclude segments — applied AFTER audience resolution. The
+          dispatcher writes a `skipped_manual_exclusion` row for each
+          excluded recipient so the report shows exactly who was
+          dropped and why. */}
+      <div className="border-t border-slate-100 pt-3 space-y-2">
+        <p className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+          <ShieldOff className="w-3.5 h-3.5 text-slate-400" />
+          استبعد التصنيفات (اختياري)
+        </p>
+        <p className="text-[11px] text-slate-500">
+          أي عميل يحمل أحد هذه التصنيفات يدوياً لن يستلم الحملة، حتى لو كان ضمن الشريحة المختارة.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {segments.filter(s => s.key !== 'all').map(s => {
+            const active = wiz.excludeSegments.includes(s.key)
+            return (
+              <button
+                key={`excl-${s.key}`}
+                type="button"
+                onClick={() => setWiz(w => ({
+                  ...w,
+                  excludeSegments: active
+                    ? w.excludeSegments.filter(k => k !== s.key)
+                    : [...w.excludeSegments, s.key],
+                }))}
+                className={`text-[11px] px-2 py-1 rounded-full border transition-colors ${
+                  active
+                    ? 'bg-red-50 text-red-700 border-red-200'
+                    : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                {active ? '✕ ' : '+ '}{s.label_ar}
+              </button>
+            )
+          })}
+        </div>
       </div>
     </div>
   )
@@ -1115,7 +1225,40 @@ function CampaignWizard({
   // and re-picking a segment refreshes the template list.
   }, [wiz.step, wiz.goalKey, wiz.segmentKey])
 
-  const segmentMeta = segments.find(s => s.key === wiz.segmentKey)
+  // Synthesise meta for the two non-registry audience types
+  // (`manual:<key>` + `test_recipients`) so the review screen still
+  // shows a meaningful label instead of "—".
+  const segmentMeta: CustomerSegmentMeta | undefined = useMemo(() => {
+    const key = wiz.segmentKey || ''
+    if (!key) return undefined
+    if (key === 'test_recipients') {
+      return {
+        key: 'test_recipients',
+        label_ar: 'قائمة اختبار الحملات',
+        label_en: 'Campaign test list',
+        description_ar: 'مجموعة داخلية صغيرة لاختبار الحملة قبل الإطلاق.',
+        criteria_ar: 'كل العملاء الذين فعّلت لهم زر «قائمة اختبار الحملات» داخل بطاقة العميل.',
+        icon: 'Beaker',
+        natural_goals: [],
+        crm_statuses: [],
+        rfm_buckets: [],
+        customer_count: 0,
+      }
+    }
+    if (key.startsWith('manual:')) {
+      const baseKey = key.slice('manual:'.length)
+      const base = segments.find(s => s.key === baseKey)
+      if (base) {
+        return {
+          ...base,
+          key,
+          label_ar: `${base.label_ar} (تصنيف يدوي)`,
+          description_ar: 'العملاء الذين قمت بتصنيفهم يدوياً ضمن هذه الفئة.',
+        }
+      }
+    }
+    return segments.find(s => s.key === key)
+  }, [segments, wiz.segmentKey])
   const goalMeta    = goals.find(g => g.key === wiz.goalKey)
 
   const canNext = (): boolean => {
@@ -1214,7 +1357,14 @@ function CampaignWizard({
         template_language: wiz.template.language,
         template_category: wiz.template.category,
         template_body: getTemplateBody(wiz.template),
-        template_variables: wiz.variables,
+        // Stash the wizard-level exclude list under a reserved key
+        // so the dispatcher can read it without a new column. Empty
+        // arrays are still serialised so a re-launch that *removes*
+        // exclusions wins over a previous one that had them.
+        template_variables: {
+          ...wiz.variables,
+          _exclude_segments: wiz.excludeSegments,
+        } as Record<string, unknown> as Record<string, string>,
         audience_type: wiz.segmentKey,
         audience_count: segmentMeta?.customer_count ?? 0,
         schedule_type: wiz.scheduleType,

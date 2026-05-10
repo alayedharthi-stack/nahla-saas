@@ -52,6 +52,18 @@ export interface CustomerRecord {
   resubscribed_at: string | null
   pending_unsubscribe: boolean
   pending_unsubscribe_at: string | null
+  /** Merchant-driven exclusion from manual marketing campaigns.
+   *  Distinct from `is_unsubscribed` (customer-driven). */
+  marketing_opt_out_manual: boolean
+  marketing_opt_out_manual_at: string | null
+  /** Internal flag for the campaign test list — no merchant-visible
+   *  tag, but the wizard can target it as a dry-run audience. */
+  is_campaign_test_recipient: boolean
+  /** Manual Nahla segment tags pinned by the merchant (e.g. ['vip',
+   *  'unsubscribed']). Always a subset of the official Nahla
+   *  registry — backend rejects unknown keys with 422. */
+  manual_segments: string[]
+  manual_segments_labels: string[]
 }
 
 export interface CustomersListResponse {
@@ -103,14 +115,78 @@ export interface CustomersSegmentsResponse {
   segments: CustomerSegmentMeta[]
 }
 
+export interface CustomersListFilters {
+  search?: string
+  page?: number
+  perPage?: number
+  /** Auto Nahla segment key (e.g. 'vip'). */
+  segment?: string
+  /** Manual segment key, OR the special string 'none' to filter
+   *  customers with NO manual tags. */
+  manualSegment?: string
+  marketingOptOut?: boolean
+  testRecipient?: boolean
+}
+
+export interface CustomerSegmentMutationResponse {
+  customer_id: number
+  segment_key?: string
+  label_ar?: string
+  source?: string
+  created_at?: string | null
+  removed?: boolean
+  manual_segments: string[]
+}
+
+export interface CustomerMarketingPreferences {
+  customer_id: number
+  marketing_opt_out_manual: boolean
+  marketing_opt_out_manual_at: string | null
+  is_campaign_test_recipient: boolean
+  campaign_test_recipient_at: string | null
+}
+
 export const customersApi = {
-  list(search = '', page = 1, perPage = 50, segment = '') {
+  list(filters: CustomersListFilters | string = '', page = 1, perPage = 50, segment = '') {
+    // Backwards-compat: old positional signature `list(search, page, perPage, segment)`
+    // is preserved; the new object form is preferred for the new manual filters.
+    const f: CustomersListFilters =
+      typeof filters === 'string'
+        ? { search: filters, page, perPage, segment }
+        : filters
     const params = new URLSearchParams()
-    if (search) params.set('search', search)
-    if (segment && segment !== 'all') params.set('segment', segment)
-    params.set('page', String(page))
-    params.set('per_page', String(perPage))
+    if (f.search) params.set('search', f.search)
+    if (f.segment && f.segment !== 'all') params.set('segment', f.segment)
+    if (f.manualSegment) params.set('manual_segment', f.manualSegment)
+    if (f.marketingOptOut !== undefined) params.set('marketing_opt_out', String(f.marketingOptOut))
+    if (f.testRecipient !== undefined) params.set('test_recipient', String(f.testRecipient))
+    params.set('page', String(f.page ?? 1))
+    params.set('per_page', String(f.perPage ?? 50))
     return apiCall<CustomersListResponse>(`/customers?${params}`)
+  },
+
+  addManualSegment(id: number, segment_key: string) {
+    return apiCall<CustomerSegmentMutationResponse>(`/customers/${id}/segments`, {
+      method: 'POST',
+      body: JSON.stringify({ segment_key }),
+    })
+  },
+
+  removeManualSegment(id: number, segment_key: string) {
+    return apiCall<CustomerSegmentMutationResponse>(
+      `/customers/${id}/segments/${encodeURIComponent(segment_key)}`,
+      { method: 'DELETE' },
+    )
+  },
+
+  updateMarketingPreferences(
+    id: number,
+    prefs: Partial<{ marketing_opt_out_manual: boolean; is_campaign_test_recipient: boolean }>,
+  ) {
+    return apiCall<CustomerMarketingPreferences>(
+      `/customers/${id}/marketing-preferences`,
+      { method: 'PATCH', body: JSON.stringify(prefs) },
+    )
   },
 
   segments() {

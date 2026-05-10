@@ -18,6 +18,11 @@ import {
   CheckSquare,
   Square,
   BellOff,
+  Tag,
+  Beaker,
+  Plus,
+  ShieldOff,
+  Filter,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -79,6 +84,11 @@ export default function Customers() {
   const [pages, setPages] = useState(1)
   const [search, setSearch] = useState('')
   const [segmentKey, setSegmentKey] = useState<string>('all')
+  // Manual segment filter — separate axis from `segmentKey` so a
+  // merchant can combine "auto VIP" with "manually tagged unsubscribed"
+  // (or "no manual tag at all" via the special 'none' value).
+  const [manualSegmentKey, setManualSegmentKey] = useState<string>('')
+  const [marketingOptOutFilter, setMarketingOptOutFilter] = useState<'all' | 'in' | 'out'>('all')
   const [segments, setSegments] = useState<CustomerSegmentMeta[]>([])
   const [segmentsLoading, setSegmentsLoading] = useState(true)
   const [loading, setLoading] = useState(true)
@@ -100,7 +110,13 @@ export default function Customers() {
     setLoading(true)
     try {
       const [res, metricsRes] = await Promise.all([
-        customersApi.list(search, page, 50, segmentKey),
+        customersApi.list({
+          search, page, perPage: 50, segment: segmentKey,
+          manualSegment: manualSegmentKey || undefined,
+          marketingOptOut: marketingOptOutFilter === 'all'
+            ? undefined
+            : marketingOptOutFilter === 'out',
+        }),
         customersApi.metrics(),
       ])
       setCustomers(res.customers)
@@ -113,7 +129,7 @@ export default function Customers() {
     } finally {
       setLoading(false)
     }
-  }, [search, page, segmentKey])
+  }, [search, page, segmentKey, manualSegmentKey, marketingOptOutFilter])
 
   const loadSegments = useCallback(async () => {
     setSegmentsLoading(true)
@@ -137,7 +153,7 @@ export default function Customers() {
 
   useEffect(() => {
     setPage(1)
-  }, [search, segmentKey])
+  }, [search, segmentKey, manualSegmentKey, marketingOptOutFilter])
 
   const handleAdd = async () => {
     if (!addName.trim() || !addPhone.trim()) {
@@ -300,6 +316,43 @@ export default function Customers() {
             className="w-full ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
           />
         </div>
+
+        {/* Manual segment filter — distinct axis from `segmentKey`
+            (the chip strip above filters by the *auto* classifier).
+            Special value "none" returns customers without any manual
+            tag at all. Designed as a dropdown to keep the chip strip
+            uncluttered.  */}
+        <div className="relative">
+          <Tag className="absolute start-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+          <select
+            value={manualSegmentKey}
+            onChange={(e) => setManualSegmentKey(e.target.value)}
+            className="ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
+            title="فلترة حسب التصنيف اليدوي"
+          >
+            <option value="">كل التصنيفات اليدوية</option>
+            <option value="none">— بدون تصنيف يدوي —</option>
+            {segments.filter(s => s.key !== 'all').map(s => (
+              <option key={s.key} value={s.key}>{s.label_ar}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Marketing opt-out filter */}
+        <div className="relative">
+          <Filter className="absolute start-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+          <select
+            value={marketingOptOutFilter}
+            onChange={(e) => setMarketingOptOutFilter(e.target.value as 'all' | 'in' | 'out')}
+            className="ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
+            title="فلترة حسب الاستبعاد التسويقي اليدوي"
+          >
+            <option value="all">كل العملاء</option>
+            <option value="in">المؤهلون للحملات</option>
+            <option value="out">المستبعدون يدوياً</option>
+          </select>
+        </div>
+
         <button
           onClick={load}
           disabled={loading}
@@ -720,16 +773,36 @@ export default function Customers() {
                     <p className="text-slate-500 text-[10px]">يتم إيقاف الأتمتة والذكاء حتى يضغط "نعم متأكد" أو "تراجع"</p>
                   </div>
                 )}
-                <Badge
-                  label={selectedCustomer.status_label}
-                  variant={segmentVariant(selectedCustomer.status)}
-                />
+                <div className="flex flex-wrap items-center justify-center gap-1.5">
+                  <Badge
+                    label={selectedCustomer.status_label}
+                    variant={segmentVariant(selectedCustomer.status)}
+                  />
+                  <span className="text-[10px] text-slate-400 px-1">تصنيف ذكي</span>
+                </div>
                 {selectedCustomer.source === 'manual' && (
                   <span className="block text-xs text-blue-600">
                     {selectedCustomer.source_label}
                   </span>
                 )}
               </div>
+
+              {/* Manual segments — merchant-curated, drawn from the same
+                  Nahla registry as the auto chip strip. We do NOT allow
+                  free-form tags by design (segment_key MUST validate
+                  against `services.nahla_segments`). */}
+              <ManualSegmentsSection
+                customer={selectedCustomer}
+                segments={segments}
+                onChange={async (next) => {
+                  setSelectedCustomer(next)
+                  // Refresh the row inside the table so the new
+                  // tags / opt-out icon update without a full page
+                  // reload.
+                  setCustomers(prev => prev.map(c => c.id === next.id ? next : c))
+                }}
+                onRequireListReload={load}
+              />
 
               <div className="space-y-3">
                 <div className="flex items-center gap-3 text-sm">
@@ -837,6 +910,264 @@ export default function Customers() {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
+
+/**
+ * Drawer block that lets the merchant pin / unpin Nahla *manual*
+ * segment tags on this customer, plus toggle the two marketing
+ * preference flags (opt-out + test-recipient).
+ *
+ * Hard rule: manual tags MUST come from the official Nahla segment
+ * registry — we render a dropdown, never a free-form input. The
+ * backend re-validates the key on every POST so even a stale UI
+ * cannot inject arbitrary strings.
+ */
+interface ManualSegmentsSectionProps {
+  customer: CustomerRecord
+  segments: CustomerSegmentMeta[]
+  onChange: (next: CustomerRecord) => void | Promise<void>
+  onRequireListReload?: () => void
+}
+
+function ManualSegmentsSection({
+  customer, segments, onChange, onRequireListReload,
+}: ManualSegmentsSectionProps) {
+  const [adding, setAdding] = useState<string>('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string>('')
+
+  const manualKeys = customer.manual_segments || []
+  const optedOut = customer.marketing_opt_out_manual
+  const isTestRecipient = customer.is_campaign_test_recipient
+
+  // Pool of segments the merchant can still add — exclude already
+  // pinned ones + the meta "all" segment which would be meaningless
+  // as a per-customer tag.
+  const addableSegments = segments.filter(
+    s => s.key !== 'all' && !manualKeys.includes(s.key),
+  )
+
+  const handleAdd = async (key: string) => {
+    if (!key) return
+    setBusy(key)
+    setError('')
+    try {
+      const res = await customersApi.addManualSegment(customer.id, key)
+      const labels = res.manual_segments.map(
+        k => segments.find(s => s.key === k)?.label_ar || k,
+      )
+      await onChange({
+        ...customer,
+        manual_segments: res.manual_segments,
+        manual_segments_labels: labels,
+      })
+      setAdding('')
+    } catch (err: any) {
+      setError(err?.detail || err?.message || 'تعذر إضافة التصنيف')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleRemove = async (key: string) => {
+    setBusy(key)
+    setError('')
+    try {
+      const res = await customersApi.removeManualSegment(customer.id, key)
+      const labels = res.manual_segments.map(
+        k => segments.find(s => s.key === k)?.label_ar || k,
+      )
+      await onChange({
+        ...customer,
+        manual_segments: res.manual_segments,
+        manual_segments_labels: labels,
+      })
+    } catch (err: any) {
+      setError(err?.detail || err?.message || 'تعذر حذف التصنيف')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleToggleOptOut = async () => {
+    setBusy('__opt__')
+    setError('')
+    try {
+      const res = await customersApi.updateMarketingPreferences(customer.id, {
+        marketing_opt_out_manual: !optedOut,
+      })
+      await onChange({
+        ...customer,
+        marketing_opt_out_manual: res.marketing_opt_out_manual,
+        marketing_opt_out_manual_at: res.marketing_opt_out_manual_at,
+      })
+      onRequireListReload?.()
+    } catch (err: any) {
+      setError(err?.detail || err?.message || 'تعذر تحديث التفضيل')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleToggleTest = async () => {
+    setBusy('__test__')
+    setError('')
+    try {
+      const res = await customersApi.updateMarketingPreferences(customer.id, {
+        is_campaign_test_recipient: !isTestRecipient,
+      })
+      await onChange({
+        ...customer,
+        is_campaign_test_recipient: res.is_campaign_test_recipient,
+      })
+    } catch (err: any) {
+      setError(err?.detail || err?.message || 'تعذر تحديث قائمة الاختبار')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="space-y-3 border border-slate-100 rounded-xl p-3 bg-slate-50/40">
+      <div className="flex items-center justify-between">
+        <h5 className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+          <Tag className="w-3.5 h-3.5 text-slate-400" />
+          التصنيفات اليدوية
+        </h5>
+        <span className="text-[10px] text-slate-400">
+          من قائمة نحلة الرسمية فقط
+        </span>
+      </div>
+
+      {/* Active manual tags */}
+      <div className="flex flex-wrap gap-1.5">
+        {manualKeys.length === 0 ? (
+          <p className="text-[11px] text-slate-400 italic">
+            لا توجد تصنيفات يدوية — التصنيف الذكي وحده يحدد سلوك العميل.
+          </p>
+        ) : (
+          manualKeys.map(k => {
+            const label = segments.find(s => s.key === k)?.label_ar || k
+            return (
+              <span
+                key={k}
+                className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-full"
+              >
+                {label}
+                <button
+                  type="button"
+                  disabled={busy === k}
+                  onClick={() => handleRemove(k)}
+                  className="text-amber-500 hover:text-amber-700 disabled:opacity-50"
+                  title="إزالة التصنيف"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            )
+          })
+        )}
+      </div>
+
+      {/* Add new tag — dropdown, never a free-form text field */}
+      <div className="flex items-center gap-2">
+        <select
+          value={adding}
+          onChange={(e) => setAdding(e.target.value)}
+          className="flex-1 ps-2 pe-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
+          disabled={addableSegments.length === 0 || !!busy}
+        >
+          <option value="">
+            {addableSegments.length === 0
+              ? 'كل التصنيفات الرسمية مضافة'
+              : 'اختر تصنيفاً لإضافته…'}
+          </option>
+          {addableSegments.map(s => (
+            <option key={s.key} value={s.key}>{s.label_ar}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => handleAdd(adding)}
+          disabled={!adding || !!busy}
+          className="text-xs font-semibold text-brand-600 bg-brand-50 hover:bg-brand-100 border border-brand-200 px-2.5 py-1.5 rounded-lg disabled:opacity-50 flex items-center gap-1"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          إضافة
+        </button>
+      </div>
+
+      {error && (
+        <p className="text-[11px] text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1">
+          {error}
+        </p>
+      )}
+
+      {/* Marketing opt-out (manual exclusion) */}
+      <div className="border-t border-slate-100 pt-3 space-y-2">
+        <label className="flex items-start gap-2.5 cursor-pointer select-none">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={optedOut}
+            onClick={handleToggleOptOut}
+            disabled={busy === '__opt__'}
+            className={`mt-0.5 relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+              optedOut ? 'bg-red-500' : 'bg-slate-200'
+            } ${busy === '__opt__' ? 'opacity-50' : ''}`}
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                optedOut ? 'translate-x-4' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+          <div className="flex-1 -mt-0.5">
+            <p className="text-xs font-semibold text-slate-800 flex items-center gap-1">
+              <ShieldOff className="w-3.5 h-3.5 text-slate-400" />
+              استبعاد من الحملات التسويقية
+            </p>
+            <p className="text-[11px] text-slate-500 leading-snug">
+              لن يدخل في أي حملة تسويقية يدوية. لا يؤثر على رسائل
+              الطلبات أو الأتمتات الخدمية أو نافذة 24 ساعة.
+            </p>
+          </div>
+        </label>
+
+        {/* Quick "add to campaign test list" — internal flag, no
+            merchant-visible tag is created. */}
+        <label className="flex items-start gap-2.5 cursor-pointer select-none">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={isTestRecipient}
+            onClick={handleToggleTest}
+            disabled={busy === '__test__'}
+            className={`mt-0.5 relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+              isTestRecipient ? 'bg-emerald-500' : 'bg-slate-200'
+            } ${busy === '__test__' ? 'opacity-50' : ''}`}
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                isTestRecipient ? 'translate-x-4' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+          <div className="flex-1 -mt-0.5">
+            <p className="text-xs font-semibold text-slate-800 flex items-center gap-1">
+              <Beaker className="w-3.5 h-3.5 text-slate-400" />
+              إضافة إلى قائمة اختبار الحملات
+            </p>
+            <p className="text-[11px] text-slate-500 leading-snug">
+              مجموعة داخلية صغيرة لاختبار الحملة قبل الإطلاق الكامل.
+              لا يُنشئ تصنيفاً ظاهراً للتاجر.
+            </p>
+          </div>
+        </label>
+      </div>
+    </div>
+  )
+}
+
 
 /**
  * Horizontal scrollable row of Nahla segment chips.

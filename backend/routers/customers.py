@@ -22,11 +22,22 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
-from models import Customer, CustomerProfile
+from models import Customer, CustomerProfile, CustomerSegmentManual
 from services.nahla_segments import (
+    SEGMENTS as NAHLA_SEGMENTS,
     build_segment_query,
     get_segment as get_nahla_segment,
     list_segments_with_counts,
+)
+from services.manual_segments import (
+    UnknownSegmentError,
+    add_manual_segment,
+    customer_ids_with_manual_segment,
+    list_manual_segments_bulk,
+    list_manual_segments_for_customer,
+    remove_manual_segment,
+    set_marketing_opt_out_manual,
+    set_test_recipient,
 )
 from services.customer_intelligence import (
     CUSTOMER_STATUS_LABELS,
@@ -188,11 +199,26 @@ def _days_since(dt: Optional[datetime]) -> Optional[int]:
     return max(0, (datetime.now(timezone.utc) - target).days)
 
 
-def _serialize_customer(cust: Customer, profile: Optional[CustomerProfile]) -> Dict[str, Any]:
+def _segment_label_for_key(key: str) -> str:
+    """Resolve a Nahla segment_key to its Arabic label using the
+    canonical registry. Returns the key itself when not found so the
+    UI never shows a blank pill."""
+    seg = get_nahla_segment(key)
+    return seg.label_ar if seg else key
+
+
+def _serialize_customer(
+    cust: Customer,
+    profile: Optional[CustomerProfile],
+    *,
+    manual_segments: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     meta = cust.extra_metadata or {}
     source, source_label = _resolve_customer_source(cust)
     is_unsubscribed:        bool = bool(meta.get("is_unsubscribed"))
     pending_unsubscribe:    bool = bool(meta.get("pending_unsubscribe"))
+    marketing_opt_out_manual: bool = bool(meta.get("marketing_opt_out_manual"))
+    is_campaign_test_recipient: bool = bool(meta.get("is_campaign_test_recipient"))
     status = str(
         (profile.customer_status if profile and getattr(profile, "customer_status", None) else None)
         or (profile.segment if profile else None)
@@ -203,6 +229,7 @@ def _serialize_customer(cust: Customer, profile: Optional[CustomerProfile]) -> D
         or ("lead" if status == "lead" else "regulars")
     )
 
+    manual_keys = list(manual_segments or [])
     result: Dict[str, Any] = {
         "id": cust.id,
         "name": cust.name or "",
@@ -215,6 +242,12 @@ def _serialize_customer(cust: Customer, profile: Optional[CustomerProfile]) -> D
         "resubscribed_at":        meta.get("resubscribed_at"),
         "pending_unsubscribe":    pending_unsubscribe,
         "pending_unsubscribe_at": meta.get("pending_unsubscribe_at"),
+        # ── Manual marketing controls (drawer + filters consume these) ──
+        "marketing_opt_out_manual":   marketing_opt_out_manual,
+        "marketing_opt_out_manual_at": meta.get("marketing_opt_out_manual_at"),
+        "is_campaign_test_recipient": is_campaign_test_recipient,
+        "manual_segments":            manual_keys,
+        "manual_segments_labels":     [_segment_label_for_key(k) for k in manual_keys],
     }
     if profile:
         result.update({
@@ -302,10 +335,29 @@ async def list_customers(
     segment: str = Query(
         "",
         description=(
-            "Optional Nahla segment key (e.g. 'vip', 'dormant', 'no_purchase_60'). "
+            "Optional auto Nahla segment key (e.g. 'vip', 'dormant', 'no_purchase_60'). "
             "Filters the list to ONLY customers belonging to that segment, using "
             "the same canonical SQL as the campaign wizard."
         ),
+    ),
+    manual_segment: str = Query(
+        "",
+        description=(
+            "Filter by a *manual* Nahla segment tag set by the merchant. "
+            "Special value 'none' returns customers with NO manual tags."
+        ),
+    ),
+    marketing_opt_out: Optional[bool] = Query(
+        None,
+        description=(
+            "When true, return only customers excluded from manual "
+            "marketing campaigns. When false, return only the ones "
+            "still eligible. When omitted, no filter is applied."
+        ),
+    ),
+    test_recipient: Optional[bool] = Query(
+        None,
+        description="True = only test-list customers; False = only non-test.",
     ),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
@@ -330,6 +382,60 @@ async def list_customers(
     else:
         q = db.query(Customer).filter(Customer.tenant_id == tenant_id)
 
+    # ── Manual segment filter ─────────────────────────────────────────
+    # Two modes:
+    #   * `manual_segment=<key>` → keep only customers tagged with that key.
+    #   * `manual_segment=none`  → keep only customers with NO manual tags.
+    msf = (manual_segment or "").strip().lower()
+    if msf == "none":
+        # NOT EXISTS (any manual tag for this customer)
+        tagged_ids_subq = (
+            db.query(CustomerSegmentManual.customer_id)
+            .filter(CustomerSegmentManual.tenant_id == tenant_id)
+            .distinct()
+            .subquery()
+        )
+        q = q.filter(~Customer.id.in_(db.query(tagged_ids_subq.c.customer_id)))
+    elif msf:
+        if get_nahla_segment(msf) is None:
+            raise HTTPException(status_code=422, detail=f"تصنيف يدوي غير معروف: {msf}")
+        ids = customer_ids_with_manual_segment(db, tenant_id, msf)
+        if not ids:
+            # Empty universe — short-circuit to no results without
+            # building a giant `IN ()` clause.
+            return {"customers": [], "total": 0, "page": page,
+                    "per_page": per_page, "pages": 1}
+        q = q.filter(Customer.id.in_(ids))
+
+    # ── Marketing opt-out filter ──────────────────────────────────────
+    # Stored on Customer.extra_metadata so we use the same JSON-cast
+    # pattern as the unsubscribed segment for cross-dialect support.
+    if marketing_opt_out is not None:
+        from sqlalchemy import String, cast, func, or_  # noqa: PLC0415
+        is_opted = cast(
+            func.coalesce(
+                Customer.extra_metadata["marketing_opt_out_manual"].astext
+                if hasattr(Customer.extra_metadata, "astext")
+                else func.json_extract(Customer.extra_metadata, "$.marketing_opt_out_manual"),
+                "false",
+            ),
+            String,
+        ).in_(["true", "1"])
+        q = q.filter(is_opted) if marketing_opt_out else q.filter(~is_opted)
+
+    if test_recipient is not None:
+        from sqlalchemy import String, cast, func  # noqa: PLC0415
+        is_test = cast(
+            func.coalesce(
+                Customer.extra_metadata["is_campaign_test_recipient"].astext
+                if hasattr(Customer.extra_metadata, "astext")
+                else func.json_extract(Customer.extra_metadata, "$.is_campaign_test_recipient"),
+                "false",
+            ),
+            String,
+        ).in_(["true", "1"])
+        q = q.filter(is_test) if test_recipient else q.filter(~is_test)
+
     if search.strip():
         term = f"%{search.strip()}%"
         q = q.filter(
@@ -346,6 +452,7 @@ async def list_customers(
 
     customer_ids = [c.id for c in rows]
     profiles = {}
+    manual_segments_by_id: Dict[int, List[str]] = {}
     if customer_ids:
         prof_rows = (
             db.query(CustomerProfile)
@@ -356,9 +463,16 @@ async def list_customers(
             .all()
         )
         profiles = {p.customer_id: p for p in prof_rows}
+        manual_segments_by_id = list_manual_segments_bulk(db, tenant_id, customer_ids)
 
     return {
-        "customers": [_serialize_customer(c, profiles.get(c.id)) for c in rows],
+        "customers": [
+            _serialize_customer(
+                c, profiles.get(c.id),
+                manual_segments=manual_segments_by_id.get(c.id, []),
+            )
+            for c in rows
+        ],
         "total": total,
         "page": page,
         "per_page": per_page,
@@ -422,8 +536,9 @@ async def get_customer(customer_id: int, request: Request, db: Session = Depends
     profile = db.query(CustomerProfile).filter_by(
         customer_id=cust.id, tenant_id=tenant_id,
     ).first()
+    manual = list_manual_segments_for_customer(db, tenant_id, cust.id)
 
-    return _serialize_customer(cust, profile)
+    return _serialize_customer(cust, profile, manual_segments=manual)
 
 
 @router.post("")
@@ -566,3 +681,133 @@ async def bulk_delete_customers(
 
     db.commit()
     return {"deleted": result}
+
+
+# ── Manual segments + marketing preferences ─────────────────────────────────
+#
+# These endpoints let the merchant pin / unpin official Nahla segments
+# on a customer (drawer UI) and toggle the two boolean flags that the
+# campaign snapshot consults: marketing opt-out and "test recipient".
+#
+# Important contract:
+#   * `segment_key` MUST be one of the keys in `services.nahla_segments`.
+#     Anything else returns 422 with the list of accepted keys — we do
+#     NOT silently coerce or ignore unknown keys.
+#   * Every write asserts `cust.tenant_id == request_tenant_id` via
+#     `services.manual_segments` so cross-tenant tagging is impossible.
+
+class CustomerSegmentAddIn(BaseModel):
+    segment_key: str
+
+
+class MarketingPrefsPatchIn(BaseModel):
+    """Both fields are optional — if a merchant only flips one toggle
+    the other stays untouched. We don't coerce missing fields to
+    ``False`` because that would silently re-subscribe customers."""
+    marketing_opt_out_manual: Optional[bool] = None
+    is_campaign_test_recipient: Optional[bool] = None
+
+
+@router.post("/{customer_id}/segments")
+async def add_customer_segment(
+    customer_id: int,
+    body: CustomerSegmentAddIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Pin a customer to one of Nahla's official manual segments.
+
+    Idempotent: re-tagging an existing pair returns 200 with the same
+    payload, never a 409. Unknown segment keys return 422 with the
+    list of accepted keys (frontend uses this to render an error
+    message that's actually useful).
+    """
+    tenant_id = resolve_tenant_id(request)
+    try:
+        row = add_manual_segment(
+            db, tenant_id=tenant_id, customer_id=customer_id,
+            segment_key=body.segment_key,
+        )
+    except UnknownSegmentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="العميل غير موجود")
+
+    return {
+        "customer_id": customer_id,
+        "segment_key": row.segment_key,
+        "label_ar":    _segment_label_for_key(row.segment_key),
+        "source":      row.source,
+        "created_at":  _iso(row.created_at),
+        "manual_segments": list_manual_segments_for_customer(db, tenant_id, customer_id),
+    }
+
+
+@router.delete("/{customer_id}/segments/{segment_key}")
+async def remove_customer_segment(
+    customer_id: int,
+    segment_key: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Remove a manual segment pin. Returns 200 even when the pin
+    didn't exist — the goal is for merchants to be able to retry on
+    flaky networks without seeing a 404 on success."""
+    tenant_id = resolve_tenant_id(request)
+    cust = db.query(Customer).filter(
+        Customer.id == customer_id, Customer.tenant_id == tenant_id,
+    ).first()
+    if not cust:
+        raise HTTPException(status_code=404, detail="العميل غير موجود")
+
+    removed = remove_manual_segment(
+        db, tenant_id=tenant_id, customer_id=customer_id, segment_key=segment_key,
+    )
+    return {
+        "customer_id": customer_id,
+        "removed":     removed,
+        "manual_segments": list_manual_segments_for_customer(db, tenant_id, customer_id),
+    }
+
+
+@router.patch("/{customer_id}/marketing-preferences")
+async def update_marketing_preferences(
+    customer_id: int,
+    body: MarketingPrefsPatchIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Toggle the two marketing-side flags on Customer.extra_metadata.
+
+    Either field may be omitted; only the ones explicitly sent are
+    written. This means a merchant can flip the test-recipient flag
+    without accidentally re-subscribing an opted-out customer.
+    """
+    tenant_id = resolve_tenant_id(request)
+    cust = db.query(Customer).filter(
+        Customer.id == customer_id, Customer.tenant_id == tenant_id,
+    ).first()
+    if not cust:
+        raise HTTPException(status_code=404, detail="العميل غير موجود")
+
+    if body.marketing_opt_out_manual is not None:
+        cust = set_marketing_opt_out_manual(
+            db, tenant_id=tenant_id, customer_id=customer_id,
+            opted_out=bool(body.marketing_opt_out_manual), commit=False,
+        )
+    if body.is_campaign_test_recipient is not None:
+        cust = set_test_recipient(
+            db, tenant_id=tenant_id, customer_id=customer_id,
+            is_test=bool(body.is_campaign_test_recipient), commit=False,
+        )
+    db.commit()
+    db.refresh(cust)
+
+    meta = cust.extra_metadata or {}
+    return {
+        "customer_id": customer_id,
+        "marketing_opt_out_manual":     bool(meta.get("marketing_opt_out_manual")),
+        "marketing_opt_out_manual_at":  meta.get("marketing_opt_out_manual_at"),
+        "is_campaign_test_recipient":   bool(meta.get("is_campaign_test_recipient")),
+        "campaign_test_recipient_at":   meta.get("campaign_test_recipient_at"),
+    }

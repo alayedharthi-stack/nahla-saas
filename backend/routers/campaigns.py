@@ -545,6 +545,7 @@ async def get_campaign_report(
         "invalid_phone":         counts.get("skipped_invalid", 0),
         "skipped_unsubscribed":  counts.get("skipped_unsubscribed", 0),
         "skipped_unreachable":   counts.get("skipped_unreachable", 0),
+        "skipped_manual_exclusion": counts.get("skipped_manual_exclusion", 0),
         "stopped_by_limit":      counts.get("skipped_duplicate", 0),
         "last_error_code":       last_error_row.error_code if last_error_row else None,
         "last_error_message":    last_error_row.error_message if last_error_row else None,

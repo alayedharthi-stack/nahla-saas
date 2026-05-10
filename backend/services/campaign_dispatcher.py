@@ -96,6 +96,12 @@ LOG_SKIPPED_DUPLICATE   = "skipped_duplicate"
 LOG_SKIPPED_INVALID     = "skipped_invalid"
 LOG_SKIPPED_UNSUBSCRIBED = "skipped_unsubscribed"
 LOG_SKIPPED_UNREACHABLE = "skipped_unreachable"
+# New: merchant-driven exclusions (drawer toggle "استبعاد من الحملات
+# التسويقية" + wizard "استبعد التصنيف X"). Tracked separately from
+# customer-driven `skipped_unsubscribed` so the report distinguishes
+# "the customer asked us to stop" from "the merchant decided not to
+# message them".
+LOG_SKIPPED_MANUAL_EXCLUSION = "skipped_manual_exclusion"
 
 # Skip reasons (free-form but kept consistent so the dashboard can
 # render an Arabic label for each).
@@ -104,6 +110,8 @@ REASON_INVALID_PHONE    = "invalid_phone"
 REASON_UNSUBSCRIBED     = "unsubscribed"
 REASON_PENDING_OPT_OUT  = "pending_unsubscribe"
 REASON_NO_PHONE         = "no_phone"
+REASON_MARKETING_OPT_OUT = "marketing_opt_out_manual"
+REASON_MANUAL_EXCLUDE   = "excluded_by_manual_segment"
 
 
 def _reconstruct_template_body(
@@ -266,8 +274,21 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         campaign_id, len(customers), campaign.audience_type,
     )
 
+    # Read manual exclusion list (set by the wizard step 2 "استبعد X").
+    # Stored as JSON list under `template_variables._exclude_segments`
+    # so we don't need a new column on `campaigns`.
+    tpl_vars_for_excl = campaign.template_variables or {}
+    excl_raw = tpl_vars_for_excl.get("_exclude_segments") or []
+    excluded_segments: List[str] = (
+        [str(s).strip().lower() for s in excl_raw if str(s).strip()]
+        if isinstance(excl_raw, list) else []
+    )
+
     # ── 1. Snapshot recipients into campaign_send_logs ──────────────────
-    snapshot = _snapshot_recipients(db, tenant_id, campaign_id, customers, template)
+    snapshot = _snapshot_recipients(
+        db, tenant_id, campaign_id, customers, template,
+        excluded_segments=excluded_segments,
+    )
     db.commit()
 
     # ── 2. Frequency-cap dedupe ─────────────────────────────────────────
@@ -323,7 +344,8 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         skipped=counts.get(LOG_SKIPPED_DUPLICATE, 0)
                 + counts.get(LOG_SKIPPED_INVALID, 0)
                 + counts.get(LOG_SKIPPED_UNSUBSCRIBED, 0)
-                + counts.get(LOG_SKIPPED_UNREACHABLE, 0),
+                + counts.get(LOG_SKIPPED_UNREACHABLE, 0)
+                + counts.get(LOG_SKIPPED_MANUAL_EXCLUSION, 0),
         errors=errors,
     )
     db.commit()
@@ -344,6 +366,7 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         "invalid_phone":      counts.get(LOG_SKIPPED_INVALID, 0),
         "skipped_unsubscribed": counts.get(LOG_SKIPPED_UNSUBSCRIBED, 0),
         "skipped_unreachable":  counts.get(LOG_SKIPPED_UNREACHABLE, 0),
+        "skipped_manual_exclusion": counts.get(LOG_SKIPPED_MANUAL_EXCLUSION, 0),
         "frequency_cap_days": MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
         "errors":         errors,
     }
@@ -364,6 +387,7 @@ def _empty_result(*, error: str = "") -> Dict[str, Any]:
         "invalid_phone":        0,
         "skipped_unsubscribed": 0,
         "skipped_unreachable":  0,
+        "skipped_manual_exclusion": 0,
         "frequency_cap_days":   MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
         "errors":               [error] if error else [],
     }
@@ -375,6 +399,8 @@ def _snapshot_recipients(
     campaign_id: int,
     customers: List[Customer],
     template: WhatsAppTemplate,
+    *,
+    excluded_segments: Optional[List[str]] = None,
 ) -> Dict[str, int]:
     """Insert one ``campaign_send_logs`` row per recipient with
     ``status='queued'`` (or the appropriate ``skipped_*`` status when
@@ -396,6 +422,15 @@ def _snapshot_recipients(
                      .filter(CampaignSendLog.campaign_id == campaign_id)
                      .all()
     }
+
+    # Pull every customer's manual segment set in a single bulk query —
+    # avoids N+1 when checking the wizard's "exclude segments" rule.
+    excl = {(s or "").strip().lower() for s in (excluded_segments or []) if s}
+    manual_segments_by_id: Dict[int, set] = {}
+    if excl and customers:
+        from services.manual_segments import list_manual_segments_bulk  # noqa: PLC0415
+        bulk = list_manual_segments_bulk(db, tenant_id, [c.id for c in customers])
+        manual_segments_by_id = {cid: set(keys) for cid, keys in bulk.items()}
 
     new_rows: List[CampaignSendLog] = []
     no_phone = 0
@@ -451,6 +486,43 @@ def _snapshot_recipients(
                 template_language=template.language,
                 status=LOG_SKIPPED_UNSUBSCRIBED,
                 skip_reason=REASON_PENDING_OPT_OUT,
+            ))
+            existing_phones.add(phone)
+            continue
+
+        # ── Merchant-driven opt-out (drawer toggle) ────────────────
+        # Distinct from `is_unsubscribed` (customer-driven). We log it
+        # under skipped_manual_exclusion so the campaign report tells
+        # the merchant exactly why the row was excluded.
+        if meta.get("marketing_opt_out_manual"):
+            new_rows.append(CampaignSendLog(
+                tenant_id=tenant_id,
+                campaign_id=campaign_id,
+                customer_id=cust.id,
+                customer_phone_e164=phone,
+                template_name=template.name,
+                template_language=template.language,
+                status=LOG_SKIPPED_MANUAL_EXCLUSION,
+                skip_reason=REASON_MARKETING_OPT_OUT,
+            ))
+            existing_phones.add(phone)
+            continue
+
+        # ── Wizard exclude-segment rule ────────────────────────────
+        # If the merchant said "exclude customers tagged X" in step 2
+        # of the wizard, drop those rows here too. We DO NOT silently
+        # skip — we record an explicit `skipped_manual_exclusion` row
+        # so the report shows the full audit.
+        if excl and excl.intersection(manual_segments_by_id.get(cust.id, ())):
+            new_rows.append(CampaignSendLog(
+                tenant_id=tenant_id,
+                campaign_id=campaign_id,
+                customer_id=cust.id,
+                customer_phone_e164=phone,
+                template_name=template.name,
+                template_language=template.language,
+                status=LOG_SKIPPED_MANUAL_EXCLUSION,
+                skip_reason=REASON_MANUAL_EXCLUDE,
             ))
             existing_phones.add(phone)
             continue
@@ -772,6 +844,51 @@ def _resolve_audience(
     db: Session, tenant_id: int, audience_type: str,
 ) -> List[Customer]:
     from services.nahla_segments import build_segment_query
+
+    # Special pseudo-segment: the wizard's "test recipients" quick
+    # action targets the tenant's internal test list (Customers flagged
+    # via `services.manual_segments.set_test_recipient`). It is NOT a
+    # registered Nahla segment because it must never appear in chips
+    # next to "VIP" / "new" — it's a dry-run helper, not an audience.
+    aud_norm = (audience_type or "").strip().lower()
+    if aud_norm == "test_recipients":
+        from services.manual_segments import list_test_recipient_customer_ids  # noqa: PLC0415
+        ids = list_test_recipient_customer_ids(db, tenant_id)
+        if not ids:
+            return []
+        return (
+            db.query(Customer)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                Customer.id.in_(ids),
+                Customer.normalized_phone.isnot(None),
+                Customer.normalized_phone != "",
+            )
+            .all()
+        )
+
+    # Wizard targeting by *manual* segment: ``manual:<key>``.
+    # Distinct from the auto Nahla segment (same registry, different
+    # source — manual rows live in `customer_segments_manual`).
+    if aud_norm.startswith("manual:"):
+        from services.manual_segments import (  # noqa: PLC0415
+            customer_ids_with_manual_segment,
+        )
+        seg_key = aud_norm.split(":", 1)[1]
+        ids = customer_ids_with_manual_segment(db, tenant_id, seg_key)
+        if not ids:
+            return []
+        return (
+            db.query(Customer)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                Customer.id.in_(ids),
+                Customer.normalized_phone.isnot(None),
+                Customer.normalized_phone != "",
+            )
+            .all()
+        )
+
     q = build_segment_query(audience_type, db, tenant_id, require_reachable=True)
     if q is None:
         is_unsubscribed = cast(
