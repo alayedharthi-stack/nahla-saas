@@ -541,53 +541,91 @@ async def list_customers(
             .all()
         )
         profiles = {p.customer_id: p for p in prof_rows}
-        manual_segments_by_id = list_manual_segments_bulk(db, tenant_id, customer_ids)
+        # NEVER let manual-segment helpers take the customer list down.
+        # The mode-column probe inside ``services.manual_segments``
+        # already handles the "migration not yet applied" case, but we
+        # keep one more belt-and-braces try/except here so a future
+        # incidental DB issue (lock, replica lag, etc.) on the manual
+        # segments table can't degrade the whole page to "لا يوجد عملاء".
+        try:
+            manual_segments_by_id = list_manual_segments_bulk(
+                db, tenant_id, customer_ids,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            manual_segments_by_id = {}
+            try:
+                import logging  # noqa: PLC0415
+                logging.getLogger("nahla.customers.list").warning(
+                    "list_manual_segments_bulk failed; rendering page without manual tags. err=%s",
+                    exc,
+                )
+            except Exception:
+                pass
 
         # ── Build segment_sources per customer ────────────────────────
-        # We compute the per-segment {automatic, manual_include,
-        # manual_exclude} breakdown for each customer in this page.
-        # This is a bounded operation — `len(customer_ids) <= per_page`
-        # (max 200 by route schema) and the number of Nahla segments
-        # is small (~20). Total work is O(page_size * segments_count)
-        # which is negligible compared to the query above.
-        from services.manual_segments import list_manual_sources_bulk  # noqa: PLC0415
-        from services.nahla_segments import (  # noqa: PLC0415
-            all_segment_keys,
-            build_segment_query,
-        )
-        manual_sources = list_manual_sources_bulk(db, tenant_id, customer_ids)
-        # For each segment in the registry, fetch the auto-match set
-        # for this tenant once; intersect with the page's customer ids.
-        # We only iterate segments that have at least one manual row
-        # OR are referenced — defensively we just check ALL keys, the
-        # cost is tiny.
-        for seg_key_iter in all_segment_keys():
+        # Wrapped end-to-end so a failure in source-breakdown
+        # computation degrades to "no sources" instead of an empty
+        # customer list. The drawer treats {} as "show only legacy
+        # manual_segments tags" which is acceptable graceful UX.
+        try:
+            from services.manual_segments import (  # noqa: PLC0415
+                list_manual_sources_bulk,
+            )
+            from services.nahla_segments import (  # noqa: PLC0415
+                all_segment_keys,
+                build_segment_query,
+            )
+            manual_sources = list_manual_sources_bulk(
+                db, tenant_id, customer_ids,
+            )
+            # For each segment in the registry, fetch the auto-match
+            # set for this tenant once; intersect with the page's
+            # customer ids. Bounded: ~20 segments × ≤ 200 ids.
+            for seg_key_iter in all_segment_keys():
+                try:
+                    auto_q = build_segment_query(
+                        seg_key_iter, db, tenant_id, require_reachable=False,
+                    )
+                    if auto_q is None:
+                        continue
+                    auto_set = {
+                        r[0] for r in
+                        auto_q.with_entities(Customer.id)
+                        .filter(Customer.id.in_(customer_ids))
+                        .all()
+                    }
+                except Exception:
+                    auto_set = set()
+                for cid in customer_ids:
+                    manual_mode = manual_sources.get(cid, {}).get(seg_key_iter)
+                    auto = cid in auto_set
+                    inc = manual_mode == "include"
+                    exc = manual_mode == "exclude"
+                    if not (auto or inc or exc):
+                        continue
+                    sources_by_id.setdefault(cid, {})[seg_key_iter] = {
+                        "automatic":      auto,
+                        "manual_include": inc,
+                        "manual_exclude": exc,
+                    }
+        except Exception as exc:  # pragma: no cover — defensive
             try:
-                auto_q = build_segment_query(
-                    seg_key_iter, db, tenant_id, require_reachable=False,
-                )
-                if auto_q is None:
-                    continue
-                auto_set = {
-                    r[0] for r in
-                    auto_q.with_entities(Customer.id)
-                    .filter(Customer.id.in_(customer_ids))
-                    .all()
-                }
+                db.rollback()
             except Exception:
-                auto_set = set()
-            for cid in customer_ids:
-                manual_mode = manual_sources.get(cid, {}).get(seg_key_iter)
-                auto = cid in auto_set
-                inc = manual_mode == "include"
-                exc = manual_mode == "exclude"
-                if not (auto or inc or exc):
-                    continue
-                sources_by_id.setdefault(cid, {})[seg_key_iter] = {
-                    "automatic":      auto,
-                    "manual_include": inc,
-                    "manual_exclude": exc,
-                }
+                pass
+            sources_by_id = {}
+            try:
+                import logging  # noqa: PLC0415
+                logging.getLogger("nahla.customers.list").warning(
+                    "segment_sources build failed; rendering page without sources. err=%s",
+                    exc,
+                )
+            except Exception:
+                pass
 
     return {
         "customers": [

@@ -728,6 +728,264 @@ class TestIncludeExcludeMode:
         assert bulk == {} or bulk.get(c.id, []) == []
 
 
+# ── 9. Pre-0053 schema fallback (production-deploy regression) ────────────
+#
+# Background
+# ──────────
+# Migration 0053 added ``customer_segments_manual.mode``. After
+# commit 2352c3f0 deployed, the customers page started showing
+# ``لا يوجد عملاء`` even though the chip strip reported 7,996
+# customers. Root cause: the new helpers queried ``mode = 'include'``
+# unconditionally, which 500'd against any schema where the migration
+# hadn't applied yet — taking the entire ``GET /customers`` endpoint
+# down with it.
+#
+# The contract proven below: every helper that can encounter a
+# pre-0053 schema must degrade gracefully (treat every row as
+# ``include``) instead of raising.
+
+
+class TestPre0053SchemaFallback:
+    def _drop_mode_column(self, engine):
+        """Simulate a pre-0053 production database by dropping the
+        ``mode`` column from the live SQLite schema. We also clear
+        the module-level cache so the next probe re-runs against the
+        modified schema."""
+        from sqlalchemy import text
+
+        import services.manual_segments as ms
+        ms._MODE_COLUMN_AVAILABLE = None
+        # SQLite refuses to DROP COLUMN while an index references the
+        # column; drop the composite index first, then the column.
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DROP INDEX IF EXISTS ix_customer_segments_manual_tenant_segment_mode"
+            ))
+            conn.execute(text(
+                "ALTER TABLE customer_segments_manual DROP COLUMN mode"
+            ))
+
+    def test_list_manual_segments_bulk_does_not_raise_without_mode(self):
+        from services.manual_segments import list_manual_segments_bulk
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        # Snapshot ids before closing the session so the test body
+        # doesn't touch detached ORM instances after the DDL.
+        tenant_id, customer_id = t.id, c.id
+        add_manual_segment(db, tenant_id=tenant_id, customer_id=customer_id, segment_key="vip")
+        db.close()
+        self._drop_mode_column(engine)
+
+        Session = sessionmaker(bind=engine)
+        db2 = Session()
+        try:
+            result = list_manual_segments_bulk(db2, tenant_id, [customer_id])
+            assert result == {customer_id: ["vip"]}
+        finally:
+            db2.close()
+
+    def test_list_manual_sources_bulk_treats_legacy_rows_as_include(self):
+        from services.manual_segments import (
+            MODE_INCLUDE, list_manual_sources_bulk,
+        )
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        add_manual_segment(db, tenant_id=tenant_id, customer_id=customer_id, segment_key="vip")
+        db.close()
+        self._drop_mode_column(engine)
+
+        Session = sessionmaker(bind=engine)
+        db2 = Session()
+        try:
+            result = list_manual_sources_bulk(db2, tenant_id, [customer_id])
+            assert result == {customer_id: {"vip": MODE_INCLUDE}}
+        finally:
+            db2.close()
+
+    def test_customer_ids_with_manual_segment_returns_empty_for_exclude_on_legacy(self):
+        # On a legacy schema there can't be any exclude rows, so the
+        # helper must return [] for mode=exclude rather than crash.
+        from services.manual_segments import (
+            MODE_EXCLUDE, MODE_INCLUDE, customer_ids_with_manual_segment,
+        )
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        add_manual_segment(db, tenant_id=tenant_id, customer_id=customer_id, segment_key="vip")
+        db.close()
+        self._drop_mode_column(engine)
+
+        Session = sessionmaker(bind=engine)
+        db2 = Session()
+        try:
+            assert customer_ids_with_manual_segment(
+                db2, tenant_id, "vip", mode=MODE_INCLUDE,
+            ) == [customer_id]
+            assert customer_ids_with_manual_segment(
+                db2, tenant_id, "vip", mode=MODE_EXCLUDE,
+            ) == []
+        finally:
+            db2.close()
+
+    def test_list_manual_segments_for_customer_falls_back_silently(self):
+        from services.manual_segments import list_manual_segments_for_customer
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        add_manual_segment(db, tenant_id=tenant_id, customer_id=customer_id, segment_key="vip")
+        db.close()
+        self._drop_mode_column(engine)
+
+        Session = sessionmaker(bind=engine)
+        db2 = Session()
+        try:
+            assert list_manual_segments_for_customer(db2, tenant_id, customer_id) == ["vip"]
+        finally:
+            db2.close()
+
+
+# ── 10. Customers list endpoint smoke contract ───────────────────────────
+#
+# These pin the bug we shipped in 2352c3f0 → fixed shortly after:
+# "all customers" / no-filter requests must return rows, not [].
+
+
+class TestCustomersListEndpointContract:
+    """In-process FastAPI smoke tests for ``GET /customers``."""
+
+    def _call_list(self, engine, tenant_id: int, **query_kwargs):
+        """Direct in-process call to ``list_customers`` — bypasses
+        FastAPI's request lifecycle (which adds a per-request thread
+        and breaks the in-memory SQLite engine the test fixture
+        produces). The test goal is to pin the SQL paths the
+        endpoint takes, not the HTTP layer."""
+        import asyncio
+
+        from routers import customers as customers_router
+
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        # Stub resolve_tenant_id on the customers router module
+        # because that's the binding the route function actually
+        # closes over.
+        original_resolve = customers_router.resolve_tenant_id
+        customers_router.resolve_tenant_id = (  # type: ignore
+            lambda request, db=None: tenant_id
+        )
+
+        # Build a minimal "request" stand-in; the route only uses it
+        # for resolve_tenant_id, which we've already monkey-patched.
+        class _FakeReq:
+            headers: dict = {}
+            cookies: dict = {}
+            state = type("S", (), {})()
+
+        req = _FakeReq()
+
+        # Default values match the FastAPI Query(...) defaults — we
+        # pass them explicitly because invoking the route function
+        # directly (rather than via FastAPI) bypasses dependency
+        # resolution, so unset args become the Query(...) sentinel.
+        defaults = dict(
+            search="",
+            segment="",
+            manual_segment="",
+            marketing_opt_out=None,
+            test_recipient=None,
+            page=1,
+            per_page=50,
+        )
+        defaults.update(query_kwargs)
+
+        try:
+            return asyncio.run(
+                customers_router.list_customers(
+                    request=req, db=db, **defaults,
+                )
+            )
+        finally:
+            customers_router.resolve_tenant_id = original_resolve
+            db.close()
+
+    def test_no_segment_filter_returns_all_customers(self):
+        # The exact bug: after the unified-segments commit, the page
+        # returned [] for tenants whose customers had no manual rows.
+        db, engine = _make_db()
+        t = _seed_tenant(db, "Big")
+        seeded = [_seed_customer(db, t.id, f"+96650000000{i}") for i in range(5)]
+        tenant_id = t.id
+        seeded_ids = {c.id for c in seeded}
+        db.close()
+
+        result = self._call_list(engine, tenant_id)
+        assert result["total"] == 5
+        assert {c["id"] for c in result["customers"]} == seeded_ids
+
+    def test_segment_all_is_treated_as_no_filter(self):
+        db, engine = _make_db()
+        t = _seed_tenant(db, "Big")
+        for i in range(3):
+            _seed_customer(db, t.id, f"+96650000000{i}")
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, segment="all")
+        assert result["total"] == 3
+
+    def test_empty_manual_segment_param_is_no_filter(self):
+        # The "كل التصنيفات اليدوية" dropdown sends an empty string;
+        # it must NOT trigger the manual-segment filter and collapse
+        # the result set to customers with manual tags only.
+        db, engine = _make_db()
+        t = _seed_tenant(db, "Big")
+        for i in range(3):
+            _seed_customer(db, t.id, f"+96650000000{i}")
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, manual_segment="")
+        assert result["total"] == 3
+
+    def test_endpoint_does_not_crash_on_pre_0053_schema(self):
+        # The exact regression that took the customers page down on
+        # tenant 33: helpers that referenced ``mode`` blew up against
+        # a schema where the migration hadn't run, and the whole
+        # endpoint 500'd → frontend fell back to "لا يوجد عملاء".
+        from sqlalchemy import text
+
+        import services.manual_segments as ms
+
+        db, engine = _make_db()
+        t = _seed_tenant(db, "Big")
+        for i in range(2):
+            _seed_customer(db, t.id, f"+96650000000{i}")
+        tenant_id = t.id
+        db.close()
+
+        # Drop the column AFTER seeding — simulates the deploy where
+        # the new code reaches the worker before the migration ran.
+        ms._MODE_COLUMN_AVAILABLE = None
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DROP INDEX IF EXISTS ix_customer_segments_manual_tenant_segment_mode"
+            ))
+            conn.execute(text(
+                "ALTER TABLE customer_segments_manual DROP COLUMN mode"
+            ))
+
+        try:
+            result = self._call_list(engine, tenant_id)
+            assert result["total"] == 2
+        finally:
+            ms._MODE_COLUMN_AVAILABLE = None
+
+
 # ── 6. Lazy billing reconcile — guard against re-introducing the bug ─────
 #
 # Tenant 33 sat at "pending_payment" because no caller ever invoked

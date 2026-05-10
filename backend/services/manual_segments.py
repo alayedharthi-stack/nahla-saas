@@ -38,13 +38,59 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from sqlalchemy import and_
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from models import Customer, CustomerSegmentManual
 from services.nahla_segments import SEGMENTS, all_segment_keys, get_segment
 
 logger = logging.getLogger(__name__)
+
+
+# ── Mode-column availability gate ──────────────────────────────────────
+#
+# Migration 0053 added ``customer_segments_manual.mode``. Production
+# deployments that haven't run the migration yet (deploy in flight,
+# Alembic step skipped, etc.) would otherwise 500 on EVERY query that
+# references ``mode``, taking the customer list page down with them.
+# We probe the column once per process and fall back to a mode-less
+# code path when it's missing — every row is treated as ``include``,
+# which is exactly what they were before 0053 anyway.
+#
+# The flag is set lazily on first use rather than at import time so a
+# DB that's still booting / migrating doesn't crash the import.
+_MODE_COLUMN_AVAILABLE: Optional[bool] = None
+
+
+def _mode_column_available(db: Session) -> bool:
+    """Return True iff ``customer_segments_manual.mode`` exists in the
+    bound database. Caches the answer on the module so we don't run
+    the probe on every helper call."""
+    global _MODE_COLUMN_AVAILABLE
+    if _MODE_COLUMN_AVAILABLE is not None:
+        return _MODE_COLUMN_AVAILABLE
+    try:
+        # The cheapest way to check: SELECT mode FROM ... LIMIT 0.
+        # If the column is missing the DB raises ProgrammingError /
+        # OperationalError before scanning any row.
+        db.query(CustomerSegmentManual.mode).limit(0).all()
+        _MODE_COLUMN_AVAILABLE = True
+    except (ProgrammingError, OperationalError):
+        # Roll back so the session isn't left in a broken state.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _MODE_COLUMN_AVAILABLE = False
+        logger.warning(
+            "[manual_segments] mode column missing on customer_segments_manual; "
+            "falling back to legacy (mode-less) helpers. Run alembic upgrade head."
+        )
+    except Exception:
+        # Any other error: assume available; the per-helper try/except
+        # will catch and roll back if it lies.
+        _MODE_COLUMN_AVAILABLE = True
+    return _MODE_COLUMN_AVAILABLE
 
 
 # ── Validation ──────────────────────────────────────────────────────────
@@ -216,16 +262,30 @@ def list_manual_segments_for_customer(
     """Return the *included* segment keys this customer is manually
     pinned to (sorted). Used by the legacy callers that only care
     about positive tags. ``list_manual_sources_for_customer`` returns
-    the include + exclude breakdown for the new sources UI."""
-    rows = (
+    the include + exclude breakdown for the new sources UI.
+
+    Pre-0053 fallback: returns every tagged segment as if mode were
+    ``include`` (the legacy semantic).
+    """
+    base = (
         db.query(CustomerSegmentManual.segment_key)
         .filter(
             CustomerSegmentManual.tenant_id == tenant_id,
             CustomerSegmentManual.customer_id == customer_id,
-            CustomerSegmentManual.mode == MODE_INCLUDE,
         )
-        .all()
     )
+    if _mode_column_available(db):
+        try:
+            rows = base.filter(CustomerSegmentManual.mode == MODE_INCLUDE).all()
+            return sorted({r[0] for r in rows})
+        except (ProgrammingError, OperationalError):
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            global _MODE_COLUMN_AVAILABLE
+            _MODE_COLUMN_AVAILABLE = False
+    rows = base.all()
     return sorted({r[0] for r in rows})
 
 
@@ -236,16 +296,36 @@ def list_manual_sources_for_customer(
 
     Used by the drawer to render the per-segment source label
     ("VIP يدوي + تلقائي" vs "مستبعد يدويًا من VIP" vs "VIP تلقائي").
+
+    Pre-0053 fallback: every row is reported as ``include``.
     """
-    rows = (
-        db.query(CustomerSegmentManual.segment_key, CustomerSegmentManual.mode)
+    if _mode_column_available(db):
+        try:
+            rows = (
+                db.query(CustomerSegmentManual.segment_key, CustomerSegmentManual.mode)
+                .filter(
+                    CustomerSegmentManual.tenant_id == tenant_id,
+                    CustomerSegmentManual.customer_id == customer_id,
+                )
+                .all()
+            )
+            return {k: m for (k, m) in rows}
+        except (ProgrammingError, OperationalError):
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            global _MODE_COLUMN_AVAILABLE
+            _MODE_COLUMN_AVAILABLE = False
+    rows_legacy = (
+        db.query(CustomerSegmentManual.segment_key)
         .filter(
             CustomerSegmentManual.tenant_id == tenant_id,
             CustomerSegmentManual.customer_id == customer_id,
         )
         .all()
     )
-    return {k: m for (k, m) in rows}
+    return {r[0]: MODE_INCLUDE for r in rows_legacy}
 
 
 def list_manual_segments_bulk(
@@ -258,18 +338,38 @@ def list_manual_segments_bulk(
     want the positive-tag list don't have to re-filter. For the
     full include + exclude breakdown use
     ``list_manual_sources_bulk``.
+
+    Defensive against pre-0053 schemas: if the ``mode`` column is
+    missing, we treat every row as ``include`` (the legacy semantic)
+    instead of 500-ing the caller. The customers page must keep
+    working during a Railway deploy where the migration runs after
+    the new code reaches the worker.
     """
     if not customer_ids:
         return {}
-    rows = (
+    base = (
         db.query(CustomerSegmentManual.customer_id, CustomerSegmentManual.segment_key)
         .filter(
             CustomerSegmentManual.tenant_id == tenant_id,
             CustomerSegmentManual.customer_id.in_(customer_ids),
-            CustomerSegmentManual.mode == MODE_INCLUDE,
         )
-        .all()
     )
+    if _mode_column_available(db):
+        try:
+            rows = base.filter(CustomerSegmentManual.mode == MODE_INCLUDE).all()
+        except (ProgrammingError, OperationalError):
+            # Probe lied (e.g. column dropped after probe). Re-probe
+            # next call by clearing the cache, and fall back to
+            # mode-less for THIS call.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            global _MODE_COLUMN_AVAILABLE
+            _MODE_COLUMN_AVAILABLE = False
+            rows = base.all()
+    else:
+        rows = base.all()
     out: Dict[int, Set[str]] = {}
     for cid, key in rows:
         out.setdefault(cid, set()).add(key)
@@ -283,14 +383,43 @@ def list_manual_sources_bulk(
 
     Powers the ``segment_sources`` field in the customers list
     response so the drawer can render labels without an N+1 fetch.
+
+    Pre-0053 fallback: when the ``mode`` column doesn't exist yet we
+    return every row as ``include``. This keeps the customers list
+    response shape stable during a deploy where the worker beats
+    the migration to the start line.
     """
     if not customer_ids:
         return {}
-    rows = (
+    if _mode_column_available(db):
+        try:
+            rows = (
+                db.query(
+                    CustomerSegmentManual.customer_id,
+                    CustomerSegmentManual.segment_key,
+                    CustomerSegmentManual.mode,
+                )
+                .filter(
+                    CustomerSegmentManual.tenant_id == tenant_id,
+                    CustomerSegmentManual.customer_id.in_(customer_ids),
+                )
+                .all()
+            )
+            out: Dict[int, Dict[str, str]] = {}
+            for cid, key, mode in rows:
+                out.setdefault(cid, {})[key] = mode
+            return out
+        except (ProgrammingError, OperationalError):
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            global _MODE_COLUMN_AVAILABLE
+            _MODE_COLUMN_AVAILABLE = False
+    rows_legacy = (
         db.query(
             CustomerSegmentManual.customer_id,
             CustomerSegmentManual.segment_key,
-            CustomerSegmentManual.mode,
         )
         .filter(
             CustomerSegmentManual.tenant_id == tenant_id,
@@ -299,8 +428,8 @@ def list_manual_sources_bulk(
         .all()
     )
     out: Dict[int, Dict[str, str]] = {}
-    for cid, key, mode in rows:
-        out.setdefault(cid, {})[key] = mode
+    for cid, key in rows_legacy:
+        out.setdefault(cid, {})[key] = MODE_INCLUDE
     return out
 
 
@@ -321,16 +450,34 @@ def customer_ids_with_manual_segment(
     key = (segment_key or "").strip().lower()
     if not key:
         return []
-    rows = (
+    base = (
         db.query(CustomerSegmentManual.customer_id)
         .filter(
             CustomerSegmentManual.tenant_id == tenant_id,
             CustomerSegmentManual.segment_key == key,
-            CustomerSegmentManual.mode == mode,
         )
-        .all()
     )
-    return [r[0] for r in rows]
+    # Pre-0053 fallback: with no mode column, every row is treated
+    # as ``include``. ``mode='exclude'`` queries return [] instead
+    # of crashing — there can't be any exclude rows on a schema
+    # that doesn't know what excludes are.
+    if not _mode_column_available(db):
+        if mode == MODE_EXCLUDE:
+            return []
+        return [r[0] for r in base.all()]
+    try:
+        rows = base.filter(CustomerSegmentManual.mode == mode).all()
+        return [r[0] for r in rows]
+    except (ProgrammingError, OperationalError):
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        global _MODE_COLUMN_AVAILABLE
+        _MODE_COLUMN_AVAILABLE = False
+        if mode == MODE_EXCLUDE:
+            return []
+        return [r[0] for r in base.all()]
 
 
 def smart_remove_manual_segment(
