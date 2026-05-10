@@ -32,6 +32,7 @@ from services.nahla_segments import (
 from services.manual_segments import (
     UnknownSegmentError,
     add_manual_segment,
+    assert_known_segment,
     customer_ids_with_manual_segment,
     list_manual_segments_bulk,
     list_manual_segments_for_customer,
@@ -184,12 +185,25 @@ def _resolve_customer_source(cust: "Customer") -> tuple:  # type: ignore[type-ar
     return (composite_key, composite_label)
 
 
-def _iso(dt: Optional[datetime]) -> Optional[str]:
+def _iso(dt) -> Optional[str]:
+    """Render a datetime / string / None as an ISO-8601 timestamp.
+
+    Accepts plain strings too because the legacy raw-SQL helpers in
+    ``services.manual_segments`` return SQLite's ``CURRENT_TIMESTAMP``
+    as a string (not a parsed datetime) — we don't want the customer
+    drawer to crash with ``str.tzinfo`` just because the migration
+    hasn't run yet.
+    """
     if not dt:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat()
+    if isinstance(dt, str):
+        return dt  # already ISO-shaped from the DB
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except Exception:
+        return str(dt)
 
 
 def _days_since(dt: Optional[datetime]) -> Optional[int]:
@@ -575,9 +589,15 @@ async def list_customers(
             from services.manual_segments import (  # noqa: PLC0415
                 list_manual_sources_bulk,
             )
+            # NOTE: deliberately NOT re-importing ``build_segment_query``
+            # here — Python's local-name analysis would treat the
+            # (never-executed) re-import as making the name a local
+            # for the entire function, shadowing the module-level
+            # import and breaking the earlier seg_key filter branch
+            # with UnboundLocalError. We reuse the module-level
+            # import already at the top of the file.
             from services.nahla_segments import (  # noqa: PLC0415
                 all_segment_keys,
-                build_segment_query,
             )
             manual_sources = list_manual_sources_bulk(
                 db, tenant_id, customer_ids,
@@ -711,8 +731,18 @@ async def debug_manual_segments(
     known = sorted(all_segment_keys())
     unknown = sorted({s["segment_key"] for s in stored} - set(known))
 
+    from services.manual_segments import (  # noqa: PLC0415
+        MODE_EXCLUDE, MODE_INCLUDE,
+        _mode_column_available, list_manual_sources_for_customer,
+    )
+    mode_avail = _mode_column_available(db)
+
     customer_tags = None
+    customer_unified_membership = None
     if customer_id is not None:
+        # Pull raw rows including ``mode`` when available. We use
+        # getattr to avoid AttributeError on legacy schemas where
+        # the model attribute exists but the column doesn't.
         rows = (
             db.query(CustomerSegmentManual)
             .filter(
@@ -721,25 +751,68 @@ async def debug_manual_segments(
             )
             .all()
         )
-        customer_tags = [
-            {
+        customer_tags = []
+        for r in rows:
+            row_mode: Optional[str]
+            if mode_avail:
+                try:
+                    row_mode = getattr(r, "mode", None) or MODE_INCLUDE
+                except Exception:
+                    row_mode = None
+            else:
+                # Legacy schema — every row is implicitly ``include``.
+                row_mode = MODE_INCLUDE
+            customer_tags.append({
                 "id":           r.id,
                 "segment_key":  r.segment_key,
-                "key_repr":     repr(r.segment_key),  # exposes hidden whitespace
+                "mode":         row_mode,
+                "key_repr":     repr(r.segment_key),
                 "key_len":      len(r.segment_key or ""),
                 "is_in_known":  (r.segment_key in known),
                 "created_at":   r.created_at.isoformat() if r.created_at else None,
+            })
+
+        # ── Unified membership breakdown ─────────────────────────
+        # For every Nahla segment, compute whether THIS customer
+        # ends up in the segment per the canonical formula:
+        #     (auto ∨ include) ∧ ¬ exclude
+        # so a merchant ticket "I tagged هيثم but VIP filter
+        # doesn't show him" can be debugged in one curl.
+        manual_sources = list_manual_sources_for_customer(db, tenant_id, customer_id)
+        breakdown: Dict[str, Dict[str, Any]] = {}
+        for seg_key in known:
+            try:
+                auto_q = build_segment_query(seg_key, db, tenant_id, require_reachable=False)
+                auto_match = (
+                    auto_q.with_entities(Customer.id)
+                    .filter(Customer.id == customer_id)
+                    .first() is not None
+                ) if auto_q is not None else False
+            except Exception:
+                auto_match = False
+            mode = manual_sources.get(seg_key)
+            inc = mode == MODE_INCLUDE
+            exc = mode == MODE_EXCLUDE
+            member = (auto_match or inc) and not exc
+            if not (auto_match or inc or exc):
+                continue
+            breakdown[seg_key] = {
+                "automatic":      bool(auto_match),
+                "manual_include": inc,
+                "manual_exclude": exc,
+                "is_member":      bool(member),
             }
-            for r in rows
-        ]
+        customer_unified_membership = breakdown
 
     return {
-        "tenant_id":             tenant_id,
-        "known_segment_keys":    known,
+        "tenant_id":              tenant_id,
+        "mode_column_available":  mode_avail,
+        "known_segment_keys":     known,
         "stored_keys_for_tenant": stored,
-        "stored_keys_unknown":   unknown,
-        "customer_id":           customer_id,
-        "customer_tags":         customer_tags,
+        "stored_keys_unknown":    unknown,
+        "customer_id":            customer_id,
+        "customer_tags":          customer_tags,
+        "customer_unified_membership": customer_unified_membership,
     }
 
 
@@ -989,7 +1062,8 @@ async def add_customer_segment(
     accepted keys.
     """
     from services.manual_segments import (  # noqa: PLC0415
-        ALLOWED_MODES, MODE_INCLUDE, list_manual_sources_for_customer,
+        ALLOWED_MODES, MODE_INCLUDE, ModeColumnUnavailableError,
+        _mode_column_available, list_manual_sources_for_customer,
     )
     tenant_id = resolve_tenant_id(request)
     requested_mode = (body.mode or MODE_INCLUDE).strip().lower()
@@ -1007,16 +1081,32 @@ async def add_customer_segment(
         raise HTTPException(status_code=422, detail=str(exc))
     except LookupError:
         raise HTTPException(status_code=404, detail="العميل غير موجود")
+    except ModeColumnUnavailableError:
+        # Legacy schema can't honour exclude rows yet. Surface a
+        # structured 200 so the dashboard renders a clear message
+        # instead of a 500.
+        return {
+            "customer_id":              customer_id,
+            "ok":                       False,
+            "code":                     "platform_upgrading",
+            "message":                  (
+                "نحن نُحدّث المنصة الآن — أعد المحاولة خلال دقيقة."
+            ),
+            "mode_column_available":    False,
+            "segment_key":              body.segment_key,
+        }
 
     return {
-        "customer_id":      customer_id,
-        "segment_key":      row.segment_key,
-        "mode":             row.mode,
-        "label_ar":         _segment_label_for_key(row.segment_key),
-        "source":           row.source,
-        "created_at":       _iso(row.created_at),
-        "manual_segments":  list_manual_segments_for_customer(db, tenant_id, customer_id),
-        "manual_sources":   list_manual_sources_for_customer(db, tenant_id, customer_id),
+        "customer_id":           customer_id,
+        "ok":                    True,
+        "segment_key":           row.segment_key,
+        "mode":                  getattr(row, "mode", None) or "include",
+        "label_ar":              _segment_label_for_key(row.segment_key),
+        "source":                row.source,
+        "created_at":            _iso(row.created_at),
+        "mode_column_available": _mode_column_available(db),
+        "manual_segments":       list_manual_segments_for_customer(db, tenant_id, customer_id),
+        "manual_sources":        list_manual_sources_for_customer(db, tenant_id, customer_id),
     }
 
 
@@ -1040,11 +1130,20 @@ async def remove_customer_segment(
       * If neither row exists, returns ``"noop"``.
 
     Returns 200 in all cases — merchant retries on flaky networks
-    must converge to "removed" without flashing a 404.
+    must converge to "removed" without flashing a 404. Unknown
+    segment keys (e.g. an Arabic label sent by mistake) return a
+    structured 200 with ``ok=false`` and a clear message rather
+    than a 500.
     """
+    import logging  # noqa: PLC0415
+
     from services.manual_segments import (  # noqa: PLC0415
-        list_manual_sources_for_customer, smart_remove_manual_segment,
+        _mode_column_available,
+        list_manual_sources_for_customer,
+        smart_remove_manual_segment,
     )
+    log = logging.getLogger("nahla.customers.segment_delete")
+
     tenant_id = resolve_tenant_id(request)
     cust = db.query(Customer).filter(
         Customer.id == customer_id, Customer.tenant_id == tenant_id,
@@ -1052,8 +1151,36 @@ async def remove_customer_segment(
     if not cust:
         raise HTTPException(status_code=404, detail="العميل غير موجود")
 
+    raw_key = segment_key
+    normalised_key = (segment_key or "").strip().lower()
+    mode_avail = _mode_column_available(db)
+
     try:
-        normalised_key = segment_key.strip().lower()
+        # Validate first so an Arabic label / typo doesn't crash the
+        # auto-match query later.
+        try:
+            normalised_key = assert_known_segment(normalised_key)
+        except UnknownSegmentError as exc:
+            log.info(
+                "delete_segment unknown_key | tenant=%s customer=%s "
+                "raw=%r normalised=%r mode_avail=%s err=%s",
+                tenant_id, customer_id, raw_key, normalised_key,
+                mode_avail, exc,
+            )
+            return {
+                "customer_id":           customer_id,
+                "ok":                    False,
+                "code":                  "unknown_segment",
+                "message":               (
+                    f"تصنيف غير معروف: {raw_key!r}. الرجاء استخدام مفاتيح "
+                    "نحلة الرسمية فقط."
+                ),
+                "segment_key_received":  raw_key,
+                "normalised_key":        normalised_key,
+                "mode_column_available": mode_avail,
+                "action":                "failed",
+            }
+
         auto_match = _customer_matches_auto_segment(
             db, tenant_id, customer_id, normalised_key,
         )
@@ -1061,15 +1188,50 @@ async def remove_customer_segment(
             db, tenant_id=tenant_id, customer_id=customer_id,
             segment_key=normalised_key, auto_match=auto_match,
         )
-    except UnknownSegmentError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        # Last-resort defence — any unexpected error must not 500
+        # the customer card. Roll back, log, and return a clean
+        # JSON failure the UI can render.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        log.exception(
+            "delete_segment unexpected | tenant=%s customer=%s "
+            "raw=%r normalised=%r mode_avail=%s",
+            tenant_id, customer_id, raw_key, normalised_key, mode_avail,
+        )
+        return {
+            "customer_id":           customer_id,
+            "ok":                    False,
+            "code":                  "internal_error",
+            "message":               (
+                "تعذر إزالة التصنيف — حدث خطأ مؤقت. حاول مجدداً، وإن "
+                "تكرر تواصل مع الدعم."
+            ),
+            "segment_key_received":  raw_key,
+            "normalised_key":        normalised_key,
+            "mode_column_available": mode_avail,
+            "action":                "failed",
+            "error":                 type(exc).__name__,
+        }
+
+    log.info(
+        "delete_segment ok | tenant=%s customer=%s key=%r "
+        "auto_match=%s action=%s mode_avail=%s",
+        tenant_id, customer_id, normalised_key,
+        auto_match, action, mode_avail,
+    )
 
     return {
-        "customer_id":     customer_id,
-        "action":          action,  # "deleted" | "excluded" | "noop"
-        "auto_match":      auto_match,
-        "manual_segments": list_manual_segments_for_customer(db, tenant_id, customer_id),
-        "manual_sources":  list_manual_sources_for_customer(db, tenant_id, customer_id),
+        "customer_id":           customer_id,
+        "ok":                    True,
+        "action":                action,  # deleted | excluded | noop | deleted_legacy
+        "auto_match":            auto_match,
+        "segment_key":           normalised_key,
+        "mode_column_available": mode_avail,
+        "manual_segments":       list_manual_segments_for_customer(db, tenant_id, customer_id),
+        "manual_sources":        list_manual_sources_for_customer(db, tenant_id, customer_id),
     }
 
 

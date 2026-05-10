@@ -98,6 +98,18 @@ def _make_db():
     for col, orig in _saved:
         col.type = orig
     Session = sessionmaker(bind=engine)
+
+    # Reset the module-level mode-column probe cache. Each test gets
+    # a fresh in-memory engine, but the cache lives at the module
+    # level — without this reset, a test that drops the column would
+    # poison the cache for every subsequent test that uses a fresh
+    # schema where the column is present.
+    try:
+        import services.manual_segments as _ms
+        _ms._MODE_COLUMN_AVAILABLE = None
+    except Exception:
+        pass
+
     return Session(), engine
 
 
@@ -951,6 +963,158 @@ class TestCustomersListEndpointContract:
 
         result = self._call_list(engine, tenant_id, manual_segment="")
         assert result["total"] == 3
+
+    def _call_delete(self, engine, tenant_id: int, customer_id: int, segment_key: str):
+        """Direct in-process call to ``remove_customer_segment``."""
+        import asyncio
+
+        from routers import customers as customers_router
+
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        original_resolve = customers_router.resolve_tenant_id
+        customers_router.resolve_tenant_id = (  # type: ignore
+            lambda request, db=None: tenant_id
+        )
+
+        class _FakeReq:
+            headers: dict = {}
+            cookies: dict = {}
+            state = type("S", (), {})()
+
+        try:
+            return asyncio.run(
+                customers_router.remove_customer_segment(
+                    customer_id=customer_id,
+                    segment_key=segment_key,
+                    request=_FakeReq(),
+                    db=db,
+                )
+            )
+        finally:
+            customers_router.resolve_tenant_id = original_resolve
+            db.close()
+
+    def test_delete_segment_on_pre_0053_schema_does_not_crash(self):
+        # The exact ticket: clicking "إزالة" on a tagged customer
+        # would 500 on a tenant whose database hadn't seen 0053 yet.
+        # Now we degrade to a legacy plain-delete and return 200.
+        from sqlalchemy import text
+
+        import services.manual_segments as ms
+
+        db, engine = _make_db()
+        t = _seed_tenant(db, "Big")
+        c = _seed_customer(db, t.id, "+966500000001")
+        # Seed a manual include row for "promising" — this is what
+        # هيثم's row looks like in production.
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id, segment_key="promising",
+        )
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        # Drop the column to simulate the deploy-window state.
+        ms._MODE_COLUMN_AVAILABLE = None
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DROP INDEX IF EXISTS ix_customer_segments_manual_tenant_segment_mode"
+            ))
+            conn.execute(text(
+                "ALTER TABLE customer_segments_manual DROP COLUMN mode"
+            ))
+
+        try:
+            result = self._call_delete(engine, tenant_id, customer_id, "promising")
+            # Endpoint must return 200-shaped JSON, not raise / 500.
+            assert result["ok"] is True
+            assert result["mode_column_available"] is False
+            # Action is either "deleted" (no auto match) or
+            # "deleted_legacy" (auto match but no exclude support).
+            assert result["action"] in {"deleted", "deleted_legacy"}
+            assert result["segment_key"] == "promising"
+        finally:
+            ms._MODE_COLUMN_AVAILABLE = None
+
+    def test_delete_segment_with_modern_schema_converts_to_exclude_when_auto_matches(self):
+        # On the modern schema, when the auto classifier still
+        # matches, smart-remove must create an exclude row so the
+        # customer doesn't pop back into the segment one second
+        # after the merchant removed them.
+        import services.manual_segments as ms
+
+        db, engine = _make_db()
+        t = _seed_tenant(db, "Big")
+        c = _seed_customer(db, t.id, "+966500000001")
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id, segment_key="promising",
+        )
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        # Force the auto-match path — easiest by monkey-patching
+        # the helper, since we don't want to seed RFM data.
+        import routers.customers as customers_router
+        original_match = customers_router._customer_matches_auto_segment
+        customers_router._customer_matches_auto_segment = (  # type: ignore
+            lambda db, tid, cid, key: True
+        )
+        try:
+            result = self._call_delete(engine, tenant_id, customer_id, "promising")
+            assert result["ok"] is True
+            assert result["mode_column_available"] is True
+            assert result["auto_match"] is True
+            assert result["action"] == "excluded"
+        finally:
+            customers_router._customer_matches_auto_segment = original_match
+            ms._MODE_COLUMN_AVAILABLE = None
+
+    def test_delete_segment_with_arabic_label_returns_clean_error(self):
+        # Frontend bug-or-future-feature: if the merchant sends an
+        # Arabic label like "عملاء واعدون" instead of the canonical
+        # English key, we must NOT 500. We surface ok=false with a
+        # clear message and the unrecognised key echoed back.
+        db, engine = _make_db()
+        t = _seed_tenant(db, "Big")
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        result = self._call_delete(
+            engine, tenant_id, customer_id, "عملاء واعدون",
+        )
+        assert result["ok"] is False
+        assert result["code"] == "unknown_segment"
+        assert result["segment_key_received"] == "عملاء واعدون"
+        assert result["action"] == "failed"
+        # And the message is in Arabic so the UI can render it as-is.
+        assert "تصنيف" in result["message"] or "نحلة" in result["message"]
+
+    def test_filter_by_promising_includes_manual_include_only_customers(self):
+        # The user's complaint: هيثم was manually tagged as
+        # promising but the chip filter "عملاء واعدون" didn't show
+        # him. The unified-segment formula must include him via
+        # manual_include even when the auto classifier disagrees.
+        db, engine = _make_db()
+        t = _seed_tenant(db, "Big")
+        # Seed two customers — neither will match the auto
+        # "promising" classifier (no orders, no profile), so the
+        # only way for them to surface under that chip is via the
+        # manual include row.
+        c1 = _seed_customer(db, t.id, "+966500000001")
+        c2 = _seed_customer(db, t.id, "+966500000002")
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c1.id, segment_key="promising",
+        )
+        # c2 stays untagged — should NOT appear in the filter.
+        tenant_id, c1_id, c2_id = t.id, c1.id, c2.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, segment="promising")
+        ids = {c["id"] for c in result["customers"]}
+        assert c1_id in ids, "manual_include must surface customer in chip filter"
+        assert c2_id not in ids, "untagged customer must NOT surface"
 
     def test_endpoint_does_not_crash_on_pre_0053_schema(self):
         # The exact regression that took the customers page down on
