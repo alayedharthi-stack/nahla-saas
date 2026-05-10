@@ -294,15 +294,29 @@ export default function Customers() {
         />
       </div>
 
-      {/* Nahla segment chips — same registry as the campaign wizard so a
-          merchant who counts "12 VIPs" here sees exactly 12 reachable
-          (or near-reachable) candidates when they open a campaign. */}
-      <SegmentChips
-        segments={segments}
-        loading={segmentsLoading}
-        active={segmentKey}
-        onSelect={setSegmentKey}
-      />
+      {/* Unified segment chips — each chip shows EVERY customer in that
+          cohort, whether the auto classifier put them there OR the
+          merchant added them manually. The drawer surfaces the source
+          per-customer ("VIP تلقائي" vs "VIP يدوي" vs "VIP يدوي + تلقائي").
+          We label the strip explicitly so merchants don't read "RFM"
+          into it — to them it's just "the segments". */}
+      <div className="space-y-1">
+        <div className="flex items-center gap-2 px-1">
+          <Tag className="w-3.5 h-3.5 text-slate-400" />
+          <span className="text-[11px] font-semibold text-slate-600">
+            شرائح العملاء
+          </span>
+          <span className="text-[10px] text-slate-400">
+            تشمل التصنيف الذكي والتصنيف اليدوي معاً
+          </span>
+        </div>
+        <SegmentChips
+          segments={segments}
+          loading={segmentsLoading}
+          active={segmentKey}
+          onSelect={setSegmentKey}
+        />
+      </div>
 
       {/* Search + Actions */}
       <div className="flex items-center gap-3 flex-wrap">
@@ -317,23 +331,22 @@ export default function Customers() {
           />
         </div>
 
-        {/* Manual segment filter — distinct axis from `segmentKey`
-            (the chip strip above filters by the *auto* classifier).
-            Special value "none" returns customers without any manual
-            tag at all. Designed as a dropdown to keep the chip strip
-            uncluttered.  */}
+        {/* Manual-only filter — narrow axis for merchants who want to
+            see ONLY their manually-tagged customers (e.g. for audit).
+            The chip strip above already unions auto+manual so this
+            dropdown is opt-in tooling, not the default path. */}
         <div className="relative">
           <Tag className="absolute start-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
           <select
             value={manualSegmentKey}
             onChange={(e) => setManualSegmentKey(e.target.value)}
             className="ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
-            title="فلترة حسب التصنيف اليدوي"
+            title="فلترة حسب العملاء المُصنَّفين يدوياً فقط"
           >
-            <option value="">كل التصنيفات اليدوية</option>
-            <option value="none">— بدون تصنيف يدوي —</option>
+            <option value="">عرض الكل</option>
+            <option value="none">— بدون أي تصنيف يدوي —</option>
             {segments.filter(s => s.key !== 'all').map(s => (
-              <option key={s.key} value={s.key}>{s.label_ar}</option>
+              <option key={s.key} value={s.key}>يدوي فقط: {s.label_ar}</option>
             ))}
           </select>
         </div>

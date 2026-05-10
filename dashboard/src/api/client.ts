@@ -112,20 +112,41 @@ export async function apiCall<T>(path: string, options?: RequestInit): Promise<T
   //   { detail: { code: "subscription_inactive", message: "..."} }
   // Surface as a normal Error whose `.message` is the human Arabic text and
   // whose `.code` (when present) is the machine-readable reason.
-  const buildApiError = (body: any, fallback: string): Error & { code?: string; status?: number } => {
+  const buildApiError = (body: any, fallback: string): Error & { code?: string; status?: number; validation?: unknown } => {
     let msg  = fallback
     let code: string | undefined
+    let validation: unknown
     const d = body?.detail
     if (typeof d === 'string') {
       msg = d
+    } else if (Array.isArray(d)) {
+      // FastAPI validation errors arrive as:
+      //   detail: [{ loc:[...], msg:"...", type:"..." }, ...]
+      // Without this branch, all 422s collapsed into the generic
+      // "API error 422" message — which is exactly what users
+      // saw when a campaign launch failed validation.
+      validation = d
+      const parts: string[] = []
+      for (const item of d) {
+        if (item && typeof item === 'object') {
+          const loc = Array.isArray(item.loc) ? item.loc.slice(1).join('.') : ''
+          const m = typeof item.msg === 'string' ? item.msg : ''
+          if (loc && m) parts.push(`${loc}: ${m}`)
+          else if (m) parts.push(m)
+        }
+      }
+      if (parts.length > 0) {
+        msg = `بيانات الطلب غير صالحة — ${parts.join('؛ ')}`
+      }
     } else if (d && typeof d === 'object') {
       if (typeof d.message === 'string' && d.message.trim()) msg = d.message
       else if (typeof d.detail === 'string') msg = d.detail
       if (typeof d.code === 'string') code = d.code
     }
-    const err = new Error(msg) as Error & { code?: string; status?: number }
-    err.code   = code
-    err.status = res.status
+    const err = new Error(msg) as Error & { code?: string; status?: number; validation?: unknown }
+    err.code       = code
+    err.status     = res.status
+    err.validation = validation
     return err
   }
 

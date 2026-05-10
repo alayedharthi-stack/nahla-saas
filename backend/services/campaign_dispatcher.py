@@ -275,10 +275,20 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
     )
 
     # Read manual exclusion list (set by the wizard step 2 "استبعد X").
-    # Stored as JSON list under `template_variables._exclude_segments`
-    # so we don't need a new column on `campaigns`.
+    # Stored as JSON list under `template_variables._exclude_segments`.
+    # The router normalises any non-string value in template_variables
+    # to a JSON-encoded string before persisting (because the column
+    # is Dict[str, str]), so we accept both shapes here:
+    #   * list[str]  — legacy / direct-writer path.
+    #   * str        — JSON-encoded list, the new normalised shape.
     tpl_vars_for_excl = campaign.template_variables or {}
     excl_raw = tpl_vars_for_excl.get("_exclude_segments") or []
+    if isinstance(excl_raw, str):
+        try:
+            import json as _json  # noqa: PLC0415
+            excl_raw = _json.loads(excl_raw) if excl_raw.strip() else []
+        except Exception:
+            excl_raw = []
     excluded_segments: List[str] = (
         [str(s).strip().lower() for s in excl_raw if str(s).strip()]
         if isinstance(excl_raw, list) else []

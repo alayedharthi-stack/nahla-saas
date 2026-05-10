@@ -45,7 +45,17 @@ class CreateCampaignIn(BaseModel):
     template_language: str = "ar"
     template_category: str = "MARKETING"
     template_body: str = ""
-    template_variables: Optional[Dict[str, str]] = None
+    # ``template_variables`` is a free-form bag the frontend uses for
+    # both real placeholder values (e.g. {"1": "خصم 20%"}) AND for
+    # internal control keys (``_exclude_segments`` is a string[],
+    # ``_failed_count`` is an int-as-str, etc.). It MUST accept any
+    # JSON value type — restricting to ``Dict[str, str]`` here was
+    # the root cause of the 422 production bug ("API error 422" on
+    # campaign launch when the wizard sent ``_exclude_segments: []``
+    # because Pydantic rejected the list as not-a-string).
+    # Normalisation back to strings happens server-side just before
+    # we persist into ``Campaign.template_variables``.
+    template_variables: Optional[Dict[str, Any]] = None
     audience_type: str = "all"
     audience_count: int = 0
     schedule_type: str = "immediate"
@@ -235,7 +245,23 @@ async def create_campaign(
         except ValueError:
             pass
 
-    tpl_vars = dict(body.template_variables or {})
+    # Coerce anything the frontend stuffed into template_variables to
+    # strings (or JSON-strings for lists/dicts). The DB column is a
+    # string-keyed JSON map and the dispatcher reads everything back
+    # as strings, so any list/int needs serialising once here.
+    raw_vars = dict(body.template_variables or {})
+    tpl_vars: Dict[str, str] = {}
+    for k, v in raw_vars.items():
+        if isinstance(v, str):
+            tpl_vars[k] = v
+        elif isinstance(v, (list, dict)):
+            import json as _json  # noqa: PLC0415
+            tpl_vars[k] = _json.dumps(v, ensure_ascii=False)
+        elif v is None:
+            tpl_vars[k] = ""
+        else:
+            tpl_vars[k] = str(v)
+
     if body.auto_coupon:
         tpl_vars["_auto_coupon"] = "true"
     if body.discount_percent is not None and body.discount_percent > 0:
