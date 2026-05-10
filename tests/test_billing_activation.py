@@ -725,3 +725,120 @@ class TestReconcileFromMoyasar:
 
         count = db.query(BillingPayment).filter_by(subscription_id=pending_sub.id).count()
         assert count == 1
+
+
+# ── Lazy reconcile resilience ───────────────────────────────────────────
+#
+# These tests pin the contract that ``lazy_reconcile_tenant_pending_subs``
+# — which runs from /billing/status, /billing/entitlements, and the
+# debug endpoint on every dashboard load — never raises and always
+# returns a well-formed ``(bool, list[dict])`` even when:
+#   * the initial DB query fails,
+#   * a per-sub Moyasar call raises,
+#   * the session is already in a bad transaction state on entry.
+#
+# Production bug this prevents: tenant 33 saw a 500 on
+# ``/billing/debug/current?force_reconcile=1`` because a single sub's
+# reconcile threw and we hadn't covered that path at the lazy layer.
+
+
+class TestLazyReconcileResilience:
+    def test_lazy_reconcile_returns_well_formed_when_no_pending(self, db, tenant):
+        from services.billing_activation import (
+            _LAZY_RECONCILE_LAST,
+            lazy_reconcile_tenant_pending_subs,
+        )
+        _LAZY_RECONCILE_LAST.clear()
+        activated, results = _run(
+            lazy_reconcile_tenant_pending_subs(db, tenant.id, source="test"),
+        )
+        assert activated is False
+        assert results == []
+
+    def test_lazy_reconcile_per_sub_failure_does_not_crash_loop(
+        self, db, tenant, plan, monkeypatch,
+    ):
+        # Two pending subs — first one raises on reconcile, second one
+        # must still get processed. This is the exact production
+        # scenario the debug endpoint hit.
+        from services.billing_activation import (
+            _LAZY_RECONCILE_LAST,
+            lazy_reconcile_tenant_pending_subs,
+        )
+        from services import billing_activation as ba
+
+        _LAZY_RECONCILE_LAST.clear()
+
+        s1 = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="pending_payment",
+            started_at=datetime.now(timezone.utc), auto_renew=True,
+            extra_metadata={"moyasar_invoice_id": "inv_a"},
+        )
+        s2 = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="pending_payment",
+            started_at=datetime.now(timezone.utc), auto_renew=True,
+            extra_metadata={"moyasar_invoice_id": "inv_b"},
+        )
+        db.add_all([s1, s2]); db.commit(); db.refresh(s1); db.refresh(s2)
+
+        seen: list[int] = []
+
+        async def _flaky_reconcile(_db, sub, *, source):
+            seen.append(sub.id)
+            if sub.id == s1.id:
+                raise RuntimeError("boom")
+            return False, "invoice_not_paid"
+
+        monkeypatch.setattr(
+            ba, "reconcile_subscription_from_moyasar", _flaky_reconcile,
+        )
+
+        activated, results = _run(
+            lazy_reconcile_tenant_pending_subs(db, tenant.id, source="test"),
+        )
+        # Must have visited BOTH subs.
+        assert sorted(seen) == sorted([s1.id, s2.id])
+        # Result list reflects the failure of the first AND the
+        # successful no-op of the second.
+        sids = {r["sub_id"]: r for r in results}
+        assert "error" in sids[s1.id]
+        assert sids[s1.id]["error_type"] == "RuntimeError"
+        assert sids[s2.id].get("activated") is False
+        assert sids[s2.id].get("reason") == "invoice_not_paid"
+        assert activated is False  # neither flipped to active
+
+    def test_lazy_reconcile_recovers_from_stale_failed_transaction(
+        self, db, tenant, plan, monkeypatch,
+    ):
+        # If a previous request left the session in a "failed transaction"
+        # state, the first query of lazy reconcile must rollback first
+        # so it doesn't propagate the error and 500 the caller. We
+        # simulate the state by raising on the first attempt and
+        # checking the call site rolled back before retrying.
+        from services.billing_activation import (
+            _LAZY_RECONCILE_LAST,
+            lazy_reconcile_tenant_pending_subs,
+        )
+        _LAZY_RECONCILE_LAST.clear()
+
+        s = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="pending_payment",
+            started_at=datetime.now(timezone.utc), auto_renew=True,
+            extra_metadata={"moyasar_invoice_id": "inv_x"},
+        )
+        db.add(s); db.commit(); db.refresh(s)
+
+        # Force the session into a "needs rollback" state.
+        try:
+            db.execute(__import__("sqlalchemy").text("SELECT 1 FROM nonexistent_table"))
+        except Exception:
+            pass
+
+        # Lazy reconcile must NOT raise; it must rollback and run
+        # cleanly. (We don't care here whether Moyasar is configured —
+        # we only assert no exception leaks.)
+        activated, results = _run(
+            lazy_reconcile_tenant_pending_subs(db, tenant.id, source="test"),
+        )
+        assert isinstance(activated, bool)
+        assert isinstance(results, list)

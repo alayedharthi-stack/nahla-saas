@@ -22,7 +22,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -924,38 +924,92 @@ async def billing_debug_current(
     request: Request,
     db: Session = Depends(get_db),
     force_reconcile: bool = False,
+    include_traceback: bool = True,
 ):
     """One-stop diagnostic dump for "why doesn't my plan show?" tickets.
 
-    Returns the same row of truth as the merchant dashboard sees — but
-    with all the upstream data points laid out side-by-side so you can
-    immediately tell where the divergence is. Common patterns this catches:
+    Hardening contract — this endpoint MUST NEVER 500. Every section
+    is wrapped in its own try/except so a failure in one block (e.g.
+    the reconcile step crashes, the session is dirtied, get_entitlements
+    explodes) cannot prevent the rest of the diagnostic JSON from
+    being returned. Each section also calls ``db.rollback()`` defensively
+    before its query so a previous block's pending exception cannot
+    poison subsequent reads.
 
-      * ``active_subscription_id`` is set but ``latest_subscription_id``
-        is *different* and ``pending_payment`` → the merchant clicked
-        Subscribe twice; the cancel-stale-siblings rule or the
-        active-first lookup will resolve it. (Both shipped in
-        commit d5a110be.)
-      * ``billing_status_endpoint.has_subscription`` is true but
-        ``entitlements.plan == "none"`` → the plan_id→slug join was
-        broken. Fixed by the BillingPlan lookup in get_entitlements.
-      * ``billing_subs_count > 1`` and multiple ``active`` rows → data
-        integrity bug; never expected.
+    Common patterns this catches:
 
-    No secrets are leaked — only IDs, statuses, and slugs.
+      * ``active_subscription_id`` set but ``latest_subscription_id``
+        *different* and pending → merchant clicked Subscribe twice.
+      * ``billing_status_endpoint.has_subscription`` true but
+        ``entitlements.plan == "none"`` → plan_id→slug join broken.
+      * ``billing_subs_count > 1`` with multiple ``active`` rows →
+        data integrity bug.
+      * Any single ``_section_errors`` entry → bug to investigate.
+
+    No secrets are leaked — only IDs, statuses, slugs, and tracebacks
+    of internal Python errors (which never contain user data).
     """
-    tenant_id = resolve_tenant_id(request)
-    get_or_create_tenant(db, tenant_id)
-
+    import traceback as _tb  # noqa: PLC0415
     from core.billing import compute_trial_info, get_tenant_subscription  # noqa: PLC0415
     from core.plan_entitlements import get_entitlements  # noqa: PLC0415
 
-    # Optional: actively poke Moyasar for any pending invoice. This is
-    # the same self-heal logic that runs lazily in /billing/status,
-    # but the debug endpoint accepts ``?force_reconcile=1`` to bypass
-    # the in-memory cooldown — useful when ops is debugging a stuck
-    # tenant and wants the truthiest possible snapshot in one shot.
-    reconcile_actions: list[dict] = []
+    payload: Dict[str, Any] = {
+        "tenant_id":     None,
+        "force_reconcile": force_reconcile,
+        "_section_errors": {},
+    }
+
+    def _safe_section(name: str):
+        """Decorator-ish helper: run ``fn`` and stash the result under
+        ``payload[name]``; on exception, capture traceback under
+        ``payload['_section_errors'][name]`` and rollback the session
+        so the next section starts clean. Returns True iff the section
+        succeeded — callers can branch on this if a later section
+        depends on the result."""
+        def _runner(fn):
+            try:
+                payload[name] = fn()
+                return True
+            except Exception as exc:
+                # Reset the session so subsequent queries don't
+                # get an "InFailedSqlTransaction" cascade error.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                err: Dict[str, Any] = {
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                }
+                if include_traceback:
+                    err["traceback"] = _tb.format_exc()
+                payload["_section_errors"][name] = err
+                payload[name] = None
+                return False
+        return _runner
+
+    # ── 0. Resolve tenant ────────────────────────────────────────────
+    tenant: Optional[Tenant] = None
+    try:
+        payload["tenant_id"] = resolve_tenant_id(request)
+        tenant = get_or_create_tenant(db, payload["tenant_id"])
+    except Exception as exc:
+        payload["_section_errors"]["resolve_tenant"] = {
+            "error_type":    type(exc).__name__,
+            "error_message": str(exc),
+            "traceback":     _tb.format_exc() if include_traceback else None,
+        }
+        # Without a tenant_id we can't query anything else — return
+        # what we have so the caller at least sees the auth error.
+        return payload
+
+    tenant_id = payload["tenant_id"]
+
+    # ── 1. Force reconcile (optional) ────────────────────────────────
+    # This is the most likely source of crashes (network call, Moyasar
+    # parse, DB write conflict). Isolated so a failure here doesn't
+    # take the rest of the dump with it. Cannot use _safe_section
+    # because that wraps a sync function and we need ``await``.
     if force_reconcile:
         try:
             from services.billing_activation import (  # noqa: PLC0415
@@ -963,98 +1017,173 @@ async def billing_debug_current(
                 lazy_reconcile_tenant_pending_subs,
             )
             _LAZY_RECONCILE_LAST.clear()
-            _, reconcile_actions = await lazy_reconcile_tenant_pending_subs(
+            _, reconcile_results = await lazy_reconcile_tenant_pending_subs(
                 db, int(tenant_id), source="debug_force_reconcile",
             )
+            payload["reconcile_actions"] = reconcile_results
         except Exception as exc:
-            reconcile_actions = [{"error": str(exc)}]
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            payload["_section_errors"]["reconcile_actions"] = {
+                "error_type":    type(exc).__name__,
+                "error_message": str(exc),
+                "traceback":     _tb.format_exc() if include_traceback else None,
+            }
+            payload["reconcile_actions"] = None
+    else:
+        payload["reconcile_actions"] = []
 
-    tenant = get_or_create_tenant(db, tenant_id)
-    all_subs = (
-        db.query(BillingSubscription)
-        .filter(BillingSubscription.tenant_id == tenant_id)
-        .order_by(BillingSubscription.id.desc())
-        .all()
-    )
-    active_sub = get_tenant_subscription(db, tenant_id)
-    latest_sub = all_subs[0] if all_subs else None
-
-    def _sub_view(sub):
-        if not sub:
-            return None
-        plan = (
-            db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
-            if sub.plan_id else None
-        )
-        meta = sub.extra_metadata or {}
-        return {
-            "id":                   sub.id,
-            "status":               sub.status,
-            "plan_id":              sub.plan_id,
-            "plan_slug":            plan.slug if plan else None,
-            "plan_name_ar":         (plan.extra_metadata or {}).get("name_ar") if plan else None,
-            "started_at":           sub.started_at.isoformat() if sub.started_at else None,
-            "ends_at":              sub.ends_at.isoformat() if sub.ends_at else None,
-            "moyasar_invoice_id":   meta.get("moyasar_invoice_id"),
-            "moyasar_payment_id":   meta.get("moyasar_payment_id"),
-            "activation_source":    meta.get("activation_source"),
-            "paid_at":              meta.get("paid_at"),
-            "price_charged_sar":    meta.get("price_charged_sar"),
-        }
-
-    ent = get_entitlements(db, tenant_id)
-    trial = compute_trial_info(tenant)
-
-    # Echo what GET /billing/status would return — not by re-issuing the
-    # request, just by computing the same booleans here so any drift
-    # between the two views is immediately visible.
-    bstatus = {
-        "has_subscription": active_sub is not None,
-        "status_field":     active_sub.status if active_sub else ("trial" if trial["is_trial"] else "none"),
-        "is_trial":         active_sub is None and trial["is_trial"],
-        "trial_expired":    active_sub is None and trial["trial_expired"],
-    }
-
-    # ── WA usage view ────────────────────────────────────────────────
-    # This is what the Overview page actually reads to render the
-    # "97/100 محادثة" warning. If this view says limit=100 while
-    # entitlements says plan=growth, that's the smoking gun for the
-    # ``_get_or_create_usage`` re-sync miss.
-    wa_usage_view: dict | None = None
+    # Re-fetch tenant in case reconcile updated tenant.subscription_status.
     try:
-        from core.wa_usage import get_usage_this_month  # noqa: PLC0415
-        wa_usage_view = get_usage_this_month(db, int(tenant_id))
-    except Exception as exc:
-        wa_usage_view = {"error": str(exc)}
+        db.rollback()
+    except Exception:
+        pass
+    try:
+        tenant = get_or_create_tenant(db, tenant_id)
+    except Exception:
+        pass
 
-    return {
-        "tenant_id": tenant_id,
-        "tenant": {
+    # ── 2. Tenant snapshot ───────────────────────────────────────────
+    @_safe_section("tenant")
+    def _tenant_view():
+        if tenant is None:
+            return None
+        return {
             "name":                tenant.name,
             "subscription_status": tenant.subscription_status,
             "trial_started_at":    tenant.trial_started_at.isoformat() if tenant.trial_started_at else None,
             "trial_ends_at":       tenant.trial_ends_at.isoformat() if tenant.trial_ends_at else None,
-        },
-        "billing_subs_count":           len(all_subs),
-        "billing_subs_by_status": {
-            s: sum(1 for x in all_subs if x.status == s)
-            for s in {x.status for x in all_subs}
-        },
-        "active_subscription":          _sub_view(active_sub),
-        "latest_subscription":          _sub_view(latest_sub),
-        "entitlements": {
+        }
+
+    # ── 3. All subs + active/latest views ────────────────────────────
+    def _sub_view(sub: Optional[BillingSubscription]) -> Optional[Dict[str, Any]]:
+        if not sub:
+            return None
+        plan = None
+        try:
+            if sub.plan_id:
+                plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            plan = None
+        meta = sub.extra_metadata or {}
+        return {
+            "id":                 sub.id,
+            "status":             sub.status,
+            "plan_id":            sub.plan_id,
+            "plan_slug":          plan.slug if plan else None,
+            "plan_name_ar":       (plan.extra_metadata or {}).get("name_ar") if plan else None,
+            "started_at":         sub.started_at.isoformat() if sub.started_at else None,
+            "ends_at":            sub.ends_at.isoformat() if sub.ends_at else None,
+            "moyasar_invoice_id": meta.get("moyasar_invoice_id"),
+            "moyasar_payment_id": meta.get("moyasar_payment_id"),
+            "activation_source":  meta.get("activation_source"),
+            "paid_at":            meta.get("paid_at"),
+            "price_charged_sar":  meta.get("price_charged_sar"),
+        }
+
+    all_subs: list = []
+
+    @_safe_section("billing_subs_summary")
+    def _subs_summary():
+        nonlocal all_subs
+        all_subs = (
+            db.query(BillingSubscription)
+            .filter(BillingSubscription.tenant_id == tenant_id)
+            .order_by(BillingSubscription.id.desc())
+            .all()
+        )
+        return {
+            "count":         len(all_subs),
+            "by_status":     {s: sum(1 for x in all_subs if x.status == s) for s in {x.status for x in all_subs}},
+            "all_sub_ids":   [x.id for x in all_subs],
+        }
+
+    @_safe_section("active_subscription")
+    def _active_view():
+        return _sub_view(get_tenant_subscription(db, tenant_id))
+
+    @_safe_section("latest_subscription")
+    def _latest_view():
+        return _sub_view(all_subs[0] if all_subs else None)
+
+    # ── 4. Entitlements ──────────────────────────────────────────────
+    @_safe_section("entitlements")
+    def _ent_view():
+        ent = get_entitlements(db, tenant_id)
+        return {
             "plan":           ent.plan,
             "plan_name_ar":   ent.plan_name_ar,
             "billing_status": ent.billing_status,
             "is_active":      ent.is_active,
             "is_blocked":     ent.is_blocked,
-        },
-        "billing_status_endpoint": bstatus,
-        "trial_info":              trial,
-        # What Overview *actually* shows in the conversations card.
-        "wa_usage_overview_source": wa_usage_view,
-        "reconcile_actions":        reconcile_actions,
-    }
+        }
+
+    # ── 5. Trial info + billing-status endpoint mirror ───────────────
+    @_safe_section("trial_info")
+    def _trial_view():
+        if tenant is None:
+            return None
+        return compute_trial_info(tenant)
+
+    @_safe_section("billing_status_endpoint")
+    def _bstatus_view():
+        active_sub = None
+        try:
+            active_sub = get_tenant_subscription(db, tenant_id)
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        trial = compute_trial_info(tenant) if tenant else {"is_trial": False, "trial_expired": False}
+        return {
+            "has_subscription": active_sub is not None,
+            "status_field":     active_sub.status if active_sub else ("trial" if trial.get("is_trial") else "none"),
+            "is_trial":         active_sub is None and trial.get("is_trial", False),
+            "trial_expired":    active_sub is None and trial.get("trial_expired", False),
+        }
+
+    # ── 6. WA usage (the actual source the Overview page reads) ──────
+    @_safe_section("wa_usage_overview_source")
+    def _wa_usage_view():
+        from core.wa_usage import get_usage_this_month  # noqa: PLC0415
+        return get_usage_this_month(db, int(tenant_id))
+
+    # ── 7. Plain-DB peek at sub 11 metadata (for tenant 33 case) ─────
+    # When the merchant has many subs, this surfaces the row metadata
+    # in raw form so we can compare against ``active_subscription``.
+    @_safe_section("raw_pending_subs")
+    def _raw_pending():
+        rows = (
+            db.query(BillingSubscription)
+            .filter(
+                BillingSubscription.tenant_id == tenant_id,
+                BillingSubscription.status.in_(["pending_payment", "payment_failed"]),
+            )
+            .all()
+        )
+        return [
+            {
+                "id":                 s.id,
+                "status":             s.status,
+                "plan_id":            s.plan_id,
+                "moyasar_invoice_id": (s.extra_metadata or {}).get("moyasar_invoice_id"),
+                "moyasar_payment_id": (s.extra_metadata or {}).get("moyasar_payment_id"),
+                "activation_source":  (s.extra_metadata or {}).get("activation_source"),
+            }
+            for s in rows
+        ]
+
+    # If everything succeeded the errors dict is empty, which is the
+    # signal "this endpoint is healthy".
+    payload["_healthy"] = not payload["_section_errors"]
+    return payload
 
 
 # ── GET /billing/entitlements ──────────────────────────────────────────────────

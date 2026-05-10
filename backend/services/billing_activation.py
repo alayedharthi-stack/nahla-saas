@@ -389,14 +389,33 @@ async def lazy_reconcile_tenant_pending_subs(
     the activation helper was correct, but no caller was actually
     invoking it on the merchant's normal navigation path.
     """
-    pending = (
-        db.query(BillingSubscription)
-        .filter(
-            BillingSubscription.tenant_id == tenant_id,
-            BillingSubscription.status == "pending_payment",
+    # Defensive: if a previous request left the session in a failed
+    # transaction state, every query below will explode with
+    # InFailedSqlTransaction. Roll back first so we always start
+    # clean.
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+    try:
+        pending = (
+            db.query(BillingSubscription)
+            .filter(
+                BillingSubscription.tenant_id == tenant_id,
+                BillingSubscription.status == "pending_payment",
+            )
+            .all()
         )
-        .all()
-    )
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[lazy_reconcile] initial query failed tenant=%s: %r", tenant_id, exc,
+        )
+        return False, [{"error": "initial_query_failed", "detail": str(exc)}]
 
     activated_any = False
     results: list[dict] = []
@@ -409,11 +428,21 @@ async def lazy_reconcile_tenant_pending_subs(
                 db, sub, source=source,
             )
         except Exception as exc:
+            # Inner failure: roll back so the next sub doesn't inherit
+            # a poisoned session.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.warning(
                 "[lazy_reconcile] sub=%s tenant=%s exception=%r",
                 sub.id, tenant_id, exc,
             )
-            results.append({"sub_id": sub.id, "error": str(exc)})
+            results.append({
+                "sub_id":     sub.id,
+                "error":      str(exc),
+                "error_type": type(exc).__name__,
+            })
             continue
         activated_any = activated_any or activated
         results.append({"sub_id": sub.id, "activated": activated, "reason": reason})
