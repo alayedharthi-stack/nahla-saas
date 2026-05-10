@@ -240,7 +240,9 @@ export const customersApi = {
       segment_key: string
       mode_received?: string
       mode_column_available?: boolean
-      manual_sources?: Record<string, string[]>
+      /** Per-segment mode for THIS customer.
+       *  Shape: ``{ "<segment_key>": "include" | "exclude" }``. */
+      manual_sources?: Record<string, string>
     }>(`/customers/${id}/segments/${encodeURIComponent(segment_key)}/override`, {
       method: 'POST',
       body:   JSON.stringify({ mode }),

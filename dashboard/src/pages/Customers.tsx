@@ -985,10 +985,39 @@ function ManualSegmentsSection({
         setError(res.message || 'تعذر تحديث التصنيف')
         return
       }
-      const sources = (res.manual_sources || {}) as CustomerRecord['segment_sources']
-      // Recompute manual_segments locally from the new sources map
-      // so existing list-side rendering stays consistent.
-      const manual_segments = Object.entries(sources || {})
+      // Optimistic merge: rebuild the segment_sources map from the
+      // response. ``manual_sources`` is ``Record<key, "include"|"exclude">``
+      // while ``segment_sources`` is the richer per-segment breakdown
+      // (automatic / manual_include / manual_exclude / is_member) the
+      // backend computes for the list endpoint, so we merge by patching
+      // each touched key against the previous snapshot.
+      const manualModes = res.manual_sources || {}
+      const prevSources = customer.segment_sources || {}
+      const nextSources: CustomerRecord['segment_sources'] = { ...prevSources }
+      // Patch every key the response mentions (these are the only ones
+      // that can have changed) and also the touched key itself in case
+      // the response cleared it.
+      const touchedKeys = new Set<string>([key, ...Object.keys(manualModes)])
+      touchedKeys.forEach(k => {
+        const prev = prevSources[k] || {
+          automatic: false, manual_include: false,
+          manual_exclude: false, is_member: false,
+        }
+        const m = manualModes[k]
+        const manual_include = m === 'include'
+        const manual_exclude = m === 'exclude'
+        const is_member =
+          k === key && typeof res.is_member === 'boolean'
+            ? res.is_member
+            : (prev.automatic || manual_include) && !manual_exclude
+        nextSources[k] = {
+          automatic: prev.automatic,
+          manual_include,
+          manual_exclude,
+          is_member,
+        }
+      })
+      const manual_segments = Object.entries(nextSources || {})
         .filter(([, v]) => v?.manual_include)
         .map(([k]) => k)
       const manual_segments_labels = manual_segments.map(
@@ -996,10 +1025,13 @@ function ManualSegmentsSection({
       )
       await onChange({
         ...customer,
-        segment_sources:        sources,
+        segment_sources: nextSources,
         manual_segments,
         manual_segments_labels,
       })
+      // The chip strip counts on the list page depend on the same
+      // unified-membership formula, so trigger a reload so the
+      // merchant sees the new counts immediately.
       onRequireListReload?.()
     } catch (err: any) {
       setError(err?.detail || err?.message || 'تعذر تحديث التصنيف')
