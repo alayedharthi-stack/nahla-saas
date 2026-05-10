@@ -1116,12 +1116,18 @@ async def billing_debug_current(
     @_safe_section("entitlements")
     def _ent_view():
         ent = get_entitlements(db, tenant_id)
+        # The dataclass field is ``plan_slug``; the JSON-shaped public
+        # API uses key ``plan`` via ``to_dict()``. We hand back the
+        # full ``to_dict()`` so the debug payload mirrors exactly what
+        # /billing/entitlements returns to the dashboard, plus a couple
+        # of extra fields we lift to the top level for at-a-glance
+        # comparison with active_subscription.plan_slug.
+        d = ent.to_dict()
         return {
-            "plan":           ent.plan,
-            "plan_name_ar":   ent.plan_name_ar,
-            "billing_status": ent.billing_status,
-            "is_active":      ent.is_active,
-            "is_blocked":     ent.is_blocked,
+            **d,
+            "plan_slug":  ent.plan_slug,  # dataclass field, == d["plan"]
+            "is_active":  ent.is_active,
+            "is_blocked": ent.is_blocked,
         }
 
     # ── 5. Trial info + billing-status endpoint mirror ───────────────

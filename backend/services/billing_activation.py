@@ -58,6 +58,41 @@ ACTIVATABLE_STATUSES = frozenset({"pending_payment"})
 ACTIVE_STATUS = "active"
 
 
+def _is_revivable_cancelled(sub: BillingSubscription) -> bool:
+    """A sub is "revivable" iff it was cancelled by US (the
+    auto-sibling-cancel rule fired by ``_do_checkout`` when the
+    merchant clicked Subscribe again) AND it was never activated.
+
+    The two markers we use:
+      * ``status == "cancelled"`` — obvious.
+      * ``"paid_at" NOT IN extra_metadata`` — if it had ever been
+        active we'd have stamped ``paid_at`` on activation. So a
+        cancelled sub without paid_at has only ever been pending.
+
+    Why this matters — tenant 33 case:
+      * Merchant clicked Subscribe 5 times over a few days
+        (subs 2, 5, 10, 11, 12).
+      * Each new click auto-cancelled the previous pending row
+        (see ``_do_checkout`` in routers/billing.py).
+      * Merchant ended up paying the *invoice* attached to sub 11,
+        not the latest one (12). Moyasar accepted it and reported
+        invoice 11 as paid.
+      * Without revival, our reconcile only looked at sub 12 (still
+        pending) and ignored sub 11 (cancelled), so the merchant
+        stayed on trial despite paying SAR 849.
+
+    What this rule deliberately does NOT do:
+      * It does NOT revive admin-cancelled subs. Those have
+        ``paid_at`` set (they were active before being cancelled),
+        so they fail this check. Refunds / forced downgrades stay
+        cancelled even if Moyasar still reports paid.
+    """
+    if sub.status != "cancelled":
+        return False
+    meta = sub.extra_metadata or {}
+    return "paid_at" not in meta
+
+
 def _moyasar_client(db: Session, tenant_id: int):
     """Return a configured ``MoyasarClient`` for the tenant.
 
@@ -156,13 +191,20 @@ def activate_subscription_from_moyasar_invoice(
         return False, "already_active"
 
     if sub.status not in ACTIVATABLE_STATUSES:
-        # We refuse to silently revive cancelled / failed subscriptions.
-        # That should be an explicit admin action, not a side-effect.
-        logger.warning(
-            "[activation] refusing to activate sub=%s status=%r (not in %s)",
-            sub.id, sub.status, sorted(ACTIVATABLE_STATUSES),
+        # ``cancelled`` is special: revive iff cancelled-by-us-not-by-admin.
+        # See ``_is_revivable_cancelled`` for the safety contract.
+        if not _is_revivable_cancelled(sub):
+            logger.warning(
+                "[activation] refusing to activate sub=%s status=%r "
+                "(not in %s, not revivable)",
+                sub.id, sub.status, sorted(ACTIVATABLE_STATUSES),
+            )
+            return False, "unexpected_status"
+        logger.info(
+            "[activation] reviving auto-cancelled sub=%s tenant=%s "
+            "because Moyasar reports invoice paid",
+            sub.id, sub.tenant_id,
         )
-        return False, "unexpected_status"
 
     txn_ref = payment_id or extract_payment_id_from_invoice(invoice_data)
     if not txn_ref:
@@ -354,13 +396,28 @@ _LAZY_RECONCILE_LAST: dict[int, float] = {}
 
 
 def _should_attempt_lazy_reconcile(sub: BillingSubscription) -> bool:
-    """Throttle gate for lazy reconcile. True iff we haven't tried this
-    sub recently. Always returns True for active subs (no cooldown
-    needed since activation helper short-circuits on already-active)."""
-    if sub.status != "pending_payment":
+    """Throttle gate for lazy reconcile. True iff this sub is
+    eligible AND we haven't tried it recently.
+
+    Eligible:
+      * ``pending_payment`` with a moyasar_invoice_id, OR
+      * ``cancelled`` with a moyasar_invoice_id AND no ``paid_at``
+        marker (cancelled-by-us, never activated — the tenant-33 case).
+
+    Active subs always return False because the activation helper
+    short-circuits on ``already_active`` and we want to avoid wasted
+    Moyasar calls.
+    """
+    if sub.status == ACTIVE_STATUS:
         return False
     meta = sub.extra_metadata or {}
     if not meta.get("moyasar_invoice_id"):
+        return False
+    if sub.status == "pending_payment":
+        pass  # eligible
+    elif sub.status == "cancelled" and _is_revivable_cancelled(sub):
+        pass  # eligible
+    else:
         return False
     import time  # noqa: PLC0415
     now = time.monotonic()
@@ -399,11 +456,18 @@ async def lazy_reconcile_tenant_pending_subs(
         pass
 
     try:
-        pending = (
+        # We iterate ``pending_payment`` AND ``cancelled`` rows that
+        # carry a Moyasar invoice id. The cancelled set covers the
+        # tenant-33 case where the merchant clicked Subscribe several
+        # times — each click auto-cancelled the previous pending sub —
+        # and then paid an *older* (now-cancelled) invoice. Without
+        # including cancelled subs here, the lazy reconcile would
+        # silently skip the actually-paid invoice.
+        candidates = (
             db.query(BillingSubscription)
             .filter(
                 BillingSubscription.tenant_id == tenant_id,
-                BillingSubscription.status == "pending_payment",
+                BillingSubscription.status.in_(["pending_payment", "cancelled"]),
             )
             .all()
         )
@@ -417,19 +481,69 @@ async def lazy_reconcile_tenant_pending_subs(
         )
         return False, [{"error": "initial_query_failed", "detail": str(exc)}]
 
+    # Skip subs without a Moyasar invoice — there's nothing to ask
+    # Moyasar about. Also skip cancelled subs that were cancelled by
+    # an admin (paid_at present) — those are intentional and must
+    # not be auto-revived.
+    def _has_invoice(s: BillingSubscription) -> bool:
+        return bool((s.extra_metadata or {}).get("moyasar_invoice_id"))
+
+    pending = [s for s in candidates if s.status == "pending_payment" and _has_invoice(s)]
+    revivable = [
+        s for s in candidates
+        if s.status == "cancelled" and _has_invoice(s) and _is_revivable_cancelled(s)
+    ]
+    work = pending + revivable
+
     activated_any = False
     results: list[dict] = []
-    for sub in pending:
+    for sub in work:
+        # Both pending and revivable-cancelled subs go through the
+        # cooldown gate so a busy dashboard can't fan out N Moyasar
+        # API calls per page mount when a tenant has multiple stale
+        # invoices (e.g. tenant 33 with 5 subs, 4 of them cancelled).
         if not _should_attempt_lazy_reconcile(sub):
-            results.append({"sub_id": sub.id, "skipped": "throttled"})
+            results.append({"sub_id": sub.id, "status": sub.status, "skipped": "throttled"})
             continue
+        meta = sub.extra_metadata or {}
+        invoice_id = meta.get("moyasar_invoice_id")
+
+        # Snapshot the raw Moyasar invoice so the debug endpoint can
+        # surface "Moyasar says paid but we didn't activate" mismatches.
+        # We do this in addition to the reconcile call (not instead of)
+        # because the reconcile path does state-mutation; here we only
+        # want to read.
+        raw_snapshot: Optional[Dict[str, Any]] = None
+        try:
+            client = _moyasar_client(db, sub.tenant_id)
+            if client is not None and invoice_id:
+                raw_invoice = await client.get_invoice(invoice_id)
+                if isinstance(raw_invoice, dict):
+                    payments = raw_invoice.get("payments") or []
+                    raw_snapshot = {
+                        "id":          raw_invoice.get("id"),
+                        "status":      raw_invoice.get("status"),
+                        "amount":      raw_invoice.get("amount"),
+                        "currency":    raw_invoice.get("currency"),
+                        "callback_url": raw_invoice.get("callback_url"),
+                        "metadata":    raw_invoice.get("metadata"),
+                        "payments_count": len(payments),
+                        "first_payment": (
+                            {
+                                "id":     payments[0].get("id"),
+                                "status": payments[0].get("status"),
+                                "amount": payments[0].get("amount"),
+                            } if payments else None
+                        ),
+                    }
+        except Exception as exc:
+            raw_snapshot = {"error": f"snapshot_failed: {exc!r}"}
+
         try:
             activated, reason = await reconcile_subscription_from_moyasar(
                 db, sub, source=source,
             )
         except Exception as exc:
-            # Inner failure: roll back so the next sub doesn't inherit
-            # a poisoned session.
             try:
                 db.rollback()
             except Exception:
@@ -439,13 +553,21 @@ async def lazy_reconcile_tenant_pending_subs(
                 sub.id, tenant_id, exc,
             )
             results.append({
-                "sub_id":     sub.id,
-                "error":      str(exc),
-                "error_type": type(exc).__name__,
+                "sub_id":         sub.id,
+                "status_before":  sub.status,
+                "moyasar_snapshot": raw_snapshot,
+                "error":          str(exc),
+                "error_type":     type(exc).__name__,
             })
             continue
         activated_any = activated_any or activated
-        results.append({"sub_id": sub.id, "activated": activated, "reason": reason})
+        results.append({
+            "sub_id":           sub.id,
+            "status_before":    sub.status,
+            "activated":        activated,
+            "reason":           reason,
+            "moyasar_snapshot": raw_snapshot,
+        })
 
     if activated_any:
         logger.info(

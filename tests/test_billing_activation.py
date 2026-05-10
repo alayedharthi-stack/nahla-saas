@@ -265,18 +265,48 @@ class TestActivateSubscription:
         db.refresh(pending_sub)
         assert pending_sub.status == "pending_payment"  # untouched
 
-    def test_refuses_to_revive_cancelled_sub(self, db, pending_sub):
+    def test_refuses_to_revive_admin_cancelled_sub(self, db, pending_sub):
+        # Admin-cancelled sub: it WAS active before, so ``paid_at``
+        # is set in metadata. Even if Moyasar still reports the
+        # invoice as paid, we refuse to silently re-bill — the cancel
+        # was an explicit admin / merchant decision (refund, downgrade,
+        # etc.) and must not be undone by an automated reconcile.
         pending_sub.status = "cancelled"
+        meta = dict(pending_sub.extra_metadata or {})
+        meta["paid_at"] = datetime.now(timezone.utc).isoformat()
+        pending_sub.extra_metadata = meta
         db.commit()
+
         activated, reason = activate_subscription_from_moyasar_invoice(
             db, pending_sub, invoice_data=_paid_invoice(),
         )
         assert activated is False
         assert reason == "unexpected_status"
         db.refresh(pending_sub)
-        # Must NOT have flipped to active — that would silently re-bill
-        # a merchant who cancelled.
         assert pending_sub.status == "cancelled"
+
+    def test_revives_auto_cancelled_sub_when_invoice_was_paid(self, db, pending_sub):
+        # Tenant-33 case: merchant clicked Subscribe twice, our auto
+        # sibling-cancel rule cancelled this sub when the second one
+        # was created (so status="cancelled" but ``paid_at`` was never
+        # set). Then the merchant paid this old sub's Moyasar invoice.
+        # The reconcile MUST revive — otherwise the merchant pays and
+        # stays on trial.
+        pending_sub.status = "cancelled"
+        # No paid_at — proves this was never activated.
+        meta = dict(pending_sub.extra_metadata or {})
+        meta.pop("paid_at", None)
+        pending_sub.extra_metadata = meta
+        db.commit()
+
+        activated, reason = activate_subscription_from_moyasar_invoice(
+            db, pending_sub, invoice_data=_paid_invoice(),
+        )
+        assert activated is True
+        assert reason == "activated"
+        db.refresh(pending_sub)
+        assert pending_sub.status == "active"
+        assert (pending_sub.extra_metadata or {}).get("paid_at")
 
     def test_records_activation_source(self, db, pending_sub):
         activate_subscription_from_moyasar_invoice(
@@ -842,3 +872,107 @@ class TestLazyReconcileResilience:
         )
         assert isinstance(activated, bool)
         assert isinstance(results, list)
+
+    def test_lazy_reconcile_revives_auto_cancelled_paid_sub(
+        self, db, tenant, plan, monkeypatch,
+    ):
+        # The exact tenant-33 production scenario:
+        #   1. Auto-cancelled sub 11 (status=cancelled, has invoice, no paid_at).
+        #   2. Newer pending sub 12 (status=pending_payment, different invoice).
+        #   3. Moyasar reports sub 11's invoice as PAID, sub 12's as pending.
+        # Expected: lazy reconcile finds sub 11 via the cancelled-revivable
+        # path, queries Moyasar, sees paid, and flips sub 11 to active.
+        # Sub 12 stays pending (its invoice isn't paid).
+        from services.billing_activation import (
+            _LAZY_RECONCILE_LAST,
+            lazy_reconcile_tenant_pending_subs,
+        )
+        from services import billing_activation as ba
+
+        _LAZY_RECONCILE_LAST.clear()
+
+        sub11 = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="cancelled",
+            started_at=datetime.now(timezone.utc), auto_renew=True,
+            extra_metadata={"moyasar_invoice_id": "inv_11"},  # NO paid_at
+        )
+        sub12 = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="pending_payment",
+            started_at=datetime.now(timezone.utc), auto_renew=True,
+            extra_metadata={"moyasar_invoice_id": "inv_12"},
+        )
+        db.add_all([sub11, sub12]); db.commit()
+        db.refresh(sub11); db.refresh(sub12)
+
+        # Mock Moyasar: inv_11 paid, inv_12 still pending.
+        class _Fake:
+            async def get_invoice(self, invoice_id):
+                if invoice_id == "inv_11":
+                    return {**_paid_invoice(invoice_id="inv_11", payment_id="pay_11")}
+                return {**_paid_invoice(invoice_id="inv_12"), "status": "pending"}
+        monkeypatch.setattr(ba, "_moyasar_client", lambda *_a, **_k: _Fake())
+
+        activated, results = _run(
+            lazy_reconcile_tenant_pending_subs(db, tenant.id, source="test"),
+        )
+
+        assert activated is True
+        # Sub 11 must now be active.
+        db.refresh(sub11)
+        assert sub11.status == "active"
+        # Sub 12 must be cancelled — the activation helper cancels
+        # stale sibling pending subs so the merchant ends up with
+        # exactly one non-cancelled subscription, never two.
+        db.refresh(sub12)
+        assert sub12.status == "cancelled"
+        # The result list includes raw moyasar snapshots so the debug
+        # endpoint can surface what Moyasar said. Note: sub12's snapshot
+        # may be missing if it was iterated AFTER sub11's activation
+        # (and thus already cancelled by the sibling rule); but sub11's
+        # snapshot must be present.
+        snaps_by_sub = {r["sub_id"]: r for r in results}
+        assert "moyasar_snapshot" in snaps_by_sub[sub11.id]
+        assert snaps_by_sub[sub11.id]["moyasar_snapshot"]["status"] == "paid"
+
+    def test_lazy_reconcile_skips_admin_cancelled_subs(
+        self, db, tenant, plan, monkeypatch,
+    ):
+        # Admin-cancelled sub (paid_at present) must NEVER be revived
+        # by lazy reconcile, even if Moyasar still reports paid.
+        from services.billing_activation import (
+            _LAZY_RECONCILE_LAST,
+            lazy_reconcile_tenant_pending_subs,
+        )
+        from services import billing_activation as ba
+
+        _LAZY_RECONCILE_LAST.clear()
+
+        admin_cancelled = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="cancelled",
+            started_at=datetime.now(timezone.utc), auto_renew=True,
+            extra_metadata={
+                "moyasar_invoice_id": "inv_old",
+                "paid_at": datetime.now(timezone.utc).isoformat(),  # was active
+            },
+        )
+        db.add(admin_cancelled); db.commit(); db.refresh(admin_cancelled)
+
+        called: list[str] = []
+
+        class _Fake:
+            async def get_invoice(self, invoice_id):
+                called.append(invoice_id)
+                return _paid_invoice(invoice_id=invoice_id)
+        monkeypatch.setattr(ba, "_moyasar_client", lambda *_a, **_k: _Fake())
+
+        activated, results = _run(
+            lazy_reconcile_tenant_pending_subs(db, tenant.id, source="test"),
+        )
+
+        assert activated is False
+        # Critically — Moyasar must NOT have been called for an
+        # admin-cancelled sub. We never want to read the invoice,
+        # let alone activate it.
+        assert called == []
+        db.refresh(admin_cancelled)
+        assert admin_cancelled.status == "cancelled"
