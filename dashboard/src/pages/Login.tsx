@@ -31,6 +31,34 @@ export default function Login() {
   const [error,    setError]    = useState('')
   const [loading,  setLoading]  = useState(false)
 
+  // ── Diagnostics gating ──────────────────────────────────────────────────
+  // The connection-diagnostics box used to ship to every merchant's
+  // login page — including the live API base URL, /auth/ping result,
+  // and a "switch to Railway domain" button. That made sense while
+  // the custom-domain edge was flaky during launch, but it leaks
+  // implementation detail in production and looks unprofessional.
+  //
+  // The box (and its on-mount /auth/ping probe — which generates a
+  // visible console error when the host is unreachable) is now gated
+  // to:
+  //
+  //   • ``import.meta.env.DEV`` — local / preview builds
+  //   • ``?debug=1`` query param — opt-in escape hatch for support
+  //                                 ("can you open the page with
+  //                                  ?debug=1 and tell me what
+  //                                  /auth/ping says?")
+  //
+  // Production end-users see neither the panel nor the probe.
+  const showDiag: boolean = (() => {
+    if (import.meta.env.DEV) return true
+    try {
+      const sp = new URLSearchParams(window.location.search)
+      return sp.get('debug') === '1'
+    } catch {
+      return false
+    }
+  })()
+
   // ── Diagnostics state ───────────────────────────────────────────────────
   // Visible to the operator on the page itself (not just DevTools).
   // Refreshed on mount and after each user-triggered "Recheck".
@@ -61,11 +89,12 @@ export default function Login() {
   }
 
   // ── Connectivity probe on mount ─────────────────────────────────────────
-  // Runs once when the login page mounts. Tells us in DevTools AND on
-  // the page itself whether the browser can even reach the API host
-  // before the user types credentials. If this fails the issue is API
-  // base URL / CORS / service-worker cache, NOT the password.
+  // Runs only when diagnostics are enabled (dev build or ?debug=1).
+  // Skipping it in production means: no extra request on every login
+  // pageview, and no console-error noise for end users when the
+  // probe path 404s during a partial deploy.
   useEffect(() => {
+    if (!showDiag) return
     let cancelled = false
     void pingAuth().then(r => {
       if (cancelled) return
@@ -77,7 +106,7 @@ export default function Login() {
       else      console.error('[auth] /auth/ping FAILED', r)
     })
     return () => { cancelled = true }
-  }, [])
+  }, [showDiag])
 
   const switchToRailway = () => {
     setApiBaseOverride(RAILWAY_FALLBACK_BASE)
@@ -276,15 +305,14 @@ export default function Login() {
         </p>
 
         {/* ── Connection diagnostics ────────────────────────────────────
-            Always visible (collapsed) so the operator can fix a stuck
-            login WITHOUT opening DevTools. Shows the live API base,
-            ping result, and gives one-click access to:
-              - retry ping
-              - switch to the Railway-generated domain (when the
-                custom-domain edge is dropping OPTIONS/POSTs)
-              - switch back to the custom domain
-              - clear stale service workers + caches
+            Hidden in production. Renders only in dev builds or when
+            the page is opened with ``?debug=1``. The block contains
+            the live API base URL, /auth/ping result, and recovery
+            buttons (switch host, clear service worker + caches) —
+            useful while we hardened the custom-domain edge during
+            launch, but not something every merchant should see.
         */}
+        {showDiag && (
         <div className="mt-4 text-xs text-slate-400">
           <button
             type="button"
@@ -364,6 +392,7 @@ export default function Login() {
             </div>
           )}
         </div>
+        )}
 
         {/* Footer */}
         <div className="mt-6 pb-4 flex flex-col items-center gap-2">
