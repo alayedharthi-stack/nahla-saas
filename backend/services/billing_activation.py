@@ -193,6 +193,30 @@ def activate_subscription_from_moyasar_invoice(
     meta["activation_source"] = source
     sub.extra_metadata = meta
 
+    # ── Cancel sibling pending subs for the same tenant ────────────────
+    # If the merchant clicked "subscribe" multiple times before payment
+    # confirmation arrived, ``_do_checkout`` may have left several
+    # ``pending_payment`` rows behind. Now that THIS sub is active, the
+    # others are stale by definition — we cancel them so admin / billing
+    # queries that pick "latest sub" cannot return a ghost pending row
+    # ahead of the real active one. Without this step the tenants table
+    # was rendering ``Growth + pending_payment`` even though sub 11 had
+    # been correctly activated.
+    cancelled_siblings = (
+        db.query(BillingSubscription)
+        .filter(
+            BillingSubscription.tenant_id == sub.tenant_id,
+            BillingSubscription.id != sub.id,
+            BillingSubscription.status.in_(["pending_payment", "payment_failed"]),
+        )
+        .update({"status": "cancelled"}, synchronize_session=False)
+    )
+    if cancelled_siblings:
+        logger.info(
+            "[activation] cancelled %d stale sibling sub(s) for tenant=%s active_sub=%s",
+            cancelled_siblings, sub.tenant_id, sub.id,
+        )
+
     invoice_amount_h = int(invoice_data.get("amount") or 0)
     final_amount_sar = (invoice_amount_h // 100) or int(meta.get("price_charged_sar") or 0)
 

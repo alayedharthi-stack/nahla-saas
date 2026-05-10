@@ -331,6 +331,210 @@ class TestActivateSubscription:
         assert payment.transaction_reference == "pay_explicit"
 
 
+# ── Sibling cancellation invariant ──────────────────────────────────────
+
+
+class TestSiblingCancellation:
+    """Activation must leave the tenant with exactly one non-cancelled
+    subscription. This is the invariant that protects the admin tenants
+    table from rendering ``Growth + pending_payment`` for a tenant whose
+    real state is ``Growth + active`` (the production bug that exposed
+    this — a merchant who clicked Subscribe again after paying ended up
+    with a fresh stale ``pending_payment`` row that ranked higher in the
+    "latest sub" query than the activated one)."""
+
+    def test_other_pending_subs_cancelled_on_activation(
+        self, db, tenant, plan, pending_sub,
+    ):
+        # Simulate the merchant clicking "Subscribe" twice — _do_checkout
+        # creates a second pending row alongside the first.
+        sib_a = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id,
+            status="pending_payment",
+            started_at=datetime.now(timezone.utc),
+            auto_renew=True, extra_metadata={"reason": "second_click"},
+        )
+        sib_b = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id,
+            status="pending_payment",
+            started_at=datetime.now(timezone.utc),
+            auto_renew=True, extra_metadata={"reason": "third_click"},
+        )
+        db.add_all([sib_a, sib_b]); db.commit()
+
+        activate_subscription_from_moyasar_invoice(
+            db, pending_sub, invoice_data=_paid_invoice(),
+        )
+        db.expire_all()  # drop session cache so we read committed state
+
+        active = (
+            db.query(BillingSubscription)
+            .filter_by(tenant_id=tenant.id, status="active").all()
+        )
+        cancelled = (
+            db.query(BillingSubscription)
+            .filter_by(tenant_id=tenant.id, status="cancelled").all()
+        )
+        assert {s.id for s in active} == {pending_sub.id}
+        assert {s.id for s in cancelled} == {sib_a.id, sib_b.id}
+
+    def test_active_subs_in_other_tenants_untouched(
+        self, db, tenant, plan, pending_sub,
+    ):
+        # Sanity: cancellation must be tenant-scoped. A pending sub in a
+        # *different* tenant must NOT be cancelled when this one activates.
+        from models import Tenant as TenantModel  # noqa: PLC0415
+        other_tenant = TenantModel(name="Other tenant")
+        db.add(other_tenant); db.commit(); db.refresh(other_tenant)
+
+        other_pending = BillingSubscription(
+            tenant_id=other_tenant.id, plan_id=plan.id,
+            status="pending_payment",
+            started_at=datetime.now(timezone.utc),
+            auto_renew=True, extra_metadata={},
+        )
+        db.add(other_pending); db.commit(); db.refresh(other_pending)
+
+        activate_subscription_from_moyasar_invoice(
+            db, pending_sub, invoice_data=_paid_invoice(),
+        )
+        db.refresh(other_pending)
+        assert other_pending.status == "pending_payment"
+
+    def test_cancelled_subs_not_revived(self, db, tenant, plan, pending_sub):
+        # Already-cancelled rows must stay cancelled (we filter to
+        # only ``pending_payment`` / ``payment_failed``).
+        cancelled = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="cancelled",
+            started_at=datetime.now(timezone.utc),
+            auto_renew=False, extra_metadata={"old": True},
+        )
+        db.add(cancelled); db.commit(); db.refresh(cancelled)
+
+        activate_subscription_from_moyasar_invoice(
+            db, pending_sub, invoice_data=_paid_invoice(),
+        )
+        db.refresh(cancelled)
+        assert cancelled.status == "cancelled"
+
+
+# ── _latest_subscription_for_tenant priority ────────────────────────────
+
+
+class TestLatestSubscriptionPriority:
+    """The admin tenants table reads ``_latest_subscription_for_tenant``
+    to render Plan + Status. Before the fix, this query was a naive
+    ``ORDER BY started_at DESC`` that surfaced any newly-created
+    ``pending_payment`` row over an existing ``active`` one. These tests
+    pin the priority order: active > trialing > pending_payment > other."""
+
+    def _query(self, db, tenant_id):
+        # Import lazily so this test file doesn't pull the FastAPI app
+        # at module load time.
+        from routers.admin import _latest_subscription_for_tenant  # noqa: PLC0415
+        return _latest_subscription_for_tenant(db, tenant_id)
+
+    def test_active_beats_newer_pending(self, db, tenant, plan):
+        from datetime import timedelta as _td  # noqa: PLC0415
+        now = datetime.now(timezone.utc)
+        active = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="active",
+            started_at=now - _td(days=2), auto_renew=True, extra_metadata={},
+        )
+        # Newer pending — would win under the naive query.
+        pending = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="pending_payment",
+            started_at=now, auto_renew=True, extra_metadata={},
+        )
+        db.add_all([active, pending]); db.commit()
+
+        latest = self._query(db, tenant.id)
+        assert latest is not None
+        assert latest.id == active.id
+        assert latest.status == "active"
+
+    def test_trialing_beats_pending(self, db, tenant, plan):
+        now = datetime.now(timezone.utc)
+        trialing = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="trialing",
+            started_at=now, auto_renew=True, extra_metadata={},
+        )
+        pending = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="pending_payment",
+            started_at=now, auto_renew=True, extra_metadata={},
+        )
+        db.add_all([trialing, pending]); db.commit()
+
+        latest = self._query(db, tenant.id)
+        assert latest is not None
+        assert latest.status == "trialing"
+
+    def test_pending_returned_when_no_active(self, db, tenant, plan):
+        pending = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="pending_payment",
+            started_at=datetime.now(timezone.utc),
+            auto_renew=True, extra_metadata={},
+        )
+        db.add(pending); db.commit()
+
+        latest = self._query(db, tenant.id)
+        assert latest is not None
+        assert latest.status == "pending_payment"
+
+    def test_returns_cancelled_only_as_last_resort(self, db, tenant, plan):
+        cancelled = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="cancelled",
+            started_at=datetime.now(timezone.utc),
+            auto_renew=False, extra_metadata={},
+        )
+        db.add(cancelled); db.commit()
+
+        latest = self._query(db, tenant.id)
+        assert latest is not None
+        assert latest.status == "cancelled"
+
+    def test_returns_none_for_tenant_without_subs(self, db, tenant):
+        latest = self._query(db, tenant.id)
+        assert latest is None
+
+
+# ── End-to-end: paid invoice → admin tenant summary shows active ────────
+
+
+class TestEndToEndActivationVisible:
+    """Pin the full contract: when reconcile activates a sub, the admin
+    tenants table must render ``status=active``, not ``pending_payment``."""
+
+    def test_activation_flips_admin_summary_to_active(
+        self, db, tenant, plan, pending_sub,
+    ):
+        # Simulate a stale newer pending row created by a retry click.
+        retry = BillingSubscription(
+            tenant_id=tenant.id, plan_id=plan.id, status="pending_payment",
+            started_at=datetime.now(timezone.utc),
+            auto_renew=True, extra_metadata={"retry": True},
+        )
+        db.add(retry); db.commit()
+
+        # Activate the original sub (the one Moyasar actually charged).
+        activated, reason = activate_subscription_from_moyasar_invoice(
+            db, pending_sub, invoice_data=_paid_invoice(),
+        )
+        assert activated is True
+        assert reason == "activated"
+        db.expire_all()
+
+        from routers.admin import _latest_subscription_for_tenant  # noqa: PLC0415
+        latest = _latest_subscription_for_tenant(db, tenant.id)
+        assert latest is not None
+        assert latest.id == pending_sub.id
+        assert latest.status == "active"
+
+        # And the retry row is now cancelled.
+        db.refresh(retry)
+        assert retry.status == "cancelled"
+
+
 # ── reconcile_subscription_from_moyasar (the polling-page path) ─────────
 
 

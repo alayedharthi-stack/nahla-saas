@@ -170,11 +170,50 @@ def _set_settings_flags(settings: TenantSettings, key: str, values: Dict[str, An
 
 
 def _latest_subscription_for_tenant(db: Session, tenant_id: int) -> Optional[BillingSubscription]:
+    """Return the canonical "current" subscription for a tenant.
+
+    Resolution order:
+      1. Most recent ``active`` row, if any exists.
+      2. Most recent ``trialing`` row.
+      3. Most recent ``pending_payment`` row.
+      4. Most recent row of *any* status (cancelled / failed / etc.).
+
+    Why this is not just "ORDER BY started_at DESC LIMIT 1":
+        ``_do_checkout`` creates a fresh ``pending_payment`` row every
+        time the merchant clicks "Subscribe", and it does NOT cancel the
+        existing ``active`` sub when it does. So a merchant who pays
+        successfully (sub becomes active) and then accidentally clicks
+        Subscribe again ends up with [active, pending_payment] where
+        pending_payment is newer. A naive "latest" query would surface
+        the pending row and the admin UI would render
+        ``Growth + pending_payment`` even though the real billing state
+        is ``Growth + active``. This priority list pins the contract.
+
+    The activation helper also cancels stale ``pending_payment`` siblings
+    when a sub becomes active (see services/billing_activation.py), so
+    new flows can't reintroduce the inversion. This function is the
+    second line of defence for any historical rows that were created
+    before that fix landed.
+    """
+    base = db.query(BillingSubscription).filter(
+        BillingSubscription.tenant_id == tenant_id
+    )
+    for status in ("active", "trialing", "pending_payment"):
+        sub = (
+            base.filter(BillingSubscription.status == status)
+            .order_by(
+                BillingSubscription.started_at.desc(),
+                BillingSubscription.id.desc(),
+            )
+            .first()
+        )
+        if sub:
+            return sub
     return (
-        db.query(BillingSubscription)
-        .filter(BillingSubscription.tenant_id == tenant_id)
-        .order_by(BillingSubscription.started_at.desc(), BillingSubscription.id.desc())
-        .first()
+        base.order_by(
+            BillingSubscription.started_at.desc(),
+            BillingSubscription.id.desc(),
+        ).first()
     )
 
 
@@ -1347,6 +1386,85 @@ async def admin_billing_payments(
             }
             for row in rows
         ]
+    }
+
+
+@router.post("/admin/billing/reconcile/tenant/{tenant_id}")
+async def admin_billing_reconcile_tenant(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Reconcile every stuck Moyasar sub for a tenant in one shot.
+
+    Walks all of the tenant's subscriptions whose status is
+    ``pending_payment`` and that carry a ``moyasar_invoice_id``, and
+    runs the live reconcile against Moyasar for each. Returns a per-row
+    summary so ops can see what actually flipped.
+
+    This is the recommended ops path when a tenant says "I paid but my
+    plan still says pending" — it doesn't require the operator to first
+    figure out which subscription_id to target. After it runs, the
+    activation helper's "cancel stale siblings" rule (see
+    services/billing_activation.py) ensures only one row remains
+    non-cancelled.
+    """
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    pending_subs = (
+        db.query(BillingSubscription)
+        .filter(
+            BillingSubscription.tenant_id == tenant_id,
+            BillingSubscription.status == "pending_payment",
+        )
+        .order_by(BillingSubscription.id.desc())
+        .all()
+    )
+
+    from services.billing_activation import reconcile_subscription_from_moyasar  # noqa: PLC0415
+
+    results: List[Dict[str, Any]] = []
+    activated_any = False
+    for sub in pending_subs:
+        activated, reason = await reconcile_subscription_from_moyasar(
+            db, sub, source="admin_reconcile_tenant",
+        )
+        activated_any = activated_any or activated
+        results.append({
+            "subscription_id": sub.id,
+            "activated":       activated,
+            "reason":          reason,
+        })
+
+    audit(
+        "admin_billing_reconcile_tenant",
+        admin_id=_admin.get("user_id"),
+        tenant_id=tenant_id,
+        attempted=len(pending_subs),
+        activated=activated_any,
+    )
+
+    # Re-fetch the canonical "current" sub so the caller can confirm the
+    # tenants table will now render the correct row.
+    current = _latest_subscription_for_tenant(db, tenant_id)
+    plan = (
+        db.query(BillingPlan).filter(BillingPlan.id == current.plan_id).first()
+        if current and current.plan_id else None
+    )
+
+    return {
+        "tenant_id":       tenant_id,
+        "attempted":       len(pending_subs),
+        "activated":       activated_any,
+        "per_subscription": results,
+        "current": {
+            "subscription_id": current.id if current else None,
+            "status":          current.status if current else "none",
+            "plan_slug":       plan.slug if plan else None,
+            "plan_name":       plan.name if plan else None,
+        },
     }
 
 
