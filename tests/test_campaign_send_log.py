@@ -287,6 +287,154 @@ class TestFrequencyCap:
         assert row.status == LOG_SKIPPED_DUPLICATE
         assert row.skip_reason and REASON_FREQ_CAP in row.skip_reason
 
+    def test_cap_ignores_prior_failed_row_same_phone(self, monkeypatch):
+        """Failed attempts must NOT count toward frequency protection —
+        only provably successful WhatsApp sends do."""
+        from services import campaign_dispatcher as disp
+        monkeypatch.setattr(disp, "MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS", 14)
+
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp_a = _seed_campaign(db, t.id, tpl, name="A")
+        camp_b = _seed_campaign(db, t.id, tpl, name="B")
+
+        cust = _seed_customer(db, t.id, "+966500000050")
+
+        db.add(CampaignSendLog(
+            tenant_id=t.id,
+            campaign_id=camp_a.id,
+            customer_id=cust.id,
+            customer_phone_e164=cust.normalized_phone,
+            template_name=tpl.name,
+            template_language=tpl.language,
+            status="failed",
+            sent_at=datetime.now(timezone.utc) - timedelta(days=1),
+            error_message="Meta boom",
+        ))
+        db.commit()
+
+        _snapshot_recipients(db, t.id, camp_b.id, [cust], tpl)
+        db.commit()
+
+        skipped = _apply_frequency_cap(db, t.id, camp_b.id)
+        db.commit()
+
+        assert skipped == 0
+        row_b = db.query(CampaignSendLog).filter_by(campaign_id=camp_b.id).one()
+        assert row_b.status == LOG_QUEUED
+
+    def test_cap_ignores_sent_without_delivery_proof(self, monkeypatch):
+        """``status=sent`` without ``provider_message_id`` AND without
+        ``sent_at`` never counts — nothing proves Meta accepted it."""
+        from services import campaign_dispatcher as disp
+        monkeypatch.setattr(disp, "MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS", 14)
+
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp_a = _seed_campaign(db, t.id, tpl, name="A")
+        camp_b = _seed_campaign(db, t.id, tpl, name="B")
+
+        cust = _seed_customer(db, t.id, "+966500000060")
+
+        db.add(CampaignSendLog(
+            tenant_id=t.id,
+            campaign_id=camp_a.id,
+            customer_id=cust.id,
+            customer_phone_e164=cust.normalized_phone,
+            template_name=tpl.name,
+            template_language=tpl.language,
+            status=LOG_SENT,
+            sent_at=None,
+            provider_message_id=None,
+        ))
+        db.commit()
+
+        _snapshot_recipients(db, t.id, camp_b.id, [cust], tpl)
+        db.commit()
+
+        skipped = _apply_frequency_cap(db, t.id, camp_b.id)
+        db.commit()
+
+        assert skipped == 0
+        row_b = db.query(CampaignSendLog).filter_by(campaign_id=camp_b.id).one()
+        assert row_b.status == LOG_QUEUED
+
+    def test_bypass_disables_frequency_cap(self, monkeypatch):
+        """When ``bypass=True``, recent successful sends must NOT dedupe."""
+        from services import campaign_dispatcher as disp
+        monkeypatch.setattr(disp, "MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS", 14)
+
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp_a = _seed_campaign(db, t.id, tpl, name="A")
+        camp_b = _seed_campaign(db, t.id, tpl, name="B")
+
+        cust = _seed_customer(db, t.id, "+966500000070")
+
+        db.add(CampaignSendLog(
+            tenant_id=t.id,
+            campaign_id=camp_a.id,
+            customer_id=cust.id,
+            customer_phone_e164=cust.normalized_phone,
+            template_name=tpl.name,
+            template_language=tpl.language,
+            status=LOG_SENT,
+            sent_at=datetime.now(timezone.utc) - timedelta(days=1),
+            provider_message_id="wamid.BYPASS_TEST",
+        ))
+        db.commit()
+
+        _snapshot_recipients(db, t.id, camp_b.id, [cust], tpl)
+        db.commit()
+
+        skipped = _apply_frequency_cap(db, t.id, camp_b.id, bypass=True)
+        db.commit()
+
+        assert skipped == 0
+        row_b = db.query(CampaignSendLog).filter_by(campaign_id=camp_b.id).one()
+        assert row_b.status == LOG_QUEUED
+
+    def test_cap_counts_legacy_wamid_without_sent_at_if_recent(self, monkeypatch):
+        """``sent_at`` may be missing on legacy rows; a live ``wamid`` +
+        fresh ``updated_at`` still proves Meta acceptance → burns cap."""
+        from services import campaign_dispatcher as disp
+        monkeypatch.setattr(disp, "MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS", 14)
+
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp_a = _seed_campaign(db, t.id, tpl, name="A")
+        camp_b = _seed_campaign(db, t.id, tpl, name="B")
+
+        cust = _seed_customer(db, t.id, "+966500000080")
+        recent = datetime.now(timezone.utc) - timedelta(hours=3)
+
+        db.add(CampaignSendLog(
+            tenant_id=t.id,
+            campaign_id=camp_a.id,
+            customer_id=cust.id,
+            customer_phone_e164=cust.normalized_phone,
+            template_name=tpl.name,
+            template_language=tpl.language,
+            status=LOG_SENT,
+            sent_at=None,
+            provider_message_id="wamid.LEGACY_NO_SENT_AT",
+            updated_at=recent,
+            created_at=recent,
+        ))
+        db.commit()
+
+        _snapshot_recipients(db, t.id, camp_b.id, [cust], tpl)
+        db.commit()
+
+        skipped = _apply_frequency_cap(db, t.id, camp_b.id)
+        db.commit()
+
+        assert skipped == 1
+
     def test_cap_does_not_skip_when_prior_send_is_outside_window(self, monkeypatch):
         """A 30-day-old sent row should NOT block a new campaign when
         the cap is 14 days."""

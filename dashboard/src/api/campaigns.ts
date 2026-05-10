@@ -197,6 +197,31 @@ export interface CampaignDebugSnapshot {
       marketing_opt_out: boolean
     }
   }>
+  /** Frequency-cap diagnostics + audit trail for skipped_duplicate
+   *  rows tied to ``frequency_cap_marketing``. */
+  frequency_cap: {
+    bypassed: boolean
+    cap_days: number
+    capped_count: number
+    /** Same data as ``source_rows`` — canonical key requested by API
+     *  contract. */
+    frequency_cap_source_rows: Array<{
+      phone_masked: string
+      skip_reason: string | null
+      last_successful_sent_at: string | null
+      last_successful_campaign_id: number | null
+    }>
+    /** Deprecated alias of ``frequency_cap_source_rows``. */
+    source_rows: Array<{
+      phone_masked: string
+      skip_reason: string | null
+      last_successful_sent_at: string | null
+      last_successful_campaign_id: number | null
+    }>
+    /** Most recent successful send among capped phones (ISO timestamp). */
+    last_successful_sent_at: string | null
+    last_successful_campaign_id: number | null
+  }
   sample_sent: Array<{
     phone: string
     provider_message_id: string | null
@@ -417,7 +442,10 @@ export const campaignsApi = {
    *  The merchant watches progress via the standard /campaigns list
    *  refresh + /campaigns/{id}/debug. Idempotent — rows already in
    *  ``status='sent'`` are NOT re-sent. */
-  dispatchNow: (id: number) =>
+  dispatchNow: (
+    id: number,
+    opts?: { bypassFrequencyCap?: boolean },
+  ) =>
     apiCall<{
       campaign_id: number
       ok: boolean
@@ -427,7 +455,13 @@ export const campaignsApi = {
       message?: string
       status?: string
       error?: string
-    }>(`/campaigns/${id}/dispatch-now`, { method: 'POST' }),
+      bypass_frequency_cap?: boolean
+    }>(
+      `/campaigns/${id}/dispatch-now${
+        opts?.bypassFrequencyCap === true ? '?bypass_frequency_cap=true' : ''
+      }`,
+      { method: 'POST' },
+    ),
 
   deleteCampaign: (id: number) =>
     apiCall<{ deleted: boolean; id: number }>(`/campaigns/${id}`, { method: 'DELETE' }),

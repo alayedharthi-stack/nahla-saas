@@ -331,7 +331,29 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
     db.commit()
 
     # ── 2. Frequency-cap dedupe ─────────────────────────────────────────
-    cap_skipped = _apply_frequency_cap(db, tenant_id, campaign_id)
+    # Honour the per-campaign bypass toggle (set via the dispatch-now
+    # button or directly on template_variables._bypass_frequency_cap).
+    # Used in QA / re-test workflows where the merchant explicitly
+    # wants to re-send to the same customers without waiting for the
+    # global cap window to expire.
+    bypass_cap_raw = (campaign.template_variables or {}).get(
+        "_bypass_frequency_cap"
+    )
+    bypass_cap = str(bypass_cap_raw).strip().lower() in (
+        "true", "1", "yes",
+    ) if bypass_cap_raw is not None else False
+    cap_skipped = _apply_frequency_cap(
+        db, tenant_id, campaign_id, bypass=bypass_cap,
+    )
+    # One-shot bypass — remove the flag immediately after the cap
+    # decision so the NEXT dispatch (scheduled or manual) runs normal
+    # protection again. Merchants opt in per click via dispatch-now.
+    if bypass_cap:
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        tv_after = dict(campaign.template_variables or {})
+        tv_after.pop("_bypass_frequency_cap", None)
+        campaign.template_variables = tv_after
+        flag_modified(campaign, "template_variables")
     db.commit()
 
     campaign.status = "active"
@@ -638,32 +660,79 @@ def _apply_frequency_cap(
     db: Session,
     tenant_id: int,
     campaign_id: int,
+    *,
+    bypass: bool = False,
 ) -> int:
     """Mark ``status='queued'`` rows whose phone received another
-    sent marketing campaign within the cap window as
-    ``status='skipped_duplicate'``.
+    *successfully delivered* marketing campaign within the cap window
+    as ``status='skipped_duplicate'``.
 
-    Returns the number of rows updated. A cap value of 0 disables the
-    check entirely (admin escape hatch — should never be 0 in prod).
+    Strict definition of "successfully delivered" (per merchant
+    feedback — frequency cap was misfiring on rows that never reached
+    Meta):
+
+        status == 'sent'
+        AND (
+            provider_message_id IS NOT NULL
+            OR sent_at IS NOT NULL
+        )
+        AND sent_at >= now() - cap_days
+
+    A row that's ``failed``, ``queued``, ``sending``, ``skipped_*``,
+    or ``status=sent`` but missing BOTH ``provider_message_id`` and
+    ``sent_at`` is NEVER counted as "the customer received a previous
+    campaign". This protects merchants from being silently blocked by
+    legacy/synthetic data or by failed-but-status-flipped rows.
+
+    Args:
+        bypass: If True, skip the cap check entirely and return 0.
+            Used by the "تجاهل حد التكرار" toggle on dispatch-now for
+            QA / re-test workflows. Always logged.
+
+    Returns:
+        Number of rows updated to ``skipped_duplicate``. A cap value
+        of 0 also disables the check entirely (admin escape hatch —
+        should never be 0 in prod).
     """
+    if bypass:
+        logger.info(
+            "[campaign_dispatcher] campaign=%d frequency_cap BYPASSED "
+            "(merchant requested via _bypass_frequency_cap)",
+            campaign_id,
+        )
+        return 0
+
     cap_days = MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS
     if cap_days <= 0:
         return 0
 
     threshold = datetime.now(timezone.utc) - timedelta(days=cap_days)
 
-    # Subquery: all phones that already received a `sent` marketing
-    # campaign for THIS tenant within the cap window — across ANY past
-    # campaign id. The current campaign's snapshot rows are intentionally
-    # excluded from this set (we don't want a queued row to dedupe
-    # itself if the merchant re-runs a campaign that already sent half
-    # of its audience).
+    # ── Stricter "successfully delivered" predicate ──────────────
+    delivered_proof = or_(
+        CampaignSendLog.provider_message_id.isnot(None),
+        CampaignSendLog.sent_at.isnot(None),
+    )
+    # Time window: prefer ``sent_at``, but legacy rows may carry a
+    # wamid without ``sent_at`` — fall back to ``updated_at`` so a
+    # provably accepted Meta message still burns the cap slot.
+    within_cap_window = or_(
+        CampaignSendLog.sent_at >= threshold,
+        and_(
+            CampaignSendLog.sent_at.is_(None),
+            CampaignSendLog.provider_message_id.isnot(None),
+            CampaignSendLog.updated_at >= threshold,
+        ),
+    )
+
     sent_phones_subq = (
         db.query(CampaignSendLog.customer_phone_e164)
         .filter(
             CampaignSendLog.tenant_id == tenant_id,
             CampaignSendLog.status == LOG_SENT,
-            CampaignSendLog.sent_at >= threshold,
+            delivered_proof,
+            within_cap_window,
+            # Don't dedupe a campaign against itself (re-runs).
             CampaignSendLog.campaign_id != campaign_id,
         )
         .distinct()
@@ -690,6 +759,70 @@ def _apply_frequency_cap(
         row.updated_at = now
 
     return len(queued)
+
+
+def _frequency_cap_evidence_for_phones(
+    db: Session,
+    tenant_id: int,
+    phones: List[str],
+    *,
+    cap_days: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """For each phone in ``phones``, return the most recent successful
+    send (if any) within the cap window, plus the campaign id that
+    sent it. Used by ``/campaigns/{id}/debug`` so the merchant can see
+    "we deduped phone X because campaign Y sent to them on date Z" —
+    instead of a generic "skipped_duplicate" with no audit trail.
+
+    Returns a dict keyed by phone; phones with no successful send are
+    omitted from the result.
+    """
+    if not phones:
+        return {}
+    cap = cap_days if cap_days is not None else MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS
+    if cap <= 0:
+        # Cap disabled — no evidence to surface.
+        return {}
+    threshold = datetime.now(timezone.utc) - timedelta(days=cap)
+
+    delivered_proof = or_(
+        CampaignSendLog.provider_message_id.isnot(None),
+        CampaignSendLog.sent_at.isnot(None),
+    )
+    within_cap_window = or_(
+        CampaignSendLog.sent_at >= threshold,
+        and_(
+            CampaignSendLog.sent_at.is_(None),
+            CampaignSendLog.provider_message_id.isnot(None),
+            CampaignSendLog.updated_at >= threshold,
+        ),
+    )
+
+    rows = (
+        db.query(CampaignSendLog)
+        .filter(
+            CampaignSendLog.tenant_id == tenant_id,
+            CampaignSendLog.status == LOG_SENT,
+            delivered_proof,
+            within_cap_window,
+            CampaignSendLog.customer_phone_e164.in_(phones),
+        )
+        .order_by(CampaignSendLog.sent_at.desc(), CampaignSendLog.updated_at.desc())
+        .all()
+    )
+    # First (most recent) hit per phone wins.
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        phone = r.customer_phone_e164
+        if phone in out:
+            continue
+        out[phone] = {
+            "last_successful_sent_at":
+                r.sent_at.isoformat() if r.sent_at else None,
+            "last_successful_campaign_id": int(r.campaign_id),
+            "provider_message_id": r.provider_message_id,
+        }
+    return out
 
 
 def _count_log_statuses(db: Session, campaign_id: int) -> Dict[str, int]:

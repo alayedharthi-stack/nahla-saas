@@ -104,7 +104,9 @@ def _call_debug(db, tenant_id, campaign_id):
         campaigns_router.resolve_tenant_id = original
 
 
-def _call_dispatch_now(db, tenant_id, campaign_id):
+def _call_dispatch_now(
+    db, tenant_id, campaign_id, *, bypass_frequency_cap: bool = False,
+):
     original = campaigns_router.resolve_tenant_id
     campaigns_router.resolve_tenant_id = (
         lambda request, db=None: tenant_id  # type: ignore
@@ -112,7 +114,10 @@ def _call_dispatch_now(db, tenant_id, campaign_id):
     try:
         return asyncio.run(
             campaigns_router.dispatch_campaign_now(
-                campaign_id=campaign_id, request=_FakeReq(), db=db,
+                campaign_id=campaign_id,
+                request=_FakeReq(),
+                db=db,
+                bypass_frequency_cap=bypass_frequency_cap,
             )
         )
     finally:
@@ -205,7 +210,13 @@ class TestDebugEndpoint:
             # New funnel + exclusion fields (see TestAudienceFunnel below).
             "audience_funnel", "excluded_reasons_summary",
             "excluded_before_send_count",
+            "frequency_cap", "failure_summary",
+            "sample_excluded_before_send",
         }
+        fc = result["frequency_cap"]
+        assert fc["capped_count"] == 0
+        assert "frequency_cap_source_rows" in fc
+        assert "cap_days" in fc
         assert result["campaign"]["id"] == c.id
         assert result["campaign"]["lifecycle"] == "pending_dispatch"
         assert result["campaign"]["audience_count"] == 4
@@ -383,6 +394,49 @@ class TestDispatchNow:
         db.refresh(c)
         assert c.status == "active"
         assert c.launched_at is not None
+
+    def test_dispatch_now_sets_bypass_flag_without_running_background_task(
+            self, monkeypatch,
+    ):
+        """``bypass_frequency_cap=true`` persists ``_bypass_frequency_cap``
+        on the campaign row before the async task starts; the dispatcher
+        consumes it as a one-shot flag."""
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="draft", audience_count=2)
+        c.launched_at = None
+        db.commit()
+
+        spawned: list = []
+
+        def _capture_only(coro):  # noqa: ANN001
+            try:
+                coro.close()
+            except (RuntimeError, GeneratorExit):
+                pass
+            spawned.append(coro)
+
+            class _Dummy:
+                def cancel(self):
+                    pass
+
+            return _Dummy()
+
+        monkeypatch.setattr(asyncio, "create_task", _capture_only)
+
+        async def _noop(_db, cid):
+            return {"campaign_id": cid, "status": "completed", "sent": 0,
+                    "failed": 0, "queued": 0, "errors": []}
+        import services.campaign_dispatcher as cd  # noqa: PLC0415
+        monkeypatch.setattr(cd, "dispatch_campaign", _noop)
+
+        result = _call_dispatch_now(db, t.id, c.id, bypass_frequency_cap=True)
+        assert result["ok"] is True
+        assert result["bypass_frequency_cap"] is True
+        assert len(spawned) == 1
+
+        db.refresh(c)
+        assert (c.template_variables or {}).get("_bypass_frequency_cap") == "true"
+        assert c.status == "active"
 
 
 # ── 4. _campaign_to_dict carries lifecycle for the listing endpoint ──

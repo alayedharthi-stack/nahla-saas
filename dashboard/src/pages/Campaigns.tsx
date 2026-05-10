@@ -1658,6 +1658,35 @@ function FieldFlag({
 
 // ── Campaign list row ─────────────────────────────────────────────────────────
 
+/** Append frequency-cap audit lines to the diagnostic ``pre`` block —
+ * surfaces WHICH phone was capped and WHEN the last successful Meta
+ * send happened so merchants stop blaming "ghost" prior sends. */
+function appendFrequencyCapDiagnostic(lines: string[], snap: CampaignDebugSnapshot) {
+  const fc = snap.frequency_cap
+  if (!fc || fc.capped_count <= 0) return
+  lines.push(
+    `⏱️ حد التكرار (${fc.cap_days} يوماً): تم تخطّي ${fc.capped_count} عميل بسبب إرسال تسويقي ناجح سابق (مسجّل لدى Meta فقط).`,
+  )
+  if (fc.last_successful_sent_at) {
+    let agg = `   أحدث إرسال ناجح في السجل: ${fc.last_successful_sent_at}`
+    if (fc.last_successful_campaign_id != null) {
+      agg += ` (حملة #${fc.last_successful_campaign_id})`
+    }
+    lines.push(agg)
+  }
+  const rows = (fc.frequency_cap_source_rows?.length ?? 0) > 0
+    ? fc.frequency_cap_source_rows
+    : fc.source_rows
+  for (const row of rows || []) {
+    const cid =
+      row.last_successful_campaign_id != null
+        ? `#${row.last_successful_campaign_id}`
+        : '—'
+    const ts = row.last_successful_sent_at ?? '—'
+    lines.push(`   • ${row.phone_masked}: آخر نجاح ${ts} (${cid})`)
+  }
+}
+
 function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   campaign: CampaignRecord
   onStatusChange: (id: number, status: string) => void
@@ -1685,6 +1714,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   // the section until the first /debug call returns.
   const [excludedSample, setExcludedSample] =
     useState<CampaignDebugSnapshot['sample_excluded_before_send'] | null>(null)
+  /** QA escape hatch — POST dispatch-now with ``bypass_frequency_cap``. */
+  const [ignoreFreqCapForDispatch, setIgnoreFreqCapForDispatch] = useState(false)
 
   // Treat both ``failed`` and ``failed_all`` as red. Note we
   // explicitly do NOT include ``partial_minor`` or
@@ -1763,6 +1794,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           }
         }
       }
+      appendFrequencyCapDiagnostic(lines, snap)
       const hints = (snap.hints || []).join(' • ')
       if (hints) lines.push(`💡 ${hints}`)
       setDiagnostic(lines.join('\n'))
@@ -1785,14 +1817,20 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
    * refreshes on focus + manually whenever the parent reloads it.
    */
   const handleDispatchNow = async () => {
-    if (!confirm(
+    let msg =
       `سيتم تشغيل الإرسال للحملة "${campaign.name}" الآن في الخلفية. ` +
-      `لن يُعاد إرسال أي مستلم تم إرساله مسبقاً.`,
-    )) return
+      `لن يُعاد إرسال أي مستلم تم إرساله مسبقاً.`
+    if (ignoreFreqCapForDispatch) {
+      msg +=
+        '\n\n⚠️ تم تفعيل «تجاهل حد التكرار لهذه الحملة» — ستُرسل هذه الجولة حتى للعملاء الذين تلقّوا رسالة تسويقية ناجحة مؤخراً (استخدام للاختبار).'
+    }
+    if (!confirm(msg)) return
     setDispatching(true)
     setDiagnostic('⏳ بدأ الإرسال في الخلفية — جاري متابعة التقدّم…')
     try {
-      const res = await campaignsApi.dispatchNow(campaign.id)
+      const res = await campaignsApi.dispatchNow(campaign.id, {
+        bypassFrequencyCap: ignoreFreqCapForDispatch,
+      })
       if (res.skipped) {
         setDiagnostic(res.message || 'تم تجاوز الإرسال.')
         return
@@ -1836,6 +1874,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               lines.push(`  • ${ex.label_ar} (${ex.count})`)
             }
           }
+          appendFrequencyCapDiagnostic(lines, snap)
           lines.push(`🚦 الحالة: ${lifecycleLabel}`)
           lastSnapshot = lines.join('\n')
           setDiagnostic(lastSnapshot)
@@ -1863,6 +1902,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       setDiagnostic(`❌ تعذر تشغيل الإرسال: ${err?.message || err}`)
     } finally {
       setDispatching(false)
+      setIgnoreFreqCapForDispatch(false)
     }
   }
 
@@ -1992,15 +2032,26 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               {diagnosing ? 'جاري…' : 'تشخيص'}
             </button>
             {(isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty' || lifecycleKey === 'excluded_before_send') && (
-              <button
-                onClick={handleDispatchNow}
-                disabled={dispatching}
-                className="text-xs text-amber-600 hover:text-amber-800 transition-colors flex items-center gap-1 disabled:opacity-50"
-                title="تشغيل الإرسال يدوياً الآن"
-              >
-                <Send className="w-3.5 h-3.5" />
-                {dispatching ? 'جاري…' : 'إرسال الآن'}
-              </button>
+              <div className="flex flex-col items-end gap-1">
+                <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-slate-600 max-w-[155px] leading-snug text-right">
+                  <input
+                    type="checkbox"
+                    className="rounded border-slate-300 text-amber-600 shrink-0"
+                    checked={ignoreFreqCapForDispatch}
+                    onChange={e => setIgnoreFreqCapForDispatch(e.target.checked)}
+                  />
+                  <span>تجاهل حد التكرار لهذه الحملة</span>
+                </label>
+                <button
+                  onClick={handleDispatchNow}
+                  disabled={dispatching}
+                  className="text-xs text-amber-600 hover:text-amber-800 transition-colors flex items-center gap-1 disabled:opacity-50"
+                  title="تشغيل الإرسال يدوياً الآن"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  {dispatching ? 'جاري…' : 'إرسال الآن'}
+                </button>
+              </div>
             )}
             <button
               onClick={() => onDelete(campaign.id)}
