@@ -723,22 +723,60 @@ async def _dispatch_queued_rows(
                 resp = response or {}
                 meta_err = resp.get("error") if isinstance(resp, dict) else None
                 if meta_err:
+                    # Extract every signal Meta sends so we can
+                    # classify into a canonical, merchant-readable
+                    # key (services.meta_errors). The raw English
+                    # message + numeric code are kept verbatim in
+                    # ``error_message`` so support can still copy
+                    # the technical details.
                     if isinstance(meta_err, dict):
-                        err_msg = meta_err.get("message") or "Unknown Meta error"
-                        err_code = str(meta_err.get("code") or "")
+                        meta_msg = (
+                            meta_err.get("message")
+                            or meta_err.get("error_user_msg")
+                            or "Unknown Meta error"
+                        )
+                        meta_code = meta_err.get("code")
+                        meta_subcode = meta_err.get("error_subcode")
+                        meta_type = meta_err.get("type")
                     else:
-                        err_msg = str(meta_err) or "Unknown Meta error"
-                        err_code = "meta_error"
+                        meta_msg = str(meta_err) or "Unknown Meta error"
+                        meta_code = None
+                        meta_subcode = None
+                        meta_type = None
+                    from services.meta_errors import classify_meta_error  # noqa: PLC0415
+                    classified = classify_meta_error(
+                        code=meta_code, subcode=meta_subcode,
+                        error_type=meta_type, message=meta_msg,
+                        raw_response=resp,
+                    )
                     row.status = LOG_FAILED
-                    row.error_code = err_code[:64]
-                    row.error_message = str(err_msg)[:500]
+                    # ``error_code`` becomes the canonical key (e.g.
+                    # ``not_on_whatsapp``) — the UI maps it to Arabic
+                    # via the same module without needing more state.
+                    row.error_code = classified.key[:64]
+                    # ``error_message`` keeps the raw Meta string +
+                    # numeric code so support can paste it into a
+                    # ticket without losing fidelity.
+                    technical = (
+                        f"[code={meta_code} subcode={meta_subcode} "
+                        f"type={meta_type}] {meta_msg}"
+                    )
+                    row.error_message = technical[:500]
                     row.updated_at = datetime.now(timezone.utc)
                     failed += 1
                     if len(errors) < 10:
-                        errors.append(f"{phone}: ({err_code}) {str(err_msg)[:120]}")
+                        # Friendly Arabic line for the campaign report
+                        # (replaces the old "client_side (meta_error)"
+                        # gibberish the merchant used to see).
+                        errors.append(
+                            f"{phone}: {classified.label_ar} "
+                            f"[{classified.key}]"
+                        )
                     logger.warning(
-                        "[campaign_dispatcher] campaign=%d Meta error %s for %s: %s",
-                        campaign.id, err_code, phone, err_msg,
+                        "[campaign_dispatcher] campaign=%d Meta error "
+                        "key=%s code=%s subcode=%s phone=%s msg=%s",
+                        campaign.id, classified.key, meta_code,
+                        meta_subcode, phone, meta_msg,
                     )
                 else:
                     messages = resp.get("messages") if isinstance(resp, dict) else None
@@ -748,13 +786,20 @@ async def _dispatch_queued_rows(
                         # No id means Meta did not actually accept the
                         # message — treat as failure so we don't lie to
                         # the merchant by counting it as sent.
+                        from services.meta_errors import label_for  # noqa: PLC0415
                         row.status = LOG_FAILED
                         row.error_code = "no_message_id"
-                        row.error_message = "Meta did not return a wamid"
+                        row.error_message = (
+                            "Meta accepted the request but did not "
+                            "return a wamid"
+                        )
                         row.updated_at = datetime.now(timezone.utc)
                         failed += 1
                         if len(errors) < 10:
-                            errors.append(f"{phone}: no message id from Meta")
+                            errors.append(
+                                f"{phone}: {label_for('no_message_id')} "
+                                f"[no_message_id]"
+                            )
                     else:
                         row.status = LOG_SENT
                         row.provider_message_id = wa_msg_id
@@ -777,13 +822,18 @@ async def _dispatch_queued_rows(
                             campaign.id, phone, wa_msg_id,
                         )
             except Exception as exc:
+                from services.meta_errors import label_for  # noqa: PLC0415
                 row.status = LOG_FAILED
                 row.error_code = "exception"
-                row.error_message = str(exc)[:500]
+                row.error_message = (
+                    f"[exception={type(exc).__name__}] {str(exc)[:480]}"
+                )
                 row.updated_at = datetime.now(timezone.utc)
                 failed += 1
                 if len(errors) < 10:
-                    errors.append(f"{phone}: {str(exc)[:120]}")
+                    errors.append(
+                        f"{phone}: {label_for('exception')} [exception]"
+                    )
                 logger.error(
                     "[campaign_dispatcher] campaign=%d exception sending to %s: %s",
                     campaign.id, phone, exc, exc_info=True,

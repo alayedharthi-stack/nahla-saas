@@ -92,8 +92,31 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
     dispatch_errors = [e for e in raw_errors.split("|") if e] if raw_errors else []
     # ``last_error`` is what the UI puts under the status pill so the
     # merchant can tell ``failed`` from ``failed because the template
-    # was unapproved`` at a glance.
+    # was unapproved`` at a glance. New writes already include an
+    # Arabic label suffixed by ``[canonical_key]`` (see dispatcher),
+    # but older rows pre-classifier hold raw English/dispatcher
+    # strings — surface a tighter Arabic label by extracting the
+    # canonical key from the bracketed suffix when present.
     last_error = dispatch_errors[0] if dispatch_errors else None
+    last_error_ar: Optional[str] = None
+    last_error_key: Optional[str] = None
+    if last_error:
+        try:
+            from services.meta_errors import (  # noqa: PLC0415
+                ERRORS as _META_ERRORS, classify_meta_error,
+            )
+            import re as _re  # noqa: PLC0415
+            m = _re.search(r"\[([a-z_]+)\]\s*$", last_error)
+            if m and m.group(1) in _META_ERRORS:
+                ce = _META_ERRORS[m.group(1)]
+                last_error_key = ce.key
+                last_error_ar = ce.label_ar
+            else:
+                ce = classify_meta_error(message=last_error)
+                last_error_key = ce.key
+                last_error_ar = ce.label_ar
+        except Exception:
+            last_error_ar = last_error  # fallback — show raw text
 
     # Synthetic ``lifecycle`` field: a merchant-friendly verb derived
     # from ``status`` + the per-recipient counters we already persisted
@@ -158,6 +181,10 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
         "skipped_count": skipped_count,
         "dispatch_errors": dispatch_errors,
         "last_error": last_error,
+        # Arabic-translated equivalent of last_error — UI uses this
+        # under the status pill instead of the raw technical line.
+        "last_error_ar": last_error_ar,
+        "last_error_key": last_error_key,
         "delivered_count": c.delivered_count,
         "read_count": c.read_count,
         "clicked_count": c.clicked_count,
@@ -636,7 +663,12 @@ async def get_campaign_report(
 # posture we used for /billing/debug/current.
 
 
-def _classify_campaign_lifecycle(campaign: Campaign, counts: Dict[str, int]) -> str:
+def _classify_campaign_lifecycle(
+    campaign: Campaign,
+    counts: Dict[str, int],
+    *,
+    db: Optional[Session] = None,
+) -> str:
     """Map the raw ``status`` column + send-log counters onto a
     merchant-friendly verb so the UI never has to show just "نشطة" for
     an inert campaign.
@@ -645,6 +677,13 @@ def _classify_campaign_lifecycle(campaign: Campaign, counts: Dict[str, int]) -> 
     snapshotting any recipient will be ``active`` with zero counts, and
     we want the merchant to see that explicitly as "ينتظر بدء الإرسال"
     instead of the falsely reassuring "نشطة".
+
+    If ``db`` is provided we also peek at the failure-severity mix:
+    a campaign that "fails for all 4 customers because none of them
+    have WhatsApp" is NOT a campaign failure — it's a recipient-list
+    mismatch. We surface that as ``no_whatsapp_recipients`` (sent==0,
+    every failure is severity=minor) or ``partial`` (sent>0 with only
+    minor failures) so the merchant doesn't see a scary red badge.
     """
     status = (campaign.status or "").lower()
     sent = counts.get("sent", 0)
@@ -652,23 +691,44 @@ def _classify_campaign_lifecycle(campaign: Campaign, counts: Dict[str, int]) -> 
     queued = counts.get("queued", 0)
     total = sum(counts.values())
 
+    # Optional minor-only check — the dispatcher writes canonical
+    # error keys (services.meta_errors) into error_code, so we can
+    # ask "are all failures of severity=minor?".
+    all_failures_minor = False
+    if db is not None and failed > 0:
+        try:
+            from services.meta_errors import severity_of  # noqa: PLC0415
+            keys = (
+                db.query(CampaignSendLog.error_code)
+                .filter(
+                    CampaignSendLog.campaign_id == campaign.id,
+                    CampaignSendLog.status == "failed",
+                )
+                .distinct()
+                .all()
+            )
+            severities = {severity_of((k[0] or "").lower()) for k in keys}
+            all_failures_minor = severities and severities.issubset({"minor"})
+        except Exception:
+            all_failures_minor = False
+
     if status in ("completed",):
         if sent > 0 and failed == 0:
-            return "sent"               # تم الإرسال
+            return "sent"
         if sent > 0 and failed > 0:
-            return "partial"            # أُرسل جزئياً
+            return "partial_minor" if all_failures_minor else "partial"
         if failed > 0 and sent == 0:
-            return "failed_all"         # فشل الإرسال للجميع
-        return "completed_empty"        # اكتملت بدون مستلمين فعليين
+            return "no_whatsapp_recipients" if all_failures_minor else "failed_all"
+        return "completed_empty"
     if status == "failed":
-        return "failed"                 # فشل الإرسال
+        return "failed"
     if status == "scheduled":
-        return "waiting_scheduler"      # بانتظار المُجدول
+        return "waiting_scheduler"
     if status == "active":
         if total == 0:
-            return "pending_dispatch"   # ينتظر بدء الإرسال
+            return "pending_dispatch"
         if queued > 0:
-            return "sending"            # جاري الإرسال
+            return "sending"
         if sent == 0 and failed == 0:
             return "pending_dispatch"
         return "sending"
@@ -742,6 +802,9 @@ async def debug_campaign(
         return ("•" * max(0, len(s) - 4)) + s[-4:] if len(s) > 4 else s
 
     def _sample_failed():
+        from services.meta_errors import (  # noqa: PLC0415
+            ERRORS as META_ERRORS, classify_meta_error,
+        )
         rows = (
             db.query(CampaignSendLog)
             .filter(
@@ -752,16 +815,35 @@ async def debug_campaign(
             .limit(5)
             .all()
         )
-        return [
-            {
-                "phone":              _mask(r.customer_phone_e164),
-                "error_code":         r.error_code,
-                "error_message":      (r.error_message or "")[:300],
-                "attempt_count":      r.attempt_count,
-                "updated_at":         r.updated_at.isoformat() if r.updated_at else None,
-            }
-            for r in rows
-        ]
+        out = []
+        for r in rows:
+            # ``error_code`` is the canonical key written by the
+            # dispatcher post-classification. If we encounter an
+            # older row from before the classifier was deployed,
+            # re-classify on the fly so the merchant always sees
+            # an Arabic label.
+            key = (r.error_code or "").strip().lower()
+            classified = (
+                META_ERRORS.get(key)
+                if key in META_ERRORS
+                else classify_meta_error(
+                    code=r.error_code, message=r.error_message,
+                )
+            )
+            out.append({
+                "phone":          _mask(r.customer_phone_e164),
+                "error_code":     classified.key,
+                "error_label_ar": classified.label_ar,
+                "severity":       classified.severity,
+                "is_recoverable": classified.is_recoverable,
+                "advice_ar":      classified.advice_ar,
+                # Raw technical message kept verbatim — surfaces in
+                # the "نسخ الخطأ التقني" button.
+                "error_technical": (r.error_message or "")[:300],
+                "attempt_count":   r.attempt_count,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            })
+        return out
     sample_failed = _safe("sample_failed", _sample_failed) or []
 
     def _sample_sent():
@@ -840,7 +922,44 @@ async def debug_campaign(
     dispatch_errors_raw = tpl_vars.get("_dispatch_errors", "") or ""
     dispatch_errors = [e for e in dispatch_errors_raw.split("|") if e]
 
-    lifecycle = _classify_campaign_lifecycle(campaign, counts)
+    lifecycle = _classify_campaign_lifecycle(campaign, counts, db=db)
+
+    # Group failures by canonical key so the merchant sees, e.g.,
+    # "3 عملاء لا يملكون واتساب، 1 خارج نافذة 24 ساعة" rather than
+    # 4 separate raw-text rows. Used by the UI's diagnostic block.
+    def _failure_summary():
+        from services.meta_errors import (  # noqa: PLC0415
+            ERRORS as META_ERRORS, classify_meta_error,
+        )
+        rows = (
+            db.query(CampaignSendLog.error_code, func.count(CampaignSendLog.id))
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.status == "failed",
+            )
+            .group_by(CampaignSendLog.error_code)
+            .all()
+        )
+        out = []
+        for raw_key, n in rows:
+            key = (raw_key or "unknown").strip().lower()
+            classified = (
+                META_ERRORS.get(key)
+                if key in META_ERRORS
+                else classify_meta_error(code=raw_key)
+            )
+            out.append({
+                "error_code":     classified.key,
+                "error_label_ar": classified.label_ar,
+                "severity":       classified.severity,
+                "is_recoverable": classified.is_recoverable,
+                "advice_ar":      classified.advice_ar,
+                "count":          int(n),
+            })
+        out.sort(key=lambda x: -x["count"])
+        return out
+    from sqlalchemy import func  # noqa: PLC0415, E402
+    failure_summary = _safe("failure_summary", _failure_summary) or []
 
     # If lifecycle is pending_dispatch but status=active and audience is
     # > 0, that almost always means the asyncio.create_task background
@@ -899,6 +1018,9 @@ async def debug_campaign(
         },
         "sample_failed":    sample_failed,
         "sample_sent":      sample_sent,
+        # NEW: aggregated failure breakdown by canonical Meta-error key.
+        # Powers the "3 عملاء لا يملكون واتساب" summary in the UI.
+        "failure_summary":  failure_summary,
         "template":         template_info,
         "wa_connection":    wa_conn_info,
         "scheduler":        scheduler_info,

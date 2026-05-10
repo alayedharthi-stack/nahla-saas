@@ -36,8 +36,14 @@ export type CampaignLifecycle =
   | 'sending'
   | 'sent'
   | 'partial'
+  /** Sent>0 with failures, but EVERY failure was minor (e.g. recipient
+   *  not on WhatsApp). Treated as success in the UI. */
+  | 'partial_minor'
   | 'failed'
   | 'failed_all'
+  /** Sent==0 with failures, but every failure was minor — the campaign
+   *  itself didn't fail, the recipient list was just unreachable. */
+  | 'no_whatsapp_recipients'
   | 'completed_empty'
   | 'unknown'
 
@@ -67,6 +73,11 @@ export interface CampaignRecord {
   dispatch_errors: string[]
   /** First entry from dispatch_errors, surfaced under the status pill. */
   last_error?: string | null
+  /** Arabic-translated equivalent of last_error. UI prefers this so
+   *  the merchant never sees raw English Meta jargon. */
+  last_error_ar?: string | null
+  /** Canonical Meta error key (e.g. "not_on_whatsapp", "rate_limit"). */
+  last_error_key?: string | null
   delivered_count: number
   read_count: number
   clicked_count: number
@@ -107,10 +118,29 @@ export interface CampaignDebugSnapshot {
   }
   sample_failed: Array<{
     phone: string
-    error_code: string | null
-    error_message: string
+    /** Canonical Meta error key. */
+    error_code: string
+    /** Human-readable Arabic label. */
+    error_label_ar: string
+    /** "minor" | "major" | "blocking" — drives whether the
+     *  campaign-level lifecycle treats this as a real failure. */
+    severity: 'minor' | 'major' | 'blocking'
+    is_recoverable: boolean
+    /** One-line action hint in Arabic ("ask for opt-in", etc.). */
+    advice_ar: string | null
+    /** Raw technical message kept verbatim so support can copy it. */
+    error_technical: string
     attempt_count: number
     updated_at: string | null
+  }>
+  /** Aggregated breakdown of failures by canonical error key. */
+  failure_summary: Array<{
+    error_code: string
+    error_label_ar: string
+    severity: 'minor' | 'major' | 'blocking'
+    is_recoverable: boolean
+    advice_ar: string | null
+    count: number
   }>
   sample_sent: Array<{
     phone: string

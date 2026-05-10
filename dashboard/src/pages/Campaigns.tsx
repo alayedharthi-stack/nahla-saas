@@ -5,7 +5,7 @@ import {
   Smartphone, AlertCircle, RefreshCw, X, MessageSquare, FileText,
   HandHeart, Repeat, Bell, Settings2, Sparkles, Moon, UserPlus, UserX,
   Calendar, ShoppingBag, TrendingUp, Star, Trash2, CheckSquare, Square,
-  Shield, Beaker, ShieldOff,
+  Shield, Beaker, ShieldOff, Copy,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -120,16 +120,24 @@ const STATUS_META: Record<string, { label: string; variant: 'green' | 'amber' | 
  * pill on an inert campaign.
  */
 const LIFECYCLE_META: Record<string, { label: string; variant: 'green' | 'amber' | 'blue' | 'slate' | 'red' }> = {
-  draft:             { label: 'مسودة',           variant: 'slate' },
-  waiting_scheduler: { label: 'بانتظار المُجدول', variant: 'amber' },
-  pending_dispatch:  { label: 'ينتظر بدء الإرسال', variant: 'amber' },
-  sending:           { label: 'جاري الإرسال',    variant: 'green' },
-  sent:              { label: 'تم الإرسال',      variant: 'blue'  },
-  partial:           { label: 'أُرسل جزئياً',     variant: 'amber' },
-  completed_empty:   { label: 'اكتملت بلا مستلمين', variant: 'slate' },
-  failed:            { label: 'فشل الإرسال',      variant: 'red'   },
-  failed_all:        { label: 'فشل الإرسال للجميع', variant: 'red'   },
-  unknown:           { label: 'غير معروفة',      variant: 'slate' },
+  draft:                   { label: 'مسودة',                  variant: 'slate' },
+  waiting_scheduler:       { label: 'بانتظار المُجدول',        variant: 'amber' },
+  pending_dispatch:        { label: 'ينتظر بدء الإرسال',       variant: 'amber' },
+  sending:                 { label: 'جاري الإرسال',            variant: 'green' },
+  sent:                    { label: 'تم الإرسال',              variant: 'blue'  },
+  partial:                 { label: 'أُرسل جزئياً',             variant: 'amber' },
+  // ``partial_minor`` = sent>0 with only minor failures (e.g. some
+  // customers don't have WhatsApp). The campaign worked — we just
+  // didn't reach 100% — so we render it green, not amber.
+  partial_minor:           { label: 'أُرسل بنجاح',              variant: 'blue'  },
+  // ``no_whatsapp_recipients`` = sent==0 but every failure is minor.
+  // Not the campaign's fault; surface it with a calm slate badge so
+  // the merchant doesn't think the platform broke.
+  no_whatsapp_recipients:  { label: 'لا يوجد عملاء على واتساب', variant: 'slate' },
+  completed_empty:         { label: 'اكتملت بلا مستلمين',       variant: 'slate' },
+  failed:                  { label: 'فشل الإرسال',              variant: 'red'   },
+  failed_all:              { label: 'فشل الإرسال للجميع',       variant: 'red'   },
+  unknown:                 { label: 'غير معروفة',              variant: 'slate' },
 }
 
 // Map the new goal keys back to the legacy `campaign_type` enum the
@@ -1534,6 +1542,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   const [dispatching, setDispatching] = useState(false)
   const [diagnostic, setDiagnostic] = useState<string | null>(null)
 
+  // Treat both ``failed`` and ``failed_all`` as red. Note we
+  // explicitly do NOT include ``partial_minor`` or
+  // ``no_whatsapp_recipients`` here — those mean "the campaign
+  // worked, the recipient list just didn't fully match".
   const isFailed = campaign.status === 'failed' || lifecycleKey === 'failed_all' || lifecycleKey === 'failed'
   const isStuck = lifecycleKey === 'pending_dispatch'
   const hasErrors = (campaign.dispatch_errors?.length ?? 0) > 0
@@ -1545,7 +1557,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     try {
       const snap = await campaignsApi.debug(campaign.id)
       const r = snap.recipients
-      const hints = (snap.hints || []).join(' • ')
+      const total = r.total || campaign.audience_count || 0
+      const skipped = r.skipped_duplicate + r.skipped_invalid +
+                      r.skipped_unsubscribed + r.skipped_unreachable +
+                      r.skipped_manual_exclusion
       const wa = snap.wa_connection
         ? `${snap.wa_connection.status} / ${snap.wa_connection.phone_number_id ?? '—'}`
         : 'لا اتصال'
@@ -1553,12 +1568,28 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         ? `${snap.template.name} (${snap.template.status})`
         : 'القالب غير موجود'
       const lines = [
-        `📊 المستلمون: total=${r.total} pending=${r.queued} sent=${r.sent} failed=${r.failed} skipped=${r.skipped_duplicate + r.skipped_invalid + r.skipped_unsubscribed + r.skipped_unreachable + r.skipped_manual_exclusion}`,
+        `📤 تم الإرسال إلى ${r.sent} من ${total} عملاء${
+          r.failed > 0 ? ` — فشل ${r.failed}` : ''
+        }${skipped > 0 ? ` — تخطّي ${skipped}` : ''}`,
         `📨 القالب: ${tpl}`,
         `📞 الواتساب: ${wa}`,
-        `🕐 المُجدول: ${snap.scheduler.campaign_dispatcher_enabled ? 'مفعّل' : 'معطّل (NAHLA_DISABLE_SCHEDULERS=1)'}`,
-        hints && `💡 ${hints}`,
-      ].filter(Boolean) as string[]
+        `🕐 المُجدول: ${snap.scheduler.campaign_dispatcher_enabled ? 'مفعّل' : 'معطّل'}`,
+      ]
+      // Failure summary — group by canonical Meta key so the merchant
+      // doesn't see 4 raw rows; just "3 عملاء لا يملكون واتساب".
+      if ((snap.failure_summary || []).length > 0) {
+        lines.push('🚨 تفصيل الفشل:')
+        for (const fs of snap.failure_summary) {
+          const sev = fs.severity === 'minor' ? 'ℹ️'
+                    : fs.severity === 'major' ? '⚠️' : '⛔'
+          lines.push(`  ${sev} ${fs.error_label_ar} (${fs.count})`)
+          if (fs.advice_ar) {
+            lines.push(`     ↳ ${fs.advice_ar}`)
+          }
+        }
+      }
+      const hints = (snap.hints || []).join(' • ')
+      if (hints) lines.push(`💡 ${hints}`)
       setDiagnostic(lines.join('\n'))
     } catch (err: any) {
       setDiagnostic(`تعذر تشغيل التشخيص: ${err?.message || err}`)
@@ -1604,30 +1635,36 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         try {
           const snap = await campaignsApi.debug(campaign.id)
           const r = snap.recipients
-          lastSnapshot = (
-            `📊 المستلمون: total=${r.total} ` +
-            `sent=${r.sent} failed=${r.failed} ` +
-            `queued=${r.queued} skipped=${
-              r.skipped_duplicate + r.skipped_invalid +
-              r.skipped_unsubscribed + r.skipped_unreachable +
-              r.skipped_manual_exclusion
-            }\n` +
-            `🚦 الحالة: ${snap.campaign.lifecycle}`
-          )
+          const total = r.total || campaign.audience_count || 0
+          const lifecycleLabel =
+            LIFECYCLE_META[snap.campaign.lifecycle]?.label
+            || snap.campaign.lifecycle
+          const lines: string[] = [
+            `📤 تم الإرسال إلى ${r.sent} من ${total} عملاء`,
+          ]
+          if (r.queued > 0) lines.push(`⏳ في الطابور: ${r.queued}`)
+          if (r.failed > 0) lines.push(`❌ فشل: ${r.failed}`)
+          if ((snap.failure_summary || []).length > 0) {
+            lines.push('🚨 تفصيل الفشل:')
+            for (const fs of snap.failure_summary) {
+              const sev = fs.severity === 'minor' ? 'ℹ️'
+                        : fs.severity === 'major' ? '⚠️' : '⛔'
+              lines.push(`  ${sev} ${fs.error_label_ar} (${fs.count})`)
+            }
+          }
+          lines.push(`🚦 الحالة: ${lifecycleLabel}`)
+          lastSnapshot = lines.join('\n')
           setDiagnostic(lastSnapshot)
           // Refresh the parent list so the lifecycle pill updates.
           onStatusChange(campaign.id, campaign.status)
           // Stop polling early once the campaign reaches a
-          // terminal lifecycle.
-          if (
-            snap.campaign.lifecycle === 'sent' ||
-            snap.campaign.lifecycle === 'partial' ||
-            snap.campaign.lifecycle === 'failed_all' ||
-            snap.campaign.lifecycle === 'failed' ||
-            snap.campaign.lifecycle === 'completed_empty'
-          ) {
-            break
-          }
+          // terminal lifecycle (success OR failure variants).
+          const terminal = new Set([
+            'sent', 'partial', 'partial_minor',
+            'no_whatsapp_recipients', 'failed_all', 'failed',
+            'completed_empty',
+          ])
+          if (terminal.has(snap.campaign.lifecycle)) break
         } catch {
           // Ignore individual poll failures — we'll retry.
         }
@@ -1664,14 +1701,34 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           <Badge label={sm.label} variant={sm.variant} dot />
           {/* last_error gets the same surface as failed_count: a small
               one-line hint under the status badge so the merchant
-              doesn't have to open the drawer to know "what broke?". */}
-          {campaign.last_error && (
-            <p
-              className="text-[10px] text-red-500 mt-1 max-w-[180px] truncate"
-              title={campaign.last_error}
-            >
-              {campaign.last_error}
-            </p>
+              doesn't have to open the drawer to know "what broke?".
+              We surface the Arabic translation (last_error_ar) and
+              a tiny "نسخ الخطأ التقني" copy icon so support can
+              paste the raw Meta payload into a ticket without having
+              to ask the merchant to find it. */}
+          {(campaign.last_error_ar || campaign.last_error) && (
+            <div className="flex items-center gap-1 mt-1 max-w-[200px]">
+              <p
+                className="text-[10px] text-red-500 truncate flex-1"
+                title={campaign.last_error || ''}
+              >
+                {campaign.last_error_ar || campaign.last_error}
+              </p>
+              {campaign.last_error && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(campaign.last_error || '')
+                      .then(() => setDiagnostic('📋 تم نسخ الخطأ التقني إلى الحافظة'))
+                      .catch(() => setDiagnostic('تعذر النسخ — انسخ يدوياً.'))
+                  }}
+                  className="text-slate-400 hover:text-slate-700 p-0.5 rounded"
+                  title="نسخ الخطأ التقني للدعم"
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              )}
+            </div>
           )}
           {isFailed && hasErrors && (
             <button
