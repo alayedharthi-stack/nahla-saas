@@ -631,6 +631,11 @@ async def list_customers(
                         "automatic":      auto,
                         "manual_include": inc,
                         "manual_exclude": exc,
+                        # Final unified membership — what the merchant
+                        # actually sees in the customers chip filter
+                        # and what the campaign audience uses.
+                        # ``(auto OR include) AND NOT exclude``.
+                        "is_member":      bool((auto or inc) and not exc),
                     }
         except Exception as exc:  # pragma: no cover — defensive
             try:
@@ -1231,6 +1236,182 @@ async def remove_customer_segment(
         "segment_key":           normalised_key,
         "mode_column_available": mode_avail,
         "manual_segments":       list_manual_segments_for_customer(db, tenant_id, customer_id),
+        "manual_sources":        list_manual_sources_for_customer(db, tenant_id, customer_id),
+    }
+
+
+# ── Unified segment override (the merchant-facing simplified surface) ───
+#
+# The drawer no longer talks about "manual" vs "auto" classification. It
+# offers three actions per segment chip:
+#
+#   * "أضِف لهذا التصنيف"        → mode=force_include
+#   * "استبعِد من هذا التصنيف"    → mode=force_exclude
+#   * "أعِده للتصنيف التلقائي"   → mode=auto  (deletes the override row)
+#
+# The endpoint maps the merchant-facing modes onto the storage layer
+# (mode='include' / mode='exclude' / no row).
+
+
+class CustomerSegmentOverrideIn(BaseModel):
+    """Body for ``POST /customers/{id}/segments/{key}/override``.
+
+    ``mode`` is the merchant-facing verb, NOT the storage mode:
+      * ``force_include`` → upsert manual_include row.
+      * ``force_exclude`` → upsert manual_exclude row.
+      * ``auto``          → delete any override row so the auto
+        classifier becomes the only signal again.
+    """
+    mode: str
+
+
+@router.post("/{customer_id}/segments/{segment_key}/override")
+async def override_customer_segment(
+    customer_id: int,
+    segment_key: str,
+    body: CustomerSegmentOverrideIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Set / clear a per-customer override for one segment.
+
+    Mirrors the drawer's three-button UI exactly. Always returns 200
+    with the updated final-membership snapshot so the UI can reflect
+    state in one round-trip.
+    """
+    import logging  # noqa: PLC0415
+
+    from services.manual_segments import (  # noqa: PLC0415
+        MODE_EXCLUDE, MODE_INCLUDE, ModeColumnUnavailableError,
+        _mode_column_available, list_manual_sources_for_customer,
+        remove_manual_segment,
+    )
+    from services.nahla_segments import (  # noqa: PLC0415
+        get_final_segment_membership,
+    )
+    log = logging.getLogger("nahla.customers.segment_override")
+
+    tenant_id = resolve_tenant_id(request)
+    cust = db.query(Customer).filter(
+        Customer.id == customer_id, Customer.tenant_id == tenant_id,
+    ).first()
+    if not cust:
+        raise HTTPException(status_code=404, detail="العميل غير موجود")
+
+    raw_mode = (body.mode or "").strip().lower()
+    raw_key = segment_key
+    normalised_key = (segment_key or "").strip().lower()
+    mode_avail = _mode_column_available(db)
+
+    try:
+        normalised_key = assert_known_segment(normalised_key)
+    except UnknownSegmentError as exc:
+        log.info(
+            "override unknown_key | tenant=%s customer=%s raw=%r err=%s",
+            tenant_id, customer_id, raw_key, exc,
+        )
+        return {
+            "customer_id":           customer_id,
+            "ok":                    False,
+            "code":                  "unknown_segment",
+            "message":               (
+                f"تصنيف غير معروف: {raw_key!r}. الرجاء استخدام مفاتيح "
+                "نحلة الرسمية فقط."
+            ),
+            "segment_key_received":  raw_key,
+            "normalised_key":        normalised_key,
+            "mode_received":         body.mode,
+            "mode_column_available": mode_avail,
+        }
+
+    action: str
+    try:
+        if raw_mode == "auto" or raw_mode == "":
+            # Drop any override → auto classifier is sole signal.
+            removed = remove_manual_segment(
+                db, tenant_id=tenant_id, customer_id=customer_id,
+                segment_key=normalised_key,
+            )
+            action = "cleared" if removed else "noop"
+        elif raw_mode == "force_include":
+            add_manual_segment(
+                db, tenant_id=tenant_id, customer_id=customer_id,
+                segment_key=normalised_key, mode=MODE_INCLUDE,
+            )
+            action = "force_include"
+        elif raw_mode == "force_exclude":
+            add_manual_segment(
+                db, tenant_id=tenant_id, customer_id=customer_id,
+                segment_key=normalised_key, mode=MODE_EXCLUDE,
+            )
+            action = "force_exclude"
+        else:
+            return {
+                "customer_id":           customer_id,
+                "ok":                    False,
+                "code":                  "unknown_mode",
+                "message":               (
+                    f"وضع غير صالح: {body.mode!r}. المسموح: "
+                    "force_include, force_exclude, auto."
+                ),
+                "mode_received":         body.mode,
+                "segment_key":           normalised_key,
+                "mode_column_available": mode_avail,
+            }
+    except ModeColumnUnavailableError:
+        return {
+            "customer_id":           customer_id,
+            "ok":                    False,
+            "code":                  "platform_upgrading",
+            "message":               (
+                "نحن نُحدّث المنصة الآن — أعد المحاولة خلال دقيقة."
+            ),
+            "segment_key":           normalised_key,
+            "mode_received":         body.mode,
+            "mode_column_available": False,
+        }
+    except LookupError:
+        raise HTTPException(status_code=404, detail="العميل غير موجود")
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        log.exception(
+            "override unexpected | tenant=%s customer=%s key=%r mode=%r",
+            tenant_id, customer_id, normalised_key, raw_mode,
+        )
+        return {
+            "customer_id":           customer_id,
+            "ok":                    False,
+            "code":                  "internal_error",
+            "message":               (
+                "تعذر تحديث التصنيف — حدث خطأ مؤقت. حاول مجدداً."
+            ),
+            "segment_key":           normalised_key,
+            "mode_received":         body.mode,
+            "mode_column_available": mode_avail,
+            "error":                 type(exc).__name__,
+        }
+
+    is_member = get_final_segment_membership(
+        db, tenant_id, customer_id, normalised_key,
+    )
+    log.info(
+        "override ok | tenant=%s customer=%s key=%r mode=%r action=%s "
+        "is_member=%s mode_avail=%s",
+        tenant_id, customer_id, normalised_key, raw_mode, action,
+        is_member, mode_avail,
+    )
+
+    return {
+        "customer_id":           customer_id,
+        "ok":                    True,
+        "segment_key":           normalised_key,
+        "mode_received":         raw_mode,
+        "action":                action,  # cleared|noop|force_include|force_exclude
+        "is_member":             is_member,
+        "mode_column_available": mode_avail,
         "manual_sources":        list_manual_sources_for_customer(db, tenant_id, customer_id),
     }
 

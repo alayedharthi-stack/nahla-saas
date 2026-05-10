@@ -644,10 +644,18 @@ def list_segments_with_counts(
 
     Both /campaigns/wizard/segments and /customers/segments call this
     so they always emit the exact same shape and the exact same numbers.
+
+    IMPORTANT — uses the FINAL membership (auto ∪ include) − exclude.
+    The merchant-visible "VIP (12)" chip and the campaign audience
+    preview both consume this list, and they MUST agree. Counting
+    auto-only here is what made manual-only customers like هيثم
+    invisible to the campaign wizard before.
     """
     out: List[Dict[str, Any]] = []
     for seg in SEGMENTS:
-        n = count_segment(seg.key, db, tenant_id, require_reachable=require_reachable)
+        n = count_unified_segment(
+            seg.key, db, tenant_id, require_reachable=require_reachable,
+        )
         out.append(serialize_segment(seg, n))
     return out
 
@@ -742,6 +750,184 @@ def coherence_report() -> Dict[str, Any]:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Unified ("final") segment membership
+# ─────────────────────────────────────────────────────────────────────────
+#
+# This is the single source of truth for "is customer X in segment Y?"
+# that EVERY caller — customer page, segment counters, campaign audience
+# preview, campaign dispatcher, debug endpoints — MUST use. Nothing
+# downstream of this module should branch on auto-vs-manual; merchants
+# only ever see one classification.
+#
+# Formula:
+#
+#     is_member ⇔ (automatic_match ∨ force_include) ∧ ¬ force_exclude
+#
+# where ``force_include`` / ``force_exclude`` are simply rows in
+# ``customer_segments_manual`` with ``mode='include'`` / ``mode='exclude'``
+# respectively. ``mode='auto'`` semantically means "no override row at
+# all"; the override endpoint deletes the row when the merchant picks
+# "auto" so the auto classifier is the only signal again.
+
+
+def build_unified_segment_query(
+    segment_key: str,
+    db: Session,
+    tenant_id: int,
+    *,
+    require_reachable: bool = True,
+) -> Optional[Query]:
+    """Return a ``Query[Customer]`` whose row-set is the FINAL membership
+    of ``segment_key`` for ``tenant_id`` — i.e. the same set merchants
+    see in the customers page filter and the campaign audience preview.
+
+    Returns ``None`` when the segment key is unknown so callers can 422
+    cleanly (matches ``build_segment_query``'s contract).
+
+    Implementation notes
+    ────────────────────
+    We compute the auto match set, the force_include set, and the
+    force_exclude set as Python int lists (each is small in practice —
+    typically O(few hundred) per tenant per segment) and feed the
+    resulting union/difference back into a single ``IN`` clause. This
+    keeps the unified query a *single* tenant-scoped SELECT and avoids
+    EXISTS-subquery fan-out across 13 segment chips on the customers
+    page.
+
+    The auto branch is short-circuited when ``build_segment_query``
+    returns None for the legacy ``abandoned_cart`` failure mode (e.g.
+    a non-Salla tenant), so the merchant-facing chip still works for
+    everyone.
+    """
+    seg = get_segment(segment_key)
+    if seg is None:
+        return None
+
+    # Local imports — avoid a top-level cycle with services.manual_segments
+    # which itself imports from this module.
+    from services.manual_segments import (  # noqa: PLC0415
+        MODE_EXCLUDE, MODE_INCLUDE, customer_ids_with_manual_segment,
+    )
+
+    auto_q = build_segment_query(
+        segment_key, db, tenant_id, require_reachable=require_reachable,
+    )
+    auto_ids: set[int] = set()
+    if auto_q is not None:
+        try:
+            auto_ids = {
+                row[0] for row in auto_q.with_entities(Customer.id).all()
+            }
+        except Exception as exc:
+            # Same defensive logic as count_segment — a buggy auto
+            # filter must not blow up the unified query.
+            logger.warning(
+                "[unified] auto query failed for segment=%s tenant=%s: %s",
+                segment_key, tenant_id, exc,
+            )
+            auto_ids = set()
+
+    include_ids = set(customer_ids_with_manual_segment(
+        db, tenant_id, segment_key, mode=MODE_INCLUDE,
+    ))
+    exclude_ids = set(customer_ids_with_manual_segment(
+        db, tenant_id, segment_key, mode=MODE_EXCLUDE,
+    ))
+
+    final_ids = (auto_ids | include_ids) - exclude_ids
+    if not final_ids:
+        # Return a query that yields zero rows but is still a proper
+        # Query[Customer] (callers expect ``.with_entities``,
+        # ``.filter`` to keep working).
+        return db.query(Customer).filter(
+            Customer.tenant_id == tenant_id,
+            Customer.id == -1,
+        )
+
+    q = db.query(Customer).filter(
+        Customer.tenant_id == tenant_id,
+        Customer.id.in_(final_ids),
+    )
+    # Re-apply reachability so callers that pass require_reachable=True
+    # consistently get only messageable customers, regardless of which
+    # set the row entered the union through.
+    if require_reachable:
+        q = _reachable_filter(q)
+    return q
+
+
+def count_unified_segment(
+    segment_key: str,
+    db: Session,
+    tenant_id: int,
+    *,
+    require_reachable: bool = True,
+) -> int:
+    """Count customers whose FINAL membership in ``segment_key`` is True.
+
+    This is what the customers page chip strip and the campaign wizard
+    chip strip both display — they MUST stay equal so the merchant can
+    trust that "8 VIPs" on the customers page == 8 launchable VIPs in
+    the campaign audience preview.
+    """
+    q = build_unified_segment_query(
+        segment_key, db, tenant_id, require_reachable=require_reachable,
+    )
+    if q is None:
+        return 0
+    try:
+        return q.with_entities(func.count(func.distinct(Customer.id))).scalar() or 0
+    except Exception as exc:
+        logger.warning(
+            "[unified] count failed for segment=%s tenant=%s: %s",
+            segment_key, tenant_id, exc,
+        )
+        return 0
+
+
+def get_final_segment_membership(
+    db: Session,
+    tenant_id: int,
+    customer_id: int,
+    segment_key: str,
+) -> bool:
+    """``True`` iff the customer is currently considered a member of
+    ``segment_key`` per the unified formula. Used by the drawer to
+    render the "أنت في هذه الشريحة" badge per chip without re-running
+    the whole audience query.
+    """
+    if get_segment(segment_key) is None:
+        return False
+    from services.manual_segments import (  # noqa: PLC0415
+        MODE_EXCLUDE, MODE_INCLUDE, customer_ids_with_manual_segment,
+    )
+    exclude_ids = customer_ids_with_manual_segment(
+        db, tenant_id, segment_key, mode=MODE_EXCLUDE,
+    )
+    if customer_id in exclude_ids:
+        return False
+    include_ids = customer_ids_with_manual_segment(
+        db, tenant_id, segment_key, mode=MODE_INCLUDE,
+    )
+    if customer_id in include_ids:
+        return True
+    auto_q = build_segment_query(
+        segment_key, db, tenant_id, require_reachable=False,
+    )
+    if auto_q is None:
+        return False
+    try:
+        return (
+            auto_q.with_entities(Customer.id)
+            .filter(Customer.id == customer_id)
+            .first()
+            is not None
+        )
+    except Exception:
+        return False
+
+
 __all__ = [
     "NahlaSegment",
     "SEGMENTS",
@@ -754,4 +940,8 @@ __all__ = [
     "list_segments_with_counts",
     "sample_segment",
     "coherence_report",
+    # Unified membership — preferred public API.
+    "build_unified_segment_query",
+    "count_unified_segment",
+    "get_final_segment_membership",
 ]

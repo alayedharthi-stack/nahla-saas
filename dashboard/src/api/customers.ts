@@ -84,6 +84,11 @@ export interface CustomerRecord {
     automatic: boolean
     manual_include: boolean
     manual_exclude: boolean
+    /** Final unified membership computed server-side:
+     *  ``(automatic OR manual_include) AND NOT manual_exclude``.
+     *  This is what the customers chip filter and the campaign
+     *  audience preview both consume. */
+    is_member?: boolean
   }>
 }
 
@@ -206,6 +211,40 @@ export const customersApi = {
       `/customers/${id}/segments/${encodeURIComponent(segment_key)}`,
       { method: 'DELETE' },
     )
+  },
+
+  /**
+   * Unified segment override — the merchant-facing simplified surface.
+   *
+   * The drawer shows three actions per segment chip:
+   *   - "أضِف لهذا التصنيف"      → mode: 'force_include'
+   *   - "استبعِد من هذا التصنيف"  → mode: 'force_exclude'
+   *   - "أعِده للتصنيف التلقائي"  → mode: 'auto'  (deletes the override)
+   *
+   * The backend computes ``final_membership = (auto ∨ force_include) ∧ ¬ force_exclude``
+   * everywhere (customers list, chip counts, campaign audience), so a
+   * successful override response immediately reflects what the merchant
+   * will see in the campaign wizard.
+   */
+  overrideSegment(
+    id: number,
+    segment_key: string,
+    mode: 'force_include' | 'force_exclude' | 'auto',
+  ) {
+    return apiCall<{
+      ok: boolean
+      code?: string
+      message?: string
+      action?: string
+      is_member?: boolean
+      segment_key: string
+      mode_received?: string
+      mode_column_available?: boolean
+      manual_sources?: Record<string, string[]>
+    }>(`/customers/${id}/segments/${encodeURIComponent(segment_key)}/override`, {
+      method: 'POST',
+      body:   JSON.stringify({ mode }),
+    })
   },
 
   updateMarketingPreferences(

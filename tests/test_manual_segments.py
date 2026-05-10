@@ -1211,3 +1211,293 @@ class TestLazyReconcileCooldown:
             extra_metadata={},  # no moyasar_invoice_id
         )
         assert _should_attempt_lazy_reconcile(sub) is False
+
+
+# ── 11. Unified segment membership (the "single classification" surface) ──
+#
+# These tests cement the user-facing contract: merchants only see ONE
+# notion of segment membership. ``force_include`` adds a customer the
+# auto classifier missed, ``force_exclude`` removes a customer the auto
+# classifier matched, and ``mode=auto`` clears the override so the auto
+# classifier is the only signal again. Everywhere the system computes
+# "who is in segment X" — customers page filter, chip count, campaign
+# audience preview, campaign dispatch — must agree on the same answer.
+
+
+class TestUnifiedSegmentMembership:
+    """The four mandated regression tests from the simplification spec."""
+
+    def _override(self, engine, tenant_id, customer_id, segment_key, mode):
+        """Helper: invoke ``POST /override`` directly in-process."""
+        import asyncio
+
+        from routers import customers as customers_router
+
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        original_resolve = customers_router.resolve_tenant_id
+        customers_router.resolve_tenant_id = (  # type: ignore
+            lambda request, db=None: tenant_id
+        )
+
+        class _FakeReq:
+            headers: dict = {}
+            cookies: dict = {}
+            state = type("S", (), {})()
+
+        try:
+            return asyncio.run(
+                customers_router.override_customer_segment(
+                    customer_id=customer_id,
+                    segment_key=segment_key,
+                    body=customers_router.CustomerSegmentOverrideIn(mode=mode),
+                    request=_FakeReq(),
+                    db=db,
+                )
+            )
+        finally:
+            customers_router.resolve_tenant_id = original_resolve
+            db.close()
+
+    def test_force_include_appears_in_customers_filter_and_audience(self):
+        # Spec test #1 — customer that does NOT match promising
+        # automatically + force_include → must appear in BOTH the
+        # customers page filter AND the campaign audience preview.
+        from services.nahla_segments import build_unified_segment_query
+
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        # No orders, no profile → auto classifier won't match
+        # "promising". The force_include row is the ONLY reason
+        # this customer should surface.
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="promising", mode="include",
+        )
+
+        # Customers page filter view
+        q = build_unified_segment_query(
+            "promising", db, t.id, require_reachable=False,
+        )
+        ids_page = {row[0] for row in q.with_entities(Customer.id).all()}
+        assert c.id in ids_page, "force_include must surface in customers page filter"
+
+        # Campaign audience view (require_reachable=True like the
+        # dispatcher uses)
+        q_camp = build_unified_segment_query(
+            "promising", db, t.id, require_reachable=True,
+        )
+        ids_camp = {row[0] for row in q_camp.with_entities(Customer.id).all()}
+        assert c.id in ids_camp, "force_include must surface in campaign audience"
+
+    def test_force_exclude_removes_auto_match_from_filter_and_audience(self):
+        # Spec test #2 — customer that DOES match the auto classifier
+        # for "all" (every customer matches "all") + force_exclude →
+        # must NOT appear in either the customers page filter or
+        # the campaign audience.
+        from services.nahla_segments import build_unified_segment_query
+
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        # "all" segment matches everyone — guaranteed auto match.
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c.id,
+            segment_key="all", mode="exclude",
+        )
+
+        q_page = build_unified_segment_query(
+            "all", db, t.id, require_reachable=False,
+        )
+        ids_page = {row[0] for row in q_page.with_entities(Customer.id).all()}
+        assert c.id not in ids_page, "force_exclude must hide from customers page"
+
+        q_camp = build_unified_segment_query(
+            "all", db, t.id, require_reachable=True,
+        )
+        ids_camp = {row[0] for row in q_camp.with_entities(Customer.id).all()}
+        assert c.id not in ids_camp, "force_exclude must hide from campaign audience"
+
+    def test_override_then_auto_clears_override_and_returns_to_auto_only(self):
+        # Spec test #3 — apply force_include, then mode=auto → row
+        # is deleted, customer no longer surfaces (auto classifier
+        # alone disagrees, so they should disappear).
+        from services.nahla_segments import (
+            build_unified_segment_query, get_final_segment_membership,
+        )
+
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+
+        # Step 1 — force include.
+        add_manual_segment(
+            db, tenant_id=tenant_id, customer_id=customer_id,
+            segment_key="promising", mode="include",
+        )
+        assert get_final_segment_membership(
+            db, tenant_id, customer_id, "promising",
+        ) is True
+
+        # Step 2 — clear override via the public endpoint.
+        db.close()
+        result = self._override(
+            engine, tenant_id, customer_id, "promising", "auto",
+        )
+        assert result["ok"] is True
+        assert result["action"] == "cleared"
+        assert result["is_member"] is False, (
+            "After clearing the override, auto classifier alone "
+            "decides — and this customer has no orders so "
+            "promising must be False."
+        )
+
+        # And the unified query must agree.
+        Session = sessionmaker(bind=engine)
+        db2 = Session()
+        try:
+            q = build_unified_segment_query(
+                "promising", db2, tenant_id, require_reachable=False,
+            )
+            ids = {row[0] for row in q.with_entities(Customer.id).all()}
+            assert customer_id not in ids
+        finally:
+            db2.close()
+
+    def test_audience_count_matches_customers_filter_count(self):
+        # Spec test #4 — the count the merchant sees on the
+        # customers chip strip MUST equal the count the campaign
+        # wizard reports for the same key, regardless of how the
+        # member entered the segment (auto or override).
+        from services.nahla_segments import (
+            count_unified_segment, list_segments_with_counts,
+        )
+
+        db, _engine = _make_db()
+        t = _seed_tenant(db)
+        # Three customers: one auto-only via "all" (which matches
+        # everyone), one force_include into "promising", one
+        # force_exclude from "all".
+        c_auto      = _seed_customer(db, t.id, "+966500000001")
+        c_forced_in = _seed_customer(db, t.id, "+966500000002")
+        c_excluded  = _seed_customer(db, t.id, "+966500000003")
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c_forced_in.id,
+            segment_key="promising", mode="include",
+        )
+        add_manual_segment(
+            db, tenant_id=t.id, customer_id=c_excluded.id,
+            segment_key="all", mode="exclude",
+        )
+
+        # Customers page chip count (require_reachable=False)
+        page_counts = {
+            s["key"]: s["customer_count"]
+            for s in list_segments_with_counts(db, t.id, require_reachable=False)
+        }
+
+        # Campaign chip count (require_reachable=True). For seeded
+        # rows we set normalized_phone, so reachability is met for
+        # everyone.
+        camp_counts = {
+            s["key"]: s["customer_count"]
+            for s in list_segments_with_counts(db, t.id, require_reachable=True)
+        }
+
+        # The force_exclude on "all" must subtract from BOTH counts.
+        # Three customers seeded total; one excluded → 2 remaining.
+        assert page_counts["all"] == 2
+        assert camp_counts["all"] == 2
+
+        # The force_include on "promising" must add to BOTH counts.
+        # Auto classifier matches nobody (no orders), so the only
+        # member is the forced-in customer.
+        assert page_counts["promising"] == 1
+        assert camp_counts["promising"] == 1
+        # And the explicit count helper agrees.
+        assert count_unified_segment(
+            "promising", db, t.id, require_reachable=False,
+        ) == 1
+        assert count_unified_segment(
+            "promising", db, t.id, require_reachable=True,
+        ) == 1
+
+
+class TestOverrideEndpoint:
+    """Endpoint-level pins for the merchant-facing override surface."""
+
+    def _override(self, engine, tenant_id, customer_id, segment_key, mode):
+        import asyncio
+
+        from routers import customers as customers_router
+
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        original_resolve = customers_router.resolve_tenant_id
+        customers_router.resolve_tenant_id = (  # type: ignore
+            lambda request, db=None: tenant_id
+        )
+
+        class _FakeReq:
+            headers: dict = {}
+            cookies: dict = {}
+            state = type("S", (), {})()
+
+        try:
+            return asyncio.run(
+                customers_router.override_customer_segment(
+                    customer_id=customer_id,
+                    segment_key=segment_key,
+                    body=customers_router.CustomerSegmentOverrideIn(mode=mode),
+                    request=_FakeReq(),
+                    db=db,
+                )
+            )
+        finally:
+            customers_router.resolve_tenant_id = original_resolve
+            db.close()
+
+    def test_force_include_response_shape(self):
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        result = self._override(
+            engine, tenant_id, customer_id, "promising", "force_include",
+        )
+        assert result["ok"] is True
+        assert result["action"] == "force_include"
+        assert result["is_member"] is True
+        assert result["segment_key"] == "promising"
+        assert "manual_sources" in result
+
+    def test_unknown_mode_returns_clean_error(self):
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        result = self._override(
+            engine, tenant_id, customer_id, "promising", "bogus_mode",
+        )
+        assert result["ok"] is False
+        assert result["code"] == "unknown_mode"
+
+    def test_unknown_segment_returns_clean_error(self):
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        result = self._override(
+            engine, tenant_id, customer_id, "not_a_segment", "force_include",
+        )
+        assert result["ok"] is False
+        assert result["code"] == "unknown_segment"

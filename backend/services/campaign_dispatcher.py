@@ -853,7 +853,11 @@ def _get_wa_connection(db: Session, tenant_id: int) -> Optional[Any]:
 def _resolve_audience(
     db: Session, tenant_id: int, audience_type: str,
 ) -> List[Customer]:
-    from services.nahla_segments import build_segment_query
+    # Use the unified-membership query so the campaign audience always
+    # matches what the merchant sees on the customers page chip filter.
+    # Falling back to ``build_segment_query`` here (auto-only) is what
+    # produced the "I tagged هيثم but he's not in the campaign" bug.
+    from services.nahla_segments import build_unified_segment_query
 
     # Special pseudo-segment: the wizard's "test recipients" quick
     # action targets the tenant's internal test list (Customers flagged
@@ -877,29 +881,21 @@ def _resolve_audience(
             .all()
         )
 
-    # Wizard targeting by *manual* segment: ``manual:<key>``.
-    # Distinct from the auto Nahla segment (same registry, different
-    # source — manual rows live in `customer_segments_manual`).
+    # Legacy wizard targeting ``manual:<key>`` — kept as an alias for
+    # the unified query on the same key. Merchants no longer see
+    # auto-vs-manual as a choice (the platform is moving to a single
+    # "final membership" concept), but old saved campaigns may still
+    # have ``manual:<key>`` in audience_type so we accept it.
     if aud_norm.startswith("manual:"):
-        from services.manual_segments import (  # noqa: PLC0415
-            customer_ids_with_manual_segment,
-        )
         seg_key = aud_norm.split(":", 1)[1]
-        ids = customer_ids_with_manual_segment(db, tenant_id, seg_key)
-        if not ids:
-            return []
-        return (
-            db.query(Customer)
-            .filter(
-                Customer.tenant_id == tenant_id,
-                Customer.id.in_(ids),
-                Customer.normalized_phone.isnot(None),
-                Customer.normalized_phone != "",
-            )
-            .all()
+        q = build_unified_segment_query(
+            seg_key, db, tenant_id, require_reachable=True,
         )
+        if q is None:
+            return []
+        return q.all()
 
-    q = build_segment_query(audience_type, db, tenant_id, require_reachable=True)
+    q = build_unified_segment_query(audience_type, db, tenant_id, require_reachable=True)
     if q is None:
         is_unsubscribed = cast(
             Customer.extra_metadata.op("->>")("is_unsubscribed"), String,

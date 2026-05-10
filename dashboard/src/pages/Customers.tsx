@@ -21,6 +21,8 @@ import {
   Tag,
   Beaker,
   Plus,
+  Minus,
+  RotateCcw,
   ShieldOff,
   Filter,
 } from 'lucide-react'
@@ -959,43 +961,48 @@ function ManualSegmentsSection({
     s => s.key !== 'all' && !manualKeys.includes(s.key),
   )
 
-  const handleAdd = async (key: string) => {
+  /**
+   * Unified override handler — replaces the legacy add/remove pair.
+   *
+   *   force_include → add to segment regardless of auto classifier
+   *   force_exclude → remove from segment regardless of auto classifier
+   *   auto          → drop the override; classifier alone decides
+   *
+   * The backend returns the updated ``manual_sources`` map and
+   * ``is_member`` for the segment, so we patch the customer record
+   * locally without a full refetch.
+   */
+  const handleOverride = async (
+    key: string,
+    mode: 'force_include' | 'force_exclude' | 'auto',
+  ) => {
     if (!key) return
     setBusy(key)
     setError('')
     try {
-      const res = await customersApi.addManualSegment(customer.id, key)
-      const labels = res.manual_segments.map(
+      const res = await customersApi.overrideSegment(customer.id, key, mode)
+      if (!res.ok) {
+        setError(res.message || 'تعذر تحديث التصنيف')
+        return
+      }
+      const sources = (res.manual_sources || {}) as CustomerRecord['segment_sources']
+      // Recompute manual_segments locally from the new sources map
+      // so existing list-side rendering stays consistent.
+      const manual_segments = Object.entries(sources || {})
+        .filter(([, v]) => v?.manual_include)
+        .map(([k]) => k)
+      const manual_segments_labels = manual_segments.map(
         k => segments.find(s => s.key === k)?.label_ar || k,
       )
       await onChange({
         ...customer,
-        manual_segments: res.manual_segments,
-        manual_segments_labels: labels,
+        segment_sources:        sources,
+        manual_segments,
+        manual_segments_labels,
       })
-      setAdding('')
+      onRequireListReload?.()
     } catch (err: any) {
-      setError(err?.detail || err?.message || 'تعذر إضافة التصنيف')
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const handleRemove = async (key: string) => {
-    setBusy(key)
-    setError('')
-    try {
-      const res = await customersApi.removeManualSegment(customer.id, key)
-      const labels = res.manual_segments.map(
-        k => segments.find(s => s.key === k)?.label_ar || k,
-      )
-      await onChange({
-        ...customer,
-        manual_segments: res.manual_segments,
-        manual_segments_labels: labels,
-      })
-    } catch (err: any) {
-      setError(err?.detail || err?.message || 'تعذر حذف التصنيف')
+      setError(err?.detail || err?.message || 'تعذر تحديث التصنيف')
     } finally {
       setBusy(null)
     }
@@ -1039,6 +1046,23 @@ function ManualSegmentsSection({
     }
   }
 
+  // Unified rendering data.
+  //
+  // The drawer shows ALL Nahla segments (except "all" which is a meta
+  // bucket) so the merchant always sees the full vocabulary — and for
+  // each one we show:
+  //   * whether the customer is a member right now (final membership)
+  //   * a SINGLE small badge if the merchant overrode the auto signal:
+  //     "مضاف يدويًا" / "مستبعد يدويًا"  (never "auto" / "manual" as
+  //     two separate concepts).
+  //
+  // Membership = automatic ∨ force_include, MINUS force_exclude.
+  // Same formula the backend uses for /customers, /campaigns audience
+  // and the chip counts — so what the merchant sees here is exactly
+  // what the campaign wizard will target.
+  const sources = customer.segment_sources || {}
+  const renderableSegments = segments.filter(s => s.key !== 'all')
+
   return (
     <div className="space-y-3 border border-slate-100 rounded-xl p-3 bg-slate-50/40">
       <div className="flex items-center justify-between">
@@ -1047,122 +1071,140 @@ function ManualSegmentsSection({
           شرائح هذا العميل
         </h5>
         <span className="text-[10px] text-slate-400">
-          ذكي + يدوي
+          التصنيف الذكي مع إمكانية التعديل
         </span>
       </div>
 
-      {/* Unified per-segment chips. Each chip carries a source label
-          ("VIP يدوي + تلقائي" / "VIP يدوي" / "VIP تلقائي" /
-          "مستبعد يدويًا من VIP") and visually distinguishes excludes
-          from positive memberships so the merchant can tell at a
-          glance why this customer is (or isn't) in each segment. */}
-      <div className="flex flex-wrap gap-1.5">
-        {(() => {
-          // Build a unified row set from segment_sources (server) so
-          // we render one pill per segment with the right source.
-          const sources = customer.segment_sources || {}
-          const keys = Object.keys(sources)
-          if (keys.length === 0) {
-            return (
-              <p className="text-[11px] text-slate-400 italic">
-                لم يُصنَّف هذا العميل بعد في أي شريحة — أضف تصنيفاً يدوياً أدناه.
-              </p>
-            )
-          }
-          return keys.map(k => {
-            const src = sources[k]
-            const label = segments.find(s => s.key === k)?.label_ar || k
-            const isExcluded = src.manual_exclude
-            const sourceLabel = isExcluded
-              ? `مستبعد يدويًا من ${label}`
-              : src.manual_include && src.automatic
-                ? `${label} — يدوي + تلقائي`
-                : src.manual_include
-                  ? `${label} — يدوي`
-                  : `${label} — تلقائي`
-            const cls = isExcluded
-              ? 'text-slate-500 bg-slate-100 border-slate-200'
-              : src.manual_include && src.automatic
-                ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
-                : src.manual_include
-                  ? 'text-amber-700 bg-amber-50 border-amber-200'
-                  : 'text-blue-700 bg-blue-50 border-blue-200'
-            return (
-              <span
-                key={k}
-                className={`inline-flex items-center gap-1 text-[11px] font-semibold border px-2 py-1 rounded-full ${cls}`}
-                title={
-                  isExcluded
-                    ? 'استبعدتَ هذا العميل من هذه الشريحة يدوياً.'
-                    : src.manual_include && src.automatic
-                      ? 'صنّفه التاجر يدوياً والذكاء التلقائي يطابقه أيضاً.'
-                      : src.manual_include
-                        ? 'صنّفه التاجر يدوياً.'
-                        : 'تصنيف ذكي تلقائي بناءً على السلوك.'
-                }
-              >
-                {sourceLabel}
-                {/* Remove button only on manual-include or auto rows.
-                    Exclude rows show a "restore" button instead. */}
-                {!isExcluded && (
-                  <button
-                    type="button"
-                    disabled={busy === k}
-                    onClick={() => handleRemove(k)}
-                    className="text-current opacity-60 hover:opacity-100 disabled:opacity-30"
-                    title={
-                      src.automatic && !src.manual_include
-                        ? 'استبعِد هذا العميل من الشريحة'
-                        : 'إزالة التصنيف اليدوي'
-                    }
+      {/* Per-segment row. Each row exposes the three actions the spec
+          requires:
+            ➕ "إضافة لهذا التصنيف"      → mode=force_include
+            ➖ "استبعاد من هذا التصنيف"   → mode=force_exclude
+            ↻ "العودة للتصنيف التلقائي" → mode=auto
+
+          The active-state badge ("مضاف يدويًا" / "مستبعد يدويًا") is
+          the ONLY place where overrides are surfaced — we never tell
+          the merchant that "manual" and "auto" are two separate
+          classifications. */}
+      <div className="space-y-1.5">
+        {renderableSegments.map(s => {
+          const src = sources[s.key] || {
+            automatic:       false,
+            manual_include:  false,
+            manual_exclude:  false,
+            is_member:       false,
+          } as any
+          const isMember     = !!src.is_member
+          const isOverridden = src.manual_include || src.manual_exclude
+          const overrideKind = src.manual_exclude
+            ? 'مستبعد يدويًا'
+            : src.manual_include
+              ? 'مضاف يدويًا'
+              : ''
+          const pillCls = isMember
+            ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
+            : src.manual_exclude
+              ? 'text-slate-500 bg-slate-100 border-slate-200 line-through'
+              : 'text-slate-400 bg-white border-slate-200'
+
+          return (
+            <div
+              key={s.key}
+              className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg bg-white border border-slate-100"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span
+                  className={`inline-flex items-center gap-1 text-[11px] font-semibold border px-2 py-0.5 rounded-full ${pillCls}`}
+                  title={
+                    isMember
+                      ? 'العميل ضمن هذه الشريحة حالياً.'
+                      : 'العميل خارج هذه الشريحة حالياً.'
+                  }
+                >
+                  {s.label_ar}
+                </span>
+                {isOverridden && (
+                  <span
+                    className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                      src.manual_exclude
+                        ? 'bg-rose-50 text-rose-700 border border-rose-100'
+                        : 'bg-amber-50 text-amber-700 border border-amber-100'
+                    }`}
+                    title="تم تعديل التصنيف يدوياً — اضغط ↻ للعودة للتصنيف التلقائي."
                   >
-                    <X className="w-3 h-3" />
-                  </button>
+                    {overrideKind}
+                  </span>
                 )}
-                {isExcluded && (
-                  <button
-                    type="button"
-                    disabled={busy === k}
-                    onClick={() => handleAdd(k)}
-                    className="text-current opacity-60 hover:opacity-100 disabled:opacity-30"
-                    title="إعادة إلى التصنيف"
-                  >
-                    <Plus className="w-3 h-3" />
-                  </button>
-                )}
-              </span>
-            )
-          })
-        })()}
+              </div>
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  disabled={busy === s.key || src.manual_include}
+                  onClick={() => handleOverride(s.key, 'force_include')}
+                  className="p-1 rounded hover:bg-emerald-50 text-emerald-600 disabled:opacity-30 disabled:hover:bg-transparent"
+                  title="إضافة لهذا التصنيف"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  disabled={busy === s.key || src.manual_exclude}
+                  onClick={() => handleOverride(s.key, 'force_exclude')}
+                  className="p-1 rounded hover:bg-rose-50 text-rose-600 disabled:opacity-30 disabled:hover:bg-transparent"
+                  title="استبعاد من هذا التصنيف"
+                >
+                  <Minus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  disabled={busy === s.key || !isOverridden}
+                  onClick={() => handleOverride(s.key, 'auto')}
+                  className="p-1 rounded hover:bg-slate-100 text-slate-500 disabled:opacity-30 disabled:hover:bg-transparent"
+                  title="العودة للتصنيف التلقائي"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )
+        })}
       </div>
 
-      {/* Add new tag — dropdown, never a free-form text field */}
-      <div className="flex items-center gap-2">
-        <select
-          value={adding}
-          onChange={(e) => setAdding(e.target.value)}
-          className="flex-1 ps-2 pe-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
-          disabled={addableSegments.length === 0 || !!busy}
-        >
-          <option value="">
-            {addableSegments.length === 0
-              ? 'كل التصنيفات الرسمية مضافة'
-              : 'اختر تصنيفاً لإضافته…'}
-          </option>
-          {addableSegments.map(s => (
-            <option key={s.key} value={s.key}>{s.label_ar}</option>
-          ))}
-        </select>
-        <button
-          type="button"
-          onClick={() => handleAdd(adding)}
-          disabled={!adding || !!busy}
-          className="text-xs font-semibold text-brand-600 bg-brand-50 hover:bg-brand-100 border border-brand-200 px-2.5 py-1.5 rounded-lg disabled:opacity-50 flex items-center gap-1"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          إضافة
-        </button>
-      </div>
+      {/* Quick add — same dropdown surface, but it now triggers the
+          unified force_include path so it round-trips through the
+          override endpoint, keeping a single audit log of changes.
+
+          We hide it when every segment already has a positive
+          override / auto match; the merchant uses the inline ➕ on
+          each row in that case.
+       */}
+      {addableSegments.length > 0 && (
+        <div className="flex items-center gap-2 border-t border-slate-100 pt-2">
+          <select
+            value={adding}
+            onChange={(e) => setAdding(e.target.value)}
+            className="flex-1 ps-2 pe-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
+            disabled={!!busy}
+          >
+            <option value="">إضافة سريعة لشريحة…</option>
+            {addableSegments.map(s => (
+              <option key={s.key} value={s.key}>{s.label_ar}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={async () => {
+              if (!adding) return
+              await handleOverride(adding, 'force_include')
+              setAdding('')
+            }}
+            disabled={!adding || !!busy}
+            className="text-xs font-semibold text-brand-600 bg-brand-50 hover:bg-brand-100 border border-brand-200 px-2.5 py-1.5 rounded-lg disabled:opacity-50 flex items-center gap-1"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            إضافة
+          </button>
+        </div>
+      )}
 
       {error && (
         <p className="text-[11px] text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1">
