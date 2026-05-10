@@ -149,8 +149,8 @@ PLAN_DEFINITIONS: Dict[str, PlanDefinition] = {
         name_ar="الأساسية",
         price_sar=979,
         limits=PlanLimits(
-            monthly_conversations=2_000,
-            campaigns_per_month=5,
+            monthly_conversations=5_000,
+            campaigns_per_month=_UNLIMITED,
         ),
         features=PlanFeatures(
             # Templates
@@ -224,8 +224,8 @@ PLAN_DEFINITIONS: Dict[str, PlanDefinition] = {
         name_ar="النمو",
         price_sar=1899,
         limits=PlanLimits(
-            monthly_conversations=10_000,
-            campaigns_per_month=_UNLIMITED,   # "بدون حد أو حد عالي جداً"
+            monthly_conversations=15_000,
+            campaigns_per_month=_UNLIMITED,
         ),
         features=PlanFeatures(
             # Templates

@@ -187,10 +187,19 @@ function PlanCard({
       <div className="p-5 flex-1">
         <ul className="space-y-2.5">
           {plan.features.map((f, i) => (
-            <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
-              <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-              {f}
-            </li>
+            i === 0 ? (
+              /* First feature = killer feature — gets a prominent
+                 visual treatment to draw the eye immediately. */
+              <li key={i} className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 -mx-1">
+                <span className="text-base shrink-0 mt-0.5">📱</span>
+                <span className="text-xs font-bold text-amber-900 leading-snug">{f}</span>
+              </li>
+            ) : (
+              <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+                <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+                {f}
+              </li>
+            )
           ))}
         </ul>
       </div>
@@ -512,6 +521,18 @@ export default function Billing() {
 
       {/* Hero value proposition */}
       <div className="rounded-2xl bg-gradient-to-l from-brand-600 to-brand-400 p-5 text-white">
+        {/* Killer feature banner */}
+        <div className="mb-4 bg-white/15 border border-white/25 rounded-xl px-3 py-2.5 flex items-center gap-2.5">
+          <span className="text-xl shrink-0">📱</span>
+          <div>
+            <p className="text-sm font-bold leading-snug">
+              واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا
+            </p>
+            <p className="text-white/70 text-[11px] mt-0.5">
+              استخدم تطبيق واتساب الأعمال على جوالك كالمعتاد — نحلة تعمل في الخلفية بدون أي تعارض. لا حاجة لحذف التطبيق.
+            </p>
+          </div>
+        </div>
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
             <Bot className="w-5 h-5" />
