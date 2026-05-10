@@ -364,6 +364,46 @@ MERCHANT_BRAIN_TENANT_IDS: set = {
     if x.strip().isdigit()
 }
 
+
+# ── Manual marketing campaign — anti-spam frequency cap ────────────────────
+#
+# Manual campaigns (broadcast / promotion / custom etc.) skip a
+# recipient when the same tenant already sent them a marketing campaign
+# within the last N days. This protects:
+#   * Meta sender reputation (high opt-out / blocked rate kills tier).
+#   * Customer experience (no two pushes in the same week).
+#   * Merchant credibility (a crashed campaign that restarts won't
+#     re-spam the recipients who already received the message).
+#
+# Default 14 days at first launch — wide enough that no realistic
+# weekly cadence trips the guard. Operators can tighten to 7 once we
+# have telemetry showing it's safe. Override via env:
+#   MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS=7
+#
+# Setting to 0 disables the cap entirely (admin-only escape hatch —
+# should NEVER be 0 in production).
+MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS = max(
+    0,
+    int(os.environ.get("MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS", "14") or "14"),
+)
+
+# Batch size for the dispatch loop. Each batch commits its rows then
+# pauses briefly so the WhatsApp Cloud API doesn't see a sustained
+# burst that would trigger rate-limiting (Meta enforces ~80 msg/sec
+# per phone-number for Tier-1 senders; 100 per batch with a small
+# inter-batch sleep keeps us comfortably under that ceiling).
+MARKETING_CAMPAIGN_BATCH_SIZE = max(
+    10,
+    int(os.environ.get("MARKETING_CAMPAIGN_BATCH_SIZE", "100") or "100"),
+)
+
+# Inter-batch pause in seconds. 1.5s/message inside a batch + this
+# pause between batches gives a steady, human-paced send rate.
+MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS = max(
+    0.0,
+    float(os.environ.get("MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS", "2.0") or "2.0"),
+)
+
 # ── Legacy conversational fallback ─────────────────────────────────────────
 # When the Brain pipeline raises (or is disabled), the merchant message
 # handler used to fall back to a free-form `generate_ai_reply()` call. The

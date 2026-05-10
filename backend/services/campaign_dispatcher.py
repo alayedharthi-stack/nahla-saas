@@ -2,7 +2,42 @@
 services/campaign_dispatcher.py
 ────────────────────────────────
 Bulk campaign dispatch: iterate the audience and send a WhatsApp
-template message to each customer.
+template message to each customer **with strict idempotency**.
+
+Why "with strict idempotency" matters
+─────────────────────────────────────
+The bug we are fixing: a manual marketing campaign that crashes
+mid-dispatch (network blip, provider error, server restart) used to
+re-iterate the entire audience on the next "Run" click, double-sending
+to recipients who already received the message. That is a serious
+reputation risk on Meta's tier system and an annoying UX for the
+customer.
+
+The new contract:
+
+  1. **Snapshot first.** Before contacting Meta we INSERT a row in
+     ``campaign_send_logs`` for every recipient with
+     ``status='queued'``. The unique constraint
+     ``UNIQUE(tenant_id, campaign_id, customer_phone_e164)`` makes the
+     insert idempotent — a re-run silently skips recipients that were
+     already snapshotted on a previous attempt.
+
+  2. **Dedupe pass.** Apply the marketing-campaign frequency cap (default
+     14 days, env-overridable). Recipients who received a prior
+     marketing campaign from the same tenant in the window flip to
+     ``status='skipped_duplicate'`` and never reach the provider.
+
+  3. **Batched sends.** Process queued/failed rows in batches of N
+     (default 100). Each row transitions
+     ``queued/failed → sending → sent/failed`` and a ``sent`` row is
+     NEVER touched again unless an admin issues an explicit "force
+     resend" (a separate code path that creates a new Campaign).
+
+Scope: this dispatcher handles **manual marketing campaigns** only —
+broadcast, promotion, reactivation, etc. Cart recovery
+(``core/automation_engine.py``), order messages, generic automations,
+and 24h-service replies use their own audit trails and are out of
+scope for this log.
 
 Called from:
   - POST /campaigns (when schedule_type == "immediate")
@@ -15,10 +50,10 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import String, and_, cast, or_
+from sqlalchemy import String, and_, cast, func, or_
 from sqlalchemy.orm import Session
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
@@ -30,11 +65,45 @@ for _p in (_BACKEND, _DB):
 
 import re as _re
 
-from models import Campaign, Conversation, Customer, MessageEvent, WhatsAppConnection, WhatsAppTemplate
+from core.config import (
+    MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS,
+    MARKETING_CAMPAIGN_BATCH_SIZE,
+    MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
+)
+from models import (
+    Campaign,
+    CampaignSendLog,
+    Conversation,
+    Customer,
+    MessageEvent,
+    WhatsAppConnection,
+    WhatsAppTemplate,
+)
 
 logger = logging.getLogger("nahla-backend")
 
 INTER_MESSAGE_DELAY = 1.5
+
+# ── Status constants for campaign_send_logs.status ────────────────────────
+# Kept as module-level strings (not Enum) so DB rows stay compatible with
+# the open Postgres String column and so we can grep for status names
+# across the codebase without IDE help.
+LOG_QUEUED              = "queued"
+LOG_SENDING             = "sending"
+LOG_SENT                = "sent"
+LOG_FAILED              = "failed"
+LOG_SKIPPED_DUPLICATE   = "skipped_duplicate"
+LOG_SKIPPED_INVALID     = "skipped_invalid"
+LOG_SKIPPED_UNSUBSCRIBED = "skipped_unsubscribed"
+LOG_SKIPPED_UNREACHABLE = "skipped_unreachable"
+
+# Skip reasons (free-form but kept consistent so the dashboard can
+# render an Arabic label for each).
+REASON_FREQ_CAP         = "frequency_cap_marketing"
+REASON_INVALID_PHONE    = "invalid_phone"
+REASON_UNSUBSCRIBED     = "unsubscribed"
+REASON_PENDING_OPT_OUT  = "pending_unsubscribe"
+REASON_NO_PHONE         = "no_phone"
 
 
 def _reconstruct_template_body(
@@ -130,13 +199,28 @@ def _record_campaign_message(
 
 
 async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
-    """Send a campaign's template to every reachable customer in its audience.
+    """Send a campaign's template to every reachable customer with
+    strict per-recipient idempotency.
 
-    Returns a summary dict: {sent, failed, skipped, errors}.
+    Pipeline:
+      1. Validate campaign / template / connection.
+      2. Resolve audience.
+      3. Snapshot every recipient into ``campaign_send_logs`` (queued).
+      4. Apply the marketing frequency cap (skipped_duplicate).
+      5. Mark unreachable / invalid / opted-out rows.
+      6. Send ``queued`` + ``failed`` rows in batches.
+      7. Recompute summary counters for the campaign report.
+
+    The function is safe to call again on the same ``campaign_id``.
+    Already-sent rows are NEVER re-sent — only ``queued`` and
+    ``failed`` rows are picked up by step 6.
+
+    Returns a summary dict including the per-status counters surfaced
+    to the merchant in the campaign report.
     """
     campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
     if not campaign:
-        return {"sent": 0, "failed": 0, "skipped": 0, "errors": ["Campaign not found"]}
+        return _empty_result(error="Campaign not found")
 
     tenant_id = campaign.tenant_id
     logger.info(
@@ -151,7 +235,7 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         campaign.status = "failed"
         _persist_dispatch_result(campaign, 0, 0, 0, [err])
         db.commit()
-        return {"sent": 0, "failed": 0, "skipped": 0, "errors": [err]}
+        return _empty_result(error=err)
 
     wa_conn = _get_wa_connection(db, tenant_id)
     if not wa_conn:
@@ -160,33 +244,9 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         campaign.status = "failed"
         _persist_dispatch_result(campaign, 0, 0, 0, [err])
         db.commit()
-        return {"sent": 0, "failed": 0, "skipped": 0, "errors": [err]}
+        return _empty_result(error=err)
 
     logger.info("[campaign_dispatcher] campaign=%d: WA conn found phone_id=%s", campaign_id, getattr(wa_conn, 'phone_number_id', '?'))
-
-    customers = _resolve_audience(db, tenant_id, campaign.audience_type)
-    if not customers:
-        err = "لا يوجد عملاء يمكن الوصول إليهم في هذه الشريحة"
-        logger.warning("[campaign_dispatcher] campaign=%d: no reachable customers for segment=%s", campaign_id, campaign.audience_type)
-        campaign.status = "failed"
-        _persist_dispatch_result(campaign, 0, 0, 0, [err])
-        db.commit()
-        return {"sent": 0, "failed": 0, "skipped": 0, "errors": [err]}
-
-    logger.info("[campaign_dispatcher] campaign=%d: found %d customers to send to", campaign_id, len(customers))
-
-    campaign.status = "active"
-    if not campaign.launched_at:
-        campaign.launched_at = datetime.now(timezone.utc)
-    campaign.audience_count = len(customers)
-    db.commit()
-
-    tpl_vars = campaign.template_variables or {}
-    auto_coupon = tpl_vars.get("_auto_coupon") == "true"
-    discount_pct_raw = tpl_vars.get("_discount_percent")
-    discount_pct = int(discount_pct_raw) if discount_pct_raw else None
-
-    store_name = _resolve_store_name(db, tenant_id)
 
     preflight = validate_template_payload(template, coupon_code="PREFLIGHT")
     if preflight:
@@ -198,122 +258,467 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         campaign.status = "failed"
         _persist_dispatch_result(campaign, 0, 0, 0, preflight)
         db.commit()
-        return {"sent": 0, "failed": 0, "skipped": 0, "errors": preflight}
+        return _empty_result(error=errs_text)
 
-    sent = 0
-    failed = 0
-    skipped = 0
-    errors: List[str] = []
+    customers = _resolve_audience(db, tenant_id, campaign.audience_type)
+    logger.info(
+        "[campaign_dispatcher] campaign=%d: resolved %d customers from segment=%s",
+        campaign_id, len(customers), campaign.audience_type,
+    )
 
-    from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+    # ── 1. Snapshot recipients into campaign_send_logs ──────────────────
+    snapshot = _snapshot_recipients(db, tenant_id, campaign_id, customers, template)
+    db.commit()
 
-    for i, customer in enumerate(customers):
-        phone = getattr(customer, "normalized_phone", None) or ""
-        if not phone:
-            skipped += 1
-            continue
+    # ── 2. Frequency-cap dedupe ─────────────────────────────────────────
+    cap_skipped = _apply_frequency_cap(db, tenant_id, campaign_id)
+    db.commit()
 
-        # Hard opt-out guard — in case a customer unsubscribed (or asked
-        # to unsubscribe and is awaiting confirmation) after the audience
-        # was resolved but before we reached them in the loop.
-        _meta = getattr(customer, "extra_metadata", None) or {}
-        if _meta.get("is_unsubscribed"):
-            skipped += 1
-            logger.debug(
-                "[campaign_dispatcher] skipping opted-out customer %s (state=unsubscribed)",
-                getattr(customer, "id", "?"),
-            )
-            continue
-        if _meta.get("pending_unsubscribe"):
-            try:
-                from services.unsubscribe import expire_pending_if_needed  # noqa: PLC0415
-                if not expire_pending_if_needed(db, customer, commit=True):
-                    skipped += 1
-                    logger.debug(
-                        "[campaign_dispatcher] skipping opted-out customer %s (state=pending)",
-                        getattr(customer, "id", "?"),
-                    )
-                    continue
-            except Exception:
-                skipped += 1
-                continue
+    campaign.status = "active"
+    if not campaign.launched_at:
+        campaign.launched_at = datetime.now(timezone.utc)
+    campaign.audience_count = len(customers)
+    db.commit()
 
-        try:
-            coupon_code = ""
-            if auto_coupon and discount_pct:
-                coupon_code = await _get_auto_coupon(
-                    db, tenant_id, customer, discount_pct,
-                )
+    counts_pre = _count_log_statuses(db, campaign_id)
+    logger.info(
+        "[campaign_dispatcher] campaign=%d snapshot=%s cap_skipped=%d counts=%s",
+        campaign_id, snapshot, cap_skipped, counts_pre,
+    )
 
-            payload = _build_send_payload(
-                template=template,
-                to_phone=phone,
-                customer_name=customer.name or "العميل",
-                store_name=store_name,
-                coupon_code=coupon_code,
-            )
+    # ── 3. Send queued / failed rows in batches ─────────────────────────
+    tpl_vars = campaign.template_variables or {}
+    auto_coupon = tpl_vars.get("_auto_coupon") == "true"
+    discount_pct_raw = tpl_vars.get("_discount_percent")
+    discount_pct = int(discount_pct_raw) if discount_pct_raw else None
+    store_name = _resolve_store_name(db, tenant_id)
 
-            response, _ctx = await provider_send_message(
-                db,
-                wa_conn,
-                tenant_id=tenant_id,
-                operation="campaign_send",
-                phone_id=wa_conn.phone_number_id,
-                payload=payload,
-            )
+    sent, failed, errors = await _dispatch_queued_rows(
+        db,
+        campaign=campaign,
+        template=template,
+        wa_conn=wa_conn,
+        store_name=store_name,
+        auto_coupon=auto_coupon,
+        discount_pct=discount_pct,
+        customers_by_phone={
+            (c.normalized_phone or ""): c for c in customers if c.normalized_phone
+        },
+    )
 
-            resp = response or {}
-            meta_err = resp.get("error") if isinstance(resp, dict) else None
-            if meta_err:
-                failed += 1
-                err_msg = meta_err.get("message", "Unknown Meta error")
-                err_code = meta_err.get("code", "")
-                logger.warning(
-                    "[campaign_dispatcher] campaign=%d: Meta error %s for %s: %s | payload=%s",
-                    campaign_id, err_code, phone, err_msg, payload,
-                )
-                if len(errors) < 10:
-                    errors.append(f"{phone}: ({err_code}) {err_msg[:120]}")
-            else:
-                sent += 1
-                wa_msg_id = (resp.get("messages") or [{}])[0].get("id", "")
-                rendered = _reconstruct_template_body(
-                    template, customer.name or "العميل", store_name, coupon_code,
-                )
-                _record_campaign_message(
-                    db, tenant_id, campaign_id, customer, phone, template, rendered,
-                    wa_message_id=wa_msg_id,
-                )
-                logger.info("[campaign_dispatcher] campaign=%d: sent OK to %s wamid=%s", campaign_id, phone, wa_msg_id)
-        except Exception as exc:
-            failed += 1
-            logger.error(
-                "[campaign_dispatcher] campaign=%d: exception sending to %s: %s",
-                campaign_id, phone, exc, exc_info=True,
-            )
-            if len(errors) < 10:
-                errors.append(f"{phone}: {str(exc)[:120]}")
-
-        campaign.sent_count = sent
-        if i % 10 == 0:
-            db.commit()
-
-        if i < len(customers) - 1:
-            await asyncio.sleep(INTER_MESSAGE_DELAY)
-
-    final_status = "completed" if sent > 0 else ("failed" if failed > 0 else "completed")
-    campaign.sent_count = sent
+    # ── 4. Final counters & campaign status ─────────────────────────────
+    counts = _count_log_statuses(db, campaign_id)
+    final_status = (
+        "completed" if counts.get("sent", 0) > 0
+        else ("failed" if counts.get("failed", 0) > 0 else "completed")
+    )
+    campaign.sent_count = counts.get("sent", 0)
     campaign.status = final_status
     campaign.updated_at = datetime.now(timezone.utc)
 
-    _persist_dispatch_result(campaign, sent, failed, skipped, errors)
+    _persist_dispatch_result(
+        campaign,
+        sent=counts.get("sent", 0),
+        failed=counts.get("failed", 0),
+        skipped=counts.get(LOG_SKIPPED_DUPLICATE, 0)
+                + counts.get(LOG_SKIPPED_INVALID, 0)
+                + counts.get(LOG_SKIPPED_UNSUBSCRIBED, 0)
+                + counts.get(LOG_SKIPPED_UNREACHABLE, 0),
+        errors=errors,
+    )
     db.commit()
 
     logger.info(
-        "[campaign_dispatcher] campaign=%d tenant=%d status=%s sent=%d failed=%d skipped=%d total=%d errors=%s",
-        campaign_id, tenant_id, final_status, sent, failed, skipped, len(customers), errors[:3],
+        "[campaign_dispatcher] campaign=%d tenant=%d status=%s counts=%s errors=%s",
+        campaign_id, tenant_id, final_status, counts, errors[:3],
     )
-    return {"sent": sent, "failed": failed, "skipped": skipped, "errors": errors}
+
+    return {
+        "campaign_id":   campaign_id,
+        "status":        final_status,
+        "total_recipients":   sum(counts.values()),
+        "sent":               counts.get("sent", 0),
+        "failed":             counts.get("failed", 0),
+        "queued":             counts.get("queued", 0),
+        "skipped_duplicate":  counts.get(LOG_SKIPPED_DUPLICATE, 0),
+        "invalid_phone":      counts.get(LOG_SKIPPED_INVALID, 0),
+        "skipped_unsubscribed": counts.get(LOG_SKIPPED_UNSUBSCRIBED, 0),
+        "skipped_unreachable":  counts.get(LOG_SKIPPED_UNREACHABLE, 0),
+        "frequency_cap_days": MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
+        "errors":         errors,
+    }
+
+
+# ── Snapshot + dedupe helpers ────────────────────────────────────────────
+
+
+def _empty_result(*, error: str = "") -> Dict[str, Any]:
+    return {
+        "campaign_id":          None,
+        "status":               "failed",
+        "total_recipients":     0,
+        "sent":                 0,
+        "failed":               0,
+        "queued":               0,
+        "skipped_duplicate":    0,
+        "invalid_phone":        0,
+        "skipped_unsubscribed": 0,
+        "skipped_unreachable":  0,
+        "frequency_cap_days":   MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
+        "errors":               [error] if error else [],
+    }
+
+
+def _snapshot_recipients(
+    db: Session,
+    tenant_id: int,
+    campaign_id: int,
+    customers: List[Customer],
+    template: WhatsAppTemplate,
+) -> Dict[str, int]:
+    """Insert one ``campaign_send_logs`` row per recipient with
+    ``status='queued'`` (or the appropriate ``skipped_*`` status when
+    the recipient is unreachable / opted-out).
+
+    Idempotency: the unique index on
+    ``(tenant_id, campaign_id, customer_phone_e164)`` makes the second
+    snapshot for the same recipient a no-op. We therefore SELECT the
+    set of phones already logged and only INSERT for the rest.
+    """
+    if not customers:
+        return {"new": 0, "existing": 0, "no_phone": 0}
+
+    # Existing rows for this campaign — these have already gone through
+    # snapshot and may even be in `sent` status. We do NOT touch them.
+    existing_phones = {
+        row[0]
+        for row in db.query(CampaignSendLog.customer_phone_e164)
+                     .filter(CampaignSendLog.campaign_id == campaign_id)
+                     .all()
+    }
+
+    new_rows: List[CampaignSendLog] = []
+    no_phone = 0
+    for cust in customers:
+        phone = (cust.normalized_phone or "").strip()
+        if not phone:
+            # No normalized phone — record an "unreachable" row keyed
+            # off a synthetic phone token so the unique index doesn't
+            # explode when multiple customers share an empty phone.
+            # Use the customer id as the anchor.
+            phone_key = f"__no_phone__:{cust.id}"
+            if phone_key in existing_phones:
+                continue
+            new_rows.append(CampaignSendLog(
+                tenant_id=tenant_id,
+                campaign_id=campaign_id,
+                customer_id=cust.id,
+                customer_phone_e164=phone_key,
+                template_name=template.name,
+                template_language=template.language,
+                status=LOG_SKIPPED_UNREACHABLE,
+                skip_reason=REASON_NO_PHONE,
+            ))
+            existing_phones.add(phone_key)
+            no_phone += 1
+            continue
+
+        if phone in existing_phones:
+            continue
+
+        meta = getattr(cust, "extra_metadata", None) or {}
+        if meta.get("is_unsubscribed"):
+            new_rows.append(CampaignSendLog(
+                tenant_id=tenant_id,
+                campaign_id=campaign_id,
+                customer_id=cust.id,
+                customer_phone_e164=phone,
+                template_name=template.name,
+                template_language=template.language,
+                status=LOG_SKIPPED_UNSUBSCRIBED,
+                skip_reason=REASON_UNSUBSCRIBED,
+            ))
+            existing_phones.add(phone)
+            continue
+
+        if meta.get("pending_unsubscribe"):
+            new_rows.append(CampaignSendLog(
+                tenant_id=tenant_id,
+                campaign_id=campaign_id,
+                customer_id=cust.id,
+                customer_phone_e164=phone,
+                template_name=template.name,
+                template_language=template.language,
+                status=LOG_SKIPPED_UNSUBSCRIBED,
+                skip_reason=REASON_PENDING_OPT_OUT,
+            ))
+            existing_phones.add(phone)
+            continue
+
+        new_rows.append(CampaignSendLog(
+            tenant_id=tenant_id,
+            campaign_id=campaign_id,
+            customer_id=cust.id,
+            customer_phone_e164=phone,
+            template_name=template.name,
+            template_language=template.language,
+            status=LOG_QUEUED,
+        ))
+        existing_phones.add(phone)
+
+    if new_rows:
+        # ``add_all`` (not ``bulk_save_objects``) so SQLAlchemy applies
+        # column defaults — the SQLite shim used in tests requires an
+        # autoincrement on the BigInteger PK that bulk_save skips.
+        # For realistic audience sizes (≤10k recipients per snapshot)
+        # add_all is plenty fast.
+        db.add_all(new_rows)
+        db.flush()
+
+    return {
+        "new": len(new_rows),
+        "existing": len(existing_phones) - len(new_rows),
+        "no_phone": no_phone,
+    }
+
+
+def _apply_frequency_cap(
+    db: Session,
+    tenant_id: int,
+    campaign_id: int,
+) -> int:
+    """Mark ``status='queued'`` rows whose phone received another
+    sent marketing campaign within the cap window as
+    ``status='skipped_duplicate'``.
+
+    Returns the number of rows updated. A cap value of 0 disables the
+    check entirely (admin escape hatch — should never be 0 in prod).
+    """
+    cap_days = MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS
+    if cap_days <= 0:
+        return 0
+
+    threshold = datetime.now(timezone.utc) - timedelta(days=cap_days)
+
+    # Subquery: all phones that already received a `sent` marketing
+    # campaign for THIS tenant within the cap window — across ANY past
+    # campaign id. The current campaign's snapshot rows are intentionally
+    # excluded from this set (we don't want a queued row to dedupe
+    # itself if the merchant re-runs a campaign that already sent half
+    # of its audience).
+    sent_phones_subq = (
+        db.query(CampaignSendLog.customer_phone_e164)
+        .filter(
+            CampaignSendLog.tenant_id == tenant_id,
+            CampaignSendLog.status == LOG_SENT,
+            CampaignSendLog.sent_at >= threshold,
+            CampaignSendLog.campaign_id != campaign_id,
+        )
+        .distinct()
+    )
+    sent_phones = {row[0] for row in sent_phones_subq.all()}
+
+    if not sent_phones:
+        return 0
+
+    # Bulk update queued rows whose phone is in the dedupe set.
+    queued = (
+        db.query(CampaignSendLog)
+        .filter(
+            CampaignSendLog.campaign_id == campaign_id,
+            CampaignSendLog.status == LOG_QUEUED,
+            CampaignSendLog.customer_phone_e164.in_(sent_phones),
+        )
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    for row in queued:
+        row.status = LOG_SKIPPED_DUPLICATE
+        row.skip_reason = f"{REASON_FREQ_CAP}:{cap_days}d"
+        row.updated_at = now
+
+    return len(queued)
+
+
+def _count_log_statuses(db: Session, campaign_id: int) -> Dict[str, int]:
+    """Return ``{status: count}`` for every status seen on this
+    campaign. Backbone of the report endpoint."""
+    rows = (
+        db.query(CampaignSendLog.status, func.count(CampaignSendLog.id))
+        .filter(CampaignSendLog.campaign_id == campaign_id)
+        .group_by(CampaignSendLog.status)
+        .all()
+    )
+    return {status: int(count) for status, count in rows}
+
+
+# ── Batched send ─────────────────────────────────────────────────────────
+
+
+async def _dispatch_queued_rows(
+    db: Session,
+    *,
+    campaign: Campaign,
+    template: WhatsAppTemplate,
+    wa_conn: Any,
+    store_name: str,
+    auto_coupon: bool,
+    discount_pct: Optional[int],
+    customers_by_phone: Dict[str, Customer],
+) -> Tuple[int, int, List[str]]:
+    """Walk the campaign's ``queued`` and ``failed`` rows in batches and
+    send each one. Already-sent rows are filtered out by the query
+    itself, so a re-run of this function is safe.
+
+    Returns ``(sent_count, failed_count, error_messages)``.
+    """
+    from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+
+    sent = 0
+    failed = 0
+    errors: List[str] = []
+    batch_size = MARKETING_CAMPAIGN_BATCH_SIZE
+    pause = MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS
+
+    while True:
+        # Pull the next batch of work. We re-query each iteration
+        # (rather than keep an in-memory list) so:
+        #   * a parallel admin "force-resend" never duplicates a row.
+        #   * crashes mid-batch resume cleanly on the next call.
+        batch = (
+            db.query(CampaignSendLog)
+            .filter(
+                CampaignSendLog.campaign_id == campaign.id,
+                CampaignSendLog.status.in_([LOG_QUEUED, LOG_FAILED]),
+            )
+            .order_by(CampaignSendLog.id.asc())
+            .limit(batch_size)
+            .all()
+        )
+        if not batch:
+            break
+
+        for row in batch:
+            # Idempotency guard: re-check status under the same row
+            # (handles the case where another worker already grabbed it).
+            if row.status == LOG_SENT:
+                continue
+
+            # Mark sending — visible in the dashboard status feed.
+            row.status = LOG_SENDING
+            row.attempt_count = (row.attempt_count or 0) + 1
+            row.updated_at = datetime.now(timezone.utc)
+            db.flush()
+
+            phone = row.customer_phone_e164
+            customer = customers_by_phone.get(phone)
+            customer_name = (customer.name if customer else None) or "العميل"
+
+            try:
+                coupon_code = ""
+                if auto_coupon and discount_pct and customer:
+                    coupon_code = await _get_auto_coupon(
+                        db, campaign.tenant_id, customer, discount_pct,
+                    )
+
+                payload = _build_send_payload(
+                    template=template,
+                    to_phone=phone,
+                    customer_name=customer_name,
+                    store_name=store_name,
+                    coupon_code=coupon_code,
+                )
+
+                response, _ctx = await provider_send_message(
+                    db,
+                    wa_conn,
+                    tenant_id=campaign.tenant_id,
+                    operation="campaign_send",
+                    phone_id=wa_conn.phone_number_id,
+                    payload=payload,
+                )
+
+                resp = response or {}
+                meta_err = resp.get("error") if isinstance(resp, dict) else None
+                if meta_err:
+                    if isinstance(meta_err, dict):
+                        err_msg = meta_err.get("message") or "Unknown Meta error"
+                        err_code = str(meta_err.get("code") or "")
+                    else:
+                        err_msg = str(meta_err) or "Unknown Meta error"
+                        err_code = "meta_error"
+                    row.status = LOG_FAILED
+                    row.error_code = err_code[:64]
+                    row.error_message = str(err_msg)[:500]
+                    row.updated_at = datetime.now(timezone.utc)
+                    failed += 1
+                    if len(errors) < 10:
+                        errors.append(f"{phone}: ({err_code}) {str(err_msg)[:120]}")
+                    logger.warning(
+                        "[campaign_dispatcher] campaign=%d Meta error %s for %s: %s",
+                        campaign.id, err_code, phone, err_msg,
+                    )
+                else:
+                    messages = resp.get("messages") if isinstance(resp, dict) else None
+                    first = messages[0] if isinstance(messages, list) and messages else None
+                    wa_msg_id = first.get("id") if isinstance(first, dict) else ""
+                    if not wa_msg_id:
+                        # No id means Meta did not actually accept the
+                        # message — treat as failure so we don't lie to
+                        # the merchant by counting it as sent.
+                        row.status = LOG_FAILED
+                        row.error_code = "no_message_id"
+                        row.error_message = "Meta did not return a wamid"
+                        row.updated_at = datetime.now(timezone.utc)
+                        failed += 1
+                        if len(errors) < 10:
+                            errors.append(f"{phone}: no message id from Meta")
+                    else:
+                        row.status = LOG_SENT
+                        row.provider_message_id = wa_msg_id
+                        row.sent_at = datetime.now(timezone.utc)
+                        row.error_code = None
+                        row.error_message = None
+                        row.updated_at = datetime.now(timezone.utc)
+                        sent += 1
+                        if customer:
+                            rendered = _reconstruct_template_body(
+                                template, customer_name, store_name, coupon_code,
+                            )
+                            _record_campaign_message(
+                                db, campaign.tenant_id, campaign.id, customer,
+                                phone, template, rendered,
+                                wa_message_id=wa_msg_id,
+                            )
+                        logger.info(
+                            "[campaign_dispatcher] campaign=%d sent OK to %s wamid=%s",
+                            campaign.id, phone, wa_msg_id,
+                        )
+            except Exception as exc:
+                row.status = LOG_FAILED
+                row.error_code = "exception"
+                row.error_message = str(exc)[:500]
+                row.updated_at = datetime.now(timezone.utc)
+                failed += 1
+                if len(errors) < 10:
+                    errors.append(f"{phone}: {str(exc)[:120]}")
+                logger.error(
+                    "[campaign_dispatcher] campaign=%d exception sending to %s: %s",
+                    campaign.id, phone, exc, exc_info=True,
+                )
+
+            # Update the campaign-level counter incrementally so the
+            # dashboard's progress bar feels live.
+            campaign.sent_count = sent
+            await asyncio.sleep(INTER_MESSAGE_DELAY)
+
+        # Flush + pause between batches so a parallel worker can pick
+        # up the new state and Meta sees a steady cadence.
+        db.commit()
+        if pause > 0:
+            await asyncio.sleep(pause)
+
+    return sent, failed, errors
 
 
 def _persist_dispatch_result(

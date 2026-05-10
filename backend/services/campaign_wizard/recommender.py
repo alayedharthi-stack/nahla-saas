@@ -56,7 +56,20 @@ _BADGE_CATEGORY_MISMATCH   = "فئة لا تناسب الهدف"
 
 
 def _body_text(template: WhatsAppTemplate) -> str:
-    for c in (template.components or []):
+    """Extract BODY text from a template's components.
+
+    Defensive against non-dict component entries (legacy Salla / 360dialog
+    rows occasionally serialise components as raw strings inside
+    ``WhatsAppTemplate.components``). Without the ``isinstance`` guard we
+    would crash with ``'str' object has no attribute 'get'`` whenever the
+    recommender hit such a row, which then bubbled up as a wizard error.
+    """
+    components = template.components or []
+    if not isinstance(components, list):
+        return ""
+    for c in components:
+        if not isinstance(c, dict):
+            continue
         if (c.get("type") or "").upper() == "BODY":
             return c.get("text", "") or ""
     return ""

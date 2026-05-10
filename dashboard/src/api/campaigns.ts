@@ -153,12 +153,49 @@ export interface WizardTestSendResult {
   error_message: string | null
 }
 
+/** Anti-spam protection settings for manual marketing campaigns. */
+export interface CampaignProtectionInfo {
+  frequency_cap_days: number
+  idempotent_resend_protected: boolean
+}
+
+/** Per-recipient counters for the campaign report. */
+export interface CampaignReport {
+  campaign_id: number
+  campaign_status: string
+  frequency_cap_days: number
+  total_recipients: number
+  queued: number
+  sending: number
+  sent: number
+  failed: number
+  skipped_duplicate: number
+  invalid_phone: number
+  skipped_unsubscribed: number
+  skipped_unreachable: number
+  stopped_by_limit: number
+  last_error_code: string | null
+  last_error_message: string | null
+}
+
 export const campaignsApi = {
   getTemplates: () =>
     apiCall<{ templates: WaTemplate[]; source: 'meta' | 'mock' }>('/campaigns/templates'),
 
   list: () =>
     apiCall<{ campaigns: CampaignRecord[] }>('/campaigns'),
+
+  /** Read-only metadata for the "🛡️ حماية ذكية من التكرار" trust card.
+   *  Cheap (one fast SELECT) so it's safe to call once per wizard
+   *  open. */
+  protectionInfo: () =>
+    apiCall<CampaignProtectionInfo>('/campaigns/protection-info'),
+
+  /** Per-recipient counters. Used both by the post-launch report and
+   *  by the wizard's pre-launch trust card to surface the historical
+   *  skipped-duplicate count for the merchant's account. */
+  report: (id: number) =>
+    apiCall<CampaignReport>(`/campaigns/${id}/report`),
 
   create: (payload: CreateCampaignPayload) =>
     apiCall<CampaignRecord>('/campaigns', {

@@ -226,3 +226,171 @@ def test_build_payload_drops_list_value_in_vars():
     body = next(c for c in payload["template"]["components"] if c["type"] == "body")
     # Falls through to MOCK_DEFAULTS instead of joining the list.
     assert body["parameters"][0]["text"] == MOCK_DEFAULTS["{{1}}"]
+
+
+# ────────── send_test_message — meta error response shapes ───────────
+#
+# Regression tests for the production bug where the wizard step 6
+# rendered the raw Python error
+#     'str' object has no attribute 'get'
+# whenever Meta (or, more often, a CDN/proxy in front of Meta) returned
+# ``{"error": "Bad Gateway"}`` instead of the documented structured
+# ``{"error": {"message": ..., "code": ...}}`` shape. The fix collapses
+# both shapes into the same merchant-friendly result.
+
+import asyncio  # noqa: E402
+
+from unittest.mock import patch  # noqa: E402
+
+from services.campaign_wizard.test_send import send_test_message  # noqa: E402
+
+
+class _FakeQuery:
+    def __init__(self, result):
+        self._result = result
+    def filter(self, *_a, **_k): return self
+    def order_by(self, *_a, **_k): return self
+    def first(self): return self._result
+
+
+class _FakeDB:
+    def __init__(self, *, template, wa_conn, tenant=None):
+        self._template = template
+        self._wa_conn = wa_conn
+        self._tenant = tenant
+
+    def query(self, model):
+        name = getattr(model, "__name__", str(model))
+        if "Template" in name:
+            return _FakeQuery(self._template)
+        if "Connection" in name:
+            return _FakeQuery(self._wa_conn)
+        if name == "Tenant":
+            return _FakeQuery(self._tenant)
+        return _FakeQuery(None)
+
+
+def _approved_template():
+    """A minimal APPROVED template suitable for end-to-end test-send."""
+    return SimpleNamespace(
+        id=11, tenant_id=7, name="welcome_test",
+        language="ar", status="APPROVED",
+        components=[{"type": "BODY", "text": "Hi {{1}}"}],
+    )
+
+
+def _wa_conn():
+    return SimpleNamespace(phone_number_id="pn_123", status="connected")
+
+
+def _run(coro):
+    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+
+
+def test_send_test_message_handles_meta_error_as_string(monkeypatch):
+    """The bug: ``provider_send_message`` returned ``{"error": "string"}``
+    and ``meta_err.get("message")`` blew up because ``meta_err`` was a
+    string, not the documented dict. Result must now be a structured
+    failure with the bare string surfaced as the error_message."""
+    db = _FakeDB(template=_approved_template(), wa_conn=_wa_conn())
+
+    async def fake_send(*_a, **_k):
+        return {"error": "Bad Gateway"}, object()
+
+    with patch(
+        "services.whatsapp_platform.service.provider_send_message",
+        new=fake_send,
+    ):
+        with patch(
+            "services.customer_intelligence.normalize_phone",
+            new=lambda v: v,
+        ):
+            result = _run(send_test_message(
+                db, tenant_id=7, template_db_id=11,
+                to_phone="+966500000000", merchant_vars={"{{1}}": "Saud"},
+            ))
+
+    assert result["sent"] is False
+    assert result["error_code"] == "meta:meta_error"
+    assert "Bad Gateway" in result["error_message"]
+
+
+def test_send_test_message_handles_meta_error_as_dict(monkeypatch):
+    """The documented Meta shape — ensure we still extract code/message
+    cleanly after the defensive isinstance guard."""
+    db = _FakeDB(template=_approved_template(), wa_conn=_wa_conn())
+
+    async def fake_send(*_a, **_k):
+        return (
+            {"error": {"code": 132001, "message": "Template translation missing"}},
+            object(),
+        )
+
+    with patch(
+        "services.whatsapp_platform.service.provider_send_message",
+        new=fake_send,
+    ):
+        with patch(
+            "services.customer_intelligence.normalize_phone",
+            new=lambda v: v,
+        ):
+            result = _run(send_test_message(
+                db, tenant_id=7, template_db_id=11,
+                to_phone="+966500000000", merchant_vars={"{{1}}": "Saud"},
+            ))
+
+    assert result["sent"] is False
+    assert result["error_code"] == "meta:132001"
+    assert result["error_message"] == "Template translation missing"
+
+
+def test_send_test_message_top_level_catchall(monkeypatch):
+    """Defence-in-depth: any future regression that leaks a raw
+    Python error from inside the inner orchestrator must still
+    return a structured Arabic message, not a raw exception text."""
+    db = _FakeDB(template=_approved_template(), wa_conn=_wa_conn())
+
+    async def boom(*_a, **_k):
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    # Patch the inner function to simulate an unrelated regression.
+    with patch(
+        "services.campaign_wizard.test_send._send_test_message_inner",
+        new=boom,
+    ):
+        result = _run(send_test_message(
+            db, tenant_id=7, template_db_id=11,
+            to_phone="+966500000000", merchant_vars={"{{1}}": "Saud"},
+        ))
+
+    assert result["sent"] is False
+    assert result["error_code"] == "unexpected_error"
+    # Must be the friendly Arabic message — never the raw Python error.
+    assert "'get'" not in result["error_message"]
+    assert "تعذّر" in result["error_message"]
+
+
+def test_send_test_message_handles_first_message_not_dict(monkeypatch):
+    """If Meta returns ``{"messages": ["wamid..."]}`` (rare bad proxy
+    response), we must not call .get() on the bare string."""
+    db = _FakeDB(template=_approved_template(), wa_conn=_wa_conn())
+
+    async def fake_send(*_a, **_k):
+        return {"messages": ["wamid_garbage"]}, object()
+
+    with patch(
+        "services.whatsapp_platform.service.provider_send_message",
+        new=fake_send,
+    ):
+        with patch(
+            "services.customer_intelligence.normalize_phone",
+            new=lambda v: v,
+        ):
+            result = _run(send_test_message(
+                db, tenant_id=7, template_db_id=11,
+                to_phone="+966500000000", merchant_vars={"{{1}}": "Saud"},
+            ))
+
+    # Treated as "no message id" — never raises AttributeError.
+    assert result["sent"] is False
+    assert result["error_code"] == "no_message_id"

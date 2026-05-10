@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -1050,6 +1051,72 @@ class GovernorSendLog(Base):
     __table_args__ = (
         # Index سريع لاستعلامات الحدود (per-customer per-tenant)
         Index('ix_gov_log_tenant_cust_sent', 'tenant_id', 'customer_id', 'sent_at'),
+    )
+
+
+class CampaignSendLog(Base):
+    """Per-recipient idempotency log for manual marketing campaigns.
+
+    One row per ``(campaign_id, customer_phone_e164)`` — enforced by a
+    unique constraint at the DB level. The dispatcher inserts a snapshot
+    row in ``status='queued'`` for every recipient *before* contacting
+    Meta, then transitions each row through ``sending → sent / failed /
+    skipped_*``. A row in ``status='sent'`` is the source of truth that
+    a recipient already received this campaign, even if the dispatcher
+    later crashes or is restarted — the snapshot insert is a NO-OP for
+    rows that already exist (``ON CONFLICT DO NOTHING``).
+
+    Frequency cap (default 14 days) is implemented by a single query:
+    *"is there any row for this tenant + this phone with status='sent'
+    and sent_at >= now() - interval '14 days'?"*. If yes, the new row
+    flips to ``status='skipped_duplicate'`` and the campaign report
+    surfaces it under ``skipped_duplicate``.
+
+    Scope: this log only covers manual marketing campaigns dispatched
+    via :func:`services.campaign_dispatcher.dispatch_campaign`. Cart
+    recovery (``core/automation_engine``), order messages, generic
+    automations, and 24h-service replies use their own audit trails.
+    """
+    __tablename__ = 'campaign_send_logs'
+
+    # ``BigInteger`` is the right call for production Postgres (the
+    # send log can grow very fast for active merchants). On SQLite —
+    # used by the test suite — BIGINT does NOT alias ROWID, so
+    # autoincrement breaks unless we fall back to plain INTEGER.
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    campaign_id = Column(Integer, ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=True)
+    customer_phone_e164 = Column(String, nullable=False)
+    template_name = Column(String, nullable=True)
+    template_language = Column(String, nullable=True)
+    payload_hash = Column(String(64), nullable=True)
+    status = Column(String(32), nullable=False, default='queued')
+    provider_message_id = Column(String, nullable=True)
+    error_code = Column(String, nullable=True)
+    error_message = Column(Text, nullable=True)
+    skip_reason = Column(String(64), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        # Idempotency: every (campaign, phone) tuple appears at most once.
+        # Snapshot inserts use this to skip recipients that were already
+        # captured on a prior dispatch attempt.
+        Index(
+            'uq_campaign_send_log_campaign_phone',
+            'tenant_id', 'campaign_id', 'customer_phone_e164',
+            unique=True,
+        ),
+        # Frequency-cap lookup: per-tenant, per-phone, status-filtered.
+        Index(
+            'ix_campaign_send_log_tenant_phone_status_sent',
+            'tenant_id', 'customer_phone_e164', 'status', 'sent_at',
+        ),
+        # Report aggregation: COUNT(*) GROUP BY status WHERE campaign_id=?
+        Index('ix_campaign_send_log_campaign_status', 'campaign_id', 'status'),
     )
 
 

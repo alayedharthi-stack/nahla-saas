@@ -21,8 +21,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from models import Campaign, WhatsAppTemplate  # noqa: E402
+from models import Campaign, CampaignSendLog, WhatsAppTemplate  # noqa: E402
 
+from core.config import MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS
 from core.database import get_db
 from core.tenant import (
     get_or_create_tenant,
@@ -114,6 +115,26 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+@router.get("/campaigns/protection-info")
+async def get_protection_info(request: Request, db: Session = Depends(get_db)):
+    """Return marketing-campaign anti-spam protection settings.
+
+    Powers the "🛡️ حماية ذكية من التكرار" trust card in the campaign
+    wizard *before* a campaign exists, so the merchant can see the
+    duplicate-protection window (default 14 days) at the moment of
+    launch confirmation.
+    """
+    # Touching the tenant ensures auth still gates the endpoint, and
+    # leaves room for per-tenant overrides later (a future per-tenant
+    # ``marketing_campaign_frequency_cap_days`` setting can return a
+    # different value here without touching the frontend).
+    resolve_tenant_id(request, db)
+    return {
+        "frequency_cap_days": MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
+        "idempotent_resend_protected": True,
+    }
+
 
 @router.get("/campaigns")
 async def list_campaigns(request: Request, db: Session = Depends(get_db)):
@@ -230,7 +251,14 @@ async def create_campaign(
         template_name=template.name,
         template_language=template.language,
         template_category=template.category,
-        template_body=next((c.get("text", "") for c in (template.components or []) if c.get("type") == "BODY"), body.template_body),
+        template_body=next(
+            (
+                c.get("text", "")
+                for c in (template.components or [])
+                if isinstance(c, dict) and c.get("type") == "BODY"
+            ),
+            body.template_body,
+        ),
         template_variables=tpl_vars,
         audience_type=body.audience_type,
         audience_count=body.audience_count,
@@ -445,6 +473,82 @@ async def test_send(body: TestSendIn, request: Request, db: Session = Depends(ge
         status_code=400,
         detail=result["error_message"] or "فشل إرسال رسالة الاختبار",
     )
+
+
+# ── Campaign report ─────────────────────────────────────────────────────────
+
+
+@router.get("/campaigns/{campaign_id}/report")
+async def get_campaign_report(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return per-recipient counters for a manual marketing campaign.
+
+    Used by the dashboard to render the post-launch report and the
+    pre-launch "🛡️ حماية ذكية من التكرار" trust card. Counters are
+    computed from ``campaign_send_logs`` so they survive restarts and
+    always agree with the durable per-recipient state.
+
+    Counters:
+      total_recipients   — every snapshotted row
+      queued             — not yet attempted
+      sent               — provider returned a wamid
+      failed             — provider error or transient failure
+      skipped_duplicate  — frequency-cap hit (default 14d)
+      invalid_phone      — phone empty / unparseable
+      skipped_unsubscribed — customer opted out before send
+      skipped_unreachable  — customer has no phone after audit
+
+    Also returns the configured ``frequency_cap_days`` and the most
+    recent error message so the merchant has a single pane to debug.
+    """
+    tenant_id = resolve_tenant_id(request, db)
+    campaign = (
+        db.query(Campaign)
+        .filter(Campaign.id == campaign_id, Campaign.tenant_id == tenant_id)
+        .first()
+    )
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    rows = (
+        db.query(CampaignSendLog.status, CampaignSendLog.id)
+        .filter(CampaignSendLog.campaign_id == campaign_id)
+        .all()
+    )
+    counts: Dict[str, int] = {}
+    for status, _ in rows:
+        counts[status] = counts.get(status, 0) + 1
+
+    last_error_row = (
+        db.query(CampaignSendLog)
+        .filter(
+            CampaignSendLog.campaign_id == campaign_id,
+            CampaignSendLog.status == "failed",
+        )
+        .order_by(CampaignSendLog.updated_at.desc())
+        .first()
+    )
+
+    return {
+        "campaign_id":           campaign_id,
+        "campaign_status":       campaign.status,
+        "frequency_cap_days":    MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
+        "total_recipients":      sum(counts.values()),
+        "queued":                counts.get("queued", 0),
+        "sending":               counts.get("sending", 0),
+        "sent":                  counts.get("sent", 0),
+        "failed":                counts.get("failed", 0),
+        "skipped_duplicate":     counts.get("skipped_duplicate", 0),
+        "invalid_phone":         counts.get("skipped_invalid", 0),
+        "skipped_unsubscribed":  counts.get("skipped_unsubscribed", 0),
+        "skipped_unreachable":   counts.get("skipped_unreachable", 0),
+        "stopped_by_limit":      counts.get("skipped_duplicate", 0),
+        "last_error_code":       last_error_row.error_code if last_error_row else None,
+        "last_error_message":    last_error_row.error_message if last_error_row else None,
+    }
 
 
 # ── Campaign dispatch (background) ──────────────────────────────────────────

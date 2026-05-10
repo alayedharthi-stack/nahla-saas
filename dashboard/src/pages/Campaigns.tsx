@@ -5,6 +5,7 @@ import {
   Smartphone, AlertCircle, RefreshCw, X, MessageSquare, FileText,
   HandHeart, Repeat, Bell, Settings2, Sparkles, Moon, UserPlus, UserX,
   Calendar, ShoppingBag, TrendingUp, Star, Trash2, CheckSquare, Square,
+  Shield,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -14,6 +15,7 @@ import { useLanguage } from '../i18n/context'
 import {
   campaignsApi, CampaignRecord, CreateCampaignPayload,
   CampaignGoal, CustomerSegmentMeta, RecommendedTemplate, TemplateRecommendation,
+  CampaignProtectionInfo,
   extractVariables, renderTemplate, getTemplateBody, getTemplateHeader, getTemplateFooter,
 } from '../api/campaigns'
 
@@ -453,8 +455,27 @@ const MANUAL_VAR_HINTS: Record<string, string> = {
   '{{8}}': 'قيمة مخصصة',
 }
 
-/** Returns true when ALL template body variables are auto-resolved. */
-function allVarsAutoResolved(vars: string[]): boolean {
+// Goals where the merchant is sending a one-off marketing message and
+// every input must come from THEM, not from a service binding. The
+// wizard treats these as fully manual:
+//   - no auto-resolved variables (every {{N}} is a free-text input)
+//   - no automatic coupon generation (only an optional manual code)
+//   - no service_key / automation_type carried into the campaign row
+//
+// Today's two manual goals are `broadcast` and `custom`. If we add a
+// new manual-style goal in `services.campaign_wizard.goals` (e.g.
+// `announcement`), extend this set in lock-step.
+const MANUAL_GOAL_KEYS: ReadonlySet<string> = new Set(['broadcast', 'custom'])
+
+function isManualGoal(goalKey: string | null): boolean {
+  return !!goalKey && MANUAL_GOAL_KEYS.has(goalKey)
+}
+
+/** Returns true when ALL template body variables are auto-resolved.
+ *  Manual goals always force this to false — the merchant must type
+ *  every variable themselves so the campaign carries no service binding. */
+function allVarsAutoResolved(vars: string[], goalKey: string | null = null): boolean {
+  if (isManualGoal(goalKey)) return false
   return vars.length > 0 && vars.every(v => v in AUTO_RESOLVE_VARS)
 }
 
@@ -462,8 +483,13 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
   const body = getTemplateBody(wiz.template!)
   const vars = extractVariables(body)
 
-  const autoVars   = vars.filter(v => v in AUTO_RESOLVE_VARS)
-  const manualVars = vars.filter(v => !(v in AUTO_RESOLVE_VARS))
+  // Manual campaigns (broadcast / custom) treat every {{N}} as merchant
+  // input. We deliberately bypass the auto-resolve map so a manual
+  // marketing message never silently inherits a coupon code, cart URL,
+  // or any other service-bound value the merchant didn't ask for.
+  const manualMode = isManualGoal(wiz.goalKey)
+  const autoVars   = manualMode ? [] : vars.filter(v => v in AUTO_RESOLVE_VARS)
+  const manualVars = manualMode ? vars : vars.filter(v => !(v in AUTO_RESOLVE_VARS))
 
   if (vars.length === 0) {
     return (
@@ -525,22 +551,29 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
         </div>
       )}
       <p className="text-xs text-slate-500">
-        أدخل القيم للمتغيرات التالية — ستُستخدم نفس القيمة لجميع المستلمين في هذه الحملة.
+        {manualMode
+          ? 'أدخل القيم يدوياً لكل متغير. هذه الحملة مستقلة تماماً — لن يتم ربطها بأي خدمة أو كوبون تلقائي.'
+          : 'أدخل القيم للمتغيرات التالية — ستُستخدم نفس القيمة لجميع المستلمين في هذه الحملة.'}
       </p>
-      {manualVars.map(v => (
-        <div key={v}>
-          <label className="label flex items-center gap-2">
-            <span className="font-mono text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded text-[11px]">{v}</span>
-            <span className="text-slate-600">{MANUAL_VAR_HINTS[v] ?? 'قيمة ديناميكية'}</span>
-          </label>
-          <input
-            className="input text-sm"
-            placeholder={`مثال: ${MANUAL_VAR_HINTS[v] ?? v}`}
-            value={wiz.variables[v] ?? ''}
-            onChange={e => setWiz(w => ({ ...w, variables: { ...w.variables, [v]: e.target.value } }))}
-          />
-        </div>
-      ))}
+      {manualVars.map(v => {
+        const hint = manualMode
+          ? AUTO_RESOLVE_VARS[v]?.label ?? MANUAL_VAR_HINTS[v] ?? 'قيمة ديناميكية'
+          : MANUAL_VAR_HINTS[v] ?? 'قيمة ديناميكية'
+        return (
+          <div key={v}>
+            <label className="label flex items-center gap-2">
+              <span className="font-mono text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded text-[11px]">{v}</span>
+              <span className="text-slate-600">{hint}</span>
+            </label>
+            <input
+              className="input text-sm"
+              placeholder={`مثال: ${hint}`}
+              value={wiz.variables[v] ?? ''}
+              onChange={e => setWiz(w => ({ ...w, variables: { ...w.variables, [v]: e.target.value } }))}
+            />
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -726,13 +759,35 @@ function Step7Review({
         )}
       </div>
 
-      {/* Coupon / Discount section — behavior depends on campaign goal */}
+      {/* Coupon / Discount section — behavior depends on campaign goal.
+          Three flavours:
+            1. `reminder` (cart-recovery, automation-style)  → fully auto.
+            2. `broadcast` / `custom`  → manual-only: optional plain code.
+            3. everything else  → opt-in auto-coupon toggle. */}
       {wiz.goalKey === 'reminder' ? (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 space-y-1">
           <p className="text-xs font-semibold text-emerald-700">الكوبونات والروابط تلقائية بالكامل</p>
           <p className="text-[11px] text-emerald-600 leading-relaxed">
             رابط السلة المتروكة يُرسل تلقائياً لكل عميل حسب سلته، والكوبون يُولّد فريداً لكل عميل من نظام الكوبونات في نحلة.
             لا تحتاج لكتابة أي شيء.
+          </p>
+        </div>
+      ) : isManualGoal(wiz.goalKey) ? (
+        <div className="space-y-2">
+          <label className="label mb-0">كود خصم يدوي (اختياري)</label>
+          <input
+            className="input text-sm"
+            placeholder="مثال: WELCOME10"
+            value={wiz.couponCode}
+            onChange={e => setWiz(w => ({
+              ...w,
+              couponCode: e.target.value,
+              autoCoupon: false,   // manual mode: never auto-bind a coupon
+            }))}
+          />
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            هذه الحملة مستقلة. لن يقوم نظام الكوبونات بتوليد كوبون لكل عميل — سيظهر الكود كما كتبتَه (أو يبقى الحقل فارغاً)
+            إذا لم تدخل أي قيمة.
           </p>
         </div>
       ) : (
@@ -792,10 +847,11 @@ function Step7Review({
 // ── Step 8: Launch ────────────────────────────────────────────────────────────
 
 function Step8Launch({
-  wiz, segmentMeta, saving, onLaunch, error,
+  wiz, segmentMeta, protection, saving, onLaunch, error,
 }: {
   wiz: WizardState
   segmentMeta: CustomerSegmentMeta | undefined
+  protection: CampaignProtectionInfo
   saving: boolean
   onLaunch: () => void
   error: string
@@ -816,6 +872,47 @@ function Step8Launch({
         </div>
       </div>
 
+      {/* Anti-duplicate trust card — surfaces the back-end protection
+       *  guarantee (idempotent send + N-day frequency cap) right
+       *  before the merchant clicks "إطلاق الحملة الآن". This is the
+       *  single most important psychological signal before sending
+       *  thousands of marketing messages. */}
+      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-2">
+        <div className="flex items-start gap-3">
+          <Shield className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+          <div className="flex-1 space-y-1.5">
+            <p className="text-sm font-semibold text-blue-900">🛡️ حماية ذكية من التكرار</p>
+            <p className="text-xs text-blue-800 leading-relaxed">
+              اطمئن، نحلة تمنع تكرار إرسال الحملات التسويقية لنفس العميل حتى في حال:
+            </p>
+            <ul className="text-[11px] text-blue-800 leading-relaxed space-y-0.5 list-none">
+              <li>• توقّف الإرسال بسبب خطأ مؤقت</li>
+              <li>• انقطاع الاتصال أو إعادة تشغيل الحملة</li>
+              <li>• إعادة محاولة الإرسال لاحقاً من نفس الحملة</li>
+            </ul>
+            <p className="text-[11px] text-blue-700 leading-relaxed pt-1">
+              لن نرسل الرسالة لنفس العميل مرة أخرى إذا تم تسجيل النجاح من قبل،
+              ولن نرسلها إذا استلم حملة تسويقية أخرى خلال آخر{' '}
+              <span className="font-semibold">{protection.frequency_cap_days}</span> يوم.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 pt-1 border-t border-blue-200/60">
+          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 bg-white px-2 py-1 rounded-full border border-blue-200">
+            <Clock className="w-3 h-3" />
+            مدة الحماية: {protection.frequency_cap_days} يوم
+          </span>
+          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-white px-2 py-1 rounded-full border border-emerald-200">
+            <CheckCircle className="w-3 h-3" />
+            استكمال آمن للحملة
+          </span>
+          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 bg-white px-2 py-1 rounded-full border border-blue-200">
+            <RefreshCw className="w-3 h-3" />
+            إرسال مقاوم للتكرار (idempotent)
+          </span>
+        </div>
+      </div>
+
       <div className="bg-slate-50 rounded-xl p-4 space-y-1 text-xs">
         <div className="flex justify-between"><span className="text-slate-500">اسم الحملة</span><span className="font-semibold text-slate-800">{wiz.campaignName}</span></div>
         <div className="flex justify-between"><span className="text-slate-500">القالب</span><span className="text-slate-800">{wiz.template?.display_name_ar || wiz.template?.name}</span></div>
@@ -826,6 +923,12 @@ function Step8Launch({
         </span></div>
         {wiz.goalKey === 'reminder' ? (
           <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-emerald-600">تلقائي لكل عميل</span></div>
+        ) : isManualGoal(wiz.goalKey) ? (
+          wiz.couponCode.trim() ? (
+            <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-slate-800 font-mono">{wiz.couponCode.trim()}</span></div>
+          ) : (
+            <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-slate-400">بدون</span></div>
+          )
         ) : wiz.autoCoupon ? (
           <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-emerald-600">خصم {wiz.discountPercent}% تلقائي لكل عميل</span></div>
         ) : null}
@@ -861,6 +964,13 @@ function CampaignWizard({
   const [saving, setSaving] = useState(false)
   const [testLoading, setTestLoading] = useState(false)
   const [error, setError] = useState('')
+  // Anti-spam protection metadata for the launch trust card. Falls
+  // back to a sane default (14 days) if the endpoint is unavailable so
+  // the merchant never sees a missing badge.
+  const [protection, setProtection] = useState<CampaignProtectionInfo>({
+    frequency_cap_days: 14,
+    idempotent_resend_protected: true,
+  })
 
   // Step 1: load goals on mount.
   useEffect(() => {
@@ -868,6 +978,12 @@ function CampaignWizard({
       .then(r => setGoals(r.goals))
       .catch(() => setGoals([]))
       .finally(() => setGoalsLoading(false))
+
+    // Fire the protection-info call alongside goals so the trust card
+    // is ready by the time the merchant reaches step 8.
+    campaignsApi.protectionInfo()
+      .then(setProtection)
+      .catch(() => { /* keep the 14-day fallback */ })
   }, [])
 
   // Step 2: load segments lazily — first time the merchant lands on
@@ -915,13 +1031,16 @@ function CampaignWizard({
 
   // Auto-skip step 4 when all template body vars are auto-resolved from
   // CRM data (e.g. {{1}} = customer_name). The merchant shouldn't waste
-  // time on a step that says "everything is automatic".
+  // time on a step that says "everything is automatic". Manual goals
+  // (broadcast / custom) deliberately disable this skip so every
+  // variable goes through the explicit input UI.
   const shouldSkipStep4 = useCallback((): boolean => {
     if (!wiz.template) return false
+    if (isManualGoal(wiz.goalKey)) return false
     const body = getTemplateBody(wiz.template)
     const vars = extractVariables(body)
-    return allVarsAutoResolved(vars)
-  }, [wiz.template])
+    return allVarsAutoResolved(vars, wiz.goalKey)
+  }, [wiz.template, wiz.goalKey])
 
   const next = () => setWiz(w => {
     let target = Math.min(w.step + 1, 8)
@@ -972,6 +1091,15 @@ function CampaignWizard({
     setSaving(true)
     setError('')
     try {
+      // Manual campaigns (broadcast / custom) MUST NOT carry an
+      // auto_coupon flag, a service binding, or the magic "auto"
+      // coupon_code — those would re-attach the campaign to the
+      // coupon-generator + service-templates pipeline, which is
+      // exactly what the merchant opted out of by picking a manual
+      // goal. We send an empty coupon string when the merchant left
+      // the manual code blank so the backend column stays NULL.
+      const manualMode = isManualGoal(wiz.goalKey)
+      const wantsAutoCoupon = !manualMode && (wiz.goalKey === 'reminder' || wiz.autoCoupon)
       const payload: CreateCampaignPayload = {
         name: wiz.campaignName,
         // The legacy column accepts the existing enum — translate the
@@ -988,9 +1116,11 @@ function CampaignWizard({
         schedule_type: wiz.scheduleType,
         schedule_time: wiz.scheduleType === 'scheduled' ? wiz.scheduleTime : undefined,
         delay_minutes: wiz.scheduleType === 'delayed' ? wiz.delayMinutes : undefined,
-        coupon_code: (wiz.goalKey === 'reminder' || wiz.autoCoupon) ? 'auto' : '',
-        discount_percent: (wiz.goalKey === 'reminder' || wiz.autoCoupon) ? wiz.discountPercent : undefined,
-        auto_coupon: wiz.goalKey === 'reminder' || wiz.autoCoupon,
+        coupon_code: wantsAutoCoupon
+          ? 'auto'
+          : (manualMode ? (wiz.couponCode.trim() || '') : ''),
+        discount_percent: wantsAutoCoupon ? wiz.discountPercent : undefined,
+        auto_coupon: wantsAutoCoupon,
       }
       const created = await campaignsApi.create(payload)
       onCreated(created)
@@ -1042,7 +1172,7 @@ function CampaignWizard({
           {wiz.step === 5 && <Step5Preview  wiz={wiz} />}
           {wiz.step === 6 && <Step6TestSend wiz={wiz} setWiz={setWiz} onTestSend={handleTestSend} testLoading={testLoading} />}
           {wiz.step === 7 && <Step7Review   wiz={wiz} setWiz={setWiz} segmentMeta={segmentMeta} goalMeta={goalMeta} />}
-          {wiz.step === 8 && <Step8Launch   wiz={wiz} segmentMeta={segmentMeta} saving={saving} onLaunch={handleLaunch} error={error} />}
+          {wiz.step === 8 && <Step8Launch   wiz={wiz} segmentMeta={segmentMeta} protection={protection} saving={saving} onLaunch={handleLaunch} error={error} />}
         </div>
 
         {/* Footer nav */}
