@@ -324,21 +324,24 @@ export const campaignsApi = {
   debug: (id: number) =>
     apiCall<CampaignDebugSnapshot>(`/campaigns/${id}/debug`),
 
-  /** Force the dispatcher to run synchronously for a campaign that's
-   *  stuck in ``pending_dispatch`` or ``failed``. Idempotent — rows
-   *  already in ``status='sent'`` are NOT re-sent. */
+  /** Kick the dispatcher for a campaign that's stuck in
+   *  ``pending_dispatch`` or ``failed``. Runs in the background on
+   *  the server (the dispatcher has 1.5s+ pauses between sends and
+   *  would exceed our 25s HTTP timeout for any sizeable audience),
+   *  so this endpoint returns immediately with ``kicked: true``.
+   *  The merchant watches progress via the standard /campaigns list
+   *  refresh + /campaigns/{id}/debug. Idempotent — rows already in
+   *  ``status='sent'`` are NOT re-sent. */
   dispatchNow: (id: number) =>
     apiCall<{
       campaign_id: number
-      ok?: boolean
+      ok: boolean
+      kicked?: boolean
       skipped?: boolean
       reason?: string
       message?: string
       status?: string
-      sent?: number
-      failed?: number
-      queued?: number
-      errors?: string[]
+      error?: string
     }>(`/campaigns/${id}/dispatch-now`, { method: 'POST' }),
 
   deleteCampaign: (id: number) =>

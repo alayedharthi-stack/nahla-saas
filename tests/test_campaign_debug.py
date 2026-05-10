@@ -286,55 +286,82 @@ class TestDebugEndpoint:
 
 
 class TestDispatchNow:
+    """The dispatch-now endpoint is fire-and-forget: it must return
+    immediately (the dispatcher has 1.5s+ pauses between sends and
+    would blow past our 25s frontend HTTP timeout for any real
+    audience). These tests pin the contract."""
+
     def test_skipped_for_completed_campaign(self):
-        # Completed campaign with sent_count>0 must not be re-run — we
-        # return a clear "skipped:completed" so the merchant doesn't
-        # think the manual button silently no-op'd.
+        # Completed campaign with sent_count>0 must not be re-kicked
+        # — we return a clear "skipped:completed" so the merchant
+        # doesn't think the manual button silently no-op'd.
         db, _ = _make_db()
         t, tpl, c = _seed(db, status="completed", audience_count=4, sent_count=4)
         result = _call_dispatch_now(db, t.id, c.id)
         assert result["skipped"] is True
         assert result["reason"] == "completed"
+        assert result["ok"] is True
 
-    def test_dispatches_and_handles_internal_crash(self, monkeypatch):
-        # Force ``dispatch_campaign`` to crash and verify the endpoint
-        # marks the campaign as failed + returns a structured error.
-        db, _ = _make_db()
-        t, tpl, c = _seed(db, status="active", audience_count=4)
-
-        async def _boom(_db, _cid):
-            raise RuntimeError("simulated provider 500")
-
-        import services.campaign_dispatcher as cd
-        monkeypatch.setattr(cd, "dispatch_campaign", _boom)
-
-        result = _call_dispatch_now(db, t.id, c.id)
-        assert result["ok"] is False
-        assert "simulated provider 500" in result["error"]
-
-        # Campaign row is now ``failed`` with the error captured.
-        db.refresh(c)
-        assert c.status == "failed"
-        assert "simulated provider 500" in (c.template_variables or {}).get("_dispatch_errors", "")
-
-    def test_returns_dispatch_result_on_success(self, monkeypatch):
+    def test_returns_immediately_with_kicked_flag(self, monkeypatch):
+        # The endpoint must spawn the dispatcher in the background
+        # via asyncio.create_task and return ``kicked: true`` BEFORE
+        # the dispatcher has done any work. We assert this by
+        # patching create_task to record the call.
         db, _ = _make_db()
         t, tpl, c = _seed(db, status="active", audience_count=2)
 
-        async def _fake(_db, cid):
-            return {
-                "campaign_id": cid, "status": "completed",
-                "sent": 2, "failed": 0, "queued": 0,
-                "errors": [],
-            }
+        spawned: list = []
+        import asyncio as _aio
+        original_create_task = _aio.create_task
 
+        def _capture(coro, *args, **kwargs):
+            spawned.append(coro)
+            # Schedule the coroutine on the running loop so it does
+            # not raise "coroutine was never awaited" warnings; the
+            # test event loop closes before the dispatcher runs.
+            return original_create_task(coro, *args, **kwargs)
+
+        monkeypatch.setattr(_aio, "create_task", _capture)
+
+        # Stub the actual dispatch so the background coroutine is
+        # cheap (we're testing the endpoint, not the dispatcher).
+        async def _fake(_db, cid):
+            return {"campaign_id": cid, "status": "completed", "sent": 2,
+                    "failed": 0, "queued": 0, "errors": []}
         import services.campaign_dispatcher as cd
         monkeypatch.setattr(cd, "dispatch_campaign", _fake)
 
         result = _call_dispatch_now(db, t.id, c.id)
         assert result["ok"] is True
-        assert result["sent"] == 2
-        assert result["status"] == "completed"
+        assert result["kicked"] is True
+        # Status pre-flipped to 'active' so the next list refresh
+        # immediately shows "جاري الإرسال".
+        assert result["status"] == "active"
+        # A background coroutine was actually scheduled.
+        assert len(spawned) == 1
+
+    def test_pre_flips_status_to_active(self, monkeypatch):
+        # A campaign that was stuck in 'draft' should flip to
+        # 'active' synchronously so the next /campaigns refresh
+        # surfaces the new lifecycle pill ("جاري الإرسال") within
+        # the polling window — without waiting for the dispatcher
+        # to do it ≈3s later.
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="draft", audience_count=2)
+        c.launched_at = None
+        db.commit()
+
+        async def _noop(_db, cid):
+            return {"campaign_id": cid, "status": "completed", "sent": 0,
+                    "failed": 0, "queued": 0, "errors": []}
+        import services.campaign_dispatcher as cd
+        monkeypatch.setattr(cd, "dispatch_campaign", _noop)
+
+        result = _call_dispatch_now(db, t.id, c.id)
+        assert result["ok"] is True
+        db.refresh(c)
+        assert c.status == "active"
+        assert c.launched_at is not None
 
 
 # ── 4. _campaign_to_dict carries lifecycle for the listing endpoint ──

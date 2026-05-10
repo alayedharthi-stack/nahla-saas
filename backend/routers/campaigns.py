@@ -913,7 +913,7 @@ async def dispatch_campaign_now(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Synchronously run the campaign dispatcher for one campaign.
+    """Kick the campaign dispatcher for one campaign in the background.
 
     Use cases:
       * The merchant launched a campaign and the asyncio background
@@ -922,14 +922,30 @@ async def dispatch_campaign_now(
         connection, audience, send) works end-to-end without waiting
         for the 30s scheduler tick.
 
-    Strict tenant scoping: the campaign must belong to the requesting
-    tenant. Returns the full :func:`dispatch_campaign` result dict so
-    the merchant can see ``sent`` / ``failed`` / ``errors`` directly
-    in the response (no second round-trip required).
+    Why background (not synchronous)?
+    ─────────────────────────────────
+    The dispatcher inserts a 1.5s pause between every send (Meta TOS
+    + soft rate-limit) and a 2s pause between every batch, plus the
+    Meta API call latency itself. For a 50-recipient campaign that
+    easily exceeds the frontend's 25s ``AbortSignal.timeout``, so
+    blocking the HTTP response on the full dispatch produced "signal
+    timed out" errors for the merchant even when the send was working.
 
-    Idempotency note — ``dispatch_campaign`` is itself idempotent:
-    rows already in ``status='sent'`` are NEVER re-sent on retry, so
-    calling this endpoint twice in a row will not double-send.
+    Instead we:
+      1. Run a *cheap* preflight (campaign exists, tenant scope, not
+         already-completed) on the request thread.
+      2. Pre-flip ``status='active'`` so the lifecycle pill on the
+         page immediately becomes "جاري الإرسال" (instead of waiting
+         on the dispatcher to do it ≈3s later).
+      3. Hand off to ``_dispatch_campaign_async`` via
+         ``asyncio.create_task`` — exactly the same path the
+         immediate-launch flow uses.
+      4. Return 202-style ``{ok: true, kicked: true}`` so the
+         frontend can refresh and watch counters tick up.
+
+    The dispatch_campaign function is itself idempotent (sent rows are
+    never re-sent), so a curious merchant double-clicking the button
+    cannot duplicate-send.
     """
     tenant_id = resolve_tenant_id(request)
     campaign = db.query(Campaign).filter(
@@ -945,6 +961,7 @@ async def dispatch_campaign_now(
         # rather than "skipped_duplicate=N".
         return {
             "campaign_id": campaign_id,
+            "ok":          True,
             "skipped":     True,
             "reason":      "completed",
             "message":     (
@@ -953,39 +970,53 @@ async def dispatch_campaign_now(
             ),
         }
 
+    # Pre-flip status so the merchant sees "جاري الإرسال" on the next
+    # /campaigns refresh (≤2s away), instead of "ينتظر بدء الإرسال"
+    # while we silently wait for the dispatcher to update it.
+    try:
+        if (campaign.status or "").lower() != "active":
+            campaign.status = "active"
+        if not campaign.launched_at:
+            campaign.launched_at = datetime.now(timezone.utc)
+        campaign.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception:
+        db.rollback()
+
     logger.info(
-        "[campaigns.dispatch-now] tenant=%d campaign=%d status=%s audience_count=%s",
+        "[campaigns.dispatch-now] tenant=%d campaign=%d status=%s "
+        "audience_count=%s — kicking background dispatch task",
         tenant_id, campaign_id, campaign.status, campaign.audience_count,
     )
-    from services.campaign_dispatcher import dispatch_campaign  # noqa: PLC0415
+
+    # Fire-and-forget: same helper the immediate-launch path uses.
+    # It opens a fresh DB session, runs the full pipeline, and
+    # writes errors back into ``template_variables._dispatch_errors``
+    # if anything goes wrong — visible via /campaigns and /debug.
     try:
-        result = await dispatch_campaign(db, campaign_id)
-    except Exception as exc:  # noqa: BLE001
+        asyncio.create_task(_dispatch_campaign_async(campaign_id))
+    except Exception as exc:
         logger.exception(
-            "[campaigns.dispatch-now] tenant=%d campaign=%d crashed",
-            tenant_id, campaign_id,
+            "[campaigns.dispatch-now] tenant=%d campaign=%d could not "
+            "spawn background task: %s",
+            tenant_id, campaign_id, exc,
         )
-        try:
-            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-            campaign.status = "failed"
-            tpl_vars = dict(campaign.template_variables or {})
-            tpl_vars["_dispatch_errors"] = f"manual dispatch crashed: {str(exc)[:200]}"
-            campaign.template_variables = tpl_vars
-            flag_modified(campaign, "template_variables")
-            db.commit()
-        except Exception:
-            db.rollback()
         return {
             "campaign_id": campaign_id,
             "ok":          False,
             "error":       f"{type(exc).__name__}: {exc!s:.200}",
-            "message":     "فشل تشغيل الإرسال يدوياً — راجع /campaigns/{id}/debug",
+            "message":     "تعذر تشغيل الإرسال — راجع /campaigns/{id}/debug",
         }
 
     return {
         "campaign_id": campaign_id,
         "ok":          True,
-        **result,
+        "kicked":      True,
+        "status":      campaign.status,
+        "message":     (
+            "بدأ الإرسال في الخلفية. حدّث الصفحة بعد لحظات لرؤية "
+            "تقدّم العدّادات، أو اضغط 'تشخيص' لمراجعة الحالة فوراً."
+        ),
     }
 
 

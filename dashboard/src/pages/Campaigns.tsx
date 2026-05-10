@@ -1567,23 +1567,79 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     }
   }
 
+  /**
+   * Kick a background dispatch and watch the recipient counters
+   * tick up via the debug endpoint.
+   *
+   * The backend can no longer block the HTTP response on the full
+   * send (would exceed our 25s timeout for any sizeable audience —
+   * the dispatcher has 1.5s pauses between sends + Meta API
+   * latency), so we get an immediate ``{kicked: true}`` and then
+   * poll /debug 5 times over ~30s to show progress. The list itself
+   * refreshes on focus + manually whenever the parent reloads it.
+   */
   const handleDispatchNow = async () => {
-    if (!confirm(`سيتم تشغيل الإرسال يدوياً للحملة "${campaign.name}" الآن. لن يُعاد إرسال أي مستلم تم إرساله مسبقاً.`)) return
+    if (!confirm(
+      `سيتم تشغيل الإرسال للحملة "${campaign.name}" الآن في الخلفية. ` +
+      `لن يُعاد إرسال أي مستلم تم إرساله مسبقاً.`,
+    )) return
     setDispatching(true)
-    setDiagnostic(null)
+    setDiagnostic('⏳ بدأ الإرسال في الخلفية — جاري متابعة التقدّم…')
     try {
       const res = await campaignsApi.dispatchNow(campaign.id)
       if (res.skipped) {
         setDiagnostic(res.message || 'تم تجاوز الإرسال.')
-      } else if (res.ok === false) {
-        setDiagnostic(`❌ فشل الإرسال اليدوي: ${(res as any).error || res.message || 'unknown'}`)
-      } else {
-        setDiagnostic(`✅ تم تشغيل الإرسال: sent=${res.sent ?? 0} failed=${res.failed ?? 0}`)
-        // Refresh the list by bubbling a no-op status change.
-        onStatusChange(campaign.id, campaign.status)
+        return
+      }
+      if (res.ok === false) {
+        setDiagnostic(`❌ تعذر تشغيل الإرسال: ${res.error || res.message || 'unknown'}`)
+        return
+      }
+      // Background task is now running. Poll the debug endpoint a
+      // few times so the merchant sees counters tick up without
+      // having to manually refresh.
+      let lastSnapshot: string | null = null
+      for (let i = 0; i < 6; i++) {
+        await new Promise(r => setTimeout(r, 4_000))
+        try {
+          const snap = await campaignsApi.debug(campaign.id)
+          const r = snap.recipients
+          lastSnapshot = (
+            `📊 المستلمون: total=${r.total} ` +
+            `sent=${r.sent} failed=${r.failed} ` +
+            `queued=${r.queued} skipped=${
+              r.skipped_duplicate + r.skipped_invalid +
+              r.skipped_unsubscribed + r.skipped_unreachable +
+              r.skipped_manual_exclusion
+            }\n` +
+            `🚦 الحالة: ${snap.campaign.lifecycle}`
+          )
+          setDiagnostic(lastSnapshot)
+          // Refresh the parent list so the lifecycle pill updates.
+          onStatusChange(campaign.id, campaign.status)
+          // Stop polling early once the campaign reaches a
+          // terminal lifecycle.
+          if (
+            snap.campaign.lifecycle === 'sent' ||
+            snap.campaign.lifecycle === 'partial' ||
+            snap.campaign.lifecycle === 'failed_all' ||
+            snap.campaign.lifecycle === 'failed' ||
+            snap.campaign.lifecycle === 'completed_empty'
+          ) {
+            break
+          }
+        } catch {
+          // Ignore individual poll failures — we'll retry.
+        }
+      }
+      if (!lastSnapshot) {
+        setDiagnostic(
+          res.message ||
+          '✅ تم تشغيل الإرسال في الخلفية. حدّث الصفحة لرؤية النتيجة.'
+        )
       }
     } catch (err: any) {
-      setDiagnostic(`❌ فشل الإرسال اليدوي: ${err?.message || err}`)
+      setDiagnostic(`❌ تعذر تشغيل الإرسال: ${err?.message || err}`)
     } finally {
       setDispatching(false)
     }
