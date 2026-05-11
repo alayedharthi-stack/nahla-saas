@@ -1367,3 +1367,211 @@ class TestAudienceFunnel:
         # All four are in the totaliser.
         assert result["excluded_before_send_count"] == 4
 
+
+# ── 8. Provider-side billing/account block (360dialog escalation) ───
+
+
+def _call_support_bundle(db, tenant_id, campaign_id):
+    """Same in-process invocation pattern as ``_call_debug``."""
+    original = campaigns_router.resolve_tenant_id
+    campaigns_router.resolve_tenant_id = (
+        lambda request, db=None: tenant_id  # type: ignore
+    )
+    try:
+        return campaigns_router.campaign_support_bundle(
+            campaign_id=campaign_id, request=_FakeReq(), db=db,
+        )
+    finally:
+        campaigns_router.resolve_tenant_id = original
+
+
+class TestProviderBlock:
+    """Provider-side billing/account block surfacing.
+
+    Covers the end-to-end UX promise:
+
+      1. ``client_payment_blocked`` (and similar provider-side
+         restrictions) carry ``provider_billing_block=True`` in the
+         classifier.
+      2. The debug endpoint aggregates them into a ``provider_block``
+         block with detected/count/error_keys + Arabic banner copy.
+      3. Per-failed-row entries on ``sample_failed`` also expose the
+         flag so the UI can hide the retry CTA at row granularity.
+      4. ``GET /campaigns/{id}/support-bundle`` returns a self-contained
+         JSON payload (template + WABA + sample Meta payload) ready
+         for the merchant to paste into a 360dialog ticket.
+    """
+
+    def _seed_blocked(self, db, *, status="completed"):
+        t, tpl, c = _seed(db, status=status, audience_count=3)
+        # Three rows blocked by the provider — one client_payment_blocked,
+        # one account_locked, one ordinary not_on_whatsapp (which is
+        # NOT a provider-side billing block — used as a negative
+        # control that the aggregator filters properly).
+        db.add_all([
+            CampaignSendLog(
+                tenant_id=t.id, campaign_id=c.id,
+                customer_phone_e164="+966500000001",
+                template_name=tpl.name, template_language="ar",
+                status="failed", error_code="client_payment_blocked",
+                error_message="[code=? subcode=? type=?] This number is blocked due to lack of payment on client side.",
+                attempt_count=1,
+            ),
+            CampaignSendLog(
+                tenant_id=t.id, campaign_id=c.id,
+                customer_phone_e164="+966500000002",
+                template_name=tpl.name, template_language="ar",
+                status="failed", error_code="client_payment_blocked",
+                error_message="[code=? subcode=? type=?] This number is blocked due to lack of payment on client side.",
+                attempt_count=1,
+            ),
+            CampaignSendLog(
+                tenant_id=t.id, campaign_id=c.id,
+                customer_phone_e164="+966500000003",
+                template_name=tpl.name, template_language="ar",
+                status="failed", error_code="not_on_whatsapp",
+                error_message="[code=131026] Message undeliverable",
+                attempt_count=1,
+            ),
+        ])
+        db.commit()
+        return t, tpl, c
+
+    def test_classifier_tags_payment_blocked_and_account_locked(self):
+        from services.meta_errors import (
+            ERRORS, is_provider_billing_block,
+        )
+        # The canonical provider-billing-block entries — all True.
+        for k in ("client_payment_blocked", "account_locked", "auth_error"):
+            assert ERRORS[k].provider_billing_block is True, k
+            assert is_provider_billing_block(k) is True, k
+        # Recipient-side / transient errors are NOT provider blocks.
+        for k in (
+            "not_on_whatsapp", "rate_limit", "service_unavailable",
+            "template_param_mismatch", "user_not_opted_in",
+            "policy_violation", "unknown",
+        ):
+            assert ERRORS[k].provider_billing_block is False, k
+            assert is_provider_billing_block(k) is False, k
+
+    def test_debug_endpoint_aggregates_provider_block(self):
+        db, _ = _make_db()
+        t, tpl, c = self._seed_blocked(db)
+        result = _call_debug(db, t.id, c.id)
+
+        pb = result["provider_block"]
+        assert pb["detected"] is True
+        # Two ``client_payment_blocked`` rows in the seed — the
+        # ``not_on_whatsapp`` row must NOT be counted (it's a
+        # recipient-side issue, not provider-side).
+        assert pb["count"] == 2
+        keys = {k["key"]: k["count"] for k in pb["error_keys"]}
+        assert keys.get("client_payment_blocked") == 2
+        assert "not_on_whatsapp" not in keys
+        # Primary label is the Arabic copy from the classifier.
+        assert "مقيّد" in (pb["primary_label_ar"] or "")
+        # The banner copy is fixed and present so every client
+        # renders the same message.
+        assert "360dialog" in (pb["support_message_ar"] or "")
+        # And first_seen/last_seen are populated.
+        assert pb["first_seen_at"]
+        assert pb["last_seen_at"]
+
+    def test_debug_provider_block_absent_when_no_blocking_rows(self):
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="completed", audience_count=1)
+        db.add(CampaignSendLog(
+            tenant_id=t.id, campaign_id=c.id,
+            customer_phone_e164="+966500000004",
+            template_name=tpl.name, template_language="ar",
+            status="failed", error_code="not_on_whatsapp",
+            attempt_count=1,
+        ))
+        db.commit()
+        result = _call_debug(db, t.id, c.id)
+        pb = result["provider_block"]
+        assert pb["detected"] is False
+        assert pb["count"] == 0
+        assert pb["error_keys"] == []
+
+    def test_debug_sample_failed_carries_provider_billing_block_flag(self):
+        db, _ = _make_db()
+        t, tpl, c = self._seed_blocked(db)
+        result = _call_debug(db, t.id, c.id)
+
+        sample = result["sample_failed"]
+        by_code = {r["error_code"]: r for r in sample}
+        # Every catalogued failure carries the flag explicitly.
+        assert by_code["client_payment_blocked"]["provider_billing_block"] is True
+        assert by_code["client_payment_blocked"]["retryable"] is False
+        assert by_code["not_on_whatsapp"]["provider_billing_block"] is False
+        # And the failure_summary mirrors the same shape.
+        fs = {f["error_code"]: f for f in result["failure_summary"]}
+        assert fs["client_payment_blocked"]["provider_billing_block"] is True
+        assert fs["not_on_whatsapp"]["provider_billing_block"] is False
+
+    def test_provider_block_hint_emitted_with_360dialog_copy(self):
+        db, _ = _make_db()
+        t, tpl, c = self._seed_blocked(db)
+        result = _call_debug(db, t.id, c.id)
+        hints = result["hints"]
+        assert any("360dialog" in h for h in hints), (
+            "merchant must see the 360dialog escalation hint when "
+            "provider_billing_block rows are present"
+        )
+
+    def test_support_bundle_returns_full_payload(self):
+        db, _ = _make_db()
+        t, tpl, c = self._seed_blocked(db)
+        bundle = _call_support_bundle(db, t.id, c.id)
+
+        # Versioned envelope so external automation can pin the shape.
+        assert bundle["kind"] == "nahla.campaign.support_bundle"
+        assert bundle["version"] == "1"
+        assert bundle["support_provider"] == "360dialog"
+        assert bundle["tenant_id"] == t.id
+
+        # Campaign and template metadata round-trip into the bundle.
+        assert bundle["campaign"]["id"] == c.id
+        assert bundle["campaign"]["name"] == c.name
+        assert bundle["template"]["name"] == tpl.name
+
+        # Provider block aggregates the right error_keys (and only
+        # those tagged provider_billing_block=True).
+        pb = bundle["provider_block"]
+        assert pb["detected"] is True
+        assert pb["count"] == 2
+        keys = {k["key"] for k in pb["error_keys"]}
+        assert "client_payment_blocked" in keys
+        assert "not_on_whatsapp" not in keys
+
+        # Sample recipients are masked (no raw phone numbers).
+        for r in bundle["sample_recipients"]:
+            assert "•" in r["phone_masked"] or len(r["phone_masked"]) <= 4
+
+        # The pasteable Arabic message exists and references the
+        # template + campaign so the support engineer has context.
+        msg = bundle["support_message_ar"]
+        assert tpl.name in msg
+        assert str(c.id) in msg
+
+    def test_support_bundle_handles_clean_campaign(self):
+        """No provider-blocked rows → still returns a structured
+        bundle (detected=False) instead of 404. Makes it safe for the
+        UI to call the endpoint speculatively for any campaign."""
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="completed", audience_count=0)
+        bundle = _call_support_bundle(db, t.id, c.id)
+        assert bundle["provider_block"]["detected"] is False
+        assert bundle["provider_block"]["count"] == 0
+        assert bundle["sample_recipients"] == []
+        assert bundle["template"]["id"] == tpl.id
+
+    def test_support_bundle_unknown_campaign_returns_404(self):
+        from fastapi import HTTPException
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="active", audience_count=0)
+        # Stale id — different tenant scope.
+        with pytest.raises(HTTPException) as exc:
+            _call_support_bundle(db, t.id, 999_999)
+        assert exc.value.status_code == 404

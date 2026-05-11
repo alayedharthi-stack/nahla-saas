@@ -5,7 +5,7 @@ import {
   Smartphone, AlertCircle, RefreshCw, X, MessageSquare, FileText,
   HandHeart, Repeat, Bell, Settings2, Sparkles, Moon, UserPlus, UserX,
   Calendar, ShoppingBag, TrendingUp, Star, Trash2, CheckSquare, Square,
-  Shield, Beaker, ShieldOff, Copy,
+  Shield, Beaker, ShieldOff, Copy, LifeBuoy, AlertTriangle,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -1548,6 +1548,97 @@ function DebugTemplateLink({ templateId }: { templateId: string }) {
 // neutral grey ("غير معروف") so the merchant doesn't blame Nahla for
 // excluding people we'd actually have tried to reach via Meta.
 
+// ── Provider-side billing/account block banner ─────────────────────
+// Rendered above the diagnostic dump when the campaign hit a Meta /
+// 360dialog provider restriction. The merchant cannot fix this from
+// the dashboard — the workflow is:
+//   1. Show the rose banner with the fixed Arabic copy
+//      ("مشكلة من مزود واتساب أو الدفع — تواصل مع 360dialog").
+//   2. Hide the auto-retry CTA (handled in the caller via the
+//      ``providerBlocked`` flag — retrying just produces the same
+//      restriction and burns attempts).
+//   3. Surface the "نسخ تقرير الدعم" button which calls
+//      ``GET /campaigns/{id}/support-bundle`` and copies the full
+//      JSON to the clipboard, ready for a 360dialog ticket.
+function ProviderBlockBanner({
+  block,
+  onCopyBundle,
+  bundleStatus,
+}: {
+  block: NonNullable<CampaignDebugSnapshot['provider_block']>
+  onCopyBundle: () => void
+  bundleStatus: 'idle' | 'loading' | 'copied' | 'error'
+}) {
+  const bundleLabel =
+    bundleStatus === 'loading' ? 'جاري التحضير…'
+    : bundleStatus === 'copied'  ? '✓ تم النسخ — الصق في تذكرة 360dialog'
+    : bundleStatus === 'error'   ? 'تعذر النسخ — حاول مجدداً'
+    : 'نسخ تقرير الدعم'
+
+  return (
+    <div className="mb-3 rounded-xl border-2 border-rose-200 bg-rose-50/80 p-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <div className="shrink-0 rounded-full bg-rose-100 p-2">
+          <AlertTriangle className="w-5 h-5 text-rose-600" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-bold text-rose-900 leading-snug">
+            مشكلة من مزود واتساب أو الدفع — تواصل مع 360dialog
+          </p>
+          <p className="mt-1 text-xs text-rose-800 leading-relaxed">
+            {block.support_message_ar ||
+              'هذه الحالة من جانب المزود (Meta / 360dialog) ولا يمكن استعادتها من جانبنا. تم إيقاف إعادة الإرسال التلقائي لهذه الحملة.'}
+          </p>
+
+          {/* Per-error breakdown — surfaces the exact reasons so the
+              support engineer has the context up front. */}
+          {block.error_keys && block.error_keys.length > 0 && (
+            <ul className="mt-2 space-y-1">
+              {block.error_keys.map(k => (
+                <li
+                  key={k.key}
+                  className="flex items-center gap-2 text-[11px] text-rose-900"
+                >
+                  <span className="inline-flex items-center rounded-md bg-rose-100 px-1.5 py-0.5 font-mono text-[10px] text-rose-700 border border-rose-200">
+                    {k.key}
+                  </span>
+                  <span className="flex-1">{k.label_ar}</span>
+                  <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-rose-700 border border-rose-200">
+                    {k.count}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onCopyBundle}
+              disabled={bundleStatus === 'loading'}
+              className={[
+                'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold shadow-sm transition-colors',
+                bundleStatus === 'copied'
+                  ? 'bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700'
+                  : bundleStatus === 'error'
+                  ? 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200'
+                  : 'bg-rose-600 text-white border-rose-600 hover:bg-rose-700 disabled:opacity-50 disabled:cursor-wait',
+              ].join(' ')}
+            >
+              <LifeBuoy className="w-3.5 h-3.5" />
+              {bundleLabel}
+            </button>
+            <span className="text-[10px] text-rose-700/80">
+              التقرير يتضمن phone_number_id واسم القالب وعيّنة من ردّ Meta الخام.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 function ExcludedCustomersDrillDown({
   rows,
 }: {
@@ -2253,6 +2344,15 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
    *  when a single row's attempt_count crossed the safety threshold. */
   const [retryHealth, setRetryHealth] =
     useState<CampaignDebugSnapshot['retry_health'] | null>(null)
+  /** Provider-side billing/account block summary. When ``detected``
+   *  is true we render the rose support banner, hide the dispatch
+   *  CTA, and show the "نسخ تقرير الدعم" button. */
+  const [providerBlock, setProviderBlock] =
+    useState<CampaignDebugSnapshot['provider_block'] | null>(null)
+  /** Tracks the support-bundle copy state so we can flash a "✓ تم
+   *  النسخ" affordance back to the merchant. */
+  const [supportBundleStatus, setSupportBundleStatus] =
+    useState<'idle' | 'loading' | 'copied' | 'error'>('idle')
   /** QA escape hatch — POST dispatch-now with ``bypass_frequency_cap``. */
   const [ignoreFreqCapForDispatch, setIgnoreFreqCapForDispatch] = useState(false)
 
@@ -2267,6 +2367,33 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     || lifecycleKey === 'unknown_status'
   const hasErrors = (campaign.dispatch_errors?.length ?? 0) > 0
   const failedCount = campaign.failed_count ?? 0
+  // Provider-side billing/account block: when detected we MUST hide
+  // the dispatch CTA (auto-retry is pointless — the recipient/WABA
+  // is restricted by Meta/360dialog), and instead surface the
+  // support-escalation workflow.
+  const providerBlocked = !!providerBlock?.detected
+
+  /**
+   * Fetch the support bundle for a 360dialog escalation and copy
+   * it as pretty-printed JSON to the merchant's clipboard. The
+   * endpoint is read-only and idempotent, so we just call it on
+   * demand instead of pre-fetching with the debug snapshot.
+   */
+  const handleCopySupportBundle = useCallback(async () => {
+    setSupportBundleStatus('loading')
+    try {
+      const bundle = await campaignsApi.supportBundle(campaign.id)
+      await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2))
+      setSupportBundleStatus('copied')
+      // Auto-clear the affordance after a short pause so the
+      // button keeps working for repeated clicks.
+      window.setTimeout(() => setSupportBundleStatus('idle'), 4_000)
+    } catch (err) {
+      console.error('[campaigns] support bundle copy failed', err)
+      setSupportBundleStatus('error')
+      window.setTimeout(() => setSupportBundleStatus('idle'), 4_000)
+    }
+  }, [campaign.id])
 
   const handleDiagnose = async () => {
     setDiagnosing(true)
@@ -2278,6 +2405,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     setStatusBreakdownRaw(null)
     setSampleRows(null)
     setRetryHealth(null)
+    setProviderBlock(null)
+    setSupportBundleStatus('idle')
     try {
       const snap = await campaignsApi.debug(campaign.id)
       setExcludedSample(snap.sample_excluded_before_send || [])
@@ -2287,6 +2416,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       setStatusBreakdownRaw(snap.status_breakdown_raw || null)
       setSampleRows(snap.sample_rows || [])
       setRetryHealth(snap.retry_health || null)
+      setProviderBlock(snap.provider_block || null)
       const r = snap.recipients
       const total = r.total || campaign.audience_count || 0
       const skipped = r.skipped_duplicate + r.skipped_invalid +
@@ -2425,6 +2555,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           setStatusBreakdownRaw(snap.status_breakdown_raw || null)
           setSampleRows(snap.sample_rows || [])
           setRetryHealth(snap.retry_health || null)
+          setProviderBlock(snap.provider_block || null)
           const r = snap.recipients
           const total = r.total || campaign.audience_count || 0
           const lifecycleLabel =
@@ -2609,7 +2740,12 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               <AlertCircle className="w-3.5 h-3.5" />
               {diagnosing ? 'جاري…' : 'تشخيص'}
             </button>
-            {(isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty' || lifecycleKey === 'excluded_before_send') && (
+            {/* Hide the dispatch CTA entirely on provider-blocked
+                campaigns — retrying produces the same restriction
+                from Meta/360dialog and creates noise in the logs.
+                The merchant gets a "Contact 360dialog" workflow
+                instead, surfaced by ProviderBlockBanner below. */}
+            {!providerBlocked && (isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty' || lifecycleKey === 'excluded_before_send') && (
               <div className="flex flex-col items-end gap-1">
                 <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-slate-600 max-w-[155px] leading-snug text-right">
                   <input
@@ -2644,6 +2780,17 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       {diagnostic && (
         <tr className="bg-slate-50/70">
           <td colSpan={TABLE_HEADERS.length} className="px-6 py-3">
+            {/* Provider-side billing/account block — must render
+                BEFORE the diagnostic dump so the merchant sees the
+                escalation workflow first instead of getting lost
+                in counters. */}
+            {providerBlocked && providerBlock && (
+              <ProviderBlockBanner
+                block={providerBlock}
+                onCopyBundle={handleCopySupportBundle}
+                bundleStatus={supportBundleStatus}
+              />
+            )}
             <pre className="text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono bg-white border border-slate-200 rounded-lg p-3 leading-relaxed">
               {diagnostic}
             </pre>

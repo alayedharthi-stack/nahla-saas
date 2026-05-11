@@ -1027,6 +1027,11 @@ async def debug_campaign(
                 # merchant-facing). The UI uses it to hide a "أعد
                 # المحاولة" button on rows that can't possibly succeed.
                 "retryable":      classified.retryable,
+                # Provider-side billing/account restriction marker.
+                # Trips the "Contact 360dialog" banner — see the
+                # aggregated ``provider_block`` section for the full
+                # campaign-level signal.
+                "provider_billing_block": classified.provider_billing_block,
                 "advice_ar":      classified.advice_ar,
                 # Raw technical message kept verbatim — surfaces in
                 # the "نسخ الخطأ التقني" button.
@@ -1197,6 +1202,7 @@ async def debug_campaign(
                 "severity":       classified.severity,
                 "is_recoverable": classified.is_recoverable,
                 "retryable":      classified.retryable,
+                "provider_billing_block": classified.provider_billing_block,
                 "advice_ar":      classified.advice_ar,
                 "count":          int(n),
             })
@@ -1204,6 +1210,102 @@ async def debug_campaign(
         return out
     from sqlalchemy import func  # noqa: PLC0415, E402
     failure_summary = _safe("failure_summary", _failure_summary) or []
+
+    # ── Provider-side billing/account block detector ────────────────
+    # Any failure tagged ``provider_billing_block=True`` in the
+    # catalogue means the campaign cannot proceed without escalating
+    # to 360dialog. The UI uses this block to: render the support
+    # banner, hide "إرسال الآن", and surface the "نسخ تقرير الدعم"
+    # CTA. We compute timestamps + a small sample so the merchant
+    # (and our support team) can correlate quickly.
+    def _provider_block():
+        from services.meta_errors import ERRORS as _ME  # noqa: PLC0415
+        blocked_keys = [
+            k for k, v in _ME.items() if v.provider_billing_block
+        ]
+        if not blocked_keys:
+            return {
+                "detected": False,
+                "count": 0,
+                "error_keys": [],
+                "first_seen_at": None,
+                "last_seen_at": None,
+                "primary_label_ar": None,
+                "support_message_ar": None,
+            }
+        rows = (
+            db.query(CampaignSendLog)
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.status == "failed",
+                CampaignSendLog.error_code.in_(blocked_keys),
+            )
+            .all()
+        )
+        if not rows:
+            return {
+                "detected": False,
+                "count": 0,
+                "error_keys": [],
+                "first_seen_at": None,
+                "last_seen_at": None,
+                "primary_label_ar": None,
+                "support_message_ar": None,
+            }
+        # Aggregate per error_code so the UI can list each distinct
+        # provider error encountered ("client_payment_blocked: 4
+        # rows" / "account_locked: 1 row").
+        per_key: Dict[str, int] = {}
+        first_seen = None
+        last_seen = None
+        for r in rows:
+            k = (r.error_code or "").strip().lower()
+            per_key[k] = per_key.get(k, 0) + 1
+            ts = r.updated_at or r.created_at
+            if ts is None:
+                continue
+            if first_seen is None or ts < first_seen:
+                first_seen = ts
+            if last_seen is None or ts > last_seen:
+                last_seen = ts
+        # Pick the most common key as the "primary" — drives the
+        # banner copy. If every recipient hit the same code we want
+        # the merchant to see THAT label, not a vague fallback.
+        primary_key = max(per_key, key=per_key.get)  # type: ignore[arg-type]
+        primary_label = _ME[primary_key].label_ar
+        return {
+            "detected": True,
+            "count": len(rows),
+            "error_keys": [
+                {
+                    "key": k,
+                    "count": c,
+                    "label_ar": _ME[k].label_ar,
+                }
+                for k, c in sorted(per_key.items(), key=lambda kv: -kv[1])
+            ],
+            "first_seen_at": first_seen.isoformat() if first_seen else None,
+            "last_seen_at":  last_seen.isoformat()  if last_seen  else None,
+            "primary_key":   primary_key,
+            "primary_label_ar": primary_label,
+            # Fixed banner copy the spec asks for — kept on the
+            # backend so all clients (mobile/web/email) show the
+            # same message.
+            "support_message_ar": (
+                "مشكلة من مزود واتساب أو الدفع — تواصل مع 360dialog "
+                "وأرفق تقرير الدعم أدناه."
+            ),
+            "support_provider": "360dialog",
+        }
+    provider_block = _safe("provider_block", _provider_block) or {
+        "detected": False,
+        "count": 0,
+        "error_keys": [],
+        "first_seen_at": None,
+        "last_seen_at": None,
+        "primary_label_ar": None,
+        "support_message_ar": None,
+    }
 
     # ── Audience funnel ─────────────────────────────────────────────
     # Persisted by the dispatcher in template_variables['_audience_funnel']
@@ -1698,6 +1800,22 @@ async def debug_campaign(
             "سيُعاد إحياؤها تلقائياً عند الإرسال التالي."
         )
 
+    # ── Provider-side billing/account block hint ───────────────────
+    # If ANY row failed with a provider_billing_block code, surface
+    # the support-escalation copy FIRST — none of the other hints
+    # matter until 360dialog is contacted.
+    if provider_block.get("detected"):
+        keys_summary = "، ".join(
+            f"{kk['label_ar']} ({kk['count']})"
+            for kk in (provider_block.get("error_keys") or [])
+        )
+        hints.insert(0, (
+            "🛑 مشكلة من مزود واتساب أو الدفع — تواصل مع 360dialog. "
+            f"تفاصيل: {keys_summary or provider_block.get('primary_label_ar') or ''}. "
+            "أرسل تقرير الدعم الجاهز إلى فريق 360dialog من زر "
+            "«نسخ تقرير الدعم»."
+        ))
+
     if not (template_info or {}).get("approved"):
         hints.append(
             "القالب ليس بحالة APPROVED — لن يُرسل واتساب أي رسالة قبل "
@@ -1759,6 +1877,13 @@ async def debug_campaign(
         # NEW: aggregated failure breakdown by canonical Meta-error key.
         # Powers the "3 عملاء لا يملكون واتساب" summary in the UI.
         "failure_summary":  failure_summary,
+        # NEW: provider-side billing/account block signal. When
+        # ``provider_block.detected`` is true the UI must:
+        #   1. Show the rose support banner with ``support_message_ar``.
+        #   2. Hide the "إرسال الآن" dispatch CTA (no point retrying).
+        #   3. Surface the "نسخ تقرير الدعم" CTA which calls
+        #      ``GET /campaigns/{id}/support-bundle``.
+        "provider_block":   provider_block,
         # NEW: complete audience funnel (raw → reachable → snapshot →
         # queued). Lets the merchant see exactly where customers were
         # dropped before any send happened.
@@ -1947,6 +2072,230 @@ async def dispatch_campaign_now(
         "revived_zombies":    revived_zombies,
         "message":     msg,
     }
+
+
+# ── Support bundle (provider escalation) ───────────────────────────────────
+
+
+@router.get("/campaigns/{campaign_id}/support-bundle")
+def campaign_support_bundle(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return a JSON snapshot suitable for pasting into a 360dialog
+    support ticket.
+
+    Use case: a recipient (or our own WABA) is blocked by the provider
+    over billing/payment/account restrictions
+    (``provider_billing_block=True`` in the classifier). The merchant
+    cannot fix this from the dashboard. The UI shows a banner and
+    surfaces the "نسخ تقرير الدعم" button which calls this endpoint
+    and copies the JSON to the merchant's clipboard.
+
+    The bundle is intentionally:
+
+    * **Self-contained** — every field a 360dialog support engineer
+      would request (template name, language, WABA phone number id,
+      Meta error code + subcode + raw payload). No follow-up
+      back-and-forth needed.
+    * **PII-aware** — recipient phone numbers are masked to the last
+      4 digits. The merchant's WABA phone number id is included
+      verbatim because that's exactly what 360dialog asks for.
+    * **Stable shape** — versioned so we can extend it without
+      breaking automation on the merchant side.
+
+    The endpoint is read-only and safe to call any number of times.
+    """
+    tenant_id = resolve_tenant_id(request)
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id, Campaign.tenant_id == tenant_id,
+    ).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    from services.meta_errors import (  # noqa: PLC0415
+        ERRORS as META_ERRORS, parse_technical,
+    )
+
+    def _mask(phone: Optional[str]) -> str:
+        if not phone:
+            return ""
+        s = str(phone)
+        return ("•" * max(0, len(s) - 4)) + s[-4:] if len(s) > 4 else s
+
+    # 1. Aggregate provider-side blocking failures so support sees the
+    #    exact distribution at a glance.
+    blocked_keys = [k for k, v in META_ERRORS.items() if v.provider_billing_block]
+    blocked_rows = []
+    if blocked_keys:
+        blocked_rows = (
+            db.query(CampaignSendLog)
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.status == "failed",
+                CampaignSendLog.error_code.in_(blocked_keys),
+            )
+            .order_by(CampaignSendLog.updated_at.desc())
+            .limit(20)
+            .all()
+        )
+
+    per_key: Dict[str, int] = {}
+    sample_recipients = []
+    for r in blocked_rows:
+        k = (r.error_code or "").strip().lower()
+        per_key[k] = per_key.get(k, 0) + 1
+        if len(sample_recipients) < 10:
+            parsed = parse_technical(r.error_message)
+            sample_recipients.append({
+                "phone_masked":       _mask(r.customer_phone_e164),
+                "error_code":         r.error_code,
+                "error_label_ar":     META_ERRORS[k].label_ar if k in META_ERRORS else None,
+                "error_message_raw":  (r.error_message or "")[:400],
+                "meta_error_code":    parsed["meta_error_code"],
+                "meta_error_subcode": parsed["meta_error_subcode"],
+                "meta_error_type":    parsed["meta_error_type"],
+                "meta_error_message": parsed["meta_error_message"],
+                "attempt_count":      int(r.attempt_count or 0),
+                "occurred_at":        r.updated_at.isoformat() if r.updated_at else None,
+            })
+
+    # 2. WhatsApp connection (provider, phone_number_id). 360dialog
+    #    needs the phone_number_id to identify the WABA — keep it
+    #    verbatim, it's not PII.
+    wa_conn_info = None
+    try:
+        from services.campaign_dispatcher import _get_wa_connection  # noqa: PLC0415
+        conn = _get_wa_connection(db, tenant_id)
+        if conn:
+            wa_conn_info = {
+                "provider": (
+                    getattr(conn, "provider", None)
+                    or getattr(conn, "provider_name", None)
+                ),
+                "phone_number_id": getattr(conn, "phone_number_id", None),
+                "business_account_id": getattr(conn, "business_account_id", None),
+                "status":            getattr(conn, "status", None),
+            }
+    except Exception:
+        wa_conn_info = None
+
+    # 3. Template metadata (name + language is what support keys off).
+    template_info = None
+    try:
+        tpl = db.query(WhatsAppTemplate).filter(
+            WhatsAppTemplate.id == int(campaign.template_id or 0),
+            WhatsAppTemplate.tenant_id == tenant_id,
+        ).first() if campaign.template_id else None
+        if tpl:
+            template_info = {
+                "id":       tpl.id,
+                "name":     tpl.name,
+                "language": tpl.language,
+                "category": tpl.category,
+                "status":   tpl.status,
+            }
+    except Exception:
+        template_info = None
+
+    # 4. Raw Meta error samples (last few). Same data the debug
+    #    endpoint exposes — included here so support has a single
+    #    JSON payload to work from.
+    raw_meta_samples: List[Any] = []
+    try:
+        import json as _json  # noqa: PLC0415
+        raw = (campaign.template_variables or {}).get("_raw_meta_error_samples")
+        if isinstance(raw, list):
+            raw_meta_samples = raw[-5:]
+        elif isinstance(raw, str) and raw.strip():
+            try:
+                parsed_raw = _json.loads(raw)
+                raw_meta_samples = parsed_raw[-5:] if isinstance(parsed_raw, list) else []
+            except Exception:
+                raw_meta_samples = []
+    except Exception:
+        raw_meta_samples = []
+
+    detected = bool(blocked_rows)
+    primary_key = max(per_key, key=per_key.get) if per_key else None  # type: ignore[arg-type]
+    primary_label = (
+        META_ERRORS[primary_key].label_ar
+        if primary_key and primary_key in META_ERRORS
+        else None
+    )
+
+    # 5. Human-readable Arabic message the merchant can paste straight
+    #    into a 360dialog ticket. Keeps the technical block (JSON)
+    #    underneath for the support engineer.
+    support_message_ar_lines = [
+        "السلام عليكم،",
+        "",
+        (
+            "نواجه مشكلة على حملة واتساب — الردّ من Meta/المزود يشير "
+            "إلى قيود على الحساب أو رصيد الدفع."
+        ),
+        "",
+        f"- اسم الحملة: {campaign.name}",
+        f"- معرّف الحملة (campaign_id): {campaign.id}",
+        f"- عدد الجمهور (audience): {campaign.audience_count or 0}",
+        f"- اسم القالب: {(template_info or {}).get('name') or campaign.template_name or '—'}",
+        f"- اللغة: {(template_info or {}).get('language') or campaign.template_language or '—'}",
+    ]
+    if wa_conn_info and wa_conn_info.get("phone_number_id"):
+        support_message_ar_lines.append(
+            f"- phone_number_id لدى المزود: {wa_conn_info['phone_number_id']}"
+        )
+    if primary_label:
+        support_message_ar_lines.append(
+            f"- تصنيف الخطأ الأساسي: {primary_label} "
+            f"(عدد {per_key.get(primary_key, 0)})"
+        )
+    support_message_ar_lines.append("")
+    support_message_ar_lines.append(
+        "يرجى مراجعة القيود على هذا الحساب/الرقم. "
+        "أدناه التقرير التقني الكامل بصيغة JSON."
+    )
+
+    bundle = {
+        "version": "1",
+        "kind":    "nahla.campaign.support_bundle",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "tenant_id":    tenant_id,
+        "support_provider": "360dialog",
+        "campaign": {
+            "id":             campaign.id,
+            "name":           campaign.name,
+            "status":         campaign.status,
+            "campaign_type":  campaign.campaign_type,
+            "audience_count": campaign.audience_count or 0,
+            "sent_count":     campaign.sent_count or 0,
+            "launched_at":    campaign.launched_at.isoformat() if campaign.launched_at else None,
+            "created_at":     campaign.created_at.isoformat() if campaign.created_at else None,
+        },
+        "template":   template_info,
+        "wa_connection": wa_conn_info,
+        "provider_block": {
+            "detected": detected,
+            "count":    len(blocked_rows),
+            "error_keys": [
+                {
+                    "key": k,
+                    "count": c,
+                    "label_ar": (
+                        META_ERRORS[k].label_ar if k in META_ERRORS else None
+                    ),
+                }
+                for k, c in sorted(per_key.items(), key=lambda kv: -kv[1])
+            ],
+            "primary_key":      primary_key,
+            "primary_label_ar": primary_label,
+        },
+        "sample_recipients":  sample_recipients,
+        "raw_meta_samples":   raw_meta_samples,
+        "support_message_ar": "\n".join(support_message_ar_lines),
+    }
+    return bundle
 
 
 # ── Campaign dispatch (background) ──────────────────────────────────────────

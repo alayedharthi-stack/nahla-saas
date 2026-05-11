@@ -71,6 +71,13 @@ class ClassifiedError:
     # send may succeed without merchant action (rate limits,
     # service_unavailable, transient exceptions).
     retryable:     bool = False
+    # NEW: True when the failure originates from the WhatsApp
+    # provider's billing/account layer (360dialog or Meta's own
+    # account-level restrictions) — i.e. there is nothing the
+    # merchant can do in the dashboard. The UI uses this to swap
+    # the normal "Retry" CTA for a "Contact 360dialog support"
+    # banner and to lock the campaign from further auto-dispatch.
+    provider_billing_block: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -134,6 +141,9 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="major",
         is_recoverable=False,
         retryable=False,
+        # Provider-side block: nothing for the merchant to "fix" in
+        # the dashboard. Trips the support banner + bundle CTA.
+        provider_billing_block=True,
         advice_ar=(
             "هذه قيود من Meta على حساب العميل ولا يمكن استعادتها من "
             "جانبنا. تخطّى هذا الرقم وتابع — لن يؤثر على سمعة الإرسال."
@@ -201,6 +211,9 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=True,
         retryable=False,  # needs WBM intervention, not blind retry
+        # Account-level Meta restriction on OUR WABA — same support
+        # workflow as client_payment_blocked: contact 360dialog.
+        provider_billing_block=True,
         advice_ar="راجع تنبيهات WhatsApp Business Manager — قد يطلب التحقق.",
     ),
     "service_unavailable": ClassifiedError(
@@ -225,7 +238,12 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=False,
         retryable=False,
-        advice_ar="أعد ربط واتساب الأعمال من إعدادات الاتصال.",
+        # An auth failure at this layer is almost always a token
+        # rotation/suspension on the provider side — surface the
+        # 360dialog support workflow rather than asking the merchant
+        # to "just reconnect" when their credentials are fine.
+        provider_billing_block=True,
+        advice_ar="أعد ربط واتساب الأعمال من إعدادات الاتصال أو تواصل مع الدعم.",
     ),
     "no_message_id": ClassifiedError(
         key="no_message_id",
@@ -565,13 +583,24 @@ def reset_unknown_registry() -> None:
 def to_dict(c: ClassifiedError) -> Dict[str, Any]:
     """Serialise a ClassifiedError for JSON responses."""
     return {
-        "key":            c.key,
-        "label_ar":       c.label_ar,
-        "severity":       c.severity,
-        "is_recoverable": c.is_recoverable,
-        "retryable":      c.retryable,
-        "advice_ar":      c.advice_ar,
+        "key":                    c.key,
+        "label_ar":               c.label_ar,
+        "severity":               c.severity,
+        "is_recoverable":         c.is_recoverable,
+        "retryable":              c.retryable,
+        "provider_billing_block": c.provider_billing_block,
+        "advice_ar":              c.advice_ar,
     }
+
+
+def is_provider_billing_block(key: Optional[str]) -> bool:
+    """Quick lookup: does this canonical key indicate a provider-side
+    billing / account block that the merchant cannot resolve in the
+    dashboard? Used to trip the "Contact 360dialog" support banner."""
+    if not key:
+        return False
+    entry = ERRORS.get(str(key).strip().lower())
+    return bool(entry.provider_billing_block) if entry else False
 
 
 def is_retryable(key: Optional[str]) -> bool:
@@ -594,6 +623,7 @@ __all__ = [
     "severity_of",
     "label_for",
     "is_retryable",
+    "is_provider_billing_block",
     "to_dict",
     "note_unknown_code",
     "reset_unknown_registry",

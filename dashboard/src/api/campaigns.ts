@@ -186,6 +186,11 @@ export interface CampaignDebugSnapshot {
      *  24h but blind retries make it worse). The UI hides "أعد
      *  المحاولة" on rows where ``retryable === false``. */
     retryable: boolean
+    /** Provider-side billing/account restriction (client_payment_blocked,
+     *  account_locked, auth_error, …). The merchant cannot fix this
+     *  from the dashboard — the workflow is to contact 360dialog
+     *  with the support bundle attached. */
+    provider_billing_block: boolean
     /** One-line action hint in Arabic ("ask for opt-in", etc.). */
     advice_ar: string | null
     /** Raw technical message kept verbatim so support can copy it. */
@@ -208,9 +213,37 @@ export interface CampaignDebugSnapshot {
     is_recoverable: boolean
     /** Auto-retry policy flag, mirrors ``ClassifiedError.retryable``. */
     retryable: boolean
+    /** Provider-side billing/account restriction marker (drives the
+     *  "Contact 360dialog" support banner + bundle CTA). */
+    provider_billing_block: boolean
     advice_ar: string | null
     count: number
   }>
+  /** Aggregated provider-side billing/account block signal. When
+   *  ``detected`` is true the UI MUST: show the support banner, hide
+   *  the dispatch CTA, and surface the "نسخ تقرير الدعم" button which
+   *  fetches the support bundle. None of these errors are
+   *  merchant-recoverable from the dashboard — the workflow is to
+   *  contact 360dialog with the support bundle attached. */
+  provider_block: {
+    detected: boolean
+    count: number
+    error_keys: Array<{
+      key: string
+      count: number
+      label_ar: string
+    }>
+    first_seen_at: string | null
+    last_seen_at: string | null
+    /** The most-common provider block key encountered. Drives the
+     *  banner sub-title. */
+    primary_key?: string | null
+    primary_label_ar: string | null
+    /** Fixed Arabic copy for the merchant banner — kept on the
+     *  backend so every client renders the same message. */
+    support_message_ar: string | null
+    support_provider?: string
+  }
   /** Audience funnel — every stage between segment match and the
    *  Meta send call. Used to render the "🚫 تم استبعاد X عميل" panel
    *  when no rows materialised. */
@@ -348,6 +381,67 @@ export interface CampaignDebugSnapshot {
   }
   hints: string[]
   errors: string[]
+}
+
+/** Provider-escalation support bundle. Returned by
+ *  ``GET /campaigns/{id}/support-bundle``. The shape is versioned
+ *  (``version: "1"``) and intentionally stable — merchants paste it
+ *  straight into 360dialog tickets and downstream tooling may
+ *  consume it as well. */
+export interface CampaignSupportBundle {
+  version: string
+  kind: 'nahla.campaign.support_bundle'
+  generated_at: string
+  tenant_id: number
+  support_provider: string
+  campaign: {
+    id: number
+    name: string
+    status: string
+    campaign_type: string | null
+    audience_count: number
+    sent_count: number
+    launched_at: string | null
+    created_at: string | null
+  }
+  template: {
+    id: number
+    name: string
+    language: string
+    category: string
+    status: string
+  } | null
+  wa_connection: {
+    provider: string | null
+    phone_number_id: string | null
+    business_account_id: string | null
+    status: string | null
+  } | null
+  provider_block: {
+    detected: boolean
+    count: number
+    error_keys: Array<{
+      key: string
+      count: number
+      label_ar: string | null
+    }>
+    primary_key: string | null
+    primary_label_ar: string | null
+  }
+  sample_recipients: Array<{
+    phone_masked: string
+    error_code: string | null
+    error_label_ar: string | null
+    error_message_raw: string
+    meta_error_code: string | null
+    meta_error_subcode: string | null
+    meta_error_type: string | null
+    meta_error_message: string | null
+    attempt_count: number
+    occurred_at: string | null
+  }>
+  raw_meta_samples: unknown[]
+  support_message_ar: string
 }
 
 export interface CreateCampaignPayload {
@@ -566,6 +660,14 @@ export const campaignsApi = {
       }`,
       { method: 'POST' },
     ),
+
+  /** Pull a provider-escalation support bundle. Read-only — safe to
+   *  call any number of times. The merchant clicks "نسخ تقرير الدعم"
+   *  in the rose banner when ``debug.provider_block.detected`` is
+   *  true; the UI copies this JSON straight to the clipboard so the
+   *  merchant can paste it into a 360dialog ticket. */
+  supportBundle: (id: number) =>
+    apiCall<CampaignSupportBundle>(`/campaigns/${id}/support-bundle`),
 
   deleteCampaign: (id: number) =>
     apiCall<{ deleted: boolean; id: number }>(`/campaigns/${id}`, { method: 'DELETE' }),
