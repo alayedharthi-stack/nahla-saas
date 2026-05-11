@@ -48,6 +48,12 @@ export type CampaignLifecycle =
    *  out (no phone, opted-out, manual-exclude) BEFORE any send-log row
    *  was written. Distinct from completed_empty (zero audience). */
   | 'excluded_before_send'
+  /** Funnel says rows were materialized but campaign_send_logs is
+   *  empty now — usually means rows were deleted or never committed. */
+  | 'orphaned_materialized_rows'
+  /** Rows exist but their status values aren't recognised by the
+   *  current dispatcher (legacy / hand-edited data). */
+  | 'unknown_status'
   | 'completed_empty'
   | 'unknown'
 
@@ -120,6 +126,37 @@ export interface CampaignDebugSnapshot {
     skipped_unreachable: number
     skipped_manual_exclusion: number
   }
+  /** Verbatim per-status counters — every canonical status plus an
+   *  ``unknown_status`` bucket aggregating non-canonical values. */
+  status_breakdown: {
+    queued: number
+    sending: number
+    sent: number
+    failed: number
+    skipped_duplicate: number
+    skipped_invalid: number
+    skipped_unsubscribed: number
+    skipped_unreachable: number
+    skipped_manual_exclusion: number
+    unknown_status: number
+  }
+  /** Raw status → count mapping straight from the GROUP BY query.
+   *  Includes any exotic legacy keys (``pending``, ``processing``, …)
+   *  so support can spot data-migration gaps. */
+  status_breakdown_raw: Record<string, number>
+  /** First 10 send-log rows for the campaign so support can drill
+   *  down when counters disagree with the funnel. */
+  sample_rows: Array<{
+    id: number
+    phone_masked: string
+    status: string
+    skip_reason: string | null
+    error_code: string | null
+    error_message: string | null
+    attempt_count: number | null
+    created_at: string | null
+    updated_at: string | null
+  }>
   sample_failed: Array<{
     phone: string
     /** Canonical Meta error key. */

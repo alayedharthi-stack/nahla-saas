@@ -193,6 +193,41 @@ class TestLifecycleClassifier:
     def test_draft_passes_through(self):
         assert self._verb("draft") == "draft"
 
+    def test_active_with_materialized_funnel_but_zero_rows_is_orphaned(self):
+        """Funnel claims ``materialized_rows`` were created but
+        campaign_send_logs is empty now → ``orphaned_materialized_rows``
+        instead of the falsely reassuring ``pending_dispatch``."""
+        camp = Campaign(status="active", sent_count=0, audience_count=4)
+        verb = campaigns_router._classify_campaign_lifecycle(
+            camp, {}, funnel={"materialized_rows": 4},
+        )
+        assert verb == "orphaned_materialized_rows"
+
+    def test_active_with_unknown_status_rows_is_unknown_status(self):
+        """Rows exist but ``status`` values aren't in the canonical
+        set (queued/sending/sent/failed/skipped_*) → ``unknown_status``."""
+        camp = Campaign(status="active", sent_count=0, audience_count=4)
+        # 4 rows under the legacy "pending" status that the current
+        # dispatcher doesn't emit.
+        verb = campaigns_router._classify_campaign_lifecycle(
+            camp, {"pending": 4},
+        )
+        assert verb == "unknown_status"
+
+    def test_completed_with_unknown_status_rows_is_unknown_status(self):
+        camp = Campaign(status="completed", sent_count=0, audience_count=4)
+        verb = campaigns_router._classify_campaign_lifecycle(
+            camp, {"processing": 4},
+        )
+        assert verb == "unknown_status"
+
+    def test_completed_with_funnel_rows_but_no_db_rows_is_orphaned(self):
+        camp = Campaign(status="completed", sent_count=0, audience_count=4)
+        verb = campaigns_router._classify_campaign_lifecycle(
+            camp, {}, funnel={"materialized_rows": 4},
+        )
+        assert verb == "orphaned_materialized_rows"
+
 
 # ── 2. /campaigns/{id}/debug ────────────────────────────────────────
 
@@ -212,7 +247,21 @@ class TestDebugEndpoint:
             "excluded_before_send_count",
             "frequency_cap", "failure_summary",
             "sample_excluded_before_send",
+            # NEW: per-status drill-down + raw row sample.
+            "status_breakdown", "status_breakdown_raw", "sample_rows",
         }
+        # status_breakdown is always populated even when zero rows
+        # exist (the canonical set of buckets plus ``unknown_status``).
+        sb = result["status_breakdown"]
+        for k in (
+            "queued", "sending", "sent", "failed",
+            "skipped_duplicate", "skipped_invalid",
+            "skipped_unsubscribed", "skipped_unreachable",
+            "skipped_manual_exclusion", "unknown_status",
+        ):
+            assert k in sb, k
+            assert sb[k] == 0
+        assert result["sample_rows"] == []
         fc = result["frequency_cap"]
         assert fc["capped_count"] == 0
         assert "frequency_cap_source_rows" in fc
@@ -274,6 +323,100 @@ class TestDebugEndpoint:
         assert result["template"] is None
         # And the helpful hint surfaces.
         assert any("APPROVED" in h for h in result["hints"])
+
+    def test_status_breakdown_surfaces_unknown_statuses(self):
+        """Rows with non-canonical ``status`` values must not silently
+        disappear under "no recipients". They land in the
+        ``unknown_status`` bucket and ``status_breakdown_raw`` echoes
+        the raw key so support can spot exotic values."""
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="active", audience_count=4)
+        for status, phone in [
+            ("pending",    "+966500000010"),
+            ("pending",    "+966500000011"),
+            ("processing", "+966500000012"),
+        ]:
+            db.add(CampaignSendLog(
+                tenant_id=t.id, campaign_id=c.id,
+                customer_phone_e164=phone, status=status,
+            ))
+        db.commit()
+
+        result = _call_debug(db, t.id, c.id)
+        sb = result["status_breakdown"]
+        assert sb["unknown_status"] == 3
+        assert sb["sent"] == 0
+        # Raw mapping exposes the EXACT status values.
+        raw = result["status_breakdown_raw"]
+        assert raw.get("pending") == 2
+        assert raw.get("processing") == 1
+        # sample_rows surfaces the actual rows so support can drill in.
+        assert len(result["sample_rows"]) == 3
+        statuses = {r["status"] for r in result["sample_rows"]}
+        assert statuses == {"pending", "processing"}
+        # Lifecycle reflects the inconsistency.
+        assert result["campaign"]["lifecycle"] == "unknown_status"
+        # And no "no recipients" hint fires — those rows DO exist.
+        joined = " ".join(result["hints"])
+        assert "بدون أي مستلم" not in joined
+        assert any("غير معروفة" in h for h in result["hints"])
+
+    def test_no_orphan_hint_when_funnel_and_db_agree(self):
+        """When materialized_rows>0 AND DB has rows with canonical
+        statuses, neither the orphan nor the "no recipients" hint
+        fires — this is the normal success path."""
+        import json as _json
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="active", audience_count=4)
+        tv = dict(c.template_variables or {})
+        tv["_audience_funnel"] = _json.dumps({
+            "raw_audience": 4, "after_reachable_filter": 4,
+            "materialized_rows": 4, "queued_for_send": 0,
+        })
+        c.template_variables = tv
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(c, "template_variables")
+        for i in range(4):
+            db.add(CampaignSendLog(
+                tenant_id=t.id, campaign_id=c.id,
+                customer_phone_e164=f"+9665000001{i:02d}",
+                status="sent",
+                provider_message_id=f"wamid.{i}",
+                sent_at=datetime.now(timezone.utc),
+            ))
+        db.commit()
+
+        result = _call_debug(db, t.id, c.id)
+        joined = " ".join(result["hints"])
+        assert "بدون أي مستلم" not in joined
+        assert "materialized_rows" not in joined  # no orphan hint
+        assert result["status_breakdown"]["sent"] == 4
+
+    def test_orphan_lifecycle_when_funnel_promised_rows_but_db_empty(self):
+        """Funnel claims rows were materialized but DB has none — the
+        merchant must see ``orphaned_materialized_rows`` + the explicit
+        hint instead of "تم إنشاء الحملة بدون أي مستلم"."""
+        import json as _json
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="active", audience_count=4)
+        tv = dict(c.template_variables or {})
+        tv["_audience_funnel"] = _json.dumps({
+            "raw_audience": 4, "after_reachable_filter": 4,
+            "materialized_rows": 4, "queued_for_send": 4,
+        })
+        c.template_variables = tv
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(c, "template_variables")
+        db.commit()
+
+        result = _call_debug(db, t.id, c.id)
+        assert result["campaign"]["lifecycle"] == "orphaned_materialized_rows"
+        joined = " ".join(result["hints"])
+        # New explicit hint fires …
+        assert "materialized_rows=4" in joined or "snapshot الحملة" in joined
+        # … and the legacy "no recipients" hint does NOT (the merchant
+        # was being told something untrue about a valid materialization).
+        assert "بدون أي مستلم" not in joined
 
     def test_recipient_counters_aggregated_correctly(self):
         db, _ = _make_db()

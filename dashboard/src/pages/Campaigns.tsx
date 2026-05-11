@@ -139,6 +139,14 @@ const LIFECYCLE_META: Record<string, { label: string; variant: 'green' | 'amber'
   // opted-out, etc.). Different from ``completed_empty`` (zero
   // audience) — the merchant needs the explicit breakdown.
   excluded_before_send:    { label: 'استبعد كل العملاء قبل الإرسال', variant: 'amber' },
+  // ``orphaned_materialized_rows`` = the audience funnel claims rows
+  // were created but campaign_send_logs is empty now. Almost always a
+  // data inconsistency that needs a manual dispatch-now.
+  orphaned_materialized_rows: { label: 'صفوف مفقودة من السجل', variant: 'amber' },
+  // ``unknown_status`` = rows exist but their status values aren't
+  // recognised (legacy / hand-edited). We surface this distinctly so
+  // the merchant doesn't read it as "no recipients".
+  unknown_status:          { label: 'حالة إرسال غير معروفة',   variant: 'amber' },
   completed_empty:         { label: 'اكتملت بلا مستلمين',       variant: 'slate' },
   failed:                  { label: 'فشل الإرسال',              variant: 'red'   },
   failed_all:              { label: 'فشل الإرسال للجميع',       variant: 'red'   },
@@ -1911,6 +1919,148 @@ function RawMetaSamplesPanel({
   )
 }
 
+// ── Status breakdown + send-log row drill-down ───────────────────────────────
+
+/** Verbatim per-status counters. Shown for every diagnose so the
+ *  merchant can spot the exact statuses present in campaign_send_logs.
+ *  Especially important for ``orphaned_materialized_rows`` (funnel
+ *  promised rows but DB disagrees) and ``unknown_status`` (rows have
+ *  values not in the canonical set). */
+function StatusBreakdownPanel({
+  breakdown,
+  raw,
+}: {
+  breakdown: NonNullable<CampaignDebugSnapshot['status_breakdown']>
+  raw: CampaignDebugSnapshot['status_breakdown_raw'] | null | undefined
+}) {
+  const items: Array<{ key: string; label: string; value: number; tone: 'slate' | 'sky' | 'emerald' | 'rose' | 'amber' }> = [
+    { key: 'queued',                   label: 'في الطابور',        value: breakdown.queued,                   tone: 'sky' },
+    { key: 'sending',                  label: 'جارٍ الإرسال',      value: breakdown.sending,                  tone: 'sky' },
+    { key: 'sent',                     label: 'تم الإرسال',        value: breakdown.sent,                     tone: 'emerald' },
+    { key: 'failed',                   label: 'فشل',               value: breakdown.failed,                   tone: 'rose' },
+    { key: 'skipped_duplicate',        label: 'تخطّي تكرار',       value: breakdown.skipped_duplicate,        tone: 'slate' },
+    { key: 'skipped_invalid',          label: 'بيانات غير صالحة',   value: breakdown.skipped_invalid,          tone: 'slate' },
+    { key: 'skipped_unsubscribed',     label: 'ألغى الاشتراك',     value: breakdown.skipped_unsubscribed,     tone: 'slate' },
+    { key: 'skipped_unreachable',      label: 'غير قابل للوصول',   value: breakdown.skipped_unreachable,      tone: 'slate' },
+    { key: 'skipped_manual_exclusion', label: 'مستبعد يدوياً',     value: breakdown.skipped_manual_exclusion, tone: 'slate' },
+    { key: 'unknown_status',           label: 'حالة غير معروفة',   value: breakdown.unknown_status,           tone: 'amber' },
+  ]
+  const total = items.reduce((s, it) => s + (it.value || 0), 0)
+  const toneClasses: Record<typeof items[number]['tone'], string> = {
+    slate:   'bg-slate-50 text-slate-700 border-slate-200',
+    sky:     'bg-sky-50 text-sky-700 border-sky-200',
+    emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    rose:    'bg-rose-50 text-rose-700 border-rose-200',
+    amber:   'bg-amber-50 text-amber-700 border-amber-200',
+  }
+  // Show non-canonical raw keys alongside the canonical bucket so
+  // support sees exactly which legacy/unknown values are present.
+  const exoticRaw = raw
+    ? Object.entries(raw).filter(
+        ([k]) => ![
+          'queued', 'sending', 'sent', 'failed',
+          'skipped_duplicate', 'skipped_invalid',
+          'skipped_unsubscribed', 'skipped_unreachable',
+          'skipped_manual_exclusion',
+        ].includes(k),
+      )
+    : []
+  return (
+    <div className="mt-3 rounded-lg border border-slate-300 bg-white p-3">
+      <p className="text-[11px] font-semibold text-slate-700 mb-2 flex items-center gap-1">
+        📊 توزيع حالات صفوف الإرسال ({total})
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-1.5">
+        {items.map(it => (
+          <div
+            key={it.key}
+            className={`border rounded px-2 py-1.5 text-[10.5px] ${toneClasses[it.tone]} ${it.value === 0 ? 'opacity-60' : ''}`}
+          >
+            <div className="font-mono" dir="ltr">{it.key}</div>
+            <div className="flex items-baseline justify-between gap-1">
+              <span>{it.label}</span>
+              <span className="font-bold">{it.value}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      {exoticRaw.length > 0 && (
+        <div className="mt-2 rounded border border-amber-200 bg-amber-50/60 p-2">
+          <p className="text-[10.5px] font-semibold text-amber-800 mb-1">
+            ⚠️ قيم حالة غير قانونية مرصودة:
+          </p>
+          <ul className="space-y-0.5">
+            {exoticRaw.map(([k, v]) => (
+              <li key={k} className="text-[10.5px] text-amber-700 font-mono" dir="ltr">
+                {k} = {v}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** First 10 send-log rows. Renders id / phone / status / skip_reason /
+ *  error_code / timestamps as a compact table so support can verify
+ *  what rows exist when the lifecycle is ``orphaned_materialized_rows``
+ *  or ``unknown_status``. */
+function SampleRowsPanel({
+  rows,
+}: {
+  rows: NonNullable<CampaignDebugSnapshot['sample_rows']>
+}) {
+  const statusTone = (status: string): string => {
+    if (status === 'sent') return 'bg-emerald-100 text-emerald-700 border-emerald-200'
+    if (status === 'failed') return 'bg-rose-100 text-rose-700 border-rose-200'
+    if (status === 'queued' || status === 'sending') return 'bg-sky-100 text-sky-700 border-sky-200'
+    if (status?.startsWith('skipped_')) return 'bg-slate-100 text-slate-700 border-slate-200'
+    return 'bg-amber-100 text-amber-700 border-amber-200'
+  }
+  return (
+    <div className="mt-3 rounded-lg border border-slate-300 bg-white p-3">
+      <p className="text-[11px] font-semibold text-slate-700 mb-2 flex items-center gap-1">
+        🔎 أول {rows.length} صفوف من سجل الإرسال
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[10.5px] border-separate border-spacing-y-1">
+          <thead>
+            <tr className="text-slate-500 text-right">
+              <th className="px-2 font-medium">#</th>
+              <th className="px-2 font-medium">رقم العميل</th>
+              <th className="px-2 font-medium">الحالة</th>
+              <th className="px-2 font-medium">سبب التخطّي</th>
+              <th className="px-2 font-medium">رمز الخطأ</th>
+              <th className="px-2 font-medium">محاولات</th>
+              <th className="px-2 font-medium">آخر تعديل</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id} className="bg-slate-50">
+                <td className="px-2 font-mono text-slate-600" dir="ltr">{r.id}</td>
+                <td className="px-2 font-mono text-slate-700" dir="ltr">{r.phone_masked || '—'}</td>
+                <td className="px-2">
+                  <span className={`border rounded px-1.5 py-0.5 font-mono ${statusTone(r.status || '')}`} dir="ltr">
+                    {r.status || '—'}
+                  </span>
+                </td>
+                <td className="px-2 text-slate-600">{r.skip_reason || '—'}</td>
+                <td className="px-2 text-slate-600 font-mono" dir="ltr">{r.error_code || '—'}</td>
+                <td className="px-2 text-slate-600 font-mono text-center" dir="ltr">{r.attempt_count ?? 0}</td>
+                <td className="px-2 text-slate-500 font-mono text-[10px]" dir="ltr">
+                  {(r.updated_at || r.created_at || '').slice(0, 19).replace('T', ' ') || '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 // ── Campaign list row ─────────────────────────────────────────────────────────
 
 /** Append frequency-cap audit lines to the diagnostic ``pre`` block —
@@ -1978,6 +2128,16 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
    *  support to add new Meta codes to the canonical classifier. */
   const [rawMetaSamples, setRawMetaSamples] =
     useState<CampaignDebugSnapshot['raw_meta_error_samples'] | null>(null)
+  /** Verbatim status counters — shown when counters disagree with the
+   *  funnel so the merchant sees the EXACT status values present. */
+  const [statusBreakdown, setStatusBreakdown] =
+    useState<CampaignDebugSnapshot['status_breakdown'] | null>(null)
+  const [statusBreakdownRaw, setStatusBreakdownRaw] =
+    useState<CampaignDebugSnapshot['status_breakdown_raw'] | null>(null)
+  /** First 10 send-log rows — drill-down for orphaned_materialized_rows
+   *  and unknown_status lifecycle states. */
+  const [sampleRows, setSampleRows] =
+    useState<CampaignDebugSnapshot['sample_rows'] | null>(null)
   /** QA escape hatch — POST dispatch-now with ``bypass_frequency_cap``. */
   const [ignoreFreqCapForDispatch, setIgnoreFreqCapForDispatch] = useState(false)
 
@@ -1986,7 +2146,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   // ``no_whatsapp_recipients`` here — those mean "the campaign
   // worked, the recipient list just didn't fully match".
   const isFailed = campaign.status === 'failed' || lifecycleKey === 'failed_all' || lifecycleKey === 'failed'
-  const isStuck = lifecycleKey === 'pending_dispatch'
+  const isStuck =
+    lifecycleKey === 'pending_dispatch'
+    || lifecycleKey === 'orphaned_materialized_rows'
+    || lifecycleKey === 'unknown_status'
   const hasErrors = (campaign.dispatch_errors?.length ?? 0) > 0
   const failedCount = campaign.failed_count ?? 0
 
@@ -1996,11 +2159,17 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     setExcludedSample(null)
     setFailedSample(null)
     setRawMetaSamples(null)
+    setStatusBreakdown(null)
+    setStatusBreakdownRaw(null)
+    setSampleRows(null)
     try {
       const snap = await campaignsApi.debug(campaign.id)
       setExcludedSample(snap.sample_excluded_before_send || [])
       setFailedSample(snap.sample_failed || [])
       setRawMetaSamples(snap.raw_meta_error_samples || [])
+      setStatusBreakdown(snap.status_breakdown || null)
+      setStatusBreakdownRaw(snap.status_breakdown_raw || null)
+      setSampleRows(snap.sample_rows || [])
       const r = snap.recipients
       const total = r.total || campaign.audience_count || 0
       const skipped = r.skipped_duplicate + r.skipped_invalid +
@@ -2118,6 +2287,9 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           setExcludedSample(snap.sample_excluded_before_send || [])
           setFailedSample(snap.sample_failed || [])
           setRawMetaSamples(snap.raw_meta_error_samples || [])
+          setStatusBreakdown(snap.status_breakdown || null)
+          setStatusBreakdownRaw(snap.status_breakdown_raw || null)
+          setSampleRows(snap.sample_rows || [])
           const r = snap.recipients
           const total = r.total || campaign.audience_count || 0
           const lifecycleLabel =
@@ -2156,6 +2328,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
             'sent', 'partial', 'partial_minor',
             'no_whatsapp_recipients', 'failed_all', 'failed',
             'completed_empty', 'excluded_before_send',
+            'orphaned_materialized_rows', 'unknown_status',
           ])
           if (terminal.has(snap.campaign.lifecycle)) break
         } catch {
@@ -2341,6 +2514,15 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
             </pre>
             {excludedSample && excludedSample.length > 0 && (
               <ExcludedCustomersDrillDown rows={excludedSample} />
+            )}
+            {statusBreakdown && (
+              <StatusBreakdownPanel
+                breakdown={statusBreakdown}
+                raw={statusBreakdownRaw}
+              />
+            )}
+            {sampleRows && sampleRows.length > 0 && (
+              <SampleRowsPanel rows={sampleRows} />
             )}
             {failedSample && failedSample.some(r => r.error_code === 'unknown') && (
               <UnknownMetaErrorsPanel rows={failedSample.filter(r => r.error_code === 'unknown')} />

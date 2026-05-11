@@ -663,11 +663,25 @@ async def get_campaign_report(
 # posture we used for /billing/debug/current.
 
 
+# Set of status values the campaign_dispatcher emits today. Anything in
+# CampaignSendLog.status that is NOT in this set is treated as a legacy
+# / unknown value and surfaced via the ``unknown_status`` lifecycle so
+# the merchant doesn't see a silent "no recipients" report when rows
+# actually exist with a non-canonical status (e.g. ``pending``,
+# ``processing``, ``created``).
+_KNOWN_LOG_STATUSES = {
+    "queued", "sending", "sent", "failed",
+    "skipped_duplicate", "skipped_invalid", "skipped_unsubscribed",
+    "skipped_unreachable", "skipped_manual_exclusion",
+}
+
+
 def _classify_campaign_lifecycle(
     campaign: Campaign,
     counts: Dict[str, int],
     *,
     db: Optional[Session] = None,
+    funnel: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Map the raw ``status`` column + send-log counters onto a
     merchant-friendly verb so the UI never has to show just "نشطة" for
@@ -690,6 +704,20 @@ def _classify_campaign_lifecycle(
     failed = counts.get("failed", 0)
     queued = counts.get("queued", 0)
     total = sum(counts.values())
+    # Rows that landed under a non-canonical ``status`` value (legacy
+    # values, half-finished migrations, hand-edited data). These rows
+    # contribute to ``total`` so the merchant doesn't see "0 recipients"
+    # when they exist, but the lifecycle surfaces them distinctly.
+    known_total = sum(
+        v for k, v in counts.items() if k in _KNOWN_LOG_STATUSES
+    )
+    unknown_total = total - known_total
+    materialized_rows = 0
+    if funnel is not None:
+        try:
+            materialized_rows = int(funnel.get("materialized_rows") or 0)
+        except (TypeError, ValueError):
+            materialized_rows = 0
 
     # Optional minor-only check — the dispatcher writes canonical
     # error keys (services.meta_errors) into error_code, so we can
@@ -719,13 +747,19 @@ def _classify_campaign_lifecycle(
             return "partial_minor" if all_failures_minor else "partial"
         if failed > 0 and sent == 0:
             return "no_whatsapp_recipients" if all_failures_minor else "failed_all"
-        # sent==0, failed==0 — distinguish two very different cases:
-        #   (a) Genuinely empty audience (segment matched 0 customers)     → completed_empty
-        #   (b) Audience > 0 but EVERY customer was filtered out before
-        #       any campaign_send_logs row was even written (e.g. all
-        #       have no normalized_phone, all are unsubscribed, all are
-        #       in an excluded segment). The merchant needs to see this
-        #       distinctly because the fix is data-side, not code-side.
+        # sent==0, failed==0 — distinguish several very different cases:
+        #   (a) Rows exist but every status is non-canonical
+        #       → ``unknown_status`` (data fix needed, not a true zero).
+        #   (b) Funnel says rows were materialized but DB has none
+        #       → ``orphaned_materialized_rows``.
+        #   (c) Audience > 0 but EVERY customer was filtered upstream
+        #       → ``excluded_before_send``.
+        #   (d) Genuinely empty audience (segment matched 0 customers)
+        #       → ``completed_empty``.
+        if total > 0 and known_total == 0 and unknown_total > 0:
+            return "unknown_status"
+        if total == 0 and materialized_rows > 0:
+            return "orphaned_materialized_rows"
         if (campaign.audience_count or 0) > 0 and total == 0:
             return "excluded_before_send"
         return "completed_empty"
@@ -735,7 +769,17 @@ def _classify_campaign_lifecycle(
         return "waiting_scheduler"
     if status == "active":
         if total == 0:
+            # Funnel claims rows were materialized but they're not in
+            # the DB now — surface this distinctly so the merchant
+            # doesn't see the falsely reassuring "ينتظر بدء الإرسال".
+            if materialized_rows > 0:
+                return "orphaned_materialized_rows"
             return "pending_dispatch"
+        # Rows exist but every single one carries a non-canonical
+        # status (likely legacy data or a migration that didn't
+        # update the values). Don't bucket them as "still sending".
+        if known_total == 0 and unknown_total > 0:
+            return "unknown_status"
         if queued > 0:
             return "sending"
         if sent == 0 and failed == 0:
@@ -809,6 +853,64 @@ async def debug_campaign(
             return ""
         s = str(phone)
         return ("•" * max(0, len(s) - 4)) + s[-4:] if len(s) > 4 else s
+
+    # ── Verbatim status breakdown ───────────────────────────────────
+    # Show the EXACT status values present in campaign_send_logs so
+    # legacy / unknown statuses (``pending``, ``processing``, …) are
+    # visible to the merchant instead of silently disappearing under
+    # a "no recipients" hint. ``known`` keys come first (canonical),
+    # then ``unknown`` — UI uses the same keys to render the
+    # ``status_breakdown`` block.
+    status_breakdown = {
+        "queued":                   counts.get("queued", 0),
+        "sending":                  counts.get("sending", 0),
+        "sent":                     counts.get("sent", 0),
+        "failed":                   counts.get("failed", 0),
+        "skipped_duplicate":        counts.get("skipped_duplicate", 0),
+        "skipped_invalid":          counts.get("skipped_invalid", 0),
+        "skipped_unsubscribed":     counts.get("skipped_unsubscribed", 0),
+        "skipped_unreachable":      counts.get("skipped_unreachable", 0),
+        "skipped_manual_exclusion": counts.get("skipped_manual_exclusion", 0),
+        # Bucket every non-canonical status under "unknown_status" so
+        # the merchant immediately sees the count without having to
+        # parse every key in ``counts``.
+        "unknown_status": sum(
+            int(v) for k, v in (counts or {}).items()
+            if k not in _KNOWN_LOG_STATUSES
+        ),
+    }
+    # Echo the raw mapping too — handy for support to spot exotic
+    # legacy statuses like ``pending`` or ``processing``.
+    status_breakdown_raw = {str(k): int(v) for k, v in (counts or {}).items()}
+
+    # ── First 10 send-log rows (audit) ──────────────────────────────
+    # When materialized_rows>0 but every counter is zero, the merchant
+    # needs to SEE the actual rows to diagnose (legacy status, weird
+    # skip_reason, etc.). We surface a tiny sample sorted by id so the
+    # ordering is stable.
+    def _sample_rows():
+        rows = (
+            db.query(CampaignSendLog)
+            .filter(CampaignSendLog.campaign_id == campaign_id)
+            .order_by(CampaignSendLog.id.asc())
+            .limit(10)
+            .all()
+        )
+        out = []
+        for r in rows:
+            out.append({
+                "id":           int(r.id),
+                "phone_masked": _mask(r.customer_phone_e164),
+                "status":       r.status,
+                "skip_reason":  r.skip_reason,
+                "error_code":   r.error_code,
+                "error_message": (r.error_message or "")[:240] or None,
+                "attempt_count": r.attempt_count,
+                "created_at":   r.created_at.isoformat() if r.created_at else None,
+                "updated_at":   r.updated_at.isoformat() if r.updated_at else None,
+            })
+        return out
+    sample_rows = _safe("sample_rows", _sample_rows) or []
 
     def _sample_failed():
         from services.meta_errors import (  # noqa: PLC0415
@@ -969,7 +1071,26 @@ async def debug_campaign(
     dispatch_errors_raw = tpl_vars.get("_dispatch_errors", "") or ""
     dispatch_errors = [e for e in dispatch_errors_raw.split("|") if e]
 
-    lifecycle = _classify_campaign_lifecycle(campaign, counts, db=db)
+    # ``audience_funnel`` is computed below — but the lifecycle
+    # classifier needs ``materialized_rows`` to distinguish
+    # ``pending_dispatch`` (truly no rows yet) from
+    # ``orphaned_materialized_rows`` (snapshot says rows exist but DB
+    # disagrees). We forward-define a lightweight read that doesn't
+    # depend on the full funnel block.
+    _funnel_for_lifecycle: Dict[str, Any] = {}
+    try:
+        import json as _json_mr  # noqa: PLC0415
+        _raw_fl = (campaign.template_variables or {}).get("_audience_funnel")
+        if isinstance(_raw_fl, str) and _raw_fl.strip():
+            _funnel_for_lifecycle = _json_mr.loads(_raw_fl) or {}
+        elif isinstance(_raw_fl, dict):
+            _funnel_for_lifecycle = _raw_fl
+    except Exception:
+        _funnel_for_lifecycle = {}
+
+    lifecycle = _classify_campaign_lifecycle(
+        campaign, counts, db=db, funnel=_funnel_for_lifecycle,
+    )
 
     # Group failures by canonical key so the merchant sees, e.g.,
     # "3 عملاء لا يملكون واتساب، 1 خارج نافذة 24 ساعة" rather than
@@ -1353,17 +1474,63 @@ async def debug_campaign(
         return out
     sample_excluded_before_send = _safe("sample_excluded", _sample_excluded) or []
 
-    # If lifecycle is pending_dispatch but status=active and audience is
-    # > 0, that almost always means the asyncio.create_task background
-    # job died before _snapshot_recipients ran. Surface a direct hint.
+    # Hints are merchant-facing, in Arabic, and follow the strict rule:
+    # never claim "no recipients" while ``materialized_rows`` or
+    # ``recipients.total`` are > 0 — the merchant has been bitten by
+    # that false-positive before.
     hints: List[str] = []
-    if lifecycle == "pending_dispatch" and (campaign.audience_count or 0) > 0:
+    recipients_total_db = sum(int(v) for v in (counts or {}).values())
+    materialized_rows_in_funnel = int(
+        (audience_funnel or {}).get("materialized_rows") or 0
+    )
+
+    # Genuine "no recipients" — and only when BOTH the in-DB count and
+    # the funnel materialization counter agree there are zero rows.
+    if (
+        lifecycle == "pending_dispatch"
+        and (campaign.audience_count or 0) > 0
+        and recipients_total_db == 0
+        and materialized_rows_in_funnel == 0
+    ):
         hints.append(
             "تم إنشاء الحملة بدون أي مستلم في سجل الإرسال. الأسباب "
             "المحتملة: (1) خلل في مَهمّة asyncio الخلفية (راجع سجلات "
             "Railway للبحث عن 'dispatching campaign'). (2) فشل التحقق "
             "من القالب أو اتصال واتساب. استخدم POST "
             f"/campaigns/{campaign_id}/dispatch-now لإعادة المحاولة."
+        )
+
+    # Funnel says rows were created but DB disagrees — usually means
+    # rows were deleted, or the snapshot finished and crashed before
+    # commit. Tell the merchant the truth so they don't trust the
+    # falsely reassuring "ينتظر بدء الإرسال".
+    if lifecycle == "orphaned_materialized_rows":
+        hints.append(
+            f"تم رصد materialized_rows={materialized_rows_in_funnel} في "
+            "snapshot الحملة، لكن لا توجد صفوف فعلية الآن في "
+            "campaign_send_logs. ربما حُذفت الصفوف يدوياً، أو فشل "
+            "commit بعد الإنشاء، أو تتابع dispatch-now فوق نفس الحملة "
+            "وأعاد التهيئة. استخدم dispatch-now لإعادة الإنشاء."
+        )
+
+    # Rows exist but their status values aren't recognised by the
+    # current dispatcher. Usually a sign of a legacy migration or
+    # hand-edited data. Surface the raw status names so support can
+    # decide whether to backfill them to canonical values.
+    if lifecycle == "unknown_status":
+        raw_keys = ", ".join(
+            sorted(
+                f"{k}={v}"
+                for k, v in status_breakdown_raw.items()
+                if k not in _KNOWN_LOG_STATUSES
+            )
+        )
+        hints.append(
+            "صفوف موجودة في campaign_send_logs لكن حالتها غير معروفة "
+            "(ليست ضمن queued/sending/sent/failed/skipped_*). "
+            f"القيم المُلتقطة: {raw_keys or 'غير محدّدة'}. راجع "
+            "sample_rows في الأسفل وحدّث الحالة إلى قيمة قانونية أو "
+            "أعد التشغيل عبر dispatch-now."
         )
     if lifecycle == "excluded_before_send":
         # Build an explicit, merchant-facing breakdown using the
@@ -1471,6 +1638,14 @@ async def debug_campaign(
             "skipped_unreachable":       counts.get("skipped_unreachable", 0),
             "skipped_manual_exclusion":  counts.get("skipped_manual_exclusion", 0),
         },
+        # NEW: exact per-status breakdown including a bucket for any
+        # non-canonical legacy/unknown status names. ``status_breakdown_raw``
+        # mirrors counts verbatim so support can spot exotic values.
+        "status_breakdown":     status_breakdown,
+        "status_breakdown_raw": status_breakdown_raw,
+        # NEW: first 10 send-log rows so the merchant can drill down
+        # when ``materialized_rows > 0`` but all counters are zero.
+        "sample_rows":          sample_rows,
         "sample_failed":    sample_failed,
         "sample_sent":      sample_sent,
         # NEW: aggregated failure breakdown by canonical Meta-error key.
