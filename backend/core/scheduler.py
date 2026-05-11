@@ -34,6 +34,82 @@ _STUCK_IMMEDIATE_THRESHOLD_SECONDS = 60  # rescue immediate campaigns whose
                                           # exception; OOM; etc.)
 
 
+# ── Campaign dispatcher heartbeat (in-process diagnostics) ───────────
+# Updated by run_campaign_dispatcher_scheduler and _dispatch_due_campaigns
+# every cycle. Exposed via get_campaign_dispatcher_state() and read by
+# the admin diagnostic endpoint GET /admin/debug/scheduler-health.
+#
+# Purpose: prove from outside Railway logs that:
+#   (a) the FastAPI lifespan completed (started_at != None),
+#   (b) the loop is alive (last_tick_at within last poll cycle),
+#   (c) the rescue path is firing for stuck immediates.
+#
+# Process-local memory only — resets on uvicorn restart. That is
+# intentional: a fresh start_at after a deploy is exactly the signal
+# we want.
+_campaign_dispatcher_state: dict = {
+    "started_at":              None,  # set once when the loop logs "Started"
+    "started_at_monotonic":    None,  # monotonic counterpart for uptime calc
+    "last_tick_at":            None,  # set at the start of every cycle
+    "last_tick_ok":            None,  # True if last tick finished without raise
+    "last_tick_error":         None,  # repr() of the last exception, or None
+    "ticks_total":             0,
+    "ticks_failed":            0,
+    "last_rescue_at":          None,  # set when at least one campaign was rescued
+    "last_rescued_campaign_ids": [],  # last batch of rescued ids
+    "rescue_invocations_total": 0,    # # of cycles that found ≥1 stuck campaign
+    "rescue_campaigns_total":   0,    # cumulative rescued campaign count
+    "poll_seconds":            _CAMPAIGN_POLL_SECONDS,
+    "stuck_threshold_seconds": _STUCK_IMMEDIATE_THRESHOLD_SECONDS,
+}
+
+
+def get_campaign_dispatcher_state() -> dict:
+    """Return a snapshot copy of the campaign dispatcher heartbeat.
+
+    Used by the admin diagnostic endpoint. Returns a plain dict so
+    the consumer cannot accidentally mutate process state."""
+    snapshot = dict(_campaign_dispatcher_state)
+    # Compute live "alive" verdict + age fields here so the
+    # endpoint can stay dumb.
+    now = datetime.now(timezone.utc)
+    started_at = snapshot.get("started_at")
+    last_tick_at = snapshot.get("last_tick_at")
+    poll_s = snapshot.get("poll_seconds") or _CAMPAIGN_POLL_SECONDS
+
+    if last_tick_at is not None:
+        try:
+            age = (now - last_tick_at).total_seconds()
+        except Exception:
+            age = None
+        snapshot["last_tick_age_seconds"] = age
+        # The loop is healthy if a tick fired within 3× the poll
+        # period — gives us tolerance for one slow cycle.
+        snapshot["alive"] = (
+            age is not None and age <= (poll_s * 3)
+        )
+    else:
+        snapshot["last_tick_age_seconds"] = None
+        snapshot["alive"] = False
+
+    snapshot["started"] = started_at is not None
+    if started_at is not None:
+        try:
+            snapshot["uptime_seconds"] = (now - started_at).total_seconds()
+        except Exception:
+            snapshot["uptime_seconds"] = None
+    else:
+        snapshot["uptime_seconds"] = None
+
+    # Format timestamps as ISO 8601 for the JSON response.
+    for k in ("started_at", "last_tick_at", "last_rescue_at"):
+        v = snapshot.get(k)
+        if isinstance(v, datetime):
+            snapshot[k] = v.isoformat()
+
+    return snapshot
+
+
 def _find_stuck_immediate_campaigns(
     db,
     *,
@@ -114,11 +190,25 @@ def _find_stuck_immediate_campaigns(
 async def run_campaign_dispatcher_scheduler() -> None:
     """Poll for scheduled/delayed campaigns that are ready to send."""
     await asyncio.sleep(10)
+    # ── Heartbeat: mark the loop as started ────────────────────
+    # Visible from outside via GET /admin/debug/scheduler-health
+    # so we can prove the lifespan completed without scraping
+    # Railway logs.
+    import time as _time  # noqa: PLC0415
+    _campaign_dispatcher_state["started_at"] = datetime.now(timezone.utc)
+    _campaign_dispatcher_state["started_at_monotonic"] = _time.monotonic()
     logger.info("[Campaign Dispatcher] Started — polling every %ss", _CAMPAIGN_POLL_SECONDS)
     while True:
+        _campaign_dispatcher_state["last_tick_at"] = datetime.now(timezone.utc)
+        _campaign_dispatcher_state["ticks_total"] += 1
         try:
             await _dispatch_due_campaigns()
+            _campaign_dispatcher_state["last_tick_ok"] = True
+            _campaign_dispatcher_state["last_tick_error"] = None
         except Exception as exc:
+            _campaign_dispatcher_state["last_tick_ok"] = False
+            _campaign_dispatcher_state["last_tick_error"] = repr(exc)[:400]
+            _campaign_dispatcher_state["ticks_failed"] += 1
             logger.error("[Campaign Dispatcher] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_CAMPAIGN_POLL_SECONDS)
 
@@ -183,6 +273,16 @@ async def _dispatch_due_campaigns() -> None:
                 exc,
             )
             stuck = []
+        if stuck:
+            # Record diagnostic state BEFORE the per-campaign loop
+            # so a slow per-campaign dispatch doesn't hide that we
+            # at least found stuck rows.
+            _campaign_dispatcher_state["last_rescue_at"] = now
+            _campaign_dispatcher_state["rescue_invocations_total"] += 1
+            _campaign_dispatcher_state["rescue_campaigns_total"] += len(stuck)
+            _campaign_dispatcher_state["last_rescued_campaign_ids"] = [
+                c.id for c in stuck
+            ][:20]
         for c in stuck:
             age_seconds = (
                 (now - c.launched_at).total_seconds()

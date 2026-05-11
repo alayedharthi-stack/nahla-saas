@@ -1725,3 +1725,156 @@ async def admin_debug_media_env(
         "hints":               hints,
     }
     return payload
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Scheduler health — verify the campaign dispatcher loop is alive
+# ──────────────────────────────────────────────────────────────────────
+
+@router.get("/scheduler-health")
+async def admin_debug_scheduler_health(
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Diagnostic snapshot of the campaign-dispatcher background loop
+    that lives inside the uvicorn web process.
+
+    Purpose
+    ───────
+    After a deploy you want to confirm — without scraping Railway logs —
+    that:
+
+      1. The FastAPI lifespan completed (``started_at`` is not None).
+      2. The loop is alive (``alive=True`` ⇔ a tick fired within 3× the
+         poll period).
+      3. The F12 rescue path actually picked up stuck immediate
+         campaigns (``last_rescue_at`` / ``last_rescued_campaign_ids``
+         populated).
+      4. The kill-switch (``NAHLA_DISABLE_SCHEDULERS``) is not flipped.
+      5. The deployed git SHA matches what you just pushed.
+
+    Hitting this endpoint with admin credentials gives you all five
+    answers in one JSON document. It is read-only and process-local —
+    no DB writes, no side effects.
+    """
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+    from core.scheduler import (  # noqa: PLC0415
+        get_campaign_dispatcher_state,
+    )
+
+    state = get_campaign_dispatcher_state()
+
+    # Kill switch state — the most common reason for a "dead" loop.
+    raw_kill = os.environ.get("NAHLA_DISABLE_SCHEDULERS", "")
+    kill_switch_set = raw_kill.strip().lower() in ("1", "true", "yes")
+
+    # Minimal-asgi check — when set, backend.minimal_asgi:app boots
+    # WITHOUT any schedulers. If a merchant deploys with this flag
+    # accidentally, no rescue path runs at all.
+    minimal_asgi = os.environ.get("NAHLA_MINIMAL_ASGI", "").strip().lower()
+    minimal_asgi_set = minimal_asgi in ("1", "true", "yes")
+
+    # Best-effort deployed-SHA. Railway / Nixpacks may not preserve
+    # ``.git``; we try a few common sources before giving up. Never
+    # raises — diagnostic, not authoritative.
+    git_sha = None
+    git_branch = None
+    for env_key in (
+        "RAILWAY_GIT_COMMIT_SHA",
+        "RAILWAY_DEPLOYMENT_COMMIT_SHA",
+        "GIT_COMMIT",
+        "COMMIT_SHA",
+        "SOURCE_VERSION",
+    ):
+        if os.environ.get(env_key):
+            git_sha = os.environ.get(env_key)
+            break
+    for env_key in (
+        "RAILWAY_GIT_BRANCH",
+        "GIT_BRANCH",
+    ):
+        if os.environ.get(env_key):
+            git_branch = os.environ.get(env_key)
+            break
+    if not git_sha:
+        try:
+            git_sha = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd="/app",
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                )
+                .decode("utf-8", errors="ignore")
+                .strip()
+                or None
+            )
+        except Exception:
+            git_sha = None
+
+    # Build human-readable diagnosis lines. The first one is the
+    # most important — what action (if any) you should take.
+    issues: List[str] = []
+    hints:  List[str] = []
+    if kill_switch_set:
+        issues.append(
+            "NAHLA_DISABLE_SCHEDULERS is set — every scheduler is "
+            "disabled, including the campaign dispatcher. Unset this "
+            "env var on Railway to re-enable the rescue path."
+        )
+    if minimal_asgi_set:
+        issues.append(
+            "NAHLA_MINIMAL_ASGI is set — backend.minimal_asgi:app is "
+            "booted, which has no schedulers registered. Unset to use "
+            "backend.main:app."
+        )
+    if not state.get("started"):
+        if not kill_switch_set and not minimal_asgi_set:
+            issues.append(
+                "campaign_dispatcher.started_at is None — the lifespan "
+                "hook never ran or the 10s startup delay has not "
+                "elapsed yet. Wait ~15s after deploy then re-check."
+            )
+    elif not state.get("alive"):
+        age = state.get("last_tick_age_seconds")
+        issues.append(
+            f"campaign_dispatcher last tick was {age:.0f}s ago — loop "
+            f"appears stalled. Expected ≤ "
+            f"{state.get('poll_seconds') * 3}s."
+        )
+    if (
+        state.get("alive")
+        and state.get("rescue_invocations_total", 0) == 0
+        and state.get("ticks_total", 0) > 2
+    ):
+        hints.append(
+            "Loop is alive but rescue path has not triggered yet. "
+            "This is normal when no campaigns are stuck. If you "
+            "currently have a stuck campaign with status='active', "
+            "schedule_type='immediate', and zero campaign_send_logs "
+            "rows older than 60s, it should appear in "
+            "last_rescued_campaign_ids on the next tick."
+        )
+
+    return {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "deployment": {
+            "git_sha": git_sha,
+            "git_branch": git_branch,
+        },
+        "kill_switches": {
+            "NAHLA_DISABLE_SCHEDULERS": raw_kill or None,
+            "NAHLA_DISABLE_SCHEDULERS_active": kill_switch_set,
+            "NAHLA_MINIMAL_ASGI": os.environ.get("NAHLA_MINIMAL_ASGI") or None,
+            "NAHLA_MINIMAL_ASGI_active": minimal_asgi_set,
+        },
+        "campaign_dispatcher": state,
+        "issues": issues,
+        "hints":  hints,
+        "ok": (
+            state.get("alive") is True
+            and not kill_switch_set
+            and not minimal_asgi_set
+        ),
+    }
