@@ -2027,6 +2027,123 @@ function RawMetaSamplesPanel({
  *  When everything is healthy this panel still renders (with a green
  *  reassurance banner) so the merchant knows the protections are
  *  active rather than missing. */
+/** Delivery-stage breakdown panel — renders directly under the
+ *  text diagnostic dump on the campaigns debug pane.
+ *
+ *  Surfaces five buckets sourced from CampaignSendLog.{delivered,read,
+ *  failed}_at timestamps which are populated by the WhatsApp status
+ *  webhook. Together they answer the merchant's #1 question:
+ *  "the campaign says 4 sent but did anyone actually receive it?"
+ *
+ *  Three failure modes are colour-coded distinct from "delivered/read":
+ *  - failed_after_accept       — amber, with a hint about Meta status
+ *  - unknown_delivery          — slate, no judgement (could still arrive)
+ *  - missing_provider_message_id — rose, a hard CORRUPTION warning.
+ *
+ *  The optional sample list under the pills shows the FIRST FEW
+ *  recipient phones with their delivery stage so support can verify
+ *  individual rows without running a separate query. */
+function DeliverySummaryPanel({
+  summary,
+  sample,
+}: {
+  summary: NonNullable<CampaignDebugSnapshot['delivery_summary']>
+  sample:  CampaignDebugSnapshot['sample_sent'] | null
+}) {
+  const total = summary.accepted_by_provider
+  if (total === 0 && summary.missing_provider_message_id === 0) {
+    // No sent rows at all — nothing to show; the regular counters
+    // already explain why ("audience zero", "all skipped", etc.).
+    return null
+  }
+
+  const pill = (
+    label: string,
+    value: number,
+    tone: 'slate' | 'emerald' | 'sky' | 'amber' | 'rose',
+  ) => {
+    const cls = {
+      slate:   'bg-slate-100 text-slate-700 border-slate-200',
+      emerald: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+      sky:     'bg-sky-50 text-sky-800 border-sky-200',
+      amber:   'bg-amber-50 text-amber-800 border-amber-200',
+      rose:    'bg-rose-50 text-rose-800 border-rose-200',
+    }[tone]
+    return (
+      <div className={`rounded-lg border px-2.5 py-1.5 text-[11.5px] font-medium ${cls}`}>
+        <div className="text-[10px] opacity-70 mb-0.5">{label}</div>
+        <div className="text-base font-bold leading-tight">{value}</div>
+      </div>
+    )
+  }
+
+  const stageLabel: Record<string, string> = {
+    accepted_by_provider: 'قبلتها Meta',
+    delivered:            'وصلت للعميل',
+    read:                 'قرأها العميل',
+    failed_after_accept:  'فشلت بعد القبول',
+  }
+  const stageTone: Record<string, string> = {
+    accepted_by_provider: 'text-slate-600',
+    delivered:            'text-sky-700',
+    read:                 'text-emerald-700',
+    failed_after_accept:  'text-amber-700',
+  }
+
+  return (
+    <div className="mt-3 rounded-lg bg-white border border-slate-200 p-3">
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-[12px] font-bold text-slate-800">
+          📬 توصيل الحملة (من Meta status webhook)
+        </h4>
+        <span className="text-[10.5px] text-slate-500">
+          {summary.delivered}/{total} وصلت
+        </span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        {pill('قبلتها Meta',         summary.accepted_by_provider, 'slate')}
+        {pill('وصلت للعميل',         summary.delivered,            'sky')}
+        {pill('قرأها العميل',        summary.read,                 'emerald')}
+        {pill('فشلت بعد القبول',     summary.failed_after_accept,  'amber')}
+        {pill('لم تصل بعد',          summary.unknown_delivery,     'slate')}
+      </div>
+      {summary.missing_provider_message_id > 0 && (
+        <div className="mt-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11.5px] px-3 py-2">
+          ⛔ {summary.missing_provider_message_id} صف مُعلَّم
+          {' '}"تم الإرسال" بدون provider_message_id — لا يجوز اعتبارها
+          مُرسلة فعلاً. راجع لوج الإرسال.
+        </div>
+      )}
+      {sample && sample.length > 0 && (
+        <div className="mt-2 border-t border-slate-100 pt-2">
+          <div className="text-[11px] text-slate-500 mb-1">
+            عينة آخر إرسالات:
+          </div>
+          <ul className="space-y-0.5">
+            {sample.slice(0, 5).map((row, idx) => (
+              <li
+                key={idx}
+                className="text-[11px] flex items-center justify-between font-mono"
+              >
+                <span className="text-slate-600">{row.phone}</span>
+                <span className={stageTone[row.delivery_stage] || 'text-slate-600'}>
+                  {stageLabel[row.delivery_stage] || row.delivery_stage}
+                </span>
+                {!row.has_provider_message_id && (
+                  <span className="text-rose-700 text-[10px] ms-1">
+                    (بدون wamid)
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 function RetryHealthPanel({
   health,
 }: {
@@ -2351,6 +2468,14 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
    *  CTA, and show the "نسخ تقرير الدعم" button. */
   const [providerBlock, setProviderBlock] =
     useState<CampaignDebugSnapshot['provider_block'] | null>(null)
+  /** Delivery breakdown sourced from WhatsApp status webhooks. We
+   *  also render it as a small standalone panel under the diagnostic
+   *  text so the merchant sees the four pills without scrolling
+   *  through the entire diagnostic dump. */
+  const [deliverySummary, setDeliverySummary] =
+    useState<CampaignDebugSnapshot['delivery_summary'] | null>(null)
+  const [sampleSent, setSampleSent] =
+    useState<CampaignDebugSnapshot['sample_sent'] | null>(null)
   /** Tracks the support-bundle copy state so we can flash a "✓ تم
    *  النسخ" affordance back to the merchant. */
   const [supportBundleStatus, setSupportBundleStatus] =
@@ -2408,6 +2533,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     setSampleRows(null)
     setRetryHealth(null)
     setProviderBlock(null)
+    setDeliverySummary(null)
+    setSampleSent(null)
     setSupportBundleStatus('idle')
     try {
       const snap = await campaignsApi.debug(campaign.id)
@@ -2419,6 +2546,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       setSampleRows(snap.sample_rows || [])
       setRetryHealth(snap.retry_health || null)
       setProviderBlock(snap.provider_block || null)
+      setDeliverySummary(snap.delivery_summary || null)
+      setSampleSent(snap.sample_sent || null)
       const r = snap.recipients
       const total = r.total || campaign.audience_count || 0
       const skipped = r.skipped_duplicate + r.skipped_invalid +
@@ -2464,6 +2593,32 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         lines.push(`🚫 تم استبعاد ${snap.excluded_before_send_count} عميل قبل الإرسال:`)
         for (const ex of snap.excluded_reasons_summary) {
           lines.push(`  • ${ex.label_ar} (${ex.count})`)
+        }
+      }
+
+      // Delivery summary — split "sent" into the four downstream
+      // stages so the merchant sees the difference between
+      // "Meta accepted" and "the customer actually received it".
+      // Only render when we have any rows to talk about; otherwise
+      // it's noise on a freshly-launched campaign that hasn't
+      // received any webhooks yet.
+      const ds = snap.delivery_summary
+      if (ds && ds.accepted_by_provider > 0) {
+        lines.push('📬 حالة التسليم:')
+        lines.push(`  • قبلتها Meta: ${ds.accepted_by_provider}`)
+        lines.push(`  • وصلت للعميل: ${ds.delivered}`)
+        lines.push(`  • قرأها العميل: ${ds.read}`)
+        if (ds.failed_after_accept > 0) {
+          lines.push(`  ⚠️ فشلت بعد قبول Meta: ${ds.failed_after_accept}`)
+        }
+        if (ds.unknown_delivery > 0) {
+          lines.push(`  • لم تصل بعد (لم نستلم إشعار من Meta): ${ds.unknown_delivery}`)
+        }
+        if (ds.missing_provider_message_id > 0) {
+          lines.push(
+            `  ⛔ ${ds.missing_provider_message_id} صف مُعلَّم "تم الإرسال" بدون provider_message_id ` +
+            `— لا يجوز اعتبارها مُرسلة فعلاً.`,
+          )
         }
       }
 
@@ -2796,6 +2951,12 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
             <pre className="text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono bg-white border border-slate-200 rounded-lg p-3 leading-relaxed">
               {diagnostic}
             </pre>
+            {deliverySummary && (
+              <DeliverySummaryPanel
+                summary={deliverySummary}
+                sample={sampleSent}
+              />
+            )}
             {retryHealth && (
               <RetryHealthPanel health={retryHealth} />
             )}

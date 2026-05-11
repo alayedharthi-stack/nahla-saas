@@ -1086,15 +1086,125 @@ async def debug_campaign(
             .limit(5)
             .all()
         )
-        return [
-            {
-                "phone":              _mask(r.customer_phone_e164),
+        out = []
+        for r in rows:
+            # Per-row delivery stage — surfaces the WhatsApp status
+            # webhook attribution so the merchant can see which sent
+            # recipient actually received vs read vs failed-after-
+            # accept. The ladder is one-way:
+            #   accepted_by_provider → delivered → read
+            # except for `failed_after_accept` which is a terminal
+            # off-ladder state for rows that DID get a wamid.
+            if r.failed_at is not None:
+                delivery_stage = "failed_after_accept"
+            elif r.read_at is not None:
+                delivery_stage = "read"
+            elif r.delivered_at is not None:
+                delivery_stage = "delivered"
+            else:
+                # The send-log row is "sent" (we have a wamid) but
+                # no downstream webhook has arrived yet. The UI
+                # renders this as "قبلتها Meta — لم تصل بعد".
+                delivery_stage = "accepted_by_provider"
+            out.append({
+                "phone":               _mask(r.customer_phone_e164),
                 "provider_message_id": r.provider_message_id,
-                "sent_at":            r.sent_at.isoformat() if r.sent_at else None,
-            }
-            for r in rows
-        ]
+                # A row in status='sent' WITHOUT a provider_message_id
+                # is corrupt — surface it on the UI as a hard warning
+                # so we don't pretend Meta accepted it.
+                "has_provider_message_id": bool(r.provider_message_id),
+                "sent_at":             r.sent_at.isoformat() if r.sent_at else None,
+                "delivered_at":        r.delivered_at.isoformat() if r.delivered_at else None,
+                "read_at":             r.read_at.isoformat() if r.read_at else None,
+                "failed_at":           r.failed_at.isoformat() if r.failed_at else None,
+                "delivery_stage":      delivery_stage,
+            })
+        return out
     sample_sent = _safe("sample_sent", _sample_sent) or []
+
+    # ── Delivery summary (aggregate across the whole campaign) ──
+    # Counts every row in status='sent' broken down by the
+    # downstream delivery stage. Built from a single query so it
+    # stays cheap even for 50k-recipient blasts.
+    def _delivery_summary():
+        from sqlalchemy import case, func  # noqa: PLC0415
+        # Every row that has a provider_message_id is counted in
+        # `accepted_by_provider`. Rows go UP the ladder into
+        # `delivered` / `read` / `failed_after_accept` based on
+        # which webhook event arrived.
+        q = db.query(
+            func.count(CampaignSendLog.id).label("total_sent"),
+            func.sum(
+                case(
+                    (CampaignSendLog.provider_message_id.isnot(None), 1),
+                    else_=0,
+                )
+            ).label("accepted_by_provider"),
+            func.sum(
+                case(
+                    (CampaignSendLog.delivered_at.isnot(None), 1),
+                    else_=0,
+                )
+            ).label("delivered"),
+            func.sum(
+                case(
+                    (CampaignSendLog.read_at.isnot(None), 1),
+                    else_=0,
+                )
+            ).label("read"),
+            func.sum(
+                case(
+                    (CampaignSendLog.failed_at.isnot(None), 1),
+                    else_=0,
+                )
+            ).label("failed_after_accept"),
+            func.sum(
+                case(
+                    (CampaignSendLog.provider_message_id.is_(None), 1),
+                    else_=0,
+                )
+            ).label("missing_provider_message_id"),
+        ).filter(
+            CampaignSendLog.campaign_id == campaign_id,
+            CampaignSendLog.status == "sent",
+        )
+        row = q.first()
+        if not row:
+            return {
+                "accepted_by_provider":        0,
+                "delivered":                   0,
+                "read":                        0,
+                "failed_after_accept":         0,
+                "unknown_delivery":            0,
+                "missing_provider_message_id": 0,
+            }
+        accepted = int(row.accepted_by_provider or 0)
+        delivered = int(row.delivered or 0)
+        read_     = int(row.read or 0)
+        failed_   = int(row.failed_after_accept or 0)
+        missing   = int(row.missing_provider_message_id or 0)
+        # ``unknown_delivery`` is the set difference: rows that Meta
+        # accepted but for which we never received a downstream
+        # delivered/read/failed webhook. This is the bucket support
+        # asks about when a merchant says "the campaign says
+        # 4 sent but my friend never got it".
+        unknown = max(0, accepted - max(delivered, read_, failed_))
+        return {
+            "accepted_by_provider":        accepted,
+            "delivered":                   delivered,
+            "read":                        read_,
+            "failed_after_accept":         failed_,
+            "unknown_delivery":            unknown,
+            "missing_provider_message_id": missing,
+        }
+    delivery_summary = _safe("delivery_summary", _delivery_summary) or {
+        "accepted_by_provider":        0,
+        "delivered":                   0,
+        "read":                        0,
+        "failed_after_accept":         0,
+        "unknown_delivery":            0,
+        "missing_provider_message_id": 0,
+    }
 
     # ── Template (approved/language/etc.) ──────────────────────────
     def _template():
@@ -1874,6 +1984,20 @@ async def debug_campaign(
         "retry_health":         retry_health,
         "sample_failed":    sample_failed,
         "sample_sent":      sample_sent,
+        # NEW (P3): per-recipient delivery breakdown sourced from the
+        # WhatsApp status webhook (delivered/read/failed_after_accept
+        # timestamps on CampaignSendLog). Lets the UI distinguish:
+        #   * "قبلتها Meta"      — accepted_by_provider
+        #   * "وصلت للعميل"     — delivered
+        #   * "قرأها العميل"     — read
+        #   * "فشلت بعد القبول" — failed_after_accept
+        #   * "لم تصل بعد"      — unknown_delivery (Meta accepted but
+        #                          no downstream status webhook yet).
+        # ``missing_provider_message_id`` flags rows that are in
+        # ``status='sent'`` without a wamid — those are CORRUPT and
+        # should never have been marked sent. UI surfaces them as
+        # a hard warning.
+        "delivery_summary": delivery_summary,
         # NEW: aggregated failure breakdown by canonical Meta-error key.
         # Powers the "3 عملاء لا يملكون واتساب" summary in the UI.
         "failure_summary":  failure_summary,

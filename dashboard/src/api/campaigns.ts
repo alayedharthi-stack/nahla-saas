@@ -357,8 +357,36 @@ export interface CampaignDebugSnapshot {
   sample_sent: Array<{
     phone: string
     provider_message_id: string | null
+    /** False when status='sent' but provider_message_id is missing —
+     *  the row is corrupt and we should NOT count it as accepted by
+     *  Meta. Surfaced in the UI as a hard warning pill. */
+    has_provider_message_id: boolean
     sent_at: string | null
+    /** Per-recipient delivery stage derived from the WhatsApp status
+     *  webhook timestamps. One of:
+     *    accepted_by_provider | delivered | read | failed_after_accept
+     *  Mirrors the keys in `delivery_summary` so the UI can render
+     *  one shared color/icon mapping. */
+    delivery_stage: 'accepted_by_provider' | 'delivered' | 'read' | 'failed_after_accept'
+    delivered_at: string | null
+    read_at: string | null
+    failed_at: string | null
   }>
+  /** Aggregate breakdown of post-accept delivery status across every
+   *  ``sent`` row in this campaign. Populated by the WhatsApp status
+   *  webhook over time (delivered/read/failed events from Meta).
+   *  ``unknown_delivery`` is rows that Meta accepted but for which no
+   *  downstream webhook has arrived yet. ``missing_provider_message_id``
+   *  is the corruption canary — rows in status='sent' WITHOUT a
+   *  wamid. The UI surfaces it as a hard warning. */
+  delivery_summary: {
+    accepted_by_provider:        number
+    delivered:                   number
+    read:                        number
+    failed_after_accept:         number
+    unknown_delivery:            number
+    missing_provider_message_id: number
+  }
   template: {
     id: number
     name: string

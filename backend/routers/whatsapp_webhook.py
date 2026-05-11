@@ -649,57 +649,156 @@ async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
 
 
 async def _handle_message_status(status: Dict[str, Any]) -> None:
-    """Process delivery/read receipts from Meta Cloud API.
+    """Process the four WhatsApp delivery-status webhook events from
+    Meta / 360dialog (``sent``, ``delivered``, ``read``, ``failed``)
+    and persist them against the matching ``CampaignSendLog`` row.
 
-    Updates ``Campaign.delivered_count`` / ``read_count`` when the
-    status webhook carries a wamid that matches a campaign send.
+    Two-layer attribution
+    ─────────────────────
+    A status event identifies its target by ``wamid`` (a.k.a.
+    ``provider_message_id``). We look it up in two places:
+
+      1. ``CampaignSendLog`` keyed by ``provider_message_id`` —
+         this is where the campaign dispatcher writes the wamid
+         when Meta accepts a template send. It's the authoritative
+         row for delivery analytics.
+      2. ``MessageEvent`` keyed by ``extra_metadata.wa_message_id``
+         (legacy) — kept so that pre-migration rows and one-off
+         non-campaign sends (e.g. ``/conversations/reply``) still
+         update the aggregate ``Campaign.*_count`` counters.
+
+    Both paths run for every event so we never miss aggregation
+    when a row exists in only one of them. Each is independently
+    idempotent (timestamp set only if currently NULL, dict-key
+    guard on extra_metadata).
+
+    Statuses we persist
+    ───────────────────
+    ``sent``       — wamid existed already (we set sent_at at dispatch
+                     time), so this is informational. We do NOT update
+                     anything but we still log it for observability.
+    ``delivered``  → CampaignSendLog.delivered_at = now()
+                  → Campaign.delivered_count++
+    ``read``       → CampaignSendLog.read_at = now()
+                  → Campaign.read_count++ (+ delivered_count++ if not
+                    already set, since "read" implies "delivered")
+    ``failed``     → CampaignSendLog.failed_at = now() — categorised
+                     as "failed_after_accept" by the debug endpoint
+                     because the send-log row is in ``status='sent'``
+                     (a wamid was issued before the failure).
     """
     wamid = status.get("id", "")
     st = (status.get("status") or "").lower()
-    if not wamid or st not in ("delivered", "read"):
+    if not wamid or st not in ("sent", "delivered", "read", "failed"):
+        return
+
+    # `sent` is just an echo of the synchronous send response — we
+    # already wrote the wamid at dispatch time. Log and skip the
+    # DB round-trip so we don't churn the connection pool with no-ops.
+    if st == "sent":
+        logger.info("[StatusWebhook] sent echo wamid=%s (no-op)", wamid[:20])
         return
 
     db = next(get_db(), None)
     if not db:
         return
+
+    now = datetime.utcnow()
+
     try:
-        row = (
-            db.query(MessageEvent)
-            .filter(
-                MessageEvent.extra_metadata["wa_message_id"].astext == wamid,
-            )
+        # ── Layer 1: per-recipient send log (preferred path) ────────
+        from models import CampaignSendLog, Campaign  # noqa: PLC0415
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        log_row = (
+            db.query(CampaignSendLog)
+            .filter(CampaignSendLog.provider_message_id == wamid)
             .first()
         )
-        if not row:
-            return
-        meta = row.extra_metadata or {}
-        campaign_id = meta.get("campaign_id")
-        if not campaign_id:
-            return
-
-        already_key = f"_status_{st}"
-        if meta.get(already_key):
-            return
-
-        from models import Campaign  # noqa: PLC0415
-        campaign = db.query(Campaign).filter(Campaign.id == int(campaign_id)).first()
-        if not campaign:
-            return
-
-        if st == "delivered":
-            campaign.delivered_count = (campaign.delivered_count or 0) + 1
-        elif st == "read":
-            campaign.read_count = (campaign.read_count or 0) + 1
-            if not meta.get("_status_delivered"):
-                campaign.delivered_count = (campaign.delivered_count or 0) + 1
-                meta["_status_delivered"] = True
-
-        meta[already_key] = True
-        row.extra_metadata = meta
-        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-        flag_modified(row, "extra_metadata")
-        db.commit()
-        logger.info("[StatusWebhook] campaign=%s status=%s wamid=%s", campaign_id, st, wamid[:20])
+        log_touched = False
+        log_campaign_id: Optional[int] = None
+        if log_row:
+            log_campaign_id = log_row.campaign_id
+            if st == "delivered" and log_row.delivered_at is None:
+                log_row.delivered_at = now
+                log_touched = True
+            elif st == "read":
+                if log_row.read_at is None:
+                    log_row.read_at = now
+                    log_touched = True
+                # Reading implies delivered — backfill if Meta didn't
+                # send the delivered event (some webhooks coalesce).
+                if log_row.delivered_at is None:
+                    log_row.delivered_at = now
+                    log_touched = True
+            elif st == "failed":
+                if log_row.failed_at is None:
+                    log_row.failed_at = now
+                    log_touched = True
+                # Stash provider error details, if Meta sent them, on
+                # the existing error_code / error_message columns —
+                # those started life as "synchronous send error"
+                # but post-accept failure is still a wire-level error.
+                errs = status.get("errors") or []
+                if errs and isinstance(errs, list) and isinstance(errs[0], dict):
+                    e0 = errs[0]
+                    if not log_row.error_code and e0.get("code"):
+                        log_row.error_code = str(e0.get("code"))
+                        log_touched = True
+                    if not log_row.error_message and e0.get("title"):
+                        log_row.error_message = (
+                            str(e0.get("title")) +
+                            (f" — {e0.get('message')}" if e0.get("message") else "")
+                        )
+                        log_touched = True
+        # ── Layer 2: aggregate counters on Campaign + idempotency on
+        #            MessageEvent (legacy path; updates the dashboard
+        #            tiles that read .delivered_count / .read_count) ─
+        evt_row = (
+            db.query(MessageEvent)
+            .filter(MessageEvent.extra_metadata["wa_message_id"].astext == wamid)
+            .first()
+        )
+        if evt_row:
+            meta = dict(evt_row.extra_metadata or {})
+            campaign_id = meta.get("campaign_id") or log_campaign_id
+            already_key = f"_status_{st}"
+            if campaign_id and not meta.get(already_key):
+                campaign = (
+                    db.query(Campaign)
+                    .filter(Campaign.id == int(campaign_id))
+                    .first()
+                )
+                if campaign:
+                    if st == "delivered":
+                        campaign.delivered_count = (campaign.delivered_count or 0) + 1
+                    elif st == "read":
+                        campaign.read_count = (campaign.read_count or 0) + 1
+                        if not meta.get("_status_delivered"):
+                            campaign.delivered_count = (
+                                campaign.delivered_count or 0
+                            ) + 1
+                            meta["_status_delivered"] = True
+                    # `failed` post-accept does NOT decrement sent_count
+                    # — the original send was real; we just track the
+                    # post-hoc failure on the send-log row for the
+                    # delivery_summary breakdown.
+                meta[already_key] = True
+                evt_row.extra_metadata = meta
+                flag_modified(evt_row, "extra_metadata")
+        if log_touched or evt_row is not None:
+            db.commit()
+            logger.info(
+                "[StatusWebhook] status=%s wamid=%s log_row=%s log_touched=%s "
+                "evt_row=%s",
+                st, wamid[:20], bool(log_row), log_touched, bool(evt_row),
+            )
+        else:
+            logger.info(
+                "[StatusWebhook] status=%s wamid=%s — no matching row "
+                "(probably a non-campaign send)",
+                st, wamid[:20],
+            )
     except Exception as exc:
         logger.warning("[StatusWebhook] error processing status: %s", exc)
         try:

@@ -1098,6 +1098,18 @@ class CampaignSendLog(Base):
     skip_reason = Column(String(64), nullable=True)
     attempt_count = Column(Integer, nullable=False, default=0)
     sent_at = Column(DateTime, nullable=True)
+    # Per-recipient delivery tracking populated by the WhatsApp status
+    # webhook (see `_handle_message_status`). Each is independently
+    # nullable:
+    #   * `delivered_at` — Meta delivered to the customer's device.
+    #   * `read_at`      — customer opened the chat / read receipt.
+    #   * `failed_at`    — Meta reported failure AFTER initially
+    #                      accepting the message ("failed_after_accept").
+    # All three NULL = "unknown delivery" (e.g. Meta never echoed
+    # back a status, or the row is from before this column existed).
+    delivered_at = Column(DateTime, nullable=True)
+    read_at      = Column(DateTime, nullable=True)
+    failed_at    = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -1117,6 +1129,10 @@ class CampaignSendLog(Base):
         ),
         # Report aggregation: COUNT(*) GROUP BY status WHERE campaign_id=?
         Index('ix_campaign_send_log_campaign_status', 'campaign_id', 'status'),
+        # Status webhook lookup: attribute incoming Meta status events
+        # back to the right send-log row by provider_message_id.
+        # Without this, every status webhook becomes a full scan.
+        Index('ix_campaign_send_log_provider_message_id', 'provider_message_id'),
     )
 
 
