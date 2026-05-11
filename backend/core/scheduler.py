@@ -27,6 +27,88 @@ _SALLA_TOKEN_REFRESH_SECONDS = 24 * 3600  # Salla token refresh daily (smart con
 _AUTOMATION_POLL_SECONDS = 60  # automation engine poll interval
 _TEMPLATE_SYNC_INTERVAL_SECONDS = 30 * 60  # WhatsApp template auto-sync every 30 min
 _CAMPAIGN_POLL_SECONDS = 30  # check for scheduled/delayed campaigns every 30s
+_STUCK_IMMEDIATE_THRESHOLD_SECONDS = 60  # rescue immediate campaigns whose
+                                          # in-process asyncio task vanished
+                                          # (uvicorn restart between commit
+                                          # and create_task; uncaught
+                                          # exception; OOM; etc.)
+
+
+def _find_stuck_immediate_campaigns(
+    db,
+    *,
+    now,
+    threshold_seconds: int = _STUCK_IMMEDIATE_THRESHOLD_SECONDS,
+):
+    """Return Campaign rows whose immediate-dispatch asyncio task
+    appears to have been dropped.
+
+    Why this exists
+    ───────────────
+    Immediate campaigns (``schedule_type='immediate'``) are
+    dispatched purely by an in-process ``asyncio.create_task`` fired
+    from ``POST /campaigns``. There's no persistence around that
+    task. If anything kills it — uvicorn restart between
+    ``db.commit()`` of the Campaign row and ``create_task`` of the
+    dispatcher, OOM, an uncaught exception that poisons the session
+    so the failure-flip in the except handler can't write
+    ``status='failed'`` — the campaign stays at ``status='active'``
+    with ZERO ``campaign_send_logs`` rows. Dashboard shows
+    "بانتظار بدء الإرسال" (lifecycle=pending_dispatch) forever.
+
+    The narrow filter in ``_dispatch_due_campaigns``
+    (``status IN ('scheduled','draft')``) excludes ``active``
+    immediates from any rescue path. This helper widens the lens:
+
+      * Campaign.status == 'active'
+      * Campaign.schedule_type == 'immediate'
+      * Campaign.launched_at <= now - threshold_seconds
+      * NO ``campaign_send_logs`` row exists for this campaign
+
+    The last condition is the critical safety: a campaign that's
+    actively sending (snapshot rows exist, batches are flowing) MUST
+    NOT be re-dispatched — that would double-send. We only rescue
+    campaigns whose snapshot never landed.
+
+    Idempotency
+    ───────────
+    ``services.campaign_dispatcher.dispatch_campaign`` is documented
+    as idempotent on the same ``campaign_id`` thanks to the unique
+    index on ``(tenant_id, campaign_id, customer_phone_e164)`` in
+    ``campaign_send_logs``. So even if our "no rows yet" check races
+    with a real-but-late snapshot commit, the re-run cannot
+    duplicate work — at worst, the second snapshot is a no-op and
+    the second send loop picks up whatever the first one left
+    ``queued``.
+
+    Returns a list of Campaign objects, never None.
+    """
+    from database.models import Campaign, CampaignSendLog  # noqa: PLC0415
+
+    cutoff = now - timedelta(seconds=int(threshold_seconds))
+
+    # Subquery: campaigns that already have at least one send-log
+    # row. Excluded from rescue — they're either in-flight or
+    # already completed.
+    has_log_subq = (
+        db.query(CampaignSendLog.campaign_id)
+        .distinct()
+        .subquery()
+    )
+
+    candidates = (
+        db.query(Campaign)
+        .outerjoin(has_log_subq, Campaign.id == has_log_subq.c.campaign_id)
+        .filter(
+            Campaign.status == "active",
+            Campaign.schedule_type == "immediate",
+            Campaign.launched_at.isnot(None),
+            Campaign.launched_at <= cutoff,
+            has_log_subq.c.campaign_id.is_(None),  # no log rows yet
+        )
+        .all()
+    )
+    return candidates
 
 
 async def run_campaign_dispatcher_scheduler() -> None:
@@ -83,6 +165,58 @@ async def _dispatch_due_campaigns() -> None:
                     "[Campaign Dispatcher] campaign=%d done: sent=%s failed=%s",
                     c.id, result.get("sent"), result.get("failed"),
                 )
+
+        # ── Rescue stuck immediate campaigns ────────────────────
+        # See _find_stuck_immediate_campaigns docstring for full
+        # rationale. Short version: if an immediate campaign's
+        # in-process asyncio dispatch task vanished (uvicorn
+        # restart, OOM, poisoned session in the except handler),
+        # the campaign stays at status='active' with zero
+        # send-log rows forever — the dashboard shows
+        # "بانتظار بدء الإرسال" indefinitely. This loop is the
+        # only path that can rescue it.
+        try:
+            stuck = _find_stuck_immediate_campaigns(db, now=now)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[Campaign Dispatcher] stuck-immediate probe failed: %s",
+                exc,
+            )
+            stuck = []
+        for c in stuck:
+            age_seconds = (
+                (now - c.launched_at).total_seconds()
+                if c.launched_at else None
+            )
+            logger.warning(
+                "[CAMPAIGN_RESCUE_STUCK_IMMEDIATE] campaign=%d tenant=%s "
+                "launched_at=%s age_seconds=%.0f — re-dispatching "
+                "(idempotent via UNIQUE constraint on send_logs)",
+                c.id, c.tenant_id, c.launched_at,
+                age_seconds if age_seconds is not None else -1,
+            )
+            try:
+                from services.campaign_dispatcher import dispatch_campaign  # noqa: PLC0415
+                result = await dispatch_campaign(db, c.id)
+                logger.info(
+                    "[CAMPAIGN_RESCUE_STUCK_IMMEDIATE] campaign=%d "
+                    "rescue done: sent=%s failed=%s skipped=%s",
+                    c.id, result.get("sent"), result.get("failed"),
+                    result.get("skipped"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[CAMPAIGN_RESCUE_STUCK_IMMEDIATE] campaign=%d "
+                    "rescue raised: %s — will retry next cycle",
+                    c.id, exc, exc_info=True,
+                )
+                # The dispatcher itself raised. Roll back so the
+                # next loop iteration / cycle gets a clean
+                # session.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
     finally:
         db.close()
 

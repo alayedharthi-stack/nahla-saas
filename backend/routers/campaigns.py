@@ -2445,6 +2445,28 @@ async def _dispatch_campaign_async(campaign_id: int) -> None:
             "[campaigns] dispatch failed campaign=%d: %s",
             campaign_id, exc, exc_info=True,
         )
+        # ── Session-recovery rollback ─────────────────────────
+        # When ``dispatch_campaign`` raises mid-transaction (most
+        # commonly: a flush/commit hit a constraint violation
+        # during _snapshot_recipients), the SQLAlchemy session
+        # is left in a ``PendingRollback`` state. Any subsequent
+        # query — including the failure-flip query just below —
+        # then raises and the inner-most ``except`` catches it
+        # silently. Net effect: ``campaign.status`` stays
+        # ``active`` with zero send-log rows forever.
+        #
+        # An explicit rollback BEFORE the recovery query
+        # unblocks the session so the failure-flip can run.
+        # If the rollback itself raises (very rare; session
+        # already detached), we still try the query — failing
+        # gracefully is no worse than the pre-F12 behaviour.
+        try:
+            db.rollback()
+        except Exception as rb_exc:  # noqa: BLE001
+            logger.warning(
+                "[campaigns] session rollback failed campaign=%d: %s",
+                campaign_id, rb_exc,
+            )
         try:
             from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
             campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
@@ -2455,6 +2477,11 @@ async def _dispatch_campaign_async(campaign_id: int) -> None:
                 campaign.template_variables = tpl_vars
                 flag_modified(campaign, "template_variables")
                 db.commit()
+                logger.info(
+                    "[campaigns] campaign=%d marked status=failed after "
+                    "dispatch exception",
+                    campaign_id,
+                )
         except Exception:
             logger.error("[campaigns] could not mark campaign=%d as failed", campaign_id, exc_info=True)
     finally:
