@@ -765,36 +765,143 @@ async def _download_meta_media(
                 )
                 return None
 
-            # ── Hop-2 auth header ────────────────────────────────
-            # Meta's CDN URLs land at ``lookaside.fbsbx.com``,
-            # which still accepts the Bearer token. 360dialog's
-            # resolved URLs land back at ``waba-v2.360dialog.io``,
-            # which requires the D360-API-KEY header (NOT a
-            # Bearer). To stay safe even if either vendor ever
-            # routes us to a third-party CDN that rejects the
-            # auth header, we only attach the header when the
-            # resolved host actually belongs to the same vendor
-            # domain — otherwise we send the request bare and
-            # rely on a signed query string in the URL.
-            fetch_headers: Dict[str, str] = {}
+            # ── Hop-2 auth strategy ──────────────────────────────
+            #
+            # Provider-by-provider observed behaviour:
+            #
+            #   * Meta Cloud:
+            #     Resolved URL → ``lookaside.fbsbx.com/whatsapp_business``
+            #     Auth        → ``Authorization: Bearer <Meta token>``
+            #
+            #   * 360dialog (this section's reason for existing):
+            #     360dialog's WABA v2 returns Meta-style lookaside
+            #     URLs, NOT bare-path waba-v2.360dialog.io URLs.
+            #     The defensive policy from F9 was "drop auth on
+            #     third-party host", which produced 401 on every
+            #     360dialog inbound media event because the
+            #     "third-party" host IS where 360dialog routes
+            #     us. F10 fixes this by attempting the fetch
+            #     with two different auth shapes:
+            #
+            #       1. ``D360-API-KEY: <D360 key>``
+            #          (consistent with hop-1; some 360dialog
+            #           gateways prefer this)
+            #       2. ``Authorization: Bearer <D360 key>``
+            #          (used when 360dialog's gateway expects
+            #           the standard WhatsApp wire format)
+            #
+            #     Both attempts use the SAME D360 key — we never
+            #     hold a Meta token for a 360dialog tenant. On
+            #     401 the first attempt's response body is
+            #     discarded; we never log the token nor the full
+            #     URL (lookaside URLs carry a session-binding
+            #     parameter).
+            #
+            # We also still defensively SKIP attaching either
+            # auth header when the resolved host clearly belongs
+            # to a third-party CDN unrelated to the provider's
+            # known footprint. That guard is now narrower —
+            # lookaside is treated as belonging to BOTH Meta and
+            # 360dialog because of the observed behaviour above.
             try:
                 _media_host_for_hop2 = (_media_host or "").lower()
             except Exception:
                 _media_host_for_hop2 = ""
-            if provider == WHATSAPP_PROVIDER_360DIALOG:
-                if _media_host_for_hop2.endswith("360dialog.io"):
-                    fetch_headers = {"D360-API-KEY": token_ctx.token}
-            else:
-                if (
-                    _media_host_for_hop2.endswith("facebook.com")
-                    or _media_host_for_hop2.endswith("fbcdn.net")
-                    or _media_host_for_hop2.endswith("fbsbx.com")
-                ):
-                    fetch_headers = {"Authorization": f"Bearer {token_ctx.token}"}
 
-            media_resp = await client.get(media_url, headers=fetch_headers)
-            media_resp.raise_for_status()
-            file_bytes = media_resp.content
+            _is_meta_host = (
+                _media_host_for_hop2.endswith("facebook.com")
+                or _media_host_for_hop2.endswith("fbcdn.net")
+                or _media_host_for_hop2.endswith("fbsbx.com")
+            )
+            _is_d360_host = _media_host_for_hop2.endswith("360dialog.io")
+
+            # Build the ordered list of (label, headers) attempts.
+            # First successful attempt wins; we only retry on 401.
+            attempts: list = []
+            if provider == WHATSAPP_PROVIDER_360DIALOG:
+                if _is_d360_host or _is_meta_host:
+                    # The two header shapes 360dialog gateways
+                    # are observed to accept — try D360-API-KEY
+                    # first (consistent with hop-1), Bearer
+                    # second.
+                    attempts.append(("d360_key", {"D360-API-KEY": token_ctx.token}))
+                    attempts.append(("bearer",   {"Authorization": f"Bearer {token_ctx.token}"}))
+                # If the host is neither d360 nor meta, fall
+                # through with no attempts → bare GET (signed
+                # URL semantics).
+            else:
+                if _is_meta_host:
+                    attempts.append(("bearer", {"Authorization": f"Bearer {token_ctx.token}"}))
+
+            if not attempts:
+                # Fall back: bare GET, relying on signed URL.
+                attempts.append(("bare", {}))
+
+            media_resp = None
+            file_bytes = b""
+            for idx, (label, hdr) in enumerate(attempts, start=1):
+                is_last = idx == len(attempts)
+                try:
+                    candidate = await client.get(media_url, headers=hdr)
+                except Exception as fetch_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[MEDIA_DOWNLOAD_FETCH_ATTEMPT] tenant=%s "
+                        "media_id=%s provider=%s attempt=%d/%d "
+                        "auth=%s exc=%s",
+                        tenant_id, media_id, provider, idx, len(attempts),
+                        label, type(fetch_exc).__name__,
+                    )
+                    if is_last:
+                        raise
+                    continue
+                # On 401 we ALWAYS log the failed attempt — but
+                # only continue to the next attempt if one
+                # exists. On the last attempt's 401, we fall
+                # through to the exhausted-warning + return None
+                # branch below WITHOUT relying on
+                # raise_for_status (some httpx mocks no-op it).
+                if candidate.status_code == 401:
+                    logger.warning(
+                        "[MEDIA_DOWNLOAD_FETCH_401] tenant=%s "
+                        "media_id=%s provider=%s attempt=%d/%d "
+                        "auth=%s%s",
+                        tenant_id, media_id, provider, idx, len(attempts),
+                        label,
+                        "" if is_last else " — retrying with next auth shape",
+                    )
+                    if is_last:
+                        break  # falls through to exhausted check
+                    continue
+                # 2xx / 3xx / 4xx-non-401 / 5xx — let
+                # raise_for_status decide. Non-401 errors bubble
+                # to the outer HTTPStatusError handler with full
+                # status + provider in the log.
+                media_resp = candidate
+                media_resp.raise_for_status()
+                file_bytes = media_resp.content
+                # Log which auth shape WON so future investigations
+                # know which header to use for this provider/host
+                # combination.
+                logger.info(
+                    "[MEDIA_DOWNLOAD_FETCH_AUTH] tenant=%s media_id=%s "
+                    "provider=%s attempt=%d/%d auth=%s",
+                    tenant_id, media_id, provider, idx, len(attempts),
+                    label,
+                )
+                break
+            if media_resp is None:
+                # All attempts hit 401 (or a non-fatal error
+                # path that didn't set media_resp). Individual
+                # attempts already logged; emit a final unified
+                # warning so a single grep on `media_id` shows
+                # the full trail.
+                logger.warning(
+                    "[MEDIA_DOWNLOAD_FETCH_EXHAUSTED] tenant=%s "
+                    "media_id=%s provider=%s attempts=%d — all "
+                    "hop-2 auth shapes returned 401",
+                    tenant_id, media_id, provider, len(attempts),
+                )
+                return None
             # ── Success log for the CDN-FETCH step ────────────────
             # This is THE crucial line that proves bytes arrived
             # (and how many). When vision later returns empty
