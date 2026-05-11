@@ -660,9 +660,17 @@ class TestRetryStormProtection:
         r.attempt_count = MAX_SEND_ATTEMPTS
         assert _is_attempts_exhausted(r) is True
 
-    def test_watchdog_revives_zombie_sending_under_threshold(self):
+    def test_watchdog_terminates_zombie_with_prior_attempts(self):
+        """A row that already burned an attempt does NOT get auto-revived.
+
+        Pre-fix policy was to flip it back to queued — which is exactly
+        how production grew 7000+ attempts on a single recipient.
+        New policy: any zombie with attempts >= 1 goes terminal
+        (``watchdog_timeout``); the merchant can still retry explicitly
+        via dispatch-now (``reschedule_failed_for_retry``).
+        """
         from services.campaign_dispatcher import (
-            _revive_zombie_sending, LOG_QUEUED, MAX_SEND_ATTEMPTS,
+            _revive_zombie_sending, LOG_FAILED,
         )
         db, _ = _make_db()
         t = _seed_tenant(db)
@@ -691,9 +699,34 @@ class TestRetryStormProtection:
         db.commit()
         assert moved == 1
         db.refresh(stuck); db.refresh(fresh)
-        assert stuck.status == LOG_QUEUED
+        assert stuck.status == LOG_FAILED
+        assert stuck.error_code == "watchdog_timeout"
         # Fresh row stays exactly where it is — no false-positive.
         assert fresh.status == "sending"
+
+    def test_watchdog_requeues_zombie_with_zero_attempts(self):
+        """A zombie that NEVER actually attempted a send (attempts=0)
+        is still safe to put back on the queue — there's no risk of
+        a storm because no Meta call ever fired."""
+        from services.campaign_dispatcher import (
+            _revive_zombie_sending, LOG_QUEUED,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+        stuck = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000006",
+            template_name=tpl.name, template_language="ar",
+            status="sending", attempt_count=0,
+            updated_at=datetime.now(timezone.utc) - timedelta(seconds=600),
+        )
+        db.add(stuck); db.commit(); db.refresh(stuck)
+
+        _revive_zombie_sending(db, camp.id, timeout_seconds=300)
+        db.commit(); db.refresh(stuck)
+        assert stuck.status == LOG_QUEUED
 
     def test_watchdog_marks_exhausted_zombie_as_retry_exhausted(self):
         from services.campaign_dispatcher import (
@@ -716,7 +749,10 @@ class TestRetryStormProtection:
         _revive_zombie_sending(db, camp.id, timeout_seconds=300)
         db.commit(); db.refresh(stuck)
         assert stuck.status == LOG_FAILED
-        assert stuck.error_code == "watchdog_timeout"
+        # Past MAX_SEND_ATTEMPTS → definitively retry_exhausted, not
+        # the soft ``watchdog_timeout``. The test name now matches the
+        # actual classification.
+        assert stuck.error_code == "retry_exhausted"
 
     def test_reschedule_failed_promotes_recoverable_rows(self):
         from services.campaign_dispatcher import (
@@ -782,3 +818,72 @@ class TestRetryStormProtection:
             ))
         db.commit()
         assert reschedule_failed_for_retry(db, camp.id) == 0
+
+    def test_reschedule_failed_skips_non_retryable_catalogue_codes(self):
+        """The regression that produced the 7345-attempt storm: a Meta
+        error ("client_payment_blocked", "policy_violation", …) was
+        being re-queued by every dispatch-now click because the old
+        allow-list relied on a hardcoded set instead of the catalogue's
+        ``retryable`` flag. Now the dispatcher consults
+        ``meta_errors.is_retryable`` so these stay terminal."""
+        from services.campaign_dispatcher import (
+            reschedule_failed_for_retry, LOG_FAILED,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+        # Every one of these is ``retryable=False`` in the catalogue.
+        non_retryable_codes = (
+            "client_payment_blocked",
+            "policy_violation",
+            "spam_rate_limit",
+            "account_locked",
+            "media_error",
+        )
+        rows = []
+        for i, code in enumerate(non_retryable_codes):
+            r = CampaignSendLog(
+                tenant_id=t.id, campaign_id=camp.id,
+                customer_phone_e164=f"+96650000{i:04d}",
+                template_name=tpl.name, template_language="ar",
+                status=LOG_FAILED, error_code=code, attempt_count=1,
+            )
+            db.add(r)
+            rows.append(r)
+        db.commit()
+        for r in rows:
+            db.refresh(r)
+
+        moved = reschedule_failed_for_retry(db, camp.id)
+        db.commit()
+        for r in rows:
+            db.refresh(r)
+        # NONE of these rows should be promoted back to ``queued`` —
+        # that's exactly the storm the catalogue's ``retryable`` flag
+        # is designed to prevent.
+        assert moved == 0
+        for r in rows:
+            assert r.status == LOG_FAILED, r.error_code
+            # And the error_code is preserved verbatim so the UI keeps
+            # showing the proper Arabic label instead of a vague
+            # ``retry_exhausted``.
+            assert r.error_code in non_retryable_codes
+
+    def test_dispatcher_retryable_helper_matches_policy(self):
+        """Cross-check: the dispatcher's local helper must match
+        ``meta_errors.is_retryable`` exactly for catalogue keys, plus
+        explicit allow-list for dispatcher-synthetic codes."""
+        from services.campaign_dispatcher import _is_error_code_retryable
+        # Catalogue keys → defer to the central policy.
+        assert _is_error_code_retryable("rate_limit") is True
+        assert _is_error_code_retryable("client_payment_blocked") is False
+        assert _is_error_code_retryable("not_on_whatsapp") is False
+        # Dispatcher-only codes that should still retry.
+        assert _is_error_code_retryable("watchdog_revive") is True
+        # Terminal dispatcher codes — never retry.
+        assert _is_error_code_retryable("retry_exhausted") is False
+        assert _is_error_code_retryable("retry_storm") is False
+        # Empty / null → safe default (no retry).
+        assert _is_error_code_retryable("") is False
+        assert _is_error_code_retryable(None) is False

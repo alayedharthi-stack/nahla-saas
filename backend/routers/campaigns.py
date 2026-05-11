@@ -1022,6 +1022,11 @@ async def debug_campaign(
                 "error_label_ar": classified.label_ar,
                 "severity":       classified.severity,
                 "is_recoverable": classified.is_recoverable,
+                # New: ``retryable`` is the policy the dispatcher
+                # actually keys off (≠ ``is_recoverable``, which is
+                # merchant-facing). The UI uses it to hide a "أعد
+                # المحاولة" button on rows that can't possibly succeed.
+                "retryable":      classified.retryable,
                 "advice_ar":      classified.advice_ar,
                 # Raw technical message kept verbatim — surfaces in
                 # the "نسخ الخطأ التقني" button.
@@ -1191,6 +1196,7 @@ async def debug_campaign(
                 "error_label_ar": classified.label_ar,
                 "severity":       classified.severity,
                 "is_recoverable": classified.is_recoverable,
+                "retryable":      classified.retryable,
                 "advice_ar":      classified.advice_ar,
                 "count":          int(n),
             })

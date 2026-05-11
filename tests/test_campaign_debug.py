@@ -711,6 +711,54 @@ class TestMetaErrorClassifier:
         assert c.label_ar
         assert c.advice_ar
 
+    def test_client_payment_blocked_via_free_text(self):
+        """Production-observed Meta error string. Meta returns no
+        numeric code for this case so the classifier MUST recognise
+        it from the free-text message alone."""
+        c = self._classify(
+            message="This number is blocked due to lack of payment on client side."
+        )
+        assert c.key == "client_payment_blocked"
+        assert c.severity == "major"
+        assert c.is_recoverable is False
+        # Most important: this MUST be non-retryable so the dispatcher
+        # stops after the first attempt and never produces a storm.
+        assert c.retryable is False
+        # Merchant should see the Arabic label, not raw English.
+        assert "مقيّد" in c.label_ar
+        assert c.advice_ar
+
+    def test_classifier_has_retryable_field_for_every_entry(self):
+        """Every ClassifiedError exposes ``retryable`` — the dispatcher
+        keys off it, so a missing flag is a silent storm hazard."""
+        from services.meta_errors import ERRORS
+        for key, entry in ERRORS.items():
+            assert hasattr(entry, "retryable"), key
+            assert isinstance(entry.retryable, bool), key
+
+    def test_retryable_helper_matches_catalogue(self):
+        from services.meta_errors import is_retryable, ERRORS
+        # Spot-check both sides of the policy.
+        assert is_retryable("rate_limit") is True
+        assert is_retryable("service_unavailable") is True
+        assert is_retryable("client_payment_blocked") is False
+        assert is_retryable("not_on_whatsapp") is False
+        assert is_retryable("policy_violation") is False
+        # Empty / unknown keys → False (safe default).
+        assert is_retryable("") is False
+        assert is_retryable(None) is False
+        assert is_retryable("definitely_not_a_real_key") is False
+        # And every catalogue entry's retryable boolean must round-trip.
+        for key, entry in ERRORS.items():
+            assert is_retryable(key) is entry.retryable, key
+
+    def test_classified_error_serialises_retryable(self):
+        from services.meta_errors import to_dict, ERRORS
+        d = to_dict(ERRORS["client_payment_blocked"])
+        assert d["retryable"] is False
+        assert d["key"] == "client_payment_blocked"
+        assert "retryable" in d
+
 
 class TestMetaTechnicalSerialisation:
     """The ``[code=X subcode=Y type=Z] msg`` shape is the contract

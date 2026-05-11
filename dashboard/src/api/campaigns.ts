@@ -180,6 +180,12 @@ export interface CampaignDebugSnapshot {
      *  campaign-level lifecycle treats this as a real failure. */
     severity: 'minor' | 'major' | 'blocking'
     is_recoverable: boolean
+    /** Whether the dispatcher should auto-retry this row. Distinct from
+     *  ``is_recoverable``: a row CAN be merchant-recoverable yet not
+     *  worth auto-retrying (e.g. ``spam_rate_limit`` recovers after
+     *  24h but blind retries make it worse). The UI hides "أعد
+     *  المحاولة" on rows where ``retryable === false``. */
+    retryable: boolean
     /** One-line action hint in Arabic ("ask for opt-in", etc.). */
     advice_ar: string | null
     /** Raw technical message kept verbatim so support can copy it. */
@@ -200,6 +206,8 @@ export interface CampaignDebugSnapshot {
     error_label_ar: string
     severity: 'minor' | 'major' | 'blocking'
     is_recoverable: boolean
+    /** Auto-retry policy flag, mirrors ``ClassifiedError.retryable``. */
+    retryable: boolean
     advice_ar: string | null
     count: number
   }>

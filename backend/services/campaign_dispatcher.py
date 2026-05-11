@@ -79,6 +79,7 @@ from models import (
     WhatsAppConnection,
     WhatsAppTemplate,
 )
+from services.meta_errors import is_retryable
 
 logger = logging.getLogger("nahla-backend")
 
@@ -1227,11 +1228,22 @@ def _revive_zombie_sending(
 
     A row in ``status='sending'`` whose ``updated_at`` is older than
     ``timeout_seconds`` is unambiguously a zombie — the worker that
-    flipped it died before transitioning to a terminal state. We:
+    flipped it died before transitioning to a terminal state.
 
-        * revert it to ``queued`` if ``attempt_count < MAX_SEND_ATTEMPTS``
-        * mark it ``failed`` with ``error_code='watchdog_timeout'``
-          otherwise.
+    Policy (post retry-storm fix):
+
+        * Rows past ``MAX_SEND_ATTEMPTS`` go directly to ``failed``
+          with ``error_code='retry_exhausted'``.
+        * Rows BELOW the attempt ceiling that have already consumed
+          at least one full attempt also go to ``failed`` with
+          ``error_code='watchdog_timeout'`` — we explicitly do NOT
+          re-queue them automatically anymore. Auto-reviving zombies
+          is what created the original 7345-attempt storm. The
+          merchant can still re-trigger them via ``dispatch-now``,
+          which calls ``reschedule_failed_for_retry``.
+        * Rows on attempt 0 (which shouldn't really exist in
+          ``sending`` — they would have been flipped on the way in)
+          are re-queued as a safety net.
 
     Returns the number of zombie rows touched. Safe to call repeatedly
     (idempotent) and cheap — single UPDATE round-trip via per-row
@@ -1250,23 +1262,40 @@ def _revive_zombie_sending(
     if not zombies:
         return 0
     now = datetime.now(timezone.utc)
+    terminated = 0
+    re_queued = 0
     for r in zombies:
-        if (r.attempt_count or 0) >= MAX_SEND_ATTEMPTS:
+        attempts = int(r.attempt_count or 0)
+        if attempts >= MAX_SEND_ATTEMPTS:
+            r.status = LOG_FAILED
+            r.error_code = "retry_exhausted"
+            r.error_message = (
+                f"[watchdog] sending row idle > {timeout_seconds}s after "
+                f"{attempts} attempts (retry ceiling)"
+            )[:480]
+            terminated += 1
+        elif attempts >= 1:
+            # The row had its shot. Don't auto-revive — that path is
+            # exactly how we produced the 7000-attempt storm. Mark it
+            # terminal; the merchant can decide to retry explicitly.
             r.status = LOG_FAILED
             r.error_code = "watchdog_timeout"
             r.error_message = (
                 f"[watchdog] sending row idle > {timeout_seconds}s after "
-                f"{r.attempt_count or 0} attempts"
+                f"{attempts} attempts — flipped to failed_terminal"
             )[:480]
+            terminated += 1
         else:
+            # attempts == 0: the row was never actually attempted —
+            # safe to put back on the queue.
             r.status = LOG_QUEUED
             r.error_code = r.error_code or "watchdog_revive"
-            # Don't blow away an existing error_message — useful trail.
+            re_queued += 1
         r.updated_at = now
     logger.warning(
-        "[campaign_dispatcher] watchdog campaign=%d revived=%d zombie "
-        "sending rows (idle > %ds)",
-        campaign_id, len(zombies), timeout_seconds,
+        "[campaign_dispatcher] watchdog campaign=%d zombies=%d "
+        "terminated=%d re_queued=%d (idle > %ds)",
+        campaign_id, len(zombies), terminated, re_queued, timeout_seconds,
     )
     return len(zombies)
 
@@ -1312,14 +1341,50 @@ def _is_attempts_exhausted(row: CampaignSendLog) -> bool:
     return int(row.attempt_count or 0) >= MAX_SEND_ATTEMPTS
 
 
-# Error codes that may be retried by an explicit ``dispatch-now`` call.
-# Recipient-specific Meta errors (the customer doesn't have WhatsApp,
-# the customer opted out, etc.) are NOT retried — they can never
-# succeed without the underlying recipient data changing.
-_RETRIABLE_ERROR_CODES = frozenset({
-    "exception", "no_message_id", "watchdog_revive", "watchdog_timeout",
-    "rate_limit", "internal_error", "service_unavailable", "unknown",
+# Dispatcher-synthetic ``error_code`` values that don't have a
+# ClassifiedError entry but ARE retryable (the row failed for
+# infrastructure reasons, not because Meta rejected it). Anything not
+# listed here defers to ``meta_errors.is_retryable`` — which keys off
+# the canonical ``retryable`` flag in the catalogue.
+_DISPATCHER_RETRYABLE_CODES = frozenset({
+    "watchdog_revive",
+    "internal_error",
 })
+
+# Terminal codes that ``reschedule_failed_for_retry`` must never
+# touch — these are end-states the dispatcher itself produced and
+# putting them back into ``queued`` would re-introduce storms.
+_TERMINAL_DISPATCHER_CODES = frozenset({
+    "retry_exhausted",
+    "retry_storm",
+})
+
+
+def _is_error_code_retryable(error_code: Optional[str]) -> bool:
+    """Decide whether a row with this stored ``error_code`` is eligible
+    for automatic re-queue. Single source of truth used by both
+    ``reschedule_failed_for_retry`` and the in-flight dispatcher.
+
+    Policy:
+      * Catalogued Meta errors: defer to ``meta_errors.is_retryable``
+        (i.e. the ``retryable`` flag on ``ClassifiedError``).
+      * Dispatcher-synthetic codes: explicit allow-list above.
+      * Empty / unclassified ``error_code``: not retryable. We refuse
+        to retry blind; the merchant can press "أرسل الآن" to force
+        a single explicit retry instead.
+    """
+    if not error_code:
+        return False
+    code = str(error_code).strip().lower()
+    if not code:
+        return False
+    if code in _TERMINAL_DISPATCHER_CODES:
+        return False
+    if code in _DISPATCHER_RETRYABLE_CODES:
+        return True
+    # Defer to the central catalogue (retryable=False for
+    # client_payment_blocked, not_on_whatsapp, policy_violation, …).
+    return is_retryable(code)
 
 
 def reschedule_failed_for_retry(
@@ -1350,8 +1415,10 @@ def reschedule_failed_for_retry(
     now = datetime.now(timezone.utc)
     for r in rows:
         code = (r.error_code or "").strip().lower()
-        if code and code not in _RETRIABLE_ERROR_CODES:
-            # Keep the terminal classification — these never recover.
+        # ``retryable=False`` errors in the catalogue (client_payment_blocked,
+        # not_on_whatsapp, policy_violation, …) are terminal: re-queuing them
+        # produces the SAME error and burns attempts. Skip them entirely.
+        if not _is_error_code_retryable(code):
             continue
         if _is_attempts_exhausted(r):
             r.error_code = "retry_exhausted"
@@ -1408,6 +1475,20 @@ async def _dispatch_queued_rows(
     errors: List[str] = []
     batch_size = MARKETING_CAMPAIGN_BATCH_SIZE
     pause = MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS
+
+    # ── Same-error-code circuit breaker ───────────────────────────────
+    # If the SAME non-retryable error_code dominates a campaign run
+    # (e.g. every recipient comes back with ``client_payment_blocked``
+    # or ``policy_violation``), keep going — each recipient is a
+    # different number — but we cap total attempts at one per row
+    # for these classes. The catch we DO want: if a *retryable*
+    # error code (rate_limit, service_unavailable) repeats more than
+    # SAME_CODE_BREAKER_THRESHOLD times in a single run, abort
+    # the dispatch so we don't keep beating on Meta while it tells
+    # us to back off.
+    SAME_CODE_BREAKER_THRESHOLD = 25
+    same_code_counts: Dict[str, int] = {}
+    abort_reason: Optional[str] = None
 
     # Run the zombie watchdog up-front so any row stuck in ``sending``
     # from a previous (crashed) run is reverted to queued before we
@@ -1646,10 +1727,34 @@ async def _dispatch_queued_rows(
                     )
                     log_method(
                         "[campaign_dispatcher] campaign=%d Meta error "
-                        "key=%s code=%s subcode=%s type=%s phone=%s msg=%s",
+                        "key=%s code=%s subcode=%s type=%s phone=%s msg=%s "
+                        "retryable=%s severity=%s",
                         campaign.id, classified.key, meta_code,
                         meta_subcode, meta_type, phone, meta_msg,
+                        classified.retryable, classified.severity,
                     )
+                    # ── Same-error-code circuit breaker (retryable only) ──
+                    # If a *retryable* code (rate_limit, service_unavailable,
+                    # …) repeats above the threshold within a single run,
+                    # break out so we stop hammering Meta. Non-retryable
+                    # codes don't trip this — each recipient gets their
+                    # own classification and we just record the failure.
+                    if classified.retryable:
+                        bucket = classified.key
+                        same_code_counts[bucket] = same_code_counts.get(bucket, 0) + 1
+                        if same_code_counts[bucket] >= SAME_CODE_BREAKER_THRESHOLD:
+                            abort_reason = (
+                                f"same_code_circuit_breaker:{bucket}"
+                                f"@{same_code_counts[bucket]}"
+                            )
+                            logger.critical(
+                                "[campaign_dispatcher] campaign=%d "
+                                "same_code_circuit_breaker tripped key=%s "
+                                "count=%d threshold=%d — aborting run",
+                                campaign.id, bucket,
+                                same_code_counts[bucket],
+                                SAME_CODE_BREAKER_THRESHOLD,
+                            )
                 else:
                     messages = resp.get("messages") if isinstance(resp, dict) else None
                     first = messages[0] if isinstance(messages, list) and messages else None
@@ -1728,9 +1833,19 @@ async def _dispatch_queued_rows(
             campaign.sent_count = sent
             await asyncio.sleep(INTER_MESSAGE_DELAY)
 
+            # If the same-error-code breaker tripped during this row,
+            # finish the in-flight DB writes and bail out cleanly so
+            # the rest of the audience isn't pummeled with the same
+            # transient Meta failure.
+            if abort_reason is not None:
+                break
+
         # Flush + pause between batches so a parallel worker can pick
         # up the new state and Meta sees a steady cadence.
         db.commit()
+        if abort_reason is not None:
+            errors.append(f"dispatch_aborted:{abort_reason}")
+            break
         if pause > 0:
             await asyncio.sleep(pause)
 
