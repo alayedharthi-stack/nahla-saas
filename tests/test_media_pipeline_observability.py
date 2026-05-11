@@ -394,57 +394,52 @@ class TestDownloadInstrumentation:
         )
         assert "Authorization" not in seen_headers[1]
 
-    # ── F10: hop-2 attempt-loop for 360dialog → lookaside URLs ──
+    # ── F11: 360dialog hop-2 lookaside → waba-v2 host rewrite ──
     #
-    # Observed in production for tenant 33: 360dialog's WABA v2
-    # returns Meta-style lookaside URLs (host = lookaside.fbsbx.com),
-    # NOT bare-path waba-v2.360dialog.io URLs. The F9 defensive
-    # policy ("drop auth on third-party host") produced 401 on
-    # every 360dialog inbound media event because the
-    # "third-party" host IS where 360dialog routes us. The fix
-    # is a two-attempt loop:
+    # 360dialog's official docs (
+    # https://docs.360dialog.com/docs/v3/whatsapp-api/messages/messages-media/
+    # ) state:
     #
-    #   1. Try D360-API-KEY header.
-    #   2. On 401, retry with Authorization: Bearer (same D360 key).
+    #   "Replace the root hostname https://lookaside.fbsbx.com
+    #    with https://waba-v2.360dialog.io"
     #
-    # Both attempts use the same 360dialog API key — we never
-    # hold a Meta access token for a 360dialog tenant.
+    # So 360dialog's WABA v2 mirrors Meta's response shape (hop-1
+    # returns a lookaside URL) but the actual bytes live on
+    # 360dialog's gateway. Hitting lookaside directly with EITHER
+    # D360-API-KEY or Bearer returns 401 because we never had a
+    # session there. The fix is a deterministic host swap →
+    # waba-v2.360dialog.io + single GET with D360-API-KEY.
+    #
+    # F9 hardcoded Meta (401). F10 added a Bearer fallback that
+    # still hit lookaside (401). F11 implements the documented
+    # contract.
 
-    def test_dialog360_lookaside_hop2_tries_d360_key_first_then_bearer(self, caplog, monkeypatch):
-        """The first hop-2 attempt MUST send D360-API-KEY. If
-        that returns 401, the second attempt MUST send
-        Authorization: Bearer (with the SAME 360dialog key).
-        We must NOT give up after the first 401."""
+    def test_dialog360_hop2_rewrites_lookaside_host_to_waba_v2(self, caplog, monkeypatch):
+        """The hop-2 GET MUST target ``waba-v2.360dialog.io`` —
+        NOT lookaside — preserving path + query exactly. Header
+        MUST be ``D360-API-KEY`` only (no Bearer). Single
+        attempt — no fallback loop."""
         from modules.ai.media import normalizer
 
         meta = MagicMock()
         meta.status_code = 200
         meta.content = b"x"
+        # 360dialog's hop-1 returns a lookaside URL with the
+        # ``mid`` query param that the rewrite MUST preserve —
+        # the path + query are the actual content selector;
+        # losing them = wrong file.
         meta.json.return_value = {
-            "url": "https://lookaside.fbsbx.com/whatsapp_business/abc?session=zzz",
+            "url": "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=ATTM123&ext=ZZZ&hash=ABC",
             "mime_type": "image/jpeg",
         }
         meta.raise_for_status = MagicMock()
-
-        # First hop-2 attempt returns 401.
-        first_401 = MagicMock()
-        first_401.status_code = 401
-        first_401.content = b""
-        first_401.headers = {}
-        first_401.raise_for_status = MagicMock()  # not called when we route on status_code first
-
-        # Second hop-2 attempt returns 200 with real bytes.
         good = self._cdn_resp(body=b"\xff\xd8\xff" + b"x" * 1000)
 
         seen: List[Dict[str, Any]] = []
 
         async def _recording_get(url, headers=None, **kw):
             seen.append({"url": url, "headers": dict(headers or {})})
-            if len(seen) == 1:
-                return meta
-            if len(seen) == 2:
-                return first_401
-            return good
+            return meta if len(seen) == 1 else good
 
         client = AsyncMock()
         client.get = _recording_get
@@ -453,7 +448,7 @@ class TestDownloadInstrumentation:
         ctx.__aexit__.return_value = None
 
         monkeypatch.setattr(normalizer, "get_token_for_operation",
-                            AsyncMock(return_value=MagicMock(token="D360-KEY-secret")))
+                            AsyncMock(return_value=MagicMock(token="D360-KEY-1")))
         monkeypatch.setattr(normalizer.httpx, "AsyncClient",
                             MagicMock(return_value=ctx))
 
@@ -461,41 +456,52 @@ class TestDownloadInstrumentation:
         caplog.set_level(logging.INFO, logger=NORMALIZER_LOGGER)
         result = _run(normalizer._download_meta_media(
             db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-d360-look", mime_type="image/jpeg",
+            tenant_id=33, media_id="m-rewrite", mime_type="image/jpeg",
         ))
-        assert result is not None, (
-            "F10: 360dialog → lookaside flow should succeed on the "
-            "Bearer retry"
+        assert result is not None
+
+        # Hop-2 must target waba-v2.360dialog.io.
+        hop2_url = seen[1]["url"]
+        assert hop2_url.startswith("https://waba-v2.360dialog.io/"), (
+            f"hop-2 went to {hop2_url!r} — should have been rewritten "
+            f"from lookaside to waba-v2.360dialog.io per 360dialog docs"
         )
-        assert len(seen) == 3  # hop-1 + two hop-2 attempts.
-        # Hop-2 attempt #1 sent D360-API-KEY (the first shape).
-        assert seen[1]["headers"].get("D360-API-KEY") == "D360-KEY-secret"
-        assert "Authorization" not in seen[1]["headers"]
-        # Hop-2 attempt #2 sent Authorization: Bearer with the SAME
-        # 360dialog key — never a separate Meta token.
-        assert seen[2]["headers"].get("Authorization") == "Bearer D360-KEY-secret"
-        assert "D360-API-KEY" not in seen[2]["headers"]
-        # Diagnostic logs are emitted: 401 attempt + winning auth.
-        records = " | ".join(r.getMessage() for r in caplog.records)
-        assert "[MEDIA_DOWNLOAD_FETCH_401]" in records
-        assert "[MEDIA_DOWNLOAD_FETCH_AUTH]" in records
-        assert "auth=bearer" in records, (
-            "Winning auth shape must be logged so future "
-            "investigations know which header worked"
+        # Path + query MUST be preserved EXACTLY (the ``mid``
+        # parameter is the content selector).
+        assert hop2_url == (
+            "https://waba-v2.360dialog.io/whatsapp_business/attachments/"
+            "?mid=ATTM123&ext=ZZZ&hash=ABC"
+        ), f"path/query mangled by rewrite: {hop2_url!r}"
+        # Header MUST be D360-API-KEY only. No Bearer.
+        assert seen[1]["headers"].get("D360-API-KEY") == "D360-KEY-1"
+        assert "Authorization" not in seen[1]["headers"], (
+            "Bearer header must NOT be sent for 360dialog hop-2 — "
+            "the docs are explicit"
         )
 
-    def test_dialog360_lookaside_hop2_succeeds_on_first_attempt_when_d360_key_works(self, caplog, monkeypatch):
-        """When the D360-API-KEY shape works on the first try
-        (some 360dialog gateways accept it on lookaside), we
-        must NOT make a second request. Avoids wasting an
-        attempt and avoids spurious 401 lines in the logs."""
+        records = " | ".join(r.getMessage() for r in caplog.records)
+        # Diagnostic log line names the rewrite and the
+        # destination host so a future investigation can
+        # confirm the contract is in force without reading
+        # source.
+        assert "[MEDIA_DOWNLOAD_FETCH_HOST]" in records
+        assert "rewrite=lookaside_to_waba_v2" in records
+        assert "fetch_host=waba-v2.360dialog.io" in records
+        assert "auth=d360_key" in records
+        # Single attempt — no [MEDIA_DOWNLOAD_FETCH_401] retry line.
+        assert "[MEDIA_DOWNLOAD_FETCH_401]" not in records
+
+    def test_dialog360_hop2_uses_waba_v2_url_asis_when_already_360dialog(self, caplog, monkeypatch):
+        """If 360dialog's hop-1 ever returns a native
+        waba-v2.360dialog.io URL (not lookaside), we MUST use
+        it as-is with D360-API-KEY. No rewrite needed."""
         from modules.ai.media import normalizer
 
         meta = MagicMock()
         meta.status_code = 200
         meta.content = b"x"
         meta.json.return_value = {
-            "url": "https://lookaside.fbsbx.com/whatsapp_business/abc",
+            "url": "https://waba-v2.360dialog.io/some/native/path?mid=NATIVE",
             "mime_type": "image/jpeg",
         }
         meta.raise_for_status = MagicMock()
@@ -522,49 +528,43 @@ class TestDownloadInstrumentation:
         caplog.set_level(logging.INFO, logger=NORMALIZER_LOGGER)
         result = _run(normalizer._download_meta_media(
             db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-d360-look-ok", mime_type="image/jpeg",
+            tenant_id=33, media_id="m-native", mime_type="image/jpeg",
         ))
         assert result is not None
-        # Exactly hop-1 + ONE hop-2 attempt — no retry needed.
-        assert len(seen) == 2
+        # URL passed through unchanged.
+        assert seen[1]["url"] == "https://waba-v2.360dialog.io/some/native/path?mid=NATIVE"
         assert seen[1]["headers"].get("D360-API-KEY") == "D360-KEY"
+        assert "Authorization" not in seen[1]["headers"]
         records = " | ".join(r.getMessage() for r in caplog.records)
-        # No 401 retry log line should appear.
-        assert "[MEDIA_DOWNLOAD_FETCH_401]" not in records
-        assert "auth=d360_key" in records
+        assert "rewrite=asis" in records
 
-    def test_dialog360_lookaside_hop2_returns_none_when_all_attempts_401(self, caplog, monkeypatch):
-        """Both auth shapes return 401 → fall through with
-        explicit `[MEDIA_DOWNLOAD_FETCH_EXHAUSTED]` warning and
-        return None. The original 401 from production was
-        silently re-raised by the catch-all; F10 makes the
-        exhaustion explicit."""
+    def test_dialog360_hop2_returns_none_on_persistent_401(self, caplog, monkeypatch):
+        """A 401 after host-rewrite + D360-API-KEY is a real
+        auth/config issue (wrong key, expired media_id, gateway
+        outage). We log explicitly and return None — no
+        fallback to Bearer, no fallback to lookaside."""
         from modules.ai.media import normalizer
 
         meta = MagicMock()
         meta.status_code = 200
         meta.content = b"x"
         meta.json.return_value = {
-            "url": "https://lookaside.fbsbx.com/abc",
+            "url": "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=X",
             "mime_type": "image/jpeg",
         }
         meta.raise_for_status = MagicMock()
 
-        def _r401():
-            m = MagicMock()
-            m.status_code = 401
-            m.content = b""
-            m.headers = {}
-            m.raise_for_status = MagicMock()
-            return m
+        bad = MagicMock()
+        bad.status_code = 401
+        bad.content = b""
+        bad.headers = {}
+        bad.raise_for_status = MagicMock()
 
         seen: List[Dict[str, Any]] = []
 
         async def _recording_get(url, headers=None, **kw):
             seen.append({"url": url, "headers": dict(headers or {})})
-            if len(seen) == 1:
-                return meta
-            return _r401()
+            return meta if len(seen) == 1 else bad
 
         client = AsyncMock()
         client.get = _recording_get
@@ -581,15 +581,19 @@ class TestDownloadInstrumentation:
         caplog.set_level(logging.WARNING, logger=NORMALIZER_LOGGER)
         result = _run(normalizer._download_meta_media(
             db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-d360-401", mime_type="image/jpeg",
+            tenant_id=33, media_id="m-401-real", mime_type="image/jpeg",
         ))
         assert result is None
-        # Both auth shapes were attempted.
-        assert len(seen) == 3
+        # Hop-1 + ONE hop-2 attempt — no Bearer fallback, no loop.
+        assert len(seen) == 2
         records = " | ".join(r.getMessage() for r in caplog.records)
         assert "[MEDIA_DOWNLOAD_FETCH_401]" in records
-        assert "[MEDIA_DOWNLOAD_FETCH_EXHAUSTED]" in records
-        assert "attempts=2" in records
+        # The 401 log line names the host so operators can tell
+        # whether the rewrite took effect or not.
+        assert "fetch_host=waba-v2.360dialog.io" in records
+        # No `[MEDIA_DOWNLOAD_FETCH_EXHAUSTED]` line — that was
+        # F10's multi-attempt vocabulary. F11 is single-attempt.
+        assert "[MEDIA_DOWNLOAD_FETCH_EXHAUSTED]" not in records
 
     def test_no_token_value_logged_anywhere(self, caplog, monkeypatch):
         """Sensitive-data invariant: the token value MUST NEVER

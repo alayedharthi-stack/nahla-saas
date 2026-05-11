@@ -767,42 +767,35 @@ async def _download_meta_media(
 
             # ── Hop-2 auth strategy ──────────────────────────────
             #
-            # Provider-by-provider observed behaviour:
+            # Provider-by-provider behaviour, per official docs:
             #
             #   * Meta Cloud:
             #     Resolved URL → ``lookaside.fbsbx.com/whatsapp_business``
             #     Auth        → ``Authorization: Bearer <Meta token>``
+            #     Fetch the resolved URL as-is.
             #
-            #   * 360dialog (this section's reason for existing):
-            #     360dialog's WABA v2 returns Meta-style lookaside
-            #     URLs, NOT bare-path waba-v2.360dialog.io URLs.
-            #     The defensive policy from F9 was "drop auth on
-            #     third-party host", which produced 401 on every
-            #     360dialog inbound media event because the
-            #     "third-party" host IS where 360dialog routes
-            #     us. F10 fixes this by attempting the fetch
-            #     with two different auth shapes:
+            #   * 360dialog (per
+            #     https://docs.360dialog.com/docs/v3/whatsapp-api/messages/messages-media/):
             #
-            #       1. ``D360-API-KEY: <D360 key>``
-            #          (consistent with hop-1; some 360dialog
-            #           gateways prefer this)
-            #       2. ``Authorization: Bearer <D360 key>``
-            #          (used when 360dialog's gateway expects
-            #           the standard WhatsApp wire format)
+            #       "Replace the root hostname
+            #        https://lookaside.fbsbx.com with
+            #        https://waba-v2.360dialog.io"
             #
-            #     Both attempts use the SAME D360 key — we never
-            #     hold a Meta token for a 360dialog tenant. On
-            #     401 the first attempt's response body is
-            #     discarded; we never log the token nor the full
-            #     URL (lookaside URLs carry a session-binding
-            #     parameter).
+            #     360dialog mirrors Meta's response shape (so
+            #     hop-1 returns a lookaside URL), but the actual
+            #     bytes live on 360dialog's gateway, NOT on
+            #     Meta's CDN. Hitting lookaside directly with
+            #     either D360-API-KEY or Bearer returns 401 —
+            #     we never had a session there in the first
+            #     place. The fix is a deterministic host swap
+            #     to ``waba-v2.360dialog.io``, preserving path +
+            #     query, then a single GET with
+            #     ``D360-API-KEY: <D360 key>``.
             #
-            # We also still defensively SKIP attaching either
-            # auth header when the resolved host clearly belongs
-            # to a third-party CDN unrelated to the provider's
-            # known footprint. That guard is now narrower —
-            # lookaside is treated as belonging to BOTH Meta and
-            # 360dialog because of the observed behaviour above.
+            # F9 hardcoded Meta. F10 added a Bearer fallback for
+            # 360dialog that ALSO went to lookaside — which 360dialog
+            # explicitly documents will not work. F11 implements the
+            # actual documented contract.
             try:
                 _media_host_for_hop2 = (_media_host or "").lower()
             except Exception:
@@ -815,93 +808,115 @@ async def _download_meta_media(
             )
             _is_d360_host = _media_host_for_hop2.endswith("360dialog.io")
 
-            # Build the ordered list of (label, headers) attempts.
-            # First successful attempt wins; we only retry on 401.
-            attempts: list = []
-            if provider == WHATSAPP_PROVIDER_360DIALOG:
-                if _is_d360_host or _is_meta_host:
-                    # The two header shapes 360dialog gateways
-                    # are observed to accept — try D360-API-KEY
-                    # first (consistent with hop-1), Bearer
-                    # second.
-                    attempts.append(("d360_key", {"D360-API-KEY": token_ctx.token}))
-                    attempts.append(("bearer",   {"Authorization": f"Bearer {token_ctx.token}"}))
-                # If the host is neither d360 nor meta, fall
-                # through with no attempts → bare GET (signed
-                # URL semantics).
-            else:
-                if _is_meta_host:
-                    attempts.append(("bearer", {"Authorization": f"Bearer {token_ctx.token}"}))
+            # Decide the EXACT hop-2 URL + headers based on the
+            # provider × host matrix. Single attempt — no
+            # fallback loop. If this fails, the failure is real
+            # (wrong key, expired media_id, gateway outage) and
+            # the right action is to log + return None.
+            fetch_url = media_url
+            fetch_headers: Dict[str, str] = {}
+            host_rewrite_label = "asis"
 
-            if not attempts:
-                # Fall back: bare GET, relying on signed URL.
-                attempts.append(("bare", {}))
+            if provider == WHATSAPP_PROVIDER_360DIALOG:
+                if _is_d360_host:
+                    # 360dialog returned a native waba-v2 URL
+                    # (some accounts / endpoints do). Use as-is.
+                    fetch_headers = {"D360-API-KEY": token_ctx.token}
+                    host_rewrite_label = "asis"
+                elif _is_meta_host:
+                    # Documented path: swap lookaside → waba-v2.
+                    # Preserve path + query EXACTLY (the ``mid``
+                    # query param is the actual content
+                    # selector — losing it = wrong file).
+                    try:
+                        from urllib.parse import urlparse, urlunparse  # noqa: PLC0415
+                        _parsed = urlparse(media_url)
+                        # waba-v2.360dialog.io is the documented
+                        # canonical host; use it regardless of
+                        # the configured D360_API_BASE_URL value
+                        # so we never accidentally point at the
+                        # partner-hub host (which lacks the
+                        # media-attachment route).
+                        fetch_url = urlunparse(_parsed._replace(
+                            scheme="https",
+                            netloc="waba-v2.360dialog.io",
+                        ))
+                    except Exception as rewrite_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[MEDIA_DOWNLOAD_HOST_REWRITE_FAILED] "
+                            "tenant=%s media_id=%s err=%s — falling "
+                            "back to original URL",
+                            tenant_id, media_id, rewrite_exc,
+                        )
+                        fetch_url = media_url
+                    fetch_headers = {"D360-API-KEY": token_ctx.token}
+                    host_rewrite_label = "lookaside_to_waba_v2"
+                else:
+                    # Unknown third-party host. Don't leak the
+                    # API key — bare GET, signed-URL semantics.
+                    fetch_headers = {}
+                    host_rewrite_label = "bare_unknown_host"
+            else:
+                # Meta: standard contract — fetch lookaside with
+                # Bearer.
+                if _is_meta_host:
+                    fetch_headers = {"Authorization": f"Bearer {token_ctx.token}"}
+                else:
+                    fetch_headers = {}
+                host_rewrite_label = "asis"
+
+            # We log the rewrite outcome BEFORE the network call
+            # so a failure mode that crashes the request is
+            # still attributable. The token value is never
+            # logged; only the symbolic ``host_rewrite_label``
+            # and the destination host (NOT the full URL — the
+            # path includes a session-binding ``mid`` parameter
+            # that we treat as sensitive).
+            try:
+                from urllib.parse import urlparse as _urlparse  # noqa: PLC0415
+                _fetch_host = _urlparse(fetch_url).netloc or "—"
+            except Exception:
+                _fetch_host = "—"
+            logger.info(
+                "[MEDIA_DOWNLOAD_FETCH_HOST] tenant=%s media_id=%s "
+                "provider=%s rewrite=%s fetch_host=%s auth=%s",
+                tenant_id, media_id, provider, host_rewrite_label,
+                _fetch_host,
+                "d360_key" if "D360-API-KEY" in fetch_headers
+                else "bearer" if "Authorization" in fetch_headers
+                else "bare",
+            )
 
             media_resp = None
             file_bytes = b""
-            for idx, (label, hdr) in enumerate(attempts, start=1):
-                is_last = idx == len(attempts)
-                try:
-                    candidate = await client.get(media_url, headers=hdr)
-                except Exception as fetch_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[MEDIA_DOWNLOAD_FETCH_ATTEMPT] tenant=%s "
-                        "media_id=%s provider=%s attempt=%d/%d "
-                        "auth=%s exc=%s",
-                        tenant_id, media_id, provider, idx, len(attempts),
-                        label, type(fetch_exc).__name__,
-                    )
-                    if is_last:
-                        raise
-                    continue
-                # On 401 we ALWAYS log the failed attempt — but
-                # only continue to the next attempt if one
-                # exists. On the last attempt's 401, we fall
-                # through to the exhausted-warning + return None
-                # branch below WITHOUT relying on
-                # raise_for_status (some httpx mocks no-op it).
-                if candidate.status_code == 401:
-                    logger.warning(
-                        "[MEDIA_DOWNLOAD_FETCH_401] tenant=%s "
-                        "media_id=%s provider=%s attempt=%d/%d "
-                        "auth=%s%s",
-                        tenant_id, media_id, provider, idx, len(attempts),
-                        label,
-                        "" if is_last else " — retrying with next auth shape",
-                    )
-                    if is_last:
-                        break  # falls through to exhausted check
-                    continue
-                # 2xx / 3xx / 4xx-non-401 / 5xx — let
-                # raise_for_status decide. Non-401 errors bubble
-                # to the outer HTTPStatusError handler with full
-                # status + provider in the log.
-                media_resp = candidate
-                media_resp.raise_for_status()
-                file_bytes = media_resp.content
-                # Log which auth shape WON so future investigations
-                # know which header to use for this provider/host
-                # combination.
-                logger.info(
-                    "[MEDIA_DOWNLOAD_FETCH_AUTH] tenant=%s media_id=%s "
-                    "provider=%s attempt=%d/%d auth=%s",
-                    tenant_id, media_id, provider, idx, len(attempts),
-                    label,
-                )
-                break
-            if media_resp is None:
-                # All attempts hit 401 (or a non-fatal error
-                # path that didn't set media_resp). Individual
-                # attempts already logged; emit a final unified
-                # warning so a single grep on `media_id` shows
-                # the full trail.
+            try:
+                media_resp = await client.get(fetch_url, headers=fetch_headers)
+            except Exception as fetch_exc:  # noqa: BLE001
                 logger.warning(
-                    "[MEDIA_DOWNLOAD_FETCH_EXHAUSTED] tenant=%s "
-                    "media_id=%s provider=%s attempts=%d — all "
-                    "hop-2 auth shapes returned 401",
-                    tenant_id, media_id, provider, len(attempts),
+                    "[MEDIA_DOWNLOAD_FETCH_EXC] tenant=%s media_id=%s "
+                    "provider=%s rewrite=%s exc=%s",
+                    tenant_id, media_id, provider, host_rewrite_label,
+                    type(fetch_exc).__name__,
+                )
+                raise
+
+            if media_resp.status_code == 401:
+                # Single-attempt design: a 401 here is a real
+                # auth/config issue, not a wire-format guess.
+                # Log explicitly so the support team can see
+                # whether the failing host is lookaside (host
+                # rewrite didn't take effect for some reason) or
+                # waba-v2 (genuine API-key problem).
+                logger.warning(
+                    "[MEDIA_DOWNLOAD_FETCH_401] tenant=%s media_id=%s "
+                    "provider=%s rewrite=%s fetch_host=%s — verify "
+                    "tenant API key and provider routing",
+                    tenant_id, media_id, provider, host_rewrite_label,
+                    _fetch_host,
                 )
                 return None
+            media_resp.raise_for_status()
+            file_bytes = media_resp.content
             # ── Success log for the CDN-FETCH step ────────────────
             # This is THE crucial line that proves bytes arrived
             # (and how many). When vision later returns empty
