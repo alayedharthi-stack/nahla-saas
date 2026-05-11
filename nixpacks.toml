@@ -1,3 +1,17 @@
+# ── Setup phase ────────────────────────────────────────────────────────
+# `aptPkgs` is appended to the default Nixpacks setup, so Python
+# autodetection still works. We add ffmpeg here for inbound media
+# processing (WhatsApp voice notes are OGG/opus, videos are MP4 —
+# both require ffmpeg for Whisper transcription and any future
+# audio-extraction steps).
+#
+# Verify after deploy:
+#   1. shell into the running container and run `ffmpeg -version`
+#   2. or call GET /admin/debug/media-env — the `ffmpeg.found`
+#      field should flip from `false` to `true`.
+[phases.setup]
+aptPkgs = ["ffmpeg"]
+
 [phases.install]
 cmds = ["pip install --no-cache-dir -r /app/requirements.txt"]
 

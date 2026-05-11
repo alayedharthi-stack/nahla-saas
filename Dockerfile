@@ -10,10 +10,18 @@
 
 FROM python:3.11-slim
 
-# System deps needed by psycopg2-binary
+# System deps:
+#   gcc + libpq-dev — needed by psycopg2-binary
+#   ffmpeg          — required for inbound WhatsApp media processing:
+#                     voice notes (OGG/opus), videos (MP4 audio
+#                     extraction), and any future codec the customer
+#                     sends. Without it, Whisper STT fails on every
+#                     audio format that isn't raw WAV/MP3. Keep
+#                     parity with nixpacks.toml (the Railway build).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         libpq-dev \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
