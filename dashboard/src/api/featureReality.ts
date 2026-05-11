@@ -278,6 +278,40 @@ export interface DashboardConversation {
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'
 
+// ── Inbound media (voice notes, images) ─────────────────────────────
+// The conversation-drawer renders an audio player / image preview for
+// any inbound message whose backend row carried a ``normalized_inbound``
+// payload (audio or image source_type). ``ai_used`` tells the merchant
+// whether AI consumed the transcript/description for the reply, which
+// matters for trust + debugging.
+export interface DashboardMessageMediaAudio {
+  kind: 'audio'
+  storage_url: string | null
+  mime_type: string | null
+  duration: number | null
+  voice: boolean
+  transcript: string | null
+  transcript_status: string | null
+  ai_used: boolean
+  caption: string | null
+  error: string | null
+}
+
+export interface DashboardMessageMediaImage {
+  kind: 'image'
+  storage_url: string | null
+  mime_type: string | null
+  description: string | null
+  vision_status: string | null
+  ai_used: boolean
+  caption: string | null
+  error: string | null
+}
+
+export type DashboardMessageMedia =
+  | DashboardMessageMediaAudio
+  | DashboardMessageMediaImage
+
 export interface DashboardMessage {
   id: string
   direction: 'in' | 'out'
@@ -285,6 +319,7 @@ export interface DashboardMessage {
   time: string
   isAI?: boolean
   eventType?: MessageEventType
+  media?: DashboardMessageMedia | null
 }
 
 export const featureRealityApi = {

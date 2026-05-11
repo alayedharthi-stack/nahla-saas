@@ -825,6 +825,40 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             return "ai"
         return "system"
 
+    def _media_block(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Surface inbound media so the conversation drawer can render
+        an audio player / image preview with the transcript / vision
+        text rendered underneath. Returns ``None`` for text rows so
+        the frontend can fall back to the plain bubble layout."""
+        ni = (meta or {}).get("normalized_inbound") or {}
+        src = str(ni.get("source_type") or "").lower()
+        if src not in {"audio", "image"}:
+            return None
+        if src == "audio":
+            return {
+                "kind":            "audio",
+                "storage_url":     ni.get("storage_url"),
+                "mime_type":       ni.get("mime_type"),
+                "duration":        ni.get("duration_seconds"),
+                "voice":           bool(ni.get("voice")),
+                "transcript":      ni.get("transcript_text"),
+                "transcript_status": ni.get("transcript_status"),
+                "ai_used":         bool(ni.get("ai_used_audio") or False),
+                "caption":         ni.get("caption"),
+                "error":           ni.get("transcript_error"),
+            }
+        # image
+        return {
+            "kind":            "image",
+            "storage_url":     ni.get("storage_url"),
+            "mime_type":       ni.get("mime_type"),
+            "description":     ni.get("vision_text"),
+            "vision_status":   ni.get("vision_status"),
+            "ai_used":         bool(ni.get("ai_used_image") or False),
+            "caption":         ni.get("caption"),
+            "error":           ni.get("vision_error"),
+        }
+
     messages: List[Dict[str, Any]] = [
         {
             "id": str(r.id),
@@ -833,6 +867,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             "time": r.created_at.isoformat() if r.created_at else "",
             "isAI": bool((r.extra_metadata or {}).get("is_ai")),
             "eventType": _event_type_label(r),
+            "media": _media_block(r.extra_metadata or {}),
             "_ts": r.created_at,
         }
         for r in me_rows
@@ -887,6 +922,129 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
         m.pop("_ts", None)
 
     return {"messages": messages}
+
+
+@router.get("/{conversation_id:int}/media-debug")
+async def conversation_media_debug(
+    conversation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 50,
+):
+    """Return every inbound media message on this conversation with
+    the per-stage status fields the merchant brain pipeline records.
+
+    Used by the dashboard's "تشخيص الوسائط" panel and by support to
+    answer questions like:
+
+      * "did نحلة actually receive the voice note?"
+      * "did Whisper transcribe it?"
+      * "what did the AI see in the photo customer attached?"
+
+    The endpoint surfaces, for each inbound MessageEvent that has a
+    ``normalized_inbound`` payload on its ``extra_metadata``:
+
+      - ``message_id``                — row id (stable for support)
+      - ``created_at``                — when it landed
+      - ``direction``                 — always 'inbound' here
+      - ``source_type``               — audio / image / text / …
+      - ``mime_type``, ``byte_size``  — what we stored
+      - ``storage_url``               — playable / viewable in the UI
+      - ``audio_download_status``     — pending / ok / failed
+      - ``transcript_status``         — pending / ok / empty / failed / skipped
+      - ``transcript_text_preview``   — first 240 chars (full text in body)
+      - ``transcript_error``          — short error description
+      - ``ai_used_audio`` / ``ai_used_image``
+      - ``image_download_status`` / ``vision_status`` / ``vision_text``
+      - ``error_message`` (alias of ``transcript_error`` / ``vision_error``)
+
+    Tenant-scoped via the standard ``resolve_tenant_id`` flow.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    convo = db.query(Conversation).filter(
+        Conversation.id == conversation_id,
+        Conversation.tenant_id == tenant_id,
+    ).first()
+    if not convo:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+
+    rows = (
+        db.query(MessageEvent)
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            MessageEvent.conversation_id == conversation_id,
+            MessageEvent.direction == "inbound",
+        )
+        .order_by(MessageEvent.created_at.desc())
+        .limit(max(1, min(int(limit or 50), 200)))
+        .all()
+    )
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        meta = dict(r.extra_metadata or {})
+        ni = meta.get("normalized_inbound") or {}
+        if not ni:
+            # No media metadata on this row — skip. We surface
+            # text-only inbounds in the main messages endpoint
+            # already; here we only want media diagnostics.
+            continue
+        source_type = str(ni.get("source_type") or "").lower()
+        if source_type not in {"audio", "image"}:
+            continue
+
+        transcript_text = ni.get("transcript_text") or ""
+        vision_text     = ni.get("vision_text") or ""
+        # ``error_message`` is the single string the UI surfaces in
+        # the diagnostic panel. Pick the one populated by whichever
+        # stage failed so we never show two competing reasons.
+        error_message = (
+            ni.get("transcript_error")
+            or ni.get("vision_error")
+            or None
+        )
+
+        out.append({
+            "message_id":           r.id,
+            "created_at":           r.created_at.isoformat() if r.created_at else None,
+            "direction":            r.direction,
+            "source_type":          source_type,
+            "media_id":             ni.get("media_id"),
+            "mime_type":            ni.get("mime_type"),
+            "voice":                ni.get("voice"),
+            "duration_seconds":     ni.get("duration_seconds"),
+            "caption":              ni.get("caption"),
+            "byte_size":            ni.get("byte_size"),
+            "storage_url":          ni.get("storage_url"),
+            "storage_sha256":       ni.get("storage_sha256"),
+            "audio_download_status": ni.get("audio_download_status"),
+            "image_download_status": ni.get("image_download_status"),
+            "transcript_status":     ni.get("transcript_status"),
+            "vision_status":         ni.get("vision_status"),
+            "transcript_text":       transcript_text or None,
+            # Short preview so a list of 50 rows stays scrollable.
+            "transcript_text_preview": (
+                (transcript_text or vision_text or "")[:240] or None
+            ),
+            "vision_text":          vision_text or None,
+            "transcript_error":     ni.get("transcript_error"),
+            "vision_error":         ni.get("vision_error"),
+            "error_message":        error_message,
+            "ai_used_audio":        bool(ni.get("ai_used_audio") or False),
+            "ai_used_image":        bool(ni.get("ai_used_image") or False),
+            "media_fallback":       bool(meta.get("media_fallback") or False),
+            "wa_message_id":        ni.get("wa_message_id") or meta.get("wa_message_id"),
+            "wa_timestamp":         ni.get("wa_timestamp"),
+        })
+
+    return {
+        "conversation_id": conversation_id,
+        "tenant_id":       tenant_id,
+        "count":           len(out),
+        "rows":            out,
+    }
 
 
 @router.post("/reply")

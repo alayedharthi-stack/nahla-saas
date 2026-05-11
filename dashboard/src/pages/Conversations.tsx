@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
+import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
 
 const EVENT_BADGE: Record<MessageEventType, { label: string; icon: React.ReactNode; cls: string }> = {
   ai:         { label: 'ذكاء اصطناعي', icon: <Bot className="w-3 h-3" />, cls: 'bg-brand-50 text-brand-600 border-brand-200' },
@@ -818,18 +819,36 @@ export default function Conversations() {
                             return { icon: '', label: t, type: 'reply' as const }
                           }
 
+                          // Inbound media: render the audio player / image
+                          // preview INSTEAD of the textual bubble. The
+                          // backend already concatenated transcript /
+                          // description into ``body`` for AI context, but
+                          // here we want the merchant to see the actual
+                          // recording / image with the extracted text shown
+                          // discreetly below it (per spec point #9).
+                          const inboundMedia = !isOut && m.media ? m.media : null
+
                           return (
                             <>
-                              <div className={`
-                                relative px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words
-                                shadow-sm
-                                ${isOut
-                                  ? `bg-brand-500 text-white ${btnLines.length ? 'rounded-t-2xl rounded-ee-sm' : 'rounded-2xl rounded-ee-sm'}`
-                                  : `bg-white text-slate-800 ${btnLines.length ? 'rounded-t-2xl rounded-es-sm' : 'rounded-2xl rounded-es-sm border border-slate-100'}`
-                                }
-                              `}>
-                                {textPart}
-                              </div>
+                              {inboundMedia ? (
+                                <div className={`
+                                  relative px-3 py-2 text-sm leading-relaxed shadow-sm
+                                  bg-white text-slate-800 rounded-2xl rounded-es-sm border border-slate-100
+                                `}>
+                                  <InboundMediaPreview media={inboundMedia} />
+                                </div>
+                              ) : (
+                                <div className={`
+                                  relative px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words
+                                  shadow-sm
+                                  ${isOut
+                                    ? `bg-brand-500 text-white ${btnLines.length ? 'rounded-t-2xl rounded-ee-sm' : 'rounded-2xl rounded-ee-sm'}`
+                                    : `bg-white text-slate-800 ${btnLines.length ? 'rounded-t-2xl rounded-es-sm' : 'rounded-2xl rounded-es-sm border border-slate-100'}`
+                                  }
+                                `}>
+                                  {textPart}
+                                </div>
+                              )}
                               {btnLines.length > 0 && (
                                 <div className="flex flex-col gap-[3px] mt-[3px] w-full">
                                   {btnLines.map((line, bi) => {

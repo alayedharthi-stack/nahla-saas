@@ -220,6 +220,19 @@ OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE   = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 OPENAI_MODEL      = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_AUDIO_MODEL = os.environ.get("OPENAI_AUDIO_MODEL", "whisper-1")
+# Vision model for describing inbound WhatsApp images. Must be a
+# chat-completions endpoint that accepts ``image_url`` parts (default
+# ``gpt-4o-mini`` — same family as ``OPENAI_MODEL`` so a single billing
+# bucket covers both turns).
+OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
+# Default STT language hint we send to Whisper for Saudi-dialect voice
+# notes. Whisper accepts ISO-639-1 codes; Arabic = "ar". Operators can
+# override per tenant or globally without redeploying the worker.
+NAHLA_STT_LANGUAGE = os.environ.get("NAHLA_STT_LANGUAGE", "ar")
+# Hard cap on how large an inbound voice note / image we'll download
+# from Meta before we bail (defense-in-depth — Meta itself caps at 16MB
+# for media, but a misconfigured proxy could still hand us a huge file).
+INBOUND_MEDIA_MAX_BYTES = int(os.environ.get("INBOUND_MEDIA_MAX_BYTES", str(20 * 1024 * 1024)))
 
 # ── Cross-Merchant Learning (anonymized signals only) ─────────────────────────
 # Salt used by TenantIsolationLayer to derive non-reversible tenant hashes

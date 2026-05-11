@@ -1912,7 +1912,7 @@ async def _dispatch_message(
                     )
             return
 
-        if normalized_inbound.normalized_type not in {"text", "audio"}:
+        if normalized_inbound.normalized_type not in {"text", "audio", "image"}:
             # ── Button-tap rescue: "button" type = customer tapped a template
             # quick-reply.  The normalizer marks it unsupported, but we have
             # already extracted human-readable text via _extract_wa_message_text.
@@ -1936,6 +1936,37 @@ async def _dispatch_message(
             return
 
         text = normalized_inbound.text.strip()
+        # ── Media-without-text fallback ─────────────────────────────
+        # The normalizer detected an audio/image but couldn't extract
+        # any usable text (Whisper failed, vision failed, missing
+        # caption, etc.) AND there's a canonical Arabic fallback
+        # message it wants us to send. We MUST NOT call the brain in
+        # that case — we'd spend tokens generating a generic apology
+        # while losing the structured metadata that explains why. The
+        # fallback reply is short, kind, and asks the customer to
+        # retype — exactly the spec's required behaviour.
+        if (
+            not text
+            and normalized_inbound.fallback_reply_ar
+            and normalized_inbound.normalized_type in {"audio", "image"}
+            and not _is_platform_tenant(db, resolved_tenant_id)
+        ):
+            logger.info(
+                "[MediaFallback] tenant=%s sender=%s normalized_type=%s "
+                "no_text → sending fallback reply",
+                resolved_tenant_id, sender,
+                normalized_inbound.normalized_type,
+            )
+            await _handle_media_fallback(
+                phone_id=used_pid, to=sender,
+                tenant_id=resolved_tenant_id, db=db,
+                fallback_reply=normalized_inbound.fallback_reply_ar,
+                inbound_metadata=normalized_inbound.metadata,
+                wa_message_ts=_wa_msg_ts,
+                wa_msg_id=msg_id or None,
+            )
+            return
+
         if not text:
             logger.info(
                 "[TRACE][4/6] INBOUND_IGNORED_EMPTY_TEXT | tenant_id=%s sender=%s normalized_type=%s",
@@ -2213,6 +2244,97 @@ async def _send_cod_followup_message(
         phone_id=phone_id, to=to, text=body,
         _tenant_id=_tenant_id, _db=_db,
     )
+
+
+async def _handle_media_fallback(
+    *,
+    phone_id: str,
+    to: str,
+    tenant_id: int,
+    db,
+    fallback_reply: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    wa_message_ts: Optional[datetime] = None,
+    wa_msg_id: Optional[str] = None,
+) -> None:
+    """Handle the "media without usable text" branch.
+
+    Called by the dispatcher when the normalizer returns
+    ``should_process=False`` for an audio / image message but
+    populated ``fallback_reply_ar`` — meaning we successfully
+    received the media (and ideally persisted it) but couldn't
+    extract any text to feed the brain.
+
+    Contract:
+
+      1. Create / fetch the dashboard conversation so the merchant
+         sees the voice note in the inbox even though no AI reply
+         was generated.
+      2. Persist an INBOUND ``MessageEvent`` with the full
+         ``normalized_inbound`` metadata (storage_url,
+         transcript_status, ai_used_audio=False, etc.) so
+         ``/conversations/{id}/media-debug`` can replay it.
+      3. Send the canonical Arabic fallback reply
+         (``AUDIO_FALLBACK_REPLY_AR`` / ``IMAGE_FALLBACK_REPLY_AR``)
+         and persist that as an OUTBOUND ``MessageEvent`` too.
+      4. NEVER call the brain. Spending tokens on "I didn't hear
+         you" is wasteful and the canned line is friendlier.
+
+    Errors are logged but never re-raised — the webhook ack loop
+    must complete regardless of bookkeeping failures here.
+    """
+    from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+
+    inbound_meta_body = "[رسالة وسائط بدون نص قابل للقراءة]"
+    convo = None
+    try:
+        convo = _get_or_create_conversation(db, tenant_id, to)
+        # Stamp the inbound row first so /media-debug picks it up
+        # even if the outbound send fails (e.g. token expired).
+        StateManager.save_message(
+            db, to, inbound_meta_body, "inbound",
+            conversation_id=convo.id,
+            tenant_id=tenant_id,
+            extra_metadata={
+                "normalized_inbound": dict(inbound_metadata or {}),
+                "media_fallback":     True,
+                "wa_message_id":      wa_msg_id or "",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[MediaFallback] failed to persist inbound row tenant=%s "
+            "to=%s err=%s",
+            tenant_id, to, exc,
+        )
+
+    try:
+        sent = await _send_whatsapp_message(
+            phone_id=phone_id, to=to, text=fallback_reply,
+            _tenant_id=tenant_id, _db=db,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[MediaFallback] failed to send fallback reply tenant=%s "
+            "to=%s err=%s",
+            tenant_id, to, exc,
+        )
+        sent = False
+
+    if sent and convo is not None:
+        try:
+            StateManager.save_message(
+                db, to, fallback_reply, "outbound",
+                conversation_id=convo.id,
+                tenant_id=tenant_id,
+                extra_metadata={"media_fallback": True},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[MediaFallback] failed to persist outbound row tenant=%s "
+                "to=%s err=%s",
+                tenant_id, to, exc,
+            )
 
 
 async def _handle_merchant_message(

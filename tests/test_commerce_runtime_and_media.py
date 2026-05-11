@@ -37,14 +37,38 @@ def test_web_search_tool_returns_summary():
 
 
 def test_audio_normalizer_returns_transcribed_text():
-    from modules.ai.media.normalizer import normalize_whatsapp_inbound
+    """Backwards-compatible smoke test against the hardened normalizer.
 
-    with patch(
-        "modules.ai.media.normalizer._transcribe_audio",
-        new=AsyncMock(return_value={"text": "أبغى فستان بسعر 150", "reason": "ok", "mime_type": "audio/ogg"}),
+    The new normalizer is layered (download → persist → transcribe)
+    so we patch the inner OpenAI call + the Meta download instead of
+    the legacy ``_transcribe_audio`` umbrella.
+    """
+    from modules.ai.media import normalizer
+
+    with patch.object(
+        normalizer,
+        "_download_meta_media",
+        new=AsyncMock(return_value={
+            "bytes": b"fake-audio-bytes", "mime_type": "audio/ogg",
+        }),
+    ), patch.object(
+        normalizer,
+        "_transcribe_bytes_with_openai",
+        new=AsyncMock(return_value="أبغى فستان بسعر 150"),
+    ), patch.object(
+        normalizer,
+        "_try_persist",
+        return_value=MagicMock(
+            storage_url="/media/inbound/1/abc.ogg",
+            sha256="abc",
+            byte_size=16,
+            mime_type="audio/ogg",
+        ),
+    ), patch.object(
+        normalizer, "OPENAI_API_KEY", "sk-test",
     ):
         result = _run(
-            normalize_whatsapp_inbound(
+            normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(),
                 wa_conn=MagicMock(),
                 tenant_id=1,
@@ -55,3 +79,5 @@ def test_audio_normalizer_returns_transcribed_text():
     assert result.should_process is True
     assert result.normalized_type == "audio"
     assert "فستان" in result.text
+    assert result.metadata["ai_used_audio"] is True
+    assert result.metadata["transcript_status"] == "ok"
