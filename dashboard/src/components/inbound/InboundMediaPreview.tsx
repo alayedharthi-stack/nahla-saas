@@ -243,8 +243,15 @@ function AudioPreview({ media }: { media: DashboardMessageMediaAudio }) {
         <div className="text-[11.5px] text-amber-700 bg-amber-50/60 border border-amber-100 rounded-lg px-2.5 py-1">
           {media.transcript_status === 'failed' && 'تعذر تفريغ التسجيل تلقائياً.'}
           {media.transcript_status === 'skipped' && 'ميزة التفريغ الصوتي غير مفعّلة على الخادم (OPENAI_API_KEY مفقود).'}
+          {/* `stale_skipped` is set by the backend at READ TIME when the
+              historical row was skipped due to a missing key but the
+              current server now has it. We don't promise the bytes
+              are still downloadable (Meta media URLs expire after
+              ~5 minutes), only that the snapshot is from a different
+              configuration era. */}
+          {media.transcript_status === 'stale_skipped' && 'لم يُستخرج التفريغ وقت الاستقبال (لقطة قديمة قبل تفعيل المفتاح). جرّب إعادة المعالجة — قد تنجح إن لم تنته صلاحية الملف.'}
           {media.transcript_status === 'empty'   && 'لم نتمكن من سماع كلمات واضحة في التسجيل.'}
-          {!['failed','skipped','empty'].includes(media.transcript_status || '') && 'التسجيل بدون نص مستخرج.'}
+          {!['failed','skipped','stale_skipped','empty'].includes(media.transcript_status || '') && 'التسجيل بدون نص مستخرج.'}
           {' '}
           <ReprocessButton
             messageEventId={media.message_event_id}
@@ -318,8 +325,10 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
         <div className="text-[11.5px] text-amber-700 bg-amber-50/60 border border-amber-100 rounded-lg px-2.5 py-1">
           {media.vision_status === 'failed' && 'تعذر استخراج وصف للصورة تلقائياً.'}
           {media.vision_status === 'skipped' && 'ميزة وصف الصور غير مفعّلة على الخادم (OPENAI_API_KEY مفقود).'}
+          {/* See transcript comment above — same logic for vision. */}
+          {media.vision_status === 'stale_skipped' && 'لم يُستخرج الوصف وقت الاستقبال (لقطة قديمة قبل تفعيل المفتاح). جرّب إعادة المعالجة — قد تنجح إن لم تنته صلاحية الملف.'}
           {media.vision_status === 'empty'   && 'الصورة لم تحتوِ على نص أو معالم يمكن وصفها.'}
-          {!['failed','skipped','empty'].includes(media.vision_status || '') && 'صورة بدون وصف مستخرج.'}
+          {!['failed','skipped','stale_skipped','empty'].includes(media.vision_status || '') && 'صورة بدون وصف مستخرج.'}
           {' '}
           <ReprocessButton
             messageEventId={media.message_event_id}

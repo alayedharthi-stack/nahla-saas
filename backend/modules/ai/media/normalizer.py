@@ -399,6 +399,8 @@ async def _process_audio(
         transcript = await _transcribe_bytes_with_openai(
             file_bytes=file_bytes,
             mime_type=actual_mime,
+            tenant_id=tenant_id,
+            media_id=media_id,
         )
     except Exception as exc:
         logger.warning(
@@ -413,6 +415,11 @@ async def _process_audio(
         return _audio_with_fallback(base_meta, caption)
 
     if not transcript:
+        logger.warning(
+            "[MEDIA_STT_EMPTY] tenant=%s media_id=%s mime=%s bytes=%d "
+            "— whisper returned no usable text",
+            tenant_id, media_id, actual_mime or "—", len(file_bytes),
+        )
         base_meta["transcript_status"] = "empty"
         base_meta["transcript_error"]  = "empty_transcript"
         return _audio_with_fallback(base_meta, caption)
@@ -561,6 +568,8 @@ async def _process_image(
             file_bytes=file_bytes,
             mime_type=actual_mime,
             caption_hint=caption,
+            tenant_id=tenant_id,
+            media_id=media_id,
         )
     except Exception as exc:
         logger.warning(
@@ -575,6 +584,12 @@ async def _process_image(
         return _image_with_fallback(base_meta, caption)
 
     if not vision_text:
+        logger.warning(
+            "[MEDIA_VISION_EMPTY] tenant=%s media_id=%s mime=%s bytes=%d "
+            "caption_present=%s — openai returned no usable text",
+            tenant_id, media_id, actual_mime or "—",
+            len(file_bytes), "true" if caption else "false",
+        )
         base_meta["vision_status"] = "empty"
         base_meta["vision_error"]  = "empty_description"
         return _image_with_fallback(base_meta, caption)
@@ -667,6 +682,28 @@ async def _download_meta_media(
             resolved_mime = str(
                 meta_json.get("mime_type") or mime_type or ""
             ).strip()
+            # ── Success log for the URL-RESOLVE step ──────────────
+            # Without this, when the customer's WhatsApp message
+            # produces a vision-empty fallback the operator can't
+            # tell whether Meta returned a 200 with a usable URL
+            # or whether the second hop failed. We log the resolve
+            # outcome (with URL host + tail only — never the full
+            # token-carrying URL) and the resolved mime so the two
+            # hops can be traced independently in Railway logs.
+            try:
+                _media_host = ""
+                if media_url:
+                    from urllib.parse import urlparse  # noqa: PLC0415
+                    _media_host = urlparse(media_url).netloc or ""
+            except Exception:
+                _media_host = ""
+            logger.info(
+                "[MEDIA_DOWNLOAD_RESOLVE] tenant=%s media_id=%s "
+                "status=%d mime=%s url_host=%s url_present=%s",
+                tenant_id, media_id, int(meta_resp.status_code),
+                resolved_mime or "—", _media_host or "—",
+                "true" if media_url else "false",
+            )
             if not media_url:
                 logger.warning(
                     "[MediaNormalizer] Meta returned no url tenant=%s "
@@ -678,6 +715,21 @@ async def _download_meta_media(
             media_resp = await client.get(media_url, headers=headers)
             media_resp.raise_for_status()
             file_bytes = media_resp.content
+            # ── Success log for the CDN-FETCH step ────────────────
+            # This is THE crucial line that proves bytes arrived
+            # (and how many). When vision later returns empty
+            # text, we can grep the same media_id and see whether
+            # we actually downloaded a real image or a 200-OK
+            # error page. Content-Type from the CDN is also key —
+            # WhatsApp sometimes returns text/html if the URL
+            # expired between resolve and fetch.
+            _cdn_ct = media_resp.headers.get("content-type") or ""
+            logger.info(
+                "[MEDIA_DOWNLOAD_FETCH] tenant=%s media_id=%s "
+                "status=%d bytes=%d content_type=%s",
+                tenant_id, media_id, int(media_resp.status_code),
+                len(file_bytes), _cdn_ct or "—",
+            )
 
         if not file_bytes:
             logger.warning(
@@ -692,6 +744,27 @@ async def _download_meta_media(
                 "bytes=%d cap=%d",
                 tenant_id, media_id, len(file_bytes),
                 INBOUND_MEDIA_MAX_BYTES,
+            )
+            return None
+        # ── Sanity check: the CDN sometimes serves an HTML error
+        # page with 200 OK when the temporary URL expired between
+        # the resolve and fetch hops. Detect by content-type +
+        # magic-byte sniff so the caller can short-circuit before
+        # spending an OpenAI Vision call on garbage.
+        looks_like_html = False
+        try:
+            head = bytes(file_bytes[:8]).lstrip().lower()
+            if head.startswith(b"<!doctype") or head.startswith(b"<html") or head.startswith(b"<?xml"):
+                looks_like_html = True
+        except Exception:
+            looks_like_html = False
+        if looks_like_html or (_cdn_ct.lower().startswith("text/html") if _cdn_ct else False):
+            logger.warning(
+                "[MEDIA_DOWNLOAD_NON_BINARY] tenant=%s media_id=%s "
+                "content_type=%s bytes=%d head=%s — likely expired "
+                "CDN URL serving HTML error page",
+                tenant_id, media_id, _cdn_ct or "—", len(file_bytes),
+                bytes(file_bytes[:24]),
             )
             return None
         return {"bytes": file_bytes, "mime_type": resolved_mime}
@@ -745,6 +818,7 @@ def _try_persist(
 
 async def _transcribe_bytes_with_openai(
     *, file_bytes: bytes, mime_type: str,
+    tenant_id: Optional[int] = None, media_id: Optional[str] = None,
 ) -> str:
     """Transcribe an in-memory audio blob via the OpenAI Whisper /
     ``audio/transcriptions`` endpoint with an Arabic language hint
@@ -757,6 +831,17 @@ async def _transcribe_bytes_with_openai(
     headers = {"Authorization": f"Bearer {_runtime_openai_key()}"}
     suffix = _guess_suffix(mime_type)
     tmp_path: Optional[Path] = None
+    # ── Pre-request log ───────────────────────────────────────
+    # Same rationale as the vision pre-request log: when whisper
+    # returns empty, we need to know whether we sent it a real
+    # audio file or 0 bytes / a 200-OK HTML page that slipped
+    # past the download non-binary check.
+    logger.info(
+        "[MEDIA_STT_REQ] tenant=%s media_id=%s model=%s mime=%s "
+        "ext_guess=%s bytes_in=%d language=%s",
+        tenant_id, media_id, OPENAI_AUDIO_MODEL, mime_type or "—",
+        suffix, len(file_bytes), NAHLA_STT_LANGUAGE,
+    )
     try:
         with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(file_bytes)
@@ -781,7 +866,20 @@ async def _transcribe_bytes_with_openai(
                 )
                 resp.raise_for_status()
                 data = resp.json()
-        return str(data.get("text") or "").strip()
+        text = str(data.get("text") or "").strip()
+        # ── Post-response log ─────────────────────────────────
+        # Whisper sometimes returns valid JSON with text="" for
+        # very short / silent / encrypted-codec recordings. We
+        # log preview (max 120 chars) so audit can see what the
+        # customer was trying to say, but never the full
+        # transcription (PII).
+        logger.info(
+            "[MEDIA_STT_RESP] tenant=%s media_id=%s status=%d "
+            "text_len=%d preview=%r",
+            tenant_id, media_id, int(resp.status_code),
+            len(text), text[:120],
+        )
+        return text
     finally:
         if tmp_path is not None:
             try:
@@ -795,6 +893,8 @@ async def _describe_image_with_openai(
     file_bytes: bytes,
     mime_type: str,
     caption_hint: str,
+    tenant_id: Optional[int] = None,
+    media_id: Optional[str] = None,
 ) -> str:
     """Run an OpenAI Vision describe over the inbound image.
 
@@ -849,6 +949,19 @@ async def _describe_image_with_openai(
         "temperature": 0.2,
     }
 
+    # ── Pre-request log ────────────────────────────────────────
+    # Without this, when vision returns empty text we cannot
+    # tell whether the payload was reasonable or malformed.
+    # We log byte counts, not bytes themselves, to keep
+    # customer images out of log storage.
+    logger.info(
+        "[MEDIA_VISION_REQ] tenant=%s media_id=%s model=%s "
+        "mime=%s bytes_in=%d b64_len=%d caption_present=%s",
+        tenant_id, media_id, OPENAI_VISION_MODEL,
+        safe_mime, len(file_bytes), len(b64),
+        "true" if caption_hint else "false",
+    )
+
     async with httpx.AsyncClient(timeout=45) as client:
         resp = await client.post(
             f"{OPENAI_API_BASE.rstrip('/')}/chat/completions",
@@ -859,7 +972,32 @@ async def _describe_image_with_openai(
         data = resp.json()
 
     choices = data.get("choices") or []
+    # ── Post-response shape log ────────────────────────────────
+    # Disambiguates the THREE empty paths below: no choices,
+    # empty content list, content-as-None. Each has a distinct
+    # remediation (model misconfig vs. safety filter vs. plain
+    # API error).
+    _finish_reason = ""
+    try:
+        if choices:
+            _finish_reason = str(choices[0].get("finish_reason") or "")
+    except Exception:
+        _finish_reason = ""
+    _usage = data.get("usage") or {}
+    logger.info(
+        "[MEDIA_VISION_RESP] tenant=%s media_id=%s status=%d "
+        "choices=%d finish_reason=%s prompt_tokens=%s "
+        "completion_tokens=%s",
+        tenant_id, media_id, int(resp.status_code),
+        len(choices), _finish_reason or "—",
+        _usage.get("prompt_tokens"), _usage.get("completion_tokens"),
+    )
     if not choices:
+        logger.warning(
+            "[MEDIA_VISION_EMPTY_CAUSE] tenant=%s media_id=%s "
+            "cause=no_choices",
+            tenant_id, media_id,
+        )
         return ""
     msg = (choices[0] or {}).get("message") or {}
     content = msg.get("content")
@@ -870,8 +1008,35 @@ async def _describe_image_with_openai(
             for p in content
             if isinstance(p, dict) and p.get("type") == "text"
         ]
-        return "".join(parts).strip()
-    return str(content or "").strip()
+        result = "".join(parts).strip()
+        if not result:
+            logger.warning(
+                "[MEDIA_VISION_EMPTY_CAUSE] tenant=%s media_id=%s "
+                "cause=no_text_parts content_parts=%d",
+                tenant_id, media_id, len(content),
+            )
+        else:
+            logger.info(
+                "[MEDIA_VISION_OK] tenant=%s media_id=%s "
+                "text_len=%d preview=%r",
+                tenant_id, media_id, len(result), result[:120],
+            )
+        return result
+    result = str(content or "").strip()
+    if not result:
+        logger.warning(
+            "[MEDIA_VISION_EMPTY_CAUSE] tenant=%s media_id=%s "
+            "cause=%s",
+            tenant_id, media_id,
+            "content_none" if content is None else "content_empty_string",
+        )
+    else:
+        logger.info(
+            "[MEDIA_VISION_OK] tenant=%s media_id=%s "
+            "text_len=%d preview=%r",
+            tenant_id, media_id, len(result), result[:120],
+        )
+    return result
 
 
 def _guess_suffix(mime_type: str) -> str:
