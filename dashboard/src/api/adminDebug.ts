@@ -37,6 +37,40 @@ export interface AdminDirectSendResponse {
   error_message:       string | null
 }
 
+// ── /admin/debug/media-env ──────────────────────────────────────────
+// Diagnostic snapshot of the inbound-media pipeline configuration —
+// without ever exposing the OPENAI_API_KEY value. Used by the
+// "تشخيص الوسائط" panel when the conversation drawer reports
+// "ميزة التفريغ الصوتي غير مفعّلة" so support can confirm whether
+// the issue is env (key missing) or volume (NAHLA_INBOUND_MEDIA_DIR
+// not writable) without grepping Railway logs.
+
+export interface AdminMediaEnvSnapshot {
+  openai: {
+    api_key_present: boolean
+    api_key_tail:    string | null
+    api_base:        string
+    chat_model:      string
+    audio_model:     string
+    vision_model:    string
+    stt_language:    string
+  }
+  storage: {
+    root:              string
+    exists:            boolean
+    writable:          boolean
+    write_probe_error: string | null
+    free_bytes:        number | null
+    max_inbound_bytes: number
+  }
+  ready: {
+    audio:  boolean
+    vision: boolean
+  }
+  issues: string[]
+  hints:  string[]
+}
+
 export const adminDebugApi = {
   /** Fire a single template send directly through the live provider. */
   sendTemplate: (body: AdminDirectSendRequest) =>
@@ -44,4 +78,7 @@ export const adminDebugApi = {
       method: 'POST',
       body:   JSON.stringify(body),
     }),
+  /** Inspect the inbound-media pipeline configuration on the server. */
+  mediaEnv: () =>
+    apiCall<AdminMediaEnvSnapshot>('/admin/debug/media-env'),
 }

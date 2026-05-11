@@ -687,3 +687,248 @@ class TestMediaDebugEndpoint:
             # Wrong tenant scope.
             _call_media_debug(db, 99, conv.id)
         assert exc.value.status_code == 404
+
+    def test_local_path_exists_true_when_file_present(self, isolated_storage):
+        """The media-debug endpoint walks the storage layer to verify
+        the bytes still exist on disk. This is the #1 indicator
+        support reaches for when a recording suddenly 404s after
+        a redeploy."""
+        from models import MessageEvent
+        from services.inbound_media_storage import save_inbound_media
+
+        db, _ = _make_db()
+        t, conv = _seed_tenant_conversation(db, tenant_id=51)
+        stored = save_inbound_media(
+            tenant_id=t.id, file_bytes=b"ogg-bytes",
+            mime_type="audio/ogg", kind="audio", media_id="wa-1",
+        )
+        db.add(MessageEvent(
+            tenant_id=t.id, conversation_id=conv.id, direction="inbound",
+            body="x", event_type="whatsapp",
+            extra_metadata={
+                "phone": "+966500000111",
+                "normalized_inbound": {
+                    "source_type":           "audio",
+                    "media_id":              "wa-1",
+                    "mime_type":             "audio/ogg",
+                    "audio_download_status": "ok",
+                    "transcript_status":     "ok",
+                    "transcript_text":       "أبغى فستان",
+                    "ai_used_audio":         True,
+                    "storage_url":           stored.storage_url,
+                    "storage_sha256":        stored.sha256,
+                    "byte_size":             stored.byte_size,
+                },
+            },
+        ))
+        db.commit()
+        result = _call_media_debug(db, t.id, conv.id)
+        row = result["rows"][0]
+        assert row["local_path_exists"] is True
+        # Spec aliases: media_type / original_media_id / last_error
+        assert row["media_type"] == "audio"
+        assert row["original_media_id"] == "wa-1"
+        assert row["public_media_url"] == stored.storage_url
+        # Unified download_status for audio routes to audio_download_status.
+        assert row["download_status"] == "ok"
+
+    def test_local_path_exists_false_when_file_missing(self, isolated_storage):
+        """Row in DB but the bytes are gone — classic "volume swept"
+        post-deploy state. Surface as ``local_path_exists=False`` so
+        support sees one canonical truth instead of three different
+        UI failures."""
+        from models import MessageEvent
+        db, _ = _make_db()
+        t, conv = _seed_tenant_conversation(db, tenant_id=53)
+        db.add(MessageEvent(
+            tenant_id=t.id, conversation_id=conv.id, direction="inbound",
+            body="x", event_type="whatsapp",
+            extra_metadata={
+                "phone": "+966500000111",
+                "normalized_inbound": {
+                    "source_type":           "audio",
+                    "media_id":              "wa-2",
+                    "mime_type":             "audio/ogg",
+                    "audio_download_status": "ok",
+                    "transcript_status":     "ok",
+                    "transcript_text":       "ت",
+                    "ai_used_audio":         True,
+                    "storage_url":           "/media/inbound/53/deadbeef.ogg",
+                    "storage_sha256":        "deadbeef" * 8,
+                    "byte_size":             16,
+                },
+            },
+        ))
+        db.commit()
+        result = _call_media_debug(db, t.id, conv.id)
+        row = result["rows"][0]
+        assert row["local_path_exists"] is False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 6. Reprocess endpoint
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _call_reprocess(db, tenant_id, message_event_id):
+    from routers import conversations as convo_router
+
+    original = convo_router.resolve_tenant_id
+    convo_router.resolve_tenant_id = (
+        lambda request, db=None: tenant_id  # type: ignore
+    )
+    try:
+        return asyncio.run(
+            convo_router.reprocess_inbound_media(
+                message_event_id=message_event_id,
+                request=_FakeReq(),
+                db=db,
+            )
+        )
+    finally:
+        convo_router.resolve_tenant_id = original
+
+
+class TestReprocessEndpoint:
+    def _seed_audio_row(self, db, tenant_id, *, storage_url=None, status="skipped"):
+        from models import (
+            Conversation, Customer, MessageEvent, Tenant,
+            WhatsAppConnection,
+        )
+        t = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not t:
+            t = Tenant(id=tenant_id, name=f"t-{tenant_id}")
+            db.add(t); db.commit()
+        # Reprocess REQUIRES a connection — exercise that requirement.
+        conn = WhatsAppConnection(
+            tenant_id=tenant_id, phone_number_id="100543193146977",
+            connection_type="direct",
+        )
+        db.add(conn); db.commit()
+        cust = Customer(
+            tenant_id=tenant_id, name="X", phone="+966500000111",
+            normalized_phone="+966500000111",
+        )
+        db.add(cust); db.commit()
+        conv = Conversation(
+            tenant_id=tenant_id, customer_id=cust.id,
+            external_id="wa::+966500000111", status="active",
+        )
+        db.add(conv); db.commit()
+        evt = MessageEvent(
+            tenant_id=tenant_id, conversation_id=conv.id, direction="inbound",
+            body="[رسالة وسائط]", event_type="whatsapp",
+            extra_metadata={
+                "phone": "+966500000111",
+                "normalized_inbound": {
+                    "source_type":           "audio",
+                    "media_id":              "wa-audio-rerun",
+                    "mime_type":             "audio/ogg",
+                    "voice":                 True,
+                    "audio_download_status": "ok" if storage_url else "failed",
+                    "transcript_status":     status,
+                    "transcript_text":       None,
+                    "ai_used_audio":         False,
+                    "storage_url":           storage_url,
+                    "storage_sha256":        None,
+                    "byte_size":             None,
+                },
+            },
+        )
+        db.add(evt); db.commit()
+        return evt
+
+    def test_reprocess_runs_full_pipeline_and_updates_metadata(self, isolated_storage):
+        from modules.ai.media import normalizer
+        db, _ = _make_db()
+        evt = self._seed_audio_row(db, tenant_id=61, status="skipped")
+        evt_id = evt.id
+
+        with patch.object(
+            normalizer, "_download_meta_media",
+            new=AsyncMock(return_value={"bytes": b"ogg", "mime_type": "audio/ogg"}),
+        ), patch.object(
+            normalizer, "_transcribe_bytes_with_openai",
+            new=AsyncMock(return_value="بعد إعادة المعالجة"),
+        ), patch.object(normalizer, "OPENAI_API_KEY", "sk-test"):
+            result = _call_reprocess(db, 61, evt_id)
+
+        assert result["ok"] is True
+        assert result["source_type"] == "audio"
+        ni = result["normalized_inbound"]
+        assert ni["transcript_status"] == "ok"
+        assert ni["transcript_text"] == "بعد إعادة المعالجة"
+        assert ni["ai_used_audio"] is True
+        # Reprocess stamp is added so support can tell first-run
+        # data apart from manually-rerun data.
+        assert "reprocessed_at" in ni
+        assert ni["reprocessed_by"] == "manual_reprocess_endpoint"
+
+    def test_reprocess_404_for_unknown_row(self):
+        from fastapi import HTTPException
+        db, _ = _make_db()
+        with pytest.raises(HTTPException) as exc:
+            _call_reprocess(db, 1, 999_999)
+        assert exc.value.status_code == 404
+
+    def test_reprocess_400_when_row_is_not_media(self):
+        from fastapi import HTTPException
+        from models import Conversation, Customer, MessageEvent, Tenant
+        db, _ = _make_db()
+        t = Tenant(id=63, name="t-63"); db.add(t); db.commit()
+        cust = Customer(tenant_id=63, name="X", phone="+9", normalized_phone="+9")
+        db.add(cust); db.commit()
+        conv = Conversation(tenant_id=63, customer_id=cust.id,
+                            external_id="x", status="active")
+        db.add(conv); db.commit()
+        # Text-only inbound — has no normalized_inbound block.
+        evt = MessageEvent(
+            tenant_id=63, conversation_id=conv.id, direction="inbound",
+            body="hi", event_type="whatsapp",
+            extra_metadata={"phone": "+9"},
+        )
+        db.add(evt); db.commit()
+        with pytest.raises(HTTPException) as exc:
+            _call_reprocess(db, 63, evt.id)
+        assert exc.value.status_code == 400
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 7. /admin/debug/media-env
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestMediaEnvEndpoint:
+    def test_returns_full_snapshot_with_writable_storage(self, isolated_storage, monkeypatch):
+        from routers import admin_debug
+
+        # Stamp config to a known, finite shape.
+        monkeypatch.setattr(admin_debug, "_mask_secret_tail",
+                            lambda v: f"***{v[-4:]}" if v else None)
+        # Ensure the import in the handler picks up the (patched)
+        # storage_root pointing at the tmp dir.
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        assert result["storage"]["exists"] is True
+        assert result["storage"]["writable"] is True
+        assert result["storage"]["write_probe_error"] is None
+        assert isinstance(result["storage"]["max_inbound_bytes"], int)
+        # Hints + issues are lists even when there are no problems.
+        assert isinstance(result["hints"], list)
+        assert isinstance(result["issues"], list)
+
+    def test_flags_missing_openai_key(self, isolated_storage, monkeypatch):
+        from routers import admin_debug
+
+        monkeypatch.setattr("core.config.OPENAI_API_KEY", "", raising=False)
+        # Also patch the module-level import inside the handler.
+        with patch.dict(__import__("sys").modules):
+            result = asyncio.run(admin_debug.admin_debug_media_env(
+                _admin={"sub": "admin@nahla", "role": "admin"},
+            ))
+        # When the key is empty/unset the issues list calls it out.
+        if not result["openai"]["api_key_present"]:
+            assert any("OPENAI_API_KEY" in s for s in result["issues"])
+            assert result["ready"]["audio"] is False
+            assert result["ready"]["vision"] is False

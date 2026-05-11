@@ -5,6 +5,26 @@
  * or image) inside the conversation drawer, plus the AI-extracted
  * transcript / description rendered immediately underneath.
  *
+ * Hardened from v1 (commit c064e038):
+ *
+ *   1. The blob fetcher now surfaces the **real** HTTP status code
+ *      (401/403/404/500) instead of a generic "تعذر التحميل".
+ *      Different status codes mean different operator actions:
+ *        401 → session expired, re-login
+ *        403 → cross-tenant URL, file belongs to a different tenant
+ *        404 → file genuinely missing on disk (volume not mounted,
+ *              swept on redeploy, or never persisted)
+ *        500 → storage layer broke server-side
+ *   2. Distinct copy for audio vs image when AI is disabled —
+ *      the v1 component reused the same label "(الميزة غير مفعّلة)"
+ *      for both, which read as if image status applied to audio.
+ *      Now: "ميزة التفريغ الصوتي غير مفعّلة على الخادم" vs
+ *           "ميزة وصف الصور غير مفعّلة على الخادم".
+ *   3. "إعادة معالجة" button — calls the new
+ *      `POST /conversations/media/{id}/reprocess` endpoint to
+ *      redownload from Meta + rerun Whisper/Vision. Useful when
+ *      OPENAI_API_KEY was added after the message arrived.
+ *
  * Why a dedicated component instead of inlining in Conversations.tsx:
  *   * The media URL is served by an auth-protected endpoint
  *     (``GET /media/inbound/<tenant_id>/<slug>``) so we cannot just
@@ -12,15 +32,13 @@
  *     our Authorization + X-Tenant-ID headers on subresource loads.
  *     We fetch via the existing authenticated fetch wrapper, build a
  *     blob URL, and bind THAT to the player.
- *   * The transcript / vision text needs careful empty / failure
- *     handling so we never display a dangling "النص المستخرج من
- *     الصوت:" with nothing under it.
  *   * Blob URLs MUST be revoked on unmount to avoid leaking memory
  *     on long conversation views (1000+ messages).
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import { getApiBase, getToken, getTenantId } from '../../auth'
+import { featureRealityApi } from '../../api/featureReality'
 
 import type {
   DashboardMessageMedia,
@@ -31,24 +49,45 @@ import type {
 interface BlobUrlState {
   url: string | null
   loading: boolean
-  error: string | null
+  /** HTTP status when the fetch returned a non-2xx, or null on success. */
+  httpStatus: number | null
+  /** Network-level error (timeout, CORS, etc.) when the fetch never
+   * completed. Mutually exclusive with ``httpStatus``. */
+  networkError: string | null
+}
+
+const _STATUS_LABEL_AR: Record<number, string> = {
+  401: 'الجلسة منتهية — أعد تسجيل الدخول.',
+  403: 'الملف يخصّ مستأجراً آخر — تواصل مع الدعم.',
+  404: 'الملف غير موجود على القرص. قد لا يكون الـ volume مربوطاً، أو حُذف بعد آخر deploy.',
+  500: 'خطأ في طبقة التخزين على الخادم.',
+  502: 'تعذّر وصول الخادم لمزود التخزين.',
+  503: 'خدمة التخزين غير متاحة مؤقتاً.',
+}
+
+function statusLabelAr(status: number): string {
+  return _STATUS_LABEL_AR[status] || `تعذر التحميل (HTTP ${status})`
 }
 
 /** Fetch an authenticated media URL and surface it as a blob URL. */
-function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlState {
+function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlState & {
+  reload: () => void
+} {
+  const [reloadKey, setReloadKey] = useState(0)
   const [state, setState] = useState<BlobUrlState>({
-    url: null, loading: !!storage_url, error: null,
+    url: null, loading: !!storage_url, httpStatus: null, networkError: null,
   })
 
   useEffect(() => {
     if (!storage_url) {
-      setState({ url: null, loading: false, error: null })
+      setState({ url: null, loading: false, httpStatus: null, networkError: null })
       return
     }
     let cancelled = false
     let createdUrl: string | null = null
 
     const load = async () => {
+      setState({ url: null, loading: true, httpStatus: null, networkError: null })
       try {
         const token    = getToken()
         const tenantId = getTenantId()
@@ -61,19 +100,43 @@ function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlStat
           },
         })
         if (!res.ok) {
-          throw new Error(`http_${res.status}`)
+          if (!cancelled) {
+            setState({
+              url: null,
+              loading: false,
+              httpStatus: res.status,
+              networkError: null,
+            })
+          }
+          return
+        }
+        // Defensive: a 200 with a JSON error body (e.g. proxy hijack)
+        // would otherwise be bound to <audio src=...> and render a
+        // silent broken player. Reject anything that isn't audio/image.
+        const contentType = res.headers.get('content-type') || ''
+        if (!/^(audio|image)\//.test(contentType)) {
+          if (!cancelled) {
+            setState({
+              url: null,
+              loading: false,
+              httpStatus: null,
+              networkError: `unexpected_content_type:${contentType || 'unknown'}`,
+            })
+          }
+          return
         }
         const blob = await res.blob()
         createdUrl = URL.createObjectURL(blob)
         if (!cancelled) {
-          setState({ url: createdUrl, loading: false, error: null })
+          setState({ url: createdUrl, loading: false, httpStatus: null, networkError: null })
         }
       } catch (e) {
         if (!cancelled) {
           setState({
             url: null,
             loading: false,
-            error: e instanceof Error ? e.message : 'fetch_failed',
+            httpStatus: null,
+            networkError: e instanceof Error ? e.message : 'fetch_failed',
           })
         }
       }
@@ -84,14 +147,51 @@ function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlStat
       cancelled = true
       if (createdUrl) URL.revokeObjectURL(createdUrl)
     }
-  }, [storage_url])
+  }, [storage_url, reloadKey])
 
-  return state
+  return { ...state, reload: () => setReloadKey(k => k + 1) }
 }
 
+/** Tiny helper button shared by audio + image. */
+function ReprocessButton({
+  messageEventId,
+  onAfter,
+}: {
+  messageEventId: number
+  onAfter: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const run = async () => {
+    setBusy(true); setError(null)
+    try {
+      await featureRealityApi.reprocessInboundMedia(messageEventId)
+      onAfter()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'فشل')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="inline-flex items-center gap-1.5 mt-0.5">
+      <button
+        onClick={run}
+        disabled={busy}
+        className="text-[10.5px] text-slate-500 hover:text-slate-800 underline underline-offset-2 disabled:opacity-50"
+      >
+        {busy ? 'جاري المعالجة…' : 'إعادة معالجة'}
+      </button>
+      {error && <span className="text-[10.5px] text-rose-600">— {error}</span>}
+    </div>
+  )
+}
+
+
 function AudioPreview({ media }: { media: DashboardMessageMediaAudio }) {
-  const { url, loading, error } = useAuthedMediaBlob(media.storage_url)
+  const { url, loading, httpStatus, networkError, reload } = useAuthedMediaBlob(media.storage_url)
   const transcriptOk = media.transcript_status === 'ok' && !!media.transcript
+  const downloadFailed = (media.download_status || '').toLowerCase() === 'failed'
 
   return (
     <div className="flex flex-col gap-1.5 max-w-full">
@@ -106,10 +206,20 @@ function AudioPreview({ media }: { media: DashboardMessageMediaAudio }) {
           />
         ) : loading ? (
           <span className="text-[12px] text-emerald-700/80">جاري تحميل التسجيل…</span>
-        ) : (
+        ) : downloadFailed && !media.storage_url ? (
           <span className="text-[12px] text-rose-600">
-            تعذر تشغيل التسجيل{error ? ` (${error})` : ''}
+            لم يصل الملف من واتساب أثناء الاستقبال.
           </span>
+        ) : httpStatus ? (
+          <span className="text-[12px] text-rose-600">
+            تعذر تشغيل التسجيل — {statusLabelAr(httpStatus)}
+          </span>
+        ) : networkError ? (
+          <span className="text-[12px] text-rose-600">
+            تعذر تشغيل التسجيل — {networkError}
+          </span>
+        ) : (
+          <span className="text-[12px] text-rose-600">تعذر تشغيل التسجيل.</span>
         )}
       </div>
 
@@ -121,20 +231,25 @@ function AudioPreview({ media }: { media: DashboardMessageMediaAudio }) {
           </span>
           <span className="whitespace-pre-wrap break-words">{media.transcript}</span>
           {media.ai_used && (
-            <span className="inline-flex items-center gap-1 ml-2 text-[10px] text-emerald-700 align-middle">
+            <span className="inline-flex items-center gap-1 ms-2 text-[10px] text-emerald-700 align-middle">
               · استخدمته نحلة في الرد
             </span>
           )}
         </div>
       )}
 
-      {/* Transcription failed / skipped */}
+      {/* Transcription failed / skipped — DIFFERENT copy from image. */}
       {!transcriptOk && (
         <div className="text-[11.5px] text-amber-700 bg-amber-50/60 border border-amber-100 rounded-lg px-2.5 py-1">
           {media.transcript_status === 'failed' && 'تعذر تفريغ التسجيل تلقائياً.'}
-          {media.transcript_status === 'skipped' && 'لم يتم تفريغ التسجيل (الميزة غير مفعّلة).'}
+          {media.transcript_status === 'skipped' && 'ميزة التفريغ الصوتي غير مفعّلة على الخادم (OPENAI_API_KEY مفقود).'}
           {media.transcript_status === 'empty'   && 'لم نتمكن من سماع كلمات واضحة في التسجيل.'}
           {!['failed','skipped','empty'].includes(media.transcript_status || '') && 'التسجيل بدون نص مستخرج.'}
+          {' '}
+          <ReprocessButton
+            messageEventId={media.message_event_id}
+            onAfter={reload}
+          />
         </div>
       )}
 
@@ -148,8 +263,9 @@ function AudioPreview({ media }: { media: DashboardMessageMediaAudio }) {
 }
 
 function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
-  const { url, loading, error } = useAuthedMediaBlob(media.storage_url)
+  const { url, loading, httpStatus, networkError, reload } = useAuthedMediaBlob(media.storage_url)
   const visionOk = media.vision_status === 'ok' && !!media.description
+  const downloadFailed = (media.download_status || '').toLowerCase() === 'failed'
 
   return (
     <div className="flex flex-col gap-1.5 max-w-full">
@@ -165,9 +281,21 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
           <div className="px-3 py-6 text-[12px] text-slate-500 text-center">
             جاري تحميل الصورة…
           </div>
+        ) : downloadFailed && !media.storage_url ? (
+          <div className="px-3 py-6 text-[12px] text-rose-600 text-center">
+            لم تصل الصورة من واتساب أثناء الاستقبال.
+          </div>
+        ) : httpStatus ? (
+          <div className="px-3 py-6 text-[12px] text-rose-600 text-center">
+            تعذر عرض الصورة — {statusLabelAr(httpStatus)}
+          </div>
+        ) : networkError ? (
+          <div className="px-3 py-6 text-[12px] text-rose-600 text-center">
+            تعذر عرض الصورة — {networkError}
+          </div>
         ) : (
           <div className="px-3 py-6 text-[12px] text-rose-600 text-center">
-            تعذر عرض الصورة{error ? ` (${error})` : ''}
+            تعذر عرض الصورة.
           </div>
         )}
       </div>
@@ -179,7 +307,7 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
           </span>
           <span className="whitespace-pre-wrap break-words">{media.description}</span>
           {media.ai_used && (
-            <span className="inline-flex items-center gap-1 ml-2 text-[10px] text-emerald-700 align-middle">
+            <span className="inline-flex items-center gap-1 ms-2 text-[10px] text-emerald-700 align-middle">
               · استخدمته نحلة في الرد
             </span>
           )}
@@ -189,9 +317,14 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
       {!visionOk && (
         <div className="text-[11.5px] text-amber-700 bg-amber-50/60 border border-amber-100 rounded-lg px-2.5 py-1">
           {media.vision_status === 'failed' && 'تعذر استخراج وصف للصورة تلقائياً.'}
-          {media.vision_status === 'skipped' && 'لم يتم استخراج وصف للصورة (الميزة غير مفعّلة).'}
+          {media.vision_status === 'skipped' && 'ميزة وصف الصور غير مفعّلة على الخادم (OPENAI_API_KEY مفقود).'}
           {media.vision_status === 'empty'   && 'الصورة لم تحتوِ على نص أو معالم يمكن وصفها.'}
           {!['failed','skipped','empty'].includes(media.vision_status || '') && 'صورة بدون وصف مستخرج.'}
+          {' '}
+          <ReprocessButton
+            messageEventId={media.message_event_id}
+            onAfter={reload}
+          />
         </div>
       )}
 

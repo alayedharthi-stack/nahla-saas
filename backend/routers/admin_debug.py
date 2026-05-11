@@ -1426,3 +1426,149 @@ async def admin_debug_send_template(
         "duration_ms":         duration_ms,
         "error_message":       error_message,
     }
+
+
+# ════════════════════════════════════════════════════════════════════════
+# MEDIA PIPELINE ENV DIAGNOSTICS
+# ════════════════════════════════════════════════════════════════════════
+#
+# When the conversation drawer shows "تعذر عرض الصورة" / "لم يتم تفريغ
+# التسجيل (الميزة غير مفعّلة)" — the merchant has no way to tell whether
+# the problem is:
+#
+#   * OPENAI_API_KEY missing on Railway
+#   * NAHLA_INBOUND_MEDIA_DIR pointing at a non-existent / read-only
+#     volume (so storage writes silently fail)
+#   * Volume mounted but empty after a redeploy
+#   * Vision / STT model env var set to something nonsensical
+#
+# This endpoint returns a structured snapshot platform support can
+# read in one HTTP call. It NEVER returns API key values — only
+# "present: true|false" and the last 4 characters when present (so we
+# can confirm the key isn't truncated without leaking it).
+
+
+def _mask_secret_tail(value: Optional[str]) -> Optional[str]:
+    """Return a hint we can show in a debug response. We expose only
+    the last 4 characters so support can verify the secret matches
+    what they set, without ever transmitting the full value."""
+    s = (value or "").strip()
+    if not s:
+        return None
+    if len(s) <= 4:
+        return "***"
+    return f"***{s[-4:]}"
+
+
+@router.get("/media-env")
+async def admin_debug_media_env(
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Diagnostic snapshot of the inbound-media pipeline configuration.
+
+    Reads:
+      * OPENAI_API_KEY                (presence + last 4)
+      * OPENAI_API_BASE               (full — public)
+      * OPENAI_MODEL / OPENAI_AUDIO_MODEL / OPENAI_VISION_MODEL
+      * NAHLA_STT_LANGUAGE
+      * INBOUND_MEDIA_MAX_BYTES       (parsed integer)
+      * NAHLA_INBOUND_MEDIA_DIR       (full path)
+      * Storage root existence + writability + free space
+
+    The writability probe creates and deletes a tiny temp file in the
+    storage root — the same operation `save_inbound_media` performs.
+    A failure here is the single best indicator of why audio / image
+    persistence is silently dropping.
+    """
+    import shutil  # noqa: PLC0415
+    from core.config import (  # noqa: PLC0415
+        INBOUND_MEDIA_MAX_BYTES,
+        NAHLA_STT_LANGUAGE,
+        OPENAI_API_BASE,
+        OPENAI_API_KEY,
+        OPENAI_AUDIO_MODEL,
+        OPENAI_MODEL,
+        OPENAI_VISION_MODEL,
+    )
+    from services.inbound_media_storage import storage_root  # noqa: PLC0415
+
+    root = storage_root()
+    root_str = str(root)
+    root_exists = root.exists()
+    root_writable = False
+    write_probe_error: Optional[str] = None
+    free_bytes: Optional[int] = None
+    if root_exists:
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            probe = root / ".__nahla_writable_probe"
+            probe.write_bytes(b"ok")
+            probe.unlink(missing_ok=True)
+            root_writable = True
+        except Exception as exc:  # noqa: BLE001
+            write_probe_error = f"{type(exc).__name__}: {exc}"
+        try:
+            free_bytes = shutil.disk_usage(root_str).free
+        except Exception:
+            free_bytes = None
+    else:
+        # If the directory doesn't exist, attempt to create it (matches
+        # what `save_inbound_media` does on first write).
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            root_exists = True
+            probe = root / ".__nahla_writable_probe"
+            probe.write_bytes(b"ok")
+            probe.unlink(missing_ok=True)
+            root_writable = True
+        except Exception as exc:  # noqa: BLE001
+            write_probe_error = f"create_failed: {type(exc).__name__}: {exc}"
+
+    audio_ready  = bool(OPENAI_API_KEY) and root_writable
+    vision_ready = bool(OPENAI_API_KEY) and root_writable
+
+    issues: List[str] = []
+    if not OPENAI_API_KEY:
+        issues.append(
+            "OPENAI_API_KEY غير مضبوط — لا تفريغ صوتي ولا وصف للصور"
+        )
+    if not root_exists:
+        issues.append(
+            f"NAHLA_INBOUND_MEDIA_DIR غير موجود: {root_str}"
+        )
+    elif not root_writable:
+        issues.append(
+            f"NAHLA_INBOUND_MEDIA_DIR غير قابل للكتابة "
+            f"({write_probe_error or 'unknown'})"
+        )
+
+    return {
+        "openai": {
+            "api_key_present":   bool(OPENAI_API_KEY),
+            "api_key_tail":      _mask_secret_tail(OPENAI_API_KEY),
+            "api_base":          OPENAI_API_BASE,
+            "chat_model":        OPENAI_MODEL,
+            "audio_model":       OPENAI_AUDIO_MODEL,
+            "vision_model":      OPENAI_VISION_MODEL,
+            "stt_language":      NAHLA_STT_LANGUAGE,
+        },
+        "storage": {
+            "root":              root_str,
+            "exists":            root_exists,
+            "writable":          root_writable,
+            "write_probe_error": write_probe_error,
+            "free_bytes":        free_bytes,
+            "max_inbound_bytes": INBOUND_MEDIA_MAX_BYTES,
+        },
+        "ready": {
+            "audio":  audio_ready,
+            "vision": vision_ready,
+        },
+        "issues": issues,
+        "hints": [
+            "في Railway اضبط OPENAI_API_KEY ثم اعمل redeploy.",
+            "اربط volume دائم على NAHLA_INBOUND_MEDIA_DIR (مثلاً /data/inbound-media) "
+            "وإلا ستضيع الملفات في كل deploy.",
+            "OPENAI_VISION_MODEL=gpt-4o-mini و OPENAI_AUDIO_MODEL=whisper-1 (الافتراضي).",
+        ],
+    }

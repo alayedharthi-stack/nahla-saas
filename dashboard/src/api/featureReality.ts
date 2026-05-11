@@ -286,12 +286,15 @@ export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | '
 // matters for trust + debugging.
 export interface DashboardMessageMediaAudio {
   kind: 'audio'
+  message_event_id: number
   storage_url: string | null
   mime_type: string | null
   duration: number | null
   voice: boolean
   transcript: string | null
   transcript_status: string | null
+  /** 'pending' | 'ok' | 'failed' | null — distinct from transcript_status */
+  download_status: string | null
   ai_used: boolean
   caption: string | null
   error: string | null
@@ -299,10 +302,12 @@ export interface DashboardMessageMediaAudio {
 
 export interface DashboardMessageMediaImage {
   kind: 'image'
+  message_event_id: number
   storage_url: string | null
   mime_type: string | null
   description: string | null
   vision_status: string | null
+  download_status: string | null
   ai_used: boolean
   caption: string | null
   error: string | null
@@ -381,6 +386,24 @@ export const featureRealityApi = {
   },
   conversationMessages(phone: string): Promise<{ messages: DashboardMessage[] }> {
     return apiCall(`/conversations/messages/${encodeURIComponent(phone)}`)
+  },
+  /** Re-run the inbound-media pipeline (download + AI) for a single
+   * `MessageEvent` row. Used by the "إعادة معالجة" button in the
+   * conversation drawer when a recording's storage url 404s or
+   * transcription was skipped because OPENAI_API_KEY was missing at
+   * intake time. Backend never calls the brain — it only refreshes
+   * `extra_metadata.normalized_inbound`. */
+  reprocessInboundMedia(messageEventId: number): Promise<{
+    ok: boolean
+    message_event_id: number
+    source_type: string
+    normalized_inbound: Record<string, unknown>
+    should_process: boolean
+    fallback_reply_ar: string | null
+  }> {
+    return apiCall(`/conversations/media/${messageEventId}/reprocess`, {
+      method: 'POST',
+    })
   },
   replyToConversation(body: { customer_phone: string; message: string }): Promise<{ sent: boolean }> {
     return apiCall('/conversations/reply', {

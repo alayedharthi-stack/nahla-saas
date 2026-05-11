@@ -825,38 +825,56 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             return "ai"
         return "system"
 
-    def _media_block(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _media_block(message_event_id: int, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Surface inbound media so the conversation drawer can render
         an audio player / image preview with the transcript / vision
         text rendered underneath. Returns ``None`` for text rows so
-        the frontend can fall back to the plain bubble layout."""
+        the frontend can fall back to the plain bubble layout.
+
+        We include ``download_status`` separately from the AI status
+        so the UI can distinguish three cases that previously all
+        looked like "تعذر عرض ...":
+
+          * download_status='failed' AND storage_url=null
+            → the bytes never landed; reprocess will try to
+              re-download from Meta if the media_id is still valid.
+          * download_status='ok'      AND storage_url=null
+            → impossible by construction (kept for safety).
+          * download_status='ok'      AND ai status='skipped'
+            → bytes are stored, transcript/vision was skipped
+              because OPENAI_API_KEY is missing in this environment.
+        """
         ni = (meta or {}).get("normalized_inbound") or {}
         src = str(ni.get("source_type") or "").lower()
         if src not in {"audio", "image"}:
             return None
         if src == "audio":
             return {
-                "kind":            "audio",
-                "storage_url":     ni.get("storage_url"),
-                "mime_type":       ni.get("mime_type"),
-                "duration":        ni.get("duration_seconds"),
-                "voice":           bool(ni.get("voice")),
-                "transcript":      ni.get("transcript_text"),
+                "kind":              "audio",
+                "message_event_id":  message_event_id,
+                "storage_url":       ni.get("storage_url"),
+                "mime_type":         ni.get("mime_type"),
+                "duration":          ni.get("duration_seconds"),
+                "voice":             bool(ni.get("voice")),
+                "transcript":        ni.get("transcript_text"),
                 "transcript_status": ni.get("transcript_status"),
-                "ai_used":         bool(ni.get("ai_used_audio") or False),
-                "caption":         ni.get("caption"),
-                "error":           ni.get("transcript_error"),
+                "download_status":   ni.get("audio_download_status"),
+                "ai_used":           bool(ni.get("ai_used_audio") or False),
+                "caption":           ni.get("caption"),
+                "error":             ni.get("transcript_error"),
             }
         # image
         return {
-            "kind":            "image",
-            "storage_url":     ni.get("storage_url"),
-            "mime_type":       ni.get("mime_type"),
-            "description":     ni.get("vision_text"),
-            "vision_status":   ni.get("vision_status"),
-            "ai_used":         bool(ni.get("ai_used_image") or False),
-            "caption":         ni.get("caption"),
-            "error":           ni.get("vision_error"),
+            "kind":              "image",
+            "message_event_id":  message_event_id,
+            "storage_url":       ni.get("storage_url"),
+            "mime_type":         ni.get("mime_type"),
+            "description":       ni.get("vision_text"),
+            "vision_status":     ni.get("vision_status"),
+            "download_status":   ni.get("image_download_status"),
+            "ai_used":           bool(ni.get("ai_used_image") or False),
+            "caption":           ni.get("caption"),
+            "error":             ni.get("vision_error"),
         }
 
     messages: List[Dict[str, Any]] = [
@@ -867,7 +885,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             "time": r.created_at.isoformat() if r.created_at else "",
             "isAI": bool((r.extra_metadata or {}).get("is_ai")),
             "eventType": _event_type_label(r),
-            "media": _media_block(r.extra_metadata or {}),
+            "media": _media_block(r.id, r.extra_metadata or {}),
             "_ts": r.created_at,
         }
         for r in me_rows
@@ -982,6 +1000,11 @@ async def conversation_media_debug(
         .all()
     )
 
+    # Lazy import — keeps the module-level cycle clean and avoids
+    # paying for an inbound-media-storage import when no row on this
+    # conversation actually has media metadata.
+    from services.inbound_media_storage import resolve_storage_path  # noqa: PLC0415
+
     out: List[Dict[str, Any]] = []
     for r in rows:
         meta = dict(r.extra_metadata or {})
@@ -1006,19 +1029,46 @@ async def conversation_media_debug(
             or None
         )
 
+        # Walk the storage layer to verify the bytes are still on
+        # disk where the storage_url claims they are. A persisted
+        # row pointing at a missing file is the #1 cause of "تعذر
+        # عرض الصورة" — we surface it explicitly so support has a
+        # single field to grep on.
+        storage_sha256 = ni.get("storage_sha256")
+        local_path_exists: Optional[bool] = None
+        if storage_sha256:
+            try:
+                local = resolve_storage_path(
+                    tenant_id=tenant_id, sha256=storage_sha256,
+                )
+                local_path_exists = bool(local and local.exists())
+            except Exception:
+                local_path_exists = False
+
         out.append({
-            "message_id":           r.id,
-            "created_at":           r.created_at.isoformat() if r.created_at else None,
-            "direction":            r.direction,
-            "source_type":          source_type,
-            "media_id":             ni.get("media_id"),
-            "mime_type":            ni.get("mime_type"),
-            "voice":                ni.get("voice"),
-            "duration_seconds":     ni.get("duration_seconds"),
-            "caption":              ni.get("caption"),
-            "byte_size":            ni.get("byte_size"),
-            "storage_url":          ni.get("storage_url"),
-            "storage_sha256":       ni.get("storage_sha256"),
+            "message_id":            r.id,
+            "created_at":            r.created_at.isoformat() if r.created_at else None,
+            "direction":             r.direction,
+            "source_type":           source_type,
+            "media_type":            source_type,  # alias matching spec
+            "media_id":              ni.get("media_id"),
+            "original_media_id":     ni.get("media_id"),  # alias matching spec
+            "mime_type":             ni.get("mime_type"),
+            "voice":                 ni.get("voice"),
+            "duration_seconds":      ni.get("duration_seconds"),
+            "caption":               ni.get("caption"),
+            "byte_size":             ni.get("byte_size"),
+            "storage_url":           ni.get("storage_url"),
+            "public_media_url":      ni.get("storage_url"),  # alias
+            "storage_sha256":        storage_sha256,
+            "local_path_exists":     local_path_exists,
+            # Unified ``download_status`` regardless of media type, so
+            # the UI can render one column without branching.
+            "download_status": (
+                ni.get("audio_download_status")
+                if source_type == "audio"
+                else ni.get("image_download_status")
+            ),
             "audio_download_status": ni.get("audio_download_status"),
             "image_download_status": ni.get("image_download_status"),
             "transcript_status":     ni.get("transcript_status"),
@@ -1028,15 +1078,16 @@ async def conversation_media_debug(
             "transcript_text_preview": (
                 (transcript_text or vision_text or "")[:240] or None
             ),
-            "vision_text":          vision_text or None,
-            "transcript_error":     ni.get("transcript_error"),
-            "vision_error":         ni.get("vision_error"),
-            "error_message":        error_message,
-            "ai_used_audio":        bool(ni.get("ai_used_audio") or False),
-            "ai_used_image":        bool(ni.get("ai_used_image") or False),
-            "media_fallback":       bool(meta.get("media_fallback") or False),
-            "wa_message_id":        ni.get("wa_message_id") or meta.get("wa_message_id"),
-            "wa_timestamp":         ni.get("wa_timestamp"),
+            "vision_text":           vision_text or None,
+            "transcript_error":      ni.get("transcript_error"),
+            "vision_error":          ni.get("vision_error"),
+            "error_message":         error_message,
+            "last_error":            error_message,  # alias matching spec
+            "ai_used_audio":         bool(ni.get("ai_used_audio") or False),
+            "ai_used_image":         bool(ni.get("ai_used_image") or False),
+            "media_fallback":        bool(meta.get("media_fallback") or False),
+            "wa_message_id":         ni.get("wa_message_id") or meta.get("wa_message_id"),
+            "wa_timestamp":          ni.get("wa_timestamp"),
         })
 
     return {
@@ -1044,6 +1095,140 @@ async def conversation_media_debug(
         "tenant_id":       tenant_id,
         "count":           len(out),
         "rows":            out,
+    }
+
+
+@router.post("/media/{message_event_id:int}/reprocess")
+async def reprocess_inbound_media(
+    message_event_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Re-run the inbound-media pipeline (download + persist + AI) for
+    a single existing ``MessageEvent`` row.
+
+    Why this exists: in production we've seen cases where:
+
+      * The bytes were downloaded but persisted to a volume that
+        wasn't mounted on the new deploy → storage_url points to a
+        404. Reprocess re-downloads from Meta (if the media_id is
+        still valid) and writes to the current storage root.
+      * OPENAI_API_KEY was missing at intake time → `transcript_status
+        = skipped`. Once the key is set, reprocess re-runs Whisper /
+        Vision without forcing the customer to re-send the message.
+      * A new vision/STT model was rolled out and we want to backfill
+        descriptions for old rows.
+
+    This DOES NOT call the brain — it only refreshes the metadata
+    block on the row. The AI didn't reply the first time around;
+    re-running transcription doesn't change that.
+
+    Tenant-scoped: 404 if the row belongs to a different tenant.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    row = db.query(MessageEvent).filter(
+        MessageEvent.id == message_event_id,
+        MessageEvent.tenant_id == tenant_id,
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="message_event_not_found")
+
+    meta = dict(row.extra_metadata or {})
+    ni = dict(meta.get("normalized_inbound") or {})
+    source_type = str(ni.get("source_type") or "").lower()
+    media_id = str(ni.get("media_id") or "").strip()
+
+    if source_type not in {"audio", "image"} or not media_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "row is not a reprocessable inbound media event "
+                f"(source_type={source_type!r}, media_id={media_id!r})"
+            ),
+        )
+
+    # Resolve the merchant's WhatsApp connection — needed for the
+    # Meta token download. We deliberately use the most-recent
+    # connection so a re-onboarded tenant still works.
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == tenant_id)
+        .order_by(WhatsAppConnection.id.desc())
+        .first()
+    )
+    if not wa_conn:
+        raise HTTPException(
+            status_code=404,
+            detail="no WhatsAppConnection for this tenant — cannot redownload",
+        )
+
+    # Reconstruct the original webhook ``message`` shape so we can
+    # reuse the production normalizer end-to-end. This guarantees
+    # reprocessing exercises the exact same code path as the live
+    # webhook does — no parallel logic to drift.
+    msg: Dict[str, Any] = {
+        "type":       source_type,
+        "timestamp":  ni.get("wa_timestamp"),
+        "id":         ni.get("wa_message_id") or "",
+    }
+    payload_inner: Dict[str, Any] = {
+        "id":        media_id,
+        "mime_type": ni.get("mime_type") or "",
+    }
+    if source_type == "audio":
+        if ni.get("voice"):
+            payload_inner["voice"] = True
+        if ni.get("caption"):
+            payload_inner["caption"] = ni["caption"]
+        msg["audio"] = payload_inner
+    else:
+        if ni.get("caption"):
+            payload_inner["caption"] = ni["caption"]
+        msg["image"] = payload_inner
+
+    from modules.ai.media.normalizer import normalize_whatsapp_inbound  # noqa: PLC0415
+
+    try:
+        result = await normalize_whatsapp_inbound(
+            db=db, wa_conn=wa_conn, tenant_id=tenant_id, message=msg,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "[ReprocessMedia] tenant=%s msg_event=%s err=%s",
+            tenant_id, message_event_id, exc,
+        )
+        raise HTTPException(status_code=502, detail=f"normalizer_failed: {exc}")
+
+    new_ni = dict(result.metadata or {})
+    # Preserve operator-only fields the new run won't re-emit.
+    new_ni["reprocessed_at"] = datetime.now(timezone.utc).isoformat()
+    new_ni["reprocessed_by"] = "manual_reprocess_endpoint"
+
+    meta["normalized_inbound"] = new_ni
+    row.extra_metadata = meta
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    flag_modified(row, "extra_metadata")
+    db.commit()
+
+    _log.info(
+        "[ReprocessMedia] tenant=%s msg_event=%s source=%s "
+        "transcript_status=%s vision_status=%s download=%s",
+        tenant_id, message_event_id, source_type,
+        new_ni.get("transcript_status"),
+        new_ni.get("vision_status"),
+        new_ni.get("audio_download_status")
+        or new_ni.get("image_download_status"),
+    )
+
+    return {
+        "ok":              True,
+        "message_event_id": message_event_id,
+        "source_type":     source_type,
+        "normalized_inbound": new_ni,
+        "should_process":  bool(result.should_process),
+        "fallback_reply_ar": result.fallback_reply_ar,
     }
 
 
