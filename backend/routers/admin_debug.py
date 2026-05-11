@@ -1878,3 +1878,378 @@ async def admin_debug_scheduler_health(
             and not minimal_asgi_set
         ),
     }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# DB schema health — verify alembic head + known critical columns
+# ──────────────────────────────────────────────────────────────────────
+
+# Columns that the dispatcher / debug endpoint depend on and which
+# came from a specific migration revision. If any of these are
+# missing in production, the merchant sees a cryptic
+# UndefinedColumn error and the campaign never enqueues. We
+# enumerate them explicitly so the schema-health endpoint can
+# report exactly which migration is missing.
+_CRITICAL_COLUMNS: List[Dict[str, str]] = [
+    # 0054_campaign_send_log_delivery_tracking
+    {"table": "campaign_send_logs", "column": "delivered_at", "added_by": "0054"},
+    {"table": "campaign_send_logs", "column": "read_at",      "added_by": "0054"},
+    {"table": "campaign_send_logs", "column": "failed_at",    "added_by": "0054"},
+    # 0053_customer_segments_manual_mode
+    {"table": "customer_segments_manual", "column": "mode", "added_by": "0053"},
+    # 0051_campaign_send_logs
+    {"table": "campaign_send_logs", "column": "provider_message_id", "added_by": "0051"},
+]
+
+
+def _latest_revision_in_codebase() -> Optional[str]:
+    """Return the highest ``revision`` string found among the
+    Alembic version files shipped in this build. Returns None on
+    error — endpoint then surfaces ``codebase_head=None`` so the
+    operator knows the comparison is unreliable."""
+    import os  # noqa: PLC0415
+    import re  # noqa: PLC0415
+
+    repo_root = "/app"
+    if not os.path.isdir(repo_root):
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+    versions_dir = os.path.join(
+        repo_root, "database", "migrations", "versions"
+    )
+    if not os.path.isdir(versions_dir):
+        return None
+
+    rev_re = re.compile(r'^revision\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
+    revisions: List[str] = []
+    try:
+        for fname in os.listdir(versions_dir):
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(versions_dir, fname)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    blob = fh.read(8192)
+                m = rev_re.search(blob)
+                if m:
+                    revisions.append(m.group(1))
+            except OSError:
+                continue
+    except OSError:
+        return None
+    if not revisions:
+        return None
+    # Versions are 4-digit strings — natural sort suffices because
+    # they're zero-padded ("0054" > "0053").
+    return sorted(revisions)[-1]
+
+
+@router.get("/db-schema-health")
+async def admin_debug_db_schema_health(
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Compare the deployed Alembic head against the codebase's
+    latest revision, and probe a list of critical columns directly
+    via ``information_schema.columns`` so a missing migration shows
+    up as a precise "column X on table Y is missing — added by
+    revision Z" verdict.
+
+    Why this exists
+    ───────────────
+    The lifespan bootstrap (``backend/main.py:_bootstrap_db_schema``)
+    runs ``alembic upgrade head`` in a background thread with a
+    180s timeout. If it fails / times out / is skipped by
+    ``NAHLA_SKIP_DB_BOOTSTRAP=1``, the next failed-migration error
+    only surfaces when an HTTP request hits a SQL query referencing
+    the missing column (e.g. ``campaign_send_logs.delivered_at`` →
+    psycopg2 ``UndefinedColumn`` → 500 → the campaign never enters
+    the queue).
+
+    This endpoint converts the symptom into a deterministic
+    diagnostic. Read-only: no DDL, no writes. Pair with
+    ``POST /admin/debug/run-migrations`` to apply pending migrations
+    on demand.
+    """
+    import os  # noqa: PLC0415
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    skip_bootstrap = (
+        os.environ.get("NAHLA_SKIP_DB_BOOTSTRAP", "") or ""
+    ).strip().lower() in ("1", "true", "yes")
+
+    # ── Deployed Alembic head ─────────────────────────────────────
+    deployed_head: Optional[str] = None
+    deployed_head_error: Optional[str] = None
+    try:
+        row = db.execute(_text(
+            "SELECT version_num FROM alembic_version LIMIT 1"
+        )).first()
+        deployed_head = row[0] if row else None
+    except Exception as exc:  # noqa: BLE001
+        deployed_head_error = f"{type(exc).__name__}: {exc}"
+    # Clear the failed transaction so subsequent queries succeed.
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+    codebase_head = _latest_revision_in_codebase()
+
+    # ── Critical column probe ─────────────────────────────────────
+    # We probe every column listed in _CRITICAL_COLUMNS and report
+    # which migrations are missing on the deployed DB.
+    column_status: List[Dict[str, Any]] = []
+    missing_migrations: set = set()
+    for spec in _CRITICAL_COLUMNS:
+        try:
+            row = db.execute(
+                _text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = :t AND column_name = :c"
+                ),
+                {"t": spec["table"], "c": spec["column"]},
+            ).first()
+            present = row is not None
+        except Exception as exc:  # noqa: BLE001
+            present = False
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            column_status.append({
+                **spec,
+                "present": False,
+                "probe_error": f"{type(exc).__name__}: {exc}",
+            })
+            missing_migrations.add(spec["added_by"])
+            continue
+        column_status.append({**spec, "present": present})
+        if not present:
+            missing_migrations.add(spec["added_by"])
+
+    behind = (
+        deployed_head is not None
+        and codebase_head is not None
+        and deployed_head != codebase_head
+    )
+
+    issues: List[str] = []
+    hints:  List[str] = []
+    if skip_bootstrap:
+        issues.append(
+            "NAHLA_SKIP_DB_BOOTSTRAP=1 — alembic upgrade head is "
+            "DISABLED at startup. Unset this env var on Railway and "
+            "redeploy, or call POST /admin/debug/run-migrations to "
+            "apply pending migrations once on demand."
+        )
+    if deployed_head_error:
+        issues.append(
+            "alembic_version table is unreachable: "
+            f"{deployed_head_error}. The DB may have never been "
+            "stamped — check that bootstrap Step B ran."
+        )
+    if behind:
+        issues.append(
+            f"deployed alembic head={deployed_head!r} is behind "
+            f"codebase head={codebase_head!r}. Run "
+            "POST /admin/debug/run-migrations to upgrade."
+        )
+    if missing_migrations:
+        for rev in sorted(missing_migrations):
+            issues.append(
+                f"migration {rev} has not been applied — columns "
+                "added by it are missing from the deployed schema. "
+                "This is the exact cause of "
+                "'UndefinedColumn ... does not exist' errors in the "
+                "dispatcher."
+            )
+        hints.append(
+            "Quick fix: POST /admin/debug/run-migrations to apply "
+            "alembic upgrade head in the running container. Always "
+            "back up the DB first if you have any doubt."
+        )
+
+    return {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "deployed_alembic_head":  deployed_head,
+        "codebase_alembic_head":  codebase_head,
+        "behind_by":              behind,
+        "missing_migrations":     sorted(missing_migrations),
+        "critical_columns":       column_status,
+        "skip_bootstrap_env_set": skip_bootstrap,
+        "issues": issues,
+        "hints":  hints,
+        "ok": (
+            not issues
+            and not missing_migrations
+            and not behind
+        ),
+    }
+
+
+class RunMigrationsBody(BaseModel):
+    """Body for POST /admin/debug/run-migrations.
+
+    ``confirm`` must be the literal string ``"YES_RUN_ALEMBIC_UPGRADE_HEAD"``
+    to prevent accidental invocation. The endpoint streams output to the
+    Railway logs and returns the alembic stdout/stderr in the response.
+    """
+    confirm: str = Field(
+        ...,
+        description=(
+            "Set to 'YES_RUN_ALEMBIC_UPGRADE_HEAD' to confirm you want "
+            "to apply pending migrations on the live database."
+        ),
+    )
+    timeout_seconds: int = Field(
+        default=240,
+        ge=30,
+        le=900,
+        description="Max wall-clock seconds before the subprocess is killed.",
+    )
+
+
+@router.post("/run-migrations")
+async def admin_debug_run_migrations(
+    body: RunMigrationsBody,
+    secret: Optional[str] = Query(default=None, alias="secret"),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Apply pending Alembic migrations on the running container.
+
+    Gated by:
+      1. ``require_admin`` JWT (FastAPI dependency).
+      2. ``ENABLE_ADMIN_DEBUG=true`` env (matches the rest of this
+         router's defaults — fail-closed when the flag is absent).
+      3. Optional ``ADMIN_DEBUG_SECRET`` query param.
+      4. ``body.confirm == 'YES_RUN_ALEMBIC_UPGRADE_HEAD'``.
+
+    Why we expose this instead of "just SSH into Railway":
+    Railway free / hobby plans don't expose a shell on the running
+    container, and a redeploy doesn't always re-run the bootstrap
+    (it may already have ``alembic_version=head_minus_one`` and the
+    file watcher didn't pick up a new migration). The merchant
+    needs a way to apply a missing migration without ops support.
+
+    The subprocess runs with the SAME env / cwd as the lifespan
+    bootstrap so any behavioural difference between "boot bootstrap"
+    and "manual run" is impossible.
+    """
+    _require_enabled(secret)
+    if body.confirm != "YES_RUN_ALEMBIC_UPGRADE_HEAD":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Missing confirmation. POST with body "
+                "{'confirm': 'YES_RUN_ALEMBIC_UPGRADE_HEAD'} to "
+                "apply pending migrations."
+            ),
+        )
+
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+
+    # Resolve the database/ directory exactly the way main.py does.
+    repo_root = "/app"
+    if not os.path.isdir(repo_root):
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+    database_dir = os.path.join(repo_root, "database")
+    if not os.path.isdir(database_dir):
+        raise HTTPException(
+            status_code=500,
+            detail=f"database/ directory not found at {database_dir!r}",
+        )
+
+    logger.warning(
+        "[admin-debug] run-migrations invoked by admin — "
+        "alembic upgrade head (cwd=%s, timeout=%ds)",
+        database_dir, body.timeout_seconds,
+    )
+
+    start = time.monotonic()
+    try:
+        result = subprocess.run(
+            [_sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=database_dir,
+            check=False,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=body.timeout_seconds,
+        )
+        elapsed_s = time.monotonic() - start
+    except subprocess.TimeoutExpired as exc:
+        logger.error(
+            "[admin-debug] run-migrations TIMEOUT after %ds: %s",
+            body.timeout_seconds, exc,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "code": "alembic_timeout",
+                "timeout_seconds": body.timeout_seconds,
+                "message": (
+                    "alembic upgrade head did not finish within the "
+                    "timeout. The migration may be holding a lock — "
+                    "inspect Railway logs and consider terminating "
+                    "the locking session."
+                ),
+            },
+        )
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+
+    audit(
+        "admin_debug_run_migrations",
+        rc        = result.returncode,
+        elapsed_s = round(elapsed_s, 3),
+        stdout_len= len(stdout),
+        stderr_len= len(stderr),
+    )
+
+    if result.returncode != 0:
+        logger.error(
+            "[admin-debug] run-migrations FAILED rc=%d elapsed=%.1fs\n"
+            "--- stderr ---\n%s\n--- stdout ---\n%s",
+            result.returncode, elapsed_s, stderr, stdout,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code":       "alembic_upgrade_failed",
+                "returncode": result.returncode,
+                "elapsed_s":  round(elapsed_s, 3),
+                "stdout":     stdout,
+                "stderr":     stderr,
+                "message": (
+                    "alembic upgrade head returned a non-zero exit "
+                    "code. Inspect 'stderr' for the offending "
+                    "migration."
+                ),
+            },
+        )
+
+    logger.warning(
+        "[admin-debug] run-migrations OK rc=0 elapsed=%.1fs\n%s",
+        elapsed_s, stdout,
+    )
+    return {
+        "ok":         True,
+        "returncode": result.returncode,
+        "elapsed_s":  round(elapsed_s, 3),
+        "stdout":     stdout,
+        "stderr":     stderr,
+        "message": (
+            "alembic upgrade head completed successfully. Re-call "
+            "GET /admin/debug/db-schema-health to confirm the head "
+            "matches the codebase and that all critical columns are "
+            "present."
+        ),
+    }
