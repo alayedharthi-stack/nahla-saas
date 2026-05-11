@@ -423,6 +423,89 @@ export function isPlatformOwner(): boolean {
   return isPlatformStaffRole(getRole())
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Support-access / impersonation visibility
+// ────────────────────────────────────────────────────────────────────
+//
+// The backend mints a SECOND kind of JWT when a platform admin enters a
+// merchant tenant via `POST /admin/impersonate/{tenant_id}` — the
+// "support impersonation" token. Its payload carries:
+//
+//   role:            "support_impersonation"
+//   impersonation:   true
+//   actor_sub:       <admin email>
+//   actor_user_id:   <admin user.id>
+//   session_version: <revocation counter>
+//   sub:             <merchant email>          // NOT the admin's
+//   tenant_id:       <merchant's tenant>       // NOT 1
+//
+// While this token is active, `getRole()` returns ``"support_impersonation"``
+// — NOT one of the PLATFORM_ADMIN_ROLES — so `isAdmin()` is false. That's
+// intentional: most merchant-scoped UI must render as the merchant sees
+// it, so support actually experiences what the merchant is reporting.
+//
+// BUT there's a small set of internal-debug tools (media diagnostics,
+// direct WhatsApp test send, etc.) that should remain available while
+// impersonating. `canUseInternalDebug()` is the single source of truth
+// for "show this debug-only UI" — true when either:
+//   (a) the user is logged in as a platform admin directly, OR
+//   (b) the user holds an active support-impersonation JWT.
+//
+// We deliberately read the JWT EACH CALL (not from localStorage role)
+// because:
+//   * `getRole()` reads `nahla_role` which the impersonation start path
+//     may overwrite to "merchant" so merchant-scoped UI renders normally.
+//   * The JWT itself is the authoritative source — it's also what the
+//     backend sees and middleware enforces.
+
+/** Cached single decode of the current token's claims. Re-decodes
+ * whenever the token changes (login / impersonation / refresh). */
+let _cachedTokenForClaims = ''
+let _cachedClaims: Record<string, unknown> = {}
+
+function _currentClaims(): Record<string, unknown> {
+  const t = getToken()
+  if (!t) {
+    _cachedTokenForClaims = ''
+    _cachedClaims = {}
+    return _cachedClaims
+  }
+  if (t !== _cachedTokenForClaims) {
+    _cachedTokenForClaims = t
+    _cachedClaims = _decodeJwtPayload(t)
+  }
+  return _cachedClaims
+}
+
+/** True when the current JWT is a support-impersonation token issued
+ *  via `POST /admin/impersonate/{tenant_id}`. */
+export function isImpersonatingSupport(): boolean {
+  const c = _currentClaims()
+  return c.impersonation === true || c.role === 'support_impersonation'
+}
+
+/** The platform-admin email that started the current support session,
+ *  or null when we're not in one. Useful for screen banners ("you are
+ *  acting as <merchant> on behalf of <admin>"). */
+export function getImpersonationActor(): string | null {
+  const c = _currentClaims()
+  const v = c.actor_sub
+  return typeof v === 'string' && v ? v : null
+}
+
+/** Unified visibility gate for internal debug tools (media diagnostics,
+ *  direct WhatsApp test send, support-only inspectors, etc.).
+ *
+ *  Returns true when the session is either a regular platform admin
+ *  OR an admin actively impersonating a merchant. The corresponding
+ *  backend endpoints are still gated by `require_admin` — this flag
+ *  only decides whether to *show* the buttons. A merchant cookie / a
+ *  spoofed `nahla_role=admin` in localStorage gets a 403 from the
+ *  server regardless. */
+export function canUseInternalDebug(): boolean {
+  return isAdmin() || isImpersonatingSupport()
+}
+
 export function isStaff(): boolean {
   return getRole() === 'staff'
 }

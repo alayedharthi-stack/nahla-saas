@@ -13,7 +13,7 @@ import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import AdminDirectSendModal from '../components/admin/AdminDirectSendModal'
 import MediaEnvModal from '../components/admin/MediaEnvModal'
-import { isAdmin } from '../auth'
+import { canUseInternalDebug } from '../auth'
 import { useLanguage } from '../i18n/context'
 import {
   campaignsApi, CampaignRecord, CreateCampaignPayload,
@@ -3018,7 +3018,9 @@ export default function Campaigns() {
   const [showAdminSend, setShowAdminSend] = useState(false)
   // Admin-only inbound-media environment diagnostic.
   const [showMediaEnv, setShowMediaEnv] = useState(false)
-  const adminMode = isAdmin()
+  // Includes platform admins AND admins actively impersonating a
+  // merchant — both should see internal debug buttons.
+  const adminMode = canUseInternalDebug()
   const [campaigns, setCampaigns] = useState<CampaignRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
