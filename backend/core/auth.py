@@ -213,34 +213,165 @@ def is_platform_admin_role(role: Any) -> bool:
     return str(role or "").strip() in PLATFORM_ADMIN_ROLES
 
 
+def _actor_is_still_platform_admin(actor_user_id: Optional[int]) -> bool:
+    """Verify that the user behind a support-impersonation token is
+    *currently* a platform admin in the database.
+
+    Why a DB check (not just trusting the JWT)
+    ──────────────────────────────────────────
+    A support-impersonation JWT is minted at the moment an admin
+    starts a session. If that admin is later demoted (role changed
+    to ``merchant`` or account deactivated) WHILE their support
+    session is still live, the JWT keeps working — its claims are
+    frozen at issuance. For sensitive endpoints we revalidate the
+    actor's admin status on every call so a demoted / deactivated
+    admin loses access immediately, without waiting for the JWT to
+    expire.
+
+    Returns False on any error (DB down, user not found, role
+    mismatch, inactive flag). Fail-closed by design.
+    """
+    if actor_user_id is None:
+        return False
+    try:
+        actor_uid = int(actor_user_id)
+    except (TypeError, ValueError):
+        return False
+
+    try:
+        from core.database import SessionLocal  # noqa: PLC0415
+        from database.models import User  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        _support_audit.warning(
+            "ADMIN_REVALIDATE_IMPORT_FAILED actor_user_id=%s err=%s",
+            actor_uid, exc,
+        )
+        return False
+
+    try:
+        with SessionLocal() as db:
+            actor = db.query(User).filter(User.id == actor_uid).first()
+        if actor is None:
+            return False
+        if not getattr(actor, "is_active", True):
+            return False
+        return is_platform_admin_role(getattr(actor, "role", None))
+    except Exception as exc:  # noqa: BLE001
+        _support_audit.warning(
+            "ADMIN_REVALIDATE_DB_FAILED actor_user_id=%s err=%s",
+            actor_uid, exc,
+        )
+        return False
+
+
 def require_admin(
     request: Request,
     creds: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
 ) -> Dict[str, Any]:
-    """Dependency — requires a valid JWT with a platform-staff role. Logs every access."""
+    """Dependency — admit either:
+
+      (a) a regular platform-admin JWT (role in PLATFORM_ADMIN_ROLES), OR
+      (b) a support-impersonation JWT whose ``actor_user_id`` STILL
+          maps to a live platform-admin user in the DB.
+
+    Branch (b) makes the internal debug surface (``/admin/debug/*``,
+    ``/admin/debug/whatsapp/send-template``, media-env, etc.) usable
+    during an active support-access session, so support staff can run
+    diagnostics without dropping out of the impersonated tenant.
+
+    Defense-in-depth on branch (b):
+      * Token must explicitly carry ``impersonation == True`` AND
+        ``role == "support_impersonation"`` — both required, in case
+        a future code path forgets to set one of them.
+      * Actor admin status is REVALIDATED against the DB every call
+        (see `_actor_is_still_platform_admin`). A demoted /
+        deactivated admin loses access immediately, without waiting
+        for the JWT to expire or for session_version to be bumped.
+      * Audit log distinguishes ``admin_access_granted`` (regular
+        admin) from ``admin_access_granted_via_support`` so the
+        merchant has full visibility into what support touched.
+
+    The blocking-prefix audit in ``support_session_middleware`` runs
+    BEFORE this dependency. If the path is on the blocked list and
+    NOT on the read allow-list, the middleware rejects with 403
+    ``support_sensitive_blocked`` first — this function never sees
+    those requests. ``/admin/debug/*`` paths are not on the blocked
+    list, so they reach this dependency unhindered.
+    """
     client_ip = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
     user = get_current_user(creds)
-    if not is_platform_admin_role(user.get("role")):
+
+    # ── Branch (a): regular platform admin ─────────────────────────
+    if is_platform_admin_role(user.get("role")):
         audit(
-            "admin_access_denied",
+            "admin_access_granted",
+            path=str(request.url.path),
+            method=request.method,
+            sub=user.get("sub"),
+            ip=client_ip,
+        )
+        return user
+
+    # ── Branch (b): support-impersonation token from a real admin ──
+    is_support = (
+        user.get("impersonation") is True
+        and user.get("role") == "support_impersonation"
+    )
+    if is_support:
+        actor_user_id = user.get("actor_user_id")
+        actor_sub = user.get("actor_sub")
+        if _actor_is_still_platform_admin(actor_user_id):
+            # Audit on the SUPPORT channel too — the merchant's
+            # session audit log needs every admin-only endpoint
+            # that was hit during impersonation.
+            _support_audit.info(
+                "SUPPORT_ADMIN_ACCESS actor=%s actor_user_id=%s "
+                "tenant=%s path=%s method=%s ip=%s",
+                actor_sub, actor_user_id,
+                user.get("tenant_id"),
+                request.url.path, request.method, client_ip,
+            )
+            audit(
+                "admin_access_granted_via_support",
+                path=str(request.url.path),
+                method=request.method,
+                sub=user.get("sub"),
+                actor_sub=actor_sub,
+                actor_user_id=actor_user_id,
+                tenant_id=user.get("tenant_id"),
+                ip=client_ip,
+            )
+            return user
+        # Support token but actor no longer admin → deny + audit.
+        audit(
+            "admin_access_denied_demoted_actor",
             path=str(request.url.path),
             method=request.method,
             role=user.get("role"),
             sub=user.get("sub"),
+            actor_sub=actor_sub,
+            actor_user_id=actor_user_id,
             tenant_id=user.get("tenant_id"),
             ip=client_ip,
         )
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(
+            status_code=403,
+            detail="Admin access required (support actor is no longer a platform admin)",
+        )
+
+    # ── Neither branch matched → 403 ────────────────────────────────
     audit(
-        "admin_access_granted",
+        "admin_access_denied",
         path=str(request.url.path),
         method=request.method,
+        role=user.get("role"),
         sub=user.get("sub"),
+        tenant_id=user.get("tenant_id"),
         ip=client_ip,
     )
-    return user
+    raise HTTPException(status_code=403, detail="Admin access required")
 
 
 def require_authenticated(request: Request) -> Dict[str, Any]:
