@@ -1257,6 +1257,39 @@ async def debug_campaign(
         }
     scheduler_info = _safe("scheduler", _scheduler) or {}
 
+    # ── F12 rescue eligibility (per-campaign verdict) ──────────────
+    # Explains in plain language whether the F12 stuck-immediate
+    # rescue probe would pick THIS specific campaign up on its next
+    # tick — and exactly which of the four conditions is blocking
+    # it if not. Critical when the merchant sees a campaign frozen
+    # at "بانتظار بدء الإرسال" with all counters at 0 and the
+    # scheduler-health endpoint reports the loop is alive.
+    def _rescue_eligibility():
+        from core.scheduler import (  # noqa: PLC0415
+            evaluate_rescue_eligibility,
+            get_campaign_dispatcher_state,
+        )
+        send_logs_count = sum(counts.values())
+        verdict = evaluate_rescue_eligibility(
+            campaign, send_logs_count=send_logs_count,
+        )
+        # Cross-reference: was this exact campaign already rescued
+        # at least once? If yes, the prior rescue may have raised
+        # — the merchant should look at dispatch_errors below.
+        sched_state = get_campaign_dispatcher_state()
+        rescued_ids = sched_state.get("last_rescued_campaign_ids") or []
+        verdict["already_rescued_in_last_batch"] = (
+            campaign.id in rescued_ids
+        )
+        verdict["rescue_invocations_total"] = (
+            sched_state.get("rescue_invocations_total", 0)
+        )
+        verdict["rescue_campaigns_total"] = (
+            sched_state.get("rescue_campaigns_total", 0)
+        )
+        return verdict
+    rescue_eligibility = _safe("rescue_eligibility", _rescue_eligibility) or {}
+
     tpl_vars = campaign.template_variables or {}
     dispatch_errors_raw = tpl_vars.get("_dispatch_errors", "") or ""
     dispatch_errors = [e for e in dispatch_errors_raw.split("|") if e]
@@ -2037,6 +2070,11 @@ async def debug_campaign(
         "template":         template_info,
         "wa_connection":    wa_conn_info,
         "scheduler":        scheduler_info,
+        # F14: per-campaign verdict on whether the F12 rescue probe
+        # would pick this campaign up on its next tick. Surfaces the
+        # exact blocking condition when the campaign is frozen at
+        # "بانتظار بدء الإرسال" and counters are all zero.
+        "rescue_eligibility": rescue_eligibility,
         "hints":            hints,
         "errors":           errors,
     }

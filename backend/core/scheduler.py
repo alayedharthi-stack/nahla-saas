@@ -110,6 +110,144 @@ def get_campaign_dispatcher_state() -> dict:
     return snapshot
 
 
+def evaluate_rescue_eligibility(
+    campaign,
+    *,
+    send_logs_count: int,
+    now=None,
+    threshold_seconds: int = _STUCK_IMMEDIATE_THRESHOLD_SECONDS,
+) -> dict:
+    """Explain — in plain JSON — whether the rescue probe would
+    pick up this specific campaign on its next tick, and exactly
+    which of the four conditions pass / fail.
+
+    Returns:
+        {
+          "would_rescue": bool,
+          "blocked_by":   [str, ...]  // empty when would_rescue=True
+          "explanation_ar": str,       // single sentence for the UI
+          "conditions": {
+            "status_is_active":        {"pass": bool, "value": "..."}
+            "schedule_type_immediate": {"pass": bool, "value": "..."}
+            "launched_at_set":         {"pass": bool, "value": "..."}
+            "past_grace_window":       {"pass": bool, "value": "...", "age_seconds": float | None}
+            "no_send_logs":            {"pass": bool, "value": int}
+          }
+        }
+
+    This is the SAME logic encoded in ``_find_stuck_immediate_campaigns``'s
+    SQL filter, but evaluated per-campaign for diagnostic display.
+    The two MUST agree — if you change one, change the other (the
+    tests in test_campaign_stuck_immediate_rescue.py + test_campaign_rescue_eligibility.py
+    lock both halves)."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    status_v       = getattr(campaign, "status", None) or ""
+    schedule_v     = getattr(campaign, "schedule_type", None) or ""
+    launched_at    = getattr(campaign, "launched_at", None)
+
+    cond_status = {
+        "pass":  status_v == "active",
+        "value": status_v,
+    }
+    cond_sched = {
+        "pass":  schedule_v == "immediate",
+        "value": schedule_v,
+    }
+    cond_launched_set = {
+        "pass":  launched_at is not None,
+        "value": launched_at.isoformat() if launched_at else None,
+    }
+    if launched_at is not None:
+        try:
+            la = launched_at
+            if la.tzinfo is None:
+                la = la.replace(tzinfo=timezone.utc)
+            age = (now - la).total_seconds()
+        except Exception:
+            age = None
+        cond_grace = {
+            "pass":  age is not None and age >= threshold_seconds,
+            "value": (
+                f"launched {age:.0f}s ago (threshold ≥ {threshold_seconds}s)"
+                if age is not None else "unknown age"
+            ),
+            "age_seconds": age,
+        }
+    else:
+        cond_grace = {
+            "pass":  False,
+            "value": "launched_at is null",
+            "age_seconds": None,
+        }
+    cond_no_logs = {
+        "pass":  int(send_logs_count) == 0,
+        "value": int(send_logs_count),
+    }
+
+    blocked: list[str] = []
+    if not cond_status["pass"]:
+        blocked.append(
+            f"status={status_v!r} (rescue requires 'active'; "
+            "non-active campaigns are either in a terminal state "
+            "or have not been launched yet)"
+        )
+    if not cond_sched["pass"]:
+        blocked.append(
+            f"schedule_type={schedule_v!r} (rescue only targets "
+            "'immediate' — scheduled/delayed campaigns are handled "
+            "by the regular due-time loop)"
+        )
+    if not cond_launched_set["pass"]:
+        blocked.append(
+            "launched_at is null (campaign was created but never "
+            "transitioned to 'launched'; check POST /campaigns flow)"
+        )
+    elif not cond_grace["pass"]:
+        age_s = cond_grace.get("age_seconds")
+        if age_s is not None:
+            blocked.append(
+                f"within {threshold_seconds}s grace window "
+                f"(launched {age_s:.0f}s ago) — the in-process "
+                "asyncio task may still be running; rescue waits "
+                "to avoid double-dispatch"
+            )
+        else:
+            blocked.append("launched_at unreadable")
+    if not cond_no_logs["pass"]:
+        blocked.append(
+            f"campaign_send_logs already has {send_logs_count} "
+            "row(s) — campaign is in flight or completed; rescue "
+            "skips to prevent double-send"
+        )
+
+    if not blocked:
+        explanation = (
+            "✅ ستلتقطها دورة الإنقاذ التالية (خلال ≤ "
+            f"{_CAMPAIGN_POLL_SECONDS}s)."
+        )
+    else:
+        explanation = "🚫 لن يلتقطها الإنقاذ — " + " ؛ ".join(blocked)
+
+    return {
+        "would_rescue":    not blocked,
+        "blocked_by":      blocked,
+        "explanation_ar":  explanation,
+        "conditions": {
+            "status_is_active":        cond_status,
+            "schedule_type_immediate": cond_sched,
+            "launched_at_set":         cond_launched_set,
+            "past_grace_window":       cond_grace,
+            "no_send_logs":            cond_no_logs,
+        },
+        "thresholds": {
+            "stuck_after_seconds":  threshold_seconds,
+            "poll_seconds":         _CAMPAIGN_POLL_SECONDS,
+        },
+    }
+
+
 def _find_stuck_immediate_campaigns(
     db,
     *,
