@@ -861,17 +861,26 @@ def _mask_payload(payload: Any) -> Any:
     return masked
 
 
-def _summarise_send_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _summarise_send_payload(
+    payload: Dict[str, Any],
+    *,
+    template: Optional["WhatsAppTemplate"] = None,
+) -> Dict[str, Any]:
     """Build the compact ``campaign_send_attempt`` log dict.
 
     Mirrors the shape the user explicitly asked for so the production
     log line is grep-able as JSON::
 
-        {template_name, language, recipient, component_count,
-         body_params, button_params, media}
+        {campaign_id, recipient, template_name, language, category,
+         component_count, header_params, body_params, button_params,
+         media}
+
+    ``template`` (optional) is consulted for ``category`` since the
+    payload doesn't carry it.
     """
     tpl = (payload or {}).get("template") or {}
     components = tpl.get("components") or []
+    header_params = 0
     body_params = 0
     button_params = 0
     media = False
@@ -888,12 +897,16 @@ def _summarise_send_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "image", "video", "document",
                 ):
                     media = True
+                else:
+                    header_params += 1
     return {
         "template_name":   tpl.get("name"),
         "language":        ((tpl.get("language") or {}).get("code")
                             if isinstance(tpl.get("language"), dict) else tpl.get("language")),
+        "category":        getattr(template, "category", None),
         "recipient":       _mask_phone_for_log(payload.get("to")),
         "component_count": len(components),
+        "header_params":   header_params,
         "body_params":     body_params,
         "button_params":   button_params,
         "media":           media,
@@ -912,16 +925,185 @@ def _log_send_attempt(
     logs and instantly correlate every ``unknown`` Meta failure with
     the template variables that were shipped."""
     try:
-        summary = _summarise_send_payload(payload)
+        summary = _summarise_send_payload(payload, template=template)
     except Exception:
         summary = {
             "template_name": getattr(template, "name", None),
+            "category":      getattr(template, "category", None),
             "recipient":     _mask_phone_for_log(recipient_phone),
         }
     logger.info(
         "[campaign_dispatcher] campaign_send_attempt campaign=%d %s",
         campaign_id, summary,
     )
+
+
+def _extract_fbtrace_id(resp: Any) -> Optional[str]:
+    """Meta sometimes nests fbtrace_id under ``error.fbtrace_id`` and
+    sometimes under ``error.error_data.fbtrace_id``. We accept either
+    and return ``None`` when neither is present."""
+    if not isinstance(resp, dict):
+        return None
+    err = resp.get("error")
+    if isinstance(err, dict):
+        for candidate in (
+            err.get("fbtrace_id"),
+            (err.get("error_data") or {}).get("fbtrace_id")
+                if isinstance(err.get("error_data"), dict) else None,
+            err.get("trace_id"),
+        ):
+            if candidate:
+                return str(candidate)
+    top = resp.get("fbtrace_id")
+    return str(top) if top else None
+
+
+def diff_template_components(
+    template: "WhatsAppTemplate",
+    payload: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Compare what Meta APPROVED for this template against what we're
+    about to send. Returns a list of issues so the merchant can see,
+    e.g. "BODY expected 2 params, got 1" or "BUTTON URL param missing"
+    right next to the raw Meta error.
+
+    Issue shape::
+
+        {component: "BODY"|"HEADER"|"BUTTONS",
+         index:    int|None,
+         kind:     "param_count_mismatch"|"missing_button_param"|"missing_media",
+         expected: <int|str>,
+         sent:     <int|str>,
+         message_ar: str}
+    """
+    issues: List[Dict[str, Any]] = []
+    sent_components = (
+        ((payload or {}).get("template") or {}).get("components") or []
+    )
+    # Build a quick lookup of sent components by (type, sub_type, index).
+    sent_body_param_count = 0
+    sent_header_text_param_count = 0
+    sent_header_media = False
+    sent_buttons: Dict[Tuple[str, int], int] = {}  # (sub_type, index) → param count
+    for comp in sent_components:
+        ctype = (comp.get("type") or "").lower()
+        params = comp.get("parameters") or []
+        if ctype == "body":
+            sent_body_param_count = len(params)
+        elif ctype == "header":
+            for p in params:
+                ptype = (p.get("type") or "").lower() if isinstance(p, dict) else ""
+                if ptype in ("image", "video", "document"):
+                    sent_header_media = True
+                else:
+                    sent_header_text_param_count += 1
+        elif ctype == "button":
+            sub = (comp.get("sub_type") or "").lower()
+            try:
+                idx = int(comp.get("index") or 0)
+            except (ValueError, TypeError):
+                idx = 0
+            sent_buttons[(sub, idx)] = len(params)
+
+    for comp in (template.components or []):
+        ctype = (comp.get("type") or "").upper()
+        text = comp.get("text") or ""
+
+        if ctype == "BODY":
+            expected = _extract_param_count(text) or _example_param_count(comp, "body_text")
+            if expected != sent_body_param_count:
+                issues.append({
+                    "component":  "BODY",
+                    "index":      None,
+                    "kind":       "param_count_mismatch",
+                    "expected":   expected,
+                    "sent":       sent_body_param_count,
+                    "message_ar": (
+                        f"BODY يتوقع {expected} متغيراً، أُرسل {sent_body_param_count}"
+                    ),
+                })
+
+        elif ctype == "HEADER":
+            fmt = (comp.get("format") or "").upper()
+            if fmt == "TEXT":
+                expected = (
+                    _extract_param_count(text)
+                    or _example_param_count(comp, "header_text")
+                )
+                if expected != sent_header_text_param_count:
+                    issues.append({
+                        "component":  "HEADER",
+                        "index":      None,
+                        "kind":       "param_count_mismatch",
+                        "expected":   expected,
+                        "sent":       sent_header_text_param_count,
+                        "message_ar": (
+                            f"HEADER نصّي يتوقع {expected} متغيّراً، أُرسل "
+                            f"{sent_header_text_param_count}"
+                        ),
+                    })
+            elif fmt in ("IMAGE", "VIDEO", "DOCUMENT"):
+                if not sent_header_media:
+                    issues.append({
+                        "component":  "HEADER",
+                        "index":      None,
+                        "kind":       "missing_media",
+                        "expected":   fmt.lower(),
+                        "sent":       "—",
+                        "message_ar": (
+                            f"HEADER يتوقع وسائط {fmt}، لكن لم تُرسل أي وسائط"
+                        ),
+                    })
+
+        elif ctype == "BUTTONS":
+            for idx, btn in enumerate(comp.get("buttons") or []):
+                btype = (btn.get("type") or "").upper()
+                if btype == "COPY_CODE":
+                    sent_count = sent_buttons.get(("copy_code", idx), 0)
+                    if sent_count == 0:
+                        issues.append({
+                            "component":  "BUTTONS",
+                            "index":      idx,
+                            "kind":       "missing_button_param",
+                            "expected":   "coupon_code",
+                            "sent":       "—",
+                            "message_ar": (
+                                f"الزر #{idx} (COPY_CODE) يتطلّب كوبون "
+                                "لكنه غير مُمرَّر"
+                            ),
+                        })
+                elif btype == "URL":
+                    url = btn.get("url") or ""
+                    if "{{" in url:
+                        sent_count = sent_buttons.get(("url", idx), 0)
+                        if sent_count == 0:
+                            issues.append({
+                                "component":  "BUTTONS",
+                                "index":      idx,
+                                "kind":       "missing_button_param",
+                                "expected":   "url_suffix",
+                                "sent":       "—",
+                                "message_ar": (
+                                    f"الزر #{idx} (URL ديناميكي) يتطلّب "
+                                    "متغيراً لكنه غير مُمرَّر"
+                                ),
+                            })
+                elif btype == "OTP":
+                    sent_count = sent_buttons.get(("url", idx), 0)
+                    if sent_count == 0:
+                        issues.append({
+                            "component":  "BUTTONS",
+                            "index":      idx,
+                            "kind":       "missing_button_param",
+                            "expected":   "otp_code",
+                            "sent":       "—",
+                            "message_ar": (
+                                f"الزر #{idx} (OTP) يتطلّب رمزاً لكنه غير "
+                                "مُمرَّر"
+                            ),
+                        })
+
+    return issues
 
 
 def _record_raw_meta_sample(
@@ -935,6 +1117,7 @@ def _record_raw_meta_sample(
     request_payload: Dict[str, Any],
     response_payload: Dict[str, Any],
     classified_key: str,
+    template: Optional["WhatsAppTemplate"] = None,
 ) -> None:
     """Append a bounded sample of the full Meta request/response onto
     ``campaign.template_variables._raw_meta_error_samples`` so the
@@ -959,6 +1142,18 @@ def _record_raw_meta_sample(
         elif isinstance(raw_str, list):
             samples = list(raw_str)
 
+        fbtrace_id = _extract_fbtrace_id(response_payload)
+        template_summary = _summarise_send_payload(
+            request_payload, template=template,
+        )
+        component_diff: List[Dict[str, Any]] = []
+        if template is not None:
+            try:
+                component_diff = diff_template_components(
+                    template, request_payload,
+                )
+            except Exception:  # noqa: BLE001
+                component_diff = []
         sample = {
             "ts":                  datetime.now(timezone.utc).isoformat(),
             "recipient":           _mask_phone_for_log(recipient_phone),
@@ -966,9 +1161,12 @@ def _record_raw_meta_sample(
             "meta_error_subcode":  str(meta_subcode) if meta_subcode is not None else None,
             "meta_error_type":     str(meta_type) if meta_type is not None else None,
             "meta_error_message":  str(meta_message or "")[:1000],
+            "fbtrace_id":          fbtrace_id,
             "request_payload":     _mask_payload(request_payload),
             "response_payload":    _mask_payload(response_payload),
             "classified_key":      classified_key,
+            "template_summary":    template_summary,
+            "component_diff":      component_diff,
         }
         # Unknown samples win priority — drop the oldest known sample
         # first when we exceed the cap.
@@ -1165,7 +1363,23 @@ async def _dispatch_queued_rows(
                         request_payload=payload,
                         response_payload=resp,
                         classified_key=classified.key,
+                        template=template,
                     )
+                    # Track first-ever sightings of unknown Meta codes
+                    # so structured logs include a single ``Unknown Meta
+                    # code encountered`` warning per (code, subcode)
+                    # tuple. Support uses this to extend ``_CODE_MAP``.
+                    if classified.key == "unknown":
+                        try:
+                            from services import meta_errors as _me  # noqa: PLC0415
+                            _me.note_unknown_code(
+                                code=meta_code,
+                                subcode=meta_subcode,
+                                error_type=meta_type,
+                                message=meta_msg,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     failed += 1
                     if len(errors) < 10:
                         # Friendly Arabic line for the campaign report

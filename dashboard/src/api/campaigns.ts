@@ -239,9 +239,29 @@ export interface CampaignDebugSnapshot {
     meta_error_subcode: string | null
     meta_error_type: string | null
     meta_error_message: string | null
+    fbtrace_id: string | null
     request_payload: Record<string, unknown>
     response_payload: Record<string, unknown>
     classified_key: string
+    template_summary?: {
+      template_name?: string | null
+      language?: string | null
+      category?: string | null
+      recipient?: string | null
+      component_count?: number
+      header_params?: number
+      body_params?: number
+      button_params?: number
+      media?: boolean
+    } | null
+    component_diff?: Array<{
+      component: 'BODY' | 'HEADER' | 'BUTTONS' | string
+      index: number | null
+      kind: string
+      expected: number | string
+      sent: number | string
+      message_ar: string
+    }>
   }>
   sample_sent: Array<{
     phone: string

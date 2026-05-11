@@ -32,9 +32,12 @@ Severity scale
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set, Tuple
+
+logger = logging.getLogger("nahla.meta_errors")
 
 
 @dataclass(frozen=True)
@@ -418,6 +421,51 @@ def label_for(key: str) -> str:
     return ERRORS.get(key, ERRORS["unknown"]).label_ar
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Unknown-code registry
+# ──────────────────────────────────────────────────────────────────────
+#
+# Production keeps surfacing new Meta error codes we haven't classified
+# yet. We record each new ``(code, subcode)`` tuple **once per process**
+# and emit a single structured WARNING line so operators can grep
+# Railway logs for ``Unknown Meta code encountered`` and extend
+# ``_CODE_MAP`` confidently.
+_SEEN_UNKNOWN_KEYS: Set[Tuple[str, str]] = set()
+
+
+def note_unknown_code(
+    *,
+    code: Any,
+    subcode: Any = None,
+    error_type: Any = None,
+    message: Any = None,
+) -> bool:
+    """Record an unknown Meta error code (idempotent per process).
+
+    Returns ``True`` if this is the first time the (code, subcode) tuple
+    has been seen this process — handy for tests / metrics.
+    """
+    code_str = str(code) if code is not None else ""
+    sub_str = str(subcode) if subcode is not None else ""
+    key = (code_str.strip(), sub_str.strip())
+    if not any(key):
+        # Pure free-text message — fingerprint by the first 80 chars.
+        key = ("", (str(message or "").strip())[:80])
+    if key in _SEEN_UNKNOWN_KEYS:
+        return False
+    _SEEN_UNKNOWN_KEYS.add(key)
+    logger.warning(
+        "Unknown Meta code encountered code=%s subcode=%s type=%s msg=%s",
+        code, subcode, error_type, (str(message or "")[:240]),
+    )
+    return True
+
+
+def reset_unknown_registry() -> None:
+    """Clear the in-process unknown-code registry. Used by tests."""
+    _SEEN_UNKNOWN_KEYS.clear()
+
+
 def to_dict(c: ClassifiedError) -> Dict[str, Any]:
     """Serialise a ClassifiedError for JSON responses."""
     return {
@@ -438,4 +486,6 @@ __all__ = [
     "severity_of",
     "label_for",
     "to_dict",
+    "note_unknown_code",
+    "reset_unknown_registry",
 ]

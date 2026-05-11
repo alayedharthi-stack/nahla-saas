@@ -1674,12 +1674,13 @@ function UnknownMetaErrorsPanel({
     <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50/60 p-3">
       <p className="text-[11px] font-semibold text-amber-800 mb-2 flex items-center gap-1">
         <AlertCircle className="w-3.5 h-3.5" />
-        Meta أعادت خطأ غير مصنّف بعد ({rows.length})
+        Meta أعادت خطأ غير مصنّف بعد — افحص الرد الخام أدناه ({rows.length})
       </p>
       <p className="text-[10px] text-amber-700 leading-relaxed mb-2">
-        نحن في طور جمع بصمات أخطاء Meta الحقيقية لتحسين المُصنِّف. انسخ
-        السطر التقني التالي وأرسله للدعم لإضافته إلى قائمة الأخطاء
-        المعروفة.
+        كل عينة فشل صنّفها النظام كـ «خطأ غير مصنّف». افحص قسم
+        «العيّنات الخام من Meta» في الأسفل — يحوي ردّ Meta الكامل لكل
+        محاولة (request + response + code + subcode + type + message).
+        أرسل لقطة منها للدعم لإضافة الكود إلى المُصنِّف.
       </p>
       <div className="space-y-2">
         {rows.map((r, i) => (
@@ -1752,19 +1753,42 @@ function RawMetaSamplesPanel({
   samples: NonNullable<CampaignDebugSnapshot['raw_meta_error_samples']>
 }) {
   const [openIdx, setOpenIdx] = useState<number | null>(null)
+  const copyAll = () => {
+    const payload = JSON.stringify(samples, null, 2)
+    navigator.clipboard.writeText(payload).catch(() => {})
+  }
   return (
     <div className="mt-3 rounded-lg border border-slate-300 bg-slate-50/70 p-3">
-      <p className="text-[11px] font-semibold text-slate-700 mb-2 flex items-center gap-1">
-        🔬 العيّنات الخام من Meta ({samples.length})
-      </p>
+      <div className="flex items-center justify-between mb-2 gap-2">
+        <p className="text-[11px] font-semibold text-slate-700 flex items-center gap-1">
+          🔬 العيّنات الخام من Meta ({samples.length})
+        </p>
+        <button
+          type="button"
+          onClick={copyAll}
+          className="text-[10px] text-slate-600 hover:text-slate-900 flex items-center gap-1 border border-slate-200 rounded px-1.5 py-0.5 bg-white"
+          title="نسخ كل العيّنات كـ JSON"
+        >
+          <Copy className="w-3 h-3" /> نسخ الكل
+        </button>
+      </div>
       <p className="text-[10px] text-slate-600 leading-relaxed mb-2">
         كل عينة تحوي الطلب والاستجابة الكاملين — مفيد للتأكد من
         ``template.name`` و``language.code`` وعدد المتغيّرات قبل
-        تقديم تذكرة للدعم.
+        تقديم تذكرة للدعم. عند اختلاف هيكل القالب عن البايلود
+        تظهر شارة "اختلاف القالب" مع التفاصيل.
       </p>
       <div className="space-y-2">
         {samples.map((s, i) => {
           const open = openIdx === i
+          const diff = s.component_diff || []
+          const summary = s.template_summary || {}
+          const technical = `[code=${s.meta_error_code ?? ''} subcode=${
+            s.meta_error_subcode ?? ''
+          } type=${s.meta_error_type ?? ''}] ${s.meta_error_message ?? ''}`
+          const copyOne = () => {
+            navigator.clipboard.writeText(technical).catch(() => {})
+          }
           return (
             <div
               key={i}
@@ -1775,8 +1799,13 @@ function RawMetaSamplesPanel({
                 onClick={() => setOpenIdx(open ? null : i)}
                 className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-[10.5px] hover:bg-slate-50"
               >
-                <span className="text-slate-700 font-mono" dir="ltr">
+                <span className="text-slate-700 font-mono flex items-center gap-2" dir="ltr">
                   {s.ts.slice(0, 19).replace('T', ' ')} • {s.recipient}
+                  {diff.length > 0 && (
+                    <span className="bg-rose-100 text-rose-700 border border-rose-200 rounded px-1.5 py-0.5 font-sans" dir="rtl">
+                      اختلاف القالب ({diff.length})
+                    </span>
+                  )}
                 </span>
                 <span className="flex items-center gap-2">
                   <span
@@ -1793,10 +1822,21 @@ function RawMetaSamplesPanel({
               </button>
               {open && (
                 <div className="border-t border-slate-200 p-2 space-y-2">
-                  <div className="grid grid-cols-3 gap-1 text-[10px]">
-                    <MetaField label="code"    value={s.meta_error_code} />
-                    <MetaField label="subcode" value={s.meta_error_subcode} />
-                    <MetaField label="type"    value={s.meta_error_type} />
+                  <div className="flex items-center justify-end">
+                    <button
+                      type="button"
+                      onClick={copyOne}
+                      className="text-[10px] text-slate-600 hover:text-slate-900 flex items-center gap-1 border border-slate-200 rounded px-1.5 py-0.5 bg-slate-50"
+                      title="نسخ السطر التقني الكامل لهذه العينة"
+                    >
+                      <Copy className="w-3 h-3" /> Copy raw Meta error
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 text-[10px]">
+                    <MetaField label="code"        value={s.meta_error_code} />
+                    <MetaField label="subcode"     value={s.meta_error_subcode} />
+                    <MetaField label="type"        value={s.meta_error_type} />
+                    <MetaField label="fbtrace_id"  value={s.fbtrace_id} />
                   </div>
                   <p
                     className="text-[10.5px] text-slate-700 leading-relaxed"
@@ -1804,12 +1844,47 @@ function RawMetaSamplesPanel({
                   >
                     {s.meta_error_message || '—'}
                   </p>
+                  {summary && (summary.template_name || summary.language) && (
+                    <div className="grid grid-cols-2 gap-1 text-[10px] bg-slate-50 border border-slate-200 rounded p-1.5">
+                      <MetaField label="template"     value={summary.template_name ?? null} />
+                      <MetaField label="language"     value={summary.language ?? null} />
+                      <MetaField label="category"     value={summary.category ?? null} />
+                      <MetaField label="components"   value={String(summary.component_count ?? '')} />
+                      <MetaField label="header_params" value={String(summary.header_params ?? '')} />
+                      <MetaField label="body_params"  value={String(summary.body_params ?? '')} />
+                      <MetaField label="button_params" value={String(summary.button_params ?? '')} />
+                      <MetaField label="media"        value={summary.media ? 'yes' : 'no'} />
+                    </div>
+                  )}
+                  {diff.length > 0 && (
+                    <div className="rounded-md border border-rose-200 bg-rose-50/70 p-2">
+                      <p className="text-[10.5px] font-semibold text-rose-800 mb-1">
+                        🧩 اختلاف بين القالب المعتمد والبايلود المُرسَل
+                      </p>
+                      <ul className="space-y-0.5">
+                        {diff.map((d, k) => (
+                          <li
+                            key={k}
+                            className="text-[10.5px] text-rose-700 flex items-center gap-1.5"
+                          >
+                            <span className="bg-rose-100 border border-rose-200 rounded px-1 py-0.5 font-mono text-[9.5px]" dir="ltr">
+                              {d.component}{d.index != null ? `#${d.index}` : ''}
+                            </span>
+                            <span>{d.message_ar}</span>
+                            <span className="text-[9.5px] text-rose-500 font-mono" dir="ltr">
+                              (expected={String(d.expected)}, sent={String(d.sent)})
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                   <div>
                     <p className="text-[10px] font-semibold text-slate-600 mb-1">
                       Request payload (masked):
                     </p>
                     <pre
-                      className="text-[9.5px] bg-slate-900 text-emerald-200 rounded p-2 overflow-x-auto max-h-44 leading-relaxed"
+                      className="text-[9.5px] bg-slate-900 text-emerald-200 rounded p-2 overflow-x-auto max-h-56 leading-relaxed whitespace-pre-wrap break-words"
                       dir="ltr"
                     >
                       {JSON.stringify(s.request_payload, null, 2)}
@@ -1817,10 +1892,10 @@ function RawMetaSamplesPanel({
                   </div>
                   <div>
                     <p className="text-[10px] font-semibold text-slate-600 mb-1">
-                      Response payload:
+                      Response payload (raw):
                     </p>
                     <pre
-                      className="text-[9.5px] bg-slate-900 text-rose-200 rounded p-2 overflow-x-auto max-h-44 leading-relaxed"
+                      className="text-[9.5px] bg-slate-900 text-rose-200 rounded p-2 overflow-x-auto max-h-56 leading-relaxed whitespace-pre-wrap break-words"
                       dir="ltr"
                     >
                       {JSON.stringify(s.response_payload, null, 2)}

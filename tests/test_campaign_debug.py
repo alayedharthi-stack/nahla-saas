@@ -671,6 +671,115 @@ class TestRawMetaSamplesPersistence:
         # Recipient is masked.
         assert "966500000099" not in samples[0]["recipient"]
 
+    def test_record_captures_fbtrace_and_component_diff(self):
+        """fbtrace_id is pulled from the response, and a component-diff
+        is generated when the dispatcher passes the template handle —
+        UI uses this to surface ``BODY expected N, got M``."""
+        from services.campaign_dispatcher import _record_raw_meta_sample
+        db, t, c = self._campaign()
+        tpl = db.query(WhatsAppTemplate).filter_by(tenant_id=t.id).one()
+        # Template expects {{1}} but the payload sent zero params.
+        request_payload = {
+            "to": "+966500000007",
+            "template": {
+                "name": tpl.name,
+                "language": {"code": "ar"},
+                "components": [{"type": "body", "parameters": []}],
+            },
+        }
+        response_payload = {
+            "error": {
+                "code": 132000, "error_subcode": 2494073,
+                "message": "Parameter mismatch",
+                "fbtrace_id": "AaAaBbBb",
+            },
+        }
+        _record_raw_meta_sample(
+            campaign=c, recipient_phone="+966500000007",
+            meta_code=132000, meta_subcode=2494073,
+            meta_type="OAuthException",
+            meta_message="Parameter mismatch",
+            request_payload=request_payload,
+            response_payload=response_payload,
+            classified_key="unknown",
+            template=tpl,
+        )
+        db.commit(); db.refresh(c)
+        import json as _json
+        samples = _json.loads(
+            (c.template_variables or {})["_raw_meta_error_samples"]
+        )
+        s = samples[0]
+        assert s["fbtrace_id"] == "AaAaBbBb"
+        diff = s.get("component_diff") or []
+        assert any(
+            d["component"] == "BODY" and d["kind"] == "param_count_mismatch"
+            for d in diff
+        ), diff
+        # Template summary tells the merchant what we shipped vs what
+        # the catalogue declares.
+        summary = s.get("template_summary") or {}
+        assert summary["template_name"] == tpl.name
+        assert summary["body_params"] == 0
+
+    def test_unknown_registry_logs_once_per_code(self, caplog):
+        """`note_unknown_code` warns the first time a (code, subcode)
+        is seen and stays silent on duplicates so log volume scales."""
+        import logging
+        from services import meta_errors as me
+        me.reset_unknown_registry()
+        with caplog.at_level(logging.WARNING, logger="nahla.meta_errors"):
+            first = me.note_unknown_code(
+                code=987654, subcode=11,
+                error_type="OAuthException", message="weird code",
+            )
+            again = me.note_unknown_code(
+                code=987654, subcode=11,
+                error_type="OAuthException", message="weird code",
+            )
+            new = me.note_unknown_code(
+                code=987655, subcode=11,
+                error_type="OAuthException", message="other code",
+            )
+        assert first is True
+        assert again is False
+        assert new is True
+        warnings = [
+            rec for rec in caplog.records
+            if rec.levelno == logging.WARNING
+            and "Unknown Meta code encountered" in rec.getMessage()
+        ]
+        assert len(warnings) == 2
+
+    def test_extract_fbtrace_id_handles_nested_locations(self):
+        from services.campaign_dispatcher import _extract_fbtrace_id
+        assert _extract_fbtrace_id({"error": {"fbtrace_id": "abc"}}) == "abc"
+        assert _extract_fbtrace_id(
+            {"error": {"error_data": {"fbtrace_id": "xyz"}}}
+        ) == "xyz"
+        assert _extract_fbtrace_id({"fbtrace_id": "top"}) == "top"
+        assert _extract_fbtrace_id({"error": {}}) is None
+
+    def test_diff_template_components_detects_missing_button_param(self):
+        from services.campaign_dispatcher import diff_template_components
+        tpl = WhatsAppTemplate(
+            tenant_id=1, name="t", language="ar", category="MARKETING",
+            status="APPROVED",
+            components=[
+                {"type": "BODY", "text": "Hi {{1}}"},
+                {"type": "BUTTONS", "buttons": [
+                    {"type": "COPY_CODE", "example": ["SAVE10"]},
+                ]},
+            ],
+        )
+        payload = {"template": {"components": [
+            {"type": "body", "parameters": [{"type": "text", "text": "n"}]},
+            # NO button component → COPY_CODE is missing its coupon.
+        ]}}
+        issues = diff_template_components(tpl, payload)
+        kinds = [(i["component"], i["kind"]) for i in issues]
+        assert ("BUTTONS", "missing_button_param") in kinds
+
     def test_sample_failed_includes_parsed_meta_fields(self):
         from services.meta_errors import format_technical
         db, _ = _make_db()
