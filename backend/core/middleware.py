@@ -696,12 +696,18 @@ async def owner_merchant_scope_middleware(request: Request, call_next):
 
 # Paths that support-impersonation sessions are NEVER allowed to call.
 # Keep this list conservative; add paths as new sensitive features are built.
+#
+# Matching: prefix-based. Any incoming request path starting with one of
+# these strings is rejected with 403 + audit log. Read-only exceptions
+# under these prefixes go into ``_SUPPORT_ALLOWED_READS`` below.
 _SUPPORT_BLOCKED_PATHS = (
     # Password / credential changes
     "/auth/change-password",
     "/auth/change-email",
     "/auth/reset-password",
-    # Billing and payment — must never be reachable from a support session
+    # Billing and payment — write paths must never be reachable from
+    # a support session. Read paths are allow-listed below so support
+    # can diagnose subscription state without the merchant on the call.
     "/billing",
     "/payment",
     "/subscription",
@@ -718,6 +724,34 @@ _SUPPORT_BLOCKED_PATHS = (
     "/account/delete",
     "/admin/delete-tenant",
 )
+
+# Read-only endpoints under blocked prefixes that ARE safe to allow
+# during a support session. Each entry is ``(METHOD, exact_path)``.
+#
+# Why exact-match (not prefix): every entry here is an attestation
+# that *this exact path* returns no mutation side-effects AND no
+# bearer-token / card-PAN-grade secret. Adding a new entry should
+# require auditing what the handler returns. A future write endpoint
+# that happens to share a prefix (e.g. `/billing/status/cancel`)
+# would NOT be allowed unless explicitly added.
+#
+# Audit trail: the support session middleware still records every
+# allowed read at INFO level, so the merchant has a full log of what
+# the admin looked at.
+_SUPPORT_ALLOWED_READS: frozenset[tuple[str, str]] = frozenset({
+    # Subscription state — needed to diagnose "why are outbound sends
+    # being rejected?" without forcing the merchant onto a call.
+    ("GET", "/billing/status"),
+    # Plan catalog — public-ish info, no merchant-specific data.
+    ("GET", "/billing/plans"),
+    # Entitlements snapshot — what features the plan unlocks.
+    ("GET", "/billing/entitlements"),
+    # Result of a returning payment redirect — read-only screen.
+    # The handler reads provider state; it does not mutate billing.
+    ("GET", "/billing/payment-result"),
+    # Read-only debug snapshot — same intent as the admin one.
+    ("GET", "/billing/debug/current"),
+})
 
 _support_middleware_log = logging.getLogger("nahla.support_audit")
 
@@ -814,7 +848,22 @@ async def support_session_middleware(request: Request, call_next):
         )
 
     # ── 2. Block sensitive paths + record attempt ───────────────────────────────
-    if any(path.startswith(blocked) for blocked in _SUPPORT_BLOCKED_PATHS):
+    #
+    # Two-tier check:
+    #   (a) If the path starts with a blocked prefix AND the
+    #       (method, path) tuple is NOT on the explicit read allow-list,
+    #       reject with 403.
+    #   (b) If it IS on the allow-list (e.g. GET /billing/status),
+    #       record an INFO audit line and let the request through.
+    #
+    # The allow-list is intentionally narrow — only paths whose
+    # handlers have been audited to return no mutation side-effects
+    # and no card-grade secrets.
+    is_blocked_prefix = any(
+        path.startswith(blocked) for blocked in _SUPPORT_BLOCKED_PATHS
+    )
+    is_allowed_read = (request.method.upper(), path) in _SUPPORT_ALLOWED_READS
+    if is_blocked_prefix and not is_allowed_read:
         _support_middleware_log.warning(
             "SUPPORT_BLOCKED_SENSITIVE actor=%s tenant=%s path=%s ip=%s",
             actor_email, tenant_id, path, ip,
@@ -841,6 +890,15 @@ async def support_session_middleware(request: Request, call_next):
         )
 
     # ── 3. Audit log every support request (logger + DB) ───────────────────────
+    if is_blocked_prefix and is_allowed_read:
+        # Distinct log line for allow-listed reads so audits can grep
+        # "SUPPORT_BLOCKED_PREFIX_READ_OK" to enumerate which
+        # otherwise-sensitive paths support hit during a session.
+        _support_middleware_log.info(
+            "SUPPORT_BLOCKED_PREFIX_READ_OK actor=%s tenant=%s "
+            "path=%s method=%s ip=%s sv=%d",
+            actor_email, tenant_id, path, request.method, ip, token_sv,
+        )
     _support_middleware_log.info(
         "SUPPORT_ACCESS actor=%s tenant=%s path=%s method=%s ip=%s sv=%d",
         actor_email, tenant_id, path, request.method, ip, token_sv,
