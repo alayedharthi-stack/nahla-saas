@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -883,6 +883,76 @@ async def debug_campaign(
     # legacy statuses like ``pending`` or ``processing``.
     status_breakdown_raw = {str(k): int(v) for k, v in (counts or {}).items()}
 
+    # ── Retry-health diagnostics ────────────────────────────────────
+    # Production was burning ~7000 attempts per row before we added
+    # the bounded loop + watchdog. This block surfaces the signals
+    # the runbook keys off: how high any single row's attempt_count
+    # got, how many rows are stuck in ``sending``, and whether ANY
+    # row tripped the circuit breaker (``retry_storm`` metric).
+    def _retry_health():
+        from sqlalchemy import func  # noqa: PLC0415
+        from services.campaign_dispatcher import (  # noqa: PLC0415
+            ATTEMPT_CIRCUIT_BREAKER, MAX_SEND_ATTEMPTS,
+            SENDING_TIMEOUT_SECONDS,
+        )
+        # Single MAX() roundtrip — the high-water mark is all we need
+        # to compute ``retry_storm_detected``.
+        max_attempts = int(
+            db.query(func.max(CampaignSendLog.attempt_count))
+            .filter(CampaignSendLog.campaign_id == campaign_id)
+            .scalar() or 0
+        )
+        at_max = int(
+            db.query(func.count(CampaignSendLog.id))
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.attempt_count >= MAX_SEND_ATTEMPTS,
+            )
+            .scalar() or 0
+        )
+        over_breaker = int(
+            db.query(func.count(CampaignSendLog.id))
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.attempt_count > ATTEMPT_CIRCUIT_BREAKER,
+            )
+            .scalar() or 0
+        )
+        # Count rows that are STILL in ``sending`` whose updated_at
+        # is older than the watchdog threshold — those are zombies
+        # waiting for the next dispatch to revive them.
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=SENDING_TIMEOUT_SECONDS)
+        zombie_count = int(
+            db.query(func.count(CampaignSendLog.id))
+            .filter(
+                CampaignSendLog.campaign_id == campaign_id,
+                CampaignSendLog.status == "sending",
+                CampaignSendLog.updated_at < cutoff,
+            )
+            .scalar() or 0
+        )
+        return {
+            "max_send_attempts":         MAX_SEND_ATTEMPTS,
+            "attempt_circuit_breaker":   ATTEMPT_CIRCUIT_BREAKER,
+            "sending_timeout_seconds":   SENDING_TIMEOUT_SECONDS,
+            "max_attempt_count":         max_attempts,
+            "rows_at_attempt_ceiling":   at_max,
+            "zombie_sending_count":      zombie_count,
+            # Hard truth: if ANY row crossed ATTEMPT_CIRCUIT_BREAKER,
+            # we DID see a retry storm. Operators are paged via the
+            # ``campaign_send_retry_storm`` log line.
+            "retry_storm_detected":      over_breaker > 0,
+        }
+    retry_health = _safe("retry_health", _retry_health) or {
+        "retry_storm_detected": False,
+        "max_attempt_count": 0,
+        "rows_at_attempt_ceiling": 0,
+        "zombie_sending_count": 0,
+        "max_send_attempts": 5,
+        "attempt_circuit_breaker": 100,
+        "sending_timeout_seconds": 300,
+    }
+
     # ── First 10 send-log rows (audit) ──────────────────────────────
     # When materialized_rows>0 but every counter is zero, the merchant
     # needs to SEE the actual rows to diagnose (legacy status, weird
@@ -1595,6 +1665,33 @@ async def debug_campaign(
             "المُصنِّف."
         )
 
+    # ── Retry-storm hint ────────────────────────────────────────────
+    # If ANY row crossed the circuit breaker, page the merchant
+    # explicitly: this almost never happens by accident, and is the
+    # signal that production saw the runaway loop bug.
+    if retry_health.get("retry_storm_detected"):
+        hints.append(
+            "🚨 تم رصد retry storm — وصل بعض الصفوف إلى "
+            f"{retry_health.get('max_attempt_count', '?')} محاولة "
+            f"(الحد الأقصى للتنبيه = "
+            f"{retry_health.get('attempt_circuit_breaker', 100)}). "
+            "تم إيقاف هذه الصفوف تلقائياً (error_code=retry_storm). "
+            "راجع لوغات Railway للبحث عن 'campaign_send_retry_storm'."
+        )
+    elif (retry_health.get("rows_at_attempt_ceiling") or 0) > 0:
+        hints.append(
+            f"{retry_health['rows_at_attempt_ceiling']} صف وصل إلى "
+            f"الحد الأقصى للمحاولات "
+            f"(MAX_SEND_ATTEMPTS={retry_health.get('max_send_attempts', 5)}) — "
+            "صُنّفت كـ retry_exhausted ولن يُعاد المحاولة معها."
+        )
+    if (retry_health.get("zombie_sending_count") or 0) > 0:
+        hints.append(
+            f"{retry_health['zombie_sending_count']} صف عالق في sending "
+            f"أطول من {retry_health.get('sending_timeout_seconds', 300)} ثانية — "
+            "سيُعاد إحياؤها تلقائياً عند الإرسال التالي."
+        )
+
     if not (template_info or {}).get("approved"):
         hints.append(
             "القالب ليس بحالة APPROVED — لن يُرسل واتساب أي رسالة قبل "
@@ -1646,6 +1743,11 @@ async def debug_campaign(
         # NEW: first 10 send-log rows so the merchant can drill down
         # when ``materialized_rows > 0`` but all counters are zero.
         "sample_rows":          sample_rows,
+        # NEW: retry health snapshot — surfaces ``retry_storm_detected``
+        # and ``max_attempt_count`` so the merchant can see when the
+        # circuit-breaker kicked in. Always present, even when there's
+        # no sign of trouble (counters are then all zero).
+        "retry_health":         retry_health,
         "sample_failed":    sample_failed,
         "sample_sent":      sample_sent,
         # NEW: aggregated failure breakdown by canonical Meta-error key.
@@ -1758,13 +1860,30 @@ async def dispatch_campaign_now(
     # Pre-flip status so the merchant sees "جاري الإرسال" on the next
     # /campaigns refresh (≤2s away), instead of "ينتظر بدء الإرسال"
     # while we silently wait for the dispatcher to update it.
+    rescheduled_count = 0
+    revived_zombies = 0
     try:
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        from services.campaign_dispatcher import (  # noqa: PLC0415
+            reschedule_failed_for_retry, _revive_zombie_sending,
+        )
         if bypass_frequency_cap:
             tv = dict(campaign.template_variables or {})
             tv["_bypass_frequency_cap"] = "true"
             campaign.template_variables = tv
             flag_modified(campaign, "template_variables")
+        # Resurrect zombie ``sending`` rows from a crashed prior run so
+        # the dispatcher doesn't trip over them. The watchdog also
+        # runs at the top of the dispatcher itself, but doing it here
+        # gives the merchant immediate visibility (the row flips to
+        # ``queued`` before the next /debug refresh).
+        revived_zombies = _revive_zombie_sending(db, campaign_id)
+        # Promote retriable ``failed`` rows back to ``queued`` so this
+        # dispatch run picks them up. Recipient-specific failures
+        # (e.g. ``not_on_whatsapp``) stay terminal; only transient
+        # error codes are retried, and only while ``attempt_count``
+        # remains below ``MAX_SEND_ATTEMPTS``.
+        rescheduled_count = reschedule_failed_for_retry(db, campaign_id)
         if (campaign.status or "").lower() != "active":
             campaign.status = "active"
         if not campaign.launched_at:
@@ -1815,6 +1934,11 @@ async def dispatch_campaign_now(
         "kicked":      True,
         "status":      campaign.status,
         "bypass_frequency_cap": bypass_frequency_cap,
+        # Surface the bookkeeping so the merchant sees "تمت إعادة
+        # جدولة N محاولات فاشلة" + "تم تحرير N صف عالق" in the
+        # diagnostic panel.
+        "rescheduled_failed": rescheduled_count,
+        "revived_zombies":    revived_zombies,
         "message":     msg,
     }
 

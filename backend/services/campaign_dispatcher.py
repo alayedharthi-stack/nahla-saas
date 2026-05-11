@@ -90,12 +90,40 @@ INTER_MESSAGE_DELAY = 1.5
 # across the codebase without IDE help.
 LOG_QUEUED              = "queued"
 LOG_SENDING             = "sending"
+LOG_RETRY_WAITING       = "retry_waiting"
 LOG_SENT                = "sent"
 LOG_FAILED              = "failed"
 LOG_SKIPPED_DUPLICATE   = "skipped_duplicate"
 LOG_SKIPPED_INVALID     = "skipped_invalid"
 LOG_SKIPPED_UNSUBSCRIBED = "skipped_unsubscribed"
 LOG_SKIPPED_UNREACHABLE = "skipped_unreachable"
+
+# ── Retry / circuit-breaker controls ──────────────────────────────────────
+# Hard ceiling on how many times a single recipient row may attempt a
+# send. After we exhaust attempts we mark the row ``failed`` with
+# ``error_code='retry_exhausted'`` so the dispatcher never spins on it
+# again. Production was seeing rows accumulate 4000–7000 attempts in
+# minutes because failed rows were being re-picked in the same loop;
+# this is the hard backstop.
+MAX_SEND_ATTEMPTS = 5
+
+# Catastrophic circuit-breaker. If any row crosses this, we don't just
+# stop it — we emit a CRITICAL log line tagged
+# ``campaign_send_retry_storm`` so support gets paged. Any value above
+# this is by definition a runaway worker.
+ATTEMPT_CIRCUIT_BREAKER = 100
+
+# A row in ``sending`` is supposed to mean: "an HTTP request to Meta
+# is currently in flight for this recipient". If it stays in ``sending``
+# longer than this, we treat it as a zombie (worker crashed mid-send,
+# event loop cancelled, or DB commit died) and the watchdog reverts
+# it to ``queued`` so a future dispatch can pick it up cleanly.
+SENDING_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# Exponential backoff between explicit retries (attempt → seconds).
+# Used by dispatch-now to schedule the next retry rather than slamming
+# Meta immediately. Index = attempt_count when retry is scheduled.
+RETRY_BACKOFF_SECONDS: Tuple[int, ...] = (5, 15, 60, 300)
 # New: merchant-driven exclusions (drawer toggle "استبعاد من الحملات
 # التسويقية" + wizard "استبعد التصنيف X"). Tracked separately from
 # customer-driven `skipped_unsubscribed` so the report distinguishes
@@ -1189,6 +1217,158 @@ def _record_raw_meta_sample(
         )
 
 
+def _revive_zombie_sending(
+    db: Session,
+    campaign_id: int,
+    *,
+    timeout_seconds: int = SENDING_TIMEOUT_SECONDS,
+) -> int:
+    """Resurrect rows stuck in ``sending``.
+
+    A row in ``status='sending'`` whose ``updated_at`` is older than
+    ``timeout_seconds`` is unambiguously a zombie — the worker that
+    flipped it died before transitioning to a terminal state. We:
+
+        * revert it to ``queued`` if ``attempt_count < MAX_SEND_ATTEMPTS``
+        * mark it ``failed`` with ``error_code='watchdog_timeout'``
+          otherwise.
+
+    Returns the number of zombie rows touched. Safe to call repeatedly
+    (idempotent) and cheap — single UPDATE round-trip via per-row
+    sets so SQLite/Postgres behave identically.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+    zombies = (
+        db.query(CampaignSendLog)
+        .filter(
+            CampaignSendLog.campaign_id == campaign_id,
+            CampaignSendLog.status == LOG_SENDING,
+            CampaignSendLog.updated_at < cutoff,
+        )
+        .all()
+    )
+    if not zombies:
+        return 0
+    now = datetime.now(timezone.utc)
+    for r in zombies:
+        if (r.attempt_count or 0) >= MAX_SEND_ATTEMPTS:
+            r.status = LOG_FAILED
+            r.error_code = "watchdog_timeout"
+            r.error_message = (
+                f"[watchdog] sending row idle > {timeout_seconds}s after "
+                f"{r.attempt_count or 0} attempts"
+            )[:480]
+        else:
+            r.status = LOG_QUEUED
+            r.error_code = r.error_code or "watchdog_revive"
+            # Don't blow away an existing error_message — useful trail.
+        r.updated_at = now
+    logger.warning(
+        "[campaign_dispatcher] watchdog campaign=%d revived=%d zombie "
+        "sending rows (idle > %ds)",
+        campaign_id, len(zombies), timeout_seconds,
+    )
+    return len(zombies)
+
+
+def _force_terminate_runaway(
+    row: CampaignSendLog,
+    *,
+    campaign_id: int,
+) -> bool:
+    """Catastrophic circuit-breaker. If a single row crosses
+    ``ATTEMPT_CIRCUIT_BREAKER`` we must stop it immediately and page
+    operators — this is the ``campaign_send_retry_storm`` metric the
+    runbook keys off.
+
+    Returns True when the row was force-terminated and the caller
+    must skip the send.
+    """
+    attempts = int(row.attempt_count or 0)
+    if attempts <= ATTEMPT_CIRCUIT_BREAKER:
+        return False
+    logger.critical(
+        "[campaign_dispatcher] campaign_send_retry_storm campaign=%d "
+        "row_id=%s attempts=%d phone_last4=%s — force-terminating row",
+        campaign_id, row.id, attempts,
+        (row.customer_phone_e164 or "")[-4:],
+    )
+    row.status = LOG_FAILED
+    row.error_code = "retry_storm"
+    row.error_message = (
+        f"[circuit_breaker] attempts={attempts} exceeded "
+        f"ATTEMPT_CIRCUIT_BREAKER={ATTEMPT_CIRCUIT_BREAKER}"
+    )[:480]
+    row.updated_at = datetime.now(timezone.utc)
+    return True
+
+
+def _is_attempts_exhausted(row: CampaignSendLog) -> bool:
+    """The merchant-friendly bound: don't ever exceed
+    ``MAX_SEND_ATTEMPTS``. Used both before the send (skip exhausted
+    rows in the loop) and after a failure (so a row that just crossed
+    the threshold is correctly marked ``retry_exhausted`` instead of
+    sitting as a generic ``failed`` waiting to be retried.)"""
+    return int(row.attempt_count or 0) >= MAX_SEND_ATTEMPTS
+
+
+# Error codes that may be retried by an explicit ``dispatch-now`` call.
+# Recipient-specific Meta errors (the customer doesn't have WhatsApp,
+# the customer opted out, etc.) are NOT retried — they can never
+# succeed without the underlying recipient data changing.
+_RETRIABLE_ERROR_CODES = frozenset({
+    "exception", "no_message_id", "watchdog_revive", "watchdog_timeout",
+    "rate_limit", "internal_error", "service_unavailable", "unknown",
+})
+
+
+def reschedule_failed_for_retry(
+    db: Session,
+    campaign_id: int,
+) -> int:
+    """Promote ``failed`` rows that haven't exhausted their attempts
+    back into ``queued`` so the next dispatch run picks them up.
+
+    Used by ``POST /campaigns/{id}/dispatch-now`` to retry transient
+    failures explicitly. Only rows whose ``error_code`` is in the
+    retriable set are promoted — recipient-specific failures like
+    ``not_on_whatsapp`` are terminal and remain ``failed``. Rows past
+    ``MAX_SEND_ATTEMPTS`` are converted to a definitive
+    ``retry_exhausted`` so they stay out of future retries.
+    """
+    rows = (
+        db.query(CampaignSendLog)
+        .filter(
+            CampaignSendLog.campaign_id == campaign_id,
+            CampaignSendLog.status == LOG_FAILED,
+            CampaignSendLog.error_code != "retry_exhausted",
+            CampaignSendLog.error_code != "retry_storm",
+        )
+        .all()
+    )
+    moved = 0
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        code = (r.error_code or "").strip().lower()
+        if code and code not in _RETRIABLE_ERROR_CODES:
+            # Keep the terminal classification — these never recover.
+            continue
+        if _is_attempts_exhausted(r):
+            r.error_code = "retry_exhausted"
+            r.updated_at = now
+            continue
+        r.status = LOG_QUEUED
+        r.updated_at = now
+        moved += 1
+    if moved:
+        logger.info(
+            "[campaign_dispatcher] reschedule_failed campaign=%d "
+            "moved=%d rows back to queued",
+            campaign_id, moved,
+        )
+    return moved
+
+
 def _count_log_statuses(db: Session, campaign_id: int) -> Dict[str, int]:
     """Return ``{status: count}`` for every status seen on this
     campaign. Backbone of the report endpoint."""
@@ -1229,16 +1409,49 @@ async def _dispatch_queued_rows(
     batch_size = MARKETING_CAMPAIGN_BATCH_SIZE
     pause = MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS
 
+    # Run the zombie watchdog up-front so any row stuck in ``sending``
+    # from a previous (crashed) run is reverted to queued before we
+    # start drawing the new batch.
+    _revive_zombie_sending(db, campaign.id)
+    db.commit()
+
+    # Track rows we've already processed in THIS invocation so a
+    # status flip during the loop (queued → failed → queued via some
+    # other code path) can never resurrect the same row in the same
+    # call — that's exactly how production accumulated 7000+ attempts
+    # on a single phone.
+    processed_ids: set = set()
+
+    # Hard ceiling on the outer loop. Even with batch_size rows per
+    # iteration, we should NEVER iterate more than the audience size
+    # plus a safety margin. This is the last line of defence against
+    # the retry-storm bug.
+    safety_iterations = 0
+    max_safety_iterations = max(50, (campaign.audience_count or 0) * 2)
+
     while True:
-        # Pull the next batch of work. We re-query each iteration
-        # (rather than keep an in-memory list) so:
-        #   * a parallel admin "force-resend" never duplicates a row.
-        #   * crashes mid-batch resume cleanly on the next call.
+        safety_iterations += 1
+        if safety_iterations > max_safety_iterations:
+            logger.critical(
+                "[campaign_dispatcher] campaign_send_retry_storm campaign=%d "
+                "outer loop hit safety cap (iterations=%d) — aborting",
+                campaign.id, safety_iterations,
+            )
+            break
+
+        # Pull the next batch of work. CRITICAL: only ``LOG_QUEUED``.
+        # NEVER include ``LOG_FAILED`` here — failed rows are terminal
+        # within a single dispatch run. Operators retry failures
+        # explicitly via dispatch-now (which calls
+        # ``reschedule_failed_for_retry`` to promote them back to
+        # queued). Re-including failed rows here was the root cause of
+        # the production retry storm (attempt_count=7345).
         batch = (
             db.query(CampaignSendLog)
             .filter(
                 CampaignSendLog.campaign_id == campaign.id,
-                CampaignSendLog.status.in_([LOG_QUEUED, LOG_FAILED]),
+                CampaignSendLog.status == LOG_QUEUED,
+                ~CampaignSendLog.id.in_(processed_ids) if processed_ids else True,
             )
             .order_by(CampaignSendLog.id.asc())
             .limit(batch_size)
@@ -1251,9 +1464,44 @@ async def _dispatch_queued_rows(
             # Idempotency guard: re-check status under the same row
             # (handles the case where another worker already grabbed it).
             if row.status == LOG_SENT:
+                processed_ids.add(int(row.id))
                 continue
 
-            # Mark sending — visible in the dashboard status feed.
+            # Mark this row as processed BEFORE we start sending so an
+            # exception thrown later can never resurrect it back into
+            # the loop within the same invocation.
+            processed_ids.add(int(row.id))
+
+            # Catastrophic circuit-breaker — fires if a runaway pre-
+            # existing row has > 100 attempts. We force-terminate it
+            # and continue without touching Meta.
+            if _force_terminate_runaway(row, campaign_id=campaign.id):
+                failed += 1
+                db.flush()
+                continue
+
+            # Soft retry ceiling. If a previous dispatch already
+            # consumed MAX_SEND_ATTEMPTS, mark the row terminally
+            # exhausted (no more Meta calls for this recipient).
+            if _is_attempts_exhausted(row):
+                row.status = LOG_FAILED
+                row.error_code = "retry_exhausted"
+                row.error_message = (
+                    f"Exceeded {MAX_SEND_ATTEMPTS} send retries"
+                )
+                row.updated_at = datetime.now(timezone.utc)
+                failed += 1
+                logger.warning(
+                    "[campaign_dispatcher] campaign=%d row=%s "
+                    "retry_exhausted attempts=%d",
+                    campaign.id, row.id, row.attempt_count or 0,
+                )
+                db.flush()
+                continue
+
+            # Mark sending — visible in the dashboard status feed. The
+            # watchdog will revive this row if we crash before
+            # reaching a terminal state.
             row.status = LOG_SENDING
             row.attempt_count = (row.attempt_count or 0) + 1
             row.updated_at = datetime.now(timezone.utc)
@@ -1447,10 +1695,22 @@ async def _dispatch_queued_rows(
                         )
             except Exception as exc:
                 from services.meta_errors import label_for  # noqa: PLC0415
+                # Capture every signal we can about the failure so the
+                # debug endpoint surfaces it instead of an opaque
+                # "exception" pill. Best-effort: never let bookkeeping
+                # raise again inside the except.
+                exc_class = type(exc).__name__
+                http_status = (
+                    getattr(exc, "status_code", None)
+                    or getattr(exc, "status", None)
+                    or getattr(getattr(exc, "response", None), "status_code", None)
+                )
+                exc_msg = str(exc)[:400]
                 row.status = LOG_FAILED
                 row.error_code = "exception"
                 row.error_message = (
-                    f"[exception={type(exc).__name__}] {str(exc)[:480]}"
+                    f"[exception={exc_class} http={http_status or '—'}] "
+                    f"{exc_msg}"
                 )
                 row.updated_at = datetime.now(timezone.utc)
                 failed += 1

@@ -324,6 +324,49 @@ class TestDebugEndpoint:
         # And the helpful hint surfaces.
         assert any("APPROVED" in h for h in result["hints"])
 
+    def test_retry_health_present_for_healthy_campaign(self):
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="active", audience_count=4)
+        result = _call_debug(db, t.id, c.id)
+        rh = result["retry_health"]
+        assert rh["retry_storm_detected"] is False
+        assert rh["max_attempt_count"] == 0
+        assert rh["rows_at_attempt_ceiling"] == 0
+        assert rh["zombie_sending_count"] == 0
+        # Constants are echoed so the UI can show "MAX=5".
+        assert rh["max_send_attempts"] >= 1
+        assert rh["attempt_circuit_breaker"] > rh["max_send_attempts"]
+        # And no storm hint fires while everything is calm.
+        joined = " ".join(result["hints"])
+        assert "retry storm" not in joined
+        assert "retry_storm" not in joined
+
+    def test_retry_health_flags_storm_and_emits_hint(self):
+        """Reproduce the production bug shape: a single row with
+        attempt_count > ATTEMPT_CIRCUIT_BREAKER. The debug endpoint
+        must flip ``retry_storm_detected`` and the hint must surface."""
+        from services.campaign_dispatcher import ATTEMPT_CIRCUIT_BREAKER
+        db, _ = _make_db()
+        t, tpl, c = _seed(db, status="active", audience_count=4)
+        db.add(CampaignSendLog(
+            tenant_id=t.id, campaign_id=c.id,
+            customer_phone_e164="+966500000099",
+            status="sending",
+            attempt_count=ATTEMPT_CIRCUIT_BREAKER + 1234,
+        ))
+        db.commit()
+
+        result = _call_debug(db, t.id, c.id)
+        # Surface the internal errors if anything in the snapshot
+        # failed silently — makes debugging tests sane.
+        assert result.get("errors", []) == [], result.get("errors")
+        rh = result["retry_health"]
+        assert rh["retry_storm_detected"] is True
+        assert rh["max_attempt_count"] == ATTEMPT_CIRCUIT_BREAKER + 1234
+        joined = " ".join(result["hints"])
+        assert "retry storm" in joined
+        assert str(ATTEMPT_CIRCUIT_BREAKER) in joined
+
     def test_status_breakdown_surfaces_unknown_statuses(self):
         """Rows with non-canonical ``status`` values must not silently
         disappear under "no recipients". They land in the

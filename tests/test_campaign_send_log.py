@@ -597,3 +597,188 @@ class TestUniqueConstraint:
         with pytest.raises(IntegrityError):
             db.commit()
         db.rollback()
+
+
+# ── Retry-storm protection (circuit breaker + watchdog) ─────────────────
+
+
+class TestRetryStormProtection:
+    """The dispatcher used to re-include ``LOG_FAILED`` rows in its
+    in-loop re-query, producing the production bug where a single row
+    accumulated 7345 attempts. These tests pin the helpers we now use
+    to prevent that from ever happening again."""
+
+    def test_circuit_breaker_force_terminates_runaway_row(self):
+        from services.campaign_dispatcher import (
+            _force_terminate_runaway, ATTEMPT_CIRCUIT_BREAKER,
+            LOG_FAILED,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+        row = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000001",
+            template_name=tpl.name, template_language="ar",
+            status="sending",
+            attempt_count=ATTEMPT_CIRCUIT_BREAKER + 5,
+        )
+        db.add(row); db.commit(); db.refresh(row)
+
+        triggered = _force_terminate_runaway(row, campaign_id=camp.id)
+        assert triggered is True
+        assert row.status == LOG_FAILED
+        assert row.error_code == "retry_storm"
+        assert "ATTEMPT_CIRCUIT_BREAKER" in (row.error_message or "")
+
+    def test_circuit_breaker_no_op_under_threshold(self):
+        from services.campaign_dispatcher import _force_terminate_runaway
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+        row = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000002",
+            template_name=tpl.name, template_language="ar",
+            status="sending", attempt_count=3,
+        )
+        db.add(row); db.commit(); db.refresh(row)
+        assert _force_terminate_runaway(row, campaign_id=camp.id) is False
+        assert row.status == "sending"  # untouched
+
+    def test_attempts_exhausted_helper(self):
+        from services.campaign_dispatcher import (
+            _is_attempts_exhausted, MAX_SEND_ATTEMPTS,
+        )
+        # 1 attempt left → not exhausted.
+        r = CampaignSendLog(attempt_count=MAX_SEND_ATTEMPTS - 1)
+        assert _is_attempts_exhausted(r) is False
+        # at threshold → exhausted (we cap inclusive so the Nth attempt
+        # is the final one).
+        r.attempt_count = MAX_SEND_ATTEMPTS
+        assert _is_attempts_exhausted(r) is True
+
+    def test_watchdog_revives_zombie_sending_under_threshold(self):
+        from services.campaign_dispatcher import (
+            _revive_zombie_sending, LOG_QUEUED, MAX_SEND_ATTEMPTS,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+        stuck = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000003",
+            template_name=tpl.name, template_language="ar",
+            status="sending", attempt_count=1,
+            updated_at=datetime.now(timezone.utc) - timedelta(seconds=600),
+        )
+        fresh = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000004",
+            template_name=tpl.name, template_language="ar",
+            status="sending", attempt_count=1,
+            updated_at=datetime.now(timezone.utc),
+        )
+        db.add_all([stuck, fresh]); db.commit()
+        db.refresh(stuck); db.refresh(fresh)
+
+        moved = _revive_zombie_sending(
+            db, camp.id, timeout_seconds=300,
+        )
+        db.commit()
+        assert moved == 1
+        db.refresh(stuck); db.refresh(fresh)
+        assert stuck.status == LOG_QUEUED
+        # Fresh row stays exactly where it is — no false-positive.
+        assert fresh.status == "sending"
+
+    def test_watchdog_marks_exhausted_zombie_as_retry_exhausted(self):
+        from services.campaign_dispatcher import (
+            _revive_zombie_sending, LOG_FAILED, MAX_SEND_ATTEMPTS,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+        stuck = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000005",
+            template_name=tpl.name, template_language="ar",
+            status="sending",
+            attempt_count=MAX_SEND_ATTEMPTS,
+            updated_at=datetime.now(timezone.utc) - timedelta(seconds=600),
+        )
+        db.add(stuck); db.commit(); db.refresh(stuck)
+
+        _revive_zombie_sending(db, camp.id, timeout_seconds=300)
+        db.commit(); db.refresh(stuck)
+        assert stuck.status == LOG_FAILED
+        assert stuck.error_code == "watchdog_timeout"
+
+    def test_reschedule_failed_promotes_recoverable_rows(self):
+        from services.campaign_dispatcher import (
+            reschedule_failed_for_retry, LOG_FAILED, LOG_QUEUED,
+            MAX_SEND_ATTEMPTS,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+        # exception / no_message_id → retriable, attempts not exhausted.
+        retriable = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000010",
+            template_name=tpl.name, template_language="ar",
+            status=LOG_FAILED, error_code="exception",
+            attempt_count=2,
+        )
+        # not_on_whatsapp → terminal, never retried.
+        terminal = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000011",
+            template_name=tpl.name, template_language="ar",
+            status=LOG_FAILED, error_code="not_on_whatsapp",
+            attempt_count=1,
+        )
+        # exception but attempts exhausted → converted to retry_exhausted,
+        # NOT promoted back to queued.
+        exhausted = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000012",
+            template_name=tpl.name, template_language="ar",
+            status=LOG_FAILED, error_code="exception",
+            attempt_count=MAX_SEND_ATTEMPTS,
+        )
+        db.add_all([retriable, terminal, exhausted]); db.commit()
+        db.refresh(retriable); db.refresh(terminal); db.refresh(exhausted)
+
+        moved = reschedule_failed_for_retry(db, camp.id)
+        db.commit()
+        db.refresh(retriable); db.refresh(terminal); db.refresh(exhausted)
+        assert moved == 1
+        assert retriable.status == LOG_QUEUED
+        assert terminal.status == LOG_FAILED
+        assert terminal.error_code == "not_on_whatsapp"
+        assert exhausted.status == LOG_FAILED
+        assert exhausted.error_code == "retry_exhausted"
+
+    def test_reschedule_failed_leaves_retry_exhausted_and_retry_storm_alone(self):
+        from services.campaign_dispatcher import (
+            reschedule_failed_for_retry, LOG_FAILED,
+        )
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+        for code in ("retry_exhausted", "retry_storm"):
+            db.add(CampaignSendLog(
+                tenant_id=t.id, campaign_id=camp.id,
+                customer_phone_e164=f"+96650000{code[-2:]}10",
+                template_name=tpl.name, template_language="ar",
+                status=LOG_FAILED, error_code=code, attempt_count=1,
+            ))
+        db.commit()
+        assert reschedule_failed_for_retry(db, camp.id) == 0

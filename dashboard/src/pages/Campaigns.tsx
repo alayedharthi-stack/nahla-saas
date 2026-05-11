@@ -1919,6 +1919,117 @@ function RawMetaSamplesPanel({
   )
 }
 
+// ── Retry-health (circuit breaker + watchdog signals) ───────────────────────
+
+/** Panel that exposes the dispatcher's runaway-protection state.
+ *
+ *  Surfaces:
+ *    * ``retry_storm_detected`` — at least one row crossed
+ *      ATTEMPT_CIRCUIT_BREAKER and was force-terminated.
+ *    * ``max_attempt_count``    — the highest attempt count on any row.
+ *    * ``rows_at_attempt_ceiling`` — rows that hit MAX_SEND_ATTEMPTS.
+ *    * ``zombie_sending_count`` — rows stuck in ``sending`` past the
+ *      watchdog timeout (will be revived next dispatch).
+ *
+ *  When everything is healthy this panel still renders (with a green
+ *  reassurance banner) so the merchant knows the protections are
+ *  active rather than missing. */
+function RetryHealthPanel({
+  health,
+}: {
+  health: NonNullable<CampaignDebugSnapshot['retry_health']>
+}) {
+  const storm = health.retry_storm_detected
+  const atCeiling = health.rows_at_attempt_ceiling > 0
+  const zombies = health.zombie_sending_count > 0
+  const tone =
+    storm ? 'border-rose-300 bg-rose-50/70'
+    : atCeiling || zombies ? 'border-amber-300 bg-amber-50/70'
+    : 'border-emerald-300 bg-emerald-50/70'
+  const titleTone =
+    storm ? 'text-rose-800'
+    : atCeiling || zombies ? 'text-amber-800'
+    : 'text-emerald-800'
+  const icon = storm ? '🚨' : atCeiling || zombies ? '⚠️' : '🛡️'
+  const headline =
+    storm
+      ? `تم رصد retry storm — حدّ المحاولات تجاوز ${health.attempt_circuit_breaker}`
+      : atCeiling
+      ? `${health.rows_at_attempt_ceiling} صف وصل إلى الحد الأقصى للمحاولات`
+      : zombies
+      ? `${health.zombie_sending_count} صف عالق في sending`
+      : 'حماية المحاولات نشطة وكل الصفوف ضمن الحدود الآمنة'
+  return (
+    <div className={`mt-3 rounded-lg border ${tone} p-3`}>
+      <p className={`text-[11px] font-semibold ${titleTone} mb-2 flex items-center gap-1`}>
+        {icon} صحة المحاولات (Retry Health)
+      </p>
+      <p className={`text-[10.5px] mb-2 ${titleTone}`}>{headline}</p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10.5px]">
+        <RetryMetric
+          label="أقصى محاولات"
+          value={health.max_attempt_count}
+          tone={
+            health.max_attempt_count > health.attempt_circuit_breaker ? 'rose'
+            : health.max_attempt_count >= health.max_send_attempts ? 'amber'
+            : 'slate'
+          }
+        />
+        <RetryMetric
+          label="صفوف بلغت الحد"
+          value={health.rows_at_attempt_ceiling}
+          tone={health.rows_at_attempt_ceiling > 0 ? 'amber' : 'slate'}
+        />
+        <RetryMetric
+          label="صفوف عالقة (sending)"
+          value={health.zombie_sending_count}
+          tone={health.zombie_sending_count > 0 ? 'amber' : 'slate'}
+        />
+        <RetryMetric
+          label="MAX_SEND_ATTEMPTS"
+          value={health.max_send_attempts}
+          tone="slate"
+        />
+      </div>
+      {storm && (
+        <p className="mt-2 text-[10.5px] text-rose-700 leading-relaxed">
+          تم إيقاف الصفوف المتأثرة تلقائياً (error_code=retry_storm). راجع
+          لوغات Railway للبحث عن{' '}
+          <code className="font-mono">campaign_send_retry_storm</code>.
+        </p>
+      )}
+      {!storm && zombies && (
+        <p className="mt-2 text-[10.5px] text-amber-700 leading-relaxed">
+          ستعيدها watchdog إلى queued تلقائياً عند إطلاق الإرسال التالي
+          (timeout = {health.sending_timeout_seconds}s).
+        </p>
+      )}
+    </div>
+  )
+}
+
+function RetryMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: number
+  tone: 'slate' | 'amber' | 'rose'
+}) {
+  const toneClasses: Record<typeof tone, string> = {
+    slate: 'bg-white border-slate-200 text-slate-700',
+    amber: 'bg-amber-100 border-amber-200 text-amber-800',
+    rose:  'bg-rose-100 border-rose-200 text-rose-800',
+  }
+  return (
+    <div className={`border rounded px-2 py-1.5 ${toneClasses[tone]}`}>
+      <div className="text-[10px] opacity-80">{label}</div>
+      <div className="font-bold font-mono" dir="ltr">{value}</div>
+    </div>
+  )
+}
+
 // ── Status breakdown + send-log row drill-down ───────────────────────────────
 
 /** Verbatim per-status counters. Shown for every diagnose so the
@@ -2138,6 +2249,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
    *  and unknown_status lifecycle states. */
   const [sampleRows, setSampleRows] =
     useState<CampaignDebugSnapshot['sample_rows'] | null>(null)
+  /** Retry-storm + watchdog signals. Surfaces the circuit breaker
+   *  when a single row's attempt_count crossed the safety threshold. */
+  const [retryHealth, setRetryHealth] =
+    useState<CampaignDebugSnapshot['retry_health'] | null>(null)
   /** QA escape hatch — POST dispatch-now with ``bypass_frequency_cap``. */
   const [ignoreFreqCapForDispatch, setIgnoreFreqCapForDispatch] = useState(false)
 
@@ -2162,6 +2277,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     setStatusBreakdown(null)
     setStatusBreakdownRaw(null)
     setSampleRows(null)
+    setRetryHealth(null)
     try {
       const snap = await campaignsApi.debug(campaign.id)
       setExcludedSample(snap.sample_excluded_before_send || [])
@@ -2170,6 +2286,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       setStatusBreakdown(snap.status_breakdown || null)
       setStatusBreakdownRaw(snap.status_breakdown_raw || null)
       setSampleRows(snap.sample_rows || [])
+      setRetryHealth(snap.retry_health || null)
       const r = snap.recipients
       const total = r.total || campaign.audience_count || 0
       const skipped = r.skipped_duplicate + r.skipped_invalid +
@@ -2276,6 +2393,23 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         setDiagnostic(`❌ تعذر تشغيل الإرسال: ${res.error || res.message || 'unknown'}`)
         return
       }
+      // Surface the pre-dispatch bookkeeping so the merchant sees
+      // what we did before kicking the background task: how many
+      // failures we rescheduled and how many zombies we revived.
+      const preLines: string[] = []
+      if ((res.rescheduled_failed ?? 0) > 0) {
+        preLines.push(
+          `🔁 تمت إعادة جدولة ${res.rescheduled_failed} صف فاشل ضمن حدّ المحاولات.`,
+        )
+      }
+      if ((res.revived_zombies ?? 0) > 0) {
+        preLines.push(
+          `🧟 تم تحرير ${res.revived_zombies} صف عالق في sending وإعادته إلى queued.`,
+        )
+      }
+      if (preLines.length > 0) {
+        setDiagnostic(preLines.join('\n') + '\n\n⏳ جاري متابعة التقدّم…')
+      }
       // Background task is now running. Poll the debug endpoint a
       // few times so the merchant sees counters tick up without
       // having to manually refresh.
@@ -2290,6 +2424,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           setStatusBreakdown(snap.status_breakdown || null)
           setStatusBreakdownRaw(snap.status_breakdown_raw || null)
           setSampleRows(snap.sample_rows || [])
+          setRetryHealth(snap.retry_health || null)
           const r = snap.recipients
           const total = r.total || campaign.audience_count || 0
           const lifecycleLabel =
@@ -2512,6 +2647,9 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
             <pre className="text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono bg-white border border-slate-200 rounded-lg p-3 leading-relaxed">
               {diagnostic}
             </pre>
+            {retryHealth && (
+              <RetryHealthPanel health={retryHealth} />
+            )}
             {excludedSample && excludedSample.length > 0 && (
               <ExcludedCustomersDrillDown rows={excludedSample} />
             )}

@@ -157,6 +157,19 @@ export interface CampaignDebugSnapshot {
     created_at: string | null
     updated_at: string | null
   }>
+  /** Retry-health snapshot — surfaces the circuit-breaker signals.
+   *  ``retry_storm_detected`` flips to true whenever a single row's
+   *  ``attempt_count`` crossed ``attempt_circuit_breaker``. Always
+   *  present (counters default to 0). */
+  retry_health: {
+    max_send_attempts: number
+    attempt_circuit_breaker: number
+    sending_timeout_seconds: number
+    max_attempt_count: number
+    rows_at_attempt_ceiling: number
+    zombie_sending_count: number
+    retry_storm_detected: boolean
+  }
   sample_failed: Array<{
     phone: string
     /** Canonical Meta error key. */
@@ -534,6 +547,11 @@ export const campaignsApi = {
       status?: string
       error?: string
       bypass_frequency_cap?: boolean
+      /** Number of failed rows promoted back to ``queued`` before
+       *  the dispatch task was kicked. */
+      rescheduled_failed?: number
+      /** Number of zombie ``sending`` rows the watchdog revived. */
+      revived_zombies?: number
     }>(
       `/campaigns/${id}/dispatch-now${
         opts?.bypassFrequencyCap === true ? '?bypass_frequency_cap=true' : ''
