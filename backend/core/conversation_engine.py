@@ -886,6 +886,49 @@ class StateManager:
                      created_at: Optional[datetime] = None,
                      extra_metadata: Optional[Dict[str, Any]] = None) -> None:
         _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
+
+        # ── Marker scrub on outbound persistence ──────────────────
+        #
+        # OUTBOUND ONLY: strip any `[TEMPLATE:foo]` / `[TRANSFER]` /
+        # `[DEBUG]` / `[ACTION]` / `[INTERNAL]` / `[MEDIA:N]` token
+        # that survived past the brain boundary scrub
+        # (pipeline.py). The DB row written here is what the
+        # dashboard renders as the merchant-visible message — we
+        # do NOT want that copy to show GPT-hallucinated
+        # placeholders even though the wire-layer scrub stripped
+        # them from the WhatsApp send.
+        #
+        # INBOUND is left untouched on purpose:
+        #   * The customer may have legitimately typed something
+        #     bracketed (e.g. ``[طلبية]`` or even Latin uppercase
+        #     stuff like ``[A1]``). Scrubbing inbound text would
+        #     mangle merchant evidence in the audit log.
+        #   * The marker leak is an OUTBOUND-only failure mode —
+        #     only the model emits the kind of pattern we strip.
+        #
+        # Fail-open: if the scrub itself errors, persist the
+        # original body. Better to write a slightly ugly row than
+        # to lose the entire message event (which downstream
+        # observability + analytics depend on).
+        safe_body = body
+        if isinstance(body, str) and body and direction in ("outbound", "out"):
+            try:
+                from core.ai_libraries import scrub_internal_markers  # noqa: PLC0415
+                safe_body = scrub_internal_markers(body)
+                if safe_body != body:
+                    logger.info(
+                        "[PERSIST_SCRUB] outbound MessageEvent "
+                        "tenant=%s phone=%s len_before=%d len_after=%d",
+                        _tid, phone, len(body), len(safe_body or ""),
+                    )
+            except Exception as _scrub_exc:  # noqa: BLE001
+                logger.warning(
+                    "[PERSIST_SCRUB] failed tenant=%s err=%s — "
+                    "writing original body",
+                    _tid, _scrub_exc,
+                )
+                safe_body = body
+
         try:
             from models import MessageEvent  # noqa: PLC0415
             meta: Dict[str, Any] = {"phone": phone}
@@ -896,7 +939,7 @@ class StateManager:
                 tenant_id=_tid,
                 conversation_id=conversation_id,
                 direction=direction,
-                body=body,
+                body=safe_body,
                 event_type=event_type or "whatsapp",
                 created_at=ts,
                 extra_metadata=meta,

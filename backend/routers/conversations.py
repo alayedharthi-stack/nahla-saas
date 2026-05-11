@@ -254,6 +254,33 @@ def record_outbound_message(
     When *customer_name* is empty the existing customer name is kept
     intact — we never overwrite a real name with a phone number.
     """
+    # ── Marker scrub on outbound persistence ──────────────────────
+    # Same rationale as in StateManager.save_message: this function
+    # is called by campaigns / automations / COD / AI-fallback /
+    # orders dashboard — each one could write text into a
+    # MessageEvent that the dashboard later renders. Strip any
+    # `[TEMPLATE:foo]`-style internal marker that leaked from a
+    # template-substitution step BEFORE we persist. Wire-layer
+    # scrub in provider_send_message handles the WhatsApp send;
+    # this one keeps the dashboard preview clean.
+    safe_body = body
+    if isinstance(body, str) and body:
+        try:
+            from core.ai_libraries import scrub_internal_markers  # noqa: PLC0415
+            safe_body = scrub_internal_markers(body)
+            if safe_body != body:
+                _log.info(
+                    "[PERSIST_SCRUB] record_outbound_message "
+                    "tenant=%s phone=%s len_before=%d len_after=%d",
+                    tenant_id, phone, len(body), len(safe_body or ""),
+                )
+        except Exception as _scrub_exc:
+            _log.warning(
+                "[PERSIST_SCRUB] failed tenant=%s err=%s — "
+                "writing original body", tenant_id, _scrub_exc,
+            )
+            safe_body = body
+
     try:
         db.begin_nested()
         norm_phone = normalize_phone(phone) or phone
@@ -280,7 +307,7 @@ def record_outbound_message(
             conversation_id=convo.id,
             tenant_id=tenant_id,
             direction="outbound",
-            body=body,
+            body=safe_body,
             event_type=event_type,
             extra_metadata=meta,
         ))

@@ -675,6 +675,55 @@ class MerchantBrain:
         except Exception:
             pass   # trace logging must never break the reply path
 
+        # ── Marker scrub at the brain boundary ──────────────────
+        #
+        # This is the SINGLE chokepoint every downstream consumer
+        # (DB persistence via StateManager.save_message + TurnLog +
+        # webhook send path + dashboard render) reads from. Scrub
+        # here so:
+        #
+        #   * The MessageEvent row written by StateManager.save_message
+        #     never contains `[TEMPLATE:contact_owner]` /
+        #     `[TRANSFER]` / `[DEBUG]` / `[ACTION]` / `[INTERNAL]`
+        #     — dashboard preview stays clean.
+        #   * The wire-layer scrub in
+        #     `services.whatsapp_platform.service._scrub_outbound_payload`
+        #     becomes a no-op for AI-generated replies (defense in
+        #     depth, not load-bearing).
+        #   * Downstream string transforms (handoff prefix, CTA
+        #     extraction, etc.) never operate on hallucinated
+        #     placeholder text.
+        #
+        # Why brain-boundary AND wire-layer?
+        # ----------------------------------
+        # The brain boundary catches AI hallucinations at the
+        # earliest possible moment in this process. The wire layer
+        # catches markers from OTHER outbound paths (manual
+        # /conversations/reply, automation engine, orders, cart
+        # recovery, admin direct-send) that don't pass through the
+        # brain. Two scrubs, two different blast radii — no
+        # single path can leak markers to Meta OR the DB.
+        #
+        # Error policy: scrub is defense-in-depth. If the import
+        # or scrub itself fails (e.g. unicode-level regex bug),
+        # log and return the un-scrubbed reply — better to send
+        # ugly text than fail the whole reply.
+        try:
+            from core.ai_libraries import scrub_internal_markers  # noqa: PLC0415
+            _orig = reply
+            reply = scrub_internal_markers(reply or "")
+            if reply != _orig:
+                logger.info(
+                    "[BRAIN_SCRUB] stripped markers from reply "
+                    "tenant=%s len_before=%d len_after=%d",
+                    tenant_id, len(_orig or ""), len(reply or ""),
+                )
+        except Exception as _scrub_exc:  # noqa: BLE001
+            logger.warning(
+                "[BRAIN_SCRUB] failed err=%s — returning original reply",
+                _scrub_exc,
+            )
+
         return {
             "reply": reply,
             "buttons": pending_buttons,
