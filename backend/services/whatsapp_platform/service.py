@@ -47,6 +47,170 @@ def _provider_url(conn: Any, path: str) -> str:
     return f"{base}/{clean}" if clean else base
 
 
+# ── Wire-layer marker scrub ─────────────────────────────────────────────
+#
+# Every outbound WhatsApp message goes through ``provider_send_message``
+# (templates use ``provider_submit_template`` instead — see below for
+# why those are deliberately skipped). This helper strips any internal
+# ``[FOO]`` / ``[FOO:bar]`` token the AI may have leaked into a text
+# slot before the payload hits Meta / 360dialog.
+#
+# Background: merchants reported customers receiving ``[TRANSFER]`` and
+# similar markers literally in WhatsApp. The root cause is GPT
+# hallucinating placeholders it saw in earlier turns / system prompts.
+# A scrub was already present in ``whatsapp_webhook._handle_ai_reply``,
+# but it only protected the AI-merchant-brain reply path. Every other
+# outbound caller (manual `/conversations/reply`, automation engine,
+# order notifications, cart recovery, admin direct-send, fallback /
+# loop-guard replies in the webhook itself) bypassed it.
+#
+# By installing the scrub at the wire layer instead of at each caller,
+# we guarantee defense-in-depth: a future caller that forgets to
+# sanitize cannot leak markers, because the bytes literally cannot
+# leave this process without passing through here.
+#
+# Slots we sanitize (Meta Graph "messages" payload shape):
+#   text:        text.body
+#   interactive: interactive.header.text (if header.type=="text")
+#                interactive.body.text
+#                interactive.footer.text
+#                interactive.action.buttons[i].reply.title
+#                interactive.action.parameters.display_text  (cta_url)
+#                interactive.action.sections[j].title
+#                interactive.action.sections[j].rows[k].title
+#                interactive.action.sections[j].rows[k].description
+#   image:       image.caption
+#   video:       video.caption
+#   document:    document.caption
+#
+# Slots we deliberately DON'T touch:
+#   template.*  — pre-approved by Meta. Parameter values flow from DB
+#                 (customer_name, coupon_code, store_name) — never from
+#                 GPT output — so internal markers cannot reach there.
+#   *.link / *.id / *.media_id — non-text identifiers.
+#   to / phone_number_id — non-text identifiers.
+
+def _scrub_outbound_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a shallow copy of ``payload`` with every known text-bearing
+    field passed through :func:`scrub_internal_markers`. Idempotent —
+    if no markers are present the values are returned unchanged.
+
+    Errors here MUST NOT block the send. The scrub is defense-in-depth
+    for hallucinated markers; a bug in the regex shouldn't prevent a
+    legitimate reply from reaching the customer. On any exception we
+    log and pass the original payload through.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    try:
+        from core.ai_libraries import scrub_internal_markers  # noqa: PLC0415
+    except Exception as exc:
+        logger.warning("[WA_WIRE_SCRUB] import failed err=%s", exc)
+        return payload
+
+    out = dict(payload)
+    mtype = out.get("type")
+    scrubbed_any = False
+
+    def _clean(v: Any) -> Any:
+        nonlocal scrubbed_any
+        if not isinstance(v, str) or not v:
+            return v
+        new = scrub_internal_markers(v)
+        if new != v:
+            scrubbed_any = True
+        return new
+
+    try:
+        if mtype == "text" and isinstance(out.get("text"), dict):
+            t = dict(out["text"])
+            t["body"] = _clean(t.get("body"))
+            out["text"] = t
+
+        elif mtype == "interactive" and isinstance(out.get("interactive"), dict):
+            inter = dict(out["interactive"])
+            # Header (only when header.type == "text")
+            hdr = inter.get("header")
+            if isinstance(hdr, dict) and hdr.get("type") == "text":
+                hdr = dict(hdr)
+                hdr["text"] = _clean(hdr.get("text"))
+                inter["header"] = hdr
+            # Body
+            body = inter.get("body")
+            if isinstance(body, dict):
+                body = dict(body)
+                body["text"] = _clean(body.get("text"))
+                inter["body"] = body
+            # Footer
+            ftr = inter.get("footer")
+            if isinstance(ftr, dict):
+                ftr = dict(ftr)
+                ftr["text"] = _clean(ftr.get("text"))
+                inter["footer"] = ftr
+            # Action — button labels + list section/row titles
+            action = inter.get("action")
+            if isinstance(action, dict):
+                action = dict(action)
+                # CTA-URL display label
+                params = action.get("parameters")
+                if isinstance(params, dict):
+                    params = dict(params)
+                    params["display_text"] = _clean(params.get("display_text"))
+                    action["parameters"] = params
+                btns = action.get("buttons")
+                if isinstance(btns, list):
+                    new_btns = []
+                    for b in btns:
+                        if isinstance(b, dict):
+                            b = dict(b)
+                            reply = b.get("reply")
+                            if isinstance(reply, dict):
+                                reply = dict(reply)
+                                reply["title"] = _clean(reply.get("title"))
+                                b["reply"] = reply
+                        new_btns.append(b)
+                    action["buttons"] = new_btns
+                secs = action.get("sections")
+                if isinstance(secs, list):
+                    new_secs = []
+                    for s in secs:
+                        if isinstance(s, dict):
+                            s = dict(s)
+                            s["title"] = _clean(s.get("title"))
+                            rows = s.get("rows")
+                            if isinstance(rows, list):
+                                new_rows = []
+                                for r in rows:
+                                    if isinstance(r, dict):
+                                        r = dict(r)
+                                        r["title"] = _clean(r.get("title"))
+                                        r["description"] = _clean(r.get("description"))
+                                    new_rows.append(r)
+                                s["rows"] = new_rows
+                        new_secs.append(s)
+                    action["sections"] = new_secs
+                inter["action"] = action
+            out["interactive"] = inter
+
+        elif mtype in ("image", "video", "document") and isinstance(out.get(mtype), dict):
+            media = dict(out[mtype])
+            media["caption"] = _clean(media.get("caption"))
+            out[mtype] = media
+
+        # Untyped / template / sticker / reaction etc. → no text slots
+        # to scrub. Pass through unchanged.
+    except Exception as exc:
+        logger.warning(
+            "[WA_WIRE_SCRUB] failed type=%s err=%s — sending original payload",
+            mtype, exc,
+        )
+        return payload
+
+    if scrubbed_any:
+        logger.info("[WA_WIRE_SCRUB] cleaned type=%s", mtype)
+    return out
+
+
 async def provider_get_with_context(
     conn: Any,
     ctx: WhatsAppTokenContext,
@@ -216,7 +380,13 @@ async def provider_send_message(
         prefer_platform=prefer_platform,
     )
     provider = wa_provider(conn)
-    send_payload = dict(payload or {})
+    # Wire-layer scrub: strip any [TRANSFER] / [DEBUG] / [ACTION] /
+    # [INTERNAL] / [MEDIA:N] / etc. tokens the AI may have leaked into
+    # a text-bearing slot. Runs on EVERY caller (webhook reply,
+    # manual /conversations/reply, automation engine, orders,
+    # cart recovery, admin direct-send) before any byte leaves
+    # this process. See _scrub_outbound_payload docstring.
+    send_payload = _scrub_outbound_payload(dict(payload or {}))
     if provider == WHATSAPP_PROVIDER_360DIALOG:
         send_payload.setdefault("recipient_type", "individual")
         data = await provider_post_with_context(

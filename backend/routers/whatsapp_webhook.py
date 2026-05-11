@@ -3602,12 +3602,19 @@ async def _handle_merchant_message(
                 tenant_id, _pi_exc,
             )
 
-        # ── Universal marker scrubber ───────────────────────────────────
-        # Final safety net: strip ANY ``[FOO]`` / ``[FOO:bar]`` token
-        # that survived past the media-marker extractor. The merchant
-        # reported customers seeing ``[TRANSFER]`` literally in WhatsApp
-        # — that's GPT hallucinating placeholders it sees in the prompt.
-        # Anything bracketed here is a leak by definition.
+        # ── Marker scrub ────────────────────────────────────────────────
+        # Previously scrubbed inline here. The scrub now runs at the
+        # wire layer in ``services.whatsapp_platform.service.
+        # provider_send_message`` so every outbound caller (manual
+        # /conversations/reply, automation engine, orders, cart
+        # recovery, admin direct-send, fallback / loop-guard replies)
+        # gets the same defense-in-depth, not just the AI reply path.
+        # See ``_scrub_outbound_payload`` in that module.
+        #
+        # We keep an inline scrub on the human-visible ``reply`` text
+        # ONLY for logging purposes (so the merchant dashboard, which
+        # reads message events directly from the DB, also sees the
+        # cleaned copy — not because we trust the inline path).
         if reply:
             try:
                 from core.ai_libraries import scrub_internal_markers as _scrub  # noqa: PLC0415
@@ -3616,7 +3623,8 @@ async def _handle_merchant_message(
                 if reply != _orig:
                     logger.info(
                         "[MARKER_SCRUB] tenant=%s conversation_id=%s "
-                        "stripped_chars=%d",
+                        "stripped_chars=%d (dashboard copy; wire layer "
+                        "also scrubs)",
                         tenant_id, getattr(convo, "id", None),
                         len(_orig) - len(reply or ""),
                     )
