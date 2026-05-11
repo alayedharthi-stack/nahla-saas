@@ -202,6 +202,66 @@ export default function MediaEnvModal({ open, onClose }: Props) {
               </div>
 
               {/* Config details */}
+              {/* Process identity — surfaces WHICH service answered.
+                  Crucial when web vs worker have env drift: this
+                  block tells us which one we're looking at right
+                  now, so support can grep [MEDIA_NORMALIZER_BOOT]
+                  in Railway logs for the OTHER services. */}
+              <div className={`rounded-lg border px-3 py-2 ${
+                data.process.needs_restart_to_pick_up_env
+                  ? 'bg-amber-50 border-amber-300'
+                  : 'bg-slate-50 border-slate-200'
+              }`}>
+                <h4 className="text-[12px] font-bold text-slate-700 mb-1.5 flex items-center gap-1.5">
+                  <span>الـ process المُجيب</span>
+                  {data.process.needs_restart_to_pick_up_env && (
+                    <span className="text-[10px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded">
+                      يحتاج Restart
+                    </span>
+                  )}
+                </h4>
+                <KvLine k="service" v={data.process.service} mono />
+                <KvLine k="pid"     v={String(data.process.pid)} mono />
+                <KvLine
+                  k="openai_key_present_now"
+                  v={String(data.process.openai_key_present_now)}
+                  mono
+                />
+                <KvLine
+                  k="openai_key_present_at_boot"
+                  v={data.process.openai_key_present_at_boot === null
+                      ? '—'
+                      : String(data.process.openai_key_present_at_boot)}
+                  mono
+                />
+                {data.process.railway_service_name && (
+                  <KvLine
+                    k="railway_service_name"
+                    v={data.process.railway_service_name}
+                    mono
+                  />
+                )}
+                {data.process.railway_replica_id && (
+                  <KvLine
+                    k="railway_replica_id"
+                    v={data.process.railway_replica_id}
+                    mono
+                  />
+                )}
+                {data.process.needs_restart_to_pick_up_env && (
+                  <p className="text-[11px] text-amber-900 mt-1.5 leading-relaxed">
+                    هذا الـ process يرى المفتاح الآن، لكنه بدأ بدونه.
+                    أعِد تشغيل خدمات <strong>worker</strong> و
+                    <strong> scheduler</strong> أيضًا (ليس فقط web)،
+                    وإلا ستظهر رسائل "OPENAI_API_KEY مفقود" في
+                    الرسائل الفعلية. تحقق من Railway logs: ابحث عن
+                    <code className="font-mono mx-1">[MEDIA_NORMALIZER_BOOT]</code>
+                    وقارن <code className="font-mono">openai_key_present_at_boot</code>
+                    لكل خدمة.
+                  </p>
+                )}
+              </div>
+
               <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
                 <h4 className="text-[12px] font-bold text-slate-700 mb-1.5">إعدادات OpenAI</h4>
                 <KvLine k="api_base"     v={data.openai.api_base} mono />

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -64,9 +65,7 @@ def test_audio_normalizer_returns_transcribed_text():
             byte_size=16,
             mime_type="audio/ogg",
         ),
-    ), patch.object(
-        normalizer, "OPENAI_API_KEY", "sk-test",
-    ):
+    ), patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
         result = _run(
             normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(),

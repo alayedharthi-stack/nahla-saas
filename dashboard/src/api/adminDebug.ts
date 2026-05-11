@@ -45,7 +45,43 @@ export interface AdminDirectSendResponse {
 // the issue is env (key missing) or volume (NAHLA_INBOUND_MEDIA_DIR
 // not writable) without grepping Railway logs.
 
+/** Identity of the backend process that answered the media-env
+ *  request. The pipeline runs across multiple Railway services
+ *  (web + worker + scheduler) and each one captures its own env
+ *  snapshot when it starts. Surfacing the answering process lets
+ *  support spot env-var drift between services — e.g. web sees
+ *  the OpenAI key but worker doesn't, which manifests as
+ *  "OPENAI_API_KEY مفقود" inside actual conversations even though
+ *  this diagnostic reads green. */
+export interface AdminMediaEnvProcessIdentity {
+  /** OS process id answering this request. */
+  pid: number
+  /** Railway service name (or NAHLA_SERVICE_ROLE override). */
+  service: string
+  /** pid that loaded `modules.ai.media.normalizer`. Same as `pid`
+   *  unless the request hopped across workers in the same dyno. */
+  boot_pid: number
+  /** False when the normalizer module was imported by a different
+   *  process — surfaces request-routing surprises. */
+  normalizer_loaded_in_this_process: boolean
+  /** Live re-read of OPENAI_API_KEY from os.environ. */
+  openai_key_present_now: boolean
+  /** Snapshot of OPENAI_API_KEY presence at module-load time.
+   *  ``null`` if the normalizer module hasn't been imported yet. */
+  openai_key_present_at_boot: boolean | null
+  /** True when key is present NOW but was missing at boot —
+   *  this process needs a restart for stale callers to pick it
+   *  up. Sibling services may also need the same treatment. */
+  needs_restart_to_pick_up_env: boolean
+  railway_service_name:    string | null
+  railway_replica_id:      string | null
+  railway_deployment_id:   string | null
+  /** Server epoch seconds — sanity check for clock skew. */
+  epoch: number
+}
+
 export interface AdminMediaEnvSnapshot {
+  process: AdminMediaEnvProcessIdentity
   openai: {
     api_key_present: boolean
     api_key_tail:    string | null

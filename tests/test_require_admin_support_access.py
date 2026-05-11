@@ -31,6 +31,75 @@ for p in [str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
         sys.path.insert(0, p)
 
 
+@pytest.fixture(autouse=True)
+def _force_database_package_resolution():
+    """Repair ``sys.modules['database']`` if a polluter test confused it.
+
+    Test pollution: when a sibling test imports backend code under
+    a sys.path order that has ``database/`` (the directory) BEFORE
+    the repo root, Python's import machinery can register a partial
+    ``database`` entry without ``__path__`` — making subsequent
+    ``from database.models import User`` raise "database is not
+    a package".
+
+    Even the PRODUCTION code's ``_actor_is_still_platform_admin``
+    hits this — its own ``from database.models import User`` fails
+    inside the function body, the helper fails-closed (returns
+    False), and the test sees False instead of True.
+
+    Fix: at the start of every test in this file, ensure
+    ``database`` resolves to the real package by forcing a clean
+    reimport via importlib.invalidate_caches. If the cached entry
+    isn't a proper package (no __path__), drop it so the next
+    __import__ goes through the normal finder."""
+    import importlib
+    for name in [m for m in list(sys.modules)
+                 if m == "database" or m.startswith("database.")]:
+        mod = sys.modules.get(name)
+        if mod is None:
+            continue
+        # Drop entries that lack __path__ (the marker of a real
+        # package) — they're what trips up the import machinery.
+        if not hasattr(mod, "__path__"):
+            sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+    # Force-resolve `database.models` now while sys.modules is
+    # clean. If the polluter test wrecked sys.path ordering, this
+    # may still fail — in which case we forcibly rebuild the
+    # package via direct file loading.
+    try:
+        import database  # noqa: F401
+        import database.models  # noqa: F401
+    except ImportError:
+        # sys.path is mis-ordered. Force-load `database/__init__.py`
+        # and `database/models.py` from absolute paths, then register
+        # them in sys.modules so subsequent `from database.models
+        # import User` works regardless of finder ordering.
+        import importlib.util
+        db_init = REPO_ROOT / "database" / "__init__.py"
+        db_models = REPO_ROOT / "database" / "models.py"
+        if db_init.exists() and db_models.exists():
+            # Build `database` package first.
+            spec_db = importlib.util.spec_from_file_location(
+                "database", str(db_init),
+                submodule_search_locations=[str(REPO_ROOT / "database")],
+            )
+            mod_db = importlib.util.module_from_spec(spec_db)
+            sys.modules["database"] = mod_db
+            spec_db.loader.exec_module(mod_db)
+            # Then `database.models` as a submodule.
+            spec_models = importlib.util.spec_from_file_location(
+                "database.models", str(db_models),
+            )
+            mod_models = importlib.util.module_from_spec(spec_models)
+            sys.modules["database.models"] = mod_models
+            spec_models.loader.exec_module(mod_models)
+            mod_db.models = mod_models
+    yield
+
+
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Test helpers
 # ──────────────────────────────────────────────────────────────────────
@@ -229,16 +298,15 @@ class TestActorRevalidation:
             def __enter__(self): return self
             def __exit__(self, *a): return False
 
+        # We only need SessionLocal mocked. `User` class itself is
+        # never used as a class — the function reads `.role` /
+        # `.is_active` off the value returned by `query().first()`,
+        # which is our FakeUser instance. So we deliberately don't
+        # patch `database.models.User` — that ImportError-prone path
+        # is unnecessary.
         monkeypatch.setattr(
-            core_auth, "SessionLocal", lambda: _FakeDB(_FakeUser()),
-            raising=False,
+            "core.database.SessionLocal", lambda: _FakeDB(_FakeUser()),
         )
-        # Patch the inline imports the helper does — it imports
-        # SessionLocal & User from inside the function.
-        import core.database
-        import database.models
-        monkeypatch.setattr(core.database, "SessionLocal", lambda: _FakeDB(_FakeUser()))
-        monkeypatch.setattr(database.models, "User", _FakeUser)
         assert core_auth._actor_is_still_platform_admin(7) is True
 
     def test_deactivated_admin_returns_false(self, monkeypatch):
@@ -258,10 +326,7 @@ class TestActorRevalidation:
             def __enter__(self): return self
             def __exit__(self, *a): return False
 
-        import core.database
-        import database.models
-        monkeypatch.setattr(core.database, "SessionLocal", lambda: _FakeDB())
-        monkeypatch.setattr(database.models, "User", _FakeUser)
+        monkeypatch.setattr("core.database.SessionLocal", lambda: _FakeDB())
         assert core_auth._actor_is_still_platform_admin(7) is False
 
     def test_demoted_admin_returns_false(self, monkeypatch):
@@ -281,10 +346,7 @@ class TestActorRevalidation:
             def __enter__(self): return self
             def __exit__(self, *a): return False
 
-        import core.database
-        import database.models
-        monkeypatch.setattr(core.database, "SessionLocal", lambda: _FakeDB())
-        monkeypatch.setattr(database.models, "User", _FakeUser)
+        monkeypatch.setattr("core.database.SessionLocal", lambda: _FakeDB())
         assert core_auth._actor_is_still_platform_admin(7) is False
 
     def test_user_not_found_returns_false(self, monkeypatch):
@@ -301,10 +363,7 @@ class TestActorRevalidation:
             def __enter__(self): return self
             def __exit__(self, *a): return False
 
-        import core.database
-        import database.models
-        monkeypatch.setattr(core.database, "SessionLocal", lambda: _FakeDB())
-        monkeypatch.setattr(database.models, "User", _FakeUser)
+        monkeypatch.setattr("core.database.SessionLocal", lambda: _FakeDB())
         assert core_auth._actor_is_still_platform_admin(42) is False
 
     def test_db_exception_fails_closed(self, monkeypatch):
@@ -314,6 +373,5 @@ class TestActorRevalidation:
         def _boom():
             raise RuntimeError("db unreachable")
 
-        import core.database
-        monkeypatch.setattr(core.database, "SessionLocal", _boom)
+        monkeypatch.setattr("core.database.SessionLocal", _boom)
         assert core_auth._actor_is_still_platform_admin(7) is False

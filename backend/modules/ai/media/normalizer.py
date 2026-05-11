@@ -34,6 +34,9 @@ Tests live in ``tests/test_inbound_media.py``.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -46,7 +49,6 @@ from core.config import (
     META_GRAPH_API_VERSION,
     NAHLA_STT_LANGUAGE,
     OPENAI_API_BASE,
-    OPENAI_API_KEY,
     OPENAI_AUDIO_MODEL,
     OPENAI_VISION_MODEL,
 )
@@ -54,6 +56,104 @@ from services.inbound_media_storage import save_inbound_media
 from services.whatsapp_platform.token_manager import get_token_for_operation
 
 logger = logging.getLogger("nahla.ai.media")
+
+
+# ── Runtime env getters + process diagnostics ───────────────────────
+#
+# Why we re-read OPENAI_API_KEY from os.environ on every call instead
+# of importing the constant from core.config:
+#
+#   `core.config.OPENAI_API_KEY` is evaluated ONCE at module load.
+#   On Railway, if the env var is set AFTER a service's process has
+#   already started (or a service is deployed before the var is
+#   provisioned), that process captures the empty string forever —
+#   even though a SIBLING service (e.g. `web` vs `worker`) booted
+#   with the var present and works correctly.
+#
+#   This produced a confusing symptom: GET /admin/debug/media-env
+#   (served by `web`) showed `openai_key_present: true`, while
+#   inbound media messages handled by `worker` showed
+#   "OPENAI_API_KEY مفقود". Same repo, same code — different env
+#   timing at process start.
+#
+# Re-reading from os.environ lets a process pick up a newly-set var
+# on the NEXT inbound media event without needing a full redeploy.
+# A simple `kill -SIGTERM` (or Railway "Restart") is enough. A fresh
+# deploy is no longer the only path to recovery.
+
+def _runtime_openai_key() -> str:
+    """Fresh re-read of OPENAI_API_KEY on every call. Returns empty
+    string when unset. Never raises."""
+    return os.environ.get("OPENAI_API_KEY") or ""
+
+
+def _service_role() -> str:
+    """Best-effort identification of which Railway service this
+    process belongs to. Used in diagnostic log lines so support can
+    answer "which process is missing the env var?" by grep."""
+    # Railway sets this for every service at deploy time.
+    rail = os.environ.get("RAILWAY_SERVICE_NAME")
+    if rail:
+        return rail
+    # Manual override (useful for local docker-compose where each
+    # container can set its own NAHLA_SERVICE_ROLE).
+    manual = os.environ.get("NAHLA_SERVICE_ROLE")
+    if manual:
+        return manual
+    # Fall back to inferring from argv. We can't tell web from worker
+    # reliably without the env var, so this is informational only.
+    argv0 = (sys.argv[0] if sys.argv else "") or ""
+    if "uvicorn" in argv0 or "uvicorn" in " ".join(sys.argv):
+        return "web?"
+    if any(s in argv0.lower() for s in ("worker", "celery", "rq", "arq")):
+        return "worker?"
+    if "scheduler" in argv0.lower() or "cron" in argv0.lower():
+        return "scheduler?"
+    return "unknown"
+
+
+# Boot-time snapshot of the env. Captured ONCE at module import so we
+# can compare against the runtime value on every skip — if they
+# differ, the operator knows the env was changed mid-process and the
+# fix is just to restart this service.
+_BOOT_PID = os.getpid()
+_BOOT_SERVICE = _service_role()
+_BOOT_OPENAI_KEY_PRESENT = bool(_runtime_openai_key())
+_BOOT_FFMPEG_FOUND = shutil.which("ffmpeg") is not None
+
+# Boot diagnostic — one line per process. Search Railway logs for
+# `[MEDIA_NORMALIZER_BOOT]` to enumerate every process that has
+# loaded this module and the env state it saw at boot. If `web`
+# logs `openai_key_present_at_boot=True` but `worker` logs
+# `openai_key_present_at_boot=False`, the worker just needs a
+# restart (env is now present in Railway, the process just hasn't
+# picked it up).
+logger.info(
+    "[MEDIA_NORMALIZER_BOOT] pid=%d service=%s "
+    "openai_key_present_at_boot=%s vision_model=%s audio_model=%s "
+    "stt_language=%s ffmpeg_found=%s",
+    _BOOT_PID, _BOOT_SERVICE,
+    _BOOT_OPENAI_KEY_PRESENT, OPENAI_VISION_MODEL, OPENAI_AUDIO_MODEL,
+    NAHLA_STT_LANGUAGE, _BOOT_FFMPEG_FOUND,
+)
+
+
+def _log_skip(reason: str, *, tenant_id: Any, media_id: Any, kind: str) -> None:
+    """Emit a structured WARN line every time the normalizer skips
+    audio/image processing due to a missing OpenAI key. Carries both
+    the boot-time and current env state so an operator can tell
+    instantly whether a process restart will fix the issue."""
+    current_present = bool(_runtime_openai_key())
+    logger.warning(
+        "[MEDIA_NORMALIZER_SKIP] reason=%s kind=%s pid=%d service=%s "
+        "openai_key_present_now=%s openai_key_present_at_boot=%s "
+        "tenant=%s media_id=%s%s",
+        reason, kind, _BOOT_PID, _BOOT_SERVICE,
+        current_present, _BOOT_OPENAI_KEY_PRESENT,
+        tenant_id, media_id,
+        (" (restart this service to pick up the env var)"
+         if (current_present and not _BOOT_OPENAI_KEY_PRESENT) else ""),
+    )
 
 # ── Canonical Arabic fallbacks ──────────────────────────────────────
 # Surfaced to the customer when we can't extract any usable text from
@@ -229,7 +329,11 @@ async def _process_audio(
             caption=caption,
         )
 
-    if not OPENAI_API_KEY:
+    if not _runtime_openai_key():
+        _log_skip(
+            "stt_not_configured",
+            tenant_id=tenant_id, media_id=media_id, kind="audio",
+        )
         # We still TRY to download + persist so the dashboard renders
         # the recording. Transcript stays empty + the merchant sees
         # "STT not configured" in the media-debug panel.
@@ -443,7 +547,11 @@ async def _process_image(
         base_meta["mime_type"]      = stored.mime_type
     base_meta["image_download_status"] = "ok"
 
-    if not OPENAI_API_KEY:
+    if not _runtime_openai_key():
+        _log_skip(
+            "vision_not_configured",
+            tenant_id=tenant_id, media_id=media_id, kind="image",
+        )
         base_meta["vision_status"] = "skipped"
         base_meta["vision_error"]  = "vision_not_configured"
         return _image_with_fallback(base_meta, caption)
@@ -646,7 +754,7 @@ async def _transcribe_bytes_with_openai(
     handle. The temp file is cleaned up after the call regardless of
     success/failure.
     """
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+    headers = {"Authorization": f"Bearer {_runtime_openai_key()}"}
     suffix = _guess_suffix(mime_type)
     tmp_path: Optional[Path] = None
     try:
@@ -699,7 +807,7 @@ async def _describe_image_with_openai(
     import base64
 
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Authorization": f"Bearer {_runtime_openai_key()}",
         "Content-Type":  "application/json",
     }
     b64 = base64.b64encode(file_bytes).decode("ascii")

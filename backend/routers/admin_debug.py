@@ -1480,18 +1480,26 @@ async def admin_debug_media_env(
     A failure here is the single best indicator of why audio / image
     persistence is silently dropping.
     """
+    import os  # noqa: PLC0415
     import shutil  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
+    import time  # noqa: PLC0415
     from core.config import (  # noqa: PLC0415
         INBOUND_MEDIA_MAX_BYTES,
         NAHLA_STT_LANGUAGE,
         OPENAI_API_BASE,
-        OPENAI_API_KEY,
         OPENAI_AUDIO_MODEL,
         OPENAI_MODEL,
         OPENAI_VISION_MODEL,
     )
     from services.inbound_media_storage import storage_root  # noqa: PLC0415
+
+    # Re-read OPENAI_API_KEY from os.environ on every call instead of
+    # using the module-load constant — see normalizer.py for the full
+    # rationale. Short version: a process that started before the env
+    # var was set in Railway captures the empty string permanently;
+    # re-reading lets a process pick up a fresh value without redeploy.
+    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or ""
 
     root = storage_root()
     root_str = str(root)
@@ -1611,7 +1619,68 @@ async def admin_debug_media_env(
             "في Railway nixpacks اكتب: NIXPACKS_PKGS=ffmpeg في Variables."
         )
 
+    # ── Process identity ─────────────────────────────────────────
+    # Surfaces WHICH process answered this request. Crucial when a
+    # multi-service deploy (web + worker + scheduler) has env-var
+    # drift — e.g. web sees the OpenAI key but worker doesn't. The
+    # operator runs media-env, sees `service=web` here, then greps
+    # Railway logs for `[MEDIA_NORMALIZER_BOOT] service=worker` to
+    # discover the worker booted with a different env snapshot.
+    try:
+        from modules.ai.media import normalizer as _norm  # noqa: PLC0415
+        boot_pid          = getattr(_norm, "_BOOT_PID", os.getpid())
+        boot_service      = getattr(_norm, "_BOOT_SERVICE", "unknown")
+        boot_key_present  = getattr(_norm, "_BOOT_OPENAI_KEY_PRESENT", None)
+    except Exception:
+        boot_pid          = os.getpid()
+        boot_service      = (
+            os.environ.get("RAILWAY_SERVICE_NAME")
+            or os.environ.get("NAHLA_SERVICE_ROLE")
+            or "unknown"
+        )
+        boot_key_present  = None
+
+    process_block: Dict[str, Any] = {
+        "pid":                  os.getpid(),
+        "service":              boot_service,
+        "boot_pid":             boot_pid,
+        # True only if the normalizer module was imported in the
+        # SAME process that's answering this HTTP request. If the
+        # request lands on a different replica/worker, these will
+        # differ — surface that so it's obvious.
+        "normalizer_loaded_in_this_process": (boot_pid == os.getpid()),
+        "openai_key_present_now":   bool(OPENAI_API_KEY),
+        "openai_key_present_at_boot": boot_key_present,
+        "needs_restart_to_pick_up_env": (
+            bool(OPENAI_API_KEY) and boot_key_present is False
+        ),
+        "railway_service_name":     os.environ.get("RAILWAY_SERVICE_NAME"),
+        "railway_replica_id":       os.environ.get("RAILWAY_REPLICA_ID"),
+        "railway_deployment_id":    os.environ.get("RAILWAY_DEPLOYMENT_ID"),
+        "epoch":                    int(time.time()),
+    }
+
+    # If web sees the key NOW but the normalizer module captured an
+    # empty key at boot, the merchant report of "OPENAI_API_KEY مفقود"
+    # in actual conversations is explained: the worker (or this very
+    # process if normalizer was loaded before env arrived) is using
+    # a stale snapshot. Add a high-signal Arabic hint.
+    if process_block["needs_restart_to_pick_up_env"]:
+        issues.append(
+            "هذا الـ process يرى OPENAI_API_KEY الآن، لكن وحدة معالجة "
+            "الوسائط حُمِّلت قبل ضبط المفتاح. لا بأس بقراءة الآن، لكن "
+            "أي process آخر (worker/scheduler) ربما لا يزال يرى قيمة "
+            "فارغة. أعد تشغيل (Restart) كل الـ services لضمان التطابق."
+        )
+        hints.append(
+            "في Railway، افتح كل خدمة على حدة (web + worker + scheduler) "
+            "واضغط Restart. ابحث في Logs عن [MEDIA_NORMALIZER_BOOT] "
+            "لتتأكد أن جميع الـ processes ترى openai_key_present_at_boot=True."
+        )
+
     payload: Dict[str, Any] = {
+        # ── Process identity (new) ────────────────────────────────
+        "process": process_block,
         # ── Nested groups (legacy shape — kept stable) ────────────
         "openai": {
             "api_key_present":   bool(OPENAI_API_KEY),

@@ -190,9 +190,7 @@ class TestAudioNormalizer:
             normalizer,
             "_transcribe_bytes_with_openai",
             new=AsyncMock(return_value="أبغى فستان أسود مقاس متوسط"),
-        ), patch.object(
-            normalizer, "OPENAI_API_KEY", "sk-test",
-        ):
+        ), patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             result = _run(normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(), wa_conn=MagicMock(), tenant_id=11,
                 message=self._audio_message(),
@@ -228,9 +226,7 @@ class TestAudioNormalizer:
             normalizer,
             "_transcribe_bytes_with_openai",
             new=AsyncMock(return_value="بكم السعر؟"),
-        ), patch.object(
-            normalizer, "OPENAI_API_KEY", "sk-test",
-        ):
+        ), patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             result = _run(normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
                 message=self._audio_message(caption="عن منتج #ABC"),
@@ -262,9 +258,7 @@ class TestAudioNormalizer:
             normalizer,
             "_transcribe_bytes_with_openai",
             new=AsyncMock(side_effect=RuntimeError("whisper boom")),
-        ), patch.object(
-            normalizer, "OPENAI_API_KEY", "sk-test",
-        ):
+        ), patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             result = _run(normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(), wa_conn=MagicMock(), tenant_id=3,
                 message=self._audio_message(),
@@ -311,7 +305,7 @@ class TestAudioNormalizer:
         with patch.object(normalizer, "_download_meta_media", new=AsyncMock(side_effect=_download_spy)), \
              patch.object(normalizer, "_try_persist", side_effect=_persist_spy), \
              patch.object(normalizer, "_transcribe_bytes_with_openai", new=AsyncMock(side_effect=_transcribe_spy)), \
-             patch.object(normalizer, "OPENAI_API_KEY", "sk-test"):
+             patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             _run(normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
                 message=self._audio_message(),
@@ -335,15 +329,21 @@ class TestAudioNormalizer:
         assert result.fallback_reply_ar == normalizer.AUDIO_FALLBACK_REPLY_AR
         assert result.metadata["transcript_error"] == "missing_media_id"
 
-    def test_stt_not_configured_still_persists_for_playback(self, isolated_storage):
+    def test_stt_not_configured_still_persists_for_playback(self, isolated_storage, monkeypatch):
         """When OPENAI_API_KEY is missing we still want to download
         and persist so the merchant can replay the recording from
-        the dashboard. Transcript status surfaces the reason."""
+        the dashboard. Transcript status surfaces the reason.
+
+        We unset the env var directly (instead of patching a module
+        constant) because the normalizer now re-reads from
+        os.environ on every call — see the [MEDIA_NORMALIZER_BOOT]
+        rationale in normalizer.py."""
         from modules.ai.media import normalizer
 
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with patch.object(normalizer, "_download_meta_media", new=AsyncMock(return_value={
             "bytes": b"ogg", "mime_type": "audio/ogg",
-        })), patch.object(normalizer, "OPENAI_API_KEY", ""):
+        })):
             result = _run(normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(), wa_conn=MagicMock(), tenant_id=5,
                 message=self._audio_message(),
@@ -387,9 +387,7 @@ class TestImageNormalizer:
         ), patch.object(
             normalizer, "_describe_image_with_openai",
             new=AsyncMock(return_value="إيصال دفع بقيمة 250 ريال من بنك الراجحي."),
-        ), patch.object(
-            normalizer, "OPENAI_API_KEY", "sk-test",
-        ):
+        ), patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             result = _run(normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(), wa_conn=MagicMock(), tenant_id=8,
                 message=self._image_message(),
@@ -415,7 +413,7 @@ class TestImageNormalizer:
             "bytes": b"png", "mime_type": "image/png",
         })), patch.object(normalizer, "_describe_image_with_openai", new=AsyncMock(
             return_value="بطاقة شحن قيمتها 200 ريال",
-        )), patch.object(normalizer, "OPENAI_API_KEY", "sk-test"):
+        )), patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             result = _run(normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
                 message=self._image_message(caption="هل أقدر أدفع بها؟"),
@@ -430,7 +428,7 @@ class TestImageNormalizer:
             "bytes": b"png", "mime_type": "image/png",
         })), patch.object(normalizer, "_describe_image_with_openai", new=AsyncMock(
             side_effect=ValueError("vision down"),
-        )), patch.object(normalizer, "OPENAI_API_KEY", "sk-test"):
+        )), patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             result = _run(normalizer.normalize_whatsapp_inbound(
                 db=MagicMock(), wa_conn=MagicMock(), tenant_id=2,
                 message=self._image_message(),
@@ -850,7 +848,7 @@ class TestReprocessEndpoint:
         ), patch.object(
             normalizer, "_transcribe_bytes_with_openai",
             new=AsyncMock(return_value="بعد إعادة المعالجة"),
-        ), patch.object(normalizer, "OPENAI_API_KEY", "sk-test"):
+        ), patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             result = _call_reprocess(db, 61, evt_id)
 
         assert result["ok"] is True
@@ -921,12 +919,14 @@ class TestMediaEnvEndpoint:
     def test_flags_missing_openai_key(self, isolated_storage, monkeypatch):
         from routers import admin_debug
 
-        monkeypatch.setattr("core.config.OPENAI_API_KEY", "", raising=False)
-        # Also patch the module-level import inside the handler.
-        with patch.dict(__import__("sys").modules):
-            result = asyncio.run(admin_debug.admin_debug_media_env(
-                _admin={"sub": "admin@nahla", "role": "admin"},
-            ))
+        # Handler now re-reads OPENAI_API_KEY from os.environ on
+        # every call (per the runtime-getter rationale in
+        # normalizer.py) — patching core.config no longer affects
+        # the response. Use monkeypatch.delenv instead.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
         # When the key is empty/unset the issues list calls it out.
         if not result["openai"]["api_key_present"]:
             assert any("OPENAI_API_KEY" in s for s in result["issues"])
@@ -1008,9 +1008,9 @@ class TestMediaEnvEndpoint:
         from routers import admin_debug
 
         secret = "sk-test-NEVER_LEAK_THIS_FULL_VALUE_1234"
-        monkeypatch.setattr("core.config.OPENAI_API_KEY", secret, raising=False)
-        # The handler imports OPENAI_API_KEY by name from core.config
-        # inside the function body, so the monkeypatch lands.
+        # Handler reads OPENAI_API_KEY from os.environ at request
+        # time (see normalizer.py for the runtime-getter rationale).
+        monkeypatch.setenv("OPENAI_API_KEY", secret)
         result = asyncio.run(admin_debug.admin_debug_media_env(
             _admin={"sub": "admin@nahla", "role": "admin"},
         ))
@@ -1018,3 +1018,228 @@ class TestMediaEnvEndpoint:
         assert secret not in as_text, (
             "OPENAI_API_KEY leaked into /admin/debug/media-env response"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 7. Runtime env re-read + process identity diagnostic
+# ──────────────────────────────────────────────────────────────────────
+#
+# Critical for the multi-service deploy story: a Railway worker that
+# booted before OPENAI_API_KEY was set must be able to pick it up
+# without a full code redeploy, and operators must be able to tell
+# WHICH process is missing the env from the diagnostic endpoint.
+
+
+class TestRuntimeEnvReread:
+    """`_runtime_openai_key()` must read `os.environ` fresh on every
+    call so a process restart (not a redeploy) is sufficient to pick
+    up a newly-set env var."""
+
+    def test_returns_fresh_value_from_environ(self, monkeypatch):
+        from modules.ai.media import normalizer
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-new-value-after-boot")
+        assert normalizer._runtime_openai_key() == "sk-new-value-after-boot"
+
+    def test_returns_empty_string_when_unset(self, monkeypatch):
+        from modules.ai.media import normalizer
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        assert normalizer._runtime_openai_key() == ""
+
+    def test_picks_up_value_set_after_import(self, monkeypatch):
+        """The whole point: even if the module was imported with no
+        env var present (worker process boot scenario), setting the
+        env var afterwards is reflected immediately on the next call."""
+        from modules.ai.media import normalizer
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        before = normalizer._runtime_openai_key()
+        assert before == ""
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-set-later")
+        after = normalizer._runtime_openai_key()
+        assert after == "sk-set-later"
+
+    def test_idempotent_within_a_call(self, monkeypatch):
+        """Same env value across multiple calls produces the same
+        result — no caching surprises that would mask drift."""
+        from modules.ai.media import normalizer
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-stable")
+        results = [normalizer._runtime_openai_key() for _ in range(3)]
+        assert all(r == "sk-stable" for r in results)
+
+
+class TestSkipLogIncludesProcessIdentity:
+    """Every transcript/vision skip emits a structured WARN line
+    that operators can grep in Railway logs to identify the
+    offending process. The message MUST include pid, service,
+    boot vs current key presence."""
+
+    def _audio_message(self):
+        return {
+            "type": "audio",
+            "audio": {"id": "wa-audio-skip", "mime_type": "audio/ogg", "voice": True},
+            "timestamp": "1700000000",
+            "id": "wa-msg-skip-audio",
+        }
+
+    def test_audio_skip_log_includes_diagnostics(
+        self, isolated_storage, monkeypatch, caplog,
+    ):
+        import logging
+        from modules.ai.media import normalizer
+
+        # Force the skip branch — no key set.
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        caplog.set_level(logging.WARNING, logger="nahla.ai.media")
+        with patch.object(normalizer, "_download_meta_media", new=AsyncMock(return_value={
+            "bytes": b"ogg", "mime_type": "audio/ogg",
+        })):
+            _run(normalizer.normalize_whatsapp_inbound(
+                db=MagicMock(), wa_conn=MagicMock(), tenant_id=42,
+                message=self._audio_message(),
+            ))
+
+        skip_logs = [r for r in caplog.records if "MEDIA_NORMALIZER_SKIP" in r.getMessage()]
+        assert skip_logs, "no [MEDIA_NORMALIZER_SKIP] log emitted on stt-not-configured"
+        msg = skip_logs[0].getMessage()
+        assert "reason=stt_not_configured" in msg
+        assert "kind=audio" in msg
+        assert "pid=" in msg
+        assert "service=" in msg
+        assert "openai_key_present_now=" in msg
+        assert "openai_key_present_at_boot=" in msg
+        assert "tenant=42" in msg
+
+    def test_image_skip_log_emitted(
+        self, isolated_storage, monkeypatch, caplog,
+    ):
+        import logging
+        from modules.ai.media import normalizer
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        caplog.set_level(logging.WARNING, logger="nahla.ai.media")
+        with patch.object(normalizer, "_download_meta_media", new=AsyncMock(return_value={
+            "bytes": b"\x89PNG...", "mime_type": "image/png",
+        })):
+            _run(normalizer.normalize_whatsapp_inbound(
+                db=MagicMock(), wa_conn=MagicMock(), tenant_id=77,
+                message={
+                    "type": "image",
+                    "image": {"id": "wa-img-skip", "mime_type": "image/png"},
+                    "timestamp": "1700000000",
+                    "id": "wa-msg-skip-image",
+                },
+            ))
+
+        skip_logs = [r for r in caplog.records if "MEDIA_NORMALIZER_SKIP" in r.getMessage()]
+        assert skip_logs
+        msg = skip_logs[0].getMessage()
+        assert "reason=vision_not_configured" in msg
+        assert "kind=image" in msg
+        assert "tenant=77" in msg
+
+    def test_boot_constants_are_exposed(self):
+        """The media-env endpoint reads `_BOOT_*` constants off the
+        normalizer module — they must exist and have the expected
+        shape so the endpoint can render them in `process` block."""
+        from modules.ai.media import normalizer
+
+        assert isinstance(normalizer._BOOT_PID, int)
+        assert normalizer._BOOT_PID > 0
+        assert isinstance(normalizer._BOOT_SERVICE, str)
+        assert isinstance(normalizer._BOOT_OPENAI_KEY_PRESENT, bool)
+        assert isinstance(normalizer._BOOT_FFMPEG_FOUND, bool)
+
+
+class TestMediaEnvProcessBlock:
+    """`GET /admin/debug/media-env` must surface a `process` block
+    that tells operators which Railway service answered the request
+    and whether THAT process needs a restart."""
+
+    def test_response_includes_process_identity(self, isolated_storage, monkeypatch):
+        from routers import admin_debug
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        assert "process" in result
+        proc = result["process"]
+        for k in (
+            "pid", "service", "boot_pid",
+            "normalizer_loaded_in_this_process",
+            "openai_key_present_now", "openai_key_present_at_boot",
+            "needs_restart_to_pick_up_env",
+            "railway_service_name", "railway_replica_id",
+            "railway_deployment_id", "epoch",
+        ):
+            assert k in proc, f"missing process.{k}"
+
+    def test_process_pid_matches_os_getpid(self, isolated_storage):
+        import os as _os
+        from routers import admin_debug
+
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        assert result["process"]["pid"] == _os.getpid()
+
+    def test_service_name_uses_railway_env_when_set(
+        self, isolated_storage, monkeypatch,
+    ):
+        """If RAILWAY_SERVICE_NAME is set, the process block uses
+        it directly rather than guessing from argv."""
+        from modules.ai.media import normalizer
+        from routers import admin_debug
+
+        # Override the boot constant directly because RAILWAY_SERVICE_NAME
+        # is captured at module load — monkeypatching env mid-test
+        # won't change _BOOT_SERVICE.
+        monkeypatch.setattr(normalizer, "_BOOT_SERVICE", "worker")
+
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        assert result["process"]["service"] == "worker"
+
+    def test_needs_restart_flag_when_boot_was_empty_and_now_set(
+        self, isolated_storage, monkeypatch,
+    ):
+        """The whole point of the diagnostic: when the env was empty
+        at module boot but is set now, flag the process as needing
+        a restart so stale callers in the same process pick it up."""
+        from modules.ai.media import normalizer
+        from routers import admin_debug
+
+        monkeypatch.setattr(normalizer, "_BOOT_OPENAI_KEY_PRESENT", False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-set-after-boot")
+
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        assert result["process"]["openai_key_present_now"] is True
+        assert result["process"]["openai_key_present_at_boot"] is False
+        assert result["process"]["needs_restart_to_pick_up_env"] is True
+        # The issue + hint must spell out the restart in Arabic.
+        assert any("Restart" in s or "Restart " in s or "أعد تشغيل" in s
+                   for s in result["issues"])
+
+    def test_no_restart_flag_when_boot_was_present(
+        self, isolated_storage, monkeypatch,
+    ):
+        """Happy case — env was set at boot, no restart needed."""
+        from modules.ai.media import normalizer
+        from routers import admin_debug
+
+        monkeypatch.setattr(normalizer, "_BOOT_OPENAI_KEY_PRESENT", True)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-present-from-start")
+
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        assert result["process"]["needs_restart_to_pick_up_env"] is False
