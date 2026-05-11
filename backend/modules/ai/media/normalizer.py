@@ -45,6 +45,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from core.config import (
+    D360_API_BASE_URL,
     INBOUND_MEDIA_MAX_BYTES,
     META_GRAPH_API_VERSION,
     NAHLA_STT_LANGUAGE,
@@ -53,6 +54,10 @@ from core.config import (
     OPENAI_VISION_MODEL,
 )
 from services.inbound_media_storage import save_inbound_media
+from services.whatsapp_platform.provider_utils import (
+    WHATSAPP_PROVIDER_360DIALOG,
+    wa_provider,
+)
 from services.whatsapp_platform.token_manager import get_token_for_operation
 
 logger = logging.getLogger("nahla.ai.media")
@@ -661,17 +666,63 @@ async def _download_meta_media(
     decide whether to fall back to the storage / caption path.
     Never raises (logs + returns None) — the whole pipeline is
     designed to keep the conversation alive even when Meta hiccups.
+
+    Provider routing
+    ────────────────
+    The repo supports both Meta Cloud and 360dialog (BSP). Each
+    speaks a different media-download wire format:
+
+      * Meta Cloud:
+          GET https://graph.facebook.com/{ver}/{media_id}
+          Authorization: Bearer <Meta WABA access token>
+        → returns ``{"url": "<https://lookaside.fbsbx.com/…>",
+                    "mime_type": "<mime>"}``
+        → second hop fetches the bytes from the lookaside CDN with
+          the SAME Authorization header.
+
+      * 360dialog:
+          GET https://waba-v2.360dialog.io/{media_id}
+          D360-API-KEY: <360dialog API key>
+        → returns the same shape but the ``url`` points BACK at
+          ``waba-v2.360dialog.io`` (no public CDN), so the second
+          hop ALSO uses the D360-API-KEY header.
+
+    Routing on ``wa_provider(wa_conn)`` mirrors what
+    ``services.whatsapp_platform.service._provider_base_url`` and
+    ``_provider_headers`` already do for the outbound send path.
+    The previous implementation hard-coded the Meta path which
+    caused a 401 Unauthorized on every 360dialog inbound media
+    event — a 360dialog API key was being sent to Meta's Graph
+    API as a Bearer token.
     """
+    provider = "meta"
     try:
+        try:
+            provider = wa_provider(wa_conn) or "meta"
+        except Exception:
+            provider = "meta"
+
         token_ctx = await get_token_for_operation(
             db, wa_conn, tenant_id=tenant_id, operation="media_download",
         )
-        graph = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-        headers = {"Authorization": f"Bearer {token_ctx.token}"}
+
+        # ── Branch on provider for base URL + auth header ────────
+        # We deliberately compute both the resolve URL (hop 1) and
+        # the auth header here, BEFORE the httpx client opens, so a
+        # provider misconfiguration produces a single clean log
+        # line instead of an opaque network error.
+        if provider == WHATSAPP_PROVIDER_360DIALOG:
+            base = D360_API_BASE_URL.rstrip("/")
+            resolve_url = f"{base}/{media_id}"
+            headers = {"D360-API-KEY": token_ctx.token}
+        else:
+            base = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+            resolve_url = f"{base}/{media_id}"
+            headers = {"Authorization": f"Bearer {token_ctx.token}"}
 
         async with httpx.AsyncClient(timeout=25) as client:
             meta_resp = await client.get(
-                f"{graph}/{media_id}", headers=headers,
+                resolve_url, headers=headers,
             )
             meta_resp.raise_for_status()
             meta_json = meta_resp.json() if meta_resp.content else {}
@@ -699,20 +750,49 @@ async def _download_meta_media(
                 _media_host = ""
             logger.info(
                 "[MEDIA_DOWNLOAD_RESOLVE] tenant=%s media_id=%s "
-                "status=%d mime=%s url_host=%s url_present=%s",
-                tenant_id, media_id, int(meta_resp.status_code),
+                "provider=%s status=%d mime=%s url_host=%s "
+                "url_present=%s",
+                tenant_id, media_id, provider,
+                int(meta_resp.status_code),
                 resolved_mime or "—", _media_host or "—",
                 "true" if media_url else "false",
             )
             if not media_url:
                 logger.warning(
-                    "[MediaNormalizer] Meta returned no url tenant=%s "
+                    "[MediaNormalizer] %s returned no url tenant=%s "
                     "media_id=%s",
-                    tenant_id, media_id,
+                    provider, tenant_id, media_id,
                 )
                 return None
 
-            media_resp = await client.get(media_url, headers=headers)
+            # ── Hop-2 auth header ────────────────────────────────
+            # Meta's CDN URLs land at ``lookaside.fbsbx.com``,
+            # which still accepts the Bearer token. 360dialog's
+            # resolved URLs land back at ``waba-v2.360dialog.io``,
+            # which requires the D360-API-KEY header (NOT a
+            # Bearer). To stay safe even if either vendor ever
+            # routes us to a third-party CDN that rejects the
+            # auth header, we only attach the header when the
+            # resolved host actually belongs to the same vendor
+            # domain — otherwise we send the request bare and
+            # rely on a signed query string in the URL.
+            fetch_headers: Dict[str, str] = {}
+            try:
+                _media_host_for_hop2 = (_media_host or "").lower()
+            except Exception:
+                _media_host_for_hop2 = ""
+            if provider == WHATSAPP_PROVIDER_360DIALOG:
+                if _media_host_for_hop2.endswith("360dialog.io"):
+                    fetch_headers = {"D360-API-KEY": token_ctx.token}
+            else:
+                if (
+                    _media_host_for_hop2.endswith("facebook.com")
+                    or _media_host_for_hop2.endswith("fbcdn.net")
+                    or _media_host_for_hop2.endswith("fbsbx.com")
+                ):
+                    fetch_headers = {"Authorization": f"Bearer {token_ctx.token}"}
+
+            media_resp = await client.get(media_url, headers=fetch_headers)
             media_resp.raise_for_status()
             file_bytes = media_resp.content
             # ── Success log for the CDN-FETCH step ────────────────
@@ -726,23 +806,24 @@ async def _download_meta_media(
             _cdn_ct = media_resp.headers.get("content-type") or ""
             logger.info(
                 "[MEDIA_DOWNLOAD_FETCH] tenant=%s media_id=%s "
-                "status=%d bytes=%d content_type=%s",
-                tenant_id, media_id, int(media_resp.status_code),
+                "provider=%s status=%d bytes=%d content_type=%s",
+                tenant_id, media_id, provider,
+                int(media_resp.status_code),
                 len(file_bytes), _cdn_ct or "—",
             )
 
         if not file_bytes:
             logger.warning(
-                "[MediaNormalizer] Meta returned empty body tenant=%s "
+                "[MediaNormalizer] %s returned empty body tenant=%s "
                 "media_id=%s",
-                tenant_id, media_id,
+                provider, tenant_id, media_id,
             )
             return None
         if len(file_bytes) > INBOUND_MEDIA_MAX_BYTES:
             logger.warning(
                 "[MediaNormalizer] media too large tenant=%s media_id=%s "
-                "bytes=%d cap=%d",
-                tenant_id, media_id, len(file_bytes),
+                "provider=%s bytes=%d cap=%d",
+                tenant_id, media_id, provider, len(file_bytes),
                 INBOUND_MEDIA_MAX_BYTES,
             )
             return None
@@ -761,25 +842,37 @@ async def _download_meta_media(
         if looks_like_html or (_cdn_ct.lower().startswith("text/html") if _cdn_ct else False):
             logger.warning(
                 "[MEDIA_DOWNLOAD_NON_BINARY] tenant=%s media_id=%s "
-                "content_type=%s bytes=%d head=%s — likely expired "
-                "CDN URL serving HTML error page",
-                tenant_id, media_id, _cdn_ct or "—", len(file_bytes),
-                bytes(file_bytes[:24]),
+                "provider=%s content_type=%s bytes=%d head=%s — "
+                "likely expired CDN URL serving HTML error page",
+                tenant_id, media_id, provider, _cdn_ct or "—",
+                len(file_bytes), bytes(file_bytes[:24]),
             )
             return None
         return {"bytes": file_bytes, "mime_type": resolved_mime}
+    except httpx.HTTPStatusError as exc:
+        # Distinguish HTTP errors (with status codes) from connection
+        # errors. A 401 with provider=meta + 360dialog token in
+        # ctx.source is a strong "wrong wire format" signal — the
+        # exact diagnostic we wanted to make trivial.
+        _status = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "[MediaNormalizer] media download HTTP error tenant=%s "
+            "provider=%s media_id=%s status=%s err=%s",
+            tenant_id, provider, media_id, _status, exc,
+        )
+        return None
     except httpx.HTTPError as exc:
         logger.warning(
-            "[MediaNormalizer] Meta media download failed tenant=%s "
-            "media_id=%s err=%s",
-            tenant_id, media_id, exc,
+            "[MediaNormalizer] media download failed tenant=%s "
+            "provider=%s media_id=%s err=%s",
+            tenant_id, provider, media_id, exc,
         )
         return None
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[MediaNormalizer] unexpected download error tenant=%s "
-            "media_id=%s err=%s",
-            tenant_id, media_id, exc,
+            "provider=%s media_id=%s err=%s",
+            tenant_id, provider, media_id, exc,
         )
         return None
 
