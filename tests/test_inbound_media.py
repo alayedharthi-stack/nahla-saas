@@ -932,3 +932,89 @@ class TestMediaEnvEndpoint:
             assert any("OPENAI_API_KEY" in s for s in result["issues"])
             assert result["ready"]["audio"] is False
             assert result["ready"]["vision"] is False
+
+    def test_response_exposes_top_level_aliases(self, isolated_storage):
+        """The flat aliases (openai_key_present, vision_enabled,
+        stt_enabled, media_dir_writable, inbound_media_dir,
+        ffmpeg_found, ffmpeg_version) are the public contract
+        documented for dashboards / runbooks. Drift between the
+        flat alias and the nested group is a bug — lock it down."""
+        from routers import admin_debug
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        # Every alias must be present, even when the underlying
+        # value is False/None — UI relies on .hasOwnProperty(...).
+        for alias in (
+            "openai_key_present", "openai_key_tail",
+            "vision_enabled", "stt_enabled",
+            "media_dir_writable", "inbound_media_dir",
+            "ffmpeg_found", "ffmpeg_version",
+        ):
+            assert alias in result, f"missing top-level alias {alias!r}"
+
+        # And they mirror the nested fields 1:1.
+        assert result["openai_key_present"]  == result["openai"]["api_key_present"]
+        assert result["openai_key_tail"]     == result["openai"]["api_key_tail"]
+        assert result["vision_enabled"]      == result["ready"]["vision"]
+        assert result["stt_enabled"]         == result["ready"]["audio"]
+        assert result["media_dir_writable"]  == result["storage"]["writable"]
+        assert result["inbound_media_dir"]   == result["storage"]["root"]
+        assert result["ffmpeg_found"]        == result["ffmpeg"]["found"]
+        assert result["ffmpeg_version"]      == result["ffmpeg"]["version"]
+
+    def test_ffmpeg_block_reflects_shutil_which(self, isolated_storage, monkeypatch):
+        """When `shutil.which("ffmpeg")` returns a path, the response
+        must surface `found=True` + the path. When it returns None
+        the inverse, AND the issues list must mention ffmpeg so
+        operators know it's not installed."""
+        import shutil as _shutil
+        from routers import admin_debug
+
+        # 1) Pretend ffmpeg IS installed.
+        monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+        # subprocess.run will fail because /usr/bin/ffmpeg doesn't
+        # exist on the test host — we only care that the handler
+        # *attempts* the call and gracefully sets version to a
+        # diagnostic string instead of crashing.
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        assert result["ffmpeg_found"] is True
+        assert result["ffmpeg"]["path"] == "/usr/bin/ffmpeg"
+        # `version` is either None, a real version string, or
+        # "execution_failed: ..." — never crashes the request.
+        v = result["ffmpeg_version"]
+        assert v is None or isinstance(v, str)
+
+        # 2) Pretend ffmpeg is NOT installed.
+        monkeypatch.setattr(_shutil, "which", lambda name: None)
+        result2 = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        assert result2["ffmpeg_found"] is False
+        assert result2["ffmpeg"]["path"] is None
+        assert any("ffmpeg" in i for i in result2["issues"])
+        # Hint must be actionable: mention Railway.
+        assert any("ffmpeg" in h.lower() or "nixpacks" in h.lower()
+                   for h in result2["hints"])
+
+    def test_never_returns_full_openai_key(self, isolated_storage, monkeypatch):
+        """Defense-in-depth: even if a future refactor accidentally
+        adds the raw key to the response, this test catches it.
+        We seed a recognisable sk-test-FULL... value and assert
+        none of the JSON values equal it."""
+        import json as _json
+        from routers import admin_debug
+
+        secret = "sk-test-NEVER_LEAK_THIS_FULL_VALUE_1234"
+        monkeypatch.setattr("core.config.OPENAI_API_KEY", secret, raising=False)
+        # The handler imports OPENAI_API_KEY by name from core.config
+        # inside the function body, so the monkeypatch lands.
+        result = asyncio.run(admin_debug.admin_debug_media_env(
+            _admin={"sub": "admin@nahla", "role": "admin"},
+        ))
+        as_text = _json.dumps(result)
+        assert secret not in as_text, (
+            "OPENAI_API_KEY leaked into /admin/debug/media-env response"
+        )

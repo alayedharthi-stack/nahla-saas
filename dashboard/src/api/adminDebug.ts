@@ -67,8 +67,23 @@ export interface AdminMediaEnvSnapshot {
     audio:  boolean
     vision: boolean
   }
-  issues: string[]
-  hints:  string[]
+  ffmpeg: {
+    found:   boolean
+    path:    string | null
+    version: string | null
+  }
+  // Flat aliases (public contract — mirrors the nested groups 1:1).
+  // Documented so dashboards/runbooks don't need to walk the structure.
+  openai_key_present:  boolean
+  openai_key_tail:     string | null
+  vision_enabled:      boolean
+  stt_enabled:         boolean
+  media_dir_writable:  boolean
+  inbound_media_dir:   string
+  ffmpeg_found:        boolean
+  ffmpeg_version:      string | null
+  issues:              string[]
+  hints:               string[]
 }
 
 export const adminDebugApi = {

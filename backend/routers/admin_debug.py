@@ -1481,6 +1481,7 @@ async def admin_debug_media_env(
     persistence is silently dropping.
     """
     import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
     from core.config import (  # noqa: PLC0415
         INBOUND_MEDIA_MAX_BYTES,
         NAHLA_STT_LANGUAGE,
@@ -1524,25 +1525,94 @@ async def admin_debug_media_env(
         except Exception as exc:  # noqa: BLE001
             write_probe_error = f"create_failed: {type(exc).__name__}: {exc}"
 
+    # ── ffmpeg detection ──────────────────────────────────────────
+    # We don't currently invoke ffmpeg in the inbound pipeline
+    # (Whisper API accepts opus/ogg directly), but operators
+    # routinely ASK whether it's installed in case we add format
+    # conversion later, and the Railway base image doesn't ship
+    # with it by default. We probe both presence and version so
+    # they can confirm the system PATH is healthy in one call.
+    ffmpeg_path: Optional[str] = shutil.which("ffmpeg")
+    ffmpeg_version: Optional[str] = None
+    if ffmpeg_path:
+        try:
+            proc = subprocess.run(
+                [ffmpeg_path, "-version"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            # First line of `ffmpeg -version` is like:
+            #   ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-...
+            # We strip the "Copyright" suffix for a compact label.
+            first_line = (proc.stdout or proc.stderr or "").splitlines()
+            if first_line:
+                ffmpeg_version = first_line[0].split("Copyright")[0].strip()
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            # Found on disk but failed to execute (rare — usually a
+            # permission issue on a custom mount). Keep the path so
+            # support has something concrete to investigate.
+            ffmpeg_version = f"execution_failed: {type(exc).__name__}"
+
     audio_ready  = bool(OPENAI_API_KEY) and root_writable
     vision_ready = bool(OPENAI_API_KEY) and root_writable
 
+    # ── Issues + hints (Arabic, dynamic per failure) ──────────────
+    # `issues` is a short list of "what's broken right now". `hints`
+    # is the parallel list of "how to fix it on Railway specifically".
+    # Empty when everything passes — so the UI can show a green
+    # checkmark instead of a stale "اضبط المفتاح" reminder.
     issues: List[str] = []
+    hints:  List[str] = []
     if not OPENAI_API_KEY:
         issues.append(
-            "OPENAI_API_KEY غير مضبوط — لا تفريغ صوتي ولا وصف للصور"
+            "OPENAI_API_KEY غير مضبوط — لا تفريغ صوتي ولا وصف للصور."
+        )
+        hints.append(
+            "في Railway → Variables أضف OPENAI_API_KEY ثم اعمل Redeploy. "
+            "بدونه ميزتا التفريغ والرؤية معطّلتان."
         )
     if not root_exists:
         issues.append(
-            f"NAHLA_INBOUND_MEDIA_DIR غير موجود: {root_str}"
+            f"NAHLA_INBOUND_MEDIA_DIR غير موجود على القرص: {root_str}"
+        )
+        hints.append(
+            "في Railway → Volumes أنشئ volume دائم واربطه على نفس المسار "
+            "في NAHLA_INBOUND_MEDIA_DIR (مثلاً /data/inbound-media)."
         )
     elif not root_writable:
         issues.append(
-            f"NAHLA_INBOUND_MEDIA_DIR غير قابل للكتابة "
-            f"({write_probe_error or 'unknown'})"
+            f"NAHLA_INBOUND_MEDIA_DIR موجود لكن غير قابل للكتابة "
+            f"({write_probe_error or 'unknown'})."
+        )
+        hints.append(
+            "الـ volume mounted لكن الـ permissions تمنع الكتابة. "
+            "تحقق من ownership على /data/inbound-media — يجب أن يكون "
+            "للمستخدم الذي يشغّل uvicorn."
+        )
+    if not audio_ready:
+        issues.append(
+            "ميزة التفريغ الصوتي (Whisper) معطّلة — التسجيلات الواردة "
+            "ستُخزَّن لكن بدون نص مستخرج."
+        )
+    if not vision_ready:
+        issues.append(
+            "ميزة وصف الصور (Vision) معطّلة — الصور الواردة ستُخزَّن "
+            "لكن بدون وصف مستخرج."
+        )
+    if not ffmpeg_path:
+        issues.append(
+            "ffmpeg غير مثبّت — لا يؤثّر على المسار الحالي (Whisper "
+            "API يقبل opus/ogg مباشرة) لكنه مطلوب إذا أردنا تحويل "
+            "صيغ صوتية مستقبلاً."
+        )
+        hints.append(
+            "إن احتجته في الإنتاج: أضف ffmpeg إلى Dockerfile/Nixpacks. "
+            "في Railway nixpacks اكتب: NIXPACKS_PKGS=ffmpeg في Variables."
         )
 
-    return {
+    payload: Dict[str, Any] = {
+        # ── Nested groups (legacy shape — kept stable) ────────────
         "openai": {
             "api_key_present":   bool(OPENAI_API_KEY),
             "api_key_tail":      _mask_secret_tail(OPENAI_API_KEY),
@@ -1564,11 +1634,25 @@ async def admin_debug_media_env(
             "audio":  audio_ready,
             "vision": vision_ready,
         },
-        "issues": issues,
-        "hints": [
-            "في Railway اضبط OPENAI_API_KEY ثم اعمل redeploy.",
-            "اربط volume دائم على NAHLA_INBOUND_MEDIA_DIR (مثلاً /data/inbound-media) "
-            "وإلا ستضيع الملفات في كل deploy.",
-            "OPENAI_VISION_MODEL=gpt-4o-mini و OPENAI_AUDIO_MODEL=whisper-1 (الافتراضي).",
-        ],
+        "ffmpeg": {
+            "found":    bool(ffmpeg_path),
+            "path":     ffmpeg_path,
+            "version":  ffmpeg_version,
+        },
+        # ── Flat aliases (new, public contract) ───────────────────
+        # Documented top-level names so dashboards, runbooks, and the
+        # support-bundle copy-paste flow don't have to walk the
+        # nested structure. These mirror the values inside the
+        # groups above 1:1 — any drift between the two is a bug.
+        "openai_key_present":  bool(OPENAI_API_KEY),
+        "openai_key_tail":     _mask_secret_tail(OPENAI_API_KEY),
+        "vision_enabled":      vision_ready,
+        "stt_enabled":         audio_ready,
+        "media_dir_writable":  root_writable,
+        "inbound_media_dir":   root_str,
+        "ffmpeg_found":        bool(ffmpeg_path),
+        "ffmpeg_version":      ffmpeg_version,
+        "issues":              issues,
+        "hints":               hints,
     }
+    return payload

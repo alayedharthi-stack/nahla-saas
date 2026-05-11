@@ -12,6 +12,7 @@ import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import AdminDirectSendModal from '../components/admin/AdminDirectSendModal'
+import MediaEnvModal from '../components/admin/MediaEnvModal'
 import { isAdmin } from '../auth'
 import { useLanguage } from '../i18n/context'
 import {
@@ -3015,6 +3016,8 @@ export default function Campaigns() {
   const [showWizard, setShowWizard] = useState(false)
   // Admin-only direct WhatsApp test send modal. Hidden for merchants.
   const [showAdminSend, setShowAdminSend] = useState(false)
+  // Admin-only inbound-media environment diagnostic.
+  const [showMediaEnv, setShowMediaEnv] = useState(false)
   const adminMode = isAdmin()
   const [campaigns, setCampaigns] = useState<CampaignRecord[]>([])
   const [loading, setLoading] = useState(true)
@@ -3091,13 +3094,22 @@ export default function Campaigns() {
         action={
           <div className="flex items-center gap-2">
             {adminMode && (
-              <button
-                onClick={() => setShowAdminSend(true)}
-                className="text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
-                title="إرسال قالب واتساب مباشرة عبر المزود — يتجاوز نظام الحملات (Admin only)"
-              >
-                <Send className="w-3.5 h-3.5" /> إرسال اختبار مباشر
-              </button>
+              <>
+                <button
+                  onClick={() => setShowMediaEnv(true)}
+                  className="text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
+                  title="فحص إعدادات الوسائط على الخادم (OpenAI / تخزين / ffmpeg) — Admin only"
+                >
+                  <AlertCircle className="w-3.5 h-3.5" /> فحص الوسائط
+                </button>
+                <button
+                  onClick={() => setShowAdminSend(true)}
+                  className="text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
+                  title="إرسال قالب واتساب مباشرة عبر المزود — يتجاوز نظام الحملات (Admin only)"
+                >
+                  <Send className="w-3.5 h-3.5" /> إرسال اختبار مباشر
+                </button>
+              </>
             )}
             <button onClick={() => setShowWizard(true)} className="btn-primary text-sm">
               <Plus className="w-4 h-4" /> حملة جديدة
@@ -3107,10 +3119,16 @@ export default function Campaigns() {
       />
 
       {adminMode && (
-        <AdminDirectSendModal
-          open={showAdminSend}
-          onClose={() => setShowAdminSend(false)}
-        />
+        <>
+          <AdminDirectSendModal
+            open={showAdminSend}
+            onClose={() => setShowAdminSend(false)}
+          />
+          <MediaEnvModal
+            open={showMediaEnv}
+            onClose={() => setShowMediaEnv(false)}
+          />
+        </>
       )}
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
