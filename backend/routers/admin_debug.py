@@ -39,15 +39,18 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+import re
+import time
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from core.auth import hash_password
+from core.auth import hash_password, require_admin
 from core.database import get_db
 from core.audit import audit
-from models import Tenant, User
+from models import Tenant, User, WhatsAppConnection, WhatsAppTemplate
 
 logger = logging.getLogger("nahla.admin_debug")
 
@@ -1111,4 +1114,315 @@ def salla_get_checkout_profile(
             if not db_profile else
             f"Profile looks healthy. Default delivery_method={db_profile.get('default_delivery_method')}"
         ),
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════
+# WhatsApp DIRECT-SEND DEBUG
+# ════════════════════════════════════════════════════════════════════════
+#
+# Purpose: let platform support staff fire a single template message
+# through the live 360dialog/Meta connection of any tenant WITHOUT going
+# anywhere near the campaign engine. This bypasses:
+#
+#   * campaign_send_logs persistence
+#   * frequency caps
+#   * retries (single try, raw result)
+#   * idempotency / dedup
+#   * snapshotting / audience filters
+#
+# It exists because the campaign pipeline is now hardened enough that
+# when a merchant says "the template isn't arriving", we need to be able
+# to ask "does the connection itself work, in isolation, right now?".
+# If THIS endpoint succeeds and the campaign still fails, the bug is in
+# the campaign layer; if THIS endpoint also fails we have an isolated
+# reproduction we can hand to 360dialog support.
+#
+# Security: gated by `require_admin` only. The endpoint does NOT use the
+# extra ENABLE_ADMIN_DEBUG flag because (a) admins are already platform
+# staff with explicit JWT roles, and (b) we want this available in
+# production at all times — that's the whole point of having it.
+#
+# Masking: the response masks the recipient phone (keeps first 4 + last
+# 3 digits) and never returns the bearer token. Logs are masked the
+# same way.
+
+_DIRECT_SEND_PATH_WHITELIST_DOC = """
+POST body shape (admin-only):
+
+    {
+      "phone_number_id": "100543193146977",   // required
+      "to":              "+966537970430",     // required, E.164
+      "template":        "nahla_special_offer_c874",
+      "language":        "ar",                // optional, default 'ar'
+      "merchant_vars":   { "1": "Hisham", "2": "499" }  // optional
+    }
+"""
+
+
+class _DirectSendBody(BaseModel):
+    """Request schema for the admin direct-template-send debug route.
+
+    ``tenant_id`` is intentionally not in the body: we resolve it from
+    ``phone_number_id`` so admins can target any tenant without first
+    looking up its numeric id. This also matches `_post_wa`'s reverse
+    resolution path (so any tenant a merchant connected to today is
+    reachable here even if its name changed).
+    """
+    phone_number_id: str   = Field(..., min_length=4, max_length=64)
+    to:              str   = Field(..., min_length=4, max_length=32)
+    template:        str   = Field(..., min_length=2, max_length=128)
+    language:        str   = Field("ar", min_length=2, max_length=12)
+    merchant_vars:   Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Optional placeholder vars keyed by '1', '2', ...",
+    )
+
+
+def _mask_phone(raw: str) -> str:
+    """Return a masked, log-safe form of a phone number.
+
+    Strategy: keep first 4 digits (country code) and last 3 digits
+    (so support can match an arriving ticket against the right
+    customer), redact the middle. Handles E.164 (+966...) and
+    bare digits. Never returns more than 11 characters.
+
+      "+966537970430" → "+9665***430"
+      "966537970430"  → "9665***430"
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if len(s) <= 7:
+        return "***"
+    head = s[:4]
+    tail = s[-3:]
+    return f"{head}***{tail}"
+
+
+def _mask_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-mask a Meta API payload for safe logging/return.
+
+    Currently only masks the top-level `to` field; templates do not
+    carry the bearer token or any other sensitive merchant data. We
+    don't mask placeholder values inside `template.components` —
+    those are merchant-provided test inputs and showing them is the
+    whole point of a debug endpoint.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    masked = dict(payload)
+    if "to" in masked:
+        masked["to"] = _mask_phone(str(masked.get("to") or ""))
+    return masked
+
+
+def _extract_provider_message_id(resp_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Pull ``messages[0].id`` out of a Meta / 360dialog response.
+
+    Both providers wrap the wamid in ``{"messages": [{"id": "<wamid>"}]}``
+    on success. Returns None on any structural mismatch — callers should
+    treat ``None`` as "the send did NOT succeed" even if HTTP 200.
+    """
+    if not isinstance(resp_data, dict):
+        return None
+    msgs = resp_data.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        return None
+    first = msgs[0]
+    if not isinstance(first, dict):
+        return None
+    mid = first.get("id")
+    return str(mid).strip() if mid else None
+
+
+@router.post("/whatsapp/send-template")
+async def admin_debug_send_template(
+    body: _DirectSendBody,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Fire a single WhatsApp template message synchronously, bypassing
+    every safety net the campaign pipeline adds.
+
+    Returns the raw provider response (Meta or 360dialog) so support
+    can read the exact error code/subcode/fbtrace_id without scraping
+    logs. Phone numbers are masked on the way in and the way out.
+
+    Errors caught:
+      * 404 — phone_number_id not connected to any tenant
+      * 404 — template not found / not approved for the tenant
+      * 502 — provider call exploded (network, auth, etc.)
+
+    Success shape:
+      {
+        "ok": bool,
+        "http_status": 200,
+        "provider": "meta_cloud" | "360dialog",
+        "phone_number_id": "100543193146977",
+        "tenant_id": 33,
+        "template": "nahla_special_offer_c874",
+        "language": "ar",
+        "to_masked": "+9665***430",
+        "raw_request_masked": { ... full payload, `to` redacted ... },
+        "raw_response": { ... unmodified provider body ... },
+        "provider_message_id": "wamid.HBgNOTY..."
+      }
+    """
+    from services.whatsapp_platform.service import provider_send_message, wa_provider  # noqa: PLC0415
+    from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG  # noqa: PLC0415
+    from services.campaign_wizard.test_send import build_test_payload  # noqa: PLC0415
+
+    started_at = time.time()
+    admin_sub = _admin.get("sub") or "?"
+
+    # ── 1. Resolve tenant via phone_number_id ────────────────────
+    # We deliberately key by phone_number_id (not tenant_id from the
+    # admin JWT) so support can target any connected merchant by
+    # quoting the number from their conversation tab.
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.phone_number_id == body.phone_number_id)
+        .order_by(WhatsAppConnection.id.desc())
+        .first()
+    )
+    if not wa_conn:
+        logger.warning(
+            "[ADMIN/WA_SEND_TEMPLATE_DEBUG] unknown phone_number_id=%s admin=%s",
+            body.phone_number_id, admin_sub,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"no WhatsAppConnection found for phone_number_id={body.phone_number_id!r}",
+        )
+    tenant_id = int(wa_conn.tenant_id)
+
+    # ── 2. Resolve template on that tenant ───────────────────────
+    template = (
+        db.query(WhatsAppTemplate)
+        .filter(
+            WhatsAppTemplate.tenant_id == tenant_id,
+            WhatsAppTemplate.name == body.template,
+        )
+        .order_by(WhatsAppTemplate.id.desc())
+        .first()
+    )
+    if not template:
+        logger.warning(
+            "[ADMIN/WA_SEND_TEMPLATE_DEBUG] unknown template tenant=%s name=%s admin=%s",
+            tenant_id, body.template, admin_sub,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"template {body.template!r} not found on tenant {tenant_id}. "
+                f"check that the merchant has synced their templates."
+            ),
+        )
+
+    # We honour the request's language code by overriding template
+    # locally — saves admins having to maintain ar/en variants when
+    # they're testing the same template on a different language code.
+    effective_template = template
+    if (body.language or "").strip() and body.language.strip() != (template.language or ""):
+        # Shallow copy via the ORM (without committing) so the payload
+        # builder sees the requested language without touching the DB.
+        from types import SimpleNamespace  # noqa: PLC0415
+        effective_template = SimpleNamespace(
+            name=template.name,
+            language=body.language.strip(),
+            components=getattr(template, "components", None),
+        )
+
+    # ── 3. Build the Meta payload ────────────────────────────────
+    try:
+        payload = build_test_payload(
+            effective_template,
+            to_phone_e164=body.to.strip(),
+            merchant_vars=body.merchant_vars or {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    masked_request = _mask_payload(payload)
+    provider_kind = wa_provider(wa_conn)
+    provider_label = (
+        "360dialog" if provider_kind == WHATSAPP_PROVIDER_360DIALOG else "meta_cloud"
+    )
+
+    logger.info(
+        "[ADMIN/WA_SEND_TEMPLATE_DEBUG] start admin=%s tenant=%s phone_number_id=%s "
+        "provider=%s template=%s language=%s to_masked=%s",
+        admin_sub, tenant_id, body.phone_number_id, provider_label,
+        body.template, body.language, _mask_phone(body.to),
+    )
+
+    # ── 4. Single-shot provider call (NO retries, NO campaign log) ───
+    resp_data: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+    http_status = 200
+    try:
+        resp_data, ctx = await provider_send_message(
+            db,
+            wa_conn,
+            tenant_id=tenant_id,
+            operation="admin_debug_send_template",
+            phone_id=body.phone_number_id,
+            payload=payload,
+            prefer_platform=bool(
+                getattr(wa_conn, "connection_type", None) == "direct"
+            ),
+            timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001
+        error_message = f"{type(exc).__name__}: {exc}"
+        http_status = 502
+        logger.warning(
+            "[ADMIN/WA_SEND_TEMPLATE_DEBUG] provider call exploded admin=%s tenant=%s "
+            "err=%s",
+            admin_sub, tenant_id, error_message,
+        )
+        resp_data = {"error": {"message": error_message, "type": "provider_exception"}}
+
+    duration_ms = int((time.time() - started_at) * 1000)
+    provider_message_id = _extract_provider_message_id(resp_data)
+    has_error = isinstance(resp_data, dict) and "error" in resp_data
+    ok = (http_status == 200) and (provider_message_id is not None) and (not has_error)
+
+    logger.info(
+        "[ADMIN/WA_SEND_TEMPLATE_DEBUG] done admin=%s tenant=%s provider=%s "
+        "ok=%s provider_message_id=%s has_error=%s duration_ms=%d",
+        admin_sub, tenant_id, provider_label, ok,
+        provider_message_id or "—", has_error, duration_ms,
+    )
+
+    audit(
+        "admin_debug_send_template",
+        admin_sub=admin_sub,
+        tenant_id=tenant_id,
+        phone_number_id=body.phone_number_id,
+        template=body.template,
+        language=body.language,
+        to_masked=_mask_phone(body.to),
+        provider=provider_label,
+        ok=ok,
+        provider_message_id=provider_message_id or "",
+        has_error=has_error,
+        duration_ms=duration_ms,
+    )
+
+    return {
+        "ok":                  bool(ok),
+        "http_status":         http_status,
+        "provider":            provider_label,
+        "phone_number_id":     body.phone_number_id,
+        "tenant_id":           tenant_id,
+        "template":            body.template,
+        "language":            body.language,
+        "to_masked":           _mask_phone(body.to),
+        "raw_request_masked":  masked_request,
+        "raw_response":        resp_data,
+        "provider_message_id": provider_message_id,
+        "duration_ms":         duration_ms,
+        "error_message":       error_message,
     }

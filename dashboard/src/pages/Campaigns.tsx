@@ -11,6 +11,8 @@ import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
+import AdminDirectSendModal from '../components/admin/AdminDirectSendModal'
+import { isAdmin } from '../auth'
 import { useLanguage } from '../i18n/context'
 import {
   campaignsApi, CampaignRecord, CreateCampaignPayload,
@@ -2850,6 +2852,9 @@ const TABLE_HEADERS = ['', 'الحملة', 'النوع', 'الحالة', 'الج
 
 export default function Campaigns() {
   const [showWizard, setShowWizard] = useState(false)
+  // Admin-only direct WhatsApp test send modal. Hidden for merchants.
+  const [showAdminSend, setShowAdminSend] = useState(false)
+  const adminMode = isAdmin()
   const [campaigns, setCampaigns] = useState<CampaignRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
@@ -2923,11 +2928,29 @@ export default function Campaigns() {
         title={t(tr => tr.pages.campaigns.title)}
         subtitle="حملات واتساب ذكية مبنية على شرائح نحلة وقوالب Meta المعتمدة"
         action={
-          <button onClick={() => setShowWizard(true)} className="btn-primary text-sm">
-            <Plus className="w-4 h-4" /> حملة جديدة
-          </button>
+          <div className="flex items-center gap-2">
+            {adminMode && (
+              <button
+                onClick={() => setShowAdminSend(true)}
+                className="text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
+                title="إرسال قالب واتساب مباشرة عبر المزود — يتجاوز نظام الحملات (Admin only)"
+              >
+                <Send className="w-3.5 h-3.5" /> إرسال اختبار مباشر
+              </button>
+            )}
+            <button onClick={() => setShowWizard(true)} className="btn-primary text-sm">
+              <Plus className="w-4 h-4" /> حملة جديدة
+            </button>
+          </div>
         }
       />
+
+      {adminMode && (
+        <AdminDirectSendModal
+          open={showAdminSend}
+          onClose={() => setShowAdminSend(false)}
+        />
+      )}
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label="حملات مكتملة" value={stats.completed.toString()} icon={CheckCircle} />
