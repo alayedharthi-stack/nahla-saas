@@ -1233,13 +1233,23 @@ function EditModal({
                           onChange={e => updateBtn(i, { example: [e.target.value] })}
                         />
                       </div>
-                      <div className="flex items-start gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
-                        <span className="text-emerald-500 text-xs mt-0.5">✦</span>
-                        <p className="text-[11px] text-emerald-700 leading-relaxed">
-                          <strong>كود ديناميكي —</strong> هذا مثال لمراجعة Meta فقط.
-                          عند الإرسال الفعلي، يُحقن كود الخصم الحقيقي تلقائياً من نظام الكوبونات.
-                        </p>
-                      </div>
+                      {tpl.library?.mode === 'manual' ? (
+                        <div className="flex items-start gap-1.5 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                          <span className="text-amber-500 text-xs mt-0.5">✎</span>
+                          <p className="text-[11px] text-amber-800 leading-relaxed">
+                            <strong>كوبون يدوي —</strong> سيتم استخدام الكود الذي يحدده التاجر عند إنشاء الحملة.
+                            هذا المثال يُرسَل لمراجعة Meta فقط ولن يتغيّر تلقائياً عند الإرسال.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="flex items-start gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
+                          <span className="text-emerald-500 text-xs mt-0.5">✦</span>
+                          <p className="text-[11px] text-emerald-700 leading-relaxed">
+                            <strong>كود ديناميكي —</strong> هذا مثال لمراجعة Meta فقط.
+                            عند الإرسال الفعلي، يُحقن كود الخصم الحقيقي تلقائياً من نظام الكوبونات.
+                          </p>
+                        </div>
+                      )}
                     </div>
                   )}
                   {btn.type === 'URL' && btn.url?.includes('{{1}}') && (

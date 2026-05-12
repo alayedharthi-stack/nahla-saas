@@ -767,6 +767,35 @@ def _normalize_provider_template_list(conn: Any, payload: Dict[str, Any]) -> Lis
     return list(payload.get("data") or [])
 
 
+def _resolve_library_meta_for_template(template: WhatsAppTemplate) -> Dict[str, Any]:
+    """Resolve the library metadata for a WhatsAppTemplate row.
+
+    Lookup precedence:
+
+      1. ``DEFAULT_TEMPLATE_LIBRARY[template.name]`` — exact name match
+         (works for un-renamed seeds like ``special_offer``).
+      2. ``DEFAULT_TEMPLATE_LIBRARY[template.nahla_source_key]`` — falls
+         back to the original library key recorded at import time.
+         This is the path that fixes per-tenant clones such as
+         ``nahla_special_offer_d381``: their ``name`` does NOT appear
+         in the library, but ``nahla_source_key == "special_offer"``,
+         so the manual/auto mode is still resolvable.
+
+    Returning the enriched meta (or ``{}`` when neither key matches)
+    means downstream consumers — the dashboard badge logic, the editor's
+    coupon copy text, and the campaign-wizard manual/auto contract — get
+    a single source of truth keyed off the merchant-visible mode flag
+    instead of guessing from ``COPY_CODE`` button presence or
+    ``has_coupon``.
+    """
+    meta = DEFAULT_TEMPLATE_LIBRARY.get(template.name, {})
+    if not meta:
+        source_key = getattr(template, "nahla_source_key", None) or ""
+        if source_key:
+            meta = DEFAULT_TEMPLATE_LIBRARY.get(source_key, {})
+    return _enrich_library_meta(meta)
+
+
 def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
     meta = dict(getattr(t, "ai_generation_metadata", None) or {})
     compatibility = meta.get("meta_compatibility") or _compute_template_compatibility(
@@ -776,7 +805,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         status=t.status,
         template_name=t.name,
     )
-    library_meta = _enrich_library_meta(DEFAULT_TEMPLATE_LIBRARY.get(t.name, {}))
+    library_meta = _resolve_library_meta_for_template(t)
 
     service_key = getattr(t, "service_key", None)
     svc_info: Dict[str, str] = {}
@@ -3144,7 +3173,7 @@ async def resolve_template_vars(
         "resolved_components": resolved_components,
         "rendered_body": body_text,
         "wa_parameters": wa_params,
-        "library": _enrich_library_meta(DEFAULT_TEMPLATE_LIBRARY.get(tpl.name, {})) or None,
+        "library": _resolve_library_meta_for_template(tpl) or None,
         "compatibility": compatibility,
     }
 
@@ -3172,7 +3201,7 @@ async def get_campaign_templates(request: Request, db: Session = Depends(get_db)
             "category": t.category,
             "status": t.status,
             "components": t.components or [],
-            "library": _enrich_library_meta(DEFAULT_TEMPLATE_LIBRARY.get(t.name, {})) or None,
+            "library": _resolve_library_meta_for_template(t) or None,
         })
     return {"templates": result, "source": "db"}
 

@@ -49,7 +49,11 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 
 
 from services import campaign_dispatcher as cd  # noqa: E402
-from routers.templates import DEFAULT_TEMPLATE_LIBRARY, _enrich_library_meta  # noqa: E402
+from routers.templates import (  # noqa: E402
+    DEFAULT_TEMPLATE_LIBRARY,
+    _enrich_library_meta,
+    _resolve_library_meta_for_template,
+)
 
 
 # ── Minimal stand-ins ──────────────────────────────────────────────────────
@@ -412,3 +416,72 @@ class TestLibraryMetaExposesMode:
             if meta.get("auto_coupon_capable") is True
         }
         assert capable == {"special_offer_auto", "vip_exclusive_auto", "win_back_auto"}
+
+
+# ── 4. Library lookup falls back to nahla_source_key for tenant clones ────
+
+
+class TestLibraryLookupFallsBackToSourceKey:
+    """When a merchant imports a Nahla library template, we mint a fresh
+    per-tenant copy with a randomized name like
+    ``nahla_special_offer_d381``. That name is NOT in
+    ``DEFAULT_TEMPLATE_LIBRARY`` — only the original key
+    ``special_offer`` is. Without a fallback the API would return
+    ``library: null`` for every imported clone, and the dashboard would
+    decide manual-vs-auto purely from the COPY_CODE button's presence
+    (which is wrong: COPY_CODE exists on BOTH manual and auto
+    templates). The fallback below is what guarantees the manual
+    contract survives the rename."""
+
+    def test_clone_name_with_source_key_resolves_to_manual(self):
+        tpl = MagicMock()
+        tpl.name = "nahla_special_offer_d381"  # tenant-scoped rename
+        tpl.nahla_source_key = "special_offer"
+
+        meta = _resolve_library_meta_for_template(tpl)
+
+        assert meta.get("mode") == "manual"
+        assert "يدوي" in meta.get("library_label_ar", "")
+
+    def test_clone_of_auto_sibling_resolves_to_auto(self):
+        tpl = MagicMock()
+        tpl.name = "nahla_special_offer_auto_a1b2"
+        tpl.nahla_source_key = "special_offer_auto"
+
+        meta = _resolve_library_meta_for_template(tpl)
+
+        assert meta.get("mode") == "auto"
+        assert meta.get("auto_coupon_capable") is True
+
+    def test_unknown_source_key_returns_empty(self):
+        tpl = MagicMock()
+        tpl.name = "tenant_bespoke_template"
+        tpl.nahla_source_key = None
+
+        meta = _resolve_library_meta_for_template(tpl)
+
+        # No library row → enricher returns {} unchanged so callers
+        # treat the template as a tenant-bespoke creation.
+        assert meta == {}
+
+    def test_unrenamed_name_still_resolves_via_first_lookup(self):
+        tpl = MagicMock()
+        tpl.name = "special_offer"
+        tpl.nahla_source_key = None  # never imported via the Nahla flow
+
+        meta = _resolve_library_meta_for_template(tpl)
+
+        assert meta.get("mode") == "manual"
+
+    def test_source_key_takes_over_when_name_unknown(self):
+        """The fallback path must not collapse to {} just because the
+        renamed name happens to be a substring of a real key. The
+        resolver MUST treat the rename as an opaque tenant identifier
+        and only trust ``nahla_source_key`` for the mode lookup."""
+        tpl = MagicMock()
+        tpl.name = "nahla_vip_exclusive_c3d4"
+        tpl.nahla_source_key = "vip_exclusive"
+
+        meta = _resolve_library_meta_for_template(tpl)
+
+        assert meta.get("mode") == "manual"

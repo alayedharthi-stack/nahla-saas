@@ -93,14 +93,11 @@ def _resolve_library_meta(template: WhatsAppTemplate) -> Dict[str, Any]:
     """
     try:
         from routers.templates import (  # noqa: PLC0415
-            DEFAULT_TEMPLATE_LIBRARY,
-            _enrich_library_meta,
+            _resolve_library_meta_for_template,
         )
     except Exception:  # noqa: silent-ok — recommender stays useful even if templates router unavailable
         return {}
-    return _enrich_library_meta(
-        DEFAULT_TEMPLATE_LIBRARY.get(template.name, {})
-    ) or {}
+    return _resolve_library_meta_for_template(template) or {}
 
 
 def _score_one(
