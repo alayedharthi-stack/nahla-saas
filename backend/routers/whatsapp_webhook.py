@@ -835,15 +835,87 @@ async def _handle_360dialog_body(
     in the per-tenant audit trail) but not acted upon — they are expected to
     arrive on a different URL.
     """
+    # F19: defensive import — the observability ring buffer must
+    # never break webhook routing if its module fails to import.
+    try:
+        from core.wa_webhook_observability import (  # noqa: PLC0415
+            ROUTE_EXCEPTION,
+            ROUTE_MATCHED,
+            ROUTE_SCOPE_MISMATCH,
+            ROUTE_UNROUTED_AMBIGUOUS,
+            ROUTE_UNROUTED_BAD_SECRET,
+            ROUTE_UNROUTED_MISSING_PHONE_ID,
+            ROUTE_UNROUTED_UNKNOWN_PHONE_ID,
+            ROUTE_UNROUTED_WRONG_PROVIDER,
+            SECRET_MISMATCH,
+            SECRET_NOT_REQUIRED,
+            SECRET_OK,
+            record_event as _record_webhook_event,
+        )
+    except Exception:
+        _record_webhook_event = None  # type: ignore[assignment]
+        # Define fallback constants so the rest of this function still
+        # references valid names. The recorder calls become no-ops.
+        ROUTE_EXCEPTION = "exception"
+        ROUTE_MATCHED = "matched"
+        ROUTE_SCOPE_MISMATCH = "scope_mismatch"
+        ROUTE_UNROUTED_AMBIGUOUS = "unrouted_ambiguous"
+        ROUTE_UNROUTED_BAD_SECRET = "unrouted_bad_secret"
+        ROUTE_UNROUTED_MISSING_PHONE_ID = "unrouted_missing_phone_id"
+        ROUTE_UNROUTED_UNKNOWN_PHONE_ID = "unrouted_unknown_phone_id"
+        ROUTE_UNROUTED_WRONG_PROVIDER = "unrouted_wrong_provider"
+        SECRET_MISMATCH = "mismatch"
+        SECRET_NOT_REQUIRED = "not_required"
+        SECRET_OK = "ok"
+
+    def _safe_record(**kwargs: Any) -> None:
+        """Wrap the recorder so a single bad payload can't take the
+        routing path down. Never raises."""
+        if _record_webhook_event is None:
+            return
+        try:
+            _record_webhook_event(**kwargs)
+        except Exception:
+            pass
+
     db = SessionLocal()
     try:
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {}) or {}
                 field = str(change.get("field") or "")
-                phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+                metadata = value.get("metadata", {}) or {}
+                phone_number_id = metadata.get("phone_number_id", "")
+                display_phone_number = metadata.get("display_phone_number", "")
+
+                # Pre-compute counts so the recorder surfaces "an
+                # inbound was in this delivery but it was dropped".
+                msgs_count    = len(value.get("messages") or []) if isinstance(value.get("messages"), list) else 0
+                statuses_cnt  = len(value.get("statuses") or []) if isinstance(value.get("statuses"), list) else 0
+                echoes_cnt    = len(value.get("smb_message_echoes") or []) if isinstance(value.get("smb_message_echoes"), list) else 0
+
                 if not phone_number_id:
+                    logger.warning(
+                        "[UNROUTED_D360_WEBHOOK] reason=missing_phone_id field=%s scope=%s "
+                        "display_phone_number=%s msgs=%d statuses=%d echoes=%d",
+                        field, scope, display_phone_number,
+                        msgs_count, statuses_cnt, echoes_cnt,
+                    )
+                    # Preserve the historical log key so existing grep /
+                    # alerting on [Webhook360] keeps firing.
                     logger.warning("[Webhook360] Missing phone_number_id field=%s scope=%s", field, scope)
+                    _safe_record(
+                        scope=scope, field=field,
+                        phone_number_id_from_payload=phone_number_id or None,
+                        display_phone_number=display_phone_number or None,
+                        matched_tenant_id=None,
+                        matched_connection_id=None,
+                        matched_phone_number_id=None,
+                        route_status=ROUTE_UNROUTED_MISSING_PHONE_ID,
+                        messages_count=msgs_count,
+                        statuses_count=statuses_cnt,
+                        echoes_count=echoes_cnt,
+                    )
                     continue
                 wa_conns = (
                     db.query(WhatsAppConnection)
@@ -851,25 +923,119 @@ async def _handle_360dialog_body(
                     .all()
                 )
                 if not wa_conns:
+                    logger.warning(
+                        "[UNROUTED_D360_WEBHOOK] reason=unknown_phone_id field=%s scope=%s "
+                        "phone_number_id=%s display=%s msgs=%d — no WhatsAppConnection row "
+                        "with this phone_number_id. Most common cause: merchant re-paired "
+                        "the channel under a NEW phone_number_id but the WhatsAppConnection "
+                        "row still stores the OLD one.",
+                        field, scope, phone_number_id, display_phone_number, msgs_count,
+                    )
                     logger.warning("[Webhook360] Unknown phone_number_id=%s field=%s scope=%s", phone_number_id, field, scope)
+                    _safe_record(
+                        scope=scope, field=field,
+                        phone_number_id_from_payload=phone_number_id,
+                        display_phone_number=display_phone_number or None,
+                        matched_tenant_id=None,
+                        matched_connection_id=None,
+                        matched_phone_number_id=None,
+                        route_status=ROUTE_UNROUTED_UNKNOWN_PHONE_ID,
+                        messages_count=msgs_count,
+                        statuses_count=statuses_cnt,
+                        echoes_count=echoes_cnt,
+                    )
                     continue
                 if len(wa_conns) > 1:
                     tenant_ids = [c.tenant_id for c in wa_conns]
+                    connection_ids = [c.id for c in wa_conns]
+                    logger.error(
+                        "[UNROUTED_D360_WEBHOOK] reason=ambiguous phone_number_id=%s "
+                        "tenants=%s connections=%s — dropped to prevent cross-tenant leak",
+                        phone_number_id, tenant_ids, connection_ids,
+                    )
                     logger.error(
                         "[Webhook360] Ambiguous phone_number_id=%s matches tenants=%s — "
                         "message dropped to prevent cross-tenant data leak",
                         phone_number_id, tenant_ids,
                     )
+                    _safe_record(
+                        scope=scope, field=field,
+                        phone_number_id_from_payload=phone_number_id,
+                        display_phone_number=display_phone_number or None,
+                        matched_tenant_id=None,
+                        matched_connection_id=None,
+                        matched_phone_number_id=None,
+                        route_status=ROUTE_UNROUTED_AMBIGUOUS,
+                        candidate_tenant_ids=tenant_ids,
+                        candidate_connection_ids=connection_ids,
+                        messages_count=msgs_count,
+                        statuses_count=statuses_cnt,
+                        echoes_count=echoes_cnt,
+                    )
                     continue
                 wa_conn = wa_conns[0]
                 if wa_provider(wa_conn) != WHATSAPP_PROVIDER_360DIALOG:
+                    logger.warning(
+                        "[UNROUTED_D360_WEBHOOK] reason=wrong_provider phone_number_id=%s "
+                        "tenant=%s connection=%s provider_on_row=%s",
+                        phone_number_id, wa_conn.tenant_id, wa_conn.id,
+                        wa_provider(wa_conn),
+                    )
                     logger.warning("[Webhook360] phone_number_id=%s is not dialog360 provider", phone_number_id)
+                    _safe_record(
+                        scope=scope, field=field,
+                        phone_number_id_from_payload=phone_number_id,
+                        display_phone_number=display_phone_number or None,
+                        matched_tenant_id=wa_conn.tenant_id,
+                        matched_connection_id=wa_conn.id,
+                        matched_phone_number_id=getattr(wa_conn, "phone_number_id", None),
+                        route_status=ROUTE_UNROUTED_WRONG_PROVIDER,
+                        messages_count=msgs_count,
+                        statuses_count=statuses_cnt,
+                        echoes_count=echoes_cnt,
+                    )
                     continue
                 expected_secret = str((wa_conn.extra_metadata or {}).get("coexistence_internal_secret") or "")
                 provided_secret = headers.get("x_nahla_coexistence_secret", "")
                 if expected_secret and provided_secret != expected_secret:
+                    logger.warning(
+                        "[UNROUTED_D360_WEBHOOK] reason=bad_secret tenant=%s connection=%s "
+                        "phone_number_id=%s — X-Nahla-Coexistence-Secret header did not "
+                        "match. Most common cause: 360dialog dashboard was not updated "
+                        "after the secret was rotated, OR the merchant connected via the "
+                        "wrong endpoint URL.",
+                        wa_conn.tenant_id, wa_conn.id, phone_number_id,
+                    )
                     logger.warning("[Webhook360] Invalid internal secret tenant=%s", wa_conn.tenant_id)
+                    _safe_record(
+                        scope=scope, field=field,
+                        phone_number_id_from_payload=phone_number_id,
+                        display_phone_number=display_phone_number or None,
+                        matched_tenant_id=wa_conn.tenant_id,
+                        matched_connection_id=wa_conn.id,
+                        matched_phone_number_id=getattr(wa_conn, "phone_number_id", None),
+                        route_status=ROUTE_UNROUTED_BAD_SECRET,
+                        secret_check=SECRET_MISMATCH,
+                        messages_count=msgs_count,
+                        statuses_count=statuses_cnt,
+                        echoes_count=echoes_cnt,
+                    )
                     return
+
+                # Reaching here means the connection routing succeeded.
+                # Surface both the payload's phone_number_id AND the
+                # connection's stored one so a drift between them is
+                # obvious in the logs.
+                stored_phone_id = getattr(wa_conn, "phone_number_id", None)
+                logger.info(
+                    "[ROUTED_D360_WEBHOOK] tenant=%s connection=%s field=%s scope=%s "
+                    "phone_number_id_from_payload=%s phone_number_id_from_connection=%s "
+                    "phone_id_match=%s msgs=%d statuses=%d echoes=%d",
+                    wa_conn.tenant_id, wa_conn.id, field, scope,
+                    phone_number_id, stored_phone_id,
+                    str(phone_number_id) == str(stored_phone_id),
+                    msgs_count, statuses_cnt, echoes_cnt,
+                )
 
                 family = _classify_360dialog_field(field)
 
@@ -885,7 +1051,34 @@ async def _handle_360dialog_body(
                         "[Webhook360] field=%s family=%s arrived on scope=%s — recorded but not processed",
                         field, family, scope,
                     )
+                    _safe_record(
+                        scope=scope, field=field,
+                        phone_number_id_from_payload=phone_number_id,
+                        display_phone_number=display_phone_number or None,
+                        matched_tenant_id=wa_conn.tenant_id,
+                        matched_connection_id=wa_conn.id,
+                        matched_phone_number_id=stored_phone_id,
+                        route_status=ROUTE_SCOPE_MISMATCH,
+                        secret_check=SECRET_OK if expected_secret else SECRET_NOT_REQUIRED,
+                        messages_count=msgs_count,
+                        statuses_count=statuses_cnt,
+                        echoes_count=echoes_cnt,
+                    )
                     continue
+
+                _safe_record(
+                    scope=scope, field=field,
+                    phone_number_id_from_payload=phone_number_id,
+                    display_phone_number=display_phone_number or None,
+                    matched_tenant_id=wa_conn.tenant_id,
+                    matched_connection_id=wa_conn.id,
+                    matched_phone_number_id=stored_phone_id,
+                    route_status=ROUTE_MATCHED,
+                    secret_check=SECRET_OK if expected_secret else SECRET_NOT_REQUIRED,
+                    messages_count=msgs_count,
+                    statuses_count=statuses_cnt,
+                    echoes_count=echoes_cnt,
+                )
 
                 # ── Channel events ────────────────────────────────────────
                 if field == "messages":
@@ -934,6 +1127,16 @@ async def _handle_360dialog_body(
         db.commit()
     except Exception as exc:
         logger.exception("[Webhook360] batch failed — rolled back: %s", exc)
+        _safe_record(
+            scope=scope, field="batch",
+            phone_number_id_from_payload=None,
+            display_phone_number=None,
+            matched_tenant_id=None,
+            matched_connection_id=None,
+            matched_phone_number_id=None,
+            route_status=ROUTE_EXCEPTION,
+            error_text=f"{type(exc).__name__}: {exc}",
+        )
         try:
             db.rollback()
         except Exception:

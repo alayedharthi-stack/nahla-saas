@@ -3107,3 +3107,252 @@ async def admin_debug_last_provider_send(
     )
 
     return response
+
+
+# ════════════════════════════════════════════════════════════════════════
+# F19 — Recent webhook events (inbound routing audit)
+# ════════════════════════════════════════════════════════════════════════
+#
+# F17 traces a SINGLE message through the pipeline. F18 traces every
+# OUTBOUND wire call. F19 closes the loop on the third axis: every
+# INCOMING 360dialog webhook, routed or not.
+#
+# The failure F19 catches:
+#
+#   The merchant says "the customer sent me a message but it doesn't
+#   appear in Nahla." 360dialog's dashboard confirms the webhook
+#   fired. F17's inbound-trace finds nothing recent because the
+#   webhook hit one of six silent drop points inside
+#   `_handle_360dialog_body`:
+#
+#     1. value.metadata.phone_number_id missing
+#     2. no WhatsAppConnection row with that phone_number_id
+#     3. multiple connections share the phone_number_id (ambiguous)
+#     4. the matched connection's provider is not 'dialog360'
+#     5. X-Nahla-Coexistence-Secret header mismatch
+#     6. scope mismatch (channel event on coexistence URL etc.)
+#
+# All six return HTTP 200 to 360dialog, so the merchant has no
+# visibility. F19 surfaces the raw routing decision per event from a
+# process-local ring buffer and tells you exactly WHICH bucket the
+# missing message landed in.
+#
+# The endpoint is read-only, admin-gated, and process-local — the
+# buffer wipes on every Railway redeploy, so hit this within minutes
+# of seeing the symptom.
+
+@router.get("/recent-webhook-events")
+async def admin_debug_recent_webhook_events(
+    tenant_id: Optional[int] = Query(
+        None,
+        description=(
+            "Filter to events whose matched_tenant_id equals this. "
+            "Unrouted events (no tenant match) are always included "
+            "alongside the matched ones — the operator must see "
+            "'webhooks arrived but landed nowhere' for the same "
+            "phone_number_id."
+        ),
+    ),
+    phone_number_id: Optional[str] = Query(
+        None,
+        description=(
+            "Filter to events whose payload OR matched-connection "
+            "phone_number_id equals this. Useful when the operator "
+            "only knows the WABA phone_number_id from the 360dialog "
+            "dashboard."
+        ),
+    ),
+    minutes: int = Query(
+        30,
+        ge=1, le=720,
+        description="Sliding time window in minutes (max 12h).",
+    ),
+    limit: int = Query(
+        100,
+        ge=1, le=500,
+        description="Maximum number of events to return (newest first).",
+    ),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Return recent 360dialog webhook deliveries with routing
+    outcomes — matched, unrouted_unknown_phone_id,
+    unrouted_ambiguous, unrouted_wrong_provider, unrouted_bad_secret,
+    unrouted_missing_phone_id, scope_mismatch, exception.
+
+    Why this matters
+    ────────────────
+    Without F19 there is no way to tell whether a customer's message
+    reached your process at all. ``last_webhook_received_at`` on
+    ``WhatsAppConnection`` only updates when routing SUCCEEDS — every
+    drop case leaves it untouched and 360dialog still records a 200.
+
+    Response shape
+    ──────────────
+      {
+        "ts":  ISO,
+        "filter": {
+          "tenant_id": ..., "phone_number_id": ..., "minutes": 30,
+          "limit": 100
+        },
+        "route_status_counts": {
+          "matched": 12, "unrouted_unknown_phone_id": 3, ...
+        },
+        "distinct_payload_phone_ids": {
+          "100543193146977": 12,
+          "1061057720431678": 3   # ← drift signal
+        },
+        "phone_id_drift_detected": true,
+        "events": [ {full event}, ... ],
+        "issues":  [arabic],
+        "hints":   [arabic],
+        "ok":      bool
+      }
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+    from core.wa_webhook_observability import (  # noqa: PLC0415
+        get_distinct_payload_phone_ids,
+        get_recent_events,
+        get_route_status_counts,
+    )
+
+    admin_sub = _admin.get("sub") or "?"
+    logger.info(
+        "[ADMIN/RECENT_WEBHOOK_EVENTS] start admin=%s tenant=%s phone_id=%s "
+        "minutes=%s limit=%s",
+        admin_sub, tenant_id, phone_number_id, minutes, limit,
+    )
+
+    issues: List[str] = []
+    hints:  List[str] = []
+
+    try:
+        events  = get_recent_events(
+            tenant_id=tenant_id,
+            phone_number_id=phone_number_id,
+            minutes=minutes,
+            include_unrouted=True,
+            limit=limit,
+        )
+        rs_counts   = get_route_status_counts(
+            tenant_id=tenant_id,
+            phone_number_id=phone_number_id,
+            minutes=minutes,
+        )
+        distinct_pids = get_distinct_payload_phone_ids(minutes=minutes)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[ADMIN/RECENT_WEBHOOK_EVENTS] buffer read failed admin=%s err=%s",
+            admin_sub, exc,
+        )
+        events, rs_counts, distinct_pids = [], {}, {}
+        issues.append(
+            "تعذّر قراءة سجل webhook events (ring buffer). راجع logs."
+        )
+
+    # ── Diagnostic flags ────────────────────────────────────────
+    phone_id_drift = len(distinct_pids) > 1
+    bad_secret_count       = rs_counts.get("unrouted_bad_secret", 0)
+    unknown_phone_count    = rs_counts.get("unrouted_unknown_phone_id", 0)
+    ambiguous_count        = rs_counts.get("unrouted_ambiguous", 0)
+    missing_phone_count    = rs_counts.get("unrouted_missing_phone_id", 0)
+    wrong_provider_count   = rs_counts.get("unrouted_wrong_provider", 0)
+    scope_mismatch_count   = rs_counts.get("scope_mismatch", 0)
+    exception_count        = rs_counts.get("exception", 0)
+    matched_count          = rs_counts.get("matched", 0)
+    total_count            = sum(rs_counts.values())
+
+    if phone_id_drift:
+        sorted_pids = sorted(distinct_pids.items(), key=lambda kv: -kv[1])
+        pretty = ", ".join(f"{pid}({count})" for pid, count in sorted_pids)
+        issues.append(
+            f"تم استقبال webhooks لأكثر من phone_number_id واحد خلال الـ "
+            f"{minutes} دقيقة الأخيرة: {pretty}. غالباً أُعيد ربط القناة برقم "
+            "مختلف لكن WhatsAppConnection ما زال يحمل الرقم القديم — "
+            "الرسائل التي تصل بالرقم الجديد تُسقَط."
+        )
+    if unknown_phone_count:
+        issues.append(
+            f"{unknown_phone_count} webhook(s) وصلت بـ phone_number_id لا "
+            "يطابق أي WhatsAppConnection — حدّث الـ phone_number_id على صف "
+            "الاتصال (أو أعد ربط القناة من جهة 360dialog)."
+        )
+    if ambiguous_count:
+        issues.append(
+            f"{ambiguous_count} webhook(s) أُسقطت بسبب تطابق أكثر من اتصال "
+            "بنفس phone_number_id — احذف الاتصالات المكررة."
+        )
+    if bad_secret_count:
+        issues.append(
+            f"{bad_secret_count} webhook(s) رُفضت بسبب اختلاف "
+            "X-Nahla-Coexistence-Secret — تأكد أن 360dialog dashboard "
+            "يحمل نفس السر المخزّن في extra_metadata.coexistence_internal_secret."
+        )
+    if missing_phone_count:
+        hints.append(
+            f"{missing_phone_count} webhook(s) جاءت بدون "
+            "metadata.phone_number_id — عادة coexistence lifecycle "
+            "events غير حرجة."
+        )
+    if wrong_provider_count:
+        issues.append(
+            f"{wrong_provider_count} webhook(s) طابقت اتصالاً ليس "
+            "dialog360 — صف WhatsAppConnection يحمل provider خاطئ."
+        )
+    if scope_mismatch_count:
+        hints.append(
+            f"{scope_mismatch_count} webhook(s) سُجّلت لكن لم تُعالج بسبب "
+            "scope mismatch (مثل channel event على coexistence URL). "
+            "أكدّ ربط الـ URL الصحيح لكل scope في 360dialog dashboard."
+        )
+    if exception_count:
+        issues.append(
+            f"{exception_count} webhook(s) رُفعت داخل routing — راجع logs "
+            "للبحث عن [Webhook360] batch failed."
+        )
+
+    if total_count == 0:
+        hints.append(
+            "لم تُسجَّل أي webhooks خلال هذه النافذة — السبب الأرجح أن "
+            "الـ process أُعيد تشغيله بعد آخر webhook، أو 360dialog لم "
+            "يُرسل أي تسليم لهذا الـ scope. أرسل رسالة اختبار وأعد "
+            "الاستعلام."
+        )
+    elif matched_count == 0 and total_count > 0:
+        issues.append(
+            f"جميع webhooks الأخيرة ({total_count}) فشل routing لها — "
+            "لا تصل أي رسالة inbound فعلاً للذكاء."
+        )
+
+    response = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "filter": {
+            "tenant_id":       tenant_id,
+            "phone_number_id": phone_number_id,
+            "minutes":         minutes,
+            "limit":           limit,
+        },
+        "events_returned":              len(events),
+        "route_status_counts":          rs_counts,
+        "distinct_payload_phone_ids":   distinct_pids,
+        "phone_id_drift_detected":      phone_id_drift,
+        "events":                       events,
+        "issues":                       issues,
+        "hints":                        hints,
+        "ok": (len(issues) == 0) and (matched_count > 0 or total_count == 0),
+    }
+
+    audit(
+        "admin_debug_recent_webhook_events",
+        admin_sub=admin_sub,
+        tenant_id=tenant_id or 0,
+        phone_number_id=phone_number_id or "",
+        events_returned=len(events),
+        unknown_phone_id_count=unknown_phone_count,
+        phone_id_drift_detected=phone_id_drift,
+    )
+    logger.info(
+        "[ADMIN/RECENT_WEBHOOK_EVENTS] done admin=%s events=%d drift=%s issues=%d",
+        admin_sub, len(events), phone_id_drift, len(issues),
+    )
+
+    return response
