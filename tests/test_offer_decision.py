@@ -708,6 +708,8 @@ SEED_EXPECTED_SOURCE: dict[str, str] = {
     "cod_confirmation":      SOURCE_NONE,         # transactional reminder, no discount
     "seasonal_offer":        SOURCE_PROMOTION,    # discount_source=promotion
     "salary_payday_offer":   SOURCE_PROMOTION,
+    "order_notifications":   SOURCE_NONE,         # WhatsApp order-status template
+                                                  # alerts; never issues a discount.
 }
 
 

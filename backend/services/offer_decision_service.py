@@ -82,6 +82,13 @@ logger = logging.getLogger(__name__)
 
 # Current deterministic policy version. Bumped when the algorithm changes
 # in a way that should be visible in analytics ("v1.0 vs v1.1 breakdown").
+#
+# Phase 6 note: this constant is the *default* a tenant sees when it has
+# no `ai_settings.offer_policy` config. The actual version stamped into
+# each ledger row is now produced by ``offer_policies.select_policy``,
+# which may resolve to a different registered policy when an A/B
+# experiment is configured. The constant stays here so existing callers
+# (tests, the analytics router) keep their imports stable.
 POLICY_VERSION = "v1.0-deterministic"
 
 # Allowed values — kept here so callers can import without fishing through
@@ -157,7 +164,15 @@ class OfferDecision:
     reason_codes:       List[str] = field(default_factory=list)
     # The segment the policy ultimately picked (used by the coupon path).
     segment:            Optional[str] = None
-    # Bandit-ready, always None in v1.
+    # The policy implementation that produced this decision. Stamped by
+    # ``decide()`` after `select_policy(...)` resolves the tenant's
+    # configured version (Phase 6). Defaults to the v1 deterministic
+    # version so unit-tested policies that build their own decisions still
+    # get a sensible value in the ledger.
+    policy_version:     str = POLICY_VERSION
+    # A/B experiment arm name, populated when the tenant has an active
+    # ``ai_settings.offer_policy.experiment`` config. None means "no
+    # experiment running" or "anonymous traffic excluded from the test".
     experiment_arm:     Optional[str] = None
 
 
@@ -165,7 +180,14 @@ class OfferDecision:
 
 def decide(db: Session, ctx: OfferDecisionContext) -> OfferDecision:
     """
-    Run the deterministic policy and persist a ledger row.
+    Run the configured policy and persist a ledger row.
+
+    Phase 6: the algorithm is selected at call-time via
+    :func:`services.offer_policies.select_policy`, which inspects the
+    tenant's ``ai_settings.offer_policy`` config (version + optional A/B
+    experiment). The *effective* ``policy_version`` and ``experiment_arm``
+    travel back through ``OfferDecision`` so the ledger reflects what
+    actually ran.
 
     Never raises — a misconfigured tenant or missing signal must not block
     a WhatsApp send. On any internal failure, returns a `SOURCE_NONE`
@@ -177,14 +199,35 @@ def decide(db: Session, ctx: OfferDecisionContext) -> OfferDecision:
         logger.warning("[OfferDecisionService] unknown surface=%r — degrading to none", ctx.surface)
         return _no_offer_decision(reason="unknown_surface")
 
+    # Resolve which policy implementation runs + which A/B arm (if any).
+    # Failures inside `select_policy` already degrade to the default; we
+    # still wrap defensively because this is on the WA hot path.
     try:
-        decision = _run_policy(db, ctx)
+        from services.offer_policies import select_policy  # noqa: PLC0415
+        effective_version, experiment_arm, policy_fn = select_policy(db, ctx)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.exception(
+            "[OfferDecisionService] policy selection failed tenant=%s: %s",
+            ctx.tenant_id, exc,
+        )
+        effective_version = POLICY_VERSION
+        experiment_arm = None
+        policy_fn = _run_policy
+
+    try:
+        decision = policy_fn(db, ctx)
     except Exception as exc:
         logger.exception(
-            "[OfferDecisionService] policy raised tenant=%s surface=%s: %s",
-            ctx.tenant_id, ctx.surface, exc,
+            "[OfferDecisionService] policy raised tenant=%s surface=%s version=%s: %s",
+            ctx.tenant_id, ctx.surface, effective_version, exc,
         )
         decision = _no_offer_decision(reason="policy_exception")
+
+    # Stamp the resolved version + arm onto the decision so apply_decision
+    # and the ledger persist exactly what ran (rather than the v1 constant).
+    decision.policy_version = effective_version
+    if experiment_arm and not decision.experiment_arm:
+        decision.experiment_arm = experiment_arm
 
     # Persist the ledger row even for `none` decisions — knowing how often
     # we *chose not* to send a discount is itself a useful signal.
@@ -627,7 +670,7 @@ def _write_ledger(db: Session, ctx: OfferDecisionContext, decision: OfferDecisio
         ),
         validity_days       = decision.validity_days,
         reason_codes        = list(decision.reason_codes or []),
-        policy_version      = POLICY_VERSION,
+        policy_version      = decision.policy_version or POLICY_VERSION,
         experiment_arm      = decision.experiment_arm,
         attributed          = False,
         created_at          = datetime.now(timezone.utc).replace(tzinfo=None),
@@ -727,3 +770,20 @@ async def _apply_coupon(
             ctx.tenant_id, decision.segment, exc,
         )
         return None
+
+
+# ── Phase 6: register the built-in deterministic policy in the registry ────
+#
+# Done at import time so any module that imports `offer_decision_service`
+# (which is the vast majority of callers) automatically populates the
+# registry. The Phase 6 selector falls back to this entry when a tenant
+# has no `ai_settings.offer_policy` config, so the default behaviour is
+# byte-for-byte identical to Phase 1–5.
+try:  # pragma: no cover — exercised by the policy registry tests
+    from services.offer_policies import register_policy as _register_policy
+
+    _register_policy(POLICY_VERSION, _run_policy)
+except Exception as _exc:  # pragma: no cover — defensive
+    logger.warning(
+        "[OfferDecisionService] failed to register default policy: %s", _exc,
+    )

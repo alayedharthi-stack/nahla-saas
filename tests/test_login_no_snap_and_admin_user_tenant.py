@@ -124,7 +124,7 @@ class TestLoginRefusesUnassignedTenant:
 
             body = auth_router.LoginIn(email="orphan@example.com", password="pw")
             with pytest.raises(HTTPException) as ei:
-                asyncio.run(auth_router.auth_login(body, _fake_request(), db))
+                auth_router.auth_login(body, _fake_request(), db)
             assert ei.value.status_code == 409, (
                 "Login MUST be refused when user.tenant_id is NULL — "
                 "we never silently snap to a default tenant anymore."
@@ -155,7 +155,7 @@ class TestLoginRefusesUnassignedTenant:
             monkeypatch.setattr(auth_router, "create_token", fake_create_token)
 
             body = auth_router.LoginIn(email="happy@example.com", password="pw")
-            res = asyncio.run(auth_router.auth_login(body, _fake_request(), db))
+            res = auth_router.auth_login(body, _fake_request(), db)
             assert res["tenant_id"] == 42
             assert res["access_token"] == "tok"
             assert captured["tenant_id"] == 42, (

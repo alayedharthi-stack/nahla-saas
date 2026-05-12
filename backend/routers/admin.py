@@ -1279,6 +1279,150 @@ async def admin_whatsapp_set_token(
     }
 
 
+# ─── Offer-decision policy configuration (Phase 6) ────────────────────────────
+# Lets ops view + edit the per-tenant `ai_settings.offer_policy` blob that
+# selects which OfferDecisionService policy implementation runs and (optionally)
+# what A/B experiment arms are active. The shape mirrors the contract
+# documented in `services/offer_policies.py`. We accept the experiment field
+# as opaque JSON to leave room for future arm metadata without a schema bump.
+
+class _OfferPolicyArmBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    weight: int = Field(..., ge=1, le=100000)
+    policy_version: Optional[str] = Field(None, max_length=64)
+
+
+class _OfferPolicyExperimentBody(BaseModel):
+    name: Optional[str] = Field(None, max_length=120)
+    arms: List[_OfferPolicyArmBody] = Field(default_factory=list)
+    sticky_by: Optional[str] = Field(
+        "customer_id",
+        description="customer_id (default) | decision_id (per-call random)",
+    )
+
+
+class _OfferPolicyConfigBody(BaseModel):
+    version: Optional[str] = Field(
+        None, max_length=64,
+        description=(
+            "Policy version registered in services.offer_policies. "
+            "Defaults to v1.0-deterministic when None."
+        ),
+    )
+    experiment: Optional[_OfferPolicyExperimentBody] = None
+
+
+@router.get("/admin/tenants/{tenant_id}/offer-policy")
+async def admin_get_offer_policy(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Return the currently-active offer policy config for a tenant.
+
+    Also surfaces the live list of registered policy versions so the
+    operator knows which strings are valid for ``version`` / arm
+    ``policy_version`` before submitting an edit.
+    """
+    from services.offer_policies import (  # noqa: PLC0415
+        DEFAULT_POLICY_VERSION,
+        registered_versions,
+    )
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+    ai = dict(getattr(ts, "ai_settings", None) or {}) if ts else {}
+    cfg = ai.get("offer_policy") if isinstance(ai, dict) else None
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    return {
+        "tenant_id": tenant_id,
+        "default_policy_version": DEFAULT_POLICY_VERSION,
+        "registered_versions": registered_versions(),
+        "config": cfg,
+    }
+
+
+@router.put("/admin/tenants/{tenant_id}/offer-policy")
+async def admin_put_offer_policy(
+    tenant_id: int,
+    body: _OfferPolicyConfigBody,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Replace the tenant's offer-policy config.
+
+    Validation:
+      * ``version`` (if set) must be a registered policy version.
+      * Every arm's ``policy_version`` (if set) must also be registered.
+      * Empty body wipes the experiment (back to the default policy).
+    """
+    from services.offer_policies import registered_versions  # noqa: PLC0415
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    versions = set(registered_versions())
+
+    if body.version and body.version not in versions:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown policy version={body.version!r}. "
+                f"Registered: {sorted(versions)}"
+            ),
+        )
+    if body.experiment:
+        for arm in body.experiment.arms:
+            if arm.policy_version and arm.policy_version not in versions:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Arm {arm.name!r} references unknown "
+                        f"policy_version={arm.policy_version!r}."
+                    ),
+                )
+
+    ts = get_or_create_settings(db, tenant_id)
+    ai = dict(getattr(ts, "ai_settings", None) or {})
+    new_cfg: Dict[str, Any] = {}
+    if body.version:
+        new_cfg["version"] = body.version
+    if body.experiment and body.experiment.arms:
+        new_cfg["experiment"] = {
+            "name": body.experiment.name,
+            "sticky_by": body.experiment.sticky_by or "customer_id",
+            "arms": [arm.model_dump() for arm in body.experiment.arms],
+        }
+    if new_cfg:
+        ai["offer_policy"] = new_cfg
+    else:
+        ai.pop("offer_policy", None)
+    ts.ai_settings = ai
+    flag_modified(ts, "ai_settings")
+    db.add(ts)
+    db.commit()
+
+    audit(
+        "admin.offer_policy.update",
+        tenant_id=tenant_id,
+        version=body.version,
+        experiment_name=(body.experiment.name if body.experiment else None),
+        arm_count=(len(body.experiment.arms) if body.experiment else 0),
+    )
+    logger.warning(
+        "[admin] offer_policy updated tenant_id=%s version=%s arms=%s",
+        tenant_id, body.version,
+        (len(body.experiment.arms) if body.experiment else 0),
+    )
+    return {"status": "ok", "tenant_id": tenant_id, "config": new_cfg}
+
+
 @router.get("/admin/billing/overview")
 async def admin_billing_overview(
     db: Session = Depends(get_db),
