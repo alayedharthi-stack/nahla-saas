@@ -35,11 +35,18 @@ Idempotency
 no-op rather than a duplicate row. The API layer translates an insert
 conflict into a 200 OK so merchants see the same outcome whether the
 tag was already there or not.
+
+Migration idempotency (F16): every create_table / create_index is
+guarded by an inspector check so re-running on a partially-migrated
+DB (where the table was created via legacy
+``Base.metadata.create_all()`` before Alembic was wired in) is a
+no-op rather than a DuplicateTable error.
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 
 revision = "0052"
 down_revision = "0051"
@@ -47,48 +54,76 @@ branch_labels = None
 depends_on = None
 
 
-def upgrade() -> None:
-    op.create_table(
-        "customer_segments_manual",
-        sa.Column("id", sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
-                  primary_key=True, autoincrement=True),
-        sa.Column("tenant_id",   sa.Integer(),     sa.ForeignKey("tenants.id"), nullable=False),
-        sa.Column("customer_id", sa.Integer(),
-                  sa.ForeignKey("customers.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("segment_key", sa.String(length=64), nullable=False),
-        # source kept for future "system-applied" rows (e.g. a bulk
-        # importer that pre-tags VIPs from a CSV). Today everything
-        # written here is ``manual``.
-        sa.Column("source",      sa.String(length=16), nullable=False, server_default="manual"),
-        sa.Column("created_by",  sa.Integer(),         nullable=True),
-        sa.Column("created_at",  sa.DateTime(),        nullable=False, server_default=sa.func.now()),
+def _has_table(bind, table_name: str) -> bool:
+    return table_name in inspect(bind).get_table_names()
+
+
+def _has_index(bind, table_name: str, index_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        ix["name"] == index_name
+        for ix in inspect(bind).get_indexes(table_name)
     )
+
+
+def upgrade() -> None:
+    bind = op.get_bind()
+
+    if not _has_table(bind, "customer_segments_manual"):
+        op.create_table(
+            "customer_segments_manual",
+            sa.Column("id", sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+                      primary_key=True, autoincrement=True),
+            sa.Column("tenant_id",   sa.Integer(),     sa.ForeignKey("tenants.id"), nullable=False),
+            sa.Column("customer_id", sa.Integer(),
+                      sa.ForeignKey("customers.id", ondelete="CASCADE"), nullable=False),
+            sa.Column("segment_key", sa.String(length=64), nullable=False),
+            # source kept for future "system-applied" rows (e.g. a bulk
+            # importer that pre-tags VIPs from a CSV). Today everything
+            # written here is ``manual``.
+            sa.Column("source",      sa.String(length=16), nullable=False, server_default="manual"),
+            sa.Column("created_by",  sa.Integer(),         nullable=True),
+            sa.Column("created_at",  sa.DateTime(),        nullable=False, server_default=sa.func.now()),
+        )
 
     # Idempotency: same (tenant, customer, segment) tuple appears at
     # most once. Without this a merchant could "re-tag VIP" 1000 times
     # and the customer would silently grow 1000 rows.
-    op.create_index(
+    if not _has_index(
+        bind, "customer_segments_manual",
         "uq_customer_segments_manual_tenant_customer_segment",
-        "customer_segments_manual",
-        ["tenant_id", "customer_id", "segment_key"],
-        unique=True,
-    )
+    ):
+        op.create_index(
+            "uq_customer_segments_manual_tenant_customer_segment",
+            "customer_segments_manual",
+            ["tenant_id", "customer_id", "segment_key"],
+            unique=True,
+        )
 
     # Filter "all customers tagged X" — used by the customers page
     # filter and the campaign wizard exclude/include lists.
-    op.create_index(
+    if not _has_index(
+        bind, "customer_segments_manual",
         "ix_customer_segments_manual_tenant_segment",
-        "customer_segments_manual",
-        ["tenant_id", "segment_key"],
-    )
+    ):
+        op.create_index(
+            "ix_customer_segments_manual_tenant_segment",
+            "customer_segments_manual",
+            ["tenant_id", "segment_key"],
+        )
 
     # Filter "all manual segments for one customer" — used by the
     # drawer and the campaign snapshot.
-    op.create_index(
+    if not _has_index(
+        bind, "customer_segments_manual",
         "ix_customer_segments_manual_customer",
-        "customer_segments_manual",
-        ["customer_id"],
-    )
+    ):
+        op.create_index(
+            "ix_customer_segments_manual_customer",
+            "customer_segments_manual",
+            ["customer_id"],
+        )
 
 
 def downgrade() -> None:
