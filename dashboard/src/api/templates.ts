@@ -49,6 +49,17 @@ export interface WhatsAppTemplateRecord {
     objective: string
     customer_statuses: string[]
     rfm_segments: string[]
+    /**
+     * Manual vs auto contract — drives badge rendering and the
+     * dispatcher's coupon resolution rule. `manual` templates carry
+     * a coupon code typed by the merchant that MUST be sent verbatim;
+     * `auto` templates are filled by Nahla at send-time.
+     */
+    mode?: 'manual' | 'auto'
+    /** Localized Arabic label suffixed with "يدوي" or "تلقائي". */
+    library_label_ar?: string
+    /** True only for `mode: 'auto'` siblings that may auto-bind a coupon. */
+    auto_coupon_capable?: boolean
   } | null
   compatibility?: TemplateCompatibility
   // Nahla display & management

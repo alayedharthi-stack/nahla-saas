@@ -5,7 +5,7 @@ import {
   Eye, EyeOff, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
   Type, Link2, Phone, Copy as CopyIcon, Zap, Star,
   BookOpen, Download, Sparkles, Tag, Search, Bot, CheckCheck,
-  Pencil, Send, Ticket, ChevronLeft as ArrowEnd,
+  Pencil, PenLine, Send, Ticket, ChevronLeft as ArrowEnd,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -251,12 +251,25 @@ function TemplateRow({
         {/* Service link — shown whenever the template is bound to a Nahla
             service slot, even when the merchant has set a custom display
             name. Uses the service color palette so the link is visually
-            distinct from generic metadata. */}
+            distinct from generic metadata.
+
+            Badge rules (manual vs auto):
+              • Manual templates carry a coupon code typed by the merchant.
+                We render a clear "كوبون يدوي" badge so the merchant cannot
+                confuse them with auto templates, and we NEVER show
+                "مربوط تلقائياً" on them — that label historically led
+                merchants to expect Nahla would substitute the coupon at
+                send-time, which is exactly the behaviour manual templates
+                opt out of.
+              • Auto templates that were imported from the Nahla library
+                (nahla_source_key set) keep the original "مربوط تلقائياً"
+                pill so the merchant sees the link to Nahla's catalogue.  */}
         {(() => {
           const svcName = tpl.service_name_ar || serviceInfo?.name
           if (!svcName) return null
           const c = svcColors(tpl.service_color || serviceInfo?.color || 'amber')
-          const autoBound = !!tpl.nahla_source_key
+          const isManual = tpl.library?.mode === 'manual'
+          const autoBound = !!tpl.nahla_source_key && !isManual
           return (
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
               <span
@@ -266,6 +279,15 @@ function TemplateRow({
                 <Link2 className="w-2.5 h-2.5" />
                 مرتبط بـ {svcName}
               </span>
+              {isManual && (
+                <span
+                  className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-800 border border-amber-200"
+                  title="قالب يدوي — الكوبون الذي يدخله التاجر يُرسل كما هو بدون أي توليد تلقائي"
+                >
+                  <PenLine className="w-2.5 h-2.5" />
+                  {tpl.has_coupon ? 'كوبون يدوي' : 'يدوي'}
+                </span>
+              )}
               {autoBound && (
                 <span
                   className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-violet-50 text-violet-700 border border-violet-200"

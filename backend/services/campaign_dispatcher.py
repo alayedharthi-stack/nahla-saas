@@ -445,6 +445,15 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
     discount_pct = int(discount_pct_raw) if discount_pct_raw else None
     store_name = _resolve_store_name(db, tenant_id)
 
+    # Manual coupon = whatever the merchant literally typed into the
+    # campaign wizard for a manual template. It MUST be sent verbatim
+    # to Meta (no coupon-generator override, no AI substitution). The
+    # legacy "auto" sentinel that the wizard writes for auto campaigns
+    # is filtered here so it never reaches the wire as a literal code.
+    manual_coupon = str(getattr(campaign, "coupon_code", "") or "").strip()
+    if auto_coupon or manual_coupon.lower() == "auto":
+        manual_coupon = ""
+
     sent, failed, errors = await _dispatch_queued_rows(
         db,
         campaign=campaign,
@@ -453,6 +462,7 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         store_name=store_name,
         auto_coupon=auto_coupon,
         discount_pct=discount_pct,
+        manual_coupon=manual_coupon,
         customers_by_phone={
             (c.normalized_phone or ""): c for c in customers if c.normalized_phone
         },
@@ -1461,6 +1471,7 @@ async def _dispatch_queued_rows(
     auto_coupon: bool,
     discount_pct: Optional[int],
     customers_by_phone: Dict[str, Customer],
+    manual_coupon: str = "",
 ) -> Tuple[int, int, List[str]]:
     """Walk the campaign's ``queued`` and ``failed`` rows in batches and
     send each one. Already-sent rows are filtered out by the query
@@ -1593,11 +1604,26 @@ async def _dispatch_queued_rows(
             customer_name = (customer.name if customer else None) or "العميل"
 
             try:
-                coupon_code = ""
+                # ── Coupon resolution rule ────────────────────────────
+                # MANUAL TEMPLATE  (auto_coupon = False)
+                #   The merchant typed the code in the campaign wizard.
+                #   It lives on `campaign.coupon_code`, was hoisted into
+                #   `manual_coupon` once at the top of `dispatch_campaign`,
+                #   and is sent VERBATIM to Meta — no coupon generator,
+                #   no AI substitution, no segment lookup. Preview code
+                #   must equal sent code, every single time.
+                #
+                # AUTO TEMPLATE    (auto_coupon = True)
+                #   The wizard requested per-customer codes. We resolve
+                #   a fresh one from CouponGeneratorService for each
+                #   recipient. This is the ONLY code path that may call
+                #   `_get_auto_coupon`.
                 if auto_coupon and discount_pct and customer:
                     coupon_code = await _get_auto_coupon(
                         db, campaign.tenant_id, customer, discount_pct,
                     )
+                else:
+                    coupon_code = manual_coupon
 
                 payload = _build_send_payload(
                     template=template,
