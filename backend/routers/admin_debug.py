@@ -2883,3 +2883,227 @@ async def admin_debug_inbound_trace(
     )
 
     return response
+
+
+# ════════════════════════════════════════════════════════════════════════
+# F18 — Last provider send (raw wire activity for one tenant)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Pairs with F17. F17 tells you "AI did or didn't reply" — F18 tells
+# you "the AI tried, here's exactly what 360dialog/Meta said back."
+# Both are needed because the failure F18 is built for catches:
+#
+#     status_code == 200
+#     response body has no `error` envelope
+#     BUT no `messages[0].id` either
+#
+# Pre-F18 the wire layer logged this as a success. The campaign
+# dispatcher / inbound dispatcher recorded "delivered", and the
+# merchant was left wondering why nothing arrived. F18 now stamps
+# these as ``classification: "missing_wamid"`` in the ring buffer,
+# injects an ``error`` envelope into the response so downstream
+# treats it as a failed send, and surfaces the raw provider body
+# through this endpoint so support can read the actual error.
+#
+# Security:
+#   * ``require_admin`` only — no env flag. Support uses this
+#     routinely.
+#   * The recipient phone in each request payload is pre-masked
+#     by the ring buffer's ``_scrub_payload``.
+#   * The API key never enters the ring buffer — only
+#     ``token_source`` and the last 4 chars via
+#     ``summarize_headers``.
+#   * Process-local state — wiped on every Railway redeploy.
+
+@router.get("/last-provider-send")
+async def admin_debug_last_provider_send(
+    tenant_id: int = Query(..., description="Merchant tenant id."),
+    limit:     int = Query(
+        10,
+        ge=1, le=50,
+        description="How many recent attempts to return (newest first).",
+    ),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Return the last N WhatsApp provider POST attempts for a tenant,
+    newest first.
+
+    Each entry is the raw wire-layer record that
+    ``provider_post_with_context`` captured: full URL, sanitised
+    request payload, response status + body, parsed wamid (or
+    ``null``), and a ``classification`` string the dashboard can
+    switch on:
+
+      * ``ok``                   — 2xx + wamid (or non-send call that
+                                    succeeded)
+      * ``non_2xx``              — HTTP error
+      * ``provider_error_field`` — 2xx body carries ``error`` envelope
+      * ``missing_wamid``        — 2xx, no error envelope, BUT no
+                                    ``messages[0].id`` either — the
+                                    silent failure F18 was created for
+      * ``exception``            — transport-level failure
+                                    (network/timeout)
+
+    Resilience notes
+    ────────────────
+    * Process-local ring buffer — every Railway redeploy resets it.
+      Hit this endpoint within minutes of seeing the symptom.
+    * Empty buffer is NOT an error — it just means no provider POST
+      has fired for this tenant in this process.
+    * The endpoint never raises 5xx on observability failures; if
+      the ring buffer can't be read for any reason, it returns
+      ``attempts: []`` with the explanation in ``issues``.
+
+    Cross-references
+    ────────────────
+    Read alongside ``GET /admin/debug/inbound-trace`` — F17 reports
+    on persisted state, F18 reports on wire activity.
+    """
+    from core.wa_provider_observability import (  # noqa: PLC0415
+        get_recent_attempts,
+    )
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    admin_sub = _admin.get("sub") or "?"
+    logger.info(
+        "[ADMIN/LAST_PROVIDER_SEND] start admin=%s tenant=%s limit=%s",
+        admin_sub, tenant_id, limit,
+    )
+
+    issues: List[str] = []
+    hints:  List[str] = []
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if tenant is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"tenant {tenant_id} not found",
+        )
+
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == tenant_id)
+        .order_by(WhatsAppConnection.id.desc())
+        .first()
+    )
+    connection_phone_id = getattr(wa_conn, "phone_number_id", None) if wa_conn else None
+    connection_provider = (
+        # Best-effort: we read the column rather than calling
+        # ``wa_provider`` to avoid pulling the services module here.
+        getattr(wa_conn, "provider", None) if wa_conn else None
+    )
+
+    try:
+        attempts = get_recent_attempts(tenant_id, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[ADMIN/LAST_PROVIDER_SEND] ring buffer read failed admin=%s tenant=%s err=%s",
+            admin_sub, tenant_id, exc,
+        )
+        attempts = []
+        issues.append(
+            "تعذّر قراءة سجل الإرسال (ring buffer). راجع logs."
+        )
+
+    # Convenience: count classifications so the dashboard can show
+    # a "3/10 missing wamid in last 10 sends" summary.
+    classification_counts: Dict[str, int] = {}
+    last_send_missing_wamid: Optional[Dict[str, Any]] = None
+    mismatch_phone_id_attempts: List[int] = []  # indices into `attempts`
+    for idx, att in enumerate(attempts):
+        cls = att.get("classification") or "unknown"
+        classification_counts[cls] = classification_counts.get(cls, 0) + 1
+
+        if cls == "missing_wamid" and last_send_missing_wamid is None:
+            last_send_missing_wamid = att
+
+        # Cross-check: the wire layer captured the connection's
+        # phone_number_id. If the *current* connection.phone_number_id
+        # disagrees with what was recorded, the merchant most likely
+        # reconnected the channel under a different phone_id —
+        # outbound traffic still aims at the OLD phone_id until the
+        # process restarts.
+        recorded_phone_id = att.get("connection_phone_number_id")
+        if (
+            connection_phone_id
+            and recorded_phone_id
+            and str(connection_phone_id) != str(recorded_phone_id)
+        ):
+            mismatch_phone_id_attempts.append(idx)
+
+    if mismatch_phone_id_attempts:
+        issues.append(
+            "تم اكتشاف اختلاف بين phone_number_id الحالي على الاتصال "
+            f"({connection_phone_id}) وما تم استخدامه فعلياً في بعض "
+            f"المحاولات ({len(mismatch_phone_id_attempts)} من {len(attempts)}). "
+            "غالباً أُعيد ربط القناة برقم مختلف — أعد تشغيل الـ process لتحديث "
+            "المرجع المُخزَّن."
+        )
+
+    if classification_counts.get("missing_wamid", 0) > 0:
+        issues.append(
+            f"{classification_counts['missing_wamid']} من آخر "
+            f"{len(attempts)} محاولات إرسال أرجعت 2xx بدون wamid — "
+            "الإرسال فشل صامتاً قبل F18. تحقّق من D360-API-KEY و "
+            "صلاحية قناة phone_number_id."
+        )
+    if classification_counts.get("non_2xx", 0) > 0:
+        issues.append(
+            f"{classification_counts['non_2xx']} محاولة فشلت بـ HTTP غير 2xx. "
+            "افتح أحدث attempt واقرأ response_body."
+        )
+    if classification_counts.get("provider_error_field", 0) > 0:
+        issues.append(
+            f"{classification_counts['provider_error_field']} محاولة 2xx لكنها "
+            "تحمل error envelope. اقرأ response_body.error لمعرفة code/subcode."
+        )
+
+    if not attempts:
+        hints.append(
+            "لم يُسجَّل أي POST لهذا التاجر في هذا الـ process. سبب محتمل: "
+            "الـ process أُعيد تشغيله للتو، أو لم يحاول إرسال أي رسالة "
+            "خارجة بعد آخر deploy."
+        )
+
+    response = {
+        "ts":            datetime.now(timezone.utc).isoformat(),
+        "tenant_id":     int(tenant_id),
+        "tenant_name":   tenant.name,
+        "current_connection": {
+            "found":           wa_conn is not None,
+            "id":              int(wa_conn.id) if wa_conn else None,
+            "provider":        connection_provider,
+            "connection_type": getattr(wa_conn, "connection_type", None) if wa_conn else None,
+            "status":          getattr(wa_conn, "status", None) if wa_conn else None,
+            "phone_number_id": connection_phone_id,
+            "access_token_tail": _mask_secret_tail(
+                getattr(wa_conn, "access_token", None) if wa_conn else None
+            ),
+        },
+        "limit":         int(limit),
+        "attempts_returned": len(attempts),
+        "classification_counts": classification_counts,
+        "last_missing_wamid_attempt": last_send_missing_wamid,
+        "mismatch_phone_id_count":  len(mismatch_phone_id_attempts),
+        "attempts":      attempts,
+        "issues":        issues,
+        "hints":         hints,
+        "ok":            len(issues) == 0,
+    }
+
+    audit(
+        "admin_debug_last_provider_send",
+        admin_sub=admin_sub,
+        tenant_id=int(tenant_id),
+        attempts_returned=len(attempts),
+        missing_wamid_count=classification_counts.get("missing_wamid", 0),
+        non_2xx_count=classification_counts.get("non_2xx", 0),
+    )
+    logger.info(
+        "[ADMIN/LAST_PROVIDER_SEND] done admin=%s tenant=%s attempts=%d missing_wamid=%d",
+        admin_sub, tenant_id, len(attempts),
+        classification_counts.get("missing_wamid", 0),
+    )
+
+    return response

@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 import httpx
 from sqlalchemy.orm import Session
 
 from core.config import D360_API_BASE_URL, D360_PARTNER_API_KEY, D360_PARTNER_HUB_BASE, META_GRAPH_API_VERSION
+from core.wa_provider_observability import (
+    CLASSIFICATION_EXCEPTION,
+    CLASSIFICATION_MISSING_WAMID,
+    CLASSIFICATION_NON_2XX,
+    CLASSIFICATION_OK,
+    CLASSIFICATION_PROVIDER_ERROR,
+    record_attempt as _record_provider_attempt,
+    summarize_headers as _summarize_provider_headers,
+)
 from .provider_utils import (
     WHATSAPP_CONNECTION_TYPE_COEXISTENCE,
     WHATSAPP_PROVIDER_360DIALOG,
@@ -15,6 +25,73 @@ from .provider_utils import (
 from .token_manager import WhatsAppTokenContext, get_token_for_operation
 
 logger = logging.getLogger("nahla.whatsapp.service")
+
+
+# ── F18: classification helpers ────────────────────────────────────
+# A "send" operation is one whose response is expected to carry a
+# ``messages[0].id`` (wamid). For sends, a 2xx response WITHOUT a
+# wamid is a provider failure — not a success — and we must surface
+# it as such so the caller doesn't persist a misleading "delivered"
+# state. Non-send POSTs (template submit, webhook configure, etc.)
+# legitimately have no wamid and must NOT be misclassified.
+
+# Path → "is this a send call?". We match by the trailing segment so
+# Meta (``{phone_id}/messages``) and 360dialog (``messages``) both
+# resolve correctly.
+_SEND_PATH_SUFFIXES = ("/messages", "messages")
+
+
+def _is_send_path(path: str) -> bool:
+    """True when ``path`` is the conversational-message send endpoint
+    for either provider."""
+    if not path:
+        return False
+    p = path.strip().lstrip("/")
+    if p == "messages":
+        return True
+    return p.endswith("/messages")
+
+
+def _extract_wamid(body: Any) -> Optional[str]:
+    """Pull ``messages[0].id`` out of a provider response, or
+    ``None`` on any structural mismatch. Both Meta and 360dialog use
+    the same success shape.
+    """
+    if not isinstance(body, dict):
+        return None
+    msgs = body.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        return None
+    first = msgs[0]
+    if not isinstance(first, dict):
+        return None
+    mid = first.get("id")
+    return str(mid).strip() if mid else None
+
+
+def _classify_response(
+    *,
+    is_send: bool,
+    status_code: Optional[int],
+    body: Any,
+    wamid: Optional[str],
+) -> str:
+    """Decide which ``CLASSIFICATION_*`` bucket the response falls
+    into. Order of checks matters — we walk from "definitely broken"
+    to "looks fine"."""
+    if status_code is None:
+        return CLASSIFICATION_EXCEPTION
+    if status_code < 200 or status_code >= 300:
+        return CLASSIFICATION_NON_2XX
+    if isinstance(body, dict) and "error" in body and body.get("error"):
+        return CLASSIFICATION_PROVIDER_ERROR
+    if is_send and not wamid:
+        # 2xx response on a send op WITHOUT a wamid is a provider
+        # failure even though no exception was raised. Pre-F18 we
+        # would have called this a success and persisted a fake
+        # "delivered" state.
+        return CLASSIFICATION_MISSING_WAMID
+    return CLASSIFICATION_OK
 
 GRAPH = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
 D360_BASE = D360_API_BASE_URL.rstrip("/")
@@ -245,19 +322,185 @@ async def provider_post_with_context(
     params: Optional[Dict[str, Any]] = None,
     timeout: float = 20,
 ) -> Dict[str, Any]:
-    headers = _provider_headers(conn, ctx)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            _provider_url(conn, path),
-            headers=headers,
-            json=json or {},
-            params=params or {},
+    """POST to the provider with full observability.
+
+    Records every attempt into the in-memory ring buffer consumed by
+    ``GET /admin/debug/last-provider-send`` (see
+    ``core/wa_provider_observability.py``). For *send* operations
+    (path ends in ``/messages``) a 2xx response WITHOUT a wamid is
+    classified as a provider failure and an ``error`` envelope is
+    INJECTED into the returned dict so downstream callers
+    (``whatsapp_webhook._post_wa``, campaign dispatcher,
+    ``record_outbound_message``) treat it as failed rather than
+    persisting a fake success state.
+
+    Logging keys:
+      ``[WA provider_post]``         — one line per request, always
+      ``[WA_SEND_FAIL_NON_2XX]``     — non-2xx status on a send
+      ``[WA_SEND_FAIL_PROVIDER_ERR]``— 2xx but the body carries
+                                       ``error`` envelope
+      ``[WA_INVALID_PROVIDER_RESPONSE]`` — 2xx, no error, but
+                                           missing wamid on a send
+      ``[WA_SEND_OK]``               — wamid present
+      ``[WA_SEND_EXCEPTION]``        — transport-level failure
+    """
+    provider = wa_provider(conn)
+    full_url = _provider_url(conn, path)
+    headers  = _provider_headers(conn, ctx)
+    headers_summary = _summarize_provider_headers(headers, token_source=ctx.source)
+    is_send  = _is_send_path(path)
+    conn_phone_id  = getattr(conn, "phone_number_id", None) if conn is not None else None
+    conn_id        = getattr(conn, "id", None) if conn is not None else None
+    conn_type      = getattr(conn, "connection_type", None) if conn is not None else None
+
+    started_at  = time.monotonic()
+    status_code: Optional[int] = None
+    data: Dict[str, Any] = {}
+    response_text: Optional[str] = None
+    error_text:    Optional[str] = None
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                full_url,
+                headers=headers,
+                json=json or {},
+                params=params or {},
+            )
+            status_code  = resp.status_code
+            response_text = resp.text  # captured for the ring buffer
+            try:
+                data = resp.json()
+            except Exception:
+                # Provider returned non-JSON (HTML error page, plain
+                # text). Surface as a synthetic error envelope so the
+                # downstream classifier reports provider_error.
+                data = {
+                    "error": {
+                        "message": (
+                            "provider returned non-JSON body. "
+                            f"status={status_code} body_preview="
+                            f"{(response_text or '')[:200]!r}"
+                        ),
+                        "type": "non_json_response",
+                    },
+                }
+    except Exception as exc:  # noqa: BLE001
+        error_text = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            "[WA_SEND_EXCEPTION] op=%s tenant=%s provider=%s path=%s err=%s",
+            operation, tenant_id, provider, path, error_text,
         )
-        data = resp.json()
-    logger.info(
-        "[WA provider_post] op=%s tenant=%s provider=%s path=%s status=%s source=%s",
-        operation, tenant_id, wa_provider(conn), path, resp.status_code, ctx.source,
+        _record_provider_attempt(
+            tenant_id=tenant_id,
+            operation=operation,
+            provider=provider,
+            method="POST",
+            full_url=full_url,
+            path=path,
+            request_payload=json,
+            headers_summary=headers_summary,
+            response_status=None,
+            response_body=None,
+            parsed_wamid=None,
+            classification=CLASSIFICATION_EXCEPTION,
+            duration_ms=(time.monotonic() - started_at) * 1000.0,
+            error_text=error_text,
+            connection_phone_number_id=conn_phone_id,
+            connection_id=conn_id,
+            connection_type=conn_type,
+        )
+        # Preserve the historical contract: re-raise on transport
+        # failure so existing exception handlers in the webhook /
+        # campaign dispatcher keep working.
+        raise
+
+    wamid = _extract_wamid(data)
+    classification = _classify_response(
+        is_send=is_send,
+        status_code=status_code,
+        body=data,
+        wamid=wamid,
     )
+    duration_ms = (time.monotonic() - started_at) * 1000.0
+
+    # Top-of-funnel always-on line (preserves old grep keys).
+    logger.info(
+        "[WA provider_post] op=%s tenant=%s provider=%s path=%s status=%s "
+        "source=%s is_send=%s wamid_present=%s classification=%s duration_ms=%.1f "
+        "conn_phone_id=%s",
+        operation, tenant_id, provider, path, status_code,
+        ctx.source, is_send, bool(wamid), classification, duration_ms,
+        conn_phone_id,
+    )
+
+    if classification == CLASSIFICATION_NON_2XX:
+        logger.warning(
+            "[WA_SEND_FAIL_NON_2XX] op=%s tenant=%s provider=%s status=%s "
+            "url=%s body_preview=%.500s",
+            operation, tenant_id, provider, status_code, full_url, response_text or "",
+        )
+    elif classification == CLASSIFICATION_PROVIDER_ERROR:
+        logger.warning(
+            "[WA_SEND_FAIL_PROVIDER_ERR] op=%s tenant=%s provider=%s status=%s "
+            "error=%.500s",
+            operation, tenant_id, provider, status_code,
+            (data.get("error") if isinstance(data, dict) else None) or "",
+        )
+    elif classification == CLASSIFICATION_MISSING_WAMID:
+        # The exact failure mode F18 was created to catch: provider
+        # accepted (2xx, no error envelope) but never returned a
+        # ``messages[0].id``. Without the explicit guard this would
+        # have been silently classified as success.
+        logger.warning(
+            "[WA_INVALID_PROVIDER_RESPONSE] op=%s tenant=%s provider=%s "
+            "status=%s url=%s conn_phone_id=%s body=%.500s",
+            operation, tenant_id, provider, status_code, full_url,
+            conn_phone_id, str(data)[:500],
+        )
+        # Inject a synthetic error envelope so the downstream success
+        # detector (``"error" in resp_data``) treats this as a failed
+        # send. Without this, ``_post_wa`` would have returned True
+        # for a message that never reached the customer.
+        if isinstance(data, dict) and "error" not in data:
+            data = dict(data)
+            data["error"] = {
+                "message": (
+                    "provider returned 2xx but no messages[0].id "
+                    "(no wamid). treated as send failure by nahla "
+                    "wire layer."
+                ),
+                "type":    "missing_wamid",
+                "code":    "WA_INVALID_PROVIDER_RESPONSE",
+                "nahla_injected": True,
+            }
+    elif classification == CLASSIFICATION_OK and is_send:
+        logger.info(
+            "[WA_SEND_OK] op=%s tenant=%s provider=%s wamid_tail=%s duration_ms=%.1f",
+            operation, tenant_id, provider,
+            wamid[-8:] if wamid else None, duration_ms,
+        )
+
+    _record_provider_attempt(
+        tenant_id=tenant_id,
+        operation=operation,
+        provider=provider,
+        method="POST",
+        full_url=full_url,
+        path=path,
+        request_payload=json,
+        headers_summary=headers_summary,
+        response_status=status_code,
+        response_body=data,
+        parsed_wamid=wamid,
+        classification=classification,
+        duration_ms=duration_ms,
+        error_text=None,
+        connection_phone_number_id=conn_phone_id,
+        connection_id=conn_id,
+        connection_type=conn_type,
+    )
+
     return data
 
 
