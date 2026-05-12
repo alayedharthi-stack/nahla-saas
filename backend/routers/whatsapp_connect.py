@@ -27,7 +27,7 @@ import secrets
 import time
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -78,7 +78,9 @@ from services.whatsapp_platform.service import (
     dialog360_configure_webhook,
     dialog360_generate_api_key,
     dialog360_get_channel_info,
+    dialog360_get_waba_webhook,
     dialog360_live_verify_probes,
+    dialog360_set_waba_webhook,
     dialog360_resolve_channel_metadata,
 )
 
@@ -1590,7 +1592,6 @@ async def coexistence_partner_connect(
         conn.sending_enabled = False
         conn.webhook_verified = False
         _set_coexistence_state(conn, status="pending_activation")
-        # Configure webhook immediately if we have the API key
         try:
             webhook_result = await dialog360_configure_webhook(
                 api_key=api_key,
@@ -1601,7 +1602,24 @@ async def coexistence_partner_connect(
         except Exception as exc:
             logger.warning("[coexistence/partner-connect] webhook configure fail-open: %s", exc)
             webhook_result = {"error": str(exc)[:500]}
-        if "error" not in (webhook_result or {}):
+        # ALSO set the WABA-level webhook (override_all=True) — this is the
+        # only scope that guarantees inbound delivery when 360dialog rotates
+        # phone_number_id during a re-bind. Channel scope alone has been
+        # observed to fall to N/A even when the partner UI shows it green.
+        try:
+            waba_webhook_result = await dialog360_set_waba_webhook(
+                api_key=api_key,
+                url=_coexistence_webhook_url(),
+                headers={"X-Nahla-Coexistence-Secret": internal_secret},
+                override_all=True,
+                timeout=8.0,
+            )
+        except Exception as exc:
+            logger.warning("[coexistence/partner-connect] WABA webhook fail-open: %s", exc)
+            waba_webhook_result = {"error": str(exc)[:500]}
+        channel_ok = "error" not in (webhook_result or {})
+        waba_ok    = "error" not in (waba_webhook_result or {})
+        if channel_ok or waba_ok:
             conn.webhook_verified = True
             if channel_status == "ready":
                 conn.status = "connected"
@@ -1610,6 +1628,7 @@ async def coexistence_partner_connect(
                 _set_coexistence_state(conn, status="connected")
                 stamp_whatsapp_ai_live_since_if_empty(conn)
         meta["last_webhook_setup"] = webhook_result
+        meta["last_waba_webhook_setup"] = waba_webhook_result
     else:
         # Channel not ready yet — store pending state, webhook from 360dialog will follow
         conn.access_token = None
@@ -1709,6 +1728,7 @@ async def admin_activate_coexistence(
     )
 
     webhook_result = None
+    waba_webhook_result: Optional[Dict[str, Any]] = None
     if body.configure_webhook:
         try:
             webhook_result = await dialog360_configure_webhook(
@@ -1720,7 +1740,24 @@ async def admin_activate_coexistence(
         except Exception as exc:
             logger.warning("[coexistence/activate] webhook configure fail-open: %s", exc)
             webhook_result = {"error": str(exc)[:500]}
-        if "error" in (webhook_result or {}):
+        try:
+            waba_webhook_result = await dialog360_set_waba_webhook(
+                api_key=body.api_key,
+                url=_coexistence_webhook_url(),
+                headers={"X-Nahla-Coexistence-Secret": internal_secret},
+                override_all=True,
+                timeout=8.0,
+            )
+        except Exception as exc:
+            logger.warning("[coexistence/activate] WABA webhook fail-open: %s", exc)
+            waba_webhook_result = {"error": str(exc)[:500]}
+        channel_ok = "error" not in (webhook_result or {})
+        waba_ok    = "error" not in (waba_webhook_result or {})
+        meta["last_webhook_setup"] = webhook_result
+        meta["last_waba_webhook_setup"] = waba_webhook_result
+        conn.extra_metadata = meta
+        flag_modified(conn, "extra_metadata")
+        if not channel_ok and not waba_ok:
             conn.status = "action_required"
             conn.webhook_verified = False
             conn.sending_enabled = False
@@ -2198,6 +2235,7 @@ async def admin_coexistence_auto_configure(
     if not secret:
         secret = D360_WEBHOOK_INTERNAL_SECRET or secrets.token_urlsafe(24)
 
+    # ── 1. Channel-level webhook (phone-number scope) ───────────────────
     try:
         result = await asyncio.wait_for(
             dialog360_configure_webhook(
@@ -2213,6 +2251,46 @@ async def admin_coexistence_auto_configure(
         result = {"error": str(exc)[:500]}
     ok = "error" not in (result or {})
 
+    # ── 2. WABA-level webhook (whole WABA fallback) ─────────────────────
+    # Why we always push BOTH:
+    #
+    #   • Channel webhook only covers the specific phone_number_id the
+    #     API-key was minted for. If 360dialog rotates the phone_number_id
+    #     during a coexistence re-bind (e.g. 100543193146977 →
+    #     1061057720431678) the *old* channel webhook is orphaned and the
+    #     *new* number has no webhook at all — until the WABA webhook
+    #     fallback kicks in.
+    #
+    #   • In the merchant's 360dialog dashboard the "Waba Webhook" panel
+    #     reads "N/A" by default because the hub does not auto-replicate
+    #     the channel webhook there. The result is: inbound stops, the
+    #     channel still shows green, our recent-webhook-events buffer
+    #     reports `events_returned=0`.
+    #
+    # Setting both, with `override_all=True`, guarantees that EVERY
+    # Cloud API number on this WABA — current and future — routes to
+    # Nahla, even if the channel-level entry is stale.
+    waba_result: Dict[str, Any] = {"skipped": True, "reason": "not_attempted"}
+    waba_ok = False
+    try:
+        waba_result = await asyncio.wait_for(
+            dialog360_set_waba_webhook(
+                api_key=conn.access_token,
+                url=_coexistence_webhook_url(),
+                headers={"X-Nahla-Coexistence-Secret": secret},
+                override_all=True,
+                timeout=8.0,
+            ),
+            timeout=10.0,
+        )
+        waba_ok = "error" not in (waba_result or {})
+    except Exception as exc:
+        logger.warning(
+            "[admin/coexistence/auto-configure] WABA webhook set failed tenant=%s: %s",
+            body.tenant_id, exc,
+        )
+        waba_result = {"error": str(exc)[:500]}
+
     meta = dict(conn.extra_metadata or {})
     meta["coexistence_internal_secret"] = secret
     coex = dict(meta.get("coexistence") or {})
@@ -2221,6 +2299,12 @@ async def admin_coexistence_auto_configure(
     webhook["channel_last_configured_at"] = datetime.now(timezone.utc).isoformat()
     if not ok:
         webhook["channel_last_error"] = str((result or {}).get("error"))[:500]
+    webhook["waba_status"] = "verified" if waba_ok else "failed"
+    webhook["waba_last_configured_at"] = datetime.now(timezone.utc).isoformat()
+    if not waba_ok:
+        webhook["waba_last_error"] = str((waba_result or {}).get("error"))[:500]
+    else:
+        webhook.pop("waba_last_error", None)
     coex["webhook"] = webhook
     meta["coexistence"] = coex
     meta.setdefault("provider_details", {}).update({
@@ -2231,10 +2315,16 @@ async def admin_coexistence_auto_configure(
     })
     conn.extra_metadata = meta
     flag_modified(conn, "extra_metadata")
-    if ok:
+    if ok or waba_ok:
+        # Either scope is enough for inbound delivery (WABA acts as a
+        # fallback when the channel webhook is missing). Mark verified so
+        # the dashboard reflects a working pipe even if one scope failed.
         conn.webhook_verified = True
-    else:
-        conn.last_error = str((result or {}).get("error"))[:500]
+    if not ok and not waba_ok:
+        conn.last_error = (
+            str((result or {}).get("error"))[:400]
+            + " | waba=" + str((waba_result or {}).get("error"))[:100]
+        )
     db.commit()
 
     audit(
@@ -2242,12 +2332,137 @@ async def admin_coexistence_auto_configure(
         admin=_admin.get("sub") if isinstance(_admin, dict) else None,
         tenant_id=body.tenant_id,
         ok=ok,
+        waba_ok=waba_ok,
     )
     return {
-        "tenant_id":  body.tenant_id,
-        "ok":         ok,
-        "result":     result,
-        "webhooks":   _coexistence_webhook_block(conn),
+        "tenant_id":      body.tenant_id,
+        "ok":             ok and waba_ok,
+        "channel_ok":     ok,
+        "waba_ok":        waba_ok,
+        "channel_result": result,
+        "waba_result":    waba_result,
+        "webhooks":       _coexistence_webhook_block(conn),
+    }
+
+
+@router.get("/admin/coexistence/waba-webhook")
+async def admin_coexistence_waba_webhook_read(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, object] = Depends(require_admin),
+):
+    """Read the WABA-level webhook 360dialog currently has on file for this
+    tenant's channel, plus the channel-level config and the local
+    ``WhatsAppConnection.phone_number_id`` — operator-grade snapshot for
+    diagnosing "channel green, WABA = N/A" coexistence drops.
+
+    Response:
+
+    ```
+    {
+      "tenant_id":             int,
+      "expected_url":          "https://api.nahlah.ai/webhook/whatsapp/360dialog",
+      "channel": {
+        "url":                 str | null,
+        "matches":             bool,
+        "raw":                 <360dialog response>,
+      },
+      "waba": {
+        "url":                 str | null,
+        "matches":             bool,
+        "waba_id":             str | null,
+        "numbers_on_this_waba": [str, ...],
+        "raw":                 <360dialog response>,
+      },
+      "local_connection": {
+        "phone_number_id":     str | null,
+        "waba_id":             str | null,
+      },
+      "phone_id_drift_with_360dialog": bool,
+    }
+    ```
+    """
+    from services.whatsapp_platform.service import dialog360_get_webhook_config  # noqa: PLC0415
+
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد اتصال واتساب لهذا المتجر")
+    if not conn.access_token:
+        raise HTTPException(status_code=400, detail="مفتاح API لـ 360dialog غير مخزّن لهذا التاجر")
+
+    expected_url = _coexistence_webhook_url()
+
+    # Channel read
+    try:
+        chan_cfg = await asyncio.wait_for(
+            dialog360_get_webhook_config(api_key=conn.access_token, timeout=5.0),
+            timeout=6.0,
+        )
+    except Exception as exc:
+        chan_cfg = {"error": f"{type(exc).__name__}: {exc}"[:400]}
+    chan_url = ""
+    if isinstance(chan_cfg, dict):
+        chan_url = (
+            str(chan_cfg.get("url") or "")
+            or str((chan_cfg.get("webhook") or {}).get("url") or "")
+            or str((chan_cfg.get("data") or {}).get("url") or "")
+        )
+    chan_matches = bool(chan_url) and chan_url.rstrip("/") == expected_url.rstrip("/")
+
+    # WABA read
+    try:
+        waba_cfg = await asyncio.wait_for(
+            dialog360_get_waba_webhook(api_key=conn.access_token, timeout=5.0),
+            timeout=6.0,
+        )
+    except Exception as exc:
+        waba_cfg = {"error": f"{type(exc).__name__}: {exc}"[:400]}
+    waba_url = ""
+    waba_id_remote = None
+    numbers_on_waba: List[str] = []
+    if isinstance(waba_cfg, dict):
+        waba_url = str(waba_cfg.get("url") or "")
+        waba_id_remote = waba_cfg.get("waba_id")
+        nums = waba_cfg.get("numbers_on_this_waba")
+        if isinstance(nums, list):
+            numbers_on_waba = [str(n) for n in nums]
+    waba_matches = bool(waba_url) and waba_url.rstrip("/") == expected_url.rstrip("/")
+
+    local_phone = str(getattr(conn, "phone_number_id", "") or "") or None
+    local_waba  = str(getattr(conn, "whatsapp_business_account_id", "") or "") or None
+    phone_drift = bool(
+        local_phone and numbers_on_waba and local_phone not in numbers_on_waba
+    )
+
+    audit(
+        "admin_coexistence_waba_webhook_read",
+        admin=_admin.get("sub") if isinstance(_admin, dict) else None,
+        tenant_id=tenant_id,
+        channel_matches=chan_matches,
+        waba_matches=waba_matches,
+        phone_drift=phone_drift,
+    )
+
+    return {
+        "tenant_id":     tenant_id,
+        "expected_url":  expected_url,
+        "channel": {
+            "url":     chan_url or None,
+            "matches": chan_matches,
+            "raw":     chan_cfg,
+        },
+        "waba": {
+            "url":                  waba_url or None,
+            "matches":              waba_matches,
+            "waba_id":              str(waba_id_remote) if waba_id_remote is not None else None,
+            "numbers_on_this_waba": numbers_on_waba,
+            "raw":                  waba_cfg,
+        },
+        "local_connection": {
+            "phone_number_id": local_phone,
+            "waba_id":         local_waba,
+        },
+        "phone_id_drift_with_360dialog": phone_drift,
     }
 
 

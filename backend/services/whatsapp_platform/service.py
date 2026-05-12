@@ -859,6 +859,111 @@ async def dialog360_get_webhook_config(
     return data
 
 
+# ── 360dialog WABA-level webhook (Coexistence) ────────────────────────────────
+#
+# 360dialog supports two webhook scopes for inbound traffic:
+#
+#   1. **Phone-number / Channel** — `POST /v1/configs/webhook`  (per channel)
+#   2. **WABA-level**             — `POST /waba_webhook`        (whole WABA)
+#
+# Delivery priority (per 360dialog docs):
+#   Phone-Number webhook > WABA webhook > nothing (callbacks drop).
+#
+# In Coexistence (WhatsApp Business App + Cloud API sharing the same number)
+# the WABA-level webhook is what actually drives `messages` callbacks for
+# every phone hanging off that WABA. If a re-link rotates the channel's
+# `phone_number_id` and the WABA-level webhook was never set (or was wiped
+# by a prior re-onboarding), inbound delivery silently stops — the
+# 360dialog UI keeps showing the Channel Webhook ✓ while WABA Webhook = N/A,
+# and `recent-webhook-events` reads `events_returned=0` even after fresh
+# customer messages. The Set/Get helpers below let us drive that scope from
+# code so we never depend on a manual hub-UI step again.
+
+async def dialog360_get_waba_webhook(
+    *,
+    api_key: str,
+    timeout: float = 5,
+) -> Dict[str, Any]:
+    """Read the current WABA-level webhook config from 360dialog.
+
+    Response includes ``url``, ``headers``, ``waba_id``, ``numbers_on_this_waba``.
+    """
+    req_headers = {"D360-API-KEY": api_key}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(f"{D360_BASE}/waba_webhook", headers=req_headers)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+    logger.info(
+        "[WA dialog360 waba_webhook] read status=%s body=%s",
+        resp.status_code, data,
+    )
+    if resp.status_code >= 400:
+        return {"error": data, "status_code": resp.status_code}
+    return data
+
+
+async def dialog360_set_waba_webhook(
+    *,
+    api_key: str,
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    override_all: bool = True,
+    timeout: float = 8.0,
+) -> Dict[str, Any]:
+    """Configure (POST) the WABA-level webhook URL with 360dialog.
+
+    Parameters
+    ----------
+    api_key
+        Channel D360-API-KEY for any channel on the target WABA.
+    url
+        Full HTTPS callback URL (no underscores in domain, no explicit port).
+    headers
+        Optional custom headers 360dialog will replay on every delivery.
+        Nahla uses this to inject ``X-Nahla-Coexistence-Secret`` so the
+        receiving router can drop forged events.
+    override_all
+        When ``True``, the WABA webhook is applied to **every** Cloud API
+        number under this WABA, regardless of any pre-existing
+        phone-number-level webhook. When ``False``, only numbers that
+        currently lack a phone-number-level webhook are touched. For
+        Nahla we default to ``True`` so a stale per-channel webhook on
+        an old ``phone_number_id`` can never silently swallow inbound
+        traffic for the new one.
+
+    Notes
+    -----
+    360dialog applies the change asynchronously (15–20 s); call
+    ``dialog360_get_waba_webhook`` after a short delay to confirm.
+    """
+    req_headers = {
+        "D360-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
+    payload: Dict[str, Any] = {"url": url, "override_all": bool(override_all)}
+    if headers:
+        payload["headers"] = headers
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            f"{D360_BASE}/waba_webhook",
+            headers=req_headers,
+            json=payload,
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+    logger.info(
+        "[WA dialog360 waba_webhook] set status=%s override_all=%s body=%s",
+        resp.status_code, override_all, data,
+    )
+    if resp.status_code >= 400 and "error" not in data:
+        data = {"error": data, "status_code": resp.status_code}
+    return data
+
+
 def _clip_body(body: Any, limit: int = 240) -> str:
     try:
         import json as _json  # noqa: PLC0415
