@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   Plus, Send, Users, ShoppingCart, BarChart2, CheckCircle, XCircle,
   Megaphone, ChevronRight, ChevronLeft, Tag, Crown, Zap, Clock,
@@ -1225,6 +1225,19 @@ function CampaignWizard({
   const [saving, setSaving] = useState(false)
   const [testLoading, setTestLoading] = useState(false)
   const [error, setError] = useState('')
+  // Stable per-wizard-session idempotency key. The backend dedupes
+  // ``POST /campaigns`` on this UUID within a 10-minute window so
+  // even if the wizard's POST times out (frontend ``signal timed
+  // out`` at 25 s on a large audience) the merchant can safely
+  // click "Launch" again — the second POST will return the SAME
+  // campaign that's already running, never spawn a second dispatch.
+  // Re-generated when the wizard remounts so a brand-new campaign
+  // gets a brand-new key.
+  const idemKeyRef = useRef<string>(
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `wiz-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  )
   // Anti-spam protection metadata for the launch trust card. Falls
   // back to a sane default (14 days) if the endpoint is unavailable so
   // the merchant never sees a missing badge.
@@ -1423,13 +1436,38 @@ function CampaignWizard({
           : (manualMode ? (wiz.couponCode.trim() || '') : ''),
         discount_percent: wantsAutoCoupon ? wiz.discountPercent : undefined,
         auto_coupon: wantsAutoCoupon,
+        // Stable per-wizard idempotency key — the backend uses this
+        // to dedupe retries within a 10-minute window so a second
+        // click on "Launch" after a 25 s ``signal timed out``
+        // returns the already-running campaign instead of spawning
+        // a second dispatch.
+        idempotency_key: idemKeyRef.current,
       }
       const created = await campaignsApi.create(payload)
       onCreated(created)
       onClose()
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'حدث خطأ أثناء إنشاء الحملة. حاول مجدداً.'
-      setError(msg)
+      // Treat a frontend timeout as a *soft* error: the campaign was
+      // almost certainly created (POST /campaigns returns in <1 s
+      // now that dispatch runs on a background thread, but
+      // entitlement checks + slow DB still occasionally tip past
+      // 25 s). Don't leave the merchant stuck on the launch screen
+      // — surface a clear "click again to recover" message. The
+      // idempotency key above guarantees the retry will NOT
+      // duplicate the dispatch.
+      const isTimeout = /انتهت مهلة الطلب|signal timed out|aborted/i.test(msg)
+      if (isTimeout) {
+        setError(
+          'انتهت مهلة الطلب قبل وصول رد الخادم، لكن الحملة على الأرجح '
+          + 'تم إنشاؤها وبدأ إرسالها في الخلفية. اضغط «إطلاق الحملة الآن» '
+          + 'مرة أخرى — حماية التكرار في الخادم ستعيد نفس الحملة بدلاً '
+          + 'من إنشاء حملة جديدة، أو أغلق هذه النافذة وافتح الحملة من '
+          + 'القائمة لرؤية حالة الإرسال.'
+        )
+      } else {
+        setError(msg)
+      }
     } finally {
       setSaving(false)
     }

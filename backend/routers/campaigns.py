@@ -64,6 +64,15 @@ class CreateCampaignIn(BaseModel):
     coupon_code: str = ""
     discount_percent: Optional[int] = None
     auto_coupon: bool = False
+    # Client-generated idempotency key (UUID v4 per wizard session).
+    # When the same key is replayed within the dedup window (10 min,
+    # same tenant) we return the **already-created campaign** instead
+    # of creating a second row. This makes the launch endpoint
+    # safe to retry after a frontend ``signal timed out`` — the
+    # merchant can click "Launch" again, or the wizard can auto-retry,
+    # without ever producing two campaigns + two dispatches for the
+    # same audience.
+    idempotency_key: Optional[str] = None
 
 
 class UpdateCampaignStatusIn(BaseModel):
@@ -239,6 +248,49 @@ async def create_campaign(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
+    # ── Idempotency replay guard ──────────────────────────────────────────────
+    # If the client supplied an ``idempotency_key`` and we already
+    # have a campaign for this tenant with the same key created in
+    # the last 10 minutes, return that campaign verbatim. This is
+    # the safety net for the "wizard timed out → merchant clicks
+    # Launch again" path. The 10-min window is intentionally short
+    # so a legitimate re-use of the same UUID (e.g. browser
+    # restored a tab a day later) still produces a new campaign.
+    idem_key = (body.idempotency_key or "").strip() or None
+    if idem_key:
+        from datetime import timedelta as _td  # noqa: PLC0415
+        cutoff = datetime.now(timezone.utc) - _td(minutes=10)
+        # Pull recent campaigns then match the key in Python so the
+        # lookup is portable across Postgres JSONB and the SQLite
+        # JSON shim used by the test suite. The window is small
+        # (≤10 min) so the candidate set is tiny.
+        recent = (
+            db.query(Campaign)
+            .filter(
+                Campaign.tenant_id == tenant_id,
+                Campaign.created_at >= cutoff.replace(tzinfo=None),
+            )
+            .order_by(Campaign.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        existing = next(
+            (
+                c for c in recent
+                if isinstance(c.template_variables, dict)
+                and c.template_variables.get("_idempotency_key") == idem_key
+            ),
+            None,
+        )
+        if existing is not None:
+            logger.info(
+                "[campaigns.create] idempotency replay tenant=%d key=%s "
+                "returning existing campaign=%d (status=%s) — no new "
+                "dispatch will be spawned",
+                tenant_id, idem_key, existing.id, existing.status,
+            )
+            return _campaign_to_dict(existing)
+
     from core.billing import require_outbound_access  # noqa: PLC0415
     require_outbound_access(db, tenant_id)
 
@@ -336,6 +388,11 @@ async def create_campaign(
         tpl_vars["_auto_coupon"] = "true"
     if body.discount_percent is not None and body.discount_percent > 0:
         tpl_vars["_discount_percent"] = str(body.discount_percent)
+    # Stamp the idempotency key on the row so the replay guard
+    # above can recognise a retry — and so support can correlate a
+    # frontend UUID with a server-side campaign_id in logs.
+    if idem_key:
+        tpl_vars["_idempotency_key"] = idem_key
 
     is_immediate = body.schedule_type == "immediate"
     campaign = Campaign(
@@ -371,7 +428,12 @@ async def create_campaign(
     db.refresh(campaign)
 
     if is_immediate:
-        asyncio.create_task(_dispatch_campaign_async(campaign.id))
+        # Fire-and-forget on a dedicated thread so the wizard's POST
+        # returns instantly even when the audience is huge — the
+        # dispatcher's synchronous prep (snapshot + frequency cap +
+        # funnel commit) would otherwise block the request event loop
+        # and trigger the 25s "signal timed out" in the frontend.
+        _spawn_dispatch_in_background(campaign.id)
 
     return _campaign_to_dict(campaign)
 
@@ -400,7 +462,7 @@ async def update_campaign_status(
     db.refresh(campaign)
 
     if body.status == "active" and was_not_active:
-        asyncio.create_task(_dispatch_campaign_async(campaign.id))
+        _spawn_dispatch_in_background(campaign.id)
 
     return _campaign_to_dict(campaign)
 
@@ -2118,8 +2180,13 @@ async def dispatch_campaign_now(
          page immediately becomes "جاري الإرسال" (instead of waiting
          on the dispatcher to do it ≈3s later).
       3. Hand off to ``_dispatch_campaign_async`` via
-         ``asyncio.create_task`` — exactly the same path the
-         immediate-launch flow uses.
+         ``_spawn_dispatch_in_background`` (dedicated daemon thread
+         with its own event loop) — exactly the same path the
+         immediate-launch flow uses. Spawning on a thread (not the
+         request event loop) is critical for large audiences: the
+         dispatcher's synchronous prep phase otherwise blocks the
+         loop and the wizard sees ``signal timed out`` before the
+         response can be flushed back.
       4. Return 202-style ``{ok: true, kicked: true}`` so the
          frontend can refresh and watch counters tick up.
 
@@ -2194,11 +2261,13 @@ async def dispatch_campaign_now(
     )
 
     # Fire-and-forget: same helper the immediate-launch path uses.
-    # It opens a fresh DB session, runs the full pipeline, and
-    # writes errors back into ``template_variables._dispatch_errors``
-    # if anything goes wrong — visible via /campaigns and /debug.
+    # Runs on a dedicated daemon thread so audience snapshotting +
+    # frequency-cap prep never block this HTTP response, regardless
+    # of audience size. Dispatch errors are written back into
+    # ``template_variables._dispatch_errors`` — visible via
+    # /campaigns and /debug.
     try:
-        asyncio.create_task(_dispatch_campaign_async(campaign_id))
+        _spawn_dispatch_in_background(campaign_id)
     except Exception as exc:
         logger.exception(
             "[campaigns.dispatch-now] tenant=%d campaign=%d could not "
@@ -2462,10 +2531,63 @@ def campaign_support_bundle(
 
 # ── Campaign dispatch (background) ──────────────────────────────────────────
 
+def _spawn_dispatch_in_background(campaign_id: int) -> None:
+    """Truly fire-and-forget campaign dispatch on an isolated OS thread.
+
+    Why a real thread (and not ``asyncio.create_task``)?
+    ────────────────────────────────────────────────────
+    ``dispatch_campaign`` is declared ``async`` but its first ~30% is
+    *synchronous* DB work — audience materialisation
+    (``_snapshot_recipients``), frequency-cap revival/application, the
+    bulk ``add_all + flush`` for the ``campaign_send_logs`` rows, and a
+    funnel ``commit()``. There is **no** ``await`` until we reach
+    ``_dispatch_queued_rows`` deep inside the function.
+
+    For a campaign with ~8000 customers that prep phase routinely takes
+    longer than the frontend's 25 s ``AbortSignal.timeout``. When the
+    task is scheduled with ``asyncio.create_task`` on the uvicorn event
+    loop, the loop is still **the same loop** that needs to flush the
+    HTTP response back to nginx; the synchronous prep monopolises the
+    loop and the response can't be written, so the wizard sees
+    ``signal timed out`` — even though the dispatch is fine and the
+    campaign row already exists.
+
+    Spawning a dedicated daemon thread with its own ``asyncio.run``
+    event loop frees the request loop the moment we return, so the
+    wizard always gets a fast ``201 Created`` back, regardless of
+    audience size. The dispatcher then proceeds in the background and
+    counters tick up via ``/campaigns/{id}/debug``.
+    """
+    import threading  # noqa: PLC0415
+
+    def _runner() -> None:
+        try:
+            asyncio.run(_dispatch_campaign_async(campaign_id))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[campaigns] background dispatch thread crashed for campaign=%d",
+                campaign_id,
+            )
+
+    t = threading.Thread(
+        target=_runner,
+        name=f"campaign-dispatch-{campaign_id}",
+        daemon=True,
+    )
+    t.start()
+    logger.info(
+        "[campaigns] campaign=%d dispatch spawned on background thread=%s",
+        campaign_id, t.name,
+    )
+
+
 async def _dispatch_campaign_async(campaign_id: int) -> None:
-    """Fire-and-forget async task that dispatches a campaign using a fresh
-    DB session.  Runs on the main uvicorn event loop via asyncio.create_task,
-    so all async HTTP calls (provider_send_message -> httpx) work natively."""
+    """Async entry point used by :func:`_spawn_dispatch_in_background`.
+
+    Opens a fresh DB session, runs the full dispatch pipeline, and
+    catches/records any unexpected exception. Safe to run either on the
+    main uvicorn event loop or on a dedicated thread loop — it never
+    touches loop-scoped state (no global ``asyncio.Lock`` etc.)."""
     from core.database import SessionLocal  # noqa: PLC0415
     from services.campaign_dispatcher import dispatch_campaign  # noqa: PLC0415
 

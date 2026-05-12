@@ -491,6 +491,12 @@ export interface CreateCampaignPayload {
   discount_percent?: number
   /** True = system generates coupons automatically per customer (no static code). */
   auto_coupon?: boolean
+  /** Client-generated UUID v4 per wizard session. The backend dedupes
+   *  on this within a 10-minute window so a retry after
+   *  ``signal timed out`` returns the already-created campaign
+   *  instead of creating a duplicate dispatch. Always send a fresh
+   *  UUID when the merchant explicitly starts a NEW campaign. */
+  idempotency_key?: string
 }
 
 import { apiCall } from './client'
