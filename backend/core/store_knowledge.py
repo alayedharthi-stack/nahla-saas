@@ -46,6 +46,8 @@ from models import (  # noqa: E402
     TenantSettings,
 )
 
+from .store_display import clean_store_name
+
 logger = logging.getLogger("nahla-backend")
 
 # ── Description sanitisation ──────────────────────────────────────────────────
@@ -714,6 +716,8 @@ def build_merchant_context(
         store_profile["store_name"] = store_settings.get("store_name")
     if store_settings.get("store_url") and not store_profile.get("store_url"):
         store_profile["store_url"] = store_settings.get("store_url")
+    if store_profile.get("store_name"):
+        store_profile["store_name"] = clean_store_name(str(store_profile["store_name"]))
 
     # Match build_context_block: if search finds nothing, still surface orderable top products.
     pq = (product_query or "").strip()
@@ -1017,10 +1021,11 @@ def build_ai_context(
     # 1. Store identity
     if "store_profile" in include:
         profile = loader.store_profile()
-        if profile.get("store_name"):
+        disp = clean_store_name(str(profile.get("store_name") or ""))
+        if disp:
             parts.append(
                 f"### المتجر:\n"
-                f"- الاسم: {profile['store_name']}\n"
+                f"- الاسم: {disp}\n"
                 + (f"- الرابط: {profile['store_url']}\n" if profile.get("store_url") else "")
                 + (f"- الوصف: {profile['description']}\n" if profile.get("description") else "")
                 + (f"- للتواصل: {profile['contact_phone']}\n" if profile.get("contact_phone") else "")

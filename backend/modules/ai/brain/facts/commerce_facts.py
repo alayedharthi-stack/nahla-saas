@@ -23,6 +23,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from core.store_display import clean_store_name
+
 from ..types import CommerceFacts
 
 logger = logging.getLogger("nahla.brain.facts_loader")
@@ -147,7 +149,9 @@ class DefaultFactsLoader:
             shipping = snapshot.shipping_summary or {}
             policy = snapshot.policy_summary or {}
 
-            facts.store_name = profile.get("store_name", "") or ""
+            facts.store_name = clean_store_name(
+                profile.get("store_name", "") or "",
+            )
             facts.store_url = profile.get("store_url", "") or ""
             facts.store_description = profile.get("description", "") or ""
             facts.store_contact_phone = profile.get("contact_phone", "") or ""

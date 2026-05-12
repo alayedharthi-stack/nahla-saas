@@ -17,6 +17,12 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+_BACKEND = os.path.join(_REPO_ROOT, "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+from core.store_display import clean_store_name  # noqa: E402
+
 from database.models import (
     Coupon,
     ConversationHistorySummary,
@@ -175,8 +181,8 @@ def load_customer_memory(
         )
 
         return {
-            # Store
-            "store_name": tenant.name,
+            # Store — customer-facing label only (strip internal slug in parens).
+            "store_name": clean_store_name(tenant.name),
             "store_address": tenant.store_address or "",
             "coupon_policy": tenant.coupon_policy or {},
             "recommendation_controls": tenant.recommendation_controls or {},
@@ -253,7 +259,7 @@ def _new_customer_context(tenant: Tenant, phone: str, db) -> Dict[str, Any]:
     ).first()
 
     return {
-        "store_name": tenant.name,
+        "store_name": clean_store_name(tenant.name),
         "store_address": tenant.store_address or "",
         "coupon_policy": tenant.coupon_policy or {},
         "recommendation_controls": tenant.recommendation_controls or {},

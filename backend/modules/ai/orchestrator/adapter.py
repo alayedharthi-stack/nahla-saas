@@ -714,11 +714,14 @@ def _runtime_summary_for_action(
         return "\n".join(lines)
 
     if action_type == "get_store_info":
+        from core.store_display import clean_store_name  # noqa: PLC0415
+
         store_profile = payload.get("store_profile") or {}
         shipping = payload.get("shipping_summary") or {}
         policy = payload.get("policy_summary") or {}
         catalog = payload.get("catalog_summary") or {}
-        store_name = str(store_profile.get("store_name") or "المتجر").strip()
+        _raw_sn = str(store_profile.get("store_name") or "").strip()
+        store_name = clean_store_name(_raw_sn) or _raw_sn or "المتجر"
         lines = [f"هذه أبرز معلومات {store_name}:"]
         description = str(store_profile.get("description") or "").strip()
         if description:

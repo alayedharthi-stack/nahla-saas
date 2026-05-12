@@ -3501,13 +3501,14 @@ async def _handle_merchant_message(
             # of the generic «نحلة من المتجر».
             _store_name = ""
             try:
+                from core.store_display import clean_store_name  # noqa: PLC0415
                 from models import Tenant  # noqa: PLC0415
                 _t = db.query(Tenant).filter(Tenant.id == tenant_id).first()
                 if _t:
                     for _attr in ("store_name", "name", "display_name"):
                         _val = getattr(_t, _attr, None)
                         if isinstance(_val, str) and _val.strip():
-                            _store_name = _val.strip()
+                            _store_name = clean_store_name(_val.strip())
                             break
             except Exception:
                 pass

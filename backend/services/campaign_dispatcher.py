@@ -2101,10 +2101,12 @@ def _resolve_audience(
 
 def _resolve_store_name(db: Session, tenant_id: int) -> str:
     try:
+        from core.store_display import clean_store_name  # noqa: PLC0415
         from core.tenant import get_or_create_settings, merge_defaults, DEFAULT_STORE
         settings = get_or_create_settings(db, tenant_id)
         store = merge_defaults(settings.store_settings, DEFAULT_STORE)
-        return store.get("store_name", "") or "المتجر"
+        raw = store.get("store_name", "") or ""
+        return clean_store_name(raw) or "المتجر"
     except Exception:
         return "المتجر"
 

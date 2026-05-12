@@ -18,6 +18,7 @@ from modules.ai.security import (
     TenantIsolationLayer,
     TenantIsolationViolation,
 )
+from core.store_display import clean_store_name
 
 
 class DefaultSalesContextLoader:
@@ -63,7 +64,13 @@ class DefaultSalesContextLoader:
         coupon_summary = store_loader.coupon_summary() or {}
 
         snapshot.store_profile = {
-            "store_name": store_profile.get("store_name") or profile.get("store_name") or "",
+            "store_name": clean_store_name(
+                str(
+                    store_profile.get("store_name")
+                    or profile.get("store_name")
+                    or "",
+                ).strip(),
+            ),
             "store_url": store_profile.get("store_url") or "",
             "description": store_profile.get("description") or "",
             "city": store_profile.get("city") or "",

@@ -851,13 +851,14 @@ def _load_assistant_name(db: Any, tenant_id: int) -> str:
 
 def _load_store_name(db: Any, tenant_id: int) -> str:
     try:
+        from core.store_display import clean_store_name  # noqa: PLC0415
         from models import Tenant  # noqa: PLC0415
         t = db.query(Tenant).filter(Tenant.id == tenant_id).first()
         if t:
             for attr in ("store_name", "name", "display_name"):
                 val = getattr(t, attr, None)
                 if isinstance(val, str) and val.strip():
-                    return val.strip()
+                    return clean_store_name(val.strip())
     except Exception:
         pass
     return ""

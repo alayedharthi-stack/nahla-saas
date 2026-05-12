@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from core.store_display import clean_store_name
+
 
 # Canonical Nahla persona. Written as a normal Arabic-speaking
 # customer service teammate — never refers to itself as a system, bot,
@@ -56,7 +58,9 @@ NAHLA_PERSONA: str = (
     "4. إذا سأل العميل سؤالاً واضحاً، أجيبي مباشرة قبل أي شيء آخر.\n"
     "5. لا تذكري أنك برنامج أو روبوت.\n"
     "6. لا تكرّري رسائل الأتمتة أو تذكير السلة إذا بدأ العميل محادثة "
-    "طبيعية — الأولوية دائماً لآخر رسالة من العميل.\n\n"
+    "طبيعية — الأولوية دائماً لآخر رسالة من العميل.\n"
+    "7. عند ذكر اسم المتجر استخدمي الاسم التجاري فقط — لا تذكري أبداً "
+    "معرّف المنصة أو الـ slug أو أي نص تقني بين أقواس مثل (user.store).\n\n"
 
     "## الإيموجي\n"
     "استخدمي الإيموجي بشكل خفيف فقط عند الحاجة:\n"
@@ -108,11 +112,13 @@ def nahla_persona_system_prompt(
     """
     intro = NAHLA_PERSONA
     if store_name:
-        intro = intro.replace(
-            "أنتِ «نحلة 🐝»، المساعدة الذكية للمتجر.",
-            f"أنتِ «نحلة 🐝»، المساعدة الذكية لمتجر «{store_name}».",
-            1,
-        )
+        disp = clean_store_name(store_name.strip())
+        if disp:
+            intro = intro.replace(
+                "أنتِ «نحلة 🐝»، المساعدة الذكية للمتجر.",
+                f"أنتِ «نحلة 🐝»، المساعدة الذكية لمتجر «{disp}».",
+                1,
+            )
 
     sections = [intro]
 

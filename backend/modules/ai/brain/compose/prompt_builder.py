@@ -21,6 +21,8 @@ from dataclasses import asdict
 
 from modules.ai.prompts.nahla_persona import nahla_persona_system_prompt
 
+from core.store_display import clean_store_name
+
 from ..types import BrainReplyState
 
 
@@ -36,7 +38,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
          coupon discipline, no-hallucination guard.
       4. Structured BrainState JSON — the actual conversation context.
     """
-    store_name = state.store_name or "المتجر"
+    store_name = clean_store_name((state.store_name or "").strip()) or "المتجر"
     tone = _tone_instruction(state.tone)
 
     # Strip tenant_overlay from the JSON to avoid duplication — it is

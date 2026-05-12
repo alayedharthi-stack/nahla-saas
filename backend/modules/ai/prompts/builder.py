@@ -18,12 +18,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from core.store_display import clean_store_name
+
 
 def build_system_prompt(ctx: Dict[str, Any]) -> str:
     sections: List[str] = []
 
     # ── 1. Role ───────────────────────────────────────────────────────────────
-    store_name = ctx.get("store_name", "our store")
+    raw_store = str(ctx.get("store_name") or "").strip()
+    store_name = clean_store_name(raw_store) or ("our store" if not raw_store else raw_store)
+    if not store_name.strip():
+        store_name = "our store"
     sections.append(
         f'You are an intelligent WhatsApp sales agent for "{store_name}".\n'
         "Your goal is to help customers discover products, answer questions, "
