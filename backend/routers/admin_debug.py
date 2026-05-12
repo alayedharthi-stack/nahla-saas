@@ -2253,3 +2253,633 @@ async def admin_debug_run_migrations(
             "present."
         ),
     }
+
+
+# ════════════════════════════════════════════════════════════════════════
+# F17 — Inbound AI trace
+# ════════════════════════════════════════════════════════════════════════
+#
+# Purpose
+# ───────
+# After a 360dialog Coexistence connection is established the most common
+# merchant complaint is "the AI isn't replying". The root cause sits in
+# one of seven places along the pipeline:
+#
+#   1. webhook_received     — 360dialog never POSTed (URL/secret/sub off)
+#   2. message_saved        — webhook arrived but the body never made it
+#                             past parsing / tenant resolution / dedup
+#   3. conversation_state   — the row was saved but the Conversation has
+#                             a hard human-takeover flag set
+#   4. ai_allowed           — every gate consulted by ai_pause_guard /
+#                             billing / live-since cutoff / platform-
+#                             tenant routing
+#   5. ai_generated         — gates passed but the brain produced no
+#                             reply (e.g. OPENAI_API_KEY missing,
+#                             OpenAI 5xx, brain raised)
+#   6. send_attempted       — reply text exists but 360dialog wire call
+#                             never happened (token resolver failed)
+#   7. send_status          — wire call attempted but the provider
+#                             rejected with no wamid
+#
+# This endpoint walks the database (read-only — NO side effects) and
+# returns a structured snapshot of which stage the most recent inbound
+# message reached. The shape is deliberately designed so a dashboard
+# can render one row per stage with a green check or a red Arabic
+# explanation.
+#
+# Safety contract
+# ───────────────
+# * Read-only — no writes, no auto-heal, no pause/resume calls.
+# * Sensitive values masked (phone numbers via `_mask_phone`, API keys
+#   via `_mask_secret_tail`, secrets reported only as `_present`
+#   booleans).
+# * Admin-gated via `require_admin` only — no env flag — because
+#   support uses it routinely during merchant onboarding.
+
+@router.get("/inbound-trace")
+async def admin_debug_inbound_trace(
+    tenant_id: int = Query(..., description="Merchant tenant id to trace."),
+    phone: Optional[str] = Query(
+        None,
+        description=(
+            "Optional customer phone (E.164 or bare digits). When set, "
+            "the trace targets the most recent inbound from this number."
+        ),
+    ),
+    wa_message_id: Optional[str] = Query(
+        None,
+        description=(
+            "Optional WhatsApp message id (wamid). When set, the trace "
+            "targets the specific message; takes precedence over `phone`."
+        ),
+    ),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Trace a single inbound message through the full AI pipeline.
+
+    Resolution order for the target message:
+      1. ``wa_message_id`` (exact match on
+         ``MessageEvent.extra_metadata->>'wa_message_id'``).
+      2. ``phone`` (latest inbound on
+         ``MessageEvent.extra_metadata->>'phone'``).
+      3. Otherwise: the latest inbound for the tenant.
+
+    Returns a structured `pipeline` block with one entry per stage.
+    Each stage carries ``ok: bool``, free-form ``details`` and (when
+    blocked) a ``blocked_by`` list of stable string codes the
+    dashboard can localise.
+
+    Read-only diagnostic. Does NOT pause, resume, dispatch, or
+    trigger any send. Does NOT change conversation state.
+    """
+    from datetime import datetime, timezone, timedelta  # noqa: PLC0415
+    from sqlalchemy import desc  # noqa: PLC0415
+    from models import Conversation, Customer, MessageEvent  # noqa: PLC0415
+    from core.billing import has_billing_access  # noqa: PLC0415
+    from core.ai_pause_guard import (  # noqa: PLC0415
+        is_internal_or_blocked,
+    )
+    from core.whatsapp_ai_live import (  # noqa: PLC0415
+        is_inbound_before_ai_live_since,
+    )
+    from services.whatsapp_platform.provider_utils import (  # noqa: PLC0415
+        WHATSAPP_PROVIDER_360DIALOG,
+        wa_provider,
+    )
+
+    def _aware(dt: Optional[datetime]) -> Optional[datetime]:
+        """Coerce a possibly-naive datetime to UTC-aware. SQLite
+        round-trips DateTime(timezone=True) as naive, so a direct
+        subtraction with ``datetime.now(timezone.utc)`` raises
+        ``TypeError: can't subtract offset-naive and offset-aware``.
+        We never assume a non-UTC zone — naive values in this codebase
+        are always UTC by convention."""
+        if dt is None:
+            return None
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    admin_sub = _admin.get("sub") or "?"
+    logger.info(
+        "[ADMIN/INBOUND_TRACE] start admin=%s tenant=%s phone=%s wa_message_id=%s",
+        admin_sub, tenant_id, _mask_phone(phone or ""), wa_message_id or "—",
+    )
+
+    issues: List[str] = []
+    hints:  List[str] = []
+    now_utc = datetime.now(timezone.utc)
+
+    # ── Tenant existence ────────────────────────────────────────
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if tenant is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"tenant {tenant_id} not found",
+        )
+
+    # ── Connection snapshot ─────────────────────────────────────
+    # We treat the connection as the source of truth for "is this
+    # merchant actually wired to 360dialog?". A missing or
+    # mis-configured row is the #1 reason webhooks never arrive.
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == tenant_id)
+        .order_by(WhatsAppConnection.id.desc())
+        .first()
+    )
+
+    connection_block: Dict[str, Any] = {"found": False}
+    if wa_conn is not None:
+        extra_meta = wa_conn.extra_metadata or {}
+        coex_meta  = extra_meta.get("coexistence") if isinstance(extra_meta, dict) else {}
+        coex_meta  = coex_meta if isinstance(coex_meta, dict) else {}
+        coex_secret = str(extra_meta.get("coexistence_internal_secret") or "") \
+            if isinstance(extra_meta, dict) else ""
+
+        provider_kind = wa_provider(wa_conn)
+        last_webhook_at = _aware(getattr(wa_conn, "last_webhook_received_at", None))
+        last_coex_at    = _aware(getattr(wa_conn, "webhook_coexistence_received_at", None))
+        last_status_at  = _aware(getattr(wa_conn, "webhook_status_received_at", None))
+        ai_live_since   = _aware(getattr(wa_conn, "whatsapp_ai_live_since", None))
+        connected_at    = _aware(getattr(wa_conn, "connected_at", None))
+        last_verified   = _aware(getattr(wa_conn, "last_verified_at", None))
+
+        connection_block = {
+            "found":              True,
+            "provider":           provider_kind,
+            "connection_type":    getattr(wa_conn, "connection_type", None),
+            "status":             getattr(wa_conn, "status", None),
+            "phone_number_id":    getattr(wa_conn, "phone_number_id", None),
+            "waba_id":            getattr(wa_conn, "whatsapp_business_account_id", None),
+            "phone_number":       getattr(wa_conn, "phone_number", None),
+            "access_token_present": bool((getattr(wa_conn, "access_token", "") or "").strip()),
+            "access_token_tail":  _mask_secret_tail(getattr(wa_conn, "access_token", None)),
+            "coexistence_secret_present": bool(coex_secret),
+            "webhook_verified":   bool(getattr(wa_conn, "webhook_verified", False)),
+            "sending_enabled":    bool(getattr(wa_conn, "sending_enabled", False)),
+            "whatsapp_ai_live_since":   ai_live_since.isoformat() if ai_live_since else None,
+            "last_webhook_received_at": last_webhook_at.isoformat() if last_webhook_at else None,
+            "last_coexistence_event_at": last_coex_at.isoformat() if last_coex_at else None,
+            "last_status_event_at":     last_status_at.isoformat() if last_status_at else None,
+            "coexistence_last_event": coex_meta.get("last_event"),
+            "connected_at":  connected_at.isoformat() if connected_at else None,
+            "last_verified_at": last_verified.isoformat() if last_verified else None,
+            "last_error": getattr(wa_conn, "last_error", None),
+        }
+
+        # Connection-level findings — surface in the top-level issues
+        # block so support sees the actionable items first.
+        if provider_kind != WHATSAPP_PROVIDER_360DIALOG:
+            issues.append(
+                f"الاتصال الحالي ليس 360dialog (provider={provider_kind}). "
+                f"هذا التشخيص مخصص لـ 360dialog Coexistence."
+            )
+        if getattr(wa_conn, "connection_type", None) != "coexistence":
+            hints.append(
+                f"connection_type={getattr(wa_conn, 'connection_type', None) or '—'} "
+                f"— ليس coexistence. التشخيص يعمل لكن بعض الفحوصات قد لا تنطبق."
+            )
+        if getattr(wa_conn, "status", None) != "connected":
+            issues.append(
+                f"حالة الاتصال = {getattr(wa_conn, 'status', None) or '—'} "
+                f"(يجب أن تكون 'connected')."
+            )
+        if not (getattr(wa_conn, "access_token", "") or "").strip():
+            issues.append("D360-API-KEY مفقود على الاتصال — لن ينجح أي إرسال.")
+        if not coex_secret:
+            hints.append(
+                "coexistence_internal_secret غير مضبوط — webhook 360dialog "
+                "سيُسقَط بهذا السبب: '[Webhook360] Invalid internal secret'."
+            )
+        if last_webhook_at is None:
+            issues.append(
+                "last_webhook_received_at = NULL — لم يصل أي webhook من 360dialog "
+                "إلى هذا الـ process أبداً. تأكد من اشتراك الـ URL في لوحة 360dialog."
+            )
+        elif now_utc - last_webhook_at > timedelta(hours=24):
+            hints.append(
+                "آخر webhook منذ أكثر من 24 ساعة — قد تكون القناة صامتة فعلاً، "
+                "أو يكون الاشتراك انتهى صلاحيته."
+            )
+
+    else:
+        issues.append(
+            "لا يوجد سجل WhatsAppConnection لهذا التاجر — يجب ربط القناة أولاً."
+        )
+
+    # ── Locate the target inbound MessageEvent ──────────────────
+    # We never load the entire body for a giant message — it's
+    # truncated to 600 chars in the response.
+    def _truncate(text: Optional[str], n: int = 600) -> Optional[str]:
+        if text is None:
+            return None
+        s = str(text)
+        if len(s) <= n:
+            return s
+        return s[:n] + "…"
+
+    target_message: Optional[MessageEvent] = None
+    target_query = (
+        db.query(MessageEvent)
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            MessageEvent.direction == "inbound",
+        )
+    )
+    if wa_message_id:
+        target_message = (
+            target_query
+            .filter(MessageEvent.extra_metadata["wa_message_id"].astext == wa_message_id)
+            .order_by(desc(MessageEvent.id))
+            .first()
+        )
+    elif phone:
+        target_message = (
+            target_query
+            .filter(MessageEvent.extra_metadata["phone"].astext == phone.strip())
+            .order_by(desc(MessageEvent.id))
+            .first()
+        )
+    else:
+        target_message = target_query.order_by(desc(MessageEvent.id)).first()
+
+    # ── Stage 1: webhook_received ───────────────────────────────
+    # Evidence the 360dialog POST reached this process. Two signals:
+    #   • last_webhook_received_at on the connection row (set by
+    #     `_stamp_webhook_received` for every accepted payload);
+    #   • OR a target MessageEvent for this tenant exists (proves a
+    #     prior webhook walked the full ingestion path).
+    has_webhook_evidence = (
+        connection_block.get("last_webhook_received_at") is not None
+        or target_message is not None
+    )
+    step_1 = {
+        "ok": bool(has_webhook_evidence),
+        "details": {
+            "last_webhook_received_at":  connection_block.get("last_webhook_received_at"),
+            "last_coexistence_event_at": connection_block.get("last_coexistence_event_at"),
+            "any_inbound_persisted":     target_message is not None,
+        },
+        "blocked_by": [] if has_webhook_evidence else ["no_webhook_evidence"],
+        "reason": None if has_webhook_evidence else (
+            "لم يصل أي webhook من 360dialog إلى هذا الـ process. تحقق من URL الاشتراك "
+            "في لوحة 360dialog، وتحقق من X-Nahla-Coexistence-Secret."
+        ),
+    }
+
+    # ── Stage 2: message_saved ──────────────────────────────────
+    step_2: Dict[str, Any] = {"ok": False, "details": None, "blocked_by": [], "reason": None}
+    inbound_extra: Dict[str, Any] = {}
+    if target_message is None:
+        step_2["blocked_by"].append("no_inbound_message_found")
+        step_2["reason"] = (
+            "لم يُعثر على أي رسالة inbound مطابقة. إن كنت متأكداً أنها أُرسلت، "
+            "السبب الأرجح: webhook secret خاطئ، أو phone_number_id لا يطابق "
+            "أي WhatsAppConnection."
+        )
+    else:
+        inbound_extra = target_message.extra_metadata or {}
+        step_2["ok"] = True
+        step_2["details"] = {
+            "message_event_id": int(target_message.id),
+            "conversation_id":  int(target_message.conversation_id) if target_message.conversation_id else None,
+            "event_type":       target_message.event_type,
+            "direction":        target_message.direction,
+            "created_at":       _aware(target_message.created_at).isoformat() if target_message.created_at else None,
+            "body_preview":     _truncate(target_message.body, 600),
+            "wa_message_id":    inbound_extra.get("wa_message_id"),
+            "phone":            _mask_phone(str(inbound_extra.get("phone") or "")),
+            "whatsapp_timestamp": inbound_extra.get("whatsapp_timestamp"),
+            "message_origin":   inbound_extra.get("message_origin"),
+            "historical_import": bool(inbound_extra.get("historical_import")),
+            "phone_number_id":  inbound_extra.get("phone_number_id"),
+            "provider":         inbound_extra.get("provider"),
+            "normalized_inbound_status": (
+                (inbound_extra.get("normalized_inbound") or {}).get("status")
+                if isinstance(inbound_extra.get("normalized_inbound"), dict) else None
+            ),
+        }
+
+    # ── Stage 3: conversation_state ─────────────────────────────
+    convo: Optional[Conversation] = None
+    if target_message and target_message.conversation_id:
+        convo = (
+            db.query(Conversation)
+            .filter(Conversation.id == target_message.conversation_id)
+            .first()
+        )
+
+    step_3: Dict[str, Any] = {"ok": False, "details": None, "blocked_by": [], "reason": None}
+    if convo is None:
+        # An inbound without a conversation_id is an unusual state —
+        # the dispatcher creates the conversation before persisting.
+        if target_message is not None:
+            step_3["blocked_by"].append("conversation_missing")
+            step_3["reason"] = (
+                "الرسالة محفوظة لكن بدون conversation_id — حالة غير متوقعة، "
+                "تحقق من _get_or_create_conversation في routers/conversations.py."
+            )
+    else:
+        convo_extra = convo.extra_metadata or {}
+        blockers: List[str] = []
+        # Note: these are the CURRENT flags, not necessarily what they
+        # were at the moment the inbound landed. Still the best signal
+        # we have for "is the AI free to reply right now?".
+        if bool(getattr(convo, "ai_paused", False)):
+            blockers.append("ai_paused")
+        if bool(getattr(convo, "needs_human", False)):
+            blockers.append("needs_human")
+        if bool(getattr(convo, "handoff_active", False)):
+            blockers.append("handoff_active")
+        if bool(getattr(convo, "is_human_handoff", False)):
+            blockers.append("is_human_handoff")
+        if bool(getattr(convo, "paused_by_human", False)):
+            blockers.append("paused_by_human")
+
+        step_3["ok"] = (len(blockers) == 0)
+        step_3["details"] = {
+            "conversation_id": int(convo.id),
+            "status":          convo.status,
+            "ai_paused":       bool(getattr(convo, "ai_paused", False)),
+            "ai_paused_reason": getattr(convo, "ai_paused_reason", None),
+            "ai_paused_at":    _aware(convo.ai_paused_at).isoformat() if getattr(convo, "ai_paused_at", None) else None,
+            "ai_paused_by":    getattr(convo, "ai_paused_by", None),
+            "needs_human":     bool(getattr(convo, "needs_human", False)),
+            "handoff_active":  bool(getattr(convo, "handoff_active", False)),
+            "is_human_handoff": bool(getattr(convo, "is_human_handoff", False)),
+            "paused_by_human": bool(getattr(convo, "paused_by_human", False)),
+            "taken_over_at":   _aware(convo.taken_over_at).isoformat() if getattr(convo, "taken_over_at", None) else None,
+            "taken_over_by":   getattr(convo, "taken_over_by", None),
+            "last_read_at":    _aware(convo.last_read_at).isoformat() if getattr(convo, "last_read_at", None) else None,
+            "brain_state_keys": (
+                list((convo_extra.get("brain_state") or {}).keys())
+                if isinstance(convo_extra.get("brain_state"), dict) else []
+            ),
+        }
+        step_3["blocked_by"] = blockers
+        if blockers:
+            step_3["reason"] = (
+                f"الذكاء معطّل على هذه المحادثة. الأسباب: {', '.join(blockers)} "
+                f"(reason={getattr(convo, 'ai_paused_reason', None) or '—'})."
+            )
+
+    # ── Stage 4: ai_allowed ─────────────────────────────────────
+    # Re-evaluate every gate the live inbound dispatcher consults,
+    # using READ-ONLY versions of the helpers. We deliberately
+    # don't invoke `should_skip_ai` because it has side effects
+    # (calls `pause_ai`) on the bot-loop branch.
+    step_4_blockers: List[str] = []
+    step_4_details: Dict[str, Any] = {}
+
+    # 4.a — Platform tenant routing (skips merchant brain entirely).
+    is_platform_tenant = bool(getattr(tenant, "is_platform_tenant", False))
+    step_4_details["is_platform_tenant"] = is_platform_tenant
+    if is_platform_tenant:
+        step_4_blockers.append("platform_tenant_routing")
+
+    # 4.b — Customer phone on tenant blocklist or internal numbers.
+    customer_phone_raw = str(inbound_extra.get("phone") or phone or "").strip()
+    if customer_phone_raw:
+        blocked_match, block_reason = is_internal_or_blocked(
+            db, int(tenant_id), customer_phone_raw,
+        )
+    else:
+        blocked_match, block_reason = (False, None)
+    step_4_details["blocklist_match"] = bool(blocked_match)
+    step_4_details["blocklist_reason"] = block_reason
+    if blocked_match:
+        step_4_blockers.append("blocklist")
+
+    # 4.c — Conversation-level ai_paused (already reported in step 3
+    # but we surface here too so the gate map is self-contained).
+    convo_paused = bool(getattr(convo, "ai_paused", False)) if convo else False
+    step_4_details["conversation_ai_paused"] = convo_paused
+    if convo_paused:
+        step_4_blockers.append("ai_paused")
+
+    # 4.d — Billing gate.
+    try:
+        billing_ok = bool(has_billing_access(db, int(tenant_id)))
+    except Exception as exc:  # noqa: BLE001
+        billing_ok = False
+        step_4_details["billing_lookup_error"] = f"{type(exc).__name__}: {exc}"
+    step_4_details["billing_access"] = billing_ok
+    if not billing_ok:
+        step_4_blockers.append("billing_access_denied")
+
+    # 4.e — whatsapp_ai_live_since cutoff (only relevant when the
+    # row has a wa timestamp; historical sync writes
+    # historical_import=True).
+    wa_ts_raw = inbound_extra.get("whatsapp_timestamp")
+    wa_ts_dt: Optional[datetime] = None
+    if isinstance(wa_ts_raw, (int, float)):
+        try:
+            wa_ts_dt = datetime.fromtimestamp(int(wa_ts_raw), tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            wa_ts_dt = None
+    elif isinstance(wa_ts_raw, str):
+        try:
+            wa_ts_dt = datetime.fromisoformat(wa_ts_raw.replace("Z", "+00:00"))
+        except ValueError:
+            wa_ts_dt = None
+
+    historical_skip = False
+    if wa_conn is not None and wa_ts_dt is not None:
+        historical_skip = bool(is_inbound_before_ai_live_since(wa_conn, wa_ts_dt))
+    historical_import_flag = bool(inbound_extra.get("historical_import"))
+    step_4_details["whatsapp_timestamp"] = wa_ts_dt.isoformat() if wa_ts_dt else None
+    step_4_details["whatsapp_ai_live_since"] = connection_block.get("whatsapp_ai_live_since")
+    step_4_details["before_ai_live_since"] = historical_skip
+    step_4_details["historical_import_flag"] = historical_import_flag
+    if historical_skip or historical_import_flag:
+        step_4_blockers.append("historical_before_ai_live_since")
+
+    step_4 = {
+        "ok": (len(step_4_blockers) == 0),
+        "blocked_by": step_4_blockers,
+        "details": step_4_details,
+        "reason": (
+            "AI gate blocks: " + ", ".join(step_4_blockers)
+            if step_4_blockers else None
+        ),
+    }
+
+    # ── Stage 5: ai_generated ───────────────────────────────────
+    # We define "AI generated a reply" as: there exists an outbound
+    # MessageEvent in the same conversation with id > target.id.
+    # `record_outbound_message` and the brain happy-path both write
+    # this row BEFORE the wire call, so this is the right signal
+    # for "the AI produced a string".
+    step_5: Dict[str, Any] = {"ok": False, "details": None, "blocked_by": [], "reason": None}
+    outbound_after: Optional[MessageEvent] = None
+    if target_message is not None and target_message.conversation_id is not None:
+        outbound_after = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                MessageEvent.conversation_id == target_message.conversation_id,
+                MessageEvent.direction == "outbound",
+                MessageEvent.id > target_message.id,
+            )
+            .order_by(MessageEvent.id.asc())
+            .first()
+        )
+    if outbound_after is None:
+        step_5["blocked_by"].append("no_outbound_after_inbound")
+        if step_4["ok"]:
+            step_5["reason"] = (
+                "كل البوّابات سمحت لكن لم يُسجَّل أي رد. غالباً brain أعاد "
+                "{reply: None} أو رفع استثناء (انظر [Merchant/Brain] / [BRAIN_RESULT] في logs). "
+                "تحقق من توفر OPENAI_API_KEY / ANTHROPIC_API_KEY."
+            )
+        else:
+            step_5["reason"] = (
+                "لم يُسجَّل أي رد لأن إحدى البوابات منعت الذكاء (راجع ai_allowed)."
+            )
+    else:
+        out_extra = outbound_after.extra_metadata or {}
+        step_5["ok"] = True
+        delta_seconds: Optional[float] = None
+        if target_message.created_at and outbound_after.created_at:
+            # Coerce both sides to aware to keep the subtraction
+            # legal regardless of how the DB driver returns them.
+            delta_seconds = (
+                _aware(outbound_after.created_at) - _aware(target_message.created_at)
+            ).total_seconds()
+        step_5["details"] = {
+            "outbound_message_event_id": int(outbound_after.id),
+            "outbound_event_type":       outbound_after.event_type,
+            "outbound_created_at":       _aware(outbound_after.created_at).isoformat() if outbound_after.created_at else None,
+            "seconds_after_inbound":     round(delta_seconds, 3) if delta_seconds is not None else None,
+            "body_preview":              _truncate(outbound_after.body, 600),
+            "wa_message_id":             out_extra.get("wa_message_id"),
+            "source":                    out_extra.get("source"),
+            "media_fallback":            out_extra.get("media_fallback"),
+        }
+
+    # ── Stage 6: send_attempted ─────────────────────────────────
+    # In the current architecture, persisting an outbound
+    # MessageEvent IS the send attempt — `_post_wa` is called
+    # immediately after, and we only see a row when the brain
+    # produced a string. The distinguishing signal between
+    # "attempted" and "delivered to provider" lives in
+    # `extra_metadata.wa_message_id`: only set on a 200 response
+    # that carried a wamid (see `_extract_provider_message_id`).
+    step_6: Dict[str, Any] = {"ok": False, "details": None, "blocked_by": [], "reason": None}
+    if outbound_after is None:
+        step_6["blocked_by"].append("no_outbound_attempt")
+        step_6["reason"] = "لم يتم استدعاء الموزّع لأن AI لم يولّد رد (راجع ai_generated)."
+    else:
+        out_extra = outbound_after.extra_metadata or {}
+        provider_msg_id = out_extra.get("wa_message_id")
+        step_6["ok"] = True
+        step_6["details"] = {
+            "attempted_at": _aware(outbound_after.created_at).isoformat() if outbound_after.created_at else None,
+            "provider_message_id_recorded": bool(provider_msg_id),
+            "provider_message_id_tail": _mask_secret_tail(provider_msg_id) if provider_msg_id else None,
+        }
+
+    # ── Stage 7: send_status ────────────────────────────────────
+    # We can't replay the wire call read-only; the closest evidence
+    # is the presence of a wamid in the outbound's metadata
+    # (provider accepted the message) and any subsequent inbound
+    # statuses persisted on the conversation. For conversational
+    # replies the WhatsApp status webhook updates the campaign log
+    # only when the wamid happens to match a campaign row — so for
+    # most conversational replies the status remains "unknown".
+    step_7: Dict[str, Any] = {"ok": None, "details": None, "blocked_by": [], "reason": None}
+    if outbound_after is None:
+        step_7["ok"] = False
+        step_7["blocked_by"].append("no_outbound_to_evaluate")
+        step_7["reason"] = "لا يوجد رد محفوظ يمكن تتبّع حالة تسليمه."
+    else:
+        out_extra = outbound_after.extra_metadata or {}
+        wamid = out_extra.get("wa_message_id")
+        if wamid:
+            step_7["ok"] = True
+            step_7["details"] = {
+                "provider_message_id_present": True,
+                "note": (
+                    "تم استلام الرد بنجاح من 360dialog ولديه wamid. "
+                    "حالة التسليم/القراءة الفعلية تأتي عبر status webhook "
+                    "(غير مسجلة على message_events للمحادثات اللحظية)."
+                ),
+            }
+        else:
+            step_7["ok"] = False
+            step_7["blocked_by"].append("missing_wamid")
+            step_7["reason"] = (
+                "تم حفظ رد AI لكن 360dialog لم يُعِد wamid — يعني الإرسال فشل "
+                "(token غير صحيح، D360-API-KEY خاطئ، quota مستنفد، أو خطأ provider). "
+                "راجع [SEND_DEBUG] / [WA provider_post] في logs."
+            )
+
+    # ── Final verdict ───────────────────────────────────────────
+    pipeline_blocks = {
+        "step_1_webhook_received":  step_1,
+        "step_2_message_saved":     step_2,
+        "step_3_conversation_state": step_3,
+        "step_4_ai_allowed":        step_4,
+        "step_5_ai_generated":      step_5,
+        "step_6_send_attempted":    step_6,
+        "step_7_send_status":       step_7,
+    }
+
+    # Pick the first stage that's not green and surface it as the
+    # verdict. Stage 7 with ok=None counts as "indeterminate" not
+    # "failed" — we promote it only when no earlier stage failed.
+    failed_stage: Optional[str] = None
+    failed_codes: List[str] = []
+    for stage_name, stage in pipeline_blocks.items():
+        ok = stage.get("ok")
+        if ok is False:
+            failed_stage = stage_name
+            failed_codes = list(stage.get("blocked_by") or [])
+            break
+
+    if failed_stage is None:
+        verdict_ar = "الذكاء رد بنجاح على هذه الرسالة وتم تسليم الرد لـ 360dialog."
+        verdict_code = "ok"
+        overall_ok = True
+    else:
+        verdict_ar = pipeline_blocks[failed_stage].get("reason") or f"المرحلة المتعثرة: {failed_stage}"
+        verdict_code = failed_stage
+        overall_ok = False
+
+    response = {
+        "ts":                  now_utc.isoformat(),
+        "tenant_id":           int(tenant_id),
+        "tenant_name":         tenant.name,
+        "input": {
+            "phone_masked":    _mask_phone(phone or "") if phone else None,
+            "wa_message_id":   wa_message_id,
+        },
+        "connection":          connection_block,
+        "inbound_message_found": target_message is not None,
+        "pipeline":            pipeline_blocks,
+        "verdict": {
+            "code":            verdict_code,
+            "failed_stage":    failed_stage,
+            "blocked_by":      failed_codes,
+            "reason_ar":       verdict_ar,
+        },
+        "issues":              issues,
+        "hints":               hints,
+        "ok":                  overall_ok,
+    }
+
+    audit(
+        "admin_debug_inbound_trace",
+        admin_sub=admin_sub,
+        tenant_id=int(tenant_id),
+        phone_masked=_mask_phone(phone or "") if phone else "",
+        wa_message_id=wa_message_id or "",
+        verdict_code=verdict_code,
+        overall_ok=overall_ok,
+    )
+    logger.info(
+        "[ADMIN/INBOUND_TRACE] done admin=%s tenant=%s ok=%s verdict=%s",
+        admin_sub, tenant_id, overall_ok, verdict_code,
+    )
+
+    return response
