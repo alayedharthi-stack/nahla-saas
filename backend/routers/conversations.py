@@ -335,6 +335,10 @@ async def list_conversations(
     3. ``ConversationTrace`` fallback for phones without MessageEvent
     """
     from sqlalchemy import and_, func, or_  # noqa: PLC0415
+    import json as _json  # noqa: PLC0415
+    import time as _time  # noqa: PLC0415
+
+    _t0 = _time.perf_counter()
 
     def _inbox_live_only_clause():
         """Rows stamped as historical/backfill must not drive inbox surface."""
@@ -871,6 +875,32 @@ async def list_conversations(
     safe_offset = max(0, int(offset or 0))
     safe_limit = paging_cap_limit
     page = result[safe_offset : safe_offset + safe_limit]
+
+    # ── 8. Structured perf log ──────────────────────────────────────────────
+    # Always emit at INFO so we get a baseline duration_ms for every request.
+    # Promote to WARNING when the response took longer than 2s — that is
+    # the post-fix expectation; anything above means we need to revisit the
+    # query plan (likely a missing index on message_events) or move to
+    # SQL-level pagination instead of Python slicing.
+    duration_ms = int((_time.perf_counter() - _t0) * 1000)
+    perf_payload = {
+        "event":                     "conversations_list_perf",
+        "tenant_id":                 tenant_id,
+        "limit":                     safe_limit,
+        "offset":                    safe_offset,
+        "conversations_count":       total,
+        "page_size":                 len(page),
+        "duration_ms":               duration_ms,
+        "unread_count_strategy":     "grouped",
+        "used_joinedload_customer":  True,
+        "pagination":                "python_slice",
+    }
+    log_line = "[CONV_LIST_PERF] " + _json.dumps(perf_payload, ensure_ascii=False)
+    if duration_ms >= 2000:
+        _log.warning(log_line)
+    else:
+        _log.info(log_line)
+
     return {
         "conversations": page,
         "total_count": total,
