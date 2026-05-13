@@ -3756,6 +3756,64 @@ async def _handle_merchant_message(
         except Exception:
             pass
 
+        # Phase 4 — Response Compression Layer.
+        # Run rule-based post-processing on the LLM reply BEFORE any
+        # marker extraction. The compression module freezes markers
+        # and URLs internally, so it never breaks [PRODUCT:...] /
+        # [MEDIA:<id>] / [MEDIA_KEY:<slug>] tokens. Adaptive mode is
+        # gated on the inbound customer message — when the customer
+        # asks for a detailed explanation we soften the paragraph
+        # cap. Compression failures are non-fatal: we log and fall
+        # back to the original reply.
+        if reply:
+            try:
+                from modules.ai.postprocess.compression import (  # noqa: PLC0415
+                    compress_for_whatsapp as _compress_reply,
+                )
+                _comp = _compress_reply(reply, customer_message=text or "")
+                if not _comp.skipped and _comp.any_change:
+                    reply = _comp.text
+                try:
+                    import json as _json_comp  # noqa: PLC0415
+                    _comp_payload: Dict[str, object] = {
+                        "event":                    "compression",
+                        "tenant_id":                tenant_id,
+                        "conversation_id":          getattr(convo, "id", None),
+                        "applied":                  bool(
+                            _comp.any_change and not _comp.skipped
+                        ),
+                        "skipped":                  _comp.skipped,
+                        "skip_reason":              _comp.skip_reason or None,
+                        "adaptive_mode":            _comp.adaptive_mode,
+                        "chars_before":             _comp.chars_before,
+                        "chars_after":              _comp.chars_after,
+                        "lines_before":             _comp.lines_before,
+                        "lines_after":              _comp.lines_after,
+                        "paragraphs_before":        _comp.paragraphs_before,
+                        "paragraphs_after":         _comp.paragraphs_after,
+                        "paragraphs_dropped":       _comp.paragraphs_dropped,
+                        "fillers_removed":          _comp.fillers_removed,
+                        "cold_disclaimers_removed": _comp.cold_disclaimers_removed,
+                        "stock_phrase_dedups":      _comp.stock_phrase_dedups,
+                        "greetings_deduped":        _comp.greetings_deduped,
+                        "emojis_removed":           _comp.emojis_removed,
+                        "blank_lines_collapsed":    _comp.blank_lines_collapsed,
+                        "markers_preserved":        _comp.markers_preserved,
+                        "urls_preserved":           _comp.urls_preserved,
+                        "duration_ms":              _comp.duration_ms,
+                    }
+                    logger.info(
+                        "[COMPRESSION] "
+                        + _json_comp.dumps(_comp_payload, ensure_ascii=False)
+                    )
+                except Exception:  # noqa: BLE001 — logging must never break the turn
+                    pass
+            except Exception as _comp_exc:  # noqa: BLE001
+                logger.warning(
+                    "[COMPRESSION] skipped tenant=%s err=%s",
+                    tenant_id, _comp_exc,
+                )
+
         # Phase 3 — Marker resolution metrics.
         # Capture the LLM's reply BEFORE any marker extraction strips
         # tokens out of it. We pre-scan it for the three marker families
