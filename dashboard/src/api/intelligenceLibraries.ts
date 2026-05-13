@@ -55,6 +55,10 @@ export interface AIMediaItem {
   storage_kind: 'external' | 'local'
   mime_type: string | null
   file_size_bytes: number | null
+  // Stable namespaced key (e.g. `payment_rajhi_barcode`). When set,
+  // the AI emits `[MEDIA_KEY:<slug>]` markers that resolve to this
+  // row deterministically — independent of relevance scoring.
+  media_key: string | null
   created_at: string | null
   updated_at: string | null
 }
@@ -69,6 +73,7 @@ export interface AIMediaInput {
   tags?: string[]
   is_active?: boolean
   priority?: number
+  media_key?: string | null
 }
 
 export interface AIMediaUploadInput {
@@ -80,6 +85,17 @@ export interface AIMediaUploadInput {
   tags?: string[]
   is_active?: boolean
   priority?: number
+  media_key?: string | null
+}
+
+// Registry entry returned by GET /intelligence/ai-media/keys.
+// One per well-known slug the AI knows how to emit.
+export interface MediaKeyOption {
+  key: string
+  label_ar: string
+  description_ar: string
+  intent: 'payment' | 'shipping' | 'store' | 'product_meta' | 'legal' | string
+  expected_media_type: 'image' | 'video' | 'document' | string
 }
 
 async function uploadAIMedia(payload: AIMediaUploadInput): Promise<AIMediaItem> {
@@ -94,6 +110,9 @@ async function uploadAIMedia(payload: AIMediaUploadInput): Promise<AIMediaItem> 
   if (payload.tags && payload.tags.length) form.append('tags', payload.tags.join(','))
   if (payload.priority !== undefined) form.append('priority', String(payload.priority))
   if (payload.is_active !== undefined) form.append('is_active', String(payload.is_active))
+  if (payload.media_key !== undefined && payload.media_key !== null) {
+    form.append('media_key', payload.media_key)
+  }
 
   let res: Response
   try {
@@ -167,6 +186,13 @@ export const intelligenceLibrariesApi = {
   },
 
   // ── AI media library ──────────────────────────────────────────────────
+  // List of well-known media keys the AI knows how to emit. The
+  // dashboard renders this as a dropdown grouped by intent so the
+  // merchant doesn't have to memorise slugs.
+  listMediaKeys() {
+    return apiCall<{ items: MediaKeyOption[] }>('/intelligence/ai-media/keys')
+  },
+
   listAIMedia(onlyActive = false, mediaType?: AIMediaType) {
     const params = new URLSearchParams()
     if (onlyActive) params.set('only_active', 'true')

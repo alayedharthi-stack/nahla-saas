@@ -529,6 +529,86 @@ def format_libraries_for_prompt(merchant_context: Dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
+# ──────────────────────────────────────────────────────────────────
+# Resolver-aware prompt overlay (Product + Media key markers)
+# ──────────────────────────────────────────────────────────────────
+
+
+_MARKER_PROTOCOL_PREAMBLE = (
+    "## بروتوكول الوسائط والمنتجات (مهم جداً)\n"
+    "أنت ترد على عملاء واتساب — لا تكتفِ بالنص النصي عند طلب صورة، "
+    "منتج، باركود، أو فيديو. استخدم الرموز التالية في ردك وسيقوم النظام "
+    "تلقائياً باستبدالها بالملف أو المنتج الحقيقي:\n"
+    "\n"
+    "1) إذا طلب العميل أو احتاج لمنتج موجود في المتجر:\n"
+    "   اكتب في ردك: [PRODUCT:اسم المنتج كما هو في الكتالوج]\n"
+    "   - سيقوم النظام بإرسال صورة المنتج + السعر + رابط الشراء "
+    "تلقائياً بعد نص ردك.\n"
+    "   - لا تخمّن السعر ولا الرابط ولا تنسخ الصورة بنفسك.\n"
+    "   - يمكن استخدام أكثر من رمز إذا اقترحت أكثر من منتج "
+    "(بحد أقصى 3).\n"
+    "\n"
+    "2) إذا طلب العميل وسيطاً معتمداً (باركود تحويل، صورة موقع، "
+    "فيديو شرح):\n"
+    "   اكتب: [MEDIA_KEY:<مفتاح_الوسيط>]\n"
+    "   - استخدم فقط المفاتيح من قائمة \"أدوات الوسائط المتوفرة\" أدناه.\n"
+    "   - إذا لم يكن المفتاح مذكوراً في القائمة فلا تخترعه — اكتب "
+    "البديل النصي فقط.\n"
+    "\n"
+    "قاعدة ذهبية:\n"
+    "- المنتجات → استخدم [PRODUCT:...]، ليس قاعدة المعرفة وحدها.\n"
+    "- الوسائط (باركود/فيديو/شهادة/موقع) → استخدم [MEDIA_KEY:...].\n"
+    "- لا تكتب الرابط أو الصورة كنص — استخدم الرمز فقط.\n"
+)
+
+
+def format_resolver_overlay_for_prompt(
+    *,
+    available_media_keys_block: str = "",
+    catalog_has_products: bool = False,
+) -> str:
+    """Build the resolver-marker protocol overlay.
+
+    Inserted into the system prompt by ``whatsapp_webhook.py``
+    AFTER the existing ``format_libraries_for_prompt`` block.
+
+    ``available_media_keys_block``:
+        the output of
+        ``services.media_key_registry.format_keys_for_prompt``
+        for THIS tenant. Empty string when no registry-keyed
+        assets exist (we still tell Claude about ``[PRODUCT:...]``
+        in that case).
+
+    ``catalog_has_products``:
+        false when the tenant has zero synced products — we omit
+        the product-marker section so Claude doesn't promise an
+        attachment it has no chance of resolving.
+    """
+    if not catalog_has_products and not available_media_keys_block:
+        # Tenant has neither catalog nor keyed media. Nothing for
+        # the resolver to do — return empty so the prompt stays lean.
+        return ""
+
+    parts: List[str] = [_MARKER_PROTOCOL_PREAMBLE]
+
+    if available_media_keys_block:
+        parts.append(
+            "\nأدوات الوسائط المتوفرة في هذا المتجر:\n"
+            + available_media_keys_block
+        )
+    if not catalog_has_products:
+        # Strip the product part: replace the [PRODUCT:...] section
+        # with a one-line disabler so Claude doesn't emit unresolvable
+        # product markers for catalog-less tenants. We do this by
+        # inserting an explicit override after the preamble.
+        parts.append(
+            "\nملاحظة: هذا المتجر لا يوجد لديه كتالوج منتجات متزامن، "
+            "لذا لا تستخدم [PRODUCT:...] في هذه المحادثة."
+        )
+
+    return "\n".join(parts)
+
+
 # ── Marker extraction (called by the WhatsApp webhook) ───────────────────────
 
 

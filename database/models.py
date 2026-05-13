@@ -2619,6 +2619,19 @@ class AIMediaItem(Base):
     __tablename__ = "ai_media_library"
     __table_args__ = (
         Index("ix_ai_media_library_tenant_active_priority", "tenant_id", "is_active", "priority"),
+        # Stable, namespaced lookup key. NULL is allowed (legacy
+        # rows + free-form merchant uploads stay relevance-ranked
+        # by title/tags as before). When SET, the resolver
+        # prefers a `media_key` exact match over relevance scoring
+        # — that is the contract the LLM relies on for things like
+        # ``[MEDIA_KEY:payment_rajhi_barcode]``.
+        Index(
+            "ix_ai_media_library_tenant_media_key",
+            "tenant_id", "media_key",
+            unique=True,
+            postgresql_where=sa.text("media_key IS NOT NULL"),
+            sqlite_where=sa.text("media_key IS NOT NULL"),
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -2636,6 +2649,13 @@ class AIMediaItem(Base):
     storage_path = Column(Text, nullable=True)
     mime_type = Column(String(128), nullable=True)
     file_size_bytes = Column(sa.BigInteger, nullable=True)
+    # Stable namespaced key (e.g. ``payment_rajhi_barcode``,
+    # ``product_usage_video``). Tenant-scoped unique when set,
+    # NULL allowed for free-form uploads. See
+    # ``services/media_key_registry.py`` for the canonical
+    # registry of well-known keys + the Arabic merchant labels
+    # the UI presents in the upload form.
+    media_key = Column(String(64), nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

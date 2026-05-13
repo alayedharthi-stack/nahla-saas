@@ -3559,6 +3559,44 @@ async def _handle_merchant_message(
                 store_context_text=store_context_text,
             )
 
+            # ── Resolver-marker protocol overlay ──────────────────────────
+            # Tell Claude about ``[PRODUCT:<name>]`` and
+            # ``[MEDIA_KEY:<slug>]`` markers + the concrete list of
+            # registry-keyed media this tenant has uploaded. The
+            # overlay self-suppresses when neither the catalog nor
+            # the keyed media library has content. See
+            # ``core.ai_libraries.format_resolver_overlay_for_prompt``
+            # for the contract.
+            try:
+                from services import media_resolver as _media_res  # noqa: PLC0415
+                from services import media_key_registry as _media_reg  # noqa: PLC0415
+                from core.ai_libraries import (  # noqa: PLC0415
+                    format_resolver_overlay_for_prompt,
+                )
+                _keys_avail = _media_res.available_keys_for_tenant(db, tenant_id)
+                _keys_block = _media_reg.format_keys_for_prompt(_keys_avail)
+                # "catalog has products?" — cheap existence query.
+                from models import Product as _Product  # noqa: PLC0415
+                _has_catalog = (
+                    db.query(_Product.id)
+                      .filter(_Product.tenant_id == tenant_id)
+                      .limit(1)
+                      .first()
+                    is not None
+                )
+                _resolver_overlay = format_resolver_overlay_for_prompt(
+                    available_media_keys_block=_keys_block,
+                    catalog_has_products=_has_catalog,
+                )
+                if _resolver_overlay:
+                    system_prompt = f"{system_prompt}\n\n{_resolver_overlay}"
+            except Exception as _ovr_exc:  # noqa: BLE001
+                # Never let the overlay computation crash the reply
+                # path — the AI can still answer in pure text.
+                logger.warning(
+                    "[Merchant] resolver overlay skipped: %s", _ovr_exc,
+                )
+
             # ── Anti-repeat + recent-message-priority overlay ─────────────
             # The legacy path has none of the structured intent / state /
             # dedup protections that the Brain provides, so without these
@@ -3750,6 +3788,134 @@ async def _handle_merchant_message(
                 logger.warning(
                     "[AIMedia.attach] extract failed tenant=%s err=%s",
                     tenant_id, _media_exc,
+                )
+
+        # ── [MEDIA_KEY:<slug>] markers ─────────────────────────────
+        # New resolver path (Phase 5). Same shape of extraction as
+        # ``[MEDIA:<id>]`` above but the LLM uses stable namespaced
+        # keys (e.g. ``payment_rajhi_barcode``). The resolver
+        # gracefully skips keys for which the merchant hasn't
+        # uploaded an asset — those land in ``_missing_media_keys``
+        # so the caller can decide whether to append the
+        # registry's text fallback to the reply.
+        _missing_media_keys: List[str] = []
+        if reply and "[MEDIA_KEY:" in reply.upper():
+            try:
+                from services.media_resolver import (  # noqa: PLC0415
+                    extract_media_key_markers as _extract_media_keys,
+                )
+                _cleaned_reply2, _key_attachments, _missing_media_keys = (
+                    _extract_media_keys(
+                        db, tenant_id, reply, max_attachments=2,
+                    )
+                )
+                if _key_attachments:
+                    _media_attachments.extend(_key_attachments)
+                    logger.info(
+                        "[AIMedia.attach] tenant=%s key_attachments=%d keys=%s",
+                        tenant_id, len(_key_attachments),
+                        [a.get("media_key") for a in _key_attachments],
+                    )
+                if _cleaned_reply2 != reply:
+                    reply = _cleaned_reply2
+                if _missing_media_keys:
+                    # Append registry fallback text for missing keys
+                    # so the conversation doesn't go silent. We
+                    # honour at most the FIRST missing key — chaining
+                    # multiple fallback blurbs would be noisy.
+                    try:
+                        from services.media_key_registry import (  # noqa: PLC0415
+                            get as _reg_get,
+                        )
+                        mk = _reg_get(_missing_media_keys[0])
+                        if mk and mk.fallback_text:
+                            reply = (
+                                f"{reply}\n\n{mk.fallback_text}"
+                                if reply.strip() else mk.fallback_text
+                            )
+                            logger.info(
+                                "[AIMedia.attach] tenant=%s key=%s "
+                                "asset_missing fallback_text_appended",
+                                tenant_id, _missing_media_keys[0],
+                            )
+                    except Exception:
+                        pass
+            except Exception as _mk_exc:  # noqa: BLE001
+                logger.warning(
+                    "[AIMedia.attach] MEDIA_KEY extract failed tenant=%s err=%s",
+                    tenant_id, _mk_exc,
+                )
+
+        # ── [PRODUCT:<query>] markers ──────────────────────────────
+        # Resolve LLM-cited products against the synced catalog and
+        # collect them as product-card attachments. The actual send
+        # (image + caption + cta_url button) lives further down in
+        # the outbound dispatch loop.
+        _product_attachments: List[Dict[str, Any]] = []
+        if reply and "[PRODUCT:" in reply.upper():
+            try:
+                from services.product_resolver import (  # noqa: PLC0415
+                    extract_product_markers as _extract_products,
+                    format_product_card_caption as _product_caption,
+                )
+                # Try to learn the customer id so affinity ranking
+                # can fire. The conversation may not yet be persisted
+                # in the very first turn — that's fine, we just skip
+                # the boost.
+                _cust_id_for_aff = None
+                try:
+                    _cust_id_for_aff = getattr(convo, "customer_id", None) or None
+                except Exception:
+                    pass
+
+                _cleaned_reply3, _resolutions, _missing_products = (
+                    _extract_products(
+                        db, tenant_id, reply,
+                        customer_id=_cust_id_for_aff,
+                        max_attachments=3,
+                    )
+                )
+                if _cleaned_reply3 != reply:
+                    reply = _cleaned_reply3
+                for _res in _resolutions:
+                    # We re-shape into the SAME dict shape the
+                    # webhook's media-attachment loop already
+                    # understands (so the down-stream sender stays
+                    # uniform). The "kind" key tags this as a
+                    # product card so the sender knows to attach a
+                    # CTA-URL button to the buy link instead of
+                    # treating it like a static media file.
+                    _product_attachments.append({
+                        "kind":         "product_card",
+                        "id":           _res.id,
+                        "title":        _res.title,
+                        "media_type":   "image",
+                        "file_url":     _res.image_url,
+                        "caption":      _product_caption(_res),
+                        "product_url":  _res.product_url,
+                        "price":        _res.price,
+                        "in_stock":     _res.in_stock,
+                        "external_id":  _res.external_id,
+                        "confidence":   _res.confidence,
+                    })
+                if _resolutions:
+                    logger.info(
+                        "[ProductResolver] tenant=%s resolved=%d "
+                        "missing=%d ids=%s",
+                        tenant_id, len(_resolutions),
+                        len(_missing_products),
+                        [r.id for r in _resolutions],
+                    )
+                if _missing_products and not _resolutions:
+                    logger.info(
+                        "[ProductResolver] tenant=%s ALL product markers "
+                        "unresolved queries=%s — letting text-only reply pass",
+                        tenant_id, _missing_products[:3],
+                    )
+            except Exception as _p_exc:  # noqa: BLE001
+                logger.warning(
+                    "[ProductResolver] extract failed tenant=%s err=%s",
+                    tenant_id, _p_exc,
                 )
 
         # ── Payment-asset HARD OVERRIDE ─────────────────────────────────
@@ -3984,8 +4150,48 @@ async def _handle_merchant_message(
             except Exception:  # noqa: BLE001
                 _validate_media = None  # type: ignore[assignment]
 
-            for _att in _media_attachments:
-                if _validate_media is not None:
+            # Concatenate library media + product cards into one
+            # ordered list so the customer sees them in the same
+            # sequence the LLM intended. Library media go FIRST
+            # (typically explanatory — payment barcode, certificate)
+            # and product cards SECOND so the customer sees the
+            # "context" before the "offer".
+            _all_attachments = list(_media_attachments) + list(
+                _product_attachments  # may be empty
+            )
+
+            for _att in _all_attachments:
+                _is_product = (_att.get("kind") == "product_card")
+
+                # Library media goes through the full validation
+                # gate (tenant scope, MIME, size, HTTPS). Product
+                # cards are validated separately: we trust the
+                # catalog adapter for the image URL but we DO need
+                # to skip cards with no image (so we don't try to
+                # send an empty link to Meta).
+                if _is_product:
+                    if not _att.get("file_url"):
+                        logger.info(
+                            "[ProductCard.send] tenant=%s product_id=%s "
+                            "SKIPPED reason=no_image_url url=%s",
+                            tenant_id, _att.get("id"),
+                            _att.get("product_url"),
+                        )
+                        # Still send the URL as a CTA-only message
+                        # so the customer at least gets the link.
+                        if _att.get("product_url"):
+                            try:
+                                await _send_cta_url(
+                                    phone_id=phone_id, to=to,
+                                    body_text=_att.get("title") or "عرض المنتج",
+                                    btn_label="عرض المنتج",
+                                    btn_url=_att.get("product_url"),
+                                    _tenant_id=tenant_id, _db=db,
+                                )
+                            except Exception:
+                                pass
+                        continue
+                elif _validate_media is not None:
                     _ok, _why, _normed = _validate_media(
                         _att, expected_tenant_id=tenant_id, db=db,
                     )
@@ -4001,6 +4207,12 @@ async def _handle_merchant_message(
                 _filename = _att.get("filename")
                 if _filename is None and _media_type_norm in ("document", "pdf"):
                     _filename = _att.get("title") or "document"
+                # Product cards carry their caption (title + price +
+                # short description) on the image itself; library
+                # media don't use captions today, so this stays
+                # ``None`` for the non-product path and matches the
+                # previous behaviour exactly.
+                _caption = _att.get("caption") if _is_product else None
                 try:
                     _media_ok = await _send_media_message(
                         phone_id=phone_id,
@@ -4008,14 +4220,49 @@ async def _handle_merchant_message(
                         media_type=_media_type_norm,
                         media_url=_att.get("file_url") or "",
                         filename=_filename,
+                        caption=_caption,
                         _tenant_id=tenant_id,
                         _db=db,
                     )
-                    logger.info(
-                        "[AIMedia.send] tenant=%s to=%s id=%s type=%s ok=%s",
-                        tenant_id, to, _att.get("id"),
-                        _media_type_norm, _media_ok,
-                    )
+                    if _is_product:
+                        logger.info(
+                            "[ProductCard.send] tenant=%s to=%s product_id=%s "
+                            "ext_id=%s ok=%s confidence=%s",
+                            tenant_id, to, _att.get("id"),
+                            _att.get("external_id"), _media_ok,
+                            _att.get("confidence"),
+                        )
+                    else:
+                        logger.info(
+                            "[AIMedia.send] tenant=%s to=%s id=%s type=%s ok=%s",
+                            tenant_id, to, _att.get("id"),
+                            _media_type_norm, _media_ok,
+                        )
+
+                    # After the product image lands, follow up with
+                    # a CTA-URL button to the buy page so the
+                    # customer can checkout in one tap. We do NOT
+                    # rely on the caption containing a link — Meta
+                    # won't auto-linkify image captions, and a
+                    # separate interactive message has much higher
+                    # click-through. Send only when both the send
+                    # succeeded and a product URL exists.
+                    if _is_product and _media_ok and _att.get("product_url"):
+                        try:
+                            await _send_cta_url(
+                                phone_id=phone_id, to=to,
+                                body_text="اضغط زر «عرض المنتج» لإكمال "
+                                          "الطلب من المتجر مباشرة.",
+                                btn_label="عرض المنتج",
+                                btn_url=_att.get("product_url"),
+                                _tenant_id=tenant_id, _db=db,
+                            )
+                        except Exception as _cta_exc:
+                            logger.debug(
+                                "[ProductCard.cta] tenant=%s product_id=%s "
+                                "cta_failed: %s",
+                                tenant_id, _att.get("id"), _cta_exc,
+                            )
                 except Exception as _media_send_exc:
                     logger.warning(
                         "[AIMedia.send] tenant=%s id=%s failed: %s",

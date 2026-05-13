@@ -52,6 +52,7 @@ import {
   type AIMediaType,
   type ManualCoupon,
   type ManualCouponInput,
+  type MediaKeyOption,
 } from '../api/intelligenceLibraries'
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -505,6 +506,10 @@ interface MediaFormState {
   tags: string
   priority: number
   is_active: boolean
+  // Optional stable namespaced key the AI emits as
+  // [MEDIA_KEY:<slug>]. Empty string means "no key" — only
+  // sent to the API as ``null``/omitted.
+  media_key: string
 }
 
 const _emptyMediaForm = (): MediaFormState => ({
@@ -518,6 +523,7 @@ const _emptyMediaForm = (): MediaFormState => ({
   tags: '',
   priority: 100,
   is_active: true,
+  media_key: '',
 })
 
 const _MEDIA_TYPE_LABELS: Record<AIMediaType, string> = {
@@ -605,6 +611,7 @@ export function AIMediaLibraryPanel() {
       tags: (row.tags || []).join(', '),
       priority: row.priority,
       is_active: row.is_active,
+      media_key: row.media_key ?? '',
     })
     setUploadFile(null)
     setError(null)
@@ -628,6 +635,7 @@ export function AIMediaLibraryPanel() {
       let saved: AIMediaItem
       if (form.id == null) {
         // Create flow — either upload a file or save an external URL.
+        const mediaKey = form.media_key.trim() || null
         if (uploadFile) {
           saved = await intelligenceLibrariesApi.uploadAIMedia({
             file: uploadFile,
@@ -638,6 +646,7 @@ export function AIMediaLibraryPanel() {
             tags: tagsArr,
             priority: form.priority,
             is_active: form.is_active,
+            media_key: mediaKey,
           })
         } else {
           if (!form.file_url.trim()) {
@@ -655,6 +664,7 @@ export function AIMediaLibraryPanel() {
             tags: tagsArr,
             priority: form.priority,
             is_active: form.is_active,
+            media_key: mediaKey,
           })
         }
         // Optimistic prepend so the merchant sees the item the moment
@@ -672,6 +682,7 @@ export function AIMediaLibraryPanel() {
           tags: tagsArr,
           priority: form.priority,
           is_active: form.is_active,
+          media_key: form.media_key.trim() || null,
         })
         setItems((prev) => prev.map((r) => (r.id === saved.id ? saved : r)))
         setSuccess(`تم تحديث الوسيط "${saved.title}"`)
@@ -853,9 +864,17 @@ function MediaListRow({
             </p>
           )}
 
-          {!!(item.tags && item.tags.length) && (
+          {(item.media_key || (item.tags && item.tags.length > 0)) && (
             <div className="flex items-center gap-1 mt-1.5 flex-wrap">
-              {item.tags.map((t) => (
+              {item.media_key ? (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-700 px-2 py-0.5 text-[11px] font-mono"
+                  title={`المفتاح الذي يستخدمه الذكاء: [MEDIA_KEY:${item.media_key}]`}
+                >
+                  🔑 {item.media_key}
+                </span>
+              ) : null}
+              {(item.tags || []).map((t) => (
                 <span
                   key={t}
                   className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-700 px-2 py-0.5 text-[11px]"
@@ -904,6 +923,17 @@ function MediaListRow({
 
 // ── Media edit modal ────────────────────────────────────────────────────────
 
+// Localised label for each `media_key` intent family.
+// Surfaces the dropdown's section groupings.
+const _MEDIA_KEY_INTENT_LABEL: Record<string, string> = {
+  payment:       'الدفع والتحويل',
+  shipping:      'الشحن والتوصيل',
+  store:         'بيانات المتجر',
+  product_meta:  'وسائط المنتجات',
+  legal:         'الثقة والاعتمادات',
+}
+
+
 function MediaEditModal({
   form,
   setForm,
@@ -926,6 +956,35 @@ function MediaEditModal({
   error: string | null
 }) {
   const isEdit = form.id != null
+
+  // Pull the well-known media-key registry once when the modal
+  // mounts. The endpoint is global + cheap (~12 rows of metadata)
+  // so we don't bother caching across sessions.
+  const [mediaKeys, setMediaKeys] = useState<MediaKeyOption[]>([])
+  useEffect(() => {
+    let alive = true
+    void intelligenceLibrariesApi
+      .listMediaKeys()
+      .then((res) => {
+        if (alive) setMediaKeys(res.items || [])
+      })
+      .catch(() => {
+        // Non-fatal — the merchant can still save with no key.
+        if (alive) setMediaKeys([])
+      })
+    return () => { alive = false }
+  }, [])
+
+  // Group by intent so the dropdown shows clean sections rather
+  // than a flat alphabetical mess.
+  const keysByIntent = useMemo(() => {
+    const groups = new Map<string, MediaKeyOption[]>()
+    for (const k of mediaKeys) {
+      if (!groups.has(k.intent)) groups.set(k.intent, [])
+      groups.get(k.intent)!.push(k)
+    }
+    return Array.from(groups.entries())
+  }, [mediaKeys])
 
   // Build a temporary object URL so the merchant can preview the file
   // they're about to upload before they commit. Revoke when the file
@@ -1158,6 +1217,32 @@ function MediaEditModal({
             icon={<Sparkles className="w-4 h-4" />}
             hint="نحلة تختار الوسيط بناءً على هذا النص + الوسوم — كن واضحاً ومحدداً."
           >
+            <Field label="مفتاح ربط الوسيط (اختياري — للوسائط الشائعة)">
+              <select
+                value={form.media_key}
+                onChange={(e) => setForm({ ...form, media_key: e.target.value })}
+                className="input-base"
+              >
+                <option value="">— بدون مفتاح ربط (يعتمد على الوسوم والعنوان) —</option>
+                {keysByIntent.map(([intent, keys]) => (
+                  <optgroup
+                    key={intent}
+                    label={_MEDIA_KEY_INTENT_LABEL[intent] || intent}
+                  >
+                    {keys.map((k) => (
+                      <option key={k.key} value={k.key}>
+                        {k.label_ar} ({k.key})
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                المفتاح يربط هذا الوسيط بنية محددة (مثل «باركود الراجحي»).
+                عند الحاجة سيرسله الذكاء تلقائياً دون الاعتماد على البحث
+                النصي. يمكن استخدام مفتاح واحد لكل متجر لكل نوع.
+              </p>
+            </Field>
             <Field label="متى يستخدمه الذكاء">
               <textarea
                 value={form.usage_context}

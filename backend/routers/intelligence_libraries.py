@@ -175,6 +175,11 @@ class AIMediaIn(BaseModel):
     tags: List[str] = Field(default_factory=list)
     is_active: bool = True
     priority: int = Field(100, ge=0, le=10000)
+    # Stable namespaced key (e.g. ``payment_rajhi_barcode``).
+    # When set, the resolver looks up this row by exact match
+    # before falling back to tag/title relevance. Optional —
+    # rows without a key keep the legacy relevance-only behaviour.
+    media_key: Optional[str] = Field(None, max_length=64)
 
 
 class AIMediaPatch(BaseModel):
@@ -187,6 +192,7 @@ class AIMediaPatch(BaseModel):
     tags: Optional[List[str]] = None
     is_active: Optional[bool] = None
     priority: Optional[int] = Field(None, ge=0, le=10000)
+    media_key: Optional[str] = Field(None, max_length=64)
 
 
 # ── Serializers ──────────────────────────────────────────────────────────────
@@ -231,9 +237,55 @@ def _serialize_media(m: AIMediaItem, request: Optional[Request] = None) -> Dict[
         "storage_kind": m.storage_kind,
         "mime_type": m.mime_type,
         "file_size_bytes": int(m.file_size_bytes) if m.file_size_bytes is not None else None,
+        "media_key": m.media_key,
         "created_at": m.created_at.isoformat() if m.created_at else None,
         "updated_at": m.updated_at.isoformat() if m.updated_at else None,
     }
+
+
+# ── media_key validation ────────────────────────────────────────────────────
+#
+# Reject keys that aren't in the canonical registry. Free-form
+# strings would break the LLM contract (Claude can't emit a
+# marker for a key it doesn't know about) — so we fail fast at
+# intake time with a clear error code the dashboard can map to
+# a "اختر مفتاحاً من القائمة" message.
+
+def _validate_media_key(key: Optional[str]) -> Optional[str]:
+    if key is None:
+        return None
+    key = (key or "").strip().lower()
+    if not key:
+        return None
+    from services.media_key_registry import is_valid_key  # noqa: PLC0415
+    if not is_valid_key(key):
+        raise HTTPException(
+            status_code=400,
+            detail="invalid_media_key",
+        )
+    return key
+
+
+def _check_media_key_unique_for_tenant(
+    db: Session, tenant_id: int, key: Optional[str], *, exclude_id: Optional[int] = None,
+) -> None:
+    """Tenant-scoped unique constraint. The DB has a partial unique
+    index (Postgres) + we re-check at the app layer so we can return
+    a friendly error code instead of letting the IntegrityError
+    bubble up as a 500."""
+    if not key:
+        return
+    q = (
+        db.query(AIMediaItem.id)
+        .filter(AIMediaItem.tenant_id == tenant_id, AIMediaItem.media_key == key)
+    )
+    if exclude_id is not None:
+        q = q.filter(AIMediaItem.id != exclude_id)
+    if q.first():
+        raise HTTPException(
+            status_code=409,
+            detail="duplicate_media_key",
+        )
 
 
 def _norm_media_type(raw: Optional[str]) -> str:
@@ -406,6 +458,34 @@ async def delete_manual_coupon(
 # ── AI media library endpoints ───────────────────────────────────────────────
 
 
+@router.get("/intelligence/ai-media/keys")
+async def list_known_media_keys() -> Dict[str, Any]:
+    """List every well-known media key the dashboard can suggest
+    in the upload form.
+
+    Pure read-only — no tenant scoping needed (the registry is
+    global). The dashboard renders this as a dropdown grouped by
+    ``intent`` so the merchant can pick the right slug for the
+    asset they're uploading. The key is what the AI will emit in
+    ``[MEDIA_KEY:<slug>]`` markers, so the registry being closed
+    + curated is part of the contract — see
+    ``backend/services/media_key_registry.py``.
+    """
+    from services.media_key_registry import all_keys  # noqa: PLC0415
+    return {
+        "items": [
+            {
+                "key": mk.key,
+                "label_ar": mk.label_ar,
+                "description_ar": mk.description_ar,
+                "intent": mk.intent,
+                "expected_media_type": mk.expected_media_type,
+            }
+            for mk in all_keys()
+        ],
+    }
+
+
 @router.get("/intelligence/ai-media")
 async def list_ai_media(
     request: Request,
@@ -441,6 +521,9 @@ async def create_ai_media(
     if not (url.startswith("http://") or url.startswith("https://")):
         raise HTTPException(status_code=400, detail="file_url_must_be_http_https")
 
+    norm_key = _validate_media_key(payload.media_key)
+    _check_media_key_unique_for_tenant(db, tenant_id, norm_key)
+
     row = AIMediaItem(
         tenant_id=tenant_id,
         title=payload.title.strip(),
@@ -453,6 +536,7 @@ async def create_ai_media(
         is_active=bool(payload.is_active),
         priority=int(payload.priority),
         storage_kind="external",
+        media_key=norm_key,
     )
     db.add(row)
     db.commit()
@@ -475,6 +559,7 @@ async def upload_ai_media(
     tags: Optional[str] = Form(None),
     priority: int = Form(100),
     is_active: bool = Form(True),
+    media_key: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
     """Upload a binary file (multipart) to local storage and register it.
@@ -510,6 +595,9 @@ async def upload_ai_media(
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"upload_write_failed:{exc}")
 
+    norm_key = _validate_media_key(media_key)
+    _check_media_key_unique_for_tenant(db, tenant_id, norm_key)
+
     row = AIMediaItem(
         tenant_id=tenant_id,
         title=(title or "").strip() or original_name,
@@ -525,6 +613,7 @@ async def upload_ai_media(
         storage_path=str(storage_path),
         mime_type=file.content_type or mimetypes.guess_type(original_name)[0],
         file_size_bytes=len(content),
+        media_key=norm_key,
     )
     db.add(row)
     db.flush()
@@ -559,6 +648,15 @@ async def update_ai_media(
         data["media_type"] = _norm_media_type(data["media_type"])
     if "tags" in data:
         data["tags"] = _norm_tags(data["tags"])
+    if "media_key" in data:
+        # ``media_key=None`` explicitly clears the key. Anything
+        # else must pass registry validation + tenant-scoped
+        # uniqueness.
+        norm_key = _validate_media_key(data["media_key"])
+        _check_media_key_unique_for_tenant(
+            db, tenant_id, norm_key, exclude_id=row.id,
+        )
+        data["media_key"] = norm_key
     if "file_url" in data and data["file_url"]:
         url = data["file_url"].strip()
         if not (url.startswith("http://") or url.startswith("https://")):
