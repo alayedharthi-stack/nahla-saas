@@ -55,6 +55,7 @@ import ZidCallback      from './pages/ZidCallback'
 import Register from './pages/Register'
 import WhatsAppConnect from './pages/WhatsAppConnect'
 import WaUsage        from './pages/WaUsage'
+import DeliveryQuality from './pages/DeliveryQuality'
 import PrivacyPolicy  from './pages/PrivacyPolicy'
 import DataDeletion   from './pages/DataDeletion'
 import Terms          from './pages/Terms'
@@ -143,6 +144,7 @@ export default function App() {
             <Route path="store-integration"  element={<StoreIntegration />} />
             <Route path="whatsapp-connect"   element={<WhatsAppConnect />} />
             <Route path="wa-usage"           element={<WaUsage />} />
+            <Route path="delivery-quality"   element={<DeliveryQuality />} />
             <Route path="handoff-queue"      element={<HandoffQueue />} />
             <Route path="system-status"      element={<SystemStatus />} />
             <Route path="merchants"          element={<Merchants />} />

@@ -74,6 +74,34 @@ class CreateCampaignIn(BaseModel):
     # same audience.
     idempotency_key: Optional[str] = None
 
+    # ── Wave/Batch sending ───────────────────────────────────────────
+    # Strategy: ``immediate`` (default, legacy), ``batched`` (the
+    # merchant supplies ``batch_size`` + ``delay_between_batches_sec``)
+    # or ``adaptive`` (the backend derives both from the current
+    # Quality Score / Meta tier — see ``services/wave_scheduler.py``).
+    # The backend will silently downgrade non-immediate strategies
+    # to ``immediate`` for campaigns whose final audience falls
+    # below ``WAVE_THRESHOLD_RECIPIENTS``; small merchants don't
+    # need a wave UI for an 80-recipient broadcast.
+    send_strategy: Optional[str] = None
+    batch_size: Optional[int] = None
+    delay_between_batches_sec: Optional[int] = None
+
+
+class PreflightStrategyIn(BaseModel):
+    """Body for the preflight-strategy endpoint.
+
+    The merchant supplies the audience they intend to target
+    (resolved by the wizard's segment picker) plus their proposed
+    strategy. The endpoint returns: (a) what the adaptive engine
+    would have chosen for that audience, and (b) a sanity check
+    on the merchant's manual choice if they supplied one.
+    """
+    audience_count: int
+    proposed_strategy: Optional[str] = None
+    proposed_batch_size: Optional[int] = None
+    proposed_delay_between_batches_sec: Optional[int] = None
+
 
 class UpdateCampaignStatusIn(BaseModel):
     status: str  # active | paused | completed
@@ -182,6 +210,11 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
         "schedule_type": c.schedule_type,
         "schedule_time": c.schedule_time.isoformat() if c.schedule_time else None,
         "delay_minutes": c.delay_minutes,
+        # Wave/Batch — surfaced so the UI's campaign card can render
+        # "إرسال على دفعات" + "دفعة 2 من 8" without a second call.
+        "send_strategy": getattr(c, "send_strategy", None) or "immediate",
+        "batch_size": getattr(c, "batch_size", None),
+        "delay_between_batches_sec": getattr(c, "delay_between_batches_sec", None),
         "coupon_code": c.coupon_code or "",
         "auto_coupon": auto_coupon,
         "discount_percent": discount_pct,
@@ -395,11 +428,95 @@ async def create_campaign(
         tpl_vars["_idempotency_key"] = idem_key
 
     is_immediate = body.schedule_type == "immediate"
+
+    # ── Wave/Batch strategy resolution ──────────────────────────────
+    # The merchant may have asked for ``batched`` / ``adaptive`` in
+    # the wizard. We resolve the FINAL strategy here so the row
+    # we persist already carries the concrete (strategy, batch_size,
+    # delay) tuple — no ambiguity for the dispatcher later.
+    #
+    # The auto-downgrade to ``immediate`` for small audiences is
+    # the central UX guarantee: a coffee shop with 80 customers
+    # never sees a "wave 1 of 1" UI even if they accidentally
+    # clicked "Batched".
+    from services import wave_scheduler as _ws  # noqa: PLC0415
+
+    requested_strategy = (body.send_strategy or "immediate").strip().lower()
+    if requested_strategy not in _ws.VALID_STRATEGIES:
+        requested_strategy = "immediate"
+
+    resolved_strategy = requested_strategy
+    resolved_batch_size: Optional[int] = body.batch_size
+    resolved_delay: Optional[int] = body.delay_between_batches_sec
+    wave_plan: Optional[_ws.WavePlanSpec] = None
+
+    audience_for_plan = max(0, int(body.audience_count or 0))
+    if (
+        requested_strategy != _ws.STRATEGY_IMMEDIATE
+        and audience_for_plan >= _ws.WAVE_THRESHOLD_RECIPIENTS
+    ):
+        if requested_strategy == _ws.STRATEGY_ADAPTIVE:
+            tier, meta_rating = _ws.latest_quality_for_tenant(
+                db=db, tenant_id=tenant_id,
+            )
+            wave_plan = _ws.compute_adaptive_strategy(
+                audience_size=audience_for_plan,
+                quality_tier=tier,
+                meta_quality_rating=meta_rating,
+            )
+            resolved_strategy = wave_plan.strategy
+            resolved_batch_size = wave_plan.batch_size
+            resolved_delay = wave_plan.delay_between_batches_sec
+        else:  # batched
+            bs = max(1, int(body.batch_size or 0)) if body.batch_size else 1000
+            dl = max(0, int(body.delay_between_batches_sec or 0))
+            wave_plan = _ws.WavePlanSpec(
+                strategy=_ws.STRATEGY_BATCHED,
+                audience_size=audience_for_plan,
+                batch_size=bs,
+                delay_between_batches_sec=dl,
+                total_waves=max(1, (audience_for_plan + bs - 1) // bs),
+                estimated_completion_at=None,
+                rationale=(
+                    f"خطة يدوية: {audience_for_plan:,} مستلم على دفعات "
+                    f"بحجم {bs:,} مع فاصل {dl} ثانية."
+                ),
+                waves=_ws.plan_waves(
+                    audience_size=audience_for_plan,
+                    batch_size=bs,
+                    delay_between_batches_sec=dl,
+                ),
+            )
+            resolved_batch_size = bs
+            resolved_delay = dl
+    else:
+        # Force immediate when the audience is too small for waves
+        # or when the merchant explicitly chose immediate.
+        resolved_strategy = _ws.STRATEGY_IMMEDIATE
+        resolved_batch_size = None
+        resolved_delay = None
+
+    # Wave-mode campaigns NEVER go through the legacy "spawn
+    # dispatcher in a background thread" path — the wave scheduler
+    # picks them up off the ``campaign_waves`` queue. They start
+    # as ``scheduled`` so they show up correctly in the wizard's
+    # "scheduled campaigns" list while waves drain.
+    is_wave_mode = resolved_strategy != _ws.STRATEGY_IMMEDIATE
+
+    if is_wave_mode:
+        initial_status = "scheduled"
+    elif is_immediate:
+        initial_status = "active"
+    elif body.schedule_type == "scheduled" and schedule_dt:
+        initial_status = "scheduled"
+    else:
+        initial_status = "draft"
+
     campaign = Campaign(
         tenant_id=tenant_id,
         name=body.name,
         campaign_type=body.campaign_type,
-        status="active" if is_immediate else ("scheduled" if body.schedule_type == "scheduled" and schedule_dt else "draft"),
+        status=initial_status,
         template_id=str(template.id),
         template_name=template.name,
         template_language=template.language,
@@ -419,15 +536,26 @@ async def create_campaign(
         schedule_time=schedule_dt,
         delay_minutes=body.delay_minutes,
         coupon_code=body.coupon_code or None,
+        send_strategy=resolved_strategy,
+        batch_size=resolved_batch_size,
+        delay_between_batches_sec=resolved_delay,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
-        launched_at=datetime.now(timezone.utc) if is_immediate else None,
+        launched_at=datetime.now(timezone.utc) if (is_immediate or is_wave_mode) else None,
     )
     db.add(campaign)
     db.commit()
     db.refresh(campaign)
 
-    if is_immediate:
+    if is_wave_mode and wave_plan is not None and wave_plan.waves:
+        # The wave scheduler can ONLY pick up rows that exist.
+        # Snapshot recipients + materialise wave rows + assign
+        # send_log → wave_id synchronously here so the merchant
+        # sees a populated "wave 1 of N — starting now" timeline
+        # the moment the POST returns. Done inside a thread so
+        # the POST itself returns quickly.
+        _spawn_wave_prepare_in_background(campaign.id, wave_plan)
+    elif is_immediate:
         # Fire-and-forget on a dedicated thread so the wizard's POST
         # returns instantly even when the audience is huge — the
         # dispatcher's synchronous prep (snapshot + frequency cap +
@@ -2529,6 +2657,177 @@ def campaign_support_bundle(
     return bundle
 
 
+# ──────────────────────────────────────────────────────────────────
+# Wave / Batch — preflight & inspection endpoints
+# ──────────────────────────────────────────────────────────────────
+
+
+@router.post("/campaigns/preflight-strategy")
+def preflight_strategy(
+    body: PreflightStrategyIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Recommend a send strategy + concrete plan for a campaign-to-be.
+
+    Called by the wizard step that lets the merchant pick between
+    "إرسال فوري" / "إرسال على دفعات" / "تلقائي حسب جودة الرقم".
+    The endpoint never persists anything — it only inspects the
+    tenant's latest quality snapshot, runs the planner, and
+    returns:
+
+      * ``suggested.adaptive``  — what Nahla would pick automatically.
+      * ``suggested.threshold`` — the audience size below which
+        waves are never recommended (so the UI can grey-out the
+        batched/adaptive options for small campaigns).
+      * ``proposed`` (optional) — if the merchant supplied their
+        own ``proposed_strategy`` / ``proposed_batch_size`` /
+        ``proposed_delay_between_batches_sec``, we sanity-check
+        it and return the resolved plan so the wizard can show
+        "you chose 8 waves of 500 every 2h — total ~14h".
+
+    Pure-read, idempotent, safe to spam from the wizard.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    from services import wave_scheduler as ws  # noqa: PLC0415
+
+    audience = max(0, int(body.audience_count or 0))
+    tier, meta_rating = ws.latest_quality_for_tenant(
+        db=db, tenant_id=tenant_id,
+    )
+
+    auto = ws.compute_adaptive_strategy(
+        audience_size=audience,
+        quality_tier=tier,
+        meta_quality_rating=meta_rating,
+    )
+
+    proposed_resolved: Optional[Dict[str, Any]] = None
+    proposed_strategy = (body.proposed_strategy or "").strip().lower() or None
+    if proposed_strategy and proposed_strategy in ws.VALID_STRATEGIES:
+        if proposed_strategy == ws.STRATEGY_IMMEDIATE or audience < ws.WAVE_THRESHOLD_RECIPIENTS:
+            proposed_resolved = {
+                "strategy": ws.STRATEGY_IMMEDIATE,
+                "downgraded_to_immediate": audience < ws.WAVE_THRESHOLD_RECIPIENTS,
+                "reason": (
+                    f"الجمهور {audience:,} مستلم أقل من الحد الأدنى "
+                    f"({ws.WAVE_THRESHOLD_RECIPIENTS:,}) — يتم الإرسال مباشرة."
+                ) if audience < ws.WAVE_THRESHOLD_RECIPIENTS else
+                "الإرسال الفوري للحملات صغيرة الحجم.",
+                "total_waves": 1 if audience > 0 else 0,
+                "batch_size": audience,
+                "delay_between_batches_sec": 0,
+            }
+        elif proposed_strategy == ws.STRATEGY_ADAPTIVE:
+            proposed_resolved = {
+                "strategy": auto.strategy,
+                "downgraded_to_immediate": auto.strategy == ws.STRATEGY_IMMEDIATE,
+                "reason": auto.rationale,
+                "total_waves": auto.total_waves,
+                "batch_size": auto.batch_size,
+                "delay_between_batches_sec": auto.delay_between_batches_sec,
+            }
+        else:  # batched
+            bs = max(1, int(body.proposed_batch_size or 1000))
+            dl = max(0, int(body.proposed_delay_between_batches_sec or 0))
+            tw = max(1, (audience + bs - 1) // bs)
+            proposed_resolved = {
+                "strategy": ws.STRATEGY_BATCHED,
+                "downgraded_to_immediate": False,
+                "reason": (
+                    f"خطة يدوية: {tw} دفعة × {bs:,} مستلم، فاصل {dl}ث."
+                ),
+                "total_waves": tw,
+                "batch_size": bs,
+                "delay_between_batches_sec": dl,
+            }
+
+    return {
+        "audience_size": audience,
+        "current_quality": {
+            "nahla_tier":           tier,
+            "meta_quality_rating":  meta_rating,
+        },
+        "threshold_recipients_for_waves": ws.WAVE_THRESHOLD_RECIPIENTS,
+        "suggested_adaptive": {
+            "strategy":      auto.strategy,
+            "batch_size":    auto.batch_size,
+            "delay_between_batches_sec": auto.delay_between_batches_sec,
+            "total_waves":   auto.total_waves,
+            "estimated_completion_at": (
+                auto.estimated_completion_at.isoformat()
+                if auto.estimated_completion_at else None
+            ),
+            "rationale":     auto.rationale,
+        },
+        "proposed": proposed_resolved,
+    }
+
+
+@router.get("/campaigns/{campaign_id}/waves")
+def list_campaign_waves(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return the wave timeline for a campaign.
+
+    Used by the campaign-detail UI to render the "wave 2 of 8 —
+    starts at 14:30" timeline + per-wave progress bars. Read-only
+    and tenant-scoped: a tenant cannot inspect another tenant's
+    waves even by guessing ``campaign_id``.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    campaign = (
+        db.query(Campaign)
+        .filter(
+            Campaign.id == campaign_id,
+            Campaign.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not campaign:
+        raise HTTPException(status_code=404, detail="campaign_not_found")
+
+    from database.models import CampaignWave  # noqa: PLC0415
+
+    waves = (
+        db.query(CampaignWave)
+        .filter(CampaignWave.campaign_id == campaign_id)
+        .order_by(CampaignWave.wave_index.asc())
+        .all()
+    )
+
+    def _wave_to_dict(w) -> Dict[str, Any]:
+        return {
+            "id":                  w.id,
+            "wave_index":          w.wave_index,
+            "total_waves":         w.total_waves,
+            "status":              w.status,
+            "scheduled_at":        w.scheduled_at.isoformat() if w.scheduled_at else None,
+            "started_at":          w.started_at.isoformat()   if w.started_at   else None,
+            "completed_at":        w.completed_at.isoformat() if w.completed_at else None,
+            "planned_recipients":  w.planned_recipients,
+            "sent_count":          w.sent_count,
+            "failed_count":        w.failed_count,
+            "plan_strategy":       w.plan_strategy,
+            "plan_rationale":      w.plan_rationale,
+        }
+
+    return {
+        "campaign_id":              campaign.id,
+        "send_strategy":            campaign.send_strategy or "immediate",
+        "batch_size":               campaign.batch_size,
+        "delay_between_batches_sec": campaign.delay_between_batches_sec,
+        "total_waves":              len(waves),
+        "waves":                    [_wave_to_dict(w) for w in waves],
+    }
+
+
 # ── Campaign dispatch (background) ──────────────────────────────────────────
 
 def _spawn_dispatch_in_background(campaign_id: int) -> None:
@@ -2644,5 +2943,177 @@ async def _dispatch_campaign_async(campaign_id: int) -> None:
                 )
         except Exception:
             logger.error("[campaigns] could not mark campaign=%d as failed", campaign_id, exc_info=True)
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Wave/Batch — launch-time preparation
+# ──────────────────────────────────────────────────────────────────
+
+
+def _spawn_wave_prepare_in_background(
+    campaign_id: int, wave_plan: Any,
+) -> None:
+    """Fire-and-forget wave preparation on its own OS thread.
+
+    Why this exists (vs running synchronously inside the POST):
+    the prep does the FULL snapshot + frequency-cap + funnel
+    commit — exactly the work that already pushes the legacy
+    immediate path over the wizard's 25s ``AbortSignal``. Same
+    rationale, same shape as ``_spawn_dispatch_in_background``.
+
+    Once prep finishes, the wave scheduler picks up
+    ``CampaignWave`` rows whose ``scheduled_at <= now()`` and
+    dispatches them. Wave 1 is scheduled at ``now()`` by the
+    planner so the first wave fires on the very next scheduler
+    tick.
+    """
+    import threading  # noqa: PLC0415
+
+    def _runner() -> None:
+        try:
+            asyncio.run(_prepare_waves_async(campaign_id, wave_plan))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[campaigns] background wave-prep thread crashed for campaign=%d",
+                campaign_id,
+            )
+
+    t = threading.Thread(
+        target=_runner,
+        name=f"campaign-wave-prep-{campaign_id}",
+        daemon=True,
+    )
+    t.start()
+    logger.info(
+        "[campaigns] campaign=%d wave-prep spawned on background thread=%s "
+        "(strategy=%s waves=%d batch_size=%d delay=%ds)",
+        campaign_id, t.name,
+        wave_plan.strategy, wave_plan.total_waves,
+        wave_plan.batch_size, wave_plan.delay_between_batches_sec,
+    )
+
+
+async def _prepare_waves_async(campaign_id: int, wave_plan: Any) -> None:
+    """Perform recipient snapshot + wave materialisation + send-log
+    assignment in a single transaction-scoped pass.
+
+    Concretely:
+
+      1. Validate the campaign + template + WA connection (same
+         guard rails as the dispatcher's first stage).
+      2. Resolve the audience.
+      3. Snapshot every reachable recipient into
+         ``campaign_send_logs`` with ``status='queued'``.
+      4. Apply the frequency cap so already-recently-contacted
+         phones are flipped to ``skipped_duplicate`` BEFORE the
+         first wave fires.
+      5. Materialise the ``CampaignWave`` rows.
+      6. Assign each queued send-log row to a wave in
+         id-ascending order, respecting each wave's
+         ``planned_recipients`` slot.
+
+    Idempotency: re-running on the same campaign is safe because
+    the snapshot inserts have a ``ON CONFLICT DO NOTHING`` unique
+    index and ``assign_send_logs_to_waves`` only touches rows
+    where ``wave_id IS NULL``.
+    """
+    from core.database import SessionLocal  # noqa: PLC0415
+    from services import wave_scheduler as ws  # noqa: PLC0415
+    from services.campaign_dispatcher import (  # noqa: PLC0415
+        _snapshot_recipients,
+        _resolve_audience,
+        _apply_frequency_cap,
+        _load_template,
+    )
+
+    db = SessionLocal()
+    try:
+        campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if not campaign:
+            logger.warning(
+                "[campaigns.wave_prep] campaign=%d not found — abort",
+                campaign_id,
+            )
+            return
+
+        template = _load_template(db, campaign)
+        if not template:
+            logger.warning(
+                "[campaigns.wave_prep] campaign=%d template missing or "
+                "unapproved — marking failed",
+                campaign_id,
+            )
+            campaign.status = "failed"
+            db.commit()
+            return
+
+        # Snapshot recipients (single source of truth for the audience).
+        customers = _resolve_audience(db, campaign.tenant_id, campaign.audience_type)
+        if not customers:
+            logger.info(
+                "[campaigns.wave_prep] campaign=%d no reachable customers "
+                "— marking completed (empty audience)",
+                campaign_id,
+            )
+            campaign.status = "completed"
+            db.commit()
+            return
+
+        tpl_vars_for_excl = campaign.template_variables or {}
+        excl_raw = tpl_vars_for_excl.get("_exclude_segments") or []
+        if isinstance(excl_raw, str):
+            try:
+                import json as _json  # noqa: PLC0415
+                excl_raw = _json.loads(excl_raw) if excl_raw.strip() else []
+            except Exception:
+                excl_raw = []
+        excluded_segments = (
+            [str(s).strip().lower() for s in excl_raw if str(s).strip()]
+            if isinstance(excl_raw, list) else []
+        )
+
+        _snapshot_recipients(
+            db, campaign.tenant_id, campaign.id, customers, template,
+            excluded_segments=excluded_segments,
+        )
+        db.commit()
+
+        _apply_frequency_cap(db, campaign.tenant_id, campaign.id, bypass=False)
+        db.commit()
+
+        # Re-fetch the campaign in case freshness matters; then
+        # materialise wave rows + assign send_log rows to them.
+        campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if campaign is None:
+            return
+        waves = ws.materialise_waves(db=db, campaign=campaign, spec=wave_plan)
+        ws.assign_send_logs_to_waves(
+            db=db, campaign_id=campaign_id, waves=waves,
+        )
+        db.commit()
+        logger.info(
+            "[campaigns.wave_prep] campaign=%d ready — strategy=%s "
+            "waves=%d audience=%d",
+            campaign_id, wave_plan.strategy,
+            len(waves), len(customers),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[campaigns.wave_prep] campaign=%d preparation raised: %s",
+            campaign_id, exc, exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+            if campaign and campaign.status not in ("completed", "failed"):
+                campaign.status = "failed"
+                db.commit()
+        except Exception:
+            pass
     finally:
         db.close()

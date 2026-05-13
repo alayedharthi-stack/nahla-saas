@@ -744,6 +744,86 @@ class AuditLog(Base):
     tenant = relationship('Tenant')
 
 
+class CustomerNameCleanupDraft(Base):
+    """In-progress review session for the bulk customer-name cleanup tool.
+
+    Reviewing 1 500+ customer names in one sitting is unrealistic. This
+    table backs an **incremental** workflow: the merchant opens the
+    modal, edits some chips, closes the modal, comes back later — and
+    every edit is restored exactly where it was left off.
+
+    One row per ``(tenant_id, customer_id)`` that the merchant has
+    touched. Customers the cleaner thinks need work but the merchant
+    hasn't reviewed yet do NOT have a row here — they appear in the
+    preview with their cleaner-default state. Rows are deleted on
+    apply (the row is no longer interesting once the name is clean)
+    or via the "تجاهل المسودة" action.
+
+    Edit state shape:
+      * ``removed_word_indices`` — JSON list of int indices (into the
+        whitespace-split tokens of ``original_name``) that the merchant
+        flipped OFF. When ``None``, the cleaner's default removal set
+        is used.
+      * ``cleared`` — when True, the row is force-cleared regardless
+        of which individual words were flipped.
+      * ``status`` — ``"edited"`` for any merchant-touched row;
+        ``"skipped"`` if the merchant explicitly opted out so the row
+        doesn't surface in future review sessions.
+
+    Tenant isolation is enforced at the application layer (the
+    endpoints always filter by ``tenant_id = resolve_tenant_id(request)``)
+    and reinforced by the unique constraint on
+    ``(tenant_id, customer_id)`` so a draft cannot be aliased across
+    stores even if the application leaks a stale id.
+    """
+    __tablename__ = 'customer_name_cleanup_drafts'
+    __table_args__ = (
+        UniqueConstraint(
+            'tenant_id', 'customer_id',
+            name='uq_cleanup_draft_tenant_customer',
+        ),
+        Index(
+            'ix_cleanup_draft_tenant_updated',
+            'tenant_id', 'updated_at',
+        ),
+        Index(
+            'ix_cleanup_draft_tenant_status',
+            'tenant_id', 'status',
+        ),
+    )
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=False)
+    # Snapshot of Customer.name at the moment the row was created or
+    # last refreshed. If the underlying customer name changes (rare
+    # — usually only happens when the merchant edits in another tab),
+    # the preview endpoint clears the draft so the merchant is not
+    # confused by stale state.
+    original_name = Column(String, nullable=True)
+    # ``removed_word_indices`` is the merchant's chip-edit set.
+    # SQLite tests use it as JSON via SA's portable JSON layer;
+    # Postgres stores it as JSONB.
+    removed_word_indices = Column(JSONB, nullable=True)
+    cleared = Column(Boolean, default=False, nullable=False)
+    # ``status`` — "edited" or "skipped". We never write a "pending"
+    # row; pending == no row.
+    status = Column(String, nullable=False, default='edited')
+    actor_user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    tenant = relationship('Tenant')
+    customer = relationship('Customer')
+
+
 class CustomerNameAuditLog(Base):
     """Row-level audit trail for the bulk customer-name cleanup tool.
 
@@ -1004,10 +1084,141 @@ class Campaign(Base):
     read_count = Column(Integer, default=0)
     clicked_count = Column(Integer, default=0)
     converted_count = Column(Integer, default=0)
+    # ── Send strategy (Wave/Batch architecture, Phase: Meta-aware pacing) ───
+    # ``immediate`` — legacy behaviour: all recipients dispatched in one
+    #                  background thread, paced only by the in-process
+    #                  inter-message delay. Default for small campaigns.
+    # ``batched``   — explicit wave plan provided by the merchant
+    #                  (``batch_size`` + ``delay_between_batches_sec``).
+    #                  One ``CampaignWave`` row per wave.
+    # ``adaptive``  — Nahla computes the wave plan automatically from
+    #                  the current Quality Score / Meta tier (see
+    #                  ``services/wave_scheduler.compute_adaptive_strategy``).
+    #                  ``batch_size`` / ``delay_between_batches_sec`` are
+    #                  populated at plan time so the merchant sees the
+    #                  resolved values, not just the strategy name.
+    send_strategy = Column(String, default='immediate', nullable=False)
+    batch_size = Column(Integer, nullable=True)
+    delay_between_batches_sec = Column(Integer, nullable=True)
+    # ``waves`` relationship populated when ``send_strategy != 'immediate'``.
+    # See ``CampaignWave`` below.
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     launched_at = Column(DateTime, nullable=True)
+
+
+class CampaignWave(Base):
+    """One scheduled batch (wave) of a campaign send.
+
+    Why this exists
+    ───────────────
+    The legacy dispatcher loop (``dispatch_campaign``) already paces
+    individual sends inside one process. But Meta's published
+    guidance for marketing messages explicitly recommends staggering
+    larger sends to protect number reputation — and inviting the
+    merchant to pause / resume between batches once they see
+    delivery rates. Doing that inside the in-memory loop is
+    impossible: the process can restart, the merchant has no UI
+    to inspect "wave 2 of 8", and we can't react to a tier drop
+    mid-send.
+
+    So we elevate "batch" from a private loop variable to a
+    first-class persisted concept. Every wave has its own row,
+    its own scheduled time, its own counters, and can be paused
+    or skipped independently. The wave scheduler
+    (``core/scheduler.run_campaign_wave_scheduler``) wakes up
+    periodically and dispatches whichever waves are due, reusing
+    the existing ``dispatch_campaign`` pipeline — no rewrite.
+
+    Small campaigns
+    ───────────────
+    Campaigns under ``WAVE_THRESHOLD_RECIPIENTS`` (default 500)
+    deliberately do NOT get wave rows. They use the historic
+    immediate path. We do not want to add operational complexity
+    for a coffee shop sending to 80 customers.
+
+    Wave membership of a recipient
+    ──────────────────────────────
+    Each ``CampaignSendLog`` row optionally carries
+    ``wave_id``. NULL = belongs to a campaign that was sent
+    immediately (or to a wave-mode campaign's pre-snapshot
+    skipped rows). Populated = the wave scheduler will pick it
+    up when that wave becomes due.
+    """
+
+    __tablename__ = 'campaign_waves'
+    __table_args__ = (
+        Index('ix_campaign_waves_due', 'status', 'scheduled_at'),
+        Index('ix_campaign_waves_campaign', 'campaign_id', 'wave_index'),
+        UniqueConstraint(
+            'campaign_id', 'wave_index',
+            name='uq_campaign_waves_campaign_index',
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    campaign_id = Column(
+        Integer, ForeignKey('campaigns.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    # Denormalised for tenant-scoped queries without a JOIN to ``campaigns``.
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+
+    # 1-based for display ("الدفعة 2 من 8"). ``total_waves`` is
+    # denormalised onto every wave row so a single row carries the
+    # information the UI needs to render its "wave N of M" label
+    # without a count query.
+    wave_index = Column(Integer, nullable=False)
+    total_waves = Column(Integer, nullable=False)
+
+    # ``pending``      — not yet due. The scheduler ignores these.
+    # ``dispatching``  — picked up by the scheduler; the dispatcher
+    #                    is currently iterating over its rows.
+    # ``completed``    — every queued row in this wave has terminal
+    #                    state (sent / failed / skipped_*).
+    # ``failed``       — the wave's dispatcher run raised before
+    #                    completing. Operator inspection required.
+    # ``paused``       — merchant explicitly paused; scheduler skips.
+    # ``cancelled``    — wave never runs (e.g. tenant cancelled the
+    #                    rest of a partially-sent campaign).
+    status = Column(String, default='pending', nullable=False)
+
+    # When this wave is supposed to start. Set at plan time
+    # (now + wave_index * delay_between_batches_sec).
+    scheduled_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Planned at materialisation. Sent/failed are populated by the
+    # dispatcher as it works through this wave's queued rows so the
+    # UI can render "1,247 / 2,000 sent" without aggregating logs.
+    planned_recipients = Column(Integer, default=0, nullable=False)
+    sent_count = Column(Integer, default=0, nullable=False)
+    failed_count = Column(Integer, default=0, nullable=False)
+
+    # When the wave plan was created we record the strategy that
+    # produced it. Useful for analytics ("how often does adaptive
+    # pick small batches?") and for the wave-detail view.
+    plan_strategy = Column(String, nullable=True)
+    plan_rationale = Column(Text, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
 
 
 class SmartAutomation(Base):
@@ -1158,6 +1369,18 @@ class CampaignSendLog(Base):
     delivered_at = Column(DateTime, nullable=True)
     read_at      = Column(DateTime, nullable=True)
     failed_at    = Column(DateTime, nullable=True)
+    # Optional wave membership — populated when the parent campaign
+    # uses ``send_strategy != 'immediate'``. NULL means the row
+    # belongs to the legacy immediate path. The wave-aware dispatch
+    # query filters on this so each wave only dispatches its own
+    # slice. ON DELETE SET NULL keeps the row alive if the wave is
+    # removed (e.g. campaign cancelled) — we still want the
+    # idempotency anchor.
+    wave_id = Column(
+        Integer,
+        ForeignKey('campaign_waves.id', ondelete='SET NULL'),
+        nullable=True,
+    )
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -1181,6 +1404,10 @@ class CampaignSendLog(Base):
         # back to the right send-log row by provider_message_id.
         # Without this, every status webhook becomes a full scan.
         Index('ix_campaign_send_log_provider_message_id', 'provider_message_id'),
+        # Wave-aware dispatch: the per-wave dispatcher pulls
+        # ``WHERE wave_id=? AND status='queued'`` once per tick.
+        # Without a composite index this scans the full campaign.
+        Index('ix_campaign_send_log_wave_status', 'wave_id', 'status'),
     )
 
 
@@ -2004,6 +2231,381 @@ class ManualCoupon(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Delivery Quality Intelligence Layer (May 2026)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Four new tables form the data backbone of the platform-wide
+# deliverability layer. They are intentionally append-only or
+# upsert-only — no UPDATE-in-place destruction of history — because
+# the entire point is to let us reconstruct *why* a WABA's quality
+# drifted, not just observe the current state.
+#
+# Read order: WaWebhookRaw → MessageDeliveryEvent → CustomerSuppression
+# → WaNumberQualitySnapshot. Each one builds on signal from the prior.
+
+
+class WaWebhookRaw(Base):
+    """Raw archive of every WhatsApp / 360dialog webhook payload.
+
+    Why a separate table (not just ``WebhookEvent``)
+    ────────────────────────────────────────────────
+    ``WebhookEvent`` exists already but is exclusively used by Salla /
+    Zid integrations and carries their FSM (received → processing →
+    processed | failed | dead_letter) — wiring WhatsApp into it would
+    conflate two retry policies and two operator dashboards. Instead
+    this table is **observability-only**: we never retry from it, we
+    never delete from it, we never block on it. The webhook handler
+    inserts and moves on.
+
+    What's in it
+    ────────────
+    Everything we need to replay or audit a delivery later: the raw
+    body, the raw headers, the parsed wamid for indexing, the status
+    (``sent`` / ``delivered`` / ``read`` / ``failed`` / template
+    status / coexistence event), and the raw Meta error code + subcode
+    if present. The classifier output (``classified_key`` +
+    ``quality_tier``) is denormalised so we can run aggregate queries
+    without re-running the regex chain.
+
+    Retention
+    ─────────
+    No TTL at the DB layer — 360dialog/Meta delivery debugging often
+    needs months of history. A separate background job will eventually
+    move rows older than ~180 d to cold storage; until then keep an
+    eye on table size via the ``ix_wa_webhook_raw_received_at`` index.
+    """
+
+    __tablename__ = "wa_webhook_raw"
+    __table_args__ = (
+        Index(
+            "ix_wa_webhook_raw_received_at",
+            "received_at",
+        ),
+        Index(
+            "ix_wa_webhook_raw_tenant_received",
+            "tenant_id", "received_at",
+        ),
+        # Looking up by wamid is the single hottest path — it's how
+        # the dispatcher reconciles ``CampaignSendLog`` rows with
+        # later status callbacks ("did this wamid eventually fail?").
+        Index(
+            "ix_wa_webhook_raw_wamid",
+            "wamid",
+        ),
+        Index(
+            "ix_wa_webhook_raw_classified_key",
+            "classified_key",
+        ),
+    )
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True, autoincrement=True,
+    )
+    # Nullable: some 360dialog channel/coexistence events don't carry
+    # enough context to attribute to a tenant. We keep them anyway so
+    # ops can debug; the analytics queries always filter `tenant_id
+    # IS NOT NULL`.
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    # Provider that delivered this webhook. ``"meta"`` = direct Cloud
+    # API webhook, ``"360dialog"`` = 360dialog single-URL or its
+    # status-only / coexistence subpaths, ``"meta_legacy"`` = the
+    # pre-360dialog Meta-direct path still wired for older tenants.
+    provider = Column(String(32), nullable=False)
+    # The HTTP path the webhook landed on — gives us a clean
+    # secondary key when 360dialog rolls out a new subpath without
+    # warning ("hey why is /webhook/whatsapp/360dialog/quality
+    # suddenly emitting events?").
+    source_path = Column(String(255), nullable=True)
+    # The parsed ``wamid`` if this payload was a status event for a
+    # specific outbound message we sent. NULL for inbound messages
+    # and 360dialog coexistence/channel events.
+    wamid = Column(String(255), nullable=True)
+    # Coarse status family: ``"sent"`` | ``"delivered"`` | ``"read"``
+    # | ``"failed"`` | ``"template_status"`` | ``"inbound"`` |
+    # ``"coexistence"`` | ``"channel"`` | ``"other"``. NEVER NULL —
+    # at minimum we know what kind of payload it is.
+    status = Column(String(32), nullable=False)
+    # Raw Meta error code as Meta surfaced it (e.g. 131026). Keep
+    # as String so we don't lose the long-tail of 7+ digit codes
+    # and so ``"unknown"`` from our own dispatcher round-trips.
+    raw_error_code = Column(String(32), nullable=True)
+    raw_error_subcode = Column(String(32), nullable=True)
+    # Output of ``meta_errors.classify_meta_error`` at the moment
+    # of ingestion. Stored so analytics queries don't need to
+    # re-run the classifier across millions of historical rows.
+    classified_key = Column(String(64), nullable=True)
+    # Output of ``meta_errors.quality_tier_of`` for the classified
+    # key — denormalised for fast roll-ups.
+    quality_tier = Column(String(16), nullable=True)
+    # The full payload, exactly as Meta/360dialog sent it. Stored as
+    # text (not JSONB) because some 360dialog coexistence events
+    # ship as form-encoded blobs that aren't valid JSON, and we
+    # never want the ingest path to fail on a parse error.
+    raw_body = Column(Text, nullable=True)
+    raw_headers = Column(JSONB, nullable=True)
+    # If we DID manage to parse the body, the structured form. NULL
+    # when ``raw_body`` is non-JSON.
+    parsed_payload = Column(JSONB, nullable=True)
+    # Best-effort attribution: which campaign send / automation
+    # execution did this event resolve against? Both nullable
+    # because not every webhook ties back to one of our rows
+    # (e.g. inbound messages, coexistence sync).
+    campaign_send_log_id = Column(Integer, nullable=True)
+    automation_execution_id = Column(Integer, nullable=True)
+    received_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class MessageDeliveryEvent(Base):
+    """Append-only per-status delivery event.
+
+    Why this exists alongside ``CampaignSendLog``
+    ─────────────────────────────────────────────
+    ``CampaignSendLog`` has ``delivered_at`` / ``read_at`` /
+    ``failed_at`` — but they're "first-occurrence" timestamps and
+    they're campaign-only. We need:
+
+    1. **Per-attempt history.** A wamid can go ``sent → failed →
+       (retry) → sent → delivered`` and we want every transition.
+    2. **Coverage outside campaigns.** Automation sends, manual
+       conversation replies, and order events all produce status
+       callbacks today; none of them get first-class delivery
+       timestamps.
+    3. **Quality joins.** The Quality Score & Suppression Engine
+       both need to query "for tenant X, in the last 7 days, how
+       many ``quality_risk`` events per phone?" — that's a cheap
+       SQL aggregate against this table, vs. an expensive walk
+       across multiple status JSON fields.
+
+    One row per (wamid, status) tuple. Idempotency is enforced via
+    the unique index; the webhook handler does ``INSERT … ON
+    CONFLICT DO NOTHING``.
+    """
+
+    __tablename__ = "message_delivery_events"
+    __table_args__ = (
+        # Idempotency anchor — Meta will redeliver the same status
+        # callback within seconds/minutes if the first 200 was slow.
+        UniqueConstraint(
+            "wamid", "status",
+            name="uq_message_delivery_events_wamid_status",
+        ),
+        Index(
+            "ix_message_delivery_events_tenant_occurred",
+            "tenant_id", "occurred_at",
+        ),
+        Index(
+            "ix_message_delivery_events_phone_occurred",
+            "tenant_id", "phone_e164", "occurred_at",
+        ),
+        Index(
+            "ix_message_delivery_events_quality_tier",
+            "tenant_id", "quality_tier", "occurred_at",
+        ),
+        Index(
+            "ix_message_delivery_events_error_code",
+            "tenant_id", "error_code", "occurred_at",
+        ),
+    )
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True, autoincrement=True,
+    )
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    # The Meta-issued message id. Some events (e.g. provider-internal
+    # ``no_message_id`` failures) won't have one — we synthesise
+    # ``"synth:{uuid}"`` so the unique constraint still works.
+    wamid = Column(String(255), nullable=False)
+    phone_e164 = Column(String(32), nullable=True)
+    # Status family, same vocabulary as ``WaWebhookRaw.status``.
+    status = Column(String(32), nullable=False)
+    # Canonical classifier key (``meta_errors.ERRORS``). NULL for
+    # non-failure statuses.
+    error_code = Column(String(64), nullable=True)
+    error_message = Column(Text, nullable=True)
+    raw_code = Column(String(32), nullable=True)
+    raw_subcode = Column(String(32), nullable=True)
+    # Denormalised from the classifier so suppression / dashboard
+    # aggregates don't need to re-run ``classify_meta_error``.
+    quality_tier = Column(String(16), nullable=True)
+    suppress_on_repeat = Column(Boolean, default=False, nullable=False)
+    occurred_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    # Best-effort joins — same nullability story as in WaWebhookRaw.
+    campaign_send_log_id = Column(Integer, nullable=True)
+    automation_execution_id = Column(Integer, nullable=True)
+    template_id = Column(Integer, nullable=True)
+    source = Column(String(32), nullable=False, server_default="meta")
+    raw_id = Column(BigInteger, nullable=True)
+
+
+class CustomerSuppression(Base):
+    """First-class suppression list.
+
+    Replaces the ad-hoc ``Customer.extra_metadata`` JSON keys
+    (``is_unsubscribed``, ``marketing_opt_out_manual``, …) for any
+    NEW reason — the legacy keys still source the unsubscribe
+    workflow, but anything driven by Meta error codes lives here.
+
+    A row exists only when the phone is currently suppressed. When
+    the auto-reinstate logic fires (inbound message received, or
+    merchant explicitly clears the list), we set ``is_active=False``
+    and stamp ``reinstated_at`` — we never DELETE so support can
+    still answer "why was this number suppressed last month?".
+
+    Tenant isolation is enforced at the application layer; the
+    ``(tenant_id, normalized_phone)`` unique constraint here is
+    the second line of defence.
+    """
+
+    __tablename__ = "customer_suppressions"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "normalized_phone",
+            name="uq_customer_suppressions_tenant_phone",
+        ),
+        Index(
+            "ix_customer_suppressions_tenant_active",
+            "tenant_id", "is_active",
+        ),
+        Index(
+            "ix_customer_suppressions_last_failure",
+            "tenant_id", "last_failure_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
+    # E.164 digits-only (matches ``Customer.normalized_phone``). Keyed
+    # by phone, not customer_id, so that the same number used by two
+    # customer rows (rare but happens during dedup) shares the same
+    # suppression.
+    normalized_phone = Column(String(32), nullable=False)
+    # Canonical classifier key that drove the FIRST suppression
+    # event (``not_on_whatsapp``, ``blocked_by_user``, …). The full
+    # history is in ``reasons``.
+    reason_primary = Column(String(64), nullable=False)
+    # JSON list of {"key": str, "count": int, "last_seen_at": iso}.
+    # Updated in place every time a new quality_risk event lands.
+    reasons = Column(JSONB, nullable=True)
+    # Total count of quality_risk events that contributed to this
+    # row — used by the dashboard for "top suppressed reasons".
+    failure_count = Column(Integer, default=0, nullable=False)
+    # Who/what created this row. ``"auto"`` = Suppression Engine
+    # threshold reached, ``"manual"`` = merchant action, ``"opt_out"``
+    # = unsubscribe lifecycle, ``"webhook_block"`` = single-event
+    # critical (``blocked_by_user``).
+    source = Column(String(32), nullable=False, server_default="auto")
+    is_active = Column(Boolean, default=True, nullable=False)
+    suppressed_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    last_failure_at = Column(DateTime(timezone=True), nullable=True)
+    reinstated_at = Column(DateTime(timezone=True), nullable=True)
+    # Why was the row reinstated? Free text + machine key.
+    # ``"inbound_message"`` is the auto-reinstate path.
+    reinstate_reason = Column(String(64), nullable=True)
+    # Optional time-bounded suppression. NULL = indefinite (the
+    # default for ``quality_risk`` codes). Set explicitly when the
+    # Suppression Engine decides on a cool-down rather than a
+    # permanent block (e.g. ``temporary_failure`` chain).
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    # JSONB for any extra context (raw error code distribution,
+    # last campaign id, …) — keeps the schema stable while we
+    # iterate on what the Engine wants to remember.
+    extra_metadata = Column(JSONB, nullable=True)
+
+
+class WaNumberQualitySnapshot(Base):
+    """Historical snapshot of a WhatsApp Business number's quality.
+
+    ``WhatsAppConnection`` already carries the **current**
+    ``meta_quality_rating`` / ``meta_messaging_limit`` — but it's
+    overwritten on every Meta sync, so we have no way to plot
+    "quality dropped from GREEN → YELLOW on May 5, then RED on
+    May 7" or to alert the merchant on the transition itself.
+
+    One row per (connection, recalculation point). Snapshots come
+    from two sources:
+
+    1. The periodic Quality scheduler (every 30 min by default).
+    2. Inline writes whenever the dispatcher observes a critical
+       quality_tier event — so the trace shows the exact event
+       that caused the rating drop, not just the next scheduled
+       point.
+
+    Both Meta-reported and Nahla-computed scores live on the same
+    row so dashboards can render them side by side.
+    """
+
+    __tablename__ = "wa_number_quality_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_wa_quality_snap_connection_taken",
+            "connection_id", "taken_at",
+        ),
+        Index(
+            "ix_wa_quality_snap_tenant_taken",
+            "tenant_id", "taken_at",
+        ),
+    )
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True, autoincrement=True,
+    )
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    connection_id = Column(Integer, nullable=False)
+    taken_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    # Meta's own labels, copied verbatim — never reinterpreted.
+    meta_quality_rating = Column(String(16), nullable=True)
+    meta_messaging_limit = Column(String(32), nullable=True)
+    # Nahla's internal 0–100 score, computed from the metrics below.
+    # NULL on snapshots taken before we had enough data.
+    nahla_quality_score = Column(Float, nullable=True)
+    # Discretised version of ``nahla_quality_score`` — keep these
+    # labels in lockstep with ``services/quality_score.py``:
+    # ``"excellent" | "healthy" | "warning" | "risky" | "critical"``.
+    nahla_quality_tier = Column(String(16), nullable=True)
+    # The lookback window used to compute the metrics, in hours
+    # (default 168 = 7d). Stored on the row so a later analyst can
+    # tell whether a low score is "really" bad or just based on a
+    # narrow window during a slow week.
+    metrics_window_hours = Column(Integer, default=168, nullable=False)
+    delivery_rate = Column(Float, nullable=True)
+    read_rate = Column(Float, nullable=True)
+    failure_rate = Column(Float, nullable=True)
+    # Suppress rate = (auto-suppressed phones in window) / (total
+    # phones messaged in window). The clearest leading indicator
+    # for an imminent Meta quality drop.
+    suppress_rate = Column(Float, nullable=True)
+    complaint_rate = Column(Float, nullable=True)
+    sample_size = Column(Integer, nullable=True)
+    # Free-form raw numerator/denominator counts — handy for the
+    # Quality Dashboard to show "84/3,210 failed" alongside the rate.
+    raw_metrics = Column(JSONB, nullable=True)
+    # If the snapshot was triggered by a specific critical event,
+    # the canonical error_code goes here (``"template_paused"`` …).
+    # NULL for routine scheduled snapshots.
+    triggered_by = Column(String(64), nullable=True)
 
 
 class AIMediaItem(Base):

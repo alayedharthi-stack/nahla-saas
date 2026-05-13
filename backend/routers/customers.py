@@ -26,6 +26,7 @@ from core.tenant import get_or_create_tenant, resolve_tenant_id
 from models import (
     Customer,
     CustomerNameAuditLog,
+    CustomerNameCleanupDraft,
     CustomerProfile,
     CustomerSegmentManual,
 )
@@ -1472,21 +1473,28 @@ async def update_marketing_preferences(
 # resolved tenant_id — there is no path here that can touch a customer
 # belonging to a different store.
 #
-# Workflow:
-#   1. Frontend calls   GET  /customers/name-cleanup/preview
+# Workflow (incremental review session):
+#   1. Frontend opens modal → GET /customers/name-cleanup/preview
 #      → backend scans Customer.name for the current tenant, runs the
-#        cleanup pipeline, returns ONLY the rows with a suggested
-#        change (and the reason + confidence).
-#   2. Merchant picks rows in a modal and clicks either
-#         * "Apply selected"            → POST with explicit ids
-#         * "Apply high-confidence only"→ POST with high_confidence_only=true
-#   3. Frontend calls   POST /customers/name-cleanup/apply
-#      → backend mutates Customer.name in place and writes one row
-#        per change to customer_name_audit_logs.
+#        cleanup pipeline, MERGES results with any saved draft rows
+#        (so the merchant's previous chip edits are restored), and
+#        returns the resulting list.
+#   2. Merchant edits chips → frontend autosaves to
+#        POST /customers/name-cleanup/draft/save
+#      every ~1.5s. The Customer.name field is NOT mutated yet;
+#      edits live in ``customer_name_cleanup_drafts``.
+#   3. Merchant clicks "تطبيق المحدد" / "تطبيق ذوي الثقة العالية":
+#        POST /customers/name-cleanup/apply
+#      → backend mutates Customer.name + writes audit log rows +
+#        deletes the corresponding draft rows.
+#   4. Optional "تجاهل المسودة":
+#        DELETE /customers/name-cleanup/draft
+#      → wipes every draft row for the tenant; next preview starts
+#        from a clean slate.
 #
-# This is a one-shot mutation. After it runs, campaigns and templates
-# read Customer.name verbatim — there is NO runtime sanitizer doing
-# the cleaning again at send time. Single source of truth.
+# Single source of truth: once a row is applied, campaigns/templates
+# read Customer.name verbatim. There is NO runtime sanitiser doing
+# the cleaning again at send time.
 
 class NameCleanupApplyItem(BaseModel):
     """One row from the merchant's selection in the preview modal."""
@@ -1494,6 +1502,24 @@ class NameCleanupApplyItem(BaseModel):
     new_name: Optional[str] = None  # None = clear the row
     reason: Optional[str] = None
     confidence: Optional[str] = None
+
+
+class NameCleanupDraftItem(BaseModel):
+    """One row of merchant-edited chip state for the autosave endpoint.
+
+    Semantics:
+      * ``removed_word_indices = None`` AND ``cleared = False`` →
+        delete the draft row (back to the cleaner's defaults).
+      * Otherwise upsert with the merchant's state.
+    """
+    customer_id: int
+    removed_word_indices: Optional[List[int]] = None
+    cleared: bool = False
+    status: Optional[str] = None  # "edited" | "skipped"
+
+
+class NameCleanupDraftSaveIn(BaseModel):
+    items: List[NameCleanupDraftItem] = []
 
 
 class NameCleanupApplyIn(BaseModel):
@@ -1525,43 +1551,71 @@ _NAME_CLEANUP_MAX_ITEMS = 3000
 _NAME_CLEANUP_BATCH_SIZE = 1000
 
 
+def _serialise_draft(draft: Optional[CustomerNameCleanupDraft]) -> Optional[Dict[str, Any]]:
+    """Render a draft row into the JSON shape consumed by the modal.
+    Returns ``None`` when the input is ``None`` so callers can use it
+    inline without branching."""
+    if draft is None:
+        return None
+    return {
+        "removed_word_indices": list(draft.removed_word_indices or []),
+        "cleared":              bool(draft.cleared),
+        "status":               draft.status or "edited",
+        "updated_at":           draft.updated_at.isoformat() if draft.updated_at else None,
+    }
+
+
 @router.get("/name-cleanup/preview")
 async def name_cleanup_preview(
     request: Request,
+    include_skipped: bool = Query(
+        False,
+        description=(
+            "When true, also surface rows the merchant previously "
+            "marked as 'skipped' in earlier sessions."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
-    """Tenant-wide preview of customer names that need cleaning.
+    """Tenant-wide preview of customer names that need cleaning, merged
+    with any in-progress draft state from previous sessions.
 
     Scans **every** customer in the current tenant — there is no page
     cursor on the request and no offset/limit on the SQL. We stream
     the table in batches of :data:`_NAME_CLEANUP_BATCH_SIZE` rows via
-    ``.yield_per()`` so memory stays bounded even for tenants with
-    tens of thousands of customers.
+    ``.yield_per()`` so memory stays bounded.
 
-    The response contains only the rows whose cleanup verdict would
-    actually mutate ``Customer.name`` (the merchant doesn't need to
-    confirm names already considered clean). The cleaner ran against
-    100% of the table regardless — ``total_scanned`` reflects that and
-    matches ``total_customers`` exactly.
+    For every customer that needs a change, the response attaches the
+    matching draft state (if any). The merchant's chip edits from
+    earlier sessions are therefore restored verbatim and they can
+    pick up exactly where they left off.
+
+    Stale drafts are auto-GC'd: a draft whose ``original_name`` no
+    longer matches the live ``Customer.name`` is deleted in-flight
+    so the merchant isn't shown obsolete state.
 
     Response shape::
 
         {
           "tenant_id":        <int>,
-          "total_customers":  <int>,   # whole-tenant count
-          "total_scanned":    <int>,   # always == total_customers
-          "match_count":      <int>,   # rows that need a change
-          "items":            [ {customer_id, current_name,
-                                 suggested_name, reason, confidence,
-                                 phone}, ... ],
+          "total_customers":  <int>,
+          "total_scanned":    <int>,
+          "match_count":      <int>,
+          "items":            [ { customer_id, current_name,
+                                  suggested_name, reason, confidence,
+                                  phone,
+                                  draft: { removed_word_indices,
+                                           cleared, status,
+                                           updated_at } | null
+                                }, ... ],
+          "draft_count":      <int>,
+          "draft_edited":     <int>,
+          "draft_skipped":    <int>,
           "high_confidence":  <int>,
           "low_confidence":   <int>,
-          "truncated":        <bool>,  # true → items capped, more exist
-          "max_items":        <int>,   # the cap that triggered truncation
+          "truncated":        <bool>,
+          "max_items":        <int>,
         }
-
-    ``suggested_name = null`` means "clear the row" — the apply step
-    will set ``Customer.name`` to ``NULL``.
     """
     from services.customer_name_cleanup import compute_cleanup  # noqa: PLC0415
     import logging  # noqa: PLC0415
@@ -1576,16 +1630,23 @@ async def name_cleanup_preview(
         .count()
     )
 
+    # Load all draft rows for this tenant up front, keyed by customer
+    # id, so we can attach them to the scan output in O(1). Even for
+    # the worst tenant we have (~10k matches) this is a few MB max.
+    drafts_by_customer: Dict[int, CustomerNameCleanupDraft] = {
+        d.customer_id: d
+        for d in db.query(CustomerNameCleanupDraft).filter(
+            CustomerNameCleanupDraft.tenant_id == tenant_id,
+        ).all()
+    }
+
     items: List[Dict[str, Any]] = []
     scanned = 0
     high = low = match_count = 0
+    draft_edited = draft_skipped = 0
     truncated = False
+    stale_draft_ids: List[int] = []
 
-    # ``yield_per`` keeps memory flat: SQLAlchemy fetches rows in
-    # batches from the DB cursor instead of loading the whole result
-    # set into Python at once. Ordering by id keeps the scan
-    # deterministic across re-runs so the merchant sees the same
-    # rows in the same order after re-opening the modal.
     query = (
         db.query(Customer)
         .filter(Customer.tenant_id == tenant_id)
@@ -1596,14 +1657,51 @@ async def name_cleanup_preview(
     for cust in query:
         scanned += 1
         verdict = compute_cleanup(cust.name)
+        draft = drafts_by_customer.get(cust.id)
+
+        # ── Stale-draft GC ───────────────────────────────────────
+        # If the live customer name diverged from the draft snapshot
+        # (merchant edited the row in another tab, or applied via
+        # another flow), the draft is no longer trustworthy. Drop
+        # it so the merchant sees the cleaner's fresh verdict.
+        if draft is not None and (draft.original_name or "") != (cust.name or ""):
+            stale_draft_ids.append(draft.id)
+            draft = None
+            drafts_by_customer.pop(cust.id, None)
+
         if not verdict.changed:
+            # Customer is clean now — any leftover draft is also
+            # garbage. Remove it so future scans don't waste time.
+            if draft is not None:
+                stale_draft_ids.append(draft.id)
+                drafts_by_customer.pop(cust.id, None)
             continue
+
+        # Skipped rows: include only when the merchant asked for them.
+        if draft is not None and draft.status == "skipped" and not include_skipped:
+            draft_skipped += 1
+            continue
+
         match_count += 1
         if verdict.confidence == "high":
             high += 1
         else:
             low += 1
+        if draft is not None:
+            if draft.status == "skipped":
+                draft_skipped += 1
+            else:
+                draft_edited += 1
+
         if len(items) < _NAME_CLEANUP_MAX_ITEMS:
+            # Surface the merchant-driven opt-out flag so the modal
+            # can render the "مستبعد من الحملات" badge inline. We
+            # intentionally do NOT bundle the customer-driven
+            # ``is_unsubscribed`` here — those rows shouldn't appear
+            # in the cleanup pipeline in the first place (they're
+            # already filtered by the campaign dispatcher), and
+            # conflating the two states would muddy the audit.
+            cust_meta = cust.extra_metadata or {}
             items.append({
                 "customer_id":    cust.id,
                 "current_name":   cust.name or "",
@@ -1611,17 +1709,28 @@ async def name_cleanup_preview(
                 "reason":         verdict.reason,
                 "confidence":     verdict.confidence,
                 "phone":          cust.phone or "",
+                "draft":          _serialise_draft(draft),
+                "marketing_opt_out_manual":
+                    bool(cust_meta.get("marketing_opt_out_manual")),
             })
         else:
             truncated = True
-            # Keep counting so the UI knows the true total, but stop
-            # appending to the response body.
+
+    # GC orphan / stale drafts. We do this once at the end so the
+    # response is consistent even if the loop short-circuits.
+    if stale_draft_ids:
+        db.query(CustomerNameCleanupDraft).filter(
+            CustomerNameCleanupDraft.id.in_(stale_draft_ids),
+        ).delete(synchronize_session=False)
+        db.commit()
 
     log.info(
         "preview | tenant=%s scanned=%d/%d matches=%d (high=%d low=%d) "
-        "items_returned=%d truncated=%s",
+        "drafts_edited=%d drafts_skipped=%d items_returned=%d truncated=%s "
+        "stale_drafts_gc=%d",
         tenant_id, scanned, total_customers, match_count,
-        high, low, len(items), truncated,
+        high, low, draft_edited, draft_skipped,
+        len(items), truncated, len(stale_draft_ids),
     )
 
     return {
@@ -1630,10 +1739,297 @@ async def name_cleanup_preview(
         "total_scanned":    scanned,
         "match_count":      match_count,
         "items":            items,
+        "draft_count":      draft_edited + draft_skipped,
+        "draft_edited":     draft_edited,
+        "draft_skipped":    draft_skipped,
         "high_confidence":  high,
         "low_confidence":   low,
         "truncated":        truncated,
         "max_items":        _NAME_CLEANUP_MAX_ITEMS,
+    }
+
+
+@router.post("/name-cleanup/draft/save")
+async def name_cleanup_draft_save(
+    body: NameCleanupDraftSaveIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Autosave the merchant's in-progress chip edits.
+
+    Idempotent batch upsert: callers can re-send the same payload
+    arbitrarily often without producing duplicate audit history (we
+    don't write to ``customer_name_audit_logs`` here — drafts are
+    purely "review state"; the audit only fires on apply).
+
+    Per item:
+      * ``removed_word_indices = None`` AND ``cleared = False`` AND
+        ``status`` not set → delete the draft row (back to defaults).
+      * Otherwise upsert.
+
+    Tenant safety: any customer_id in the payload that doesn't belong
+    to the requesting tenant is silently dropped from the batch
+    (logged at info level).
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+    import logging  # noqa: PLC0415
+
+    log = logging.getLogger("nahla.customers.name_cleanup")
+    tenant_id = resolve_tenant_id(request)
+    actor_user_id = get_jwt_user_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    if not body.items:
+        return {
+            "tenant_id":    tenant_id,
+            "saved":        0,
+            "deleted":      0,
+            "skipped":      0,
+            "saved_at":     datetime.now(timezone.utc).isoformat(),
+        }
+
+    ids = [it.customer_id for it in body.items if it.customer_id]
+    customers_by_id: Dict[int, Customer] = {
+        c.id: c
+        for c in db.query(Customer).filter(
+            Customer.tenant_id == tenant_id,
+            Customer.id.in_(ids),
+        ).all()
+    }
+
+    existing_drafts: Dict[int, CustomerNameCleanupDraft] = {
+        d.customer_id: d
+        for d in db.query(CustomerNameCleanupDraft).filter(
+            CustomerNameCleanupDraft.tenant_id == tenant_id,
+            CustomerNameCleanupDraft.customer_id.in_(ids),
+        ).all()
+    }
+
+    saved = deleted = skipped = 0
+    now = datetime.now(timezone.utc)
+
+    for item in body.items:
+        cust = customers_by_id.get(item.customer_id)
+        if cust is None:
+            skipped += 1
+            continue
+        existing = existing_drafts.get(item.customer_id)
+        wants_status = (item.status or "").strip().lower() or None
+
+        # Decide: delete vs upsert.
+        is_default = (
+            item.removed_word_indices is None
+            and not item.cleared
+            and wants_status in (None, "edited")
+        )
+
+        if is_default and existing is None:
+            # Nothing to do — no edit and no existing row.
+            continue
+        if is_default and existing is not None and existing.status != "skipped":
+            # Merchant cleared their edits → drop the draft row so
+            # the row falls back to cleaner defaults. Skipped rows
+            # are NOT auto-cleared by an "is_default" payload (they
+            # carry the skip flag, not chip state).
+            db.delete(existing)
+            deleted += 1
+            continue
+
+        # Upsert path. ``status`` defaults to "edited" unless the
+        # caller explicitly requested "skipped".
+        status_value = (
+            "skipped" if wants_status == "skipped" else "edited"
+        )
+        indices = (
+            list(item.removed_word_indices)
+            if item.removed_word_indices is not None
+            else None
+        )
+
+        if existing is None:
+            row = CustomerNameCleanupDraft(
+                tenant_id=tenant_id,
+                customer_id=cust.id,
+                original_name=cust.name,
+                removed_word_indices=indices,
+                cleared=bool(item.cleared),
+                status=status_value,
+                actor_user_id=actor_user_id,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(row)
+        else:
+            existing.original_name = cust.name
+            existing.removed_word_indices = indices
+            existing.cleared = bool(item.cleared)
+            existing.status = status_value
+            existing.actor_user_id = actor_user_id
+            existing.updated_at = now
+        saved += 1
+
+    db.commit()
+    log.info(
+        "draft_save | tenant=%s actor=%s saved=%d deleted=%d skipped=%d",
+        tenant_id, actor_user_id, saved, deleted, skipped,
+    )
+    return {
+        "tenant_id":    tenant_id,
+        "saved":        saved,
+        "deleted":      deleted,
+        "skipped":      skipped,
+        "saved_at":     now.isoformat(),
+    }
+
+
+@router.delete("/name-cleanup/draft")
+async def name_cleanup_draft_discard(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Discard every draft row for the current tenant.
+
+    Used by the "تجاهل المسودة" / "ابدأ من جديد" action. The next
+    preview returns the cleaner's pristine defaults for all rows.
+    Does NOT touch ``Customer.name`` — only the review session is
+    wiped.
+    """
+    import logging  # noqa: PLC0415
+    log = logging.getLogger("nahla.customers.name_cleanup")
+    tenant_id = resolve_tenant_id(request)
+    actor_user_id = get_jwt_user_id(request)
+
+    deleted = (
+        db.query(CustomerNameCleanupDraft)
+        .filter(CustomerNameCleanupDraft.tenant_id == tenant_id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    log.info(
+        "draft_discard | tenant=%s actor=%s deleted=%d",
+        tenant_id, actor_user_id, deleted,
+    )
+    return {"tenant_id": tenant_id, "deleted": deleted}
+
+
+# ── Inline "marketing opt-out" toggle for the cleanup modal ─────────
+#
+# During name review, the merchant often spots customers that aren't
+# just dirty names — they're customers they don't want to market to
+# at all (low engagement, wrong audience, etc.). Previously the only
+# fix was to leave the modal, navigate to the customer page, find
+# the row, and toggle ``marketing_opt_out_manual``. The endpoint
+# below is a thin wrapper that lets the modal flip the flag in one
+# click without leaving the review session.
+#
+# What this is NOT
+# ────────────────
+# * NOT a customer-driven unsubscribe (``is_unsubscribed`` —
+#   triggered by the customer sending "STOP"). That flag stays
+#   untouched here; we only set the merchant-driven
+#   ``marketing_opt_out_manual`` flag, which the campaign dispatcher
+#   honours in its ``_snapshot_recipients`` pre-send filter (logs
+#   the skip under ``LOG_SKIPPED_MANUAL_EXCLUSION`` /
+#   ``REASON_MARKETING_OPT_OUT`` — preserving the audit distinction).
+# * NOT a quality-suppression (``CustomerSuppression`` — written by
+#   the Suppression Engine after repeated quality_risk failures).
+#   The Quality Engine continues to write its own rows when the
+#   underlying signal warrants it, regardless of this manual flag.
+#
+# Three independent buckets, three independent sources of truth.
+# The frontend renders distinct badges for each.
+
+
+class NameCleanupMarketingOptOutIn(BaseModel):
+    """Body for ``POST /customers/name-cleanup/marketing-opt-out``.
+
+    A list so the merchant can flip multiple rows in one round-trip
+    without N modal-row clicks → N HTTP calls. The list is bounded
+    so a buggy frontend can't DoS the DB with a massive batch.
+    """
+    customer_ids: List[int]
+    opted_out: bool = True
+
+
+@router.post("/name-cleanup/marketing-opt-out")
+async def name_cleanup_marketing_opt_out(
+    body: NameCleanupMarketingOptOutIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Toggle ``marketing_opt_out_manual`` on one or more customers.
+
+    Use case: the merchant is reviewing names in the cleanup modal,
+    spots a customer they no longer want to market to, and clicks
+    "استبعاد من الحملات" on that row. The customer's record is NOT
+    deleted, their conversation history is NOT touched, and inbound
+    messages from them continue to be received normally. Only
+    outbound marketing/broadcast sends are blocked.
+
+    Tenant isolation: only the customers owned by the requesting
+    tenant are touched, even if the request body lists ids that
+    belong elsewhere — those are silently skipped.
+    """
+    import logging  # noqa: PLC0415
+    log = logging.getLogger("nahla.customers.name_cleanup")
+
+    tenant_id = resolve_tenant_id(request)
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="tenant_unresolved")
+
+    actor_user_id = get_jwt_user_id(request)
+
+    cust_ids = list({int(cid) for cid in (body.customer_ids or []) if cid})
+    if not cust_ids:
+        return {"tenant_id": tenant_id, "updated": 0, "skipped": 0}
+
+    # Hard cap — the modal currently supports up to 3 000 visible
+    # rows, but a single batch click should never request more than
+    # a few hundred. 500 is the sane upper bound; anything beyond
+    # that should make multiple API calls.
+    MAX_BATCH = 500
+    if len(cust_ids) > MAX_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"batch_too_large (max {MAX_BATCH})",
+        )
+
+    customers = (
+        db.query(Customer)
+        .filter(
+            Customer.tenant_id == tenant_id,
+            Customer.id.in_(cust_ids),
+        )
+        .all()
+    )
+    found_ids = {c.id for c in customers}
+    skipped_unknown = [cid for cid in cust_ids if cid not in found_ids]
+
+    updated = 0
+    for cust in customers:
+        try:
+            set_marketing_opt_out_manual(
+                db, tenant_id=tenant_id, customer_id=cust.id,
+                opted_out=bool(body.opted_out), commit=False,
+            )
+            updated += 1
+        except Exception as exc:
+            log.warning(
+                "marketing_opt_out_failed | tenant=%s customer=%s err=%s",
+                tenant_id, cust.id, exc,
+            )
+
+    db.commit()
+    log.info(
+        "marketing_opt_out | tenant=%s actor=%s opted_out=%s updated=%d "
+        "skipped_unknown=%d",
+        tenant_id, actor_user_id, body.opted_out, updated, len(skipped_unknown),
+    )
+    return {
+        "tenant_id": tenant_id,
+        "opted_out": bool(body.opted_out),
+        "updated":   updated,
+        "skipped_unknown": skipped_unknown,
     }
 
 
@@ -1693,6 +2089,7 @@ async def name_cleanup_apply(
                 "skipped":       [],
                 "applied_count": 0,
                 "skipped_count": 0,
+                "drafts_cleared": 0,
             }
         # Strict tenant filter: any customer_id not belonging to the
         # requester is silently dropped (not 404'd) — that way a stale
@@ -1797,18 +2194,35 @@ async def name_cleanup_apply(
             tenant_id, scanned, len(applied),
         )
 
+    # Drop any draft rows for customers we just applied — their
+    # in-progress review state is no longer interesting (the name
+    # is now what the merchant approved, no need to keep editing it).
+    drafts_cleared = 0
+    if applied:
+        applied_ids = [a["customer_id"] for a in applied]
+        drafts_cleared = (
+            db.query(CustomerNameCleanupDraft)
+            .filter(
+                CustomerNameCleanupDraft.tenant_id == tenant_id,
+                CustomerNameCleanupDraft.customer_id.in_(applied_ids),
+            )
+            .delete(synchronize_session=False)
+        )
+
     db.commit()
     log.info(
-        "apply | tenant=%s actor=%s mode=%s applied=%d skipped=%d",
+        "apply | tenant=%s actor=%s mode=%s applied=%d skipped=%d "
+        "drafts_cleared=%d",
         tenant_id, actor_user_id,
         "items" if has_explicit_items else "high_confidence_only",
-        len(applied), len(skipped),
+        len(applied), len(skipped), drafts_cleared,
     )
 
     return {
-        "tenant_id":     tenant_id,
-        "applied":       applied,
-        "skipped":       skipped,
-        "applied_count": len(applied),
-        "skipped_count": len(skipped),
+        "tenant_id":      tenant_id,
+        "applied":        applied,
+        "skipped":        skipped,
+        "applied_count":  len(applied),
+        "skipped_count":  len(skipped),
+        "drafts_cleared": drafts_cleared,
     }

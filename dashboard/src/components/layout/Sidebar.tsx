@@ -30,6 +30,7 @@ import {
   Wrench,
   HelpCircle,
   BookOpen,
+  Gauge,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -109,6 +110,7 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/help/whatsapp-manual-setup', icon: HelpCircle,   label: tr => tr.nav.items.manualSetup      },
       { to: '/widgets',                    icon: TrendingUp,   label: tr => tr.nav.items.widgets          },
       { to: '/system-status',              icon: Activity,     label: tr => tr.nav.items.systemStatus     },
+      { to: '/delivery-quality',           icon: Gauge,        label: tr => tr.nav.items.deliveryQuality  },
       { to: '/billing',                    icon: CreditCard,   label: tr => tr.nav.items.billing          },
       { to: '/settings',                   icon: Settings,     label: tr => tr.nav.items.settings         },
     ],

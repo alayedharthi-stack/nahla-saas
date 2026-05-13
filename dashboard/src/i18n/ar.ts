@@ -37,6 +37,7 @@ const ar: Translations = {
       manualSetup:      'دليل الربط اليدوي',
       widgets:          'أدوات زيادة المبيعات',
       systemStatus:     'حالة النظام',
+      deliveryQuality:  'جودة الإرسال',
       billing:          'الاشتراك والفوترة',
       settings:         'الإعدادات',
     },

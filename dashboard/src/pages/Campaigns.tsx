@@ -19,6 +19,7 @@ import {
   campaignsApi, CampaignRecord, CreateCampaignPayload,
   CampaignGoal, CustomerSegmentMeta, RecommendedTemplate, TemplateRecommendation,
   CampaignProtectionInfo, CampaignDebugSnapshot,
+  PreflightStrategyResponse, CampaignWavesResponse, CampaignWaveRow,
   extractVariables, renderTemplate, getTemplateBody, getTemplateHeader, getTemplateFooter,
 } from '../api/campaigns'
 
@@ -50,6 +51,18 @@ interface WizardState {
    *  marks these recipients as ``skipped_manual_exclusion`` so the
    *  report shows exactly who was filtered out and why. */
   excludeSegments: string[]
+  /** Wave / Batch sending strategy (Meta-aware pacing).
+   *
+   *  - `immediate` — default; the small-campaign default that
+   *    skips all wave UI.
+   *  - `adaptive` — Nahla picks `batch_size` + delay from the
+   *    current Quality Score / Meta tier (recommended for
+   *    large broadcasts).
+   *  - `batched`  — merchant supplies their own `batch_size` +
+   *    `delayBetweenBatchesSec`. */
+  sendStrategy: 'immediate' | 'batched' | 'adaptive'
+  batchSize: number
+  delayBetweenBatchesSec: number
 }
 
 const INITIAL_WIZARD: WizardState = {
@@ -71,6 +84,9 @@ const INITIAL_WIZARD: WizardState = {
   autoCoupon: true,
   discountPercent: 10,
   excludeSegments: [],
+  sendStrategy: 'immediate',
+  batchSize: 1000,
+  delayBetweenBatchesSec: 3600,
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -937,6 +953,353 @@ function Step6TestSend({
   )
 }
 
+// ── Wave timeline (used inside the campaign-detail drawer) ──────────────────
+//
+// Renders the persisted ``campaign_waves`` rows for a wave-mode
+// campaign as a vertical timeline. Each wave shows: index of
+// total, scheduled time, status pill, planned vs sent counters,
+// and a thin progress bar. Auto-refreshes every 15s while at
+// least one wave is still ``pending`` or ``dispatching`` so the
+// merchant sees progress live without a manual reload.
+//
+// Read-only — no actions exposed here yet (pause/cancel will
+// come in a follow-up once the backend exposes the mutators).
+
+function WavesPanel({ campaignId }: { campaignId: number }) {
+  const [data, setData] = useState<CampaignWavesResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const fetchWaves = useCallback(async () => {
+    try {
+      const r = await campaignsApi.waves(campaignId)
+      setData(r)
+      setError(null)
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'تعذر تحميل الدفعات'
+      setError(message)
+    } finally {
+      setLoading(false)
+    }
+  }, [campaignId])
+
+  useEffect(() => {
+    fetchWaves()
+  }, [fetchWaves])
+
+  // Live refresh while waves are still draining.
+  useEffect(() => {
+    if (!data) return
+    const stillRunning = data.waves.some(
+      (w) => w.status === 'pending' || w.status === 'dispatching',
+    )
+    if (!stillRunning) return
+    const t = setInterval(fetchWaves, 15000)
+    return () => clearInterval(t)
+  }, [data, fetchWaves])
+
+  if (loading) return null
+  if (error) {
+    return (
+      <div className="mt-3 text-[11px] text-slate-500">{error}</div>
+    )
+  }
+  if (!data || data.send_strategy === 'immediate' || data.waves.length === 0) {
+    return null
+  }
+
+  const totalPlanned = data.waves.reduce((acc, w) => acc + w.planned_recipients, 0)
+  const totalSent = data.waves.reduce((acc, w) => acc + w.sent_count, 0)
+  const totalFailed = data.waves.reduce((acc, w) => acc + w.failed_count, 0)
+
+  const statusMeta: Record<
+    CampaignWaveRow['status'],
+    { label: string; variant: 'green' | 'amber' | 'blue' | 'slate' | 'red' | 'purple' }
+  > = {
+    pending:     { label: 'بانتظار الإطلاق', variant: 'slate'  },
+    dispatching: { label: 'جارٍ الإرسال',    variant: 'blue'   },
+    completed:   { label: 'مكتملة',          variant: 'green'  },
+    failed:      { label: 'فشلت',           variant: 'red'    },
+    paused:      { label: 'موقوفة',          variant: 'amber'  },
+    cancelled:   { label: 'ملغية',          variant: 'slate'  },
+  }
+
+  return (
+    <div className="mt-3 bg-white border border-slate-200 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 bg-gradient-to-l from-purple-50 to-white border-b border-slate-200">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <p className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+              <Repeat className="w-4 h-4 text-purple-500" />
+              جدول الدفعات
+            </p>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              استراتيجية {data.send_strategy === 'adaptive' ? 'تلقائية' : 'يدوية'}
+              {' • '}
+              {data.total_waves} دفعة
+              {data.batch_size ? ` • ${data.batch_size.toLocaleString('ar-SA')}/دفعة` : ''}
+            </p>
+          </div>
+          <div className="text-[11px] text-slate-600">
+            <span className="text-emerald-600 font-semibold">{totalSent.toLocaleString('ar-SA')}</span>
+            <span className="text-slate-400 mx-1">/</span>
+            <span>{totalPlanned.toLocaleString('ar-SA')}</span>
+            {totalFailed > 0 && (
+              <span className="text-rose-500 mr-2"> • فشل {totalFailed.toLocaleString('ar-SA')}</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="divide-y divide-slate-100">
+        {data.waves.map((w) => {
+          const sm = statusMeta[w.status]
+          const pct = w.planned_recipients > 0
+            ? Math.min(100, Math.round((w.sent_count / w.planned_recipients) * 100))
+            : 0
+          const scheduledLabel = w.scheduled_at
+            ? new Date(w.scheduled_at).toLocaleString('ar-SA', {
+                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+              })
+            : '—'
+          return (
+            <div key={w.id} className="px-4 py-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center text-[11px] font-semibold">
+                    {w.wave_index}
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-slate-800">
+                      دفعة {w.wave_index} من {w.total_waves}
+                    </p>
+                    <p className="text-[10px] text-slate-500 flex items-center gap-1">
+                      <Clock className="w-3 h-3" /> {scheduledLabel}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10.5px] text-slate-500">
+                    {w.sent_count.toLocaleString('ar-SA')} / {w.planned_recipients.toLocaleString('ar-SA')}
+                  </span>
+                  <Badge label={sm.label} variant={sm.variant} />
+                </div>
+              </div>
+              <div className="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all ${
+                    w.status === 'failed' ? 'bg-rose-400' :
+                    w.status === 'completed' ? 'bg-emerald-400' :
+                    w.status === 'dispatching' ? 'bg-blue-400' :
+                    'bg-slate-200'
+                  }`}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+
+// ── Send Strategy preview (used inside Step7) ────────────────────────────────
+//
+// Calls the backend's /campaigns/preflight-strategy endpoint every
+// time the merchant changes audience size or strategy. Displays
+// what the adaptive engine would pick, plus a sanity check on the
+// merchant's explicit choice. Read-only — never persists anything.
+
+function SendStrategyPicker({
+  wiz, setWiz, audienceCount,
+}: {
+  wiz: WizardState
+  setWiz: React.Dispatch<React.SetStateAction<WizardState>>
+  audienceCount: number
+}) {
+  const [preview, setPreview] = useState<PreflightStrategyResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // Refresh preview when the strategy, batch size, or audience changes.
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    campaignsApi
+      .preflightStrategy({
+        audience_count: audienceCount,
+        proposed_strategy: wiz.sendStrategy,
+        proposed_batch_size:
+          wiz.sendStrategy === 'batched' ? wiz.batchSize : undefined,
+        proposed_delay_between_batches_sec:
+          wiz.sendStrategy === 'batched' ? wiz.delayBetweenBatchesSec : undefined,
+      })
+      .then((r) => { if (!cancelled) setPreview(r) })
+      .catch(() => { if (!cancelled) setPreview(null) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [audienceCount, wiz.sendStrategy, wiz.batchSize, wiz.delayBetweenBatchesSec])
+
+  const threshold = preview?.threshold_recipients_for_waves ?? 500
+  const tooSmall = audienceCount > 0 && audienceCount < threshold
+
+  const formatDelay = (seconds: number): string => {
+    if (seconds <= 0) return 'بدون فاصل'
+    if (seconds < 60) return `${seconds} ثانية`
+    const minutes = Math.round(seconds / 60)
+    if (minutes < 60) return `${minutes} دقيقة`
+    const hours = (seconds / 3600).toFixed(1).replace(/\.0$/, '')
+    if (Number(hours) < 24) return `${hours} ساعة`
+    const days = (seconds / 86400).toFixed(1).replace(/\.0$/, '')
+    return `${days} يوم`
+  }
+
+  const options: Array<{
+    id: WizardState['sendStrategy']
+    label: string
+    desc: string
+    icon: React.ReactNode
+  }> = [
+    {
+      id: 'immediate',
+      label: 'إرسال فوري',
+      desc: 'دفعة واحدة الآن. مناسب للحملات الصغيرة.',
+      icon: <Send className="w-3.5 h-3.5" />,
+    },
+    {
+      id: 'adaptive',
+      label: 'تلقائي حسب جودة الرقم',
+      desc: 'نحلة تختار حجم الدفعة وفترات الإرسال تلقائياً.',
+      icon: <Sparkles className="w-3.5 h-3.5" />,
+    },
+    {
+      id: 'batched',
+      label: 'إرسال على دفعات يدوياً',
+      desc: 'حدد حجم الدفعة والفاصل الزمني بنفسك.',
+      icon: <Repeat className="w-3.5 h-3.5" />,
+    },
+  ]
+
+  const proposed = preview?.proposed
+  const adaptive = preview?.suggested_adaptive
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <label className="label mb-0">استراتيجية الإرسال</label>
+        {preview?.current_quality?.nahla_tier && (
+          <Badge
+            label={`جودة الرقم: ${preview.current_quality.nahla_tier}`}
+            variant="blue"
+          />
+        )}
+      </div>
+
+      <div className="grid sm:grid-cols-3 gap-2">
+        {options.map((opt) => {
+          const disabled = tooSmall && opt.id !== 'immediate'
+          const active = wiz.sendStrategy === opt.id
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              disabled={disabled}
+              onClick={() => setWiz((w) => ({ ...w, sendStrategy: opt.id }))}
+              className={`flex flex-col items-start gap-1 border rounded-xl px-3 py-2 text-xs text-right transition-all ${
+                active
+                  ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-200 text-brand-700'
+                  : disabled
+                    ? 'border-slate-100 bg-slate-50 text-slate-300 cursor-not-allowed'
+                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+              }`}
+            >
+              <div className="flex items-center gap-1.5 font-medium">
+                {opt.icon} {opt.label}
+              </div>
+              <p className="text-[10.5px] text-slate-500 leading-relaxed">{opt.desc}</p>
+            </button>
+          )
+        })}
+      </div>
+
+      {tooSmall && (
+        <div className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <p>
+            الجمهور الحالي ({audienceCount.toLocaleString('ar-SA')} مستلم) أقل من الحد الأدنى
+            لتقسيم الحملات ({threshold.toLocaleString('ar-SA')}). سيتم الإرسال مباشرة بدون دفعات.
+          </p>
+        </div>
+      )}
+
+      {wiz.sendStrategy === 'batched' && !tooSmall && (
+        <div className="grid sm:grid-cols-2 gap-2">
+          <div>
+            <label className="label text-[11px]">حجم الدفعة</label>
+            <select
+              className="input text-sm"
+              value={wiz.batchSize}
+              onChange={(e) => setWiz((w) => ({ ...w, batchSize: Number(e.target.value) }))}
+            >
+              {[100, 250, 500, 1000, 2000, 3000, 5000].map((n) => (
+                <option key={n} value={n}>{n.toLocaleString('ar-SA')} مستلم</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="label text-[11px]">الفاصل بين الدفعات</label>
+            <select
+              className="input text-sm"
+              value={wiz.delayBetweenBatchesSec}
+              onChange={(e) => setWiz((w) => ({ ...w, delayBetweenBatchesSec: Number(e.target.value) }))}
+            >
+              <option value={900}>15 دقيقة</option>
+              <option value={1800}>30 دقيقة</option>
+              <option value={3600}>1 ساعة</option>
+              <option value={7200}>2 ساعة</option>
+              <option value={14400}>4 ساعات</option>
+              <option value={21600}>6 ساعات</option>
+              <option value={43200}>12 ساعة</option>
+              <option value={86400}>24 ساعة</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      {!loading && wiz.sendStrategy !== 'immediate' && !tooSmall && (proposed || adaptive) && (
+        <div className="rounded-xl border border-brand-200 bg-brand-50/60 p-3 space-y-1.5">
+          <p className="text-xs font-semibold text-brand-700 flex items-center gap-1.5">
+            <BarChart2 className="w-3.5 h-3.5" />
+            خطة الإرسال
+          </p>
+          {(() => {
+            const p = proposed || {
+              total_waves: adaptive!.total_waves,
+              batch_size: adaptive!.batch_size,
+              delay_between_batches_sec: adaptive!.delay_between_batches_sec,
+              reason: adaptive!.rationale,
+              strategy: adaptive!.strategy,
+              downgraded_to_immediate: false,
+            }
+            return (
+              <>
+                <p className="text-[11px] text-slate-700 leading-relaxed">
+                  <strong>{p.total_waves.toLocaleString('ar-SA')}</strong> دفعة ×{' '}
+                  <strong>{p.batch_size.toLocaleString('ar-SA')}</strong> مستلم،
+                  فاصل <strong>{formatDelay(p.delay_between_batches_sec)}</strong>.
+                </p>
+                <p className="text-[10.5px] text-slate-500 leading-relaxed">{p.reason}</p>
+              </>
+            )
+          })()}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 // ── Step 7: Review (campaign name + schedule + coupon) ────────────────────────
 
 function Step7Review({
@@ -1018,6 +1381,18 @@ function Step7Review({
           </select>
         )}
       </div>
+
+      {/* Wave / Batch sending — the merchant picks how the audience
+          is paced over time. Only shown for `immediate` schedule;
+          scheduled/delayed campaigns currently use the legacy
+          single-shot path. */}
+      {wiz.scheduleType === 'immediate' && (
+        <SendStrategyPicker
+          wiz={wiz}
+          setWiz={setWiz}
+          audienceCount={segmentMeta?.customer_count ?? 0}
+        />
+      )}
 
       {/* Coupon / Discount section — behavior depends on campaign goal.
           Three flavours:
@@ -1442,6 +1817,15 @@ function CampaignWizard({
         // returns the already-running campaign instead of spawning
         // a second dispatch.
         idempotency_key: idemKeyRef.current,
+        // Wave/Batch — the backend silently downgrades to
+        // ``immediate`` for small audiences (see
+        // ``WAVE_THRESHOLD_RECIPIENTS``), so we always send the
+        // merchant's chosen strategy verbatim and trust the
+        // server to apply the threshold rule.
+        send_strategy: wiz.scheduleType === 'immediate' ? wiz.sendStrategy : 'immediate',
+        batch_size: wiz.sendStrategy === 'batched' ? wiz.batchSize : undefined,
+        delay_between_batches_sec:
+          wiz.sendStrategy === 'batched' ? wiz.delayBetweenBatchesSec : undefined,
       }
       const created = await campaignsApi.create(payload)
       onCreated(created)
@@ -2828,6 +3212,24 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         </td>
         <td className="px-5 py-3.5">
           <Badge label={sm.label} variant={sm.variant} dot />
+          {/* Wave/Batch indicator: surface the chosen strategy
+              right under the status pill so the merchant can
+              tell "إرسال على دفعات" apart from a stalled
+              immediate campaign at a glance. Only renders when
+              the campaign is actually batched/adaptive — small
+              immediate campaigns are not labelled. */}
+          {campaign.send_strategy && campaign.send_strategy !== 'immediate' && (
+            <div className="mt-1">
+              <Badge
+                label={
+                  campaign.send_strategy === 'adaptive'
+                    ? 'إرسال تلقائي على دفعات'
+                    : 'إرسال على دفعات'
+                }
+                variant="purple"
+              />
+            </div>
+          )}
           {/* last_error gets the same surface as failed_count: a small
               one-line hint under the status badge so the merchant
               doesn't have to open the drawer to know "what broke?".
@@ -2987,6 +3389,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 bundleStatus={supportBundleStatus}
               />
             )}
+            {/* Wave timeline — only renders for batched/adaptive
+                campaigns; immediate ones get nothing (the panel
+                self-suppresses based on the API response). */}
+            <WavesPanel campaignId={campaign.id} />
             <pre className="text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono bg-white border border-slate-200 rounded-lg p-3 leading-relaxed">
               {diagnostic}
             </pre>

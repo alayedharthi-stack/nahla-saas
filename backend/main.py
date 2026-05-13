@@ -383,6 +383,9 @@ from routers.notification_logs import router as _notification_logs_router  # noq
 from routers.addons            import router as _addons_router               # noqa: E402
 from routers.widgets           import router as _widgets_router              # noqa: E402
 from routers.product_interests import router as _product_interests_router    # noqa: E402
+# Delivery Quality Intelligence Layer (Phase 2 — analytical only).
+# Read-only endpoints; no send-behaviour side effects.
+from routers.delivery_quality   import router as _delivery_quality_router    # noqa: E402
 
 # TEMPORARY: token-gated public debug router. Safe to delete once the
 # abandoned-cart investigation is closed. See routers/debug_public.py.
@@ -397,6 +400,7 @@ app.include_router(_auth_router)
 app.include_router(_settings_router)
 app.include_router(_templates_router)
 app.include_router(_campaigns_router)
+app.include_router(_delivery_quality_router)
 app.include_router(_campaign_wizard_router)
 app.include_router(_automations_router)
 app.include_router(_analytics_router)
@@ -1215,6 +1219,15 @@ async def on_startup() -> None:
         from core.scheduler import run_campaign_dispatcher_scheduler  # noqa: PLC0415
         return run_campaign_dispatcher_scheduler()
     _start("campaign_dispatcher", _f_campaign_dispatcher, 12)
+
+    # Wave / Batch scheduler — runs alongside the campaign dispatcher
+    # but on its own loop so a misbehaving wave can never break the
+    # immediate-campaign rescue path. See ``run_campaign_wave_scheduler``
+    # docstring for the full design rationale.
+    def _f_campaign_wave_scheduler():
+        from core.scheduler import run_campaign_wave_scheduler  # noqa: PLC0415
+        return run_campaign_wave_scheduler()
+    _start("campaign_wave_scheduler", _f_campaign_wave_scheduler, 14)
 
     def _f_abandoned_cart():
         from core.abandoned_cart_scheduler import run_abandoned_cart_scheduler  # noqa: PLC0415

@@ -141,6 +141,13 @@ REASON_PENDING_OPT_OUT  = "pending_unsubscribe"
 REASON_NO_PHONE         = "no_phone"
 REASON_MARKETING_OPT_OUT = "marketing_opt_out_manual"
 REASON_MANUAL_EXCLUDE   = "excluded_by_manual_segment"
+# Delivery Quality Intelligence Layer (May 2026): phones the
+# Suppression Engine auto-blocked after repeated quality_risk
+# failures (``not_on_whatsapp``, ``invalid_phone``, ``blocked_by_user``,
+# …). We log these under a distinct reason so the merchant can tell
+# them apart from customer-driven opt-outs in the campaign report.
+LOG_SKIPPED_QUALITY_SUPPRESSED = "skipped_quality_suppressed"
+REASON_QUALITY_SUPPRESSED = "auto_suppressed_quality"
 
 
 def _reconstruct_template_body(
@@ -235,7 +242,12 @@ def _record_campaign_message(
         )
 
 
-async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
+async def dispatch_campaign(
+    db: Session,
+    campaign_id: int,
+    *,
+    only_wave_id: Optional[int] = None,
+) -> Dict[str, Any]:
     """Send a campaign's template to every reachable customer with
     strict per-recipient idempotency.
 
@@ -251,6 +263,19 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
     The function is safe to call again on the same ``campaign_id``.
     Already-sent rows are NEVER re-sent — only ``queued`` and
     ``failed`` rows are picked up by step 6.
+
+    Wave-aware dispatch
+    ───────────────────
+    When ``only_wave_id`` is provided (the Wave Scheduler's normal
+    invocation path), the dispatcher SKIPS steps 2–5 entirely
+    — the campaign's recipients were already snapshot-ted and
+    assigned to waves at launch time by the wave scheduler. Step
+    6 then filters its queue by ``wave_id == only_wave_id`` so
+    each scheduler tick dispatches only the recipients belonging
+    to that wave.
+
+    Legacy ``only_wave_id=None`` retains the historic single-shot
+    behaviour for ``send_strategy='immediate'`` campaigns.
 
     Returns a summary dict including the per-status counters surfaced
     to the merchant in the campaign report.
@@ -296,6 +321,59 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         _persist_dispatch_result(campaign, 0, 0, 0, preflight)
         db.commit()
         return _empty_result(error=errs_text)
+
+    # ── Wave-aware fast path ──────────────────────────────────────────
+    # When the wave scheduler calls us with ``only_wave_id`` we SKIP
+    # audience resolution + snapshot + frequency cap entirely — those
+    # ran once at launch time. We re-establish ``customers_by_phone``
+    # from the snapshot rows (the wave's queued rows) so the dispatch
+    # loop can still personalise messages. Everything downstream from
+    # the snapshot (validation already passed above, the dispatch
+    # loop, final counters) runs as normal but filtered to the wave.
+    if only_wave_id is not None:
+        wave_customers = _load_customers_for_wave(
+            db, campaign_id=campaign_id, wave_id=only_wave_id,
+        )
+        customers_by_phone = {
+            (c.normalized_phone or ""): c
+            for c in wave_customers
+            if c.normalized_phone
+        }
+        manual_coupon = str(getattr(campaign, "coupon_code", "") or "").strip()
+        auto_coupon = bool((campaign.template_variables or {}).get("_auto_coupon"))
+        discount_pct = (campaign.template_variables or {}).get("_discount_percent")
+        store_name = _resolve_store_name(db, tenant_id)
+        if auto_coupon or manual_coupon.lower() == "auto":
+            manual_coupon = ""
+
+        sent, failed, errors = await _dispatch_queued_rows(
+            db,
+            campaign=campaign,
+            template=template,
+            wa_conn=wa_conn,
+            store_name=store_name,
+            auto_coupon=auto_coupon,
+            discount_pct=discount_pct,
+            manual_coupon=manual_coupon,
+            customers_by_phone=customers_by_phone,
+            only_wave_id=only_wave_id,
+        )
+
+        counts = _count_log_statuses(db, campaign_id)
+        # Wave runs do NOT flip the campaign's status to terminal —
+        # that's the wave scheduler's job once the LAST wave finishes.
+        # We only persist incremental counters.
+        campaign.sent_count = counts.get("sent", 0)
+        campaign.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return {
+            "campaign_id":   campaign_id,
+            "wave_id":       only_wave_id,
+            "status":        "wave_completed",
+            "sent":          sent,
+            "failed":        failed,
+            "errors":        errors[:5],
+        }
 
     # ── Audience funnel — phase 1: raw count (pre-reachability) ────
     # We capture the unfiltered audience count BEFORE reachability
@@ -537,6 +615,8 @@ async def dispatch_campaign(db: Session, campaign_id: int) -> Dict[str, Any]:
         "skipped_unsubscribed": counts.get(LOG_SKIPPED_UNSUBSCRIBED, 0),
         "skipped_unreachable":  counts.get(LOG_SKIPPED_UNREACHABLE, 0),
         "skipped_manual_exclusion": counts.get(LOG_SKIPPED_MANUAL_EXCLUSION, 0),
+        "skipped_quality_suppressed":
+            counts.get(LOG_SKIPPED_QUALITY_SUPPRESSED, 0),
         "frequency_cap_days": MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
         "errors":         errors,
     }
@@ -558,6 +638,7 @@ def _empty_result(*, error: str = "") -> Dict[str, Any]:
         "skipped_unsubscribed": 0,
         "skipped_unreachable":  0,
         "skipped_manual_exclusion": 0,
+        "skipped_quality_suppressed": 0,
         "frequency_cap_days":   MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
         "errors":               [error] if error else [],
     }
@@ -601,6 +682,30 @@ def _snapshot_recipients(
         from services.manual_segments import list_manual_segments_bulk  # noqa: PLC0415
         bulk = list_manual_segments_bulk(db, tenant_id, [c.id for c in customers])
         manual_segments_by_id = {cid: set(keys) for cid, keys in bulk.items()}
+
+    # ── Delivery Quality Intelligence Layer (May 2026) ──
+    # Bulk-load the set of currently-suppressed phones for this
+    # tenant. One query instead of one per recipient. We tolerate
+    # the table not existing yet (e.g. during a partial deployment)
+    # by catching any exception and treating the set as empty.
+    suppressed_phones: set[str] = set()
+    try:
+        from models import CustomerSuppression  # noqa: PLC0415
+        suppressed_phones = {
+            row[0]
+            for row in db.query(CustomerSuppression.normalized_phone)
+                         .filter(
+                             CustomerSuppression.tenant_id == tenant_id,
+                             CustomerSuppression.is_active.is_(True),
+                         )
+                         .all()
+            if row and row[0]
+        }
+    except Exception as _supp_exc:
+        logger.debug(
+            "[snapshot] suppression lookup skipped (table missing?): %s",
+            _supp_exc,
+        )
 
     new_rows: List[CampaignSendLog] = []
     no_phone = 0
@@ -674,6 +779,26 @@ def _snapshot_recipients(
                 template_language=template.language,
                 status=LOG_SKIPPED_MANUAL_EXCLUSION,
                 skip_reason=REASON_MARKETING_OPT_OUT,
+            ))
+            existing_phones.add(phone)
+            continue
+
+        # ── Delivery Quality auto-suppression ─────────────────────
+        # Phone is in the active suppression list — i.e. it has hit
+        # the auto-suppress threshold (e.g. 2× ``not_on_whatsapp``)
+        # or a critical one-shot signal (``blocked_by_user``). We
+        # do NOT send and we log the row so the merchant can see
+        # how many phones the engine filtered.
+        if phone in suppressed_phones:
+            new_rows.append(CampaignSendLog(
+                tenant_id=tenant_id,
+                campaign_id=campaign_id,
+                customer_id=cust.id,
+                customer_phone_e164=phone,
+                template_name=template.name,
+                template_language=template.language,
+                status=LOG_SKIPPED_QUALITY_SUPPRESSED,
+                skip_reason=REASON_QUALITY_SUPPRESSED,
             ))
             existing_phones.add(phone)
             continue
@@ -1565,10 +1690,17 @@ async def _dispatch_queued_rows(
     discount_pct: Optional[int],
     customers_by_phone: Dict[str, Customer],
     manual_coupon: str = "",
+    only_wave_id: Optional[int] = None,
 ) -> Tuple[int, int, List[str]]:
     """Walk the campaign's ``queued`` and ``failed`` rows in batches and
     send each one. Already-sent rows are filtered out by the query
     itself, so a re-run of this function is safe.
+
+    When ``only_wave_id`` is set the inner SELECT is additionally
+    constrained by ``wave_id == only_wave_id`` so each call
+    dispatches exactly one wave's slice of the campaign's
+    recipients. The legacy ``None`` path is unaffected — it
+    dispatches every queued row regardless of wave membership.
 
     Returns ``(sent_count, failed_count, error_messages)``.
     """
@@ -1631,7 +1763,7 @@ async def _dispatch_queued_rows(
         # ``reschedule_failed_for_retry`` to promote them back to
         # queued). Re-including failed rows here was the root cause of
         # the production retry storm (attempt_count=7345).
-        batch = (
+        batch_q = (
             db.query(CampaignSendLog)
             .filter(
                 CampaignSendLog.campaign_id == campaign.id,
@@ -1640,8 +1772,13 @@ async def _dispatch_queued_rows(
             )
             .order_by(CampaignSendLog.id.asc())
             .limit(batch_size)
-            .all()
         )
+        # Wave-scoped dispatch: each scheduler tick only touches the
+        # slice that belongs to its wave. The composite index
+        # ``ix_campaign_send_log_wave_status`` keeps this cheap.
+        if only_wave_id is not None:
+            batch_q = batch_q.filter(CampaignSendLog.wave_id == only_wave_id)
+        batch = batch_q.all()
         if not batch:
             break
 
@@ -2108,6 +2245,38 @@ def _resolve_audience(
             )
         )
     return q.all()
+
+
+def _load_customers_for_wave(
+    db: Session, *, campaign_id: int, wave_id: int,
+) -> List[Customer]:
+    """Load every ``Customer`` whose ``CampaignSendLog`` row belongs
+    to the given wave AND is still pending (``queued``).
+
+    Used by the wave-aware path of ``dispatch_campaign`` so each
+    wave dispatcher run gets the per-recipient context
+    (``customer.id``, ``customer.name``, ``customer.normalized_phone``)
+    it needs to personalise the template — without re-running the
+    audience segment query (which would pick up customers added
+    AFTER launch, defeating the wave plan).
+
+    Returns at most ``planned_recipients`` customers per wave. The
+    legacy non-wave code path is unaffected.
+    """
+    rows = (
+        db.query(Customer)
+        .join(
+            CampaignSendLog,
+            CampaignSendLog.customer_id == Customer.id,
+        )
+        .filter(
+            CampaignSendLog.campaign_id == campaign_id,
+            CampaignSendLog.wave_id == wave_id,
+            CampaignSendLog.status == LOG_QUEUED,
+        )
+        .all()
+    )
+    return list(rows)
 
 
 def _resolve_store_name(db: Session, tenant_id: int) -> str:

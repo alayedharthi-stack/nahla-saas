@@ -715,6 +715,25 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
             .filter(CampaignSendLog.provider_message_id == wamid)
             .first()
         )
+        # ── Delivery Quality Intelligence Layer (May 2026) ──
+        # Best-effort append-only event capture. NEVER let this fail
+        # the existing dispatcher flow — wrapped in try/except, runs
+        # against the same `db` session so commit/rollback below
+        # naturally cleans up if needed.
+        try:
+            from services.delivery_quality import record_status_event  # noqa: PLC0415
+            record_status_event(
+                db=db,
+                tenant_id=(log_row.tenant_id if log_row else None),
+                wamid=wamid,
+                status=st,
+                phone_e164=(log_row.phone_e164 if log_row else None),
+                errors_payload=status.get("errors"),
+                campaign_send_log_id=(log_row.id if log_row else None),
+                source="meta",
+            )
+        except Exception as exc:
+            logger.debug("[StatusWebhook] quality recorder failed: %s", exc)
         log_touched = False
         log_campaign_id: Optional[int] = None
         if log_row:
@@ -1786,6 +1805,28 @@ async def _dispatch_message(
             )
             if _lead:
                 _inbound_customer_id = _lead.id
+
+            # ── Delivery Quality: auto-reinstate suppression on inbound ──
+            # If this phone was previously auto-suppressed (e.g. after
+            # repeated not_on_whatsapp failures, or a single
+            # blocked_by_user signal), an inbound message is the
+            # clearest possible "yes I want to hear from you" signal.
+            # Flip the row to ``is_active=False`` so the next dispatch
+            # cycle includes the customer again. Never blocks the
+            # message flow on a quality-layer hiccup.
+            try:
+                from services.delivery_quality import reinstate_on_inbound  # noqa: PLC0415
+                reinstate_on_inbound(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    normalized_phone=normalized_sender,
+                    reason="inbound_message",
+                )
+            except Exception as _reinstate_exc:
+                logger.debug(
+                    "[delivery_quality] reinstate on inbound failed: %s",
+                    _reinstate_exc,
+                )
 
             # ── Unsubscribe / Pending / Re-subscribe gate ────────────────────
             # 3-state flow:

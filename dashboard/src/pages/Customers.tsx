@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Search,
@@ -28,6 +28,10 @@ import {
   Sparkles,
   ShieldCheck,
   Loader2,
+  Save,
+  SkipForward,
+  UserMinus,
+  Check,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -39,6 +43,47 @@ import {
   type CustomerSegmentMeta,
   type NameCleanupPreviewItem,
 } from '../api/customers'
+
+// ── Name-cleanup modal state shapes ──────────────────────────────────
+//
+// One ``RowState`` per customer the modal is currently showing. The
+// chip state lives here in-memory; autosave dribbles diffs out to the
+// backend so closing the modal mid-review never loses work.
+type CleanupRowStatus = 'edited' | 'skipped'
+
+interface CleanupRowState {
+  /** Token indices (into ``current_name`` split on whitespace) that
+   *  the merchant has flipped OFF. ``null`` means "use the cleaner's
+   *  default removal set" — equivalent to "merchant hasn't touched
+   *  this row's words yet". */
+  removed: number[] | null
+  /** Force-clear flag (the "مسح الاسم بالكامل" button). Wins over
+   *  individual word toggles. */
+  cleared: boolean
+  /** Skipped rows are filtered out of the default view so the
+   *  merchant doesn't see them again on the next session. */
+  status: CleanupRowStatus
+  /** True when the row has unsaved local edits — the autosave loop
+   *  uses this to decide what to ship next. Cleared on save success. */
+  dirty: boolean
+  /** When the backend last confirmed the row. ``null`` means the
+   *  row state lives only in the browser so far. */
+  savedAt: string | null
+}
+
+type CleanupFilter =
+  | 'all'
+  | 'pending'
+  | 'edited'
+  | 'high'
+  | 'low'
+  /** Show ONLY customers the merchant flagged as
+   *  "exclude from marketing" inline during this review. Useful for
+   *  reviewing the merchant's own exclusion list before applying. */
+  | 'opted_out'
+type CleanupSaveState = 'idle' | 'saving' | 'saved' | 'error'
+
+const NAME_CLEANUP_AUTOSAVE_DEBOUNCE_MS = 1200
 
 function segmentVariant(
   seg: string,
@@ -129,15 +174,14 @@ export default function Customers() {
   const [nameCleanupApplying, setNameCleanupApplying] = useState(false)
   const [nameCleanupItems, setNameCleanupItems] = useState<NameCleanupPreviewItem[]>([])
   const [nameCleanupSelected, setNameCleanupSelected] = useState<Set<number>>(new Set())
-  // Per-row chip-based editing.
-  //   * ``nameCleanupRemoved[id]`` — indices of words (split on whitespace
-  //     of ``current_name``) the merchant chose to drop. The remaining
-  //     words rebuild the suggested name in order.
-  //   * ``nameCleanupCleared`` — explicit "clear the whole row" set; wins
-  //     over per-word removal. Absence means "follow the cleaner's
-  //     original suggestion for this row".
-  const [nameCleanupRemoved, setNameCleanupRemoved] = useState<Record<number, number[]>>({})
-  const [nameCleanupCleared, setNameCleanupCleared] = useState<Set<number>>(new Set())
+  // Per-row edit state — keyed by customer_id. Initialised from the
+  // preview response (which merges in any saved draft) and mutated
+  // in-place as the merchant toggles chips. Autosave watches the
+  // ``dirty`` flag and dribbles changes to the backend.
+  const [nameCleanupRowState, setNameCleanupRowState] = useState<
+    Record<number, CleanupRowState>
+  >({})
+  const [nameCleanupFilter, setNameCleanupFilter] = useState<CleanupFilter>('all')
   const [nameCleanupSummary, setNameCleanupSummary] = useState<{
     totalCustomers: number
     totalScanned:   number
@@ -146,12 +190,26 @@ export default function Customers() {
     lowConfidence:  number
     truncated:      boolean
     maxItems:       number
+    draftEdited:    number
+    draftSkipped:   number
   } | null>(null)
   const [nameCleanupResult, setNameCleanupResult] = useState<{
     applied: number
     skipped: number
+    draftsCleared: number
   } | null>(null)
   const [nameCleanupError, setNameCleanupError] = useState('')
+  const [nameCleanupSaveState, setNameCleanupSaveState] = useState<CleanupSaveState>('idle')
+  const [nameCleanupLastSavedAt, setNameCleanupLastSavedAt] = useState<string | null>(null)
+
+  // Autosave plumbing: a ref-held debounce timer so consecutive chip
+  // toggles coalesce into one POST, plus a ref-held "in-flight" guard
+  // so we don't fire overlapping save requests when the merchant is
+  // clicking fast. We keep them in refs (not state) so toggling them
+  // doesn't re-render the modal.
+  const nameCleanupSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const nameCleanupSaveInFlight = useRef(false)
+  const nameCleanupPendingFlush = useRef(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -278,8 +336,55 @@ export default function Customers() {
   }
 
   // ── Name-cleanup handlers ─────────────────────────────────────────
-  // Each handler is wrapped in try/finally so the modal never gets
-  // stuck in a loading state on a transient network error.
+  const splitCleanupTokens = (raw: string): string[] =>
+    (raw || '').trim().split(/\s+/).filter(Boolean)
+
+  // For a row that the merchant hasn't manually edited, infer what
+  // the cleaner would have removed by diffing current_name against
+  // suggested_name. This is the starting chip state per row.
+  const inferCleanerRemoved = (it: NameCleanupPreviewItem): number[] => {
+    const tokens = splitCleanupTokens(it.current_name)
+    if (!it.suggested_name) {
+      return tokens.map((_, i) => i)
+    }
+    const remaining = new Map<string, number>()
+    splitCleanupTokens(it.suggested_name).forEach(t =>
+      remaining.set(t, (remaining.get(t) || 0) + 1),
+    )
+    const removed: number[] = []
+    tokens.forEach((tok, i) => {
+      const left = remaining.get(tok) || 0
+      if (left > 0) {
+        remaining.set(tok, left - 1)
+      } else {
+        removed.push(i)
+      }
+    })
+    return removed
+  }
+
+  // Build the initial RowState map for a preview response. Draft state
+  // (from a previous session) wins; otherwise we use the cleaner's
+  // default removal set. Either way the row starts ``dirty=false``.
+  const buildInitialRowState = (
+    items: NameCleanupPreviewItem[],
+  ): Record<number, CleanupRowState> => {
+    const map: Record<number, CleanupRowState> = {}
+    for (const it of items) {
+      const draft = it.draft
+      map[it.customer_id] = {
+        removed: draft?.removed_word_indices
+          ? [...draft.removed_word_indices]
+          : null,
+        cleared: !!draft?.cleared,
+        status:  (draft?.status as CleanupRowStatus) || 'edited',
+        dirty:   false,
+        savedAt: draft?.updated_at ?? null,
+      }
+    }
+    return map
+  }
+
   const openNameCleanup = async () => {
     setNameCleanupOpen(true)
     setNameCleanupResult(null)
@@ -288,6 +393,7 @@ export default function Customers() {
     try {
       const res = await customersApi.nameCleanupPreview()
       setNameCleanupItems(res.items)
+      setNameCleanupRowState(buildInitialRowState(res.items))
       setNameCleanupSummary({
         totalCustomers: res.total_customers,
         totalScanned:   res.total_scanned,
@@ -296,9 +402,11 @@ export default function Customers() {
         lowConfidence:  res.low_confidence,
         truncated:      res.truncated,
         maxItems:       res.max_items,
+        draftEdited:    res.draft_edited,
+        draftSkipped:   res.draft_skipped,
       })
-      // Default selection: every high-confidence row pre-checked. Low
-      // confidence rows stay unchecked so the merchant has to opt in.
+      // Pre-tick every high-confidence row so the default "Apply
+      // selected" run wipes the easy wins out in one click.
       setNameCleanupSelected(
         new Set(
           res.items
@@ -306,6 +414,8 @@ export default function Customers() {
             .map(it => it.customer_id),
         ),
       )
+      setNameCleanupSaveState('saved')
+      setNameCleanupLastSavedAt(new Date().toISOString())
     } catch (err: any) {
       const msg = err?.detail || err?.message || 'تعذر تحميل المعاينة'
       setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
@@ -318,99 +428,189 @@ export default function Customers() {
 
   const closeNameCleanup = () => {
     if (nameCleanupApplying) return
+    // Flush any pending autosave synchronously-ish so the merchant
+    // doesn't lose the last few chip toggles by closing the modal
+    // half a second too early. ``triggerCleanupAutosave`` resolves
+    // when the in-flight POST finishes; we fire-and-forget so the
+    // modal closes immediately but the network call still runs.
+    if (nameCleanupSaveTimer.current) {
+      clearTimeout(nameCleanupSaveTimer.current)
+      nameCleanupSaveTimer.current = null
+    }
+    void flushCleanupAutosave()
     setNameCleanupOpen(false)
     setNameCleanupItems([])
     setNameCleanupSelected(new Set())
-    setNameCleanupRemoved({})
-    setNameCleanupCleared(new Set())
+    setNameCleanupRowState({})
     setNameCleanupSummary(null)
     setNameCleanupResult(null)
     setNameCleanupError('')
+    setNameCleanupFilter('all')
+    setNameCleanupSaveState('idle')
   }
 
-  // Tokenise the raw current_name once per row. We split on whitespace
-  // (the only token boundary that survives Arabic) and KEEP each token
-  // exactly as it appeared so re-joining is lossless. Empty entries
-  // (from collapsed double-spaces) are dropped.
-  const splitCleanupTokens = (raw: string): string[] =>
-    (raw || '').trim().split(/\s+/).filter(Boolean)
+  // ── Autosave loop ────────────────────────────────────────────────
+  // Collect every "dirty" row and POST it as a single batch. We re-run
+  // ourselves whenever:
+  //   * the debounce timer fires from a chip toggle, or
+  //   * a save completes and there are still dirty rows queued.
+  const flushCleanupAutosave = useCallback(async (): Promise<void> => {
+    if (nameCleanupSaveInFlight.current) {
+      // A save is already running. Mark "another flush needed" so we
+      // re-trigger as soon as the current one resolves.
+      nameCleanupPendingFlush.current = true
+      return
+    }
+    // Snapshot current dirty rows. We mutate state at the end, so
+    // capture by reference from the latest setState callback.
+    let dirtyPayload: Array<{
+      customer_id: number
+      removed_word_indices: number[] | null
+      cleared: boolean
+      status: 'edited' | 'skipped'
+    }> = []
+    setNameCleanupRowState(prev => {
+      dirtyPayload = Object.entries(prev)
+        .filter(([, st]) => st.dirty)
+        .map(([cid, st]) => ({
+          customer_id:          Number(cid),
+          removed_word_indices: st.removed,
+          cleared:              st.cleared,
+          status:               st.status,
+        }))
+      return prev
+    })
+    if (dirtyPayload.length === 0) {
+      setNameCleanupSaveState(prevState => (
+        prevState === 'saving' ? 'saved' : prevState
+      ))
+      return
+    }
 
-  // Compute the effective indices of words REMOVED for one row.
-  // If the merchant hasn't touched it, we infer the cleaner's initial
-  // removal set: words present in current_name but absent from the
-  // suggestion. This gives the merchant a sensible starting point
-  // (the row "looks pre-cleaned") that they can then refine.
-  const cleanupInitialRemoved = (it: NameCleanupPreviewItem): Set<number> => {
-    if (it.customer_id in nameCleanupRemoved) {
-      return new Set(nameCleanupRemoved[it.customer_id])
+    nameCleanupSaveInFlight.current = true
+    setNameCleanupSaveState('saving')
+    try {
+      const res = await customersApi.nameCleanupDraftSave(dirtyPayload)
+      const savedIds = new Set(dirtyPayload.map(p => p.customer_id))
+      setNameCleanupRowState(prev => {
+        const next: Record<number, CleanupRowState> = { ...prev }
+        for (const id of savedIds) {
+          if (next[id]) {
+            next[id] = { ...next[id], dirty: false, savedAt: res.saved_at }
+          }
+        }
+        return next
+      })
+      setNameCleanupLastSavedAt(res.saved_at)
+      setNameCleanupSaveState('saved')
+    } catch (err: any) {
+      // Surface but keep the dirty flag so the next debounce retries.
+      const msg = err?.detail || err?.message || 'تعذر حفظ المسودة'
+      setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+      setNameCleanupSaveState('error')
+    } finally {
+      nameCleanupSaveInFlight.current = false
+      if (nameCleanupPendingFlush.current) {
+        nameCleanupPendingFlush.current = false
+        // Another flush was requested while we were running — go
+        // again so the merchant's latest edits don't sit forever.
+        void flushCleanupAutosave()
+      }
     }
-    if (nameCleanupCleared.has(it.customer_id)) {
-      // "Clear the whole row" wins — every word removed.
-      return new Set(splitCleanupTokens(it.current_name).map((_, i) => i))
+  }, [])
+
+  // Mark a single row dirty AND schedule a debounced autosave run.
+  const queueCleanupAutosave = useCallback(() => {
+    if (nameCleanupSaveTimer.current) {
+      clearTimeout(nameCleanupSaveTimer.current)
     }
+    setNameCleanupSaveState('saving')
+    nameCleanupSaveTimer.current = setTimeout(() => {
+      nameCleanupSaveTimer.current = null
+      void flushCleanupAutosave()
+    }, NAME_CLEANUP_AUTOSAVE_DEBOUNCE_MS)
+  }, [flushCleanupAutosave])
+
+  // ── Row helpers (rebuild around the new RowState shape) ──────────
+  const cleanupResolvedRemoved = useCallback(
+    (it: NameCleanupPreviewItem): Set<number> => {
+      const st = nameCleanupRowState[it.customer_id]
+      if (st?.cleared) {
+        return new Set(splitCleanupTokens(it.current_name).map((_, i) => i))
+      }
+      if (st?.removed !== undefined && st.removed !== null) {
+        return new Set(st.removed)
+      }
+      return new Set(inferCleanerRemoved(it))
+    },
+    [nameCleanupRowState],
+  )
+
+  const cleanupRowIsCleared = (id: number): boolean =>
+    !!nameCleanupRowState[id]?.cleared
+
+  const cleanupRowIsSkipped = (id: number): boolean =>
+    nameCleanupRowState[id]?.status === 'skipped'
+
+  const cleanupRowIsEdited = (id: number): boolean => {
+    const st = nameCleanupRowState[id]
+    if (!st) return false
+    return st.cleared || st.removed !== null || st.status === 'skipped'
+  }
+
+  const cleanupRowResolvedValue = (it: NameCleanupPreviewItem): string | null => {
+    if (cleanupRowIsCleared(it.customer_id)) return null
+    const removed = cleanupResolvedRemoved(it)
     const tokens = splitCleanupTokens(it.current_name)
-    const suggestedTokens = it.suggested_name
-      ? new Set(splitCleanupTokens(it.suggested_name))
-      : null
-    const removed = new Set<number>()
-    if (!suggestedTokens) {
-      // Suggestion is "clear" — mark everything removed by default.
-      tokens.forEach((_, i) => removed.add(i))
-      return removed
-    }
-    // Build a multiset so duplicate tokens are honoured (rare but cheap).
-    const remaining = new Map<string, number>()
-    suggestedTokens.forEach(t => remaining.set(t, (remaining.get(t) || 0) + 1))
-    tokens.forEach((tok, i) => {
-      const left = remaining.get(tok) || 0
-      if (left > 0) {
-        remaining.set(tok, left - 1)
-      } else {
-        removed.add(i)
+    const kept = tokens.filter((_, i) => !removed.has(i))
+    const joined = kept.join(' ').trim()
+    return joined.length > 0 ? joined : null
+  }
+
+  // Mutator: toggle one word in the row's removed set. Implicitly
+  // marks the row dirty and selects it for apply.
+  const toggleCleanupWord = (it: NameCleanupPreviewItem, idx: number) => {
+    setNameCleanupRowState(prev => {
+      const existing = prev[it.customer_id]
+      const baseRemoved = existing?.removed
+        ?? inferCleanerRemoved(it)
+      const set = new Set(baseRemoved)
+      if (set.has(idx)) set.delete(idx)
+      else set.add(idx)
+      return {
+        ...prev,
+        [it.customer_id]: {
+          removed: Array.from(set),
+          // Touching a chip implicitly takes the row out of "cleared".
+          cleared: false,
+          status:  existing?.status === 'skipped' ? 'edited' : (existing?.status ?? 'edited'),
+          dirty:   true,
+          savedAt: existing?.savedAt ?? null,
+        },
       }
     })
-    return removed
-  }
-
-  // Toggle one word in/out of the "removed" list for a row. Editing
-  // a row implicitly selects it for apply.
-  const toggleCleanupWord = (it: NameCleanupPreviewItem, idx: number) => {
-    const current = cleanupInitialRemoved(it)
-    if (current.has(idx)) current.delete(idx)
-    else current.add(idx)
-    setNameCleanupRemoved(prev => ({
-      ...prev,
-      [it.customer_id]: Array.from(current),
-    }))
-    // Touching word chips implies the row is "clear-everything" → no
-    // longer true.
-    setNameCleanupCleared(prev => {
-      if (!prev.has(it.customer_id)) return prev
-      const next = new Set(prev)
-      next.delete(it.customer_id)
-      return next
-    })
-    // Auto-select for apply.
     setNameCleanupSelected(prev => {
       if (prev.has(it.customer_id)) return prev
       const next = new Set(prev)
       next.add(it.customer_id)
       return next
     })
+    queueCleanupAutosave()
   }
 
-  // "Clear the whole row" — sets the row's resolved value to null
-  // regardless of which individual words were/weren't removed.
   const clearCleanupRow = (id: number) => {
-    setNameCleanupCleared(prev => {
-      const next = new Set(prev)
-      next.add(id)
-      return next
-    })
-    setNameCleanupRemoved(prev => {
-      const next = { ...prev }
-      delete next[id]
-      return next
+    setNameCleanupRowState(prev => {
+      const existing = prev[id]
+      return {
+        ...prev,
+        [id]: {
+          removed: null,
+          cleared: true,
+          status:  'edited',
+          dirty:   true,
+          savedAt: existing?.savedAt ?? null,
+        },
+      }
     })
     setNameCleanupSelected(prev => {
       if (prev.has(id)) return prev
@@ -418,40 +618,177 @@ export default function Customers() {
       next.add(id)
       return next
     })
+    queueCleanupAutosave()
   }
 
-  // Discard all manual word/clear edits for a row → fall back to the
-  // cleaner's original suggestion.
   const resetCleanupRow = (id: number) => {
-    setNameCleanupRemoved(prev => {
-      if (!(id in prev)) return prev
-      const next = { ...prev }
-      delete next[id]
-      return next
+    // Drop the row back to "no edits". When we autosave with
+    // ``removed=null && cleared=false && status='edited'`` the
+    // backend deletes the draft row server-side.
+    setNameCleanupRowState(prev => {
+      const existing = prev[id]
+      if (!existing) return prev
+      return {
+        ...prev,
+        [id]: {
+          removed: null,
+          cleared: false,
+          status:  'edited',
+          dirty:   true,
+          savedAt: existing.savedAt,
+        },
+      }
     })
-    setNameCleanupCleared(prev => {
+    queueCleanupAutosave()
+  }
+
+  const skipCleanupRow = (id: number) => {
+    setNameCleanupRowState(prev => {
+      const existing = prev[id]
+      return {
+        ...prev,
+        [id]: {
+          removed: existing?.removed ?? null,
+          cleared: !!existing?.cleared,
+          status:  'skipped',
+          dirty:   true,
+          savedAt: existing?.savedAt ?? null,
+        },
+      }
+    })
+    // Skipped rows are NOT going to be applied — remove from selection.
+    setNameCleanupSelected(prev => {
       if (!prev.has(id)) return prev
       const next = new Set(prev)
       next.delete(id)
       return next
     })
+    queueCleanupAutosave()
   }
 
-  // Build the value we'll send to the backend for this row, given
-  // current chip state. Empty result → null (clear).
-  const resolveCleanupValue = (it: NameCleanupPreviewItem): string | null => {
-    if (nameCleanupCleared.has(it.customer_id)) return null
-    const removed = cleanupInitialRemoved(it)
-    const tokens = splitCleanupTokens(it.current_name)
-    const kept = tokens.filter((_, i) => !removed.has(i))
-    const joined = kept.join(' ').trim()
-    return joined.length > 0 ? joined : null
+  // Inline "exclude from marketing campaigns" toggle.
+  //
+  // What this does: flips ``Customer.extra_metadata.marketing_opt_out_manual``
+  // for ONE row server-side, then optimistically reflects the new
+  // state in the modal's local items array so the badge updates
+  // without a full preview refetch.
+  //
+  // What this is NOT (three distinct buckets, by design):
+  //   * NOT a customer-driven unsubscribe (the customer sending STOP).
+  //   * NOT a Quality Engine auto-suppression (repeated quality_risk
+  //     failures).
+  // Each lives in a separate column / table server-side; conflating
+  // them in the UI here would mislead the merchant about WHY a row
+  // is excluded. The backend distinction is locked down in
+  // ``/customers/name-cleanup/marketing-opt-out`` + the test suite.
+  const toggleCleanupRowOptedOut = async (customerId: number, optedOut: boolean) => {
+    try {
+      await customersApi.nameCleanupMarketingOptOut({
+        customer_ids: [customerId],
+        opted_out: optedOut,
+      })
+      // Optimistic update of the local item — keeps the UI snappy
+      // without a full preview round-trip. The next manual
+      // "إعادة الفحص" will canonicalise from the server anyway.
+      setNameCleanupItems(prev =>
+        prev.map(it =>
+          it.customer_id === customerId
+            ? { ...it, marketing_opt_out_manual: optedOut }
+            : it,
+        ),
+      )
+      // If the merchant opted them OUT, also de-select the row so
+      // a subsequent "Apply selected" doesn't accidentally rename
+      // them — opt-out is a strong signal that the row is no
+      // longer interesting for the cleanup workflow.
+      if (optedOut) {
+        setNameCleanupSelected(prev => {
+          if (!prev.has(customerId)) return prev
+          const next = new Set(prev)
+          next.delete(customerId)
+          return next
+        })
+      }
+    } catch (err: any) {
+      const msg = err?.detail || err?.message || 'تعذر تنفيذ الإجراء'
+      setNameCleanupError(
+        typeof msg === 'string' ? msg : JSON.stringify(msg),
+      )
+    }
   }
 
-  // True iff the merchant has touched the row away from the cleaner's
-  // default — used to render a "reset" affordance.
-  const isCleanupRowEdited = (it: NameCleanupPreviewItem): boolean =>
-    (it.customer_id in nameCleanupRemoved) || nameCleanupCleared.has(it.customer_id)
+  // Explicit "save now" — used by the "حفظ ومتابعة لاحقاً" button.
+  const saveCleanupDraftNow = async () => {
+    if (nameCleanupSaveTimer.current) {
+      clearTimeout(nameCleanupSaveTimer.current)
+      nameCleanupSaveTimer.current = null
+    }
+    await flushCleanupAutosave()
+  }
+
+  // Discard every draft row server-side; reload the modal to see
+  // pristine cleaner defaults again.
+  const discardCleanupDraft = async () => {
+    if (!confirm('سيتم تجاهل جميع التعديلات المحفوظة في المسودة. هل أنت متأكد؟')) {
+      return
+    }
+    try {
+      await customersApi.nameCleanupDraftDiscard()
+      await openNameCleanup()
+    } catch (err: any) {
+      const msg = err?.detail || err?.message || 'تعذر تجاهل المسودة'
+      setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+    }
+  }
+
+  // Filtered view derived from current state + filter chip.
+  const visibleCleanupItems = useMemo(() => {
+    if (nameCleanupFilter === 'opted_out') {
+      // Show ONLY the customers the merchant has flagged as
+      // "exclude from marketing" inline. Skipped rows are still
+      // hidden unless explicitly included — opt-out and skip are
+      // distinct dimensions.
+      return nameCleanupItems.filter(
+        it => it.marketing_opt_out_manual && !cleanupRowIsSkipped(it.customer_id),
+      )
+    }
+    if (nameCleanupFilter === 'all') {
+      return nameCleanupItems.filter(it => !cleanupRowIsSkipped(it.customer_id))
+    }
+    if (nameCleanupFilter === 'pending') {
+      return nameCleanupItems.filter(
+        it => !cleanupRowIsEdited(it.customer_id),
+      )
+    }
+    if (nameCleanupFilter === 'edited') {
+      return nameCleanupItems.filter(
+        it =>
+          cleanupRowIsEdited(it.customer_id) &&
+          !cleanupRowIsSkipped(it.customer_id),
+      )
+    }
+    if (nameCleanupFilter === 'high') {
+      return nameCleanupItems.filter(
+        it => it.confidence === 'high' && !cleanupRowIsSkipped(it.customer_id),
+      )
+    }
+    // 'low'
+    return nameCleanupItems.filter(
+      it => it.confidence === 'low' && !cleanupRowIsSkipped(it.customer_id),
+    )
+  }, [nameCleanupItems, nameCleanupRowState, nameCleanupFilter])
+
+  // Flush the autosave on unmount so the merchant doesn't lose work
+  // by navigating away from the customers page mid-review.
+  useEffect(() => {
+    return () => {
+      if (nameCleanupSaveTimer.current) {
+        clearTimeout(nameCleanupSaveTimer.current)
+      }
+      // Fire-and-forget — the page is unloading, we can't await.
+      void flushCleanupAutosave()
+    }
+  }, [flushCleanupAutosave])
 
   const toggleCleanupRow = (id: number) => {
     setNameCleanupSelected(prev => {
@@ -463,10 +800,22 @@ export default function Customers() {
   }
 
   const toggleCleanupSelectAll = () => {
-    if (nameCleanupSelected.size === nameCleanupItems.length) {
-      setNameCleanupSelected(new Set())
+    // Operate on the currently visible (post-filter) rows so the
+    // merchant can e.g. "select all low-confidence + apply".
+    const visibleIds = visibleCleanupItems.map(it => it.customer_id)
+    const allVisibleSelected = visibleIds.every(id => nameCleanupSelected.has(id))
+    if (allVisibleSelected) {
+      setNameCleanupSelected(prev => {
+        const next = new Set(prev)
+        visibleIds.forEach(id => next.delete(id))
+        return next
+      })
     } else {
-      setNameCleanupSelected(new Set(nameCleanupItems.map(it => it.customer_id)))
+      setNameCleanupSelected(prev => {
+        const next = new Set(prev)
+        visibleIds.forEach(id => next.add(id))
+        return next
+      })
     }
   }
 
@@ -475,41 +824,46 @@ export default function Customers() {
     setNameCleanupApplying(true)
     setNameCleanupError('')
     try {
+      // Make sure any in-flight chip edits hit the server before we
+      // apply, so the audit row picks up the merchant's latest state.
+      await saveCleanupDraftNow()
+
       const items = nameCleanupItems
         .filter(it => nameCleanupSelected.has(it.customer_id))
+        .filter(it => !cleanupRowIsSkipped(it.customer_id))
         .map(it => {
-          const resolved = resolveCleanupValue(it)
-          const wasEdited = isCleanupRowEdited(it)
+          const resolved = cleanupRowResolvedValue(it)
+          const wasEdited = cleanupRowIsEdited(it.customer_id)
           return {
             customer_id: it.customer_id,
             new_name:    resolved,
-            // When the merchant chip-edited the row, mark the reason
-            // so support can tell auto-applied edits apart from manual
-            // overrides in the audit log.
             reason:      wasEdited ? `تعديل يدوي — ${it.reason}` : it.reason,
             confidence:  it.confidence,
           }
         })
       const res = await customersApi.nameCleanupApply({ items })
       setNameCleanupResult({
-        applied: res.applied_count,
-        skipped: res.skipped_count,
+        applied:       res.applied_count,
+        skipped:       res.skipped_count,
+        draftsCleared: res.drafts_cleared,
       })
-      // Drop the just-applied rows from the preview list so the
-      // merchant can keep working on the leftovers without a fresh
-      // round-trip.
       const appliedIds = new Set(res.applied.map(a => a.customer_id))
       setNameCleanupItems(prev => prev.filter(it => !appliedIds.has(it.customer_id)))
       setNameCleanupSelected(new Set())
-      setNameCleanupRemoved(prev => {
+      setNameCleanupRowState(prev => {
         const next = { ...prev }
         appliedIds.forEach(id => delete next[id])
         return next
       })
-      setNameCleanupCleared(prev => {
-        const next = new Set(prev)
-        appliedIds.forEach(id => next.delete(id))
-        return next
+      // Drop applied counts off the summary so the merchant sees
+      // realistic remaining numbers without a round-trip.
+      setNameCleanupSummary(prev => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          matchCount:  Math.max(0, prev.matchCount - res.applied_count),
+          draftEdited: Math.max(0, prev.draftEdited - res.drafts_cleared),
+        }
       })
       load()
     } catch (err: any) {
@@ -524,12 +878,14 @@ export default function Customers() {
     setNameCleanupApplying(true)
     setNameCleanupError('')
     try {
+      await saveCleanupDraftNow()
       const res = await customersApi.nameCleanupApply({
         highConfidenceOnly: true,
       })
       setNameCleanupResult({
-        applied: res.applied_count,
-        skipped: res.skipped_count,
+        applied:       res.applied_count,
+        skipped:       res.skipped_count,
+        draftsCleared: res.drafts_cleared,
       })
       const appliedIds = new Set(res.applied.map(a => a.customer_id))
       setNameCleanupItems(prev => prev.filter(it => !appliedIds.has(it.customer_id)))
@@ -537,6 +893,20 @@ export default function Customers() {
         const next = new Set(prev)
         appliedIds.forEach(id => next.delete(id))
         return next
+      })
+      setNameCleanupRowState(prev => {
+        const next = { ...prev }
+        appliedIds.forEach(id => delete next[id])
+        return next
+      })
+      setNameCleanupSummary(prev => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          matchCount:     Math.max(0, prev.matchCount - res.applied_count),
+          highConfidence: Math.max(0, prev.highConfidence - res.applied_count),
+          draftEdited:    Math.max(0, prev.draftEdited - res.drafts_cleared),
+        }
       })
       load()
     } catch (err: any) {
@@ -992,10 +1362,117 @@ export default function Customers() {
                 </>
               )}
 
+              {!nameCleanupLoading && nameCleanupSummary && (
+                <div className="flex items-center justify-between gap-2 flex-wrap text-[11px]">
+                  {/* Save-state indicator (left side, where data lives). */}
+                  <div className="flex items-center gap-3 text-slate-500">
+                    {nameCleanupSaveState === 'saving' && (
+                      <span className="inline-flex items-center gap-1 text-blue-600">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        جاري حفظ المسودة...
+                      </span>
+                    )}
+                    {nameCleanupSaveState === 'saved' && nameCleanupLastSavedAt && (
+                      <span className="inline-flex items-center gap-1 text-emerald-600">
+                        <Check className="w-3.5 h-3.5" />
+                        تم الحفظ
+                      </span>
+                    )}
+                    {nameCleanupSaveState === 'error' && (
+                      <span className="inline-flex items-center gap-1 text-rose-600">
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        فشل الحفظ — سنحاول مجدداً
+                      </span>
+                    )}
+                    {nameCleanupSummary.draftEdited > 0 && (
+                      <span className="text-slate-500">
+                        مسودة محفوظة: {nameCleanupSummary.draftEdited.toLocaleString('ar-EG')}
+                        {nameCleanupSummary.draftSkipped > 0 && (
+                          <span className="text-slate-400">
+                            {' '}+ {nameCleanupSummary.draftSkipped.toLocaleString('ar-EG')} متخطى
+                          </span>
+                        )}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Session actions (right side). */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={openNameCleanup}
+                      disabled={nameCleanupLoading || nameCleanupApplying}
+                      className="btn-secondary text-xs px-2.5 py-1 flex items-center gap-1.5 disabled:opacity-40"
+                      title="إعادة فحص قاعدة العملاء كاملة من جديد"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      إعادة الفحص
+                    </button>
+                    <button
+                      type="button"
+                      onClick={saveCleanupDraftNow}
+                      disabled={
+                        nameCleanupApplying || nameCleanupSaveState === 'saving'
+                      }
+                      className="btn-secondary text-xs px-2.5 py-1 flex items-center gap-1.5 disabled:opacity-40"
+                    >
+                      <Save className="w-3 h-3" />
+                      حفظ ومتابعة لاحقاً
+                    </button>
+                    {nameCleanupSummary.draftEdited + nameCleanupSummary.draftSkipped > 0 && (
+                      <button
+                        type="button"
+                        onClick={discardCleanupDraft}
+                        disabled={nameCleanupApplying}
+                        className="text-xs px-2.5 py-1 flex items-center gap-1.5 text-slate-500 hover:text-rose-600 disabled:opacity-40"
+                        title="حذف جميع التعديلات المحفوظة في المسودة"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        تجاهل المسودة
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {!nameCleanupLoading && nameCleanupSummary && nameCleanupItems.length > 0 && (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <Filter className="w-3 h-3 text-slate-400" />
+                  {([
+                    { key: 'all',     label: 'الكل',                 count: nameCleanupItems.filter(it => !cleanupRowIsSkipped(it.customer_id)).length },
+                    { key: 'pending', label: 'غير منظف',             count: nameCleanupItems.filter(it => !cleanupRowIsEdited(it.customer_id)).length },
+                    { key: 'edited',  label: 'تم تعديله يدوياً',     count: nameCleanupItems.filter(it => cleanupRowIsEdited(it.customer_id) && !cleanupRowIsSkipped(it.customer_id)).length },
+                    { key: 'high',    label: 'تنظيف تلقائي (ثقة عالية)', count: nameCleanupItems.filter(it => it.confidence === 'high' && !cleanupRowIsSkipped(it.customer_id)).length },
+                    { key: 'low',     label: 'يحتاج مراجعة',         count: nameCleanupItems.filter(it => it.confidence === 'low' && !cleanupRowIsSkipped(it.customer_id)).length },
+                    { key: 'opted_out', label: 'مستبعد من الحملات', count: nameCleanupItems.filter(it => it.marketing_opt_out_manual && !cleanupRowIsSkipped(it.customer_id)).length },
+                  ] as { key: CleanupFilter; label: string; count: number }[]).map(f => (
+                    <button
+                      key={f.key}
+                      type="button"
+                      onClick={() => setNameCleanupFilter(f.key)}
+                      className={
+                        'text-[11px] px-2 py-0.5 rounded-full border transition ' +
+                        (nameCleanupFilter === f.key
+                          ? 'bg-brand-600 text-white border-brand-600'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')
+                      }
+                    >
+                      {f.label}
+                      <span className={
+                        'ms-1 text-[10px] ' +
+                        (nameCleanupFilter === f.key ? 'text-brand-50' : 'text-slate-400')
+                      }>
+                        ({f.count.toLocaleString('ar-EG')})
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
               {!nameCleanupLoading && nameCleanupItems.length === 0 && !nameCleanupError && (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 text-slate-600 text-sm p-6 text-center">
                   {nameCleanupResult
-                    ? 'لا توجد أسماء أخرى تحتاج تنظيفاً.'
+                    ? 'لا توجد أسماء أخرى تحتاج تنظيفاً. يمكنك إغلاق النافذة أو الضغط على "إعادة الفحص" لإعادة المسح.'
                     : 'جميع أسماء العملاء في هذا المتجر تبدو نظيفة — لا يوجد ما يحتاج إلى تغيير.'}
                 </div>
               )}
@@ -1007,41 +1484,102 @@ export default function Customers() {
                       onClick={toggleCleanupSelectAll}
                       className="flex items-center gap-2 text-slate-700 hover:text-brand-600"
                     >
-                      {nameCleanupSelected.size === nameCleanupItems.length ? (
+                      {visibleCleanupItems.length > 0
+                        && visibleCleanupItems.every(it => nameCleanupSelected.has(it.customer_id)) ? (
                         <CheckSquare className="w-4 h-4 text-brand-600" />
                       ) : (
                         <Square className="w-4 h-4 text-slate-400" />
                       )}
                       <span>
-                        {nameCleanupSelected.size === nameCleanupItems.length
-                          ? 'إلغاء تحديد الكل'
-                          : 'تحديد الكل'}
+                        {visibleCleanupItems.length > 0
+                          && visibleCleanupItems.every(it => nameCleanupSelected.has(it.customer_id))
+                          ? 'إلغاء تحديد الكل (المعروض)'
+                          : 'تحديد الكل (المعروض)'}
                       </span>
                     </button>
                     <span className="text-slate-500">
-                      {nameCleanupSelected.size} / {nameCleanupItems.length} محدد
+                      {nameCleanupSelected.size} / {visibleCleanupItems.length} محدد
+                      {visibleCleanupItems.length !== nameCleanupItems.length && (
+                        <span className="text-slate-400 ms-1">
+                          (من {nameCleanupItems.length})
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-slate-400 text-[10px] hidden sm:inline">
+                      • انقر على الصف لتحديد العميل
                     </span>
                   </div>
                   <div className="max-h-[50vh] overflow-y-auto divide-y divide-slate-100">
-                    {nameCleanupItems.map((it) => {
+                    {visibleCleanupItems.length === 0 ? (
+                      <div className="py-10 text-center text-xs text-slate-500">
+                        لا توجد أسماء ضمن هذا الفلتر.
+                      </div>
+                    ) : visibleCleanupItems.map((it) => {
                       const checked = nameCleanupSelected.has(it.customer_id)
                       const isHigh = it.confidence === 'high'
                       const tokens = splitCleanupTokens(it.current_name)
-                      const removed = cleanupInitialRemoved(it)
-                      const isCleared = nameCleanupCleared.has(it.customer_id)
-                      const resolved = resolveCleanupValue(it)
-                      const isEdited = isCleanupRowEdited(it)
+                      const removed = cleanupResolvedRemoved(it)
+                      const isCleared = cleanupRowIsCleared(it.customer_id)
+                      const resolved = cleanupRowResolvedValue(it)
+                      const isEdited = cleanupRowIsEdited(it.customer_id)
+                      const isSkipped = cleanupRowIsSkipped(it.customer_id)
+
+                      /* Helper: any button/chip handler is wrapped
+                       * with this so the row-level click (which
+                       * toggles selection) does NOT also fire when
+                       * the merchant taps an actual action. With
+                       * thousands of rows the merchant lives by
+                       * clicking the row; an accidental
+                       * selection-toggle on every chip click would
+                       * be infuriating. */
+                      const stopAnd = (fn: () => void) =>
+                        (e: React.MouseEvent) => {
+                          e.stopPropagation()
+                          fn()
+                        }
+
+                      /* Row click toggles selection — but only when
+                       * the row is not "skipped" (skipped rows
+                       * aren't candidates for apply). Making the
+                       * whole row a hit target is the dominant
+                       * win for tenants reviewing thousands of
+                       * names; the original 16×16 checkbox was
+                       * the #1 UX complaint. */
+                      const onRowClick = isSkipped
+                        ? undefined
+                        : () => toggleCleanupRow(it.customer_id)
                       return (
                         <div
                           key={it.customer_id}
+                          onClick={onRowClick}
+                          role={onRowClick ? 'button' : undefined}
+                          aria-pressed={onRowClick ? checked : undefined}
+                          tabIndex={onRowClick ? 0 : undefined}
+                          onKeyDown={(e) => {
+                            // Keyboard parity — Space/Enter on a
+                            // focused row toggles selection the
+                            // same way a mouse click does.
+                            if (!onRowClick) return
+                            if (e.key === ' ' || e.key === 'Enter') {
+                              e.preventDefault()
+                              onRowClick()
+                            }
+                          }}
                           className={
-                            'px-3 py-3 flex items-start gap-3 ' +
-                            (checked ? 'bg-brand-50/30' : 'hover:bg-slate-50/60')
+                            'px-3 py-3 flex items-start gap-3 select-none transition-colors ' +
+                            (isSkipped
+                              ? 'bg-slate-50/80 opacity-70'
+                              : checked
+                                ? 'bg-brand-50/50 cursor-pointer ring-1 ring-inset ring-brand-200'
+                                : 'hover:bg-slate-50/80 cursor-pointer')
                           }
                         >
                           <button
-                            onClick={() => toggleCleanupRow(it.customer_id)}
-                            className="mt-0.5 text-slate-400 hover:text-brand-600"
+                            type="button"
+                            onClick={stopAnd(() => toggleCleanupRow(it.customer_id))}
+                            disabled={isSkipped}
+                            className="mt-0.5 text-slate-400 hover:text-brand-600 disabled:opacity-30"
+                            aria-label={checked ? 'إلغاء التحديد' : 'تحديد العميل'}
                           >
                             {checked ? (
                               <CheckSquare className="w-4 h-4 text-brand-600" />
@@ -1051,7 +1589,7 @@ export default function Customers() {
                           </button>
 
                           <div className="flex-1 min-w-0 space-y-2">
-                            {/* Header row: phone + reason + confidence */}
+                            {/* Header row: phone + reason + confidence + state */}
                             <div className="flex items-center justify-between gap-2 text-[11px]">
                               <div className="flex items-center gap-2 min-w-0">
                                 {it.phone && (
@@ -1063,10 +1601,30 @@ export default function Customers() {
                                   {it.reason || '—'}
                                 </span>
                               </div>
-                              <Badge
-                                label={isHigh ? 'ثقة عالية' : 'مراجعة'}
-                                variant={isHigh ? 'green' : 'amber'}
-                              />
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {it.marketing_opt_out_manual && (
+                                  // Distinct badge — three states never
+                                  // conflate: "مستبعد من الحملات"
+                                  // (merchant-driven), "ألغى الاشتراك"
+                                  // (customer-driven), "تم حجبه تلقائياً"
+                                  // (Quality Engine). Three buckets, three
+                                  // badges, three audit trails.
+                                  <Badge
+                                    label="مستبعد من الحملات"
+                                    variant="purple"
+                                  />
+                                )}
+                                {isEdited && !isSkipped && (
+                                  <Badge label="معدّل" variant="blue" />
+                                )}
+                                {isSkipped && (
+                                  <Badge label="متخطى" variant="slate" />
+                                )}
+                                <Badge
+                                  label={isHigh ? 'ثقة عالية' : 'مراجعة'}
+                                  variant={isHigh ? 'green' : 'amber'}
+                                />
+                              </div>
                             </div>
 
                             {/* Word chips: click to drop / restore each word.
@@ -1084,7 +1642,7 @@ export default function Customers() {
                                     <button
                                       key={idx}
                                       type="button"
-                                      onClick={() => toggleCleanupWord(it, idx)}
+                                      onClick={stopAnd(() => toggleCleanupWord(it, idx))}
                                       className={
                                         'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border transition ' +
                                         (isDropped
@@ -1106,7 +1664,7 @@ export default function Customers() {
                             </div>
 
                             {/* Resolved value preview + per-row actions */}
-                            <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
                               <div className="text-xs">
                                 <span className="text-slate-500 me-1">الناتج:</span>
                                 {resolved ? (
@@ -1120,11 +1678,11 @@ export default function Customers() {
                                   </span>
                                 )}
                               </div>
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
                                 {isEdited && (
                                   <button
                                     type="button"
-                                    onClick={() => resetCleanupRow(it.customer_id)}
+                                    onClick={stopAnd(() => resetCleanupRow(it.customer_id))}
                                     className="text-[11px] text-slate-500 hover:text-slate-700 inline-flex items-center gap-1"
                                   >
                                     <RotateCcw className="w-3 h-3" />
@@ -1133,7 +1691,21 @@ export default function Customers() {
                                 )}
                                 <button
                                   type="button"
-                                  onClick={() => clearCleanupRow(it.customer_id)}
+                                  onClick={stopAnd(() => skipCleanupRow(it.customer_id))}
+                                  className={
+                                    'text-[11px] inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition ' +
+                                    (isSkipped
+                                      ? 'border-slate-400 bg-slate-100 text-slate-700'
+                                      : 'border-slate-200 text-slate-500 hover:bg-slate-50')
+                                  }
+                                  title="تخطّى هذا الصف — لن يظهر في جلسات المراجعة القادمة"
+                                >
+                                  <SkipForward className="w-3 h-3" />
+                                  {isSkipped ? 'متخطى' : 'تخطّى'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={stopAnd(() => clearCleanupRow(it.customer_id))}
                                   className={
                                     'text-[11px] inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition ' +
                                     (isCleared
@@ -1143,6 +1715,48 @@ export default function Customers() {
                                 >
                                   <Trash2 className="w-3 h-3" />
                                   مسح الاسم بالكامل
+                                </button>
+                                {/*
+                                 * Inline marketing opt-out. The button
+                                 * toggles ``marketing_opt_out_manual`` on
+                                 * the customer record — distinct from
+                                 * the cleanup pipeline (we never delete
+                                 * the customer, the conversation, or
+                                 * any inbound history). The dispatcher
+                                 * honours the flag in its pre-send
+                                 * filter; inbound messages still arrive
+                                 * normally.
+                                 */}
+                                <button
+                                  type="button"
+                                  onClick={stopAnd(() =>
+                                    toggleCleanupRowOptedOut(
+                                      it.customer_id,
+                                      !it.marketing_opt_out_manual,
+                                    )
+                                  )}
+                                  className={
+                                    // Slightly stronger visual weight than
+                                    // the other inline actions — this is
+                                    // the only one with a permanent
+                                    // side-effect on the customer's
+                                    // marketing eligibility, so it earns
+                                    // a more saturated chip.
+                                    'text-[11px] font-medium inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition ' +
+                                    (it.marketing_opt_out_manual
+                                      ? 'border-purple-400 bg-purple-100 text-purple-800 hover:bg-purple-200'
+                                      : 'border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100')
+                                  }
+                                  title={
+                                    it.marketing_opt_out_manual
+                                      ? 'إعادة تفعيل التسويق لهذا العميل'
+                                      : 'استبعاد العميل من الحملات التسويقية (لا يتأثر استقبال رسائله)'
+                                  }
+                                >
+                                  <UserMinus className="w-3 h-3" />
+                                  {it.marketing_opt_out_manual
+                                    ? 'إعادة تفعيل التسويق'
+                                    : 'استبعاد من الحملات'}
                                 </button>
                               </div>
                             </div>

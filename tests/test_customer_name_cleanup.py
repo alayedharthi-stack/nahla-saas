@@ -246,6 +246,71 @@ class TestBulkScale:
             f"matches stop at id={max_id} — pagination regression?"
         )
 
+    def test_incremental_reopen_hides_already_cleaned_rows(self):
+        """Locks down the merchant-facing "incremental workflow" contract.
+
+        Scenario (the actual production complaint):
+        - Merchant opens cleanup tool, applies "high-confidence only".
+        - 1 000+ low-confidence rows remain. They close the modal.
+        - They reopen later. The 1 000+ already-applied rows MUST NOT
+          reappear. Only the still-dirty rows should.
+
+        We simulate this without a DB by:
+        1. Computing cleanup for the full corpus (pass 1).
+        2. Applying every high-confidence suggestion in place.
+        3. Recomputing cleanup (pass 2) and asserting that nothing
+           that was applied in pass 1 reappears as ``changed`` in
+           pass 2 — i.e. the cleaner is idempotent on its own output.
+        """
+        rows: list[tuple[int, str | None]] = self._build_corpus(400)
+
+        # Pass 1: high-confidence apply.
+        pass1_applied: dict[int, str | None] = {}
+        new_rows: list[tuple[int, str | None]] = []
+        for cid, name in rows:
+            v = compute_cleanup(name)
+            if v.changed and v.confidence == "high":
+                pass1_applied[cid] = v.suggested
+                new_rows.append((cid, v.suggested))
+            else:
+                new_rows.append((cid, name))
+
+        assert pass1_applied, "corpus should contain some high-confidence dirt"
+
+        # Pass 2: re-scan the post-apply state.
+        re_flagged_after_apply = [
+            cid
+            for cid, name in new_rows
+            if cid in pass1_applied and compute_cleanup(name).changed
+        ]
+        assert re_flagged_after_apply == [], (
+            "cleaner is not idempotent: rows flagged again after their "
+            f"own suggestion was applied → {re_flagged_after_apply[:5]}"
+        )
+
+    def test_rescan_reevaluates_previously_cleaned_rows(self):
+        """Re-scan MUST be allowed to reconsider previously-cleaned rows.
+
+        The merchant's escape-hatch: if they imported new data, or if
+        we tightened heuristics, the explicit "إعادة الفحص" button
+        should re-run the cleaner over EVERY customer — no
+        "cleaned_at" gate is allowed to prevent that.
+
+        We assert that calling ``compute_cleanup`` on a row that was
+        previously edited still yields a useful result if the new
+        value is still dirty. (No persistent memo / version flag
+        short-circuits the cleaner.)
+        """
+        # Pretend the merchant earlier "cleaned" the row to a value
+        # that, with today's stricter rules, is still dirty.
+        previously_edited = "عميل الجهني"
+        v = compute_cleanup(previously_edited)
+        assert v.changed, (
+            "re-scan must still flag rows that contain stopwords, "
+            "even if a human touched them before"
+        )
+        assert v.suggested == "الجهني"
+
     def test_scan_is_fast_enough_for_large_tenants(self):
         # At ~5 µs per call we comfortably scan a 50 000-row tenant
         # in under a second. We assert a generous budget so flaky CI

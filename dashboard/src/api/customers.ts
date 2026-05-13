@@ -186,6 +186,20 @@ export interface CustomerMarketingPreferences {
 // Strictly tenant-scoped on the backend — the JWT decides which
 // store's names get cleaned; no cross-tenant access is possible.
 
+export interface NameCleanupDraftState {
+  /** Indices into the whitespace-split tokens of ``current_name``
+   *  that the merchant flipped OFF (i.e. dropped from the result).
+   *  When ``null``, the cleaner's default removal set applies. */
+  removed_word_indices: number[] | null
+  /** When true, the row is force-cleared regardless of which
+   *  individual words were toggled. */
+  cleared: boolean
+  /** ``"edited"`` (merchant touched chips) or ``"skipped"``
+   *  (merchant explicitly opted the row out). */
+  status: 'edited' | 'skipped'
+  updated_at: string | null
+}
+
 export interface NameCleanupPreviewItem {
   customer_id: number
   /** What's currently stored on Customer.name. */
@@ -202,6 +216,15 @@ export interface NameCleanupPreviewItem {
   /** Phone shown alongside the name in the preview, so the merchant
    *  has enough context to decide on ambiguous rows. */
   phone: string
+  /** Merchant's saved review state for this row from a previous
+   *  session, or ``null`` if the row is fresh. The UI restores chip
+   *  state from this so reopens are seamless. */
+  draft: NameCleanupDraftState | null
+  /** Merchant-driven "exclude from marketing campaigns" flag.
+   *  Distinct from customer-driven ``is_unsubscribed`` and from
+   *  the Suppression Engine's auto-blocks — three independent
+   *  buckets, locked down server-side. */
+  marketing_opt_out_manual?: boolean
 }
 
 export interface NameCleanupPreviewResponse {
@@ -224,6 +247,27 @@ export interface NameCleanupPreviewResponse {
   truncated: boolean
   /** The cap that triggered truncation (max items per response). */
   max_items: number
+  /** How many rows currently have any draft state (edited OR skipped). */
+  draft_count: number
+  /** How many draft rows are in the "edited" state — surfaced in the UI. */
+  draft_edited: number
+  /** How many draft rows are in the "skipped" state. */
+  draft_skipped: number
+}
+
+export interface NameCleanupDraftSaveItem {
+  customer_id: number
+  removed_word_indices: number[] | null
+  cleared: boolean
+  status?: 'edited' | 'skipped'
+}
+
+export interface NameCleanupDraftSaveResponse {
+  tenant_id: number
+  saved: number
+  deleted: number
+  skipped: number
+  saved_at: string
 }
 
 export interface NameCleanupApplyResult {
@@ -239,12 +283,25 @@ export interface NameCleanupSkipped {
   reason: string
 }
 
+export interface NameCleanupMarketingOptOutResponse {
+  tenant_id: number
+  opted_out: boolean
+  updated: number
+  /** Ids that the request listed but that weren't found under the
+   *  current tenant — silently skipped server-side. */
+  skipped_unknown: number[]
+}
+
 export interface NameCleanupApplyResponse {
   tenant_id: number
   applied: NameCleanupApplyResult[]
   skipped: NameCleanupSkipped[]
   applied_count: number
   skipped_count: number
+  /** How many draft rows were also deleted as part of the apply
+   *  (one per applied customer; gives the UI an accurate post-apply
+   *  draft count without an extra round-trip). */
+  drafts_cleared: number
 }
 
 export const customersApi = {
@@ -420,6 +477,61 @@ export const customersApi = {
           items: payload.items ?? null,
           high_confidence_only: !!payload.highConfidenceOnly,
         }),
+      },
+    )
+  },
+
+  /**
+   * Autosave the merchant's in-progress chip edits.
+   *
+   * Per row:
+   *   * ``removed_word_indices = null`` AND ``cleared = false`` AND
+   *     ``status`` not set → backend deletes the draft row, the row
+   *     falls back to cleaner defaults on the next preview.
+   *   * Otherwise the backend upserts the merchant's state.
+   *
+   * Idempotent — safe to call as often as the autosave debounce
+   * decides.
+   */
+  nameCleanupDraftSave(items: NameCleanupDraftSaveItem[]) {
+    return apiCall<NameCleanupDraftSaveResponse>(
+      '/customers/name-cleanup/draft/save',
+      {
+        method: 'POST',
+        body: JSON.stringify({ items }),
+      },
+    )
+  },
+
+  /**
+   * Discard every draft row for the current tenant. Does NOT touch
+   * Customer.name — only the in-progress review session is wiped.
+   */
+  nameCleanupDraftDiscard() {
+    return apiCall<{ tenant_id: number; deleted: number }>(
+      '/customers/name-cleanup/draft',
+      { method: 'DELETE' },
+    )
+  },
+
+  /**
+   * Toggle the merchant-driven "exclude from marketing campaigns"
+   * flag on one or more customers, from inside the cleanup modal.
+   *
+   * Distinct from a customer-driven unsubscribe (``is_unsubscribed``)
+   * and from a Quality Engine auto-suppression — three buckets, three
+   * sources of truth, locked down in ``backend/routers/customers.py``.
+   */
+  nameCleanupMarketingOptOut(payload: {
+    customer_ids: number[]
+    opted_out: boolean
+  }) {
+    return apiCall<NameCleanupMarketingOptOutResponse>(
+      '/customers/name-cleanup/marketing-opt-out',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       },
     )
   },

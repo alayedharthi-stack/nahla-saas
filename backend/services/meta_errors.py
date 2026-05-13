@@ -19,8 +19,8 @@ campaign dispatcher writes the canonical ``key`` into
 the Arabic label, severity and recoverability from this table without
 any further parsing.
 
-Severity scale
-──────────────
+Severity scale (campaign-level — "did this break the campaign?")
+────────────────────────────────────────────────────────────────
 * ``minor``     — recipient-specific, doesn't reflect a problem with
                   the campaign or the merchant. The campaign should
                   NOT be marked "failed" if every failure is minor
@@ -29,6 +29,34 @@ Severity scale
 * ``blocking``  — affects the entire campaign (template paused,
                   rate limit, account locked) — if every failure is
                   blocking, the campaign IS failed.
+
+Quality tier (May 2026 — "does this hurt the SENDER'S Meta quality?")
+─────────────────────────────────────────────────────────────────────
+Independent axis from ``severity``. Used by the Delivery Quality
+Intelligence Layer to decide:
+
+* whether a failure should trip the Suppression Engine
+* how a failure rolls up into the per-WABA Quality Score
+* whether a campaign should be auto-paused before it drags
+  ``WhatsAppConnection.meta_quality_rating`` down
+
+Levels (lowest → highest impact):
+
+* ``harmless``     — failure tells us nothing about sender quality
+                     (e.g. ``client_payment_blocked`` is purely on the
+                     recipient's side; Meta does not penalise us).
+* ``warning``      — accumulates context but is not actionable per
+                     event (``out_of_24h_window``, ``user_not_opted_in``
+                     — symptoms of bad targeting, not blocked sends).
+* ``quality_risk`` — repeated occurrences WILL degrade quality
+                     (``not_on_whatsapp``, ``invalid_phone``,
+                     ``marketing_blocked``, ``spam_rate_limit``) →
+                     these are the codes the Suppression Engine
+                     accumulates against per-phone counters.
+* ``critical``     — single occurrence already indicates damage
+                     (``account_locked``, ``policy_violation``,
+                     ``template_paused``) → trigger merchant alert
+                     immediately, not just a counter increment.
 """
 from __future__ import annotations
 
@@ -79,6 +107,19 @@ class ClassifiedError:
     # banner and to lock the campaign from further auto-dispatch.
     provider_billing_block: bool = False
 
+    # Delivery Quality Intelligence axis (May 2026). Independent
+    # from ``severity`` — see module docstring for definitions.
+    #   harmless | warning | quality_risk | critical
+    # Default ``warning`` is the safest assumption for newly-added
+    # codes: a real engineer should explicitly opt in to harmless or
+    # critical when they classify the code.
+    quality_tier: str = "warning"
+    # True when accumulating this failure on a phone number is what
+    # the Suppression Engine counts against the auto-suppression
+    # threshold. Set on the per-recipient codes that, repeated, mean
+    # the phone genuinely cannot receive WhatsApp from us.
+    suppress_on_repeat: bool = False
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Canonical error catalogue
@@ -95,6 +136,10 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="minor",
         is_recoverable=False,
         retryable=False,
+        # Per-recipient code that Meta will keep penalising us for if
+        # we keep sending. Counts toward the suppression threshold.
+        quality_tier="quality_risk",
+        suppress_on_repeat=True,
         advice_ar="هذا العميل لا يمكن مراسلته على واتساب — تجاهله أو تواصل عبر قناة أخرى.",
     ),
     "invalid_phone": ClassifiedError(
@@ -103,6 +148,8 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="major",
         is_recoverable=False,
         retryable=False,
+        quality_tier="quality_risk",
+        suppress_on_repeat=True,
         advice_ar="تأكد من صيغة الرقم E.164 (مثال: +9665XXXXXXXX).",
     ),
     "out_of_24h_window": ClassifiedError(
@@ -111,6 +158,9 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="major",
         is_recoverable=False,
         retryable=False,
+        # Targeting issue, not a deliverability one — surface but
+        # don't push the phone toward suppression.
+        quality_tier="warning",
         advice_ar="استخدم قالب تسويقي معتمد بدل الرسالة الحرة.",
     ),
     "user_not_opted_in": ClassifiedError(
@@ -119,6 +169,10 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="minor",
         is_recoverable=False,
         retryable=False,
+        # Repeating against an opted-out number is exactly the kind
+        # of bad-target signal Meta penalises. Suppress on repeat.
+        quality_tier="quality_risk",
+        suppress_on_repeat=True,
         advice_ar="اطلب موافقة العميل (opt-in) قبل إرسال الحملة.",
     ),
     "marketing_blocked": ClassifiedError(
@@ -127,6 +181,8 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="minor",
         is_recoverable=True,
         retryable=False,
+        quality_tier="quality_risk",
+        suppress_on_repeat=True,
         advice_ar="حاول لاحقاً — قد تكون Meta أعادت تقييم العميل.",
     ),
     # NEW: Meta returns "This number is blocked due to lack of payment
@@ -144,6 +200,9 @@ ERRORS: Dict[str, ClassifiedError] = {
         # Provider-side block: nothing for the merchant to "fix" in
         # the dashboard. Trips the support banner + bundle CTA.
         provider_billing_block=True,
+        # Block is entirely on the RECIPIENT's side — Meta does not
+        # penalise our sender quality for these.
+        quality_tier="harmless",
         advice_ar=(
             "هذه قيود من Meta على حساب العميل ولا يمكن استعادتها من "
             "جانبنا. تخطّى هذا الرقم وتابع — لن يؤثر على سمعة الإرسال."
@@ -155,6 +214,9 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=True,
         retryable=True,
+        # Per-minute throttling — fine on its own, but sustained
+        # rate-limiting is a quality signal at the WABA level.
+        quality_tier="warning",
         advice_ar="أعد الإرسال بعد بضع دقائق — Meta تطبّق حد رسائل في الدقيقة.",
     ),
     "spam_rate_limit": ClassifiedError(
@@ -163,6 +225,10 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=True,
         retryable=False,  # waiting 24h is a merchant action, not auto-retry
+        # Meta is explicitly flagging us for spam-like behaviour →
+        # this is the strongest single-event signal short of an
+        # account lock.
+        quality_tier="critical",
         advice_ar="انتظر 24 ساعة أو ارفع تقييم رقمك لدى Meta.",
     ),
     "template_param_mismatch": ClassifiedError(
@@ -171,6 +237,9 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=False,
         retryable=False,
+        # Our bug, not Meta's view of the recipient. Doesn't move
+        # the WABA quality needle.
+        quality_tier="warning",
         advice_ar="افتح القالب وتأكد أن كل {{1}}، {{2}}… ممرَّر بقيمة.",
     ),
     "template_not_found": ClassifiedError(
@@ -179,6 +248,7 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=False,
         retryable=False,
+        quality_tier="warning",
         advice_ar="أعد مزامنة القوالب — قد يكون القالب مُحذف من Meta.",
     ),
     "template_paused": ClassifiedError(
@@ -187,6 +257,10 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=False,
         retryable=False,
+        # Meta paused us — this IS the quality signal. Critical so
+        # the dashboard alerts immediately and stops further sends
+        # against this template.
+        quality_tier="critical",
         advice_ar="القالب أُوقف بسبب جودة منخفضة — أنشئ نسخة جديدة وقدّمها للاعتماد.",
     ),
     "template_disabled": ClassifiedError(
@@ -195,6 +269,7 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=False,
         retryable=False,
+        quality_tier="critical",
         advice_ar="استخدم قالباً آخر بحالة APPROVED.",
     ),
     "policy_violation": ClassifiedError(
@@ -203,6 +278,9 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=False,
         retryable=False,
+        # Single most damaging classification. Meta records it at
+        # the WABA level — must alert merchant, not just count.
+        quality_tier="critical",
         advice_ar="راجع نص القالب والصور — قد يحتوي على محتوى ممنوع.",
     ),
     "account_locked": ClassifiedError(
@@ -214,6 +292,7 @@ ERRORS: Dict[str, ClassifiedError] = {
         # Account-level Meta restriction on OUR WABA — same support
         # workflow as client_payment_blocked: contact 360dialog.
         provider_billing_block=True,
+        quality_tier="critical",
         advice_ar="راجع تنبيهات WhatsApp Business Manager — قد يطلب التحقق.",
     ),
     "service_unavailable": ClassifiedError(
@@ -222,6 +301,8 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=True,
         retryable=True,
+        # Transient infra — no quality impact.
+        quality_tier="harmless",
         advice_ar="حاول مجدداً بعد دقائق — مشكلة عابرة من Meta.",
     ),
     "media_error": ClassifiedError(
@@ -230,6 +311,7 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="blocking",
         is_recoverable=True,
         retryable=False,  # merchant must fix the media URL first
+        quality_tier="warning",
         advice_ar="تحقق من الصورة/الفيديو في القالب — قد يكون رابطها معطلاً.",
     ),
     "auth_error": ClassifiedError(
@@ -243,6 +325,7 @@ ERRORS: Dict[str, ClassifiedError] = {
         # 360dialog support workflow rather than asking the merchant
         # to "just reconnect" when their credentials are fine.
         provider_billing_block=True,
+        quality_tier="critical",
         advice_ar="أعد ربط واتساب الأعمال من إعدادات الاتصال أو تواصل مع الدعم.",
     ),
     "no_message_id": ClassifiedError(
@@ -297,7 +380,64 @@ ERRORS: Dict[str, ClassifiedError] = {
         severity="major",
         is_recoverable=True,
         retryable=True,
+        quality_tier="harmless",
         advice_ar="أعد المحاولة — إن تكرر الخطأ تواصل مع الدعم.",
+    ),
+    # ── New entries (May 2026) for the Delivery Quality layer ──
+    "recipient_quality_low": ClassifiedError(
+        key="recipient_quality_low",
+        label_ar="جودة العميل لدى Meta منخفضة — تم رفض الرسالة",
+        severity="major",
+        is_recoverable=False,
+        retryable=False,
+        # Meta's explicit "this recipient's WhatsApp quality is too
+        # low to deliver to" — a strong per-recipient suppress signal.
+        quality_tier="quality_risk",
+        suppress_on_repeat=True,
+        advice_ar=(
+            "Meta رفضت التسليم لهذا الرقم لأسباب تخص جودة حسابه. "
+            "تجاهله مؤقتاً وتابع — لن يعود تلقائياً قبل أن يتفاعل معك."
+        ),
+    ),
+    "blocked_by_user": ClassifiedError(
+        key="blocked_by_user",
+        label_ar="العميل حظر متجرك على واتساب",
+        severity="major",
+        is_recoverable=False,
+        retryable=False,
+        # User-initiated block — single hardest signal on a single
+        # recipient. We must stop sending immediately.
+        quality_tier="quality_risk",
+        suppress_on_repeat=True,
+        advice_ar="العميل حظر رقمك — لا ترسل له مرة أخرى حتى يبادر بالتواصل.",
+    ),
+    "country_restricted": ClassifiedError(
+        key="country_restricted",
+        label_ar="دولة العميل لا تدعم استقبال هذا النوع من الرسائل",
+        severity="major",
+        is_recoverable=False,
+        retryable=False,
+        quality_tier="warning",
+        advice_ar="استخدم قالب يدعم دولة العميل أو تواصل عبر قناة أخرى.",
+    ),
+    "temporary_failure": ClassifiedError(
+        key="temporary_failure",
+        label_ar="فشل مؤقت من Meta — يمكن إعادة المحاولة",
+        severity="major",
+        is_recoverable=True,
+        retryable=True,
+        quality_tier="harmless",
+        advice_ar="أعد الإرسال بعد قليل — الخطأ مؤقت من Meta.",
+    ),
+    "permanent_failure": ClassifiedError(
+        key="permanent_failure",
+        label_ar="فشل دائم — لن ينجح الإرسال لهذا الرقم",
+        severity="major",
+        is_recoverable=False,
+        retryable=False,
+        quality_tier="quality_risk",
+        suppress_on_repeat=True,
+        advice_ar="تخطّى هذا الرقم — Meta رفضت التسليم بشكل دائم.",
     ),
 }
 
@@ -382,6 +522,12 @@ _CODE_MAP: Dict[int, str] = {
     136025: "policy_violation",
     # ── 368 — temporarily blocked ──
     368:    "policy_violation",
+    # ── Codes added May 2026 for the Quality Intelligence layer ──
+    # 130472 — recipient experiencing quality-pacing block on Meta's
+    # side. Production-observed under "experimental" rollouts.
+    130472: "recipient_quality_low",
+    # 1006   — legacy "invalid_token" surfacing on graph debug routes.
+    1006:   "auth_error",
 }
 
 
@@ -414,6 +560,16 @@ _TEXT_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"unauth|access.*denied|invalid.*token", re.I), "auth_error"),
     (re.compile(r"unavailable|temporar|try.*again", re.I), "service_unavailable"),
     (re.compile(r"media|image|video|document.*error", re.I), "media_error"),
+    # ── Delivery Quality additions ──
+    (re.compile(r"recipient.*low.*quality|quality.*pacing|experience.*quality", re.I),
+                                                          "recipient_quality_low"),
+    (re.compile(r"recipient.*blocked|user.*blocked.*business", re.I),
+                                                          "blocked_by_user"),
+    (re.compile(r"country.*not.*support|region.*restrict", re.I),
+                                                          "country_restricted"),
+    (re.compile(r"permanent.*fail|undeliverable.*permanent", re.I),
+                                                          "permanent_failure"),
+    (re.compile(r"transient|temporary.*fail", re.I),       "temporary_failure"),
 ]
 
 
@@ -589,8 +745,32 @@ def to_dict(c: ClassifiedError) -> Dict[str, Any]:
         "is_recoverable":         c.is_recoverable,
         "retryable":              c.retryable,
         "provider_billing_block": c.provider_billing_block,
+        "quality_tier":           c.quality_tier,
+        "suppress_on_repeat":     c.suppress_on_repeat,
         "advice_ar":              c.advice_ar,
     }
+
+
+def quality_tier_of(key: Optional[str]) -> str:
+    """Quick lookup — Delivery Quality tier for a stored
+    ``error_code``. Defaults to ``warning`` (the safe middle ground)
+    for unknown keys so we never accidentally classify a new code
+    as ``harmless`` and miss a real signal."""
+    if not key:
+        return "warning"
+    entry = ERRORS.get(str(key).strip().lower())
+    return entry.quality_tier if entry else "warning"
+
+
+def should_suppress_on_repeat(key: Optional[str]) -> bool:
+    """True when repeated occurrences of this error against a single
+    phone should trip the Suppression Engine threshold. Used by the
+    webhook handler when deciding whether to bump the per-phone
+    failure counter that drives auto-suppression."""
+    if not key:
+        return False
+    entry = ERRORS.get(str(key).strip().lower())
+    return bool(entry.suppress_on_repeat) if entry else False
 
 
 def is_provider_billing_block(key: Optional[str]) -> bool:
@@ -624,6 +804,8 @@ __all__ = [
     "label_for",
     "is_retryable",
     "is_provider_billing_block",
+    "quality_tier_of",
+    "should_suppress_on_repeat",
     "to_dict",
     "note_unknown_code",
     "reset_unknown_registry",

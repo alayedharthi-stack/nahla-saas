@@ -33,6 +33,7 @@ const en: Translations = {
       manualSetup:      'Manual Setup Guide',
       widgets:          'Sales Tools',
       systemStatus:     'System Status',
+      deliveryQuality:  'Delivery Quality',
       billing:          'Billing',
       settings:         'Settings',
     },

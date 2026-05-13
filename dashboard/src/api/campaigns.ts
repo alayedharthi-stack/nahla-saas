@@ -94,6 +94,13 @@ export interface CampaignRecord {
   converted_count: number
   created_at: string | null
   launched_at: string | null
+  /** Wave/Batch — `immediate` for legacy / small campaigns,
+   *  `batched` or `adaptive` once the merchant opts in. The UI
+   *  shows the "wave N of M" badge whenever this is not
+   *  `immediate`. */
+  send_strategy?: 'immediate' | 'batched' | 'adaptive'
+  batch_size?: number | null
+  delay_between_batches_sec?: number | null
 }
 
 export interface CampaignDebugSnapshot {
@@ -497,6 +504,79 @@ export interface CreateCampaignPayload {
    *  instead of creating a duplicate dispatch. Always send a fresh
    *  UUID when the merchant explicitly starts a NEW campaign. */
   idempotency_key?: string
+  /** Wave/Batch sending strategy.
+   *
+   * - `immediate` (default) — single-shot dispatch, legacy behaviour.
+   * - `batched` — merchant-supplied wave plan
+   *   (`batch_size` + `delay_between_batches_sec` must also be set).
+   * - `adaptive` — Nahla computes the plan from the current
+   *   Quality Score / Meta tier (the wizard previews it via
+   *   `campaignsApi.preflightStrategy`).
+   *
+   * Audiences below the platform's wave threshold are silently
+   * downgraded to `immediate` server-side; see
+   * `services/wave_scheduler.WAVE_THRESHOLD_RECIPIENTS`. */
+  send_strategy?: 'immediate' | 'batched' | 'adaptive'
+  batch_size?: number
+  delay_between_batches_sec?: number
+}
+
+
+// ── Wave/Batch preflight + listing ─────────────────────────────────
+
+export interface PreflightStrategyResponse {
+  audience_size: number
+  current_quality: {
+    nahla_tier: string | null
+    meta_quality_rating: string | null
+  }
+  threshold_recipients_for_waves: number
+  /** What the adaptive engine WOULD pick automatically. The
+   *  strategy may be `immediate` if the audience is too small. */
+  suggested_adaptive: {
+    strategy: 'immediate' | 'batched' | 'adaptive'
+    batch_size: number
+    delay_between_batches_sec: number
+    total_waves: number
+    estimated_completion_at: string | null
+    rationale: string
+  }
+  /** Echo of the merchant's explicit choice, resolved to a
+   *  concrete plan (or downgraded to immediate when the audience
+   *  is too small). Null when the merchant didn't propose
+   *  anything. */
+  proposed: null | {
+    strategy: 'immediate' | 'batched' | 'adaptive'
+    downgraded_to_immediate: boolean
+    reason: string
+    total_waves: number
+    batch_size: number
+    delay_between_batches_sec: number
+  }
+}
+
+export interface CampaignWaveRow {
+  id: number
+  wave_index: number
+  total_waves: number
+  status: 'pending' | 'dispatching' | 'completed' | 'failed' | 'paused' | 'cancelled'
+  scheduled_at: string | null
+  started_at:   string | null
+  completed_at: string | null
+  planned_recipients: number
+  sent_count: number
+  failed_count: number
+  plan_strategy: string | null
+  plan_rationale: string | null
+}
+
+export interface CampaignWavesResponse {
+  campaign_id: number
+  send_strategy: 'immediate' | 'batched' | 'adaptive'
+  batch_size: number | null
+  delay_between_batches_sec: number | null
+  total_waves: number
+  waves: CampaignWaveRow[]
 }
 
 import { apiCall } from './client'
@@ -641,6 +721,28 @@ export const campaignsApi = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  /** Preview the wave / batch plan Nahla would use for this audience.
+   *
+   *  Read-only and idempotent. The wizard's strategy step calls this
+   *  every time the merchant changes audience size or picks a
+   *  different strategy so the preview ("8 waves of 500 every 2h —
+   *  total ~14h") stays live. */
+  preflightStrategy: (payload: {
+    audience_count: number
+    proposed_strategy?: 'immediate' | 'batched' | 'adaptive'
+    proposed_batch_size?: number
+    proposed_delay_between_batches_sec?: number
+  }) =>
+    apiCall<PreflightStrategyResponse>('/campaigns/preflight-strategy', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  /** Wave timeline for a campaign — used by the detail drawer to
+   *  render "wave 2 of 8 — starts at 14:30" + per-wave progress. */
+  waves: (id: number) =>
+    apiCall<CampaignWavesResponse>(`/campaigns/${id}/waves`),
 
   updateStatus: (id: number, status: string) =>
     apiCall<CampaignRecord>(`/campaigns/${id}/status`, {

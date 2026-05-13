@@ -41,6 +41,7 @@ export interface Translations {
       manualSetup:      string
       widgets:          string
       systemStatus:     string
+      deliveryQuality:  string
       billing:          string
       settings:         string
     }

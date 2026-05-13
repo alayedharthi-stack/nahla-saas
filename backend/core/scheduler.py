@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict
 
 from sqlalchemy.orm import Session
 
@@ -455,6 +456,210 @@ async def _dispatch_due_campaigns() -> None:
                     db.rollback()
                 except Exception:
                     pass
+    finally:
+        db.close()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Wave / Batch sending scheduler
+# ──────────────────────────────────────────────────────────────────
+#
+# This loop is the runtime arm of the Wave/Batch architecture (see
+# ``services/wave_scheduler.py`` for the planning side). It wakes up
+# every ``_WAVE_POLL_SECONDS`` and:
+#
+#   1. Picks every ``CampaignWave`` whose ``status='pending'`` and
+#      ``scheduled_at <= now()`` (cheap range scan on
+#      ``ix_campaign_waves_due``).
+#   2. Flips each picked wave to ``dispatching``.
+#   3. Calls ``services.campaign_dispatcher.dispatch_campaign``
+#      with ``only_wave_id=wave.id`` — which short-circuits the
+#      audience/snapshot/freq-cap stages and dispatches exactly
+#      this wave's slice of the campaign's snapshot rows.
+#   4. On success: marks the wave ``completed`` with its counters.
+#      If this was the LAST wave of the campaign, flips the
+#      parent ``Campaign.status`` to ``completed``.
+#   5. On exception: marks the wave ``failed`` so the merchant can
+#      inspect / retry from the UI.
+#
+# Why a separate loop (and not piggy-back on the dispatcher loop)
+# ──────────────────────────────────────────────────────────────
+# The existing campaign-dispatcher loop already polls every 30s
+# for `scheduled` / `delayed` campaigns and rescues stuck immediate
+# ones. Adding wave logic to it would entangle two very different
+# state machines: "campaign-as-a-whole" vs "wave-as-an-instance".
+# Keeping them in distinct loops:
+#   * lets us tune the poll cadence independently (waves want
+#     finer granularity so a 30-min-spaced wave fires close to
+#     its scheduled time),
+#   * isolates failure domains (a misbehaving wave can't break
+#     the immediate-campaign rescue path),
+#   * keeps the wave loop trivially deletable if we ever
+#     decommission the Wave/Batch feature.
+
+_WAVE_POLL_SECONDS = int(os.getenv("CAMPAIGN_WAVE_POLL_SECONDS", "30"))
+
+_wave_scheduler_state: Dict[str, Any] = {
+    "started_at":           None,
+    "last_tick_at":         None,
+    "last_tick_ok":         None,
+    "last_tick_error":      None,
+    "ticks_total":          0,
+    "ticks_failed":         0,
+    "waves_dispatched":     0,
+    "waves_failed":         0,
+}
+
+
+def get_wave_scheduler_state() -> Dict[str, Any]:
+    """Snapshot of the wave scheduler heartbeat — used by
+    ``/admin/debug/scheduler-health`` and operator scripts."""
+    return dict(_wave_scheduler_state)
+
+
+async def run_campaign_wave_scheduler() -> None:
+    """Poll for ``CampaignWave`` rows that are due and dispatch them.
+
+    Runs as a single asyncio task in the FastAPI lifespan, identical
+    in shape to ``run_campaign_dispatcher_scheduler``.
+    """
+    await asyncio.sleep(15)
+    _wave_scheduler_state["started_at"] = datetime.now(timezone.utc)
+    logger.info(
+        "[Campaign Wave Scheduler] Started — polling every %ss",
+        _WAVE_POLL_SECONDS,
+    )
+    while True:
+        _wave_scheduler_state["last_tick_at"] = datetime.now(timezone.utc)
+        _wave_scheduler_state["ticks_total"] += 1
+        try:
+            await _dispatch_due_waves()
+            _wave_scheduler_state["last_tick_ok"] = True
+            _wave_scheduler_state["last_tick_error"] = None
+        except Exception as exc:  # noqa: BLE001
+            _wave_scheduler_state["last_tick_ok"] = False
+            _wave_scheduler_state["last_tick_error"] = repr(exc)[:400]
+            _wave_scheduler_state["ticks_failed"] += 1
+            logger.error(
+                "[Campaign Wave Scheduler] Error: %s", exc, exc_info=True,
+            )
+        await asyncio.sleep(_WAVE_POLL_SECONDS)
+
+
+async def _dispatch_due_waves() -> None:
+    """One pass of the wave scheduler.
+
+    Picks every due wave, marks it ``dispatching``, then calls the
+    main dispatcher. Each wave is processed sequentially in a
+    single tick — that's safe because the dispatcher is itself
+    bounded by the campaign's ``audience_count`` and Meta's API
+    has its own rate limits. If the queue grows we increase
+    ``_WAVE_POLL_SECONDS`` rather than parallelise here.
+    """
+    # Defer imports so this module stays cheap on startup and the
+    # test harness's path-bootstrapping doesn't fight us.
+    import sys as _sys, os as _os  # noqa: PLC0415
+    _backend = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _db_dir = _os.path.abspath(_os.path.join(_backend, "..", "database"))
+    for _p in (_backend, _db_dir):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+
+    from core.database import SessionLocal  # noqa: PLC0415
+    from database.models import Campaign, CampaignWave  # noqa: PLC0415
+    from services import wave_scheduler as ws  # noqa: PLC0415
+    from services.campaign_dispatcher import dispatch_campaign  # noqa: PLC0415
+
+    db = SessionLocal()
+    try:
+        due_waves = ws.pick_due_waves(db=db)
+        if not due_waves:
+            return
+        logger.info(
+            "[Campaign Wave Scheduler] %d wave(s) due", len(due_waves),
+        )
+
+        for wave in due_waves:
+            campaign_id = int(wave.campaign_id)
+            wave_id = int(wave.id)
+            # Re-check status under our own transaction — another
+            # tick might have grabbed it (defensive even in
+            # single-worker mode).
+            ws.mark_wave_dispatching(db=db, wave=wave)
+            db.commit()
+
+            try:
+                logger.info(
+                    "[Campaign Wave Scheduler] dispatching wave=%d "
+                    "campaign=%d (%d/%d, planned=%d)",
+                    wave_id, campaign_id,
+                    wave.wave_index, wave.total_waves,
+                    wave.planned_recipients,
+                )
+                result = await dispatch_campaign(
+                    db, campaign_id, only_wave_id=wave_id,
+                )
+                sent = int(result.get("sent") or 0)
+                failed = int(result.get("failed") or 0)
+                ws.complete_wave(
+                    db=db, wave=wave,
+                    sent=sent, failed=failed, success=True,
+                )
+                db.commit()
+                _wave_scheduler_state["waves_dispatched"] += 1
+
+                # If this was the last wave, finalise the parent
+                # campaign's status. The legacy dispatch path also
+                # writes ``Campaign.status='completed'`` at the end
+                # of its single run; we mirror that here so the
+                # campaign report card reflects "completed" once
+                # every wave has terminated.
+                remaining_pending = (
+                    db.query(CampaignWave)
+                    .filter(
+                        CampaignWave.campaign_id == campaign_id,
+                        CampaignWave.status.in_((
+                            ws.WAVE_PENDING, ws.WAVE_DISPATCHING,
+                        )),
+                    )
+                    .count()
+                )
+                if remaining_pending == 0:
+                    camp = db.query(Campaign).filter(
+                        Campaign.id == campaign_id,
+                    ).first()
+                    if camp and camp.status not in ("completed", "failed"):
+                        camp.status = "completed"
+                        camp.updated_at = datetime.now(timezone.utc)
+                        db.commit()
+                        logger.info(
+                            "[Campaign Wave Scheduler] campaign=%d "
+                            "all waves complete — marked campaign completed",
+                            campaign_id,
+                        )
+
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[Campaign Wave Scheduler] wave=%d campaign=%d "
+                    "dispatch raised: %s",
+                    wave_id, campaign_id, exc, exc_info=True,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                # Pull a fresh handle on the wave row — the rollback
+                # detached the original from the session.
+                fresh = db.query(CampaignWave).filter(
+                    CampaignWave.id == wave_id,
+                ).first()
+                if fresh:
+                    ws.complete_wave(
+                        db=db, wave=fresh,
+                        sent=0, failed=0, success=False,
+                    )
+                    db.commit()
+                _wave_scheduler_state["waves_failed"] += 1
     finally:
         db.close()
 
